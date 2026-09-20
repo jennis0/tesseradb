@@ -1,39 +1,20 @@
-//! Shapes — box, circle, ellipse and polygon — with one semantics: **the rows whose stored
-//! position is inside the shape, exactly** (`polygon-membership.md` §4.1).
+//! Shapes: box, circle, ellipse and polygon, with one semantics: the rows whose stored position
+//! is inside the shape, exactly.
 //!
 //! The module owns the geometry and nothing else: the model, its readers (WKB, WKT), the
 //! canonical grid-unit form and its bytes, the descent that turns a shape into interior tiles and
 //! boundary cells ([`decompose`]), the point test a boundary cell applies, and the two things the
-//! wire needs — a simplification weight per polygon vertex and a densified ring for a curve. It
-//! knows the grid (`morton.rs`) and does not know the store, the engine or a principal.
+//! wire needs, a simplification weight per polygon vertex and a densified ring for a curve.
 //!
-//! **Two questions of a shape, and nothing else.** The descent asks a shape to classify a tile —
-//! disjoint, wholly inside, or crossed by the boundary — and to test a point. Every kind answers
-//! both through the [`Region`] trait, so the descent is written once and *the same semantics* for
-//! four kinds is a construction rather than a promise. A polygon's answers ride on a per-tile
-//! context (the edges crossing the tile and the parity of one corner) that the descent refines
-//! down the tree; the three closed forms need no context at all.
+//! The descent asks a shape two questions through the [`Region`] trait: classify a tile as
+//! disjoint, wholly inside, or crossed by the boundary, and test a point. A polygon's answers
+//! ride on a per-tile context (the edges crossing the tile and the parity of one corner) that the
+//! descent refines down the tree; the three closed forms need no context at all.
 //!
-//! **A shape and the points are placed by one function.** A shape declared in longitude and
-//! latitude is put through the *view's own* projection before it is canonicalised ([`project`],
-//! [`Space`]), each edge densified first because the space a shape is declared in defines the
-//! plane its edges are straight in (`polygon-membership.md` R10). A view that projects nothing
-//! has one space and refuses the second.
-//!
-//! **Exact where it can be, deterministic everywhere.** A polygon is tested in integer arithmetic
-//! over the 32-bit grid with one symbolic perturbation rule for ties (`polygon.rs`); a circle or an
-//! ellipse is a general conic once the extent's two axes scale differently, so its test is
-//! correctly-rounded `f64` — the same licence `artifact-shapes.md` §1 takes for the hull's two
-//! floating steps — and two platforms agree because every IEEE-754 operation it uses is correctly
-//! rounded.
-//!
-//! **What is held per artifact, and why.** A polygon's edge table ([`PolygonRegion`]) is built
-//! once and held beside the canonical polygon for the artifact's life (`polygon-membership.md`
-//! §6.3): it borrows the vertices and adds four bytes per edge, so the descent and every
-//! boundary-cell test run over one copy of the coordinates. [`Shape::prepared`] is that: a
-//! [`PreparedShape`] answers `contains` and `decompose` without rebuilding anything, and a caller
-//! on a hot path holds one. `Shape::contains` and `Shape::decompose` prepare per call and are for
-//! the one-off — a test, a check.
+//! A polygon's edge table ([`PolygonRegion`]) is built once and held beside the canonical polygon
+//! for the artifact's life. [`Shape::prepared`] is that: a [`PreparedShape`] answers `contains`
+//! and `decompose` without rebuilding anything, and a caller on a hot path holds one.
+//! `Shape::contains` and `Shape::decompose` prepare per call and are for the one-off.
 
 mod canon;
 mod conic;
@@ -54,7 +35,7 @@ pub use project::{Space, DENSIFY_TOLERANCE_CELLS};
 pub use wkb::{read_wkb, WkbError};
 pub use wkt::{read_wkt, WktError};
 
-/// A position on the 32-bit-per-axis grid — what `fixed32` produces and `unsplit32` recovers.
+/// A position on the 32-bit-per-axis grid: what `fixed32` produces and `unsplit32` recovers.
 pub type GridPoint = (u32, u32);
 
 /// An axis-aligned box in grid units, closed on every side.
@@ -66,21 +47,18 @@ pub struct Bbox {
     pub max_y: u32,
 }
 
-/// A shape in its canonical grid-unit form — what is stored, tested and served.
+/// A shape in its canonical grid-unit form: what is stored, tested and served.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
     Bbox(Bbox),
-    /// A circle or an ellipse. Both are one conic in grid units, because an extent whose axes
-    /// scale differently turns a circle into an ellipse and a rotated ellipse into a differently
-    /// rotated one; keeping the caller's five numbers would store a shape the grid does not hold.
+    /// A circle or an ellipse: both are one conic once the extent's axes scale differently.
     Conic(Conic),
     Polygon(Polygon),
 }
 
 impl Shape {
-    /// The kind's name, as `disclosure.json` and the reports spell it. A circle and an ellipse are
-    /// one conic once quantised (§4.1), so the stored form cannot say which was declared; the
-    /// layer's own declaration is where that word lives.
+    /// The kind's name, as `disclosure.json` and the reports spell it. The stored form cannot say
+    /// whether a conic was declared as a circle or an ellipse; the layer's declaration has that.
     pub fn kind_name(&self) -> &'static str {
         match self {
             Shape::Bbox(_) => "bbox",
@@ -100,8 +78,8 @@ impl Shape {
         }
     }
 
-    /// How many vertices the shape carries — the quantity `max_shape_vertices` caps. Zero for a
-    /// closed form, which has parameters rather than vertices.
+    /// How many vertices the shape carries, the quantity `max_shape_vertices` caps; zero for a
+    /// closed form.
     pub fn vertex_count(&self) -> u64 {
         match self {
             Shape::Polygon(p) => p.vertex_count(),
@@ -129,31 +107,26 @@ impl Shape {
         }
     }
 
-    /// Decompose against the grid: interior tiles, boundary cells, and — only under a budget —
-    /// cover tiles. See [`decompose`]. Prepares per call; hold a [`PreparedShape`] on a hot path.
+    /// See [`decompose`]. Prepares per call; hold a [`PreparedShape`] on a hot path.
     pub fn decompose(&self, max_boundary_cells: Option<usize>) -> Decomposition<PolyCtx> {
         self.prepared().decompose(max_boundary_cells)
     }
 
-    /// Whether a point is inside — the direct test, without a decomposition. What every boundary
-    /// cell's test agrees with, and what the tests in `tests/shape.rs` hold the descent to.
-    /// Prepares per call; hold a [`PreparedShape`] on a hot path.
+    /// The direct test, without a decomposition. Prepares per call; hold a [`PreparedShape`].
     pub fn contains(&self, p: GridPoint) -> bool {
         self.prepared().contains(p)
     }
 
-    /// The shape as rings for the wire — parts, then rings, then vertices — at a resolution:
-    /// a polygon filtered to the vertices whose weight is at least `min_weight` (grid units, the
-    /// side of the cell at the request's depth) and to its `budget` heaviest; a curve densified
-    /// so that no chord departs from it by more than `min_weight`; a box as its four corners.
+    /// The shape as rings for the wire at a resolution: a polygon filtered to the vertices whose
+    /// weight is at least `min_weight` and to its `budget` heaviest; a curve densified so that no
+    /// chord departs from it by more than `min_weight`; a box as its four corners.
     pub fn rings(&self, min_weight: u32, budget: usize) -> Vec<Vec<Vec<GridPoint>>> {
         self.rings_guarded(min_weight, budget).0
     }
 
-    /// [`Shape::rings`], and whether the `budget` guard fired — a polygon with more vertices above
-    /// `min_weight` than the budget, or a curve whose chord tolerance asked for more vertices than
-    /// it — so a serve can record that the drawing is coarser than the depth alone would make it
-    /// (`polygon-membership.md` §7.2). A box never fires it.
+    /// [`Shape::rings`], and whether the `budget` guard fired: a polygon with more vertices above
+    /// `min_weight` than the budget, or a curve whose chord tolerance asked for more than it. A
+    /// box never fires it.
     pub fn rings_guarded(&self, min_weight: u32, budget: usize) -> (Vec<Vec<Vec<GridPoint>>>, bool) {
         match self {
             Shape::Bbox(b) => (
@@ -174,7 +147,7 @@ impl Shape {
     }
 }
 
-/// A shape and, for a polygon, its edge table — built once, held for the shape's life (§6.3).
+/// A shape and, for a polygon, its edge table, built once and held for the shape's life.
 #[derive(Debug, Clone)]
 pub struct PreparedShape<'a> {
     shape: &'a Shape,
@@ -215,8 +188,8 @@ impl<'a> PreparedShape<'a> {
         }
     }
 
-    /// The test a boundary cell applies to a position in it, with the cell's carried context —
-    /// for a polygon the cell's edges and corner parity; a closed form ignores the context.
+    /// The test a boundary cell applies, with the cell's carried context: for a polygon the
+    /// cell's edges and corner parity; a closed form ignores it.
     pub fn contains_in_cell(&self, p: GridPoint, cell: Rect, ctx: &PolyCtx) -> bool {
         match &self.region {
             Some(region) => region.contains(p, cell, ctx),

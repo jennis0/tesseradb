@@ -1,11 +1,10 @@
-//! The descent holds to the direct test, for every kind (`polygon-membership.md` §12, stage 1).
+//! The descent holds to the direct test, for every kind.
 //!
-//! A shape's membership is defined by its direct test — `Shape::contains`, which for a polygon is
+//! A shape's membership is defined by its direct test, `Shape::contains`, which for a polygon is
 //! the naive even-odd walk over every edge and for a conic the quadratic. The decomposition must
 //! answer identically for every position: inside an interior tile ⇒ inside; in a boundary cell ⇒
 //! whatever the cell's own context says; anywhere else ⇒ outside. These tests draw random shapes
-//! and random positions — dense near the boundary, where the tie rules live — and hold the two
-//! answers together.
+//! and random positions, dense near the boundary, where the tie rules live.
 
 use proptest::prelude::*;
 use tessera_spatial::morton::{split32, Bounds, Tile};
@@ -21,8 +20,7 @@ const E: Bounds = Bounds {
 };
 
 /// A decomposition indexed for the lookup a probe makes: tile code ranges sorted by their start,
-/// boundary cells sorted by code. The descent's tiles are disjoint, so one binary search answers
-/// each. The linear scan this replaced cost the polygon test fifty seconds at 64 cases.
+/// boundary cells sorted by code.
 struct Lookup<'a> {
     d: &'a Decomposition<PolyCtx>,
     /// `(lo, hi)` of every interior and cover tile, sorted by `lo`.
@@ -68,8 +66,7 @@ impl<'a> Lookup<'a> {
     }
 }
 
-/// Positions to test: random ones, plus ones near every vertex and along every edge, where the
-/// ties are.
+/// Positions to test: random ones, plus ones near every vertex and edge, where ties are.
 fn probes(shape: &Shape, seed: u64) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     let mut s = seed | 1;
@@ -128,13 +125,13 @@ fn probes(shape: &Shape, seed: u64) -> Vec<(u32, u32)> {
     out
 }
 
-/// Whether every served ring is one stored ring with vertices removed — nothing added, nothing
-/// moved, nothing reordered.
+/// Whether every served ring is one stored ring with vertices removed: nothing added, moved or
+/// reordered.
 ///
 /// The stored rings are matched in order and each is used at most once, so a served ring that
-/// appeared before the ring it came from, or twice, fails as well as one carrying a vertex the
-/// shape does not hold. Serving may drop a whole part or hole (`polygon-membership.md` §7.2), so
-/// a stored ring with no served counterpart is not itself a failure.
+/// appeared before the ring it came from, or twice, fails, as does one carrying a vertex the
+/// shape does not hold. Serving may drop a whole part or hole, so a stored ring with no served
+/// counterpart is not itself a failure.
 fn each_served_ring_is_a_stored_ring_filtered(
     served: &[Vec<Vec<(u32, u32)>>],
     stored: &[Vec<(u32, u32)>],
@@ -165,8 +162,7 @@ fn is_subsequence(a: &[(u32, u32)], b: &[(u32, u32)]) -> bool {
 }
 
 fn rings_strategy() -> impl Strategy<Value = ShapeF64> {
-    // A star-shaped ring around a centre with random radii, sometimes with a hole and
-    // sometimes a second part: simple enough to be OGC-valid, jagged enough to cross many cells.
+    // A star-shaped ring around a centre with random radii, sometimes with a hole or second part.
     let ring = |cx: f64, cy: f64, r: f64, n: usize| {
         proptest::collection::vec(0.2f64..1.0, n).prop_map(move |radii| {
             radii
@@ -265,8 +261,7 @@ proptest! {
         let Shape::Conic(c) = &shape else { unreachable!() };
         let look = Lookup::new(&d);
         for p in probes(&shape, seed) {
-            // Skip the positions within rounding of the curve: there the decomposition's corner
-            // test and the direct test may legitimately fall either side of 1.0.
+            // Skip positions within rounding of the curve, where the two tests may disagree.
             let dx = f64::from(p.0) - f64::from(c.cx);
             let dy = f64::from(p.1) - f64::from(c.cy);
             let q = c.m11 * dx * dx + 2.0 * c.m12 * dx * dy + c.m22 * dy * dy;
@@ -306,20 +301,17 @@ proptest! {
         }
     }
 
-    /// **A served ring is the stored ring filtered** (`polygon-membership.md` §7.2): every vertex
-    /// on the wire is one of the shape's own, in the shape's own order, at every resolution. The
-    /// vertex count falling is the weaker half and is checked alongside it.
+    /// A served ring is the stored ring filtered: every vertex on the wire is one of the shape's
+    /// own, in the shape's own order, at every resolution.
     ///
     /// Mutations this kills: a serving path that resamples or interpolates a ring rather than
-    /// dropping vertices from it (the count still falls, and every vertex is new); one that
-    /// perturbs a served coordinate; one that reorders the rings or the vertices within one.
+    /// dropping vertices from it; one that perturbs a served coordinate or reorders rings or
+    /// vertices.
     #[test]
     fn the_served_rings_are_a_subsequence_at_every_resolution(shape in rings_strategy()) {
         let (shape, _) = shape.canonical(Space::View, &E).unwrap();
         let Shape::Polygon(poly) = &shape else { unreachable!() };
-        // The stored rings, read from the polygon itself rather than back through the serving
-        // path — a comparison against `rings(0, MAX)` would be the serving path agreeing with
-        // itself.
+        // Read from the polygon itself, not through the serving path this test is checking.
         let stored: Vec<Vec<(u32, u32)>> = poly
             .parts
             .iter()
@@ -328,8 +320,7 @@ proptest! {
             .collect();
         let full = shape.rings(0, usize::MAX);
         prop_assert_eq!(full.iter().flatten().map(Vec::len).sum::<usize>() as u64, poly.vertex_count());
-        // Unfiltered, the wire is the stored rings exactly — which is the base case of the
-        // subsequence property and the guard that `stored` is the right reference.
+        // Unfiltered, the wire is the stored rings exactly: the subsequence property's base case.
         prop_assert_eq!(full.iter().flatten().cloned().collect::<Vec<_>>(), stored.clone());
         let mut last = poly.vertex_count() as usize;
         for w in [1u32 << 8, 1 << 12, 1 << 16, 1 << 20] {
@@ -346,8 +337,7 @@ proptest! {
             return Err(TestCaseError::fail(format!("budget 8: {why}")));
         }
         prop_assert!(capped_rings.iter().flatten().map(Vec::len).sum::<usize>() <= 8);
-        // The guard says when it cut what the resolution alone would have kept
-        // (`polygon-membership.md` §7.2), and only then.
+        // The guard says when it cut what the resolution alone would have kept, and only then.
         let (_, fired) = shape.rings_guarded(0, 8);
         prop_assert_eq!(fired, poly.vertex_count() > 8);
         let (_, unfired) = shape.rings_guarded(0, usize::MAX);
@@ -355,8 +345,8 @@ proptest! {
     }
 }
 
-/// A curve's guard fires when the chord tolerance asks for more vertices than the budget holds —
-/// a large circle at a fine tolerance — and not when the budget is generous or the circle small.
+/// A curve's guard fires when the chord tolerance asks for more vertices than the budget holds,
+/// and not when the budget is generous or the circle small.
 #[test]
 fn a_conics_guard_fires_only_when_the_budget_binds_its_densification() {
     let circle = ShapeF64::Circle {
@@ -381,9 +371,7 @@ fn a_conics_guard_fires_only_when_the_budget_binds_its_densification() {
 }
 
 proptest! {
-    // The two tests that decompose a full-perimeter polygon per case: a jagged ring of the
-    // strategy's largest radius runs to ~700k boundary cells, and the descent is genuinely
-    // linear in that (a second per shape unoptimised), so these run half the cases of the rest.
+    // These two decompose a full-perimeter polygon per case, so run half the usual cases.
     #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
@@ -406,8 +394,7 @@ proptest! {
         let d = prepared.decompose(None);
         for b in &d.boundary {
             let r = Rect::of_cell(b.cell);
-            // The context's parity is refined corner to corner down the descent; the full ray
-            // cast from the cell's own corner must agree with it exactly.
+            // The carried parity must agree with the full ray cast from the cell's own corner.
             prop_assert_eq!(region.ray_parity((r.x0, r.y0)), b.ctx.parity, "cell {:?}", r);
         }
     }
@@ -431,15 +418,13 @@ fn a_wkt_polygon_with_a_hole_excludes_the_hole_through_the_descent() {
     assert!(look.contains(&prepared, (q(400_000.0), q(500_000.0)))); // on the hole's edge
     assert!(!look.contains(&prepared, (q(50_000.0), q(500_000.0))));
     assert!(!d.interior.is_empty());
-    // The boundary is the perimeter in depth-16 cells: an axis-aligned edge of length L cells
-    // crosses at most L + 2 of them, and the eight edges sum to (4 × 0.8 + 4 × 0.2) × 65,536.
+    // The boundary is the perimeter in depth-16 cells, not the area.
     let perimeter_cells = 4 * 65_536;
     assert!(
         d.boundary.len() <= perimeter_cells + 16,
         "{}",
         d.boundary.len()
     );
-    // …and not the area, which is 0.8² × 2³² cells of the outer square alone.
     assert!(
         d.boundary.len() + d.interior.len() < 1 << 20,
         "{} + {}",
@@ -450,7 +435,7 @@ fn a_wkt_polygon_with_a_hole_excludes_the_hole_through_the_descent() {
 
 #[test]
 fn the_descent_is_linear_in_the_perimeter_not_the_area() {
-    // A square 1/8 of the extent across and one 3/4 across: 6× the perimeter, 36× the area.
+    // A square 1/8 of the extent across and one 3/4 across: 6x the perimeter, 36x the area.
     let square = |half: f64| {
         let (c, h) = (500_000.0, half);
         ShapeF64::Polygon(vec![vec![vec![
@@ -477,12 +462,9 @@ fn the_descent_is_linear_in_the_perimeter_not_the_area() {
         large.boundary.len(),
         small.boundary.len()
     );
-    // The interior tiles are the perimeter too, summed over the depths: a square whose edges do
-    // not lie on tile boundaries is crossed by ≤ 4·(s·2^d + 2) tiles at depth d, where s is its
-    // side as a fraction of the extent, and a tile crossed by one axis-aligned edge has at most
-    // two children wholly inside. Interior tiles at every depth ≤ Σ_d 2·4·(s·2^d + 2) for
-    // d < 16, which is 8·s·65,536 plus 128; the actual count is close to half that, one interior
-    // child per crossing tile.
+    // Interior tiles are the perimeter too: a square off tile boundaries is crossed by
+    // <= 4*(s*2^d + 2) tiles at depth d, s its side as a fraction of the extent, summing for
+    // d < 16 to 8*s*65536 plus 128.
     let bound = |s: f64| (8.0 * s * 65_536.0) as usize + 128;
     assert!(
         small.interior.len() <= bound(0.125),

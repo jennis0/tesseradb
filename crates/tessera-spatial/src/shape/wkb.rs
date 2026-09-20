@@ -1,9 +1,9 @@
-//! A reader for OGC well-known binary — `Polygon` and `MultiPolygon` only, either byte order,
+//! A reader for OGC well-known binary: `Polygon` and `MultiPolygon` only, either byte order,
 //! Z and M ordinates skipped, an EWKB SRID skipped.
 //!
 //! A polygon in a table arrives as WKB because that is what GeoParquet writes and what every GIS
-//! tool exports (`polygon-membership.md` §4.2). Nothing else is read: a `Point`, a `LineString`
-//! or a collection is a refusal naming the type, since none of them is a shape with an inside.
+//! tool exports. Nothing else is read: a `Point`, a `LineString` or a collection is a refusal
+//! naming the type, since none of them is a shape with an inside.
 
 use super::canon::RingsF64;
 
@@ -11,8 +11,7 @@ use super::canon::RingsF64;
 pub enum WkbError {
     Truncated,
     BadByteOrder(u8),
-    /// A geometry type this reader does not accept, by its OGC code with the Z/M/SRID flags
-    /// stripped.
+    /// A geometry type this reader does not accept, by its OGC code with Z/M/SRID stripped.
     NotAPolygon(u32),
     NotFinite,
     Trailing,
@@ -70,8 +69,7 @@ impl Reader<'_> {
         }
     }
 
-    /// The byte-order flag and the type word of one geometry, with the flags decoded: returns
-    /// the base type and how many ordinates each point carries.
+    /// The byte-order flag and the type word: the base type and how many ordinates a point carries.
     fn header(&mut self) -> Result<(u32, usize), WkbError> {
         let order = self.take::<1>()?[0];
         self.little = match order {
@@ -128,8 +126,7 @@ impl Reader<'_> {
     }
 }
 
-/// Read a `Polygon` or `MultiPolygon` as parts → rings → `(x, y)`, exactly as encoded: no
-/// canonicalisation, closing vertices kept, and the whole buffer consumed.
+/// Read a `Polygon` or `MultiPolygon` as parts → rings → `(x, y)`, exactly as encoded.
 pub fn read_wkb(bytes: &[u8]) -> Result<RingsF64, WkbError> {
     let mut r = Reader {
         bytes,

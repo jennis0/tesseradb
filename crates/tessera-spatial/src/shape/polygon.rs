@@ -5,28 +5,27 @@
 //!
 //! Every test here is integer arithmetic over grid positions, and a grid has ties: a vertex on
 //! the ray, an edge through a cell's corner, a point on an edge. The even-odd rule is made total
-//! by one **symbolic perturbation**: every polygon vertex is taken to sit at `(x − ε, y − ε²)` for
-//! an infinitesimal ε. Then no vertex lies on a grid line, no edge passes through a grid position,
+//! by one symbolic perturbation: every polygon vertex is taken to sit at `(x − ε, y − ε²)` for an
+//! infinitesimal ε. Then no vertex lies on a grid line, no edge passes through a grid position,
 //! and every crossing count is a count over a genuine set, so the parity carried down the descent
 //! is a set partition rather than a topological argument. Concretely:
 //!
-//! - an edge straddles the horizontal line `y = Y` iff `(ay > Y) != (by > Y)` — a vertex *at* `Y`
-//!   is below it;
+//! - an edge straddles the horizontal line `y = Y` iff `(ay > Y) != (by > Y)`: a vertex at `Y` is
+//!   below it;
 //! - its crossing with that line is at `x_int − ε`, so a crossing exactly at an integer `X`
 //!   counts as *left of* `X`;
 //! - an edge straddles the vertical line `x = X` iff `(ax > X) != (bx > X)`;
 //! - its crossing with that line is at `y_int + ε·(dy/dx) − ε²`, so a crossing exactly at an
 //!   integer `Y` is *above* `Y` iff `dy·dx > 0`.
 //!
-//! The one rule that is not the perturbation's is the last one applied: **a position exactly on
-//! an edge is inside** (`polygon-membership.md` §4.1), tested first and exactly.
+//! The one rule that is not the perturbation's is the last one applied: a position exactly on an
+//! edge is inside, tested first and exactly.
 
 use super::decompose::{Class, Rect, Region};
 use super::{Bbox, GridPoint};
 
-/// A vertex in grid units, with its simplification weight (`simplify.rs`): the side of the square
-/// whose area the vertex's removal would change the ring by, so that a request at a depth whose
-/// cell side is `s` drops every vertex with `weight < s`. `u32::MAX` on a vertex never dropped.
+/// A vertex in grid units, with its simplification weight: a request at a depth whose cell side
+/// is `s` drops every vertex with `weight < s`. `u32::MAX` on a vertex never dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vertex {
     pub x: u32,
@@ -46,9 +45,8 @@ pub struct Part {
     pub rings: Vec<Ring>,
 }
 
-/// A canonical polygon (`polygon-membership.md` §4.4): parts ordered by their lowest vertex,
-/// each ring rotated to start at its own lowest, outer rings positive and holes negative in
-/// shoelace sign.
+/// A canonical polygon: parts ordered by their lowest vertex, each ring rotated to start at its
+/// own lowest, outer rings positive and holes negative in shoelace sign.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Polygon {
     pub parts: Vec<Part>,
@@ -85,8 +83,7 @@ impl Polygon {
         Some(b)
     }
 
-    /// The edge table the descent and the test run over. Built once and held beside the polygon
-    /// (`polygon-membership.md` §6.3): it borrows the vertices rather than copying them.
+    /// The edge table the descent and the test run over, built once, borrowing the vertices.
     pub fn region(&self) -> PolygonRegion<'_> {
         let mut rings: Vec<&[Vertex]> = Vec::new();
         let mut starts = Vec::new();
@@ -107,19 +104,17 @@ impl Polygon {
     /// The rings for the wire: vertices of weight at least `min_weight`, then the `budget`
     /// heaviest of what survives, in ring order.
     ///
-    /// **A ring's role survives the filter or the ring does not** (`polygon-membership.md` §7.2).
-    /// A part's first ring is its outer: filtered to nothing, it takes the whole part with it,
-    /// because a surviving hole served first would be drawn as the polygon; left with one or two
-    /// vertices, it is served as those, as a degenerate hull is. A hole filtered below three
-    /// vertices is dropped rather than served degenerate.
+    /// A ring's role survives the filter or the ring does not. A part's first ring is its outer:
+    /// filtered to nothing, it takes the whole part with it, since a surviving hole served first
+    /// would be drawn as the polygon; left with one or two vertices, it is served as those. A
+    /// hole filtered below three vertices is dropped rather than served degenerate.
     pub fn rings(&self, min_weight: u32, budget: usize) -> Vec<Vec<Vec<GridPoint>>> {
         self.rings_guarded(min_weight, budget).0
     }
 
     /// [`Polygon::rings`], and whether the budget cut vertices the depth alone would have kept.
     pub fn rings_guarded(&self, min_weight: u32, budget: usize) -> (Vec<Vec<Vec<GridPoint>>>, bool) {
-        // The budget is spent by weight across the whole shape, so a many-ringed shape does not
-        // multiply the wire: find the weight threshold at which `budget` vertices survive.
+        // The budget is spent by weight across the whole shape: find the threshold weight.
         let mut weights: Vec<u32> = self
             .parts
             .iter()
@@ -128,8 +123,7 @@ impl Polygon {
             .map(|v| v.weight)
             .filter(|w| *w >= min_weight)
             .collect();
-        // Everything strictly heavier than the budget-th weight survives; ties at it are taken
-        // in ring order until the budget is met.
+        // Everything heavier than the budget-th weight survives; ties are taken in ring order.
         let guarded = weights.len() > budget;
         let (threshold, mut left) = if guarded {
             weights.sort_unstable_by(|a, b| b.cmp(a));
@@ -232,8 +226,7 @@ impl Edge {
         }
     }
 
-    /// Whether the closed segment meets the closed rectangle. Exact, and conservative in the one
-    /// way that is safe: a touch counts.
+    /// Whether the closed segment meets the closed rectangle. Exact; a touch counts.
     fn meets(&self, r: Rect) -> bool {
         let (x0, y0, x1, y1) = self.bounds();
         let (rx0, ry0, rx1, ry1) = (
@@ -249,8 +242,7 @@ impl Edge {
         if inside(self.ax, self.ay) || inside(self.bx, self.by) {
             return true;
         }
-        // Both endpoints outside a rectangle the segment's box overlaps: it meets the rectangle
-        // iff it meets one of the four sides.
+        // Both endpoints outside: it meets the rectangle iff it meets one of the four sides.
         let sides = [
             Edge {
                 ax: rx0,
@@ -303,28 +295,19 @@ fn segments_meet(p: &Edge, q: &Edge) -> bool {
 
 /// The polygon as the descent sees it: its edge table.
 ///
-/// **What is held, and why it is this.** Edge `k` runs from the polygon's `k`-th vertex, in
-/// part-then-ring order, to the next vertex of the same ring; the table holds only what finds
-/// those two vertices in the borrowed ring slices — a ring number per edge and a first-vertex
-/// index per ring — so that a held polygon costs its `u32` vertices once
-/// (`polygon-membership.md` §6.3, §9): 4 B per edge over the polygon itself, against the 32 B
-/// per edge a table of `i64` endpoints cost. The endpoints are widened to `i64` at the point of
-/// use, where every predicate is exact `i64`/`i128` arithmetic. The table is built once per
-/// artifact and held for the artifact's life; `refine` and `contains` are the hot path and never
-/// rebuild it.
+/// Edge `k` runs from the polygon's `k`-th vertex, in part-then-ring order, to the next vertex of
+/// the same ring; the table holds only a ring number per edge and a first-vertex index per ring,
+/// finding both in the borrowed ring slices, widened to `i64` at the point of use for exact
+/// `i64`/`i128` arithmetic. Built once per artifact; `refine` and `contains` never rebuild it.
 #[derive(Debug, Clone)]
 pub struct PolygonRegion<'a> {
-    /// Every ring's vertices, parts then rings, borrowed from the polygon.
     rings: Vec<&'a [Vertex]>,
-    /// Per ring, the flat index of its first vertex — the number of the ring's first edge.
     starts: Vec<u32>,
-    /// Per edge, the ring it belongs to.
     ring_of: Vec<u32>,
 }
 
-/// A tile's context: the edges that meet it, and the parity of the horizontal ray from its
-/// lower corner `(x0, y0)` — under the tie rule, the count of edges crossing `y = y0` right of
-/// `x0`, mod 2.
+/// A tile's context: the edges that meet it, and the parity of the horizontal ray from its lower
+/// corner, under the tie rule.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PolyCtx {
     pub edges: Vec<u32>,
@@ -361,15 +344,14 @@ impl PolygonRegion<'_> {
         self.edges().any(|e| e.carries(q)) || self.ray_parity(p)
     }
 
-    /// The parity of the horizontal ray from `p` under the tie rule, over every edge — what a
-    /// tile's context carries for its lower corner, without the on-edge override.
+    /// The parity of the horizontal ray from `p` under the tie rule, without the on-edge override.
     pub fn ray_parity(&self, (px, py): GridPoint) -> bool {
         let (x, y) = (i64::from(px), i64::from(py));
         self.edges().filter(|e| e.crosses_right_of(y, x)).count() % 2 == 1
     }
 
-    /// Crossings of the path from `from` to `to` — horizontal first, then vertical — over the
-    /// given edges, mod 2. `to` is right of and above `from`, or equal to it on either axis.
+    /// Crossings of the path from `from` to `to`, horizontal then vertical, mod 2. `to` is right of
+    /// and above `from`, or equal on either axis.
     fn path_parity(&self, edges: &[u32], from: (i64, i64), to: (i64, i64)) -> bool {
         if from == to {
             // The first child of every tile shares its parent's corner: an empty path.
@@ -378,8 +360,8 @@ impl PolygonRegion<'_> {
         let mut parity = false;
         for &i in edges {
             let e = self.edge(i);
-            // Horizontal leg along y = from.1 over (from.0, to.0]: crossings right of from.0
-            // that are not right of to.0.
+            // Horizontal leg along y = from.1 over (from.0, to.0]: crossings right of from.0 not
+            // right of to.0.
             if to.0 > from.0
                 && e.crosses_right_of(from.1, from.0)
                 && !e.crosses_right_of(from.1, to.0)
@@ -412,9 +394,8 @@ impl Region for PolygonRegion<'_> {
             .copied()
             .filter(|&i| self.edge(i).meets(to))
             .collect();
-        // The path from the parent's corner to the child's runs along the parent's bottom side
-        // and then up the child's left side, so it lies inside the parent and can only be crossed
-        // by the parent's own edges.
+        // The path from the parent's corner to the child's runs along the parent's bottom then up
+        // the child's left side, so it lies inside the parent and is crossed only by its edges.
         let step = self.path_parity(
             &parent.edges,
             (i64::from(from.x0), i64::from(from.y0)),
@@ -486,8 +467,7 @@ mod tests {
 
     #[test]
     fn a_ring_through_the_ray_vertex_counts_once() {
-        // A diamond whose vertex sits exactly on the ray from (0, 20): the tie rule places the
-        // vertex below the line, so exactly one of its two edges straddles it.
+        // A vertex on the ray from (0, 20): the tie rule places it below the line.
         let p = one_ring(vec![v(20, 10), v(30, 20), v(20, 30), v(10, 20)]);
         let d = p.region();
         assert!(!d.contains_direct((0, 20)));
@@ -556,8 +536,7 @@ mod tests {
 
     #[test]
     fn a_part_whose_outer_filters_away_goes_with_its_hole() {
-        // A light outer around a heavy hole: past the outer's weight the hole must not be served
-        // first and drawn as the polygon.
+        // A light outer around a heavy hole: past the outer's weight the hole must not be drawn.
         let w = |x, y, weight| Vertex { x, y, weight };
         let p = Polygon {
             parts: vec![Part {

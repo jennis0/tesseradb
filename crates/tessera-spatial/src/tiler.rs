@@ -1,16 +1,14 @@
-//! The tiler: sorts a batch of items into Morton/row order (contracts §2.6, R3).
+//! The tiler: sorts a batch of items into Morton/row order.
 //!
-//! One implementation shared by `tessera build` now and streaming flush later (plan §5).
-//! Deliberately free of I/O — segment writing lives in `tessera-store`. Priority is **not**
-//! computed here: it is the leading 16 bits of the `tessera_id` the caller supplies (contracts
-//! §2.6 r6), so the tiler needs no separate value and the allocator owns nothing about it.
+//! One implementation shared by a build and a streaming flush, free of I/O. Priority is not
+//! computed here: it is the leading 16 bits of the `tessera_id` the caller supplies.
 
 use tessera_types::{EntityId, TesseraId};
 
 use crate::morton::split32;
 
 /// A declared-scalar value carried alongside the fixed columns (`tessera_id`, `residual`).
-/// The kinds below are the whole set (contracts §2.2).
+/// The kinds below are the whole set.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
     Bool(bool),
@@ -24,46 +22,21 @@ pub enum ScalarValue {
     I64(i64),
     F32(f32),
     F64(f64),
-    /// Microseconds since the Unix epoch. Stored as an `i64`; the *type* exists so the unit is in
-    /// the manifest rather than a convention between a schema author and their client.
+    /// Microseconds since the Unix epoch, stored as an `i64`; the type exists so the unit is in
+    /// the manifest.
     TimestampUs(i64),
     Utf8(String),
-    /// **No value at all** — distinct from every in-band value, including the empty string.
+    /// No value at all: distinct from every in-band value, including the empty string.
     ///
-    /// A category expresses absence in band, as the reserved code 0, because its value space is the
-    /// vocabulary's and 0 is reserved out of it. A string has no such spare value: the empty string
-    /// is one a corpus may legitimately hold, and contracts §2.4 already refuses it on the ingest
-    /// plane precisely because an unset field and a client bug both produce it. Folding the two
-    /// together here would make "carries nothing" and "carries the empty string" the same answer to
-    /// every filter — and the filter index would then report an item as matching a value it does
-    /// not have.
+    /// A category expresses absence in band as the reserved code 0; a string has no such spare
+    /// value, since the empty string is one a corpus may legitimately hold.
     Null,
 }
 
 impl ScalarValue {
-    /// This value as a **render** column holds it — `columns.arrow`, which is contractually
-    /// non-nullable (contracts R4) and has nowhere to put [`ScalarValue::Null`].
-    ///
-    /// **The zero still goes in the column; what changed is that something now records it was a
-    /// substitution.** [Decision 0064] rules that a render column keeps absence in a presence
-    /// bitmap *beside* it — declining the validity buffer precisely so this array stays flat,
-    /// dense and non-nullable — so this substitution is not a loss any more and the call sites
-    /// stay. `tessera_store::render_presence` is the bitmap; every producer of a segment writes it
-    /// beside the column, and the row-space filter route reads it, so an item with no number
-    /// matches no range (the 2026-08-11 defect, closed on this side too).
-    ///
-    /// ⊘ **What remains deferred is the wire and the client**: the points batch has no way to say
-    /// "absent", so a client still draws an absent number at the type's zero while the filter
-    /// treats it as having no value. The two artefacts therefore still disagree, in the
-    /// *narrowing* direction (**I12**: the filter shows fewer items, never more), which is why it
-    /// stays a stated residual rather than a blocker. 0064 defers that half while the client is
-    /// under active development, and it is the half this substitution is visible in.
-    ///
-    /// This function is the one place the substitution happens, so the three render paths — the
-    /// linear build, the streaming build and the flush — cannot come to disagree about it, and
-    /// each pairs it with the bitmap write that says which rows it touched.
-    ///
-    /// [Decision 0064]: ../../../docs/decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md
+    /// This value as a render column holds it: `columns.arrow`, non-nullable with nowhere to put
+    /// [`ScalarValue::Null`]. The zero goes in the column, and a presence bitmap beside it
+    /// records the substitution.
     pub fn or_render_placeholder(&self, ty: ScalarType) -> ScalarValue {
         if !matches!(self, ScalarValue::Null) {
             return self.clone();
@@ -81,9 +54,7 @@ impl ScalarValue {
             ScalarType::F32 => ScalarValue::F32(0.0),
             ScalarType::F64 => ScalarValue::F64(0.0),
             ScalarType::TimestampUs => ScalarValue::TimestampUs(0),
-            // Unreachable in practice — `render` on a string type is refused at schema parse — and
-            // the empty string rather than a panic, because this function's whole job is to keep a
-            // non-nullable column writable.
+            // Unreachable in practice: `render` on strings is refused at schema parse.
             ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
                 ScalarValue::Utf8(String::new())
             }
@@ -91,29 +62,12 @@ impl ScalarValue {
     }
 }
 
-/// The Arrow type of a declared scalar column, used to build `columns.arrow`'s schema
-/// (`scalar_schema` in [`crate::tiler`]'s consumers, e.g. `tessera_store::write::write_segment`).
+/// The Arrow type of a declared scalar column, used to build `columns.arrow`'s schema.
 ///
-/// **The narrow widths are the point, not a convenience.** A hot column is baked into every row
-/// and priced at 0.93 GiB per byte per row per 10⁹ items (§10.5), so a category code declared
-/// `u64` because that was the only integer available costs 7.45 GiB where `u8` costs 0.93. The
-/// width is also unalterable — changing it rewrites the corpus (per-point-attributes §2.2), which
-/// is why the set is widened here rather than left for a caller to work around.
-///
-/// `Utf8` is the one variable-width member and the one the segment writer pays an offset table
-/// for. It predates the fixed-width set and is kept, but per-point-attributes §3.6 is explicit
-/// that a category belongs in a fixed-width column: a string repeated per row is the vocabulary
-/// stored a hundred million times.
-/// **`Bool` is the only member that is not a flat slice of itself.** Arrow packs it to one bit per
-/// row, so it is eight times cheaper than the `u8` a flag would otherwise cost — and every reader
-/// of it needs the array rather than a `&[bool]`, which is why `ScalarSlice` carries a
-/// `&BooleanArray` for it as it does for `Utf8`.
-///
-/// **`TimestampUs` stores as an `i64` and exists for the declaration, not the storage.** Without
-/// it a time is an `i64` in the manifest and its unit is a convention between the schema author
-/// and whoever reads the column; with it the unit is a fact a reader can check. It is deliberately
-/// the *only* time type: nothing records a unit per column beyond the type name, so admitting
-/// milliseconds too would let two builds store incomparable numbers under one declaration.
+/// The widths are narrow because a hot column is baked into every row and priced per bit; the
+/// width is unalterable, since changing it rewrites the corpus. `Utf8` is the one variable-width
+/// member; `Bool` packs to one bit per row in Arrow. `TimestampUs` stores as an `i64` and exists
+/// for the declaration, not the storage, and is the only time type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarType {
     Bool,
@@ -129,40 +83,23 @@ pub enum ScalarType {
     F64,
     TimestampUs,
     Utf8,
-    /// A short string with no vocabulary, matched exactly (`records-and-search.md` §4.3). Its
-    /// *value* is a [`ScalarValue::Utf8`] — the ingest wire carries a keyword as a string and knows
-    /// nothing of the storage — and what the type names is the storage the filter index gives it: a
-    /// per-layer front-coded dictionary of the distinct values, with a `u32` ordinal into it per
-    /// present entity, in place of the flat string column `Utf8` gets.
-    ///
-    /// **There is no `ScalarValue::Keyword`, deliberately.** An ordinal is a position in one
-    /// layer's dictionary and means nothing outside it, so a value in flight — in a points file, in
-    /// a buffered row, in the WAL — has no ordinal to carry and must not appear to. The ordinal is
-    /// minted where the layer is written and nowhere else.
+    /// A short string with no vocabulary, matched exactly. Its value is a [`ScalarValue::Utf8`];
+    /// the type names the storage, a per-layer front-coded dictionary with a `u32` ordinal per
+    /// present entity. There is no `ScalarValue::Keyword`, since an ordinal means nothing outside
+    /// its layer.
     Keyword,
-    /// Prose, matched by what it says rather than by its bytes (`records-and-search.md` §4.4).
+    /// Prose, matched by what it says rather than by its bytes. Its value is a
+    /// [`ScalarValue::Utf8`]; the value lives in the record blob, and `index = true` adds a
+    /// per-layer token dictionary over terms a named analyser produced.
     ///
-    /// Its *value* is a [`ScalarValue::Utf8`] for the same reason a keyword's is — the ingest wire
-    /// carries text as a string — and what the type names is the storage: the value lives in the
-    /// record blob whether or not the field is indexed, and `index = true` adds a per-layer token
-    /// dictionary and postings over the terms a **named analyser** produced (decision 0070).
-    ///
-    /// **The analyser is part of the column's declaration, not of this type.** Two `text` columns
-    /// may be analysed differently, and a column's resolved analyser identity is recorded against
-    /// it in the manifest, because an index built by one analyser and queried by another matches
-    /// on precisely the strings whose segmentation differs — with no error anywhere.
+    /// The analyser is part of the column's declaration, recorded in the manifest.
     Text,
 }
 
 impl ScalarType {
     /// The spelling `MANIFEST.declared_scalars[].arrow_type` uses.
     ///
-    /// **One definition, because there were two and they disagreed.** The flush path parsed
-    /// `"u64"` while ingest validation compared against `"uint64"`, so a manifest either path
-    /// accepted was one the other refused. Neither had ever run — `declared_scalars` was written
-    /// empty unconditionally — so the disagreement was invisible until something populated it.
-    /// These are the short forms because they are what the design's own §3.6 writes (`u8`,
-    /// `u16`, `u32`) and what a schema author therefore types.
+    /// These are the short forms a schema author types: `u8`, `u16`, `u32` and so on.
     pub fn arrow_type_name(self) -> &'static str {
         match self {
             ScalarType::Bool => "bool",
@@ -184,7 +121,7 @@ impl ScalarType {
     }
 
     /// The inverse of [`ScalarType::arrow_type_name`]; `None` for a spelling this build cannot
-    /// write, which every caller must treat as fail-closed rather than as an absent column.
+    /// write, treated as fail-closed rather than as an absent column.
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "bool" => ScalarType::Bool,
@@ -206,17 +143,10 @@ impl ScalarType {
         })
     }
 
-    /// **Bits**, not bytes, this column adds to every row — `None` for the two string types.
+    /// Bits, not bytes, this column adds to every row; `None` for the two string types, since
+    /// neither is ever in a row.
     ///
-    /// Bits because [`ScalarType::Bool`] costs one, and a byte-denominated figure would have to
-    /// round it to either 0 or 1 — the first hiding the cost, the second reporting eight times it
-    /// and erasing the reason to declare a `bool` at all.
-    ///
-    /// The `None`s are not all the same `None`. A [`ScalarType::Utf8`] column has a row cost that
-    /// depends on the data; a [`ScalarType::Keyword`] and a [`ScalarType::Text`] have no row cost
-    /// at all, because neither is ever in a row — `render` on both is refused at the declaration,
-    /// and their storage is a `u32` ordinal in entity space and a blob row respectively. None is a
-    /// number this can report, so all three decline.
+    /// [`ScalarType::Bool`] costs one bit; a byte-denominated figure would round it to 0 or 1.
     pub fn row_bits(self) -> Option<u64> {
         Some(match self {
             ScalarType::Bool => 1,
@@ -230,15 +160,14 @@ impl ScalarType {
         })
     }
 
-    /// Whether a value of this type can be a category code — per-point-attributes §3.6's three
-    /// declarable widths. `u64`, `i64`, `f32` and `utf8` are excluded: a code space wider than
-    /// `u32` is not a vocabulary, and the last two cannot index one at all.
+    /// Whether a value of this type can be a category code: `u8`, `u16` or `u32` only, since a
+    /// wider code space is not a vocabulary and `utf8` cannot index one at all.
     pub fn is_category_width(self) -> bool {
         matches!(self, ScalarType::U8 | ScalarType::U16 | ScalarType::U32)
     }
 
-    /// The largest code this width can carry. Code `0` is the reserved *absent* sentinel
-    /// (§3.6), so the usable count is one less than this.
+    /// The largest code this width can carry. Code `0` is the reserved absent sentinel, so the
+    /// usable count is one less than this.
     pub fn max_code(self) -> Option<u32> {
         Some(match self {
             ScalarType::U8 => u8::MAX as u32,
@@ -249,16 +178,9 @@ impl ScalarType {
     }
 }
 
-/// One item to be placed into a segment: its wire identity, geometry, and any declared
-/// scalars. No `priority` field — it is a prefix of `tessera_id`, and a stored second copy
-/// would be a second source of truth (contracts §2.6 r6, 2026-07-30 fold).
-///
-/// Geometry is **already quantised**: 32-bit fixed point per axis against the build extent
-/// ([`crate::fixed32`]), not the coordinates the source held. The item therefore carries the
-/// position in the one form from which both stored words — the cell code and its sub-cell
-/// residual — fall out by shift and mask ([`crate::split32`]), so the tiler cannot disagree
-/// with the segment writer about which cell a point is in. Coordinates are quantised exactly
-/// once, upstream in the importer.
+/// One item to be placed into a segment: its wire identity, geometry, and any declared scalars.
+/// Geometry is already quantised: 32-bit fixed point per axis against the build extent
+/// ([`crate::fixed32`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TilerItem {
     pub tessera_id: TesseraId,
@@ -269,27 +191,14 @@ pub struct TilerItem {
     pub scalars: Vec<ScalarValue>,
 }
 
-/// Sort `items` into segment (row) order: `(morton, tessera_id)` ascending (contracts §2.6 r6).
-/// No further tiebreak: `tessera_id` is a bijection over 2^64 and there is one row per entity,
-/// so the order is total — and because `priority` is the leading 16 bits of `tessera_id`,
-/// ordering by `(morton, priority, tessera_id)` is identically this order. The entity ID is
-/// **not** a sort key at any position; it is passed alongside so the caller can keep
-/// `permutation.bin` and the external-ID sidecars aligned with the new row order. Row order is
-/// key-dependent: a different deployment key reorders rows inside a Morton cell (contracts
-/// §2.2, rotation).
+/// Sort `items` into segment (row) order: `(morton, tessera_id)` ascending. `tessera_id` is a
+/// bijection over 2^64 with one row per entity, so no further tiebreak is needed. The entity ID
+/// is not a sort key; it is passed alongside to keep `permutation.bin` and the external-ID
+/// sidecars aligned with the new row order.
 ///
-/// Returns the sorted items' Morton codes as `u32`s, matching `morton.u32`'s on-disk
-/// representation, in the same order as `items` post-sort. The code is 32 bits because §5.2
-/// fixes the grid at 2^16 x 2^16 — a property of the *grid*, not the population, so this width
-/// does not change at 10^10 or 10^11 (contracts §2.5, r5; was a low-aligned `u64`).
-///
-/// **No extent, and no quantisation here.** The code is the high half of the item's fixed-point
-/// position ([`split32`]), which the importer already computed against the build extent — so
-/// this function cannot re-quantise, and there is no second place a coordinate could be turned
-/// into a cell under bounds that have drifted from the ones `MANIFEST.json` declares.
-///
-/// `entity_ids` is permuted identically to `items` (a companion vector, not a sort key) and
-/// must be the same length.
+/// Returns the sorted items' Morton codes as `u32`s: the high half of each item's fixed-point
+/// position ([`split32`]), already computed against the build extent, so this does not
+/// re-quantise. `entity_ids` is permuted identically to `items` and must be the same length.
 pub fn sort_batch(items: &mut Vec<TilerItem>, entity_ids: &mut Vec<EntityId>) -> Vec<u32> {
     assert_eq!(
         items.len(),
@@ -331,7 +240,7 @@ mod tests {
     }
 
     /// An item at coordinate `(x, y)`, quantised against the unit extent the way the importer
-    /// quantises — the tiler itself never sees a coordinate.
+    /// quantises: the tiler itself never sees a coordinate.
     fn item(tessera_id: u64, x: f64, y: f64) -> TilerItem {
         let e = unit_extent();
         TilerItem {
@@ -344,10 +253,8 @@ mod tests {
 
     #[test]
     fn sorts_by_morton_then_tessera_id() {
-        // Two items at the identical coordinate (same Morton code) plus a third sharing the
-        // leading 16 bits with one of them: must order purely by ascending `tessera_id` — the
-        // tiebreak is contract (contracts §2.6 r6). Without a Morton collision this test would
-        // prove nothing about the order that just changed.
+        // Two items at the identical coordinate plus a third sharing the leading 16 bits: must
+        // order purely by ascending `tessera_id`, or the Morton collision proves nothing.
         let mut items = vec![item(9, 0.5, 0.5), item(2, 0.5, 0.5), item(1, 0.5, 0.5)];
         let mut entity_ids = vec![EntityId::new(90), EntityId::new(20), EntityId::new(10)];
         let codes = sort_batch(&mut items, &mut entity_ids);
@@ -367,10 +274,8 @@ mod tests {
 
     #[test]
     fn ordering_by_the_priority_prefix_then_the_full_id_equals_ordering_by_the_id() {
-        // Contracts §2.6 r6: `priority` is a PREFIX of `tessera_id`, so the two orders are
-        // the same order. This is what licenses an implementation to compare the cheap
-        // 16-bit prefix first (pipeline.rs's 12-byte RowRec does exactly that). Ids share
-        // their high 16 bits (prefix ties) so the test proves something.
+        // `priority` is a prefix of `tessera_id`, so the two orders are the same order. Ids
+        // share their high 16 bits so the test proves something about the tie.
         let ids: Vec<TesseraId> = vec![
             TesseraId::new(0x0001_0000_0000_0005),
             TesseraId::new(0x0001_0000_0000_0002),
@@ -396,10 +301,8 @@ mod tests {
         assert!(codes.windows(2).all(|w| w[0] <= w[1]));
     }
 
-    /// The code the tiler returns for a point is the code `morton_of` gives for the coordinate
-    /// that point came from. The tiler now derives it by shifting the importer's fixed point
-    /// rather than by quantising, so this is the join between the two routes — if they ever
-    /// disagreed, `morton.u32` would stop describing where the points actually are.
+    /// The code the tiler returns for a point equals `morton_of` on the coordinate it came from:
+    /// the join between shifting the importer's fixed point and quantising directly.
     #[test]
     fn returned_codes_are_u32_and_match_morton_of_on_the_source_coordinates() {
         let e = unit_extent();

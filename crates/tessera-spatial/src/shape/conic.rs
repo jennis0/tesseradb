@@ -3,14 +3,13 @@
 //! A circle of radius *r* in data units is `(p − c)ᵀ A (p − c) ≤ 1` with `A = I / r²`; an ellipse
 //! with semi-axes *a*, *b* rotated by θ has `A = R diag(1/a², 1/b²) Rᵀ`. Quantisation scales the
 //! two axes by `sx = 2³² / (x_max − x_min)` and `sy` likewise, so in grid units the matrix is
-//! `M = S⁻¹ A S⁻¹` — a circle on a non-square extent is an ellipse here, and a rotated ellipse a
-//! differently rotated one. Storing the caller's five numbers would store a shape the grid does
-//! not hold; storing the conic stores the one it does.
+//! `M = S⁻¹ A S⁻¹`: a circle on a non-square extent is an ellipse here, and a rotated ellipse a
+//! differently rotated one.
 //!
-//! The test is `q(d) = m11·dx² + 2·m12·dx·dy + m22·dy² ≤ 1` in `f64`, with `dx`, `dy` exact
-//! (a difference of two `u32`s is exactly representable). Every operation is correctly rounded,
-//! so the result is the same on every platform; it is not exact at the last bit, and the property
-//! tests skip positions within rounding of the boundary rather than pretend otherwise.
+//! The test is `q(d) = m11·dx² + 2·m12·dx·dy + m22·dy² ≤ 1` in `f64`, with `dx`, `dy` exact (a
+//! difference of two `u32`s is exactly representable). Every operation is correctly rounded, so
+//! the result is the same on every platform; it is not exact at the last bit, and the property
+//! tests skip positions within rounding of the boundary.
 
 use super::decompose::{Class, Rect, Region};
 use super::{Bbox, GridPoint};
@@ -27,8 +26,7 @@ pub struct Conic {
 impl Conic {
     /// A conic from data-space parameters and the per-axis grid scales.
     ///
-    /// `angle` is degrees anticlockwise from the x axis in data space. `a`, `b` and `r` are
-    /// data units. `None` if any axis is not positive or any input is not finite.
+    /// `None` if an axis is not positive or an input not finite.
     pub fn from_ellipse(
         (cx, cy): GridPoint,
         a: f64,
@@ -43,11 +41,10 @@ impl Conic {
         let (s, c) = t.sin_cos();
         let ia = 1.0 / (a * a);
         let ib = 1.0 / (b * b);
-        // A = R diag(ia, ib) Rᵀ with R = [[c, -s], [s, c]].
+        // A = R diag(ia, ib) Rᵀ with R = [[c, -s], [s, c]]; M = S⁻¹ A S⁻¹.
         let a11 = c * c * ia + s * s * ib;
         let a12 = c * s * ia - s * c * ib;
         let a22 = s * s * ia + c * c * ib;
-        // M = S⁻¹ A S⁻¹.
         Some(Conic {
             cx,
             cy,
@@ -64,7 +61,6 @@ impl Conic {
         )
     }
 
-    /// `q` at an offset from the centre.
     fn q_at(&self, dx: f64, dy: f64) -> f64 {
         self.m11 * dx * dx + 2.0 * self.m12 * dx * dy + self.m22 * dy * dy
     }
@@ -73,8 +69,7 @@ impl Conic {
         self.q(p) <= 1.0
     }
 
-    /// The semi-axis lengths in grid units and the major axis's angle, from the eigen-decomposition
-    /// of `M`: `(major, minor, angle_radians)`.
+    /// `(major, minor, angle_radians)` from the eigen-decomposition of `M`.
     fn axes(&self) -> (f64, f64, f64) {
         let tr = self.m11 + self.m22;
         let det = self.m11 * self.m22 - self.m12 * self.m12;
@@ -97,7 +92,7 @@ impl Conic {
         (1.0 / l_min.sqrt(), 1.0 / l_max.sqrt(), angle)
     }
 
-    /// The grid box enclosing the conic — the half-widths are `sqrt(M⁻¹)`'s diagonal.
+    /// The grid box enclosing the conic.
     pub fn bounds(&self) -> Bbox {
         let det = (self.m11 * self.m22 - self.m12 * self.m12).max(f64::MIN_POSITIVE);
         let hx = (self.m22 / det).sqrt();
@@ -112,8 +107,7 @@ impl Conic {
     }
 
     /// The least value of `q` over a closed rectangle. `q` is convex, so it is zero when the
-    /// centre lies inside, and otherwise attained on one of the four sides, where it is a
-    /// one-dimensional quadratic clamped to the side.
+    /// centre lies inside, and otherwise attained on a side as a clamped one-dimensional quadratic.
     fn min_over(&self, r: Rect) -> f64 {
         if r.contains((self.cx, self.cy)) {
             return 0.0;
@@ -139,14 +133,14 @@ impl Conic {
         best
     }
 
-    /// A ring around the conic with no chord further than `tolerance` grid units from the curve,
-    /// at most `budget` vertices, anticlockwise from the major axis.
+    /// A ring around the conic with no chord further than `tolerance` from the curve, at most
+    /// `budget` vertices, anticlockwise from the major axis.
     pub fn ring(&self, tolerance: u32, budget: usize) -> Vec<GridPoint> {
         self.ring_guarded(tolerance, budget).0
     }
 
     /// [`Conic::ring`], and whether the budget held the vertex count below what the tolerance
-    /// asked for — the guard of `polygon-membership.md` §7.2, fired for a curve as for a polygon.
+    /// asked for.
     pub fn ring_guarded(&self, tolerance: u32, budget: usize) -> (Vec<GridPoint>, bool) {
         let (major, minor, angle) = self.axes();
         let tol = f64::from(tolerance);

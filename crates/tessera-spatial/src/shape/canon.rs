@@ -1,14 +1,11 @@
-//! From what a caller wrote to what the grid holds (`polygon-membership.md` §4.3–§4.4).
+//! From what a caller wrote to what the grid holds.
 //!
-//! A shape arrives in the space its submission declared — the view's own coordinates, or
-//! longitude and latitude, which [`super::project`] places in the view's frame through the
-//! view's own transform before anything here looks at it — and
-//! leaves as a [`Shape`] in grid units: clipped to the extent, quantised through `fixed32`,
-//! and for a polygon deduplicated, de-collinearised, oriented, rotated to a fixed start and
-//! weighted. Everything that happened on the way is in the [`CanonReport`], which the build
-//! prints and never refuses on: a clipped boundary and a ring that collapsed are facts about the
-//! caller's data the caller can see, not disclosures (`CLAUDE.md`, *what the strictness is for*).
-//! What does refuse is a coordinate that is not one.
+//! A shape arrives in the space its submission declared, the view's own coordinates, or
+//! longitude and latitude, which [`super::project`] places in the view's frame before anything
+//! here looks at it, and leaves as a [`Shape`] in grid units: clipped to the extent, quantised
+//! through `fixed32`, and for a polygon deduplicated, de-collinearised, oriented, rotated to a
+//! fixed start and weighted. Everything that happened on the way is in the [`CanonReport`], which
+//! the build prints and never refuses on. What does refuse is a coordinate that is not one.
 
 use crate::morton::{fixed32, Bounds, FIXED_SPAN};
 
@@ -57,7 +54,7 @@ pub struct CanonReport {
     pub vertices_in: u64,
     pub vertices_out: u64,
     /// Every coordinate lay within ±180 × ±90 while the extent does not: the shape may have been
-    /// written in degrees for a view that is not (R12).
+    /// written in degrees for a view that is not.
     pub degrees_looking: bool,
 }
 
@@ -67,10 +64,9 @@ pub enum CanonError {
     /// A box whose max is below its min on an axis.
     InvertedBox,
     NonPositiveAxis,
-    /// A `wgs84` coordinate outside ±180 × ±90, which is not a coordinate (`projections.md` §2).
+    /// A `wgs84` coordinate outside ±180 × ±90, which is not a coordinate.
     NotACoordinate,
-    /// A `wgs84` shape on a view that projects nothing: one space, and nothing to convert from
-    /// (`polygon-membership.md` §4.3).
+    /// A `wgs84` shape on a view that projects nothing: one space, and nothing to convert from.
     NoProjection,
 }
 
@@ -122,11 +118,8 @@ impl ShapeF64 {
     /// The canonical shape over `extent`, with the report. The extent must be valid
     /// (`Bounds::validate`).
     ///
-    /// **`space` names the plane the shape's edges are straight in** (`polygon-membership.md`
-    /// R10), and carries with it the transform that reaches the view's frame. A
-    /// [`Space::Wgs84`] shape is densified and projected first ([`super::project::place`]), so
-    /// that everything below this line is working in the coordinates the points are stored in and
-    /// the shape and the corpus are placed by one function (R12).
+    /// `space` names the plane the shape's edges are straight in. A [`Space::Wgs84`] shape is
+    /// densified and projected first, so everything below this works in stored coordinates.
     pub fn canonical(
         &self,
         space: Space,
@@ -135,9 +128,7 @@ impl ShapeF64 {
         debug_assert!(extent.validate().is_ok());
         let placed = place(self, space, extent)?;
         let (shape, mut report) = placed.canonical_in_view(extent)?;
-        // **`vertices_in` is what the caller wrote**, not what densification produced: a `wgs84`
-        // polygon reaching this line already carries the vertices its curved edges needed, and a
-        // report saying `47 in → 47 out` would hide the transform the line exists to show.
+        // `vertices_in` is what the caller wrote, not what densification produced.
         report.vertices_in = match self {
             ShapeF64::Polygon(parts) => parts.iter().flatten().map(|r| r.len() as u64).sum(),
             _ => 0,
@@ -288,8 +279,7 @@ fn clip_ring(ring: &[(f64, f64)], e: &Bounds) -> (Vec<(f64, f64)>, bool) {
     if all_inside {
         return (pts, false);
     }
-    // Each side as: inside predicate and intersection with the side's line.
-    // Sutherland–Hodgman, one side at a time: the axis, the bound, and whether inside is above it.
+    // One side at a time: the axis, the bound, and whether inside is above it.
     for (axis, bound, above) in [
         (0, e.x_min, true),
         (0, e.x_max, false),
@@ -332,8 +322,8 @@ fn clip_ring(ring: &[(f64, f64)], e: &Bounds) -> (Vec<(f64, f64)>, bool) {
     (pts, true)
 }
 
-/// Remove consecutive duplicates and collinear runs (spikes included) from a closed ring of
-/// grid positions; `None` if fewer than three vertices survive.
+/// Remove consecutive duplicates and collinear runs from a closed ring; `None` if fewer than
+/// three vertices survive.
 fn tidy_ring(pts: &[(u32, u32)]) -> Option<Ring> {
     let cross = |a: (u32, u32), b: (u32, u32), c: (u32, u32)| -> i128 {
         let (ax, ay) = (i128::from(a.0), i128::from(a.1));
@@ -387,8 +377,8 @@ fn doubled_signed_area(ring: &Ring) -> i128 {
     s
 }
 
-/// Outer rings positive, holes negative; every ring rotated to its lowest `(y, x)` vertex;
-/// parts ordered by their outer ring's first vertex.
+/// Outer rings positive, holes negative; every ring rotated to its lowest `(y, x)` vertex; parts
+/// ordered by their outer ring's first vertex.
 fn orient_and_order(polygon: &mut Polygon) {
     for part in &mut polygon.parts {
         for (i, ring) in part.rings.iter_mut().enumerate() {

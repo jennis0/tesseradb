@@ -1,10 +1,9 @@
-//! Property tests for Morton interleaving and tile enumeration (contracts §2.5).
+//! Property tests for Morton interleaving and tile enumeration.
 
 use proptest::prelude::*;
 use tessera_spatial::{interleave, tiles_for_bbox, Bounds, Tile};
 
-/// Inverse of `interleave`: split a 32-bit Morton code back into its (x, y) 16-bit cells.
-/// Bit `2*i` of the code is bit `i` of x; bit `2*i+1` of the code is bit `i` of y.
+/// Inverse of `interleave`: bit `2*i` of the code is bit `i` of x, bit `2*i+1` is bit `i` of y.
 fn deinterleave(code: u32) -> (u16, u16) {
     fn compact(mut x: u32) -> u16 {
         x &= 0x5555_5555;
@@ -27,7 +26,7 @@ fn full_extent() -> Bounds {
 }
 
 proptest! {
-    /// (a) `interleave` is injective on random pairs.
+    /// `interleave` is injective on random pairs.
     #[test]
     fn interleave_is_injective(
         x1 in any::<u16>(), y1 in any::<u16>(),
@@ -38,7 +37,7 @@ proptest! {
         }
     }
 
-    /// (b) Deinterleaving (the inverse written above) round-trips through `interleave`.
+    /// Deinterleaving (the inverse written above) round-trips through `interleave`.
     #[test]
     fn interleave_round_trips(x in any::<u16>(), y in any::<u16>()) {
         let code = interleave(x, y).raw();
@@ -46,15 +45,12 @@ proptest! {
         prop_assert_eq!((dx, dy), (x, y));
     }
 
-    /// (c) For random points and any depth, the point's code falls inside exactly one
-    /// depth-d tile of `tiles_for_bbox` over the full extent.
+    /// For random points and any depth, the point's code falls inside exactly one depth-d tile
+    /// of `tiles_for_bbox` over the full extent.
     ///
-    /// Depth is capped at 8 (4^8 = 65,536 tiles) rather than the full 0..=16: `tiles_for_bbox`
-    /// over the *full* extent enumerates every tile at the given depth (up to 4^16 ≈ 4.3
-    /// billion at the top depth), which is a property of an exhaustive full-grid query, not of
-    /// `interleave`/`code_range` themselves — those are covered independently by (a), (b) and
-    /// (d). The exactly-one-tile containment property is depth-independent, so this range is
-    /// representative without exhausting memory/CPU.
+    /// Depth is capped at 8 rather than 0..=16: `tiles_for_bbox` over the full extent enumerates
+    /// every tile at the given depth (up to 4^16 at the top), which would exhaust memory. The
+    /// containment property is depth-independent, so this range is representative.
     #[test]
     fn point_falls_in_exactly_one_tile(
         px in 0.0f64..1.0, py in 0.0f64..1.0,
@@ -74,7 +70,7 @@ proptest! {
         prop_assert_eq!(containing.len(), 1, "point code {} matched {} tiles at depth {}", code, containing.len(), depth);
     }
 
-    /// (d) A parent tile's code range contains all four of its children's ranges.
+    /// A parent tile's code range contains all four of its children's ranges.
     #[test]
     fn parent_contains_children(
         depth in 0u8..16u8,
