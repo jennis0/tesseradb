@@ -1,35 +1,39 @@
-//! The analysers for `text` columns, and the fold the value-suggestion index shares with them.
+//! Text analysis: the analysers that turn a `text` column's strings into tokens, and the
+//! normalisation that the value-suggestion index shares with them.
 //!
 //! An analyser is a named, versioned pipeline from a string to its tokens. A `text` column
-//! declares one by name, and the manifest records the analyser's full identity against the column.
-//! Analysers are built in. A loaded one would make the token stream depend on the deployment, and
-//! the golden vectors in `tests/golden.rs` could then pin only a default.
+//! declares an analyser by name, and the manifest records the analyser's identity
+//! (`<name>/<version>`) for that column. Analysers are compiled in. If one could be loaded at run
+//! time, the tokens would depend on the deployment, and the golden vectors in `tests/golden.rs`
+//! could check only the built-in one.
 //!
-//! One analyser ships, [`UNICODE`]. Its stages are NFKC normalisation, full Unicode case folding,
-//! then UAX #29 word segmentation. Normalising first gives the case folder and the segmenter one
-//! spelling of each character (`ﬁ` and `fi`, halfwidth and fullwidth katakana, the Kelvin sign and
-//! `K`), so a query and a document that differ only in spelling produce the same tokens.
+//! There is one analyser, [`UNICODE`]. It applies NFKC normalisation, then full Unicode case
+//! folding, then UAX #29 word segmentation. Normalisation runs first so that the later stages see
+//! one spelling of each character (`ﬁ` and `fi`, halfwidth and fullwidth katakana, the Kelvin sign
+//! and `K`). A query and a document that differ only in spelling then produce the same tokens.
 //!
 //! The segmenter is icu4x's [`WordSegmenter::new_auto`], which chooses its method per script run:
 //! dictionary segmentation for Chinese, Japanese, Thai, Lao, Khmer and Burmese, and the plain
 //! UAX #29 rules elsewhere. Those six scripts are written without spaces between words, so a
-//! tokeniser that splits on non-alphanumerics returns a sentence as one token. One analyser serves
-//! a mixed-script column with nothing declared.
+//! tokeniser that splits on non-alphanumeric characters returns a whole sentence as one token.
+//! Because the method is chosen per run, a column that mixes scripts needs no configuration.
 //!
-//! `unicode` has no stemming, stopwords, diacritic folding or synonyms. Each depends on the
-//! language (`ö` and `o` are one letter in German and two in Swedish), and a wrong default loses
-//! matches without an error. A pipeline that wants them is a new name with its own vectors.
+//! `unicode` does no stemming, stopword removal, diacritic removal or synonym expansion. Each of
+//! those depends on the language (`ö` and `o` are one letter in German and two in Swedish), and a
+//! wrong choice loses matches without reporting an error. A pipeline that does any of them would
+//! be a second analyser with its own name and golden vectors.
 //!
-//! A token stream does not describe itself. An index built under one identity and queried under
-//! another fails to match the strings whose segmentation differs, and two layers' postings can be
-//! merged only when the same analyser produced both. Every reader and writer of a text index
-//! therefore resolves its analyser with [`analyser_with_identity`] and refuses a column whose
-//! recorded identity this binary cannot reproduce.
+//! Tokens do not record which analyser produced them. If an index is built with one analyser
+//! version and queried with another, the strings that the two versions segment differently do not
+//! match, and no error is reported. Two layers' postings can be merged only if the same version
+//! produced both. Every reader and writer of a text index therefore gets its analyser from
+//! [`analyser_with_identity`], which returns `None` unless this binary has exactly the recorded
+//! version.
 //!
-//! The conformance oracle reaches this analyser through `tessera tokenise` and does not reimplement
-//! it: PyICU wraps ICU4C, whose segmentation can differ from icu4x's, so a second implementation
-//! would compare the two libraries. The independent check is the golden vectors, which are known
-//! answers per script family.
+//! The conformance oracle tokenises by running `tessera tokenise`. It has no tokeniser of its own,
+//! because the Python binding (PyICU) wraps ICU4C, whose segmentation can differ from icu4x's, and
+//! a comparison would then test one library against the other. The golden vectors are the
+//! independent check: expected tokens for each script family, reviewed by a person.
 
 use std::borrow::Cow;
 
@@ -42,35 +46,39 @@ use icu_properties::{
 use icu_segmenter::options::WordBreakInvariantOptions;
 use icu_segmenter::{WordSegmenter, WordSegmenterBorrowed};
 
-/// The name a `text` column declares to select the general prose pipeline.
+/// The name a `text` column declares to use the general-purpose analyser.
 pub const UNICODE: &str = "unicode";
 
-/// `unicode`'s version. The `icu4x` part is the crate minor whose compiled data this binary
-/// carries, and `Cargo.toml` pins the four icu4x crates to it exactly, so a data change is an edit
-/// that has to move this constant. The `p` part is the pipeline's shape: it moves when a stage or
-/// the token rule changes. Either change is a rebuild of every column indexed under the old value.
+/// The version of `unicode`. The `icu4x` part is the minor version of the icu4x crates, whose
+/// compiled Unicode data is built into this binary. `Cargo.toml` requires exactly that version, so
+/// upgrading the data means editing `Cargo.toml`, and this constant must be changed in the same
+/// edit. The `p` part numbers the pipeline itself: increase it when a stage or the token rule
+/// changes. After either change, every column indexed under the old version must be rebuilt.
 ///
-/// Every input to the token stream comes from that pin. The token rule reads icu4x's property
-/// tables and not `char::is_alphanumeric`, whose tables move with the Rust toolchain.
+/// All Unicode data the tokens depend on comes from those crates. The token rule reads icu4x's
+/// property tables, not `char::is_alphanumeric`, because std's tables change with the Rust
+/// toolchain.
 const UNICODE_VERSION: &str = "icu4x-2.2/p1";
 
-/// SHA-256 of each analyser's golden vectors, kept beside the version they were recorded under.
+/// The SHA-256 of each analyser's golden vectors, kept next to the analyser's version.
 ///
-/// [`Analyser::identity`] does not depend on what the tokeniser does, so vectors regenerated from
-/// changed behaviour would pass every token assertion with the version unmoved. Editing
-/// `tests/vectors/golden.json` fails `tests/golden.rs` until this digest moves, and the line to
-/// edit is next to the version that should move with it. `tests/golden.rs` holds the canonical
-/// form and checks that every name in [`ANALYSER_NAMES`] has a row.
+/// The version string is written by hand and does not change when the tokeniser's behaviour
+/// changes. If the vectors were regenerated from changed behaviour, every token assertion would
+/// pass with the version unchanged. This digest catches that case: any edit to
+/// `tests/vectors/golden.json` fails `tests/golden.rs` until the digest is updated here, next to
+/// the version that should change with it. `tests/golden.rs` defines the bytes that are hashed
+/// and checks that every name in [`ANALYSER_NAMES`] has a digest.
 pub const ANALYSER_VECTOR_DIGESTS: &[(&str, &str)] = &[(
     UNICODE,
     "8f5b0d5efb3708f2f6d2d7a88ad56f163ffb91a03874908c38bd5bcda1eddbbd",
 )];
 
-/// Every analyser name this binary carries.
+/// The name of every analyser in this binary.
 pub const ANALYSER_NAMES: &[&str] = &[UNICODE];
 
-/// The analyser a column declares by `name`. `None` for a name this binary does not carry; there
-/// is no default, because a fallback would index a column with a pipeline it did not declare.
+/// The analyser called `name`, or `None` if this binary has no analyser of that name. An unknown
+/// name is not replaced with a default, because the column would then be indexed by an analyser
+/// it did not declare.
 pub fn analyser(name: &str) -> Option<Analyser> {
     match name {
         UNICODE => Some(Analyser::new()),
@@ -78,8 +86,9 @@ pub fn analyser(name: &str) -> Option<Analyser> {
     }
 }
 
-/// The identity, `<name>/<version>`, that a column declaring `name` is recorded under. It
-/// constructs no analyser, so a declaration is checked without loading the segmenter.
+/// The identity, `<name>/<version>`, that the manifest records for a column declaring `name`.
+/// This does not construct the analyser, so checking a declaration does not load the segmenter's
+/// dictionaries.
 pub fn identity_of(name: &str) -> Option<String> {
     match name {
         UNICODE => Some(format!("{UNICODE}/{UNICODE_VERSION}")),
@@ -87,20 +96,23 @@ pub fn identity_of(name: &str) -> Option<String> {
     }
 }
 
-/// The analyser whose recorded identity is `identity`. `None` where this binary does not carry
-/// that name, or carries it at another version: its terms could not be reproduced.
+/// The analyser whose identity is `identity`, or `None` if this binary has no analyser of that
+/// name or has a different version of it. A different version may tokenise differently, so it
+/// must not read or extend the column's index.
 pub fn analyser_with_identity(identity: &str) -> Option<Analyser> {
     let name = declared_name(identity);
-    (identity_of(name)? == identity).then(|| analyser(name)).flatten()
+    (identity_of(name)? == identity)
+        .then(|| analyser(name))
+        .flatten()
 }
 
-/// The declared name inside an identity, which is `<name>/<version>`.
+/// The analyser name in an identity of the form `<name>/<version>`.
 pub fn declared_name(identity: &str) -> &str {
     identity.split('/').next().unwrap_or_default()
 }
 
-/// The two character classes the token rule and the word-boundary rule read, from icu4x's tables
-/// so that [`UNICODE_VERSION`] covers them.
+/// The Unicode property tables that the token rule and the word-start rule read. They come from
+/// icu4x, so [`UNICODE_VERSION`] identifies their contents.
 struct Classes {
     alphabetic: CodePointSetDataBorrowed<'static>,
     general_category: CodePointMapDataBorrowed<'static, GeneralCategory>,
@@ -128,9 +140,10 @@ impl Classes {
 
 /// The `unicode` analyser.
 ///
-/// Constructing one deserialises the segmenter's dictionaries, so build one per flush or build
-/// stage and pass it down. It holds no request state and is `Send + Sync`. The icu4x handles are
-/// not `Clone`; a holder that must clone shares it behind an `Arc`.
+/// Constructing an `Analyser` deserialises the segmenter's dictionaries, so construct one per
+/// flush or build stage and pass a reference down. An `Analyser` has no mutable state and is
+/// `Send + Sync`. It is not `Clone`, because the icu4x types it holds are not; share it in an
+/// `Arc` where a clone is needed.
 pub struct Analyser {
     fold: Fold,
     words: WordSegmenterBorrowed<'static>,
@@ -158,23 +171,24 @@ impl Analyser {
         }
     }
 
-    /// The declared name that selects this analyser.
+    /// The name a column declares to use this analyser.
     pub fn name(&self) -> &'static str {
         UNICODE
     }
 
-    /// The first two stages without the segmenter.
+    /// The normalisation and case-folding stages, without segmentation.
     pub fn fold(&self) -> &Fold {
         &self.fold
     }
 
-    /// `<name>/<version>`, recorded in the manifest against every column this analyser indexed.
+    /// `<name>/<version>`. The manifest records it for every column this analyser indexes.
     pub fn identity(&self) -> String {
         identity_of(UNICODE).expect("`unicode` is carried")
     }
 
-    /// The tokens of `text`, in order, with duplicates kept. `match` needs neither, but a phrase
-    /// or scoring consumer needs both; the index deduplicates when it builds a posting.
+    /// The tokens of `text`, in order of appearance, including repeats. A `match` query needs
+    /// neither the order nor the repeats, but phrase search and scoring need both. The index
+    /// removes repeats when it builds a posting list.
     pub fn tokens(&self, text: &str) -> Vec<String> {
         let mut scratch = TokenScratch::default();
         let mut out = Vec::new();
@@ -182,18 +196,21 @@ impl Analyser {
         out
     }
 
-    /// [`Self::tokens`], borrowed, over a buffer the caller keeps between documents. An index
-    /// looks most tokens up and keeps few, so a sweep over a column allocates only for the terms
-    /// it keeps.
+    /// Calls `f` with each token of `text`, in the order [`Self::tokens`] returns them. The tokens
+    /// are borrowed from `scratch`, which the caller reuses from one document to the next. An
+    /// indexer has already seen most of the tokens it meets, so it allocates only for new terms.
     ///
-    /// A segment is a token when it holds at least one alphanumeric character. The segmenter's own
-    /// `is_word_like()` is not used: icu_segmenter 2.2 reports any run its dictionary resolves to a
-    /// single word as not word-like, so `中文`, `日本語` and `ភាសាខ្មែរ` would yield no tokens and
-    /// a document holding exactly `中文` could not be found by that query. Whitespace, punctuation
-    /// and symbol runs hold no alphanumeric character and are dropped under either rule.
+    /// A segment is a token if it contains at least one alphanumeric character. Segments of
+    /// whitespace, punctuation or symbols contain none and are dropped.
     ///
-    /// Segmentation quality in the scripts without spaces is imperfect: Japanese `はとても` splits
-    /// as `はと`/`て`/`も` and Thai `มาก` as `มา`/`ก`, so a query for the mis-split word misses.
+    /// The segmenter's own `is_word_like()` flag is not used. In icu_segmenter 2.2 it is false for
+    /// a run that the dictionary resolves to a single word, so `中文`, `日本語` and `ភាសាខ្មែរ` would
+    /// produce no tokens, and a document containing only `中文` could not be found by searching
+    /// for `中文`.
+    ///
+    /// The dictionary segmentation makes mistakes in the scripts written without spaces. Japanese
+    /// `はとても` is split as `はと`/`て`/`も` and Thai `มาก` as `มา`/`ก`. A query for a word that was
+    /// split wrongly does not find the document.
     pub fn for_each_token(&self, text: &str, scratch: &mut TokenScratch, f: &mut impl FnMut(&str)) {
         let folded = self.fold.fold_into(text, &mut scratch.normalised);
         let mut breaks = self.words.segment_str(&folded);
@@ -210,15 +227,16 @@ impl Analyser {
     }
 }
 
-/// The buffer [`Analyser::for_each_token`] reuses across documents. The caller holds it because an
-/// [`Analyser`] is shared across threads.
+/// The buffer that [`Analyser::for_each_token`] reuses from one document to the next. The caller
+/// owns it because an [`Analyser`] is shared between threads.
 #[derive(Default)]
 pub struct TokenScratch {
     normalised: String,
 }
 
-/// NFKC, then full Unicode case folding: the analyser's first two stages, which the suggestion
-/// index applies to its entries and queries too, so both surfaces fold by one rule.
+/// NFKC normalisation followed by full Unicode case folding. These are the analyser's first two
+/// stages. The suggestion index applies them to its entries and to typed queries, so text search
+/// and suggestion normalise strings identically.
 pub struct Fold {
     nfkc: ComposingNormalizerBorrowed<'static>,
     case: CaseMapperBorrowed<'static>,
@@ -249,31 +267,33 @@ impl Fold {
         self.fold_into(text, &mut String::new()).into_owned()
     }
 
-    /// [`Self::fold`], with the normalised copy written into a buffer the caller reuses. The case
-    /// folder allocates its own output where the text is not already folded: writing it into a
-    /// buffer needs the `writeable` crate as a direct dependency tracking icu4x's version.
+    /// [`Self::fold`], with the NFKC output written into `normalised`, a buffer the caller
+    /// reuses. The case-folding stage still allocates when it changes the text. Writing its
+    /// output into a buffer as well would need the `writeable` crate as a direct dependency, kept
+    /// at the version icu4x uses.
     pub fn fold_into<'a>(&self, text: &str, normalised: &'a mut String) -> Cow<'a, str> {
-        // `normalize` would borrow an already-normalised input, but finding that out costs a full
-        // normalising pass, so the copy is written unconditionally.
+        // `normalize` returns a borrow when the input is already normalised, but it finds that
+        // out by normalising the whole input, so it saves no work. `normalize_to` always copies.
         normalised.clear();
         let _ = self.nfkc.normalize_to(text, normalised);
         self.case.fold_string(&*normalised)
     }
 }
 
-/// The rules of a category vocabulary's suggestion index: which entry strings a value contributes
-/// and where each begins in the string a response serves. They say nothing about how a `text`
-/// column is tokenised.
+/// The rules for a category vocabulary's suggestion index: which entry strings each value adds to
+/// the index, and where each entry begins in the key or title as the user wrote it. These rules
+/// do not affect how a `text` column is tokenised.
 ///
-/// An entry string is folded as the analyser folds, then has its whitespace collapsed and trimmed.
-/// The same is applied to a typed query, so a match is a byte-prefix comparison.
+/// An entry string is normalised and case-folded by [`Fold`], then runs of whitespace are
+/// collapsed and the ends trimmed. A typed query is treated the same way, so matching is a
+/// comparison of byte prefixes.
 ///
-/// A word starts at a transition into a letter, digit or combining mark from any other character,
-/// read from the same pinned tables as the token rule. A script written without spaces therefore
-/// yields no word starts: a run of Han, Khmer or Thai is one word, and such a vocabulary is
-/// suggested on whole-key and whole-title prefixes alone. Dictionary segmentation would multiply
-/// the index by the character count for those scripts and make the entry set depend on icu4x's
-/// data version.
+/// A word starts at a letter, digit or combining mark that follows any other kind of character.
+/// The character properties come from the same icu4x tables as the token rule. Text in a script
+/// written without spaces, such as Han, Khmer or Thai, is one run of letters and so has one word.
+/// A vocabulary in such a script is suggested by the start of the whole key or title only.
+/// Splitting these scripts with the dictionary segmenter would add about one entry per character
+/// and would make the set of entries depend on the icu4x data version.
 pub struct SuggestionFold {
     fold: Fold,
     classes: Classes,
@@ -291,7 +311,7 @@ impl std::fmt::Debug for SuggestionFold {
     }
 }
 
-/// Which served string an entry came from, as `match.field` reports it.
+/// Whether an entry came from a value's key or its title. `match.field` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SuggestionField {
     Key,
@@ -299,7 +319,7 @@ pub enum SuggestionField {
 }
 
 impl SuggestionField {
-    /// The wire spelling.
+    /// The name used in the response.
     pub fn as_str(self) -> &'static str {
         match self {
             SuggestionField::Key => "key",
@@ -308,11 +328,11 @@ impl SuggestionField {
     }
 }
 
-/// The three entry kinds, in the order ties between them break: a whole-key match, then a
-/// whole-title match, then a word start inside a longer string.
+/// The kind of an entry. Entries with equal strings are ordered by kind: a whole key first, then
+/// a whole title, then a word start inside a longer string.
 ///
-/// The discriminants are the sort key and are written to the suggestion index, so reordering them
-/// changes the order of a page.
+/// The discriminants are written to the suggestion index and sorted on, so changing them changes
+/// the order of results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum EntryKind {
@@ -335,12 +355,13 @@ impl EntryKind {
 /// One entry of the suggestion index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuggestionEntry {
-    /// The folded, whitespace-collapsed, trimmed string a prefix is matched against.
+    /// The entry string, which a query is matched against by prefix.
     pub entry: String,
     pub kind: EntryKind,
     pub field: SuggestionField,
-    /// The character offset into the served string (`key` or `title` as written) at which this
-    /// entry begins. `match.start` reports it, and `match.len` is found by folding forward from it.
+    /// The character offset at which this entry begins in the key or title as written.
+    /// `match.start` reports it, and the engine computes `match.len` by folding the text from
+    /// this offset.
     pub start: u32,
 }
 
@@ -352,28 +373,28 @@ impl SuggestionFold {
         }
     }
 
-    /// The shared fold, without the entry rules.
+    /// The normalisation and case folding alone, without whitespace collapsing.
     pub fn fold(&self) -> &Fold {
         &self.fold
     }
 
-    /// The entry string for `text`: folded, runs of whitespace collapsed to one space, trimmed.
-    /// A string of whitespace alone gives the empty string.
+    /// The entry string for `text`: normalised and case-folded, with each run of whitespace
+    /// replaced by one space and the ends trimmed. Text that is all whitespace gives `""`.
     pub fn entry(&self, text: &str) -> String {
         self.entry_into(text, &mut String::new())
     }
 
-    /// [`Self::entry`] with the normalisation buffer reused across strings.
+    /// [`Self::entry`], reusing `normalised` as the NFKC buffer.
     fn entry_into(&self, text: &str, normalised: &mut String) -> String {
         collapse_whitespace(&self.fold.fold_into(text, normalised))
     }
 
-    /// Every entry one value contributes: the whole key, the whole title where there is one, and
-    /// every word start of the title, or of the key where there is no title, that the whole entry
-    /// does not already begin at.
+    /// The entries for one value: its whole key, its whole title if it has one, and one entry for
+    /// each word start in the title, or in the key if there is no title. A word that starts where
+    /// the whole entry starts gets no entry of its own.
     ///
-    /// A whole entry that folds to the empty string is dropped: it would sit at the lower bound of
-    /// every prefix range and stands for nothing a caller could type.
+    /// A key or title whose entry string is empty gets no entry. An empty entry would match every
+    /// query, and no query a user types corresponds to it.
     pub fn entries_of(&self, key: &str, title: Option<&str>) -> Vec<SuggestionEntry> {
         let mut scratch = String::new();
         let key_entry = self.entry_into(key, &mut scratch);
@@ -400,19 +421,22 @@ impl SuggestionFold {
         out
     }
 
-    /// The word-start entries of one served string and its entry string.
+    /// The word-start entries for one key or title. `served` is the text as written and `entry`
+    /// is its entry string.
     ///
-    /// The fold has no offset map: icu4x normalises and folds whole strings. The k-th word start
-    /// of `served` is instead paired with the k-th of `entry`. The character before a word start
-    /// is not a letter, digit or mark, and NFKC does not compose across such a character, so
-    /// folding from a word start gives the tail of the whole string's fold.
+    /// Each entry needs a word's position in both strings, and icu4x does not report which input
+    /// character produced which output byte. The k-th word start in `served` is therefore assumed
+    /// to be the k-th word start in `entry`. The character before a word start is not a letter,
+    /// digit or mark, and NFKC does not combine characters across it, so folding `served` from a
+    /// word start gives the same bytes as `entry` from the matching word start.
     ///
-    /// NFKC can move a boundary: `¼` becomes `1⁄4`, two words where there was one non-word
-    /// character. Where the two lists differ in length the value gets no word-start entries.
-    /// Equal lengths do not prove the pairing: `a㎏b ¼` folds to `akgb 1⁄4`, and the two changes
-    /// cancel. A mis-paired `start` reaches only `match.start` and `match.len`, a highlight over
-    /// the wrong characters. The entry string is the fold's own output, so which values match, and
-    /// which are served, does not depend on it.
+    /// NFKC can add or remove word starts: `¼` becomes `1⁄4`, which has two. If the two strings
+    /// have different numbers of word starts, the value gets no word-start entries. Equal numbers
+    /// do not guarantee a correct pairing: `a㎏b ¼` becomes `akgb 1⁄4`, where one word start is
+    /// lost and one gained. A wrong pairing gives a wrong `start`, which affects only
+    /// `match.start` and `match.len`, so the client highlights the wrong characters. It does not
+    /// affect which values match or which values a viewer is sent, because the entry string is
+    /// taken from `entry` itself.
     fn word_entries(
         &self,
         served: &str,
@@ -436,11 +460,13 @@ impl SuggestionFold {
             .collect()
     }
 
-    /// The position of every word start over `(position, character)` pairs: byte positions for an
-    /// entry string, character positions for a served one.
+    /// The positions of the word starts in `chars`, which yields `(position, character)` pairs.
+    /// The caller passes byte positions for an entry string and character positions for text as
+    /// written.
     ///
-    /// A word that starts at `whole`, where the whole-string entry begins, is left out: that entry
-    /// stands for it. A first word behind a bracket is kept, so `draft` finds `[Draft] Notes`.
+    /// A word that starts at `whole`, the position where the whole-string entry starts, is
+    /// omitted, because that entry already matches it. A first word that follows a bracket is
+    /// kept, so the query `draft` finds `[Draft] Notes`.
     fn word_starts(&self, chars: impl Iterator<Item = (usize, char)>, whole: usize) -> Vec<usize> {
         let mut previous = false;
         chars
@@ -453,26 +479,26 @@ impl SuggestionFold {
             .collect()
     }
 
-    /// The token rule's classes plus `Mark`. A combining mark is not `Alphabetic`, so without it
-    /// the Thai `เป็น` would break at U+0E47, as would any Devanagari, Arabic or Hebrew word
-    /// carrying a diacritic. A mark does not begin a word in well-formed text, so admitting it
-    /// only joins runs.
+    /// Whether `c` is part of a word: alphanumeric, or a combining mark. Combining marks are not
+    /// `Alphabetic`. If they were excluded, the Thai word `เป็น` would be split at U+0E47, and so
+    /// would any Devanagari, Arabic or Hebrew word with a diacritic. Well-formed text has no word
+    /// that begins with a mark, so including marks joins parts of a word and adds no word starts.
     fn wordish(&self, c: char) -> bool {
         self.classes.alphanumeric(c) || self.classes.mark(c)
     }
 }
 
-/// The character index at which the whole-string entry begins in `served`: past the leading
-/// whitespace the entry fold trims.
+/// The character offset of the first non-whitespace character in `served`, which is where its
+/// whole-string entry begins.
 fn served_start(served: &str) -> usize {
     served.chars().position(|c| !c.is_whitespace()).unwrap_or(0)
 }
 
-/// Runs of whitespace collapsed to one space, and the result trimmed.
+/// `folded` with each run of whitespace replaced by one space and the ends trimmed.
 ///
-/// `split_whitespace` reads std's `White_Space` table, which moves with the toolchain. No stored
-/// identity depends on it: a code point becoming whitespace changes how one title collapses, and
-/// the suggestion index is derived and rebuilt.
+/// `split_whitespace` uses std's `White_Space` table, which can change with the Rust toolchain.
+/// That is acceptable here because the suggestion index is rebuilt every time the engine opens a
+/// bundle, so no stored data depends on the table.
 fn collapse_whitespace(folded: &str) -> String {
     let mut out = String::with_capacity(folded.len());
     for word in folded.split_whitespace() {
@@ -521,8 +547,8 @@ mod tests {
         );
     }
 
-    /// The whole entry of `[Draft] Machine Learning` opens with `[`, so its first word is reached
-    /// by a word start and not by the whole entry.
+    /// The whole entry for `[Draft] Machine Learning` begins with `[`, so a query for `draft` can
+    /// only match a word-start entry.
     #[test]
     fn a_first_word_behind_a_non_word_character_is_a_word_start() {
         let s = SuggestionFold::new();
@@ -597,8 +623,8 @@ mod tests {
         );
     }
 
-    /// `start` counts characters of the served string, so leading whitespace and a non-ASCII
-    /// character both shift it away from the byte offset in the folded form.
+    /// `start` counts characters in the text as written. Leading whitespace and a multi-byte
+    /// character both make it differ from the byte offset in the entry string.
     #[test]
     fn start_is_a_character_offset_into_the_served_string() {
         let s = SuggestionFold::new();
@@ -649,8 +675,8 @@ mod tests {
         assert_eq!(a.tokens(""), Vec::<String>::new());
     }
 
-    /// The numeric half of the token rule. `٣٤٥` is `Nd` and not `Alphabetic`, and NFKC leaves it
-    /// alone, so a rule that kept `Alphabetic` only would drop it.
+    /// Digits are tokens. `٣٤٥` has `General_Category = Nd`, is not `Alphabetic`, and is unchanged
+    /// by NFKC, so a token rule that tested `Alphabetic` alone would drop it.
     #[test]
     fn a_segment_of_digits_alone_is_a_token() {
         let a = Analyser::new();

@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Pinned to the minor. `UNICODE_VERSION` in src/lib.rs records `icu4x-2.2` in every bundle's
-# manifest and readers compare that string, so a caret range would let `cargo update` change the
-# segmenter's dictionary data, and with it the token stream, under an unchanged identity. Moving
-# these four moves that constant.
+# These four crates are required at exactly this version. `UNICODE_VERSION` in src/lib.rs writes
+# `icu4x-2.2` into every bundle's manifest, and readers compare that string. With a caret
+# requirement, `cargo update` could change the segmenter's dictionary data, and so the tokens,
+# while the recorded version stayed the same. When upgrading these crates, change that constant.
 icu_normalizer = "=2.2"
 icu_casemap = "=2.2"
 icu_properties = "=2.2"
