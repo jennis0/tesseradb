@@ -146,7 +146,7 @@ pub(crate) fn refresh_resident(
             generation.watermark,
         ) {
             Ok(fragment) => fragment,
-            Err(FragmentCacheError::Building) => continue,
+            Err(FragmentCacheError::Building | FragmentCacheError::Cancelled) => continue,
             Err(FragmentCacheError::Io(e)) => {
                 tracing::warn!(
                     error = %e,

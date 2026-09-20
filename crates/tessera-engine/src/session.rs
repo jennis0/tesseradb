@@ -192,14 +192,16 @@ impl Engine {
 
         let fragment = generation
             .fragments
-            .get_or_build(
+            .get_or_build_waiting(
                 &satisfied_sorted,
                 &generation.postings,
                 &generation.delta_postings,
                 generation.watermark,
+                &tessera_cache::NeverCancelled,
             )
             .map_err(|e| match e {
                 FragmentCacheError::Building => EngineError::FragmentBuilding,
+                FragmentCacheError::Cancelled => EngineError::Cancelled,
                 FragmentCacheError::Io(io_err) => EngineError::Io(io_err),
             })?;
 
@@ -294,14 +296,16 @@ impl Engine {
         }
         generation
             .fragments
-            .get_or_build(
+            .get_or_build_waiting(
                 &session.satisfied_sorted,
                 &generation.postings,
                 &generation.delta_postings,
                 generation.watermark,
+                &tessera_cache::NeverCancelled,
             )
             .map_err(|e| match e {
                 FragmentCacheError::Building => EngineError::FragmentBuilding,
+                FragmentCacheError::Cancelled => EngineError::Cancelled,
                 FragmentCacheError::Io(io_err) => EngineError::Io(io_err),
             })
     }
