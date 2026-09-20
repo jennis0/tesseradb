@@ -40,14 +40,10 @@ from .split import (
 
 
 def executor_laps(before: dict, after: dict, rows: int) -> dict:
-    """The `WriteStage` laps across one ingest phase, µs per accepted row.
-
-    Differenced rather than read absolute, because the laps are process totals and the base's own
-    open may have closed windows before the phase began. **All zero without `bench-timing`** — the
-    `bench_timing` flag is carried through so a reader can tell an uninstrumented binary from an
-    idle executor. `unattributed` is the coarse `apply_nanos_total` minus the three `apply` laps
-    plus whatever `submit\u2192receipt` sees beyond the executor's own stages; it is reported, not
-    hidden, because the close's stages are meant to partition its wall clock.
+    """The `WriteStage` laps across one ingest phase, µs per accepted row, differenced rather
+    than read absolute since the laps are process totals. All zero without `bench-timing`.
+    `unattributed` is the coarse `apply_nanos_total` minus the three `apply` laps plus whatever
+    `submit\u2192receipt` sees beyond the executor's own stages.
     """
     stages = after.get("stage_nanos") or {}
     prior = before.get("stage_nanos") or {}
@@ -82,8 +78,7 @@ class Cycle:
     def __init__(self, args):
         self.args = args
         self.rung = Path(args.rung_dir)
-        #: The bundle built from every row of the rung: the census reference, and the frame
-        #: `--state-extent` states. A rung's `tessera.toml` may name its own bundle anything.
+        #: The bundle built from every row of the rung: the census reference.
         self.all_in = Path(args.all_in_bundle) if args.all_in_bundle else self.rung / "bundle"
         self.work = Path(args.work)
         self.binary = Path(args.binary)
@@ -93,19 +88,15 @@ class Cycle:
             "seed": args.seed,
             "all_in_bundle": str(self.all_in),
         }
-        #: The served deployment's `limits` block, read once the server is up
-        #: ([`Cycle.served_limits`]); every request is sized from it.
+        #: The served deployment's `limits` block, read once the server is up.
         self.limits: dict | None = None
-        #: Every declared view, the anchor first, as `{"name", "points"}`; and each one's frame off
-        #: `/v1/meta` once the server is up.
+        #: Every declared view, the anchor first, and each one's frame off `/v1/meta`.
         self.views: list[dict] = []
         self.frames: dict[str, dict] = {}
-        #: Credentials minted for this run, by variable name — see [`Cycle.credentials`].
+        #: Credentials minted for this run, by variable name.
         self.minted: dict[str, str] = {}
         self.ladder: list[dict] | None = None
-        #: The served deployment, its session credential and the 100% principal's terms, settled
-        #: once the base bundle is serving. Every phase after that reads them from here rather
-        #: than being handed them.
+        #: The served deployment, its session credential and the 100% principal's terms.
         self.served: Deployment | None = None
         self.session_cred = ""
         self.all_terms: list[str] = []
@@ -119,13 +110,8 @@ class Cycle:
         return self.views[0]["name"]
 
     def credentials(self) -> dict[str, str]:
-        """A value for every credential variable the rung's deployment names that the environment
-        does not carry, minted for this run and this run only.
-
-        A rung's `.env` may hold the identity key alone, and a server with no value for its session
-        or operator credential refuses to start. The variable *names* are the rung's and are
-        recorded; no value is printed or written to the result.
-        """
+        """A value for every credential variable the environment does not carry, minted for this
+        run only."""
         self.minted = minted_credentials(self.rung)
         self.result["minted_credentials"] = sorted(self.minted)
         if self.minted:
@@ -148,11 +134,8 @@ class Cycle:
             self.log(f"reusing {bundle}")
             self.result["build"] = {"reused": True}
             return base_dir
-        # **The split survives a failed build.** Writing rung 4's base inputs is a quarter of an
-        # hour and 50 GB, and a build that dies after it — out of memory, out of disc — would
-        # otherwise pay for it again. `--reuse-base` reuses a *prepared* base as well as a built
-        # one, on the same test the split itself would apply: the points file exists and holds the
-        # rows this fraction and seed ask for.
+        # `--reuse-base` also reuses prepared inputs whose build failed: the points file holds
+        # the row count this fraction and seed give.
         prepared = base_dir / "points.parquet"
         reuse_inputs = (
             self.args.reuse_base
@@ -166,22 +149,13 @@ class Cycle:
                 shutil.rmtree(base_dir)
             self.log(f"splitting: base {len(base_ids):,} rows, hold-out {len(held):,} rows")
             write_base_inputs(self.rung, base_dir, base_ids)
-            # Whatever the split's last row group left in the pool goes back before the build,
-            # which runs beside this process and needs the memory more.
+            # Release what the split left in the pool: the build runs beside this process.
             pa.default_memory_pool().release_unused()
         if self.args.state_extent:
             self.result["stated_extent"] = state_extent(base_dir / "corpus.toml", self.all_in)
             self.log(f"stated the all-in frame in the base declaration: {self.result['stated_extent']}")
-        # **A zero-row base is a real case and it is the point of the f = 1.0 cell**: nothing is
-        # held for the build at all, so this is `tessera build` over an empty points file, and
-        # whether a deployment can start from one is the first thing this driver finds out.
-        #
-        # `--mint-external-ids`, because the artifacts published after the ingest name their
-        # members that way and most of those members are base rows. The flag mints one per item
-        # from its source entity id (`ExternalIdRow`), which is the form [`encode_batch`] sends for
-        # the hold-out. `--out` is where this driver serves from rather than where the rung's
-        # deployment file points: a rung may name its bundle anything (`bundle-final`), and a base
-        # built there is a base the run then serves an empty directory in place of.
+        # At f = 1.0 this is `tessera build` over an empty points file. `--mint-external-ids`,
+        # since published artifacts name their members that way.
         self.result["build"] = build_bundle(
             self.binary,
             base_dir,
@@ -201,20 +175,8 @@ class Cycle:
 
     @staticmethod
     def served_limits(status: dict) -> dict:
-        """The pagination units every route publishes (ingest §2.1): `/control/status`'s
-        `limits` block, one entry per route with its record count and byte cap.
-
-        Every cap this driver sizes a request by is read from here and from nowhere else: the
-        ingest route's `max_batch_rows` and `max_batch_bytes`, the publication route's
-        `max_body_bytes` and `max_artifacts_per_request`, the growth route's `max_body_bytes`
-        and `max_members_per_request`, the change route's `max_changes_per_request`. Every one is
-        read here, so a route this driver pages by is missing at the start rather than mid-run. A
-        value carried by the driver, from a flag or a constant,
-        would be a second number that can disagree with the one the route refuses over. To
-        exercise the ingest split on a rung whose bodies are under 16 MiB, lower the server's own
-        cap with `--ingest-config '{"ingest_max_batch_bytes": 262144}'`. A status without the
-        block is a server this driver was not written for, and raises.
-        """
+        """The pagination units every route publishes: `/control/status`'s `limits` block.
+        Raises if absent."""
         limits = status["limits"]
         for route, keys in {
             "ingest": ("max_batch_rows", "max_batch_bytes"),
@@ -227,12 +189,9 @@ class Cycle:
         return limits
 
     def run_ingest(self, control: Control, source, label: str) -> dict:
-        """Put `source`'s batches through `/control/ingest` at *C* concurrent callers.
-
-        `source` yields `(first row index, body, rows)`. It is a **generator**, so the hold-out is
-        encoded as it is sent rather than built in full first — and the pool is fed through a
-        bounded window so a fast producer cannot put the whole corpus's encoded batches in memory
-        in front of a slower server.
+        """Put `source`'s batches through `/control/ingest` at `C` concurrent callers. `source`
+        yields `(first row index, body, rows)` as a generator, fed through a bounded window so
+        a fast producer cannot outrun a slower server.
         """
         run_id = uuid.uuid4().hex[:8]
         acks: list[float] = []
@@ -245,9 +204,7 @@ class Cycle:
             batch_id = f"{label}-{run_id}-{start}"
             session = requests.Session()
             r = dt = None
-            # **A 429 is backpressure, not a failure**: the contract says retry, so the driver
-            # does, and counts every one. A run that reported the 429 as a refusal would report
-            # the server's own flow control as an error rate.
+            # A 429 is backpressure, not a failure: the driver retries and counts every one.
             for _ in range(600):
                 r, dt = control.ingest(body, batch_id, session)
                 with lock:
@@ -310,12 +267,8 @@ class Cycle:
         return self.result
 
     def serve_base(self, base_dir: Path) -> Deployment | None:
-        """Serve a **copy** of the base bundle on this run's own ports; None where it would not open.
-
-        Every publication adds a side manifest and every flush writes rows, so a base served
-        directly is a *different* base afterwards and the next `--reuse-base` run 409s on the
-        hold-out its predecessor already ingested.
-        """
+        """Serve a copy of the base bundle on this run's own ports; None where it would not
+        open. A base served directly is a different base once a publication or flush writes."""
         args = self.args
         scratch = self.work / f"serve-{args.fraction:g}"
         bundle = scratch / "bundle"
@@ -351,11 +304,8 @@ class Cycle:
         return served
 
     def read_views(self) -> None:
-        """**Every declared view, the anchor first**, with the points file each one's pass sends.
-
-        The hold-out's rows are ingested into each view from that view's own points file, and the
-        anchor goes first because a row in a second view joins an entity that must already exist.
-        """
+        """Every declared view, the anchor first, with the points file each one's pass sends: a
+        row in a second view joins an entity that must already exist."""
         declared = tomllib.loads((self.rung / "corpus.toml").read_text())
         named = declared.get("sources", {})
         default_source = declared.get("defaults", {}).get("source", "points")
@@ -391,12 +341,8 @@ class Cycle:
         )
 
     def ingest_holdout(self, served: Deployment, cap: int, batch_rows: int) -> HoldOut:
-        """One ingest pass per declared view, the anchor first; the anchor's hold-out is returned.
-
-        A bundle carrying more than one view refuses an unlabelled batch, so each pass names its
-        own. Membership and the write cycle's head ride the anchor's pass alone: the entities are
-        allocated there, and a second view's pass joins rows to them.
-        """
+        """One ingest pass per declared view, the anchor first; the anchor's hold-out is
+        returned, since entities are allocated on its pass alone."""
         head = 3 * self.args.write_cycle_n if self.args.write_cycle else 0
         hold = None
         self.result["ingest_by_view"] = {}
@@ -434,11 +380,8 @@ class Cycle:
         return hold
 
     def phase(self, name: str, fn) -> None:
-        """Run one named phase, recording a failure rather than ending the run.
-
-        A cell that died at the flush used to lose its ingest figures too, which are the expensive
-        half; and a failure here is as often a *result* — a shed stream, a refusal — as it is a bug
-        in the driver.
+        """Run one named phase, recording a failure rather than ending the run: a failure here is
+        as often a result — a shed stream, a refusal — as it is a bug in the driver.
         """
         try:
             self.result[name] = fn()
@@ -470,8 +413,7 @@ class Cycle:
             batch_rows = int(self.limits["ingest"]["max_batch_rows"])
             self.result["batch_rows"] = batch_rows
             before = status["write_executor"]
-            # Every key a batch's membership column names must already resolve, so a layer whose
-            # roster is published rather than minted is published first.
+            # A key a batch's column names must already resolve, so its roster publishes first.
             self.result["publish_rosters"] = self.publish_rosters(control)
             hold = self.ingest_holdout(served, cap, batch_rows)
             self.result["executor_laps"] = executor_laps(
@@ -481,17 +423,11 @@ class Cycle:
             )
             self.result["driver_rss"]["after_ingest"] = driver_rss()
             if args.stop_after_ingest:
-                # **The attribution cell, not the cycle.** Everything after this measures
-                # publication, flush and the fold; a run that only wants the executor's laps
-                # pays ~an hour for figures it is not reading. The equivalence census is
-                # therefore *absent* from such a run's result, not passed — see `stop_after`.
+                # The attribution cell, not the cycle: see `stop_after`.
                 self.result["stop_after"] = "ingest"
                 return
 
-            # **Every artifact, after every point it depends on.** Before the flush, deliberately:
-            # an ingested row is resolvable by its external id from the moment it is acked
-            # (`Session::resolve_external_ids` consults the live map first), so the ordering the
-            # ruling states — points before the artifacts that name them — is the only one there is.
+            # Every artifact is published after every point it depends on, before the flush.
             self.result["publish"] = self.publish_layers(control)
             self.result["driver_rss"]["after_publish"] = driver_rss()
 
@@ -512,16 +448,8 @@ class Cycle:
     # -- the artifacts, on the wire --------------------------------------------------------
 
     def publish_rosters(self, control: Control) -> dict:
-        """A column-route layer's roster — keys, content and parents, **no members** — before the
-        ingest.
-
-        Membership on that route arrives as the ingest batch's column named for the layer, and a key
-        the level does not hold is minted there only where the layer's declaration allows minting. A
-        layer declaring supplied content allows none, so every key the hold-out's rows name must
-        exist before the first batch: an artifact whose only points are held back exists nowhere
-        else. A key the base build already minted is held, and a record restating its content with
-        no members joins nothing and changes nothing.
-        """
+        """A column-route layer's roster — keys, content, parents, no members — before the
+        ingest, since every key the hold-out's rows name must already exist."""
         out: dict = {}
         work = self.work / f"roster-{self.args.fraction:g}"
         for layer in declared_layers(self.rung):
@@ -545,23 +473,8 @@ class Cycle:
         return out
 
     def publish_layers(self, control: Control) -> dict:
-        """Publish every declared layer, or record why it was not. Its own figure.
-
-        **The whole roster, and the whole of each artifact's membership**, base rows and ingested
-        rows alike. An artifact exists because the layer declares it, so publishing only the ones
-        whose members survived the split would make the two deployments differ in their *roster* as
-        well as in their membership, which is a second variable in a test that has one.
-
-        **Every declared layer is accounted for.** Each has an entry under `layers`, under
-        `on_column`, or under `declined` with its reason: a column-route layer's membership rode
-        the ingest batches (the module doc) and is recorded under `on_column` with what the hold-out
-        carried; an attribute-membership layer has nothing to publish (an ingested row joins it
-        through the column its batch carries); a layer with supplied content and no roster cannot
-        be published; a roster whose publication failed carries the failure. Within a published
-        layer, an artifact whose body alone would exceed the route's cap is declined per artifact
-        and listed in the layer's `declined_artifacts`, so a census difference on the layer is
-        attributable to named artifacts.
-        """
+        """Publish every declared layer's whole roster and membership, or record why not, under
+        `layers`, `on_column` or `declined`."""
         out: dict = {"layers": {}, "on_column": {}, "declined": {}}
         work = self.work / f"publish-{self.args.fraction:g}"
         for layer in declared_layers(self.rung):
@@ -684,12 +597,8 @@ class Cycle:
         return entry
 
     def send_publication(self, control: Control, name: str, publication: Publication) -> dict:
-        """Send one layer's bodies as they are assembled, and what the route said to them.
-
-        `wall_s` is the sum of the requests' round trips, the service's cost, and `prepared_s` the
-        time spent inside the body generator, the driver's; `phase_s` is the two together with
-        whatever else the loop spent.
-        """
+        """Send one layer's bodies as they are assembled. `wall_s` is the requests' round
+        trips, `prepared_s` the time in the body generator, `phase_s` the two together."""
         statuses: dict[str, int] = {}
         refusal = None
         refusals = 0
@@ -729,10 +638,7 @@ class Cycle:
                 except (ValueError, KeyError, TypeError):
                     pass
             elif key is None and r.status_code in (200, 201):
-                # **201 where the batch created an artifact, 200 where the level held every
-                # key.** A held key is compared part by part and its membership joins, so a
-                # batch of keys the base build already minted is a 200 and is not a refusal;
-                # `created` says how many of the batch were new.
+                # 201 for a created artifact, 200 where the level already held the key.
                 published["artifacts"] += artifacts
                 published["members"] += members_n
                 published["edges"] += edges
@@ -741,8 +647,7 @@ class Cycle:
                 except (ValueError, KeyError, TypeError):
                     pass
             else:
-                # **Never quiet.** Each status is logged with its detail the first time it
-                # appears, and every refusal is counted into the record and the summary line.
+                # Each status is logged with its detail the first time it appears.
                 refusals += 1
                 if refusal is None:
                     refusal = {"level": level, "status": r.status_code, "body": r.text[:1500]}
@@ -774,17 +679,9 @@ class Cycle:
         }
 
     def probe_layers_after_ingest(self) -> dict:
-        """One zoom-0 viewport **with `layers: "all"`** after the flush, timed and allowed to fail.
-
-        Its own measurement because it is the request that broke the first 3.6×10⁷ cell. The
-        trigger is not the flush: it is the record change under a level — a publication here, a
-        one-row growth before — which moves the level's version, after which the engine refuses the
-        fold-written column and rebuilds the level's row form on the next layered request —
-        94–113 s here, shed against `serve.stream_deadline_ms`. Reproduced with no flush in
-        `probes/2026-09-03-growth-trigger/`; the fix is ruled in
-        `docs/evidence/memos/2026-09-03-post-flush-artifact-frames.md`. Recorded rather than
-        routed around.
-        """
+        """One zoom-0 viewport with `layers: "all"` after the flush, timed and allowed to fail:
+        a record change moves the level's version, so the next layered request rebuilds its row
+        form and can be shed. Recorded rather than routed around."""
         served = self.served
         token, _ = serve_battery.authorise(served.session, self.session_cred, self.all_terms)
         t0 = time.perf_counter()
@@ -820,11 +717,7 @@ class Cycle:
         t0 = time.perf_counter()
         code = control.flush().status_code
         request_s = time.perf_counter() - t0
-        # **Or nothing left to flush.** Under the row trigger (write-path §4.1) a fast loader's
-        # rows are published as they arrive, so the buffer can be empty when this request lands —
-        # and a tick against an empty buffer publishes nothing and moves no counter. Waiting on
-        # the counter alone then burns the whole `--flush-timeout` on a deployment that is already
-        # fully visible, which is what this cell would otherwise report as a 900 s flush.
+        # Or nothing left to flush: the buffer can already be empty under the row trigger.
         def flush_landed() -> bool:
             flush = control.status()["write_executor"]["flush"]
             return flush["flushes"] > before or flush["buffered_items"] == 0
@@ -866,12 +759,8 @@ class Cycle:
         }
 
     def boxes(self, quant: dict) -> list[tuple[int, list[float]]]:
-        """The census's boxes in one view's frame: `--equivalence-boxes` at each of zoom 3, 6, 9.
-
-        Drawn from the seed, so the two deployments are asked the same questions, and drawn in the
-        frame of the view they are asked of — a box is a region of a layout, and a second view is a
-        second layout over the same entities.
-        """
+        """The census's boxes in one view's frame: `--equivalence-boxes` at zoom 3, 6, 9, drawn
+        from the seed."""
         rng = random.Random(self.args.seed)
         return [
             (zoom, box)
@@ -880,11 +769,8 @@ class Cycle:
         ]
 
     def census_views(self, deployment, cred: str, ladder) -> dict:
-        """One census per declared view of a deployment, keyed by view.
-
-        In the **folded** deployment's frames whichever deployment is asked, so that the two are
-        asked the same boxes over the same ground.
-        """
+        """One census per declared view, keyed by view, in the folded deployment's frames
+        whichever deployment is asked."""
         return {
             name: census(
                 deployment.viewer,
@@ -899,16 +785,9 @@ class Cycle:
         }
 
     def visible(self) -> int:
-        """The anchor view's masked count at zoom 0 over its whole extent, under every term.
-
-        **`layers=None`, and that is not a detail.** A zoom-0 whole-extent viewport asking for
-        `layers: "all"` on a freshly-ingested 3.6×10⁷-row deployment was **shed mid-body** at
-        113 s against a 60 s stream deadline: a growth moved the mesh level's version, so its row
-        form is rebuilt from scratch on the first layered request after it. That is a result about
-        the read path after a record change (in `layers_after_ingest`), not something a visibility
-        poll should be measuring — what this needs is the masked count, which the tiles frame
-        carries on its own.
-        """
+        """The anchor view's masked count at zoom 0, under every term. `layers=None`, since a
+        layered request rebuilds the level's row form after a growth and a poll needs only the
+        count."""
         token, _ = serve_battery.authorise(
             self.served.session, self.session_cred, self.all_terms
         )
@@ -918,18 +797,15 @@ class Cycle:
         )["counts"]["visible"]
 
     def do_equivalence(self, ranks) -> dict:
-        """The folded deployment's census against the all-in build's, **per view**, same boxes.
-
-        One entry per declared view, each carrying its own frames, its own boxes and its own
-        differences; `equal` is every view agreeing.
+        """The folded deployment's census against the all-in build's, per view, same boxes.
+        `equal` is every view agreeing.
         """
         targets = [float(t) for t in self.args.targets.split(",")]
         ladder = serve_battery.compose_ladder(ranks, self.visible() or 1, targets)
         self.ladder = ladder
         folded = self.census_views(self.served, self.session_cred, ladder)
 
-        # The all-in deployment, served beside it on its own ports and scratch: the three ports
-        # after the folded deployment's, so a cycle takes six consecutive ports from `--port0`.
+        # The all-in deployment, served on the three ports after the folded deployment's.
         allin = Deployment(
             self.rung,
             self.all_in,
@@ -961,9 +837,7 @@ class Cycle:
         differences: list[dict] = []
         for name in self.view_names:
             compared = compare_census(folded[name], reference[name])
-            # **The frames, side by side.** Under `extent = "auto"` they differ, and that difference
-            # is what a box-level disagreement of a handful of rows is; recording them is what stops
-            # the next reader attributing it to the write path.
+            # The frames, side by side: under `extent = "auto"` they differ at the margins.
             compared["frames"] = {"folded": self.frames[name], "all_in": all_in_frames.get(name)}
             compared["frames_equal"] = self.frames[name] == all_in_frames.get(name)
             out["views"][name] = compared
@@ -980,14 +854,9 @@ class Cycle:
         return out
 
     def do_restart(self, ranks) -> dict:
-        """Stop the server and open it again over the same bundle, cache and WAL.
-
-        A deletion is folded into the rows and a suppression is a stored deny, so both survive the
-        close: the anchor's masked count and every view's census must be the ones the deployment
-        answered before it was stopped. The census is compared against *itself* across the restart
-        rather than against the all-in build, the write cycle having suppressed rows the all-in
-        deployment still serves.
-        """
+        """Stop the server and reopen it over the same bundle, cache and WAL: counts and census
+        must match those from before it stopped. Compared against itself, not the all-in build,
+        since the write cycle suppresses rows the all-in deployment still serves."""
         served = self.served
         ladder = self.ladder or serve_battery.compose_ladder(
             ranks,
@@ -1014,10 +883,8 @@ class Cycle:
         return out
 
     def send_changes(self, control, items: list[dict]) -> tuple[requests.Response, float]:
-        """Every change, paged by the route's published record count, as publish and grow are.
-
-        Returns the first refusal or the last acknowledgement, and the pages' total wall.
-        """
+        """Every change, paged by the route's published record count. Returns the first refusal
+        or the last acknowledgement, and the pages' total wall."""
         assert self.limits is not None, "the limits block is read before any change is sent"
         per_page = int(self.limits["changes"]["max_changes_per_request"])
         r, wall = control.changes(items[:per_page])
@@ -1045,13 +912,8 @@ class Cycle:
         }
 
     def do_write_cycle(self, control, hold) -> dict:
-        """1,000 deletes, 1,000 suppressions, 1,000 re-ingests, a fold, and the census again.
-
-        Addressed by `external_id` — the source entity id, as [`external_ids`] spells it — because
-        that is the address an ingested row has that survives a delete: `tessera_id`s are per
-        entity and a deleted holder does not block a re-ingest of the same external id (decision
-        0047, edit is delete + re-ingest).
-        """
+        """1,000 deletes, 1,000 suppressions, 1,000 re-ingests, a fold, and the census again,
+        addressed by `external_id` since a deleted holder never blocks a re-ingest of it."""
         if hold.head is None or hold.head.num_rows < 2:
             return {"skipped": "hold-out too small for a write cycle"}
         ids = [
@@ -1062,18 +924,15 @@ class Cycle:
         if n == 0:
             return {"skipped": "hold-out too small for a write cycle"}
         start_visible = self.visible()
-        # The deleted rows come back and the suppressed ones do not, so the count this cycle ends
-        # at is the count it started at less the suppressions.
+        # Deleted rows come back and suppressed ones do not.
         out: dict = {"n": n, "visible_before": start_visible, "expected_after_cycle": start_visible - n}
 
         for op, batch in (("delete", ids[:n]), ("suppress", ids[n : 2 * n])):
             out[op] = self.change_and_wait(control, op, batch, start_visible)
             start_visible = out[op]["visible_after"]
 
-        # Re-ingest: the deleted rows, under fresh batch ids. A deleted holder never blocks a
-        # re-ingest (decision 0047), so these must be accepted rather than 409'd.
-        # The deleted ids are `ids[:n]`, so the rows to re-ingest are the head's first `n` — the
-        # same bytes, under fresh batch ids, which makes this a re-ingest rather than a replay.
+        # Re-ingest the deleted rows, the head's first `n`, under fresh batch ids: a deleted
+        # holder never blocks a re-ingest, so these must be accepted rather than 409'd.
         reingest_bodies = hold.new_body_stats()
 
         def head_slice():
@@ -1098,14 +957,7 @@ class Cycle:
     # -- what did not hold -----------------------------------------------------------------
 
     def failures(self) -> list[str]:
-        """One short sentence per way this run did not hold; empty is a cycle that held.
-
-        A run is a measurement and records numbers rather than assertions, but a *blocked* run, a
-        layer that was not published, a census that disagrees, a write cycle that never reached its
-        counts, a batch refused for something other than backpressure and a fold that did not
-        complete are all findings the exit code carries, so a campaign script does not have to read
-        the JSON to know.
-        """
+        """One short sentence per way this run did not hold; empty is a cycle that held."""
         out: list[str] = []
         result = self.result
         if result.get("driver_failure"):
@@ -1205,11 +1057,8 @@ class Cycle:
 
 
 def driver_rss() -> dict:
-    """This process's `VmRSS` and `VmHWM`, in bytes, from `/proc/self/status`.
-
-    The driver's resident set is a figure of every cell. It runs beside the server it loads, on
-    the same box, and a driver that grows with the corpus stops the cell before the write path is
-    measured. `peak` is the process's high-water mark and only rises.
+    """This process's `VmRSS` and `VmHWM`, in bytes, from `/proc/self/status`: a figure of every
+    cell, since the driver runs beside the server it loads on the same box. `peak` only rises.
     """
     out: dict = {}
     for line in Path("/proc/self/status").read_text().splitlines():
