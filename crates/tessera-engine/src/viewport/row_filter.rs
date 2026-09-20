@@ -665,38 +665,52 @@ fn match_run(
             rows.add_range(run);
             return;
         }
-        Prepared::Bool(a, test) => bool_run(a, span, first_row, test, rows, buf),
-        Prepared::U8(v, test) => int_run(&v[span], first_row, test, rows, buf),
-        Prepared::U16(v, test) => int_run(&v[span], first_row, test, rows, buf),
-        Prepared::U32(v, test) => int_run(&v[span], first_row, test, rows, buf),
-        Prepared::U64(v, test) => int_run(&v[span], first_row, test, rows, buf),
-        Prepared::I8(v, test) => int_run(&v[span], first_row, test, rows, buf),
-        Prepared::I16(v, test) => int_run(&v[span], first_row, test, rows, buf),
-        Prepared::I32(v, test) => int_run(&v[span], first_row, test, rows, buf),
-        Prepared::I64(v, test) => int_run(&v[span], first_row, test, rows, buf),
-        Prepared::F32(v, test) => float_run(&v[span], first_row, test, rows, buf),
-        Prepared::F64(v, test) => float_run(&v[span], first_row, test, rows, buf),
+        // The one fixed-width type Arrow does not store as a flat slice of itself: the run's bits
+        // are taken once and read forward, which is what makes this the same loop as a slice's,
+        // and the test over them is the integer widths'.
+        Prepared::Bool(a, test) => {
+            let bits = a.values().slice(span.start, span.len());
+            int_run(bits.iter().map(u8::from), first_row, test, rows, buf)
+        }
+        Prepared::U8(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::U16(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::U32(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::U64(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::I8(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::I16(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::I32(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::I64(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::F32(v, test) => float_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::F64(v, test) => float_run(values_of(v, span), first_row, test, rows, buf),
     }
     rows.add_many(buf);
     buf.clear();
 }
 
-/// One integer run: the test decided once, then a native compare per row.
+/// One run of a flat slice, as the values themselves.
+#[inline]
+fn values_of<T: Copy>(values: &[T], span: Range<usize>) -> impl Iterator<Item = T> + '_ {
+    values[span].iter().copied()
+}
+
+/// One integer run: the test decided once, then a native compare per value.
 #[inline]
 fn int_run<T: Copy + Ord>(
-    values: &[T],
+    values: impl Iterator<Item = T>,
     first_row: u32,
     test: &IntTest<T>,
     rows: &mut croaring::Bitmap,
     buf: &mut Vec<u32>,
 ) {
     match test {
-        IntTest::Eq(needle) => run_matching(values, first_row, rows, buf, |x| x == needle),
-        IntTest::In(w) => run_matching(values, first_row, rows, buf, |x| w.binary_search(x).is_ok()),
+        IntTest::Eq(needle) => run_matching(values, first_row, rows, buf, |x| x == *needle),
+        IntTest::In(w) => {
+            run_matching(values, first_row, rows, buf, |x| w.binary_search(&x).is_ok())
+        }
         IntTest::Range { lo, hi } => {
             let (lo, hi) = (*lo, *hi);
             run_matching(values, first_row, rows, buf, move |x| {
-                lo.is_none_or(|b| *x >= b) && hi.is_none_or(|b| *x <= b)
+                lo.is_none_or(|b| x >= b) && hi.is_none_or(|b| x <= b)
             })
         }
     }
@@ -706,21 +720,18 @@ fn int_run<T: Copy + Ord>(
 /// route.
 #[inline]
 fn float_run<T: Copy + Into<f64>>(
-    values: &[T],
+    values: impl Iterator<Item = T>,
     first_row: u32,
     test: &FloatTest,
     rows: &mut croaring::Bitmap,
     buf: &mut Vec<u32>,
 ) {
     match test {
-        FloatTest::In(w) => run_matching(values, first_row, rows, buf, |x| {
-            let x: f64 = (*x).into();
-            w.contains(&x)
-        }),
+        FloatTest::In(w) => run_matching(values, first_row, rows, buf, |x| w.contains(&x.into())),
         FloatTest::Range { lo, hi } => {
             let (lo, hi) = (*lo, *hi);
             run_matching(values, first_row, rows, buf, move |x| {
-                let x: f64 = (*x).into();
+                let x: f64 = x.into();
                 lo.is_none_or(|(b, inc)| if inc { x >= b } else { x > b })
                     && hi.is_none_or(|(b, inc)| if inc { x <= b } else { x < b })
             })
@@ -728,68 +739,21 @@ fn float_run<T: Copy + Into<f64>>(
     }
 }
 
-/// [`int_run`] for the one fixed-width type Arrow does not store as a flat slice of itself.
-#[inline]
-fn bool_run(
-    values: &arrow::array::BooleanArray,
-    span: Range<usize>,
-    first_row: u32,
-    test: &IntTest<u8>,
-    rows: &mut croaring::Bitmap,
-    buf: &mut Vec<u32>,
-) {
-    match test {
-        IntTest::Eq(needle) => bool_matching(values, span, first_row, rows, buf, |x| x == *needle),
-        IntTest::In(w) => {
-            bool_matching(values, span, first_row, rows, buf, |x| {
-                w.binary_search(&x).is_ok()
-            })
-        }
-        IntTest::Range { lo, hi } => {
-            let (lo, hi) = (*lo, *hi);
-            bool_matching(values, span, first_row, rows, buf, move |x| {
-                lo.is_none_or(|b| x >= b) && hi.is_none_or(|b| x <= b)
-            })
-        }
-    }
-}
-
-/// The monomorphic inner loop every flat-slice arm above resolves to: one slice, one test, one
-/// buffered flush. Generic over the stored type so each width compiles to its own loop.
+/// The monomorphic inner loop every arm above resolves to: one run of values, one test, one
+/// buffered flush. Generic over the stored type and over how a value is read, so each width
+/// compiles to its own loop — a slice's is over the slice itself, and a bool's is the same loop
+/// over the bits Arrow packs it into.
 #[inline]
 fn run_matching<T: Copy>(
-    values: &[T],
+    values: impl Iterator<Item = T>,
     first_row: u32,
     rows: &mut croaring::Bitmap,
     buf: &mut Vec<u32>,
-    matches: impl Fn(&T) -> bool,
+    matches: impl Fn(T) -> bool,
 ) {
-    for (offset, code) in values.iter().enumerate() {
-        if matches(code) {
+    for (offset, value) in values.enumerate() {
+        if matches(value) {
             buf.push(first_row + offset as u32);
-            if buf.len() == 1024 {
-                rows.add_many(buf);
-                buf.clear();
-            }
-        }
-    }
-}
-
-/// [`run_matching`] for the one fixed-width type Arrow does not store as a flat slice of itself.
-/// The test is hoisted exactly as the others are; what differs is only the bit extraction.
-#[inline]
-fn bool_matching(
-    values: &arrow::array::BooleanArray,
-    span: Range<usize>,
-    first_row: u32,
-    rows: &mut croaring::Bitmap,
-    buf: &mut Vec<u32>,
-    matches: impl Fn(u8) -> bool,
-) {
-    let start = span.start;
-    for idx in span {
-        if matches(u8::from(values.value(idx))) {
-            buf.push(first_row + (idx - start) as u32);
             if buf.len() == 1024 {
                 rows.add_many(buf);
                 buf.clear();
