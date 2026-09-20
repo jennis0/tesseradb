@@ -468,15 +468,9 @@ fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
     tessera_engine::filter::FilterColumns::open(
         &out.join(current_prefix(out)),
         &phash,
-        &bundle.manifest.declared_scalars,
-        &bundle.manifest.scoped_scalars(),
-        &|view: &str| bundle.manifest.incarnation_of(view),
-        &bundle.manifest.vocabularies,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
+        &bundle.manifest,
+        // A built bundle has flushed nothing, so every column is its base layer alone.
+        Default::default(),
         &[],
         false,
     )

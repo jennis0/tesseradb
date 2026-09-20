@@ -277,31 +277,15 @@ fn open_filter_columns(
     crate::filter::FilterColumns::open(
         prefix_dir,
         &partition,
-        &bundle.manifest.declared_scalars,
-        // The scoped column families of every group, flattened: the group is already the first
-        // component of each family's view ids.
-        &bundle.manifest.scoped_scalars(),
-        &|view: &str| bundle.manifest.incarnation_of(view),
-        &bundle.manifest.vocabularies,
-        manifest.map(|m| m.attr_extents.as_slice()).unwrap_or(&[]),
-        // The base the schema owes plus every extent the side-manifest names, always the full
-        // shape, so a restart composes whatever was published even while no flush writes one.
-        manifest.map(|m| m.record_extents.as_slice()).unwrap_or(&[]),
-        manifest
-            .map(|m| m.artifact_record_extents.as_slice())
-            .unwrap_or(&[]),
-        // The base the build always writes plus every extent the side-manifest names, so a
-        // restart composes the labels of everything flushed since the build.
-        manifest
-            .map(|m| m.entity_terms_extents.as_slice())
-            .unwrap_or(&[]),
-        manifest.map(|m| m.text_extents.as_slice()).unwrap_or(&[]),
+        &bundle.manifest,
+        crate::filter::PartitionExtents::of(manifest),
         // The columns whose base no fold has written yet.
         unfolded_attributes,
         // Mapped: the engine opens every declared column at once and holds it for the process
         // lifetime, so the alternative is paying tens of GB of residency before any filter arrives.
         true,
     )
+    .map_err(std::io::Error::from)
 }
 
 /// What the side manifests declare, merged into the manifest and then kept: [`ManifestSeed`]

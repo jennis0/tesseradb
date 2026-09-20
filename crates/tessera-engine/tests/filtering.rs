@@ -28,7 +28,8 @@ use croaring::Bitmap;
 use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::filter::{
-    candidate, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand, Scalar,
+    candidate, ComposeError, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand,
+    OpenedExtent, Scalar, MAX_FILTER_DEPTH,
 };
 use tessera_engine::ViewportRequest;
 use tessera_lifecycle::command::UnallocatedRow;
@@ -107,6 +108,12 @@ index    = true
 name     = "bonus"
 type     = "i32"
 index    = true
+
+[[attribute]]
+name     = "prose"
+type     = "text"
+index    = true
+analyser = "unicode"
 "#;
 
 /// Source id → department key. Every fifth item carries none, so the absent path is exercised
@@ -166,6 +173,12 @@ fn title_of(e: u64) -> String {
     format!("paper-{e:02}")
 }
 
+/// The analysed column: one word every item carries and one only this item does, so a `match`
+/// answer is a set no other item's prose can fake.
+fn prose_of(e: u64) -> String {
+    format!("shared p{e:02}")
+}
+
 fn write_points(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -176,6 +189,7 @@ fn write_points(path: &Path) {
         Field::new("title", DataType::Utf8, true),
         Field::new("score", DataType::Int32, false),
         Field::new("bonus", DataType::Int32, true),
+        Field::new("prose", DataType::Utf8, true),
     ]));
     let ids: Vec<u64> = (0..N).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
@@ -191,6 +205,7 @@ fn write_points(path: &Path) {
     let titles: Vec<Option<String>> = ids.iter().map(|&e| Some(title_of(e))).collect();
     let scores: Vec<i32> = ids.iter().map(|&e| score_of(e)).collect();
     let bonuses: Vec<Option<i32>> = ids.iter().map(|&e| bonus_of(e)).collect();
+    let prose: Vec<Option<String>> = ids.iter().map(|&e| Some(prose_of(e))).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -202,6 +217,7 @@ fn write_points(path: &Path) {
             Arc::new(StringArray::from(titles)),
             Arc::new(arrow::array::Int32Array::from(scores)),
             Arc::new(arrow::array::Int32Array::from(bonuses)),
+            Arc::new(StringArray::from(prose)),
         ],
     )
     .unwrap();
@@ -226,8 +242,7 @@ struct Fixture {
     /// deliberately corrupted a *file* can still reopen the columns: `open_bundle` verifies every
     /// digest, so it refuses first and the reader under test is never reached.
     phash: String,
-    declared: Vec<tessera_store::manifest::DeclaredScalar>,
-    vocabularies: Vec<tessera_store::manifest::ManifestVocabulary>,
+    manifest: tessera_store::manifest::Manifest,
     extents: Vec<tessera_store::manifest::AttrExtent>,
 }
 
@@ -286,16 +301,9 @@ fn fixture() -> Fixture {
     let columns = FilterColumns::open(
         &bundle.join(&prefix),
         &phash,
-        &opened.manifest.declared_scalars,
-        &opened.manifest.scoped_scalars(),
-        &|view: &str| opened.manifest.incarnation_of(view),
-        &opened.manifest.vocabularies,
+        &opened.manifest,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
-        &opened.partitions[&phash].manifest.attr_extents,
-        &opened.partitions[&phash].manifest.record_extents,
-        &opened.partitions[&phash].manifest.artifact_record_extents,
-        &[],
-        &opened.partitions[&phash].manifest.text_extents,
+        tessera_engine::filter::PartitionExtents::of(Some(&opened.partitions[&phash].manifest)),
         &[],
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
@@ -326,8 +334,7 @@ fn fixture() -> Fixture {
         archive_codes,
         prefix,
         phash: phash.clone(),
-        declared: opened.manifest.declared_scalars.clone(),
-        vocabularies: opened.manifest.vocabularies.clone(),
+        manifest: opened.manifest.clone(),
         extents: opened.partitions[&phash].manifest.attr_extents.clone(),
     }
 }
@@ -454,36 +461,46 @@ fn a_zero_coverage_principal_matches_nothing() {
     }
 }
 
-/// String predicates over a real mask: equality, prefix and substring, each against the corpus.
+/// One keyword case: what to call it, the operand, and the corpus predicate it must agree with.
+type KeywordCase = (&'static str, FilterOperand, fn(u64) -> bool);
+
+/// Every keyword operand over a real mask, against the corpus: equality, a set, a prefix and a
+/// substring, on the built `title` column. The set names a key nobody carries beside two that are
+/// carried, so a miss inside an `in` is answered rather than refused.
 #[test]
 fn string_filters_agree_with_the_corpus_under_a_real_mask() {
     let fx = fixture();
     let (_engine, cand) = candidate_for(&fx, &subset_credential());
     let terms = [SUBSET_TERM];
 
-    let eq = fx
-        .columns
-        .resolve("title", &FilterOperand::TextEquals(title_of(3)), &cand)
-        .unwrap();
-    assert_eq!(as_vec(&eq), expected(&fx, &terms, |e| e == 3));
-
-    let prefix = fx
-        .columns
-        .resolve("title", &FilterOperand::TextPrefix("paper-1".into()), &cand)
-        .unwrap();
-    assert_eq!(
-        as_vec(&prefix),
-        expected(&fx, &terms, |e| title_of(e).starts_with("paper-1"))
-    );
-
-    let contains = fx
-        .columns
-        .resolve("title", &FilterOperand::TextContains("-2".into()), &cand)
-        .unwrap();
-    assert_eq!(
-        as_vec(&contains),
-        expected(&fx, &terms, |e| title_of(e).contains("-2"))
-    );
+    let cases: [KeywordCase; 4] = [
+        ("eq", FilterOperand::TextEquals(title_of(3)), |e| e == 3),
+        (
+            "in",
+            FilterOperand::TextIn(vec![
+                title_of(3),
+                title_of(9),
+                "paper-no-such-thing".to_string(),
+            ]),
+            |e| e == 3 || e == 9,
+        ),
+        (
+            "prefix",
+            FilterOperand::TextPrefix("paper-1".into()),
+            |e| title_of(e).starts_with("paper-1"),
+        ),
+        (
+            "contains",
+            FilterOperand::TextContains("-2".into()),
+            |e| title_of(e).contains("-2"),
+        ),
+    ];
+    for (label, operand, carries) in cases {
+        let got = fx.columns.resolve("title", &operand, &cand).unwrap();
+        let want = expected(&fx, &terms, carries);
+        assert!(!want.is_empty(), "{label}: the fixture selects nothing");
+        assert_eq!(as_vec(&got), want, "{label}");
+    }
 }
 
 /// **Composition is intersection, and it commutes with the corpus.** Two operands over different
@@ -623,6 +640,9 @@ fn ingest_and_flush_with(
             // `bonus` is the nullable numeric: the default above passes `WalScalar::Null`, which is
             // how an ingested item says it carries no value for a column (decision 0064).
             bonus,
+            // The analysed column, keyed off the external id so each flushed item carries a word
+            // no other item holds.
+            WalScalar::Utf8(format!("shared {external}")),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
         scoped: Vec::new(),
@@ -1084,15 +1104,11 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
         FilterColumns::open(
             &prefix,
             &phash,
-            &opened.manifest.declared_scalars,
-            &opened.manifest.scoped_scalars(),
-            &|view: &str| opened.manifest.incarnation_of(view),
-            &opened.manifest.vocabularies,
-            extents,
-            &[],
-            &[],
-            &[],
-            &[],
+            &opened.manifest,
+            tessera_engine::filter::PartitionExtents {
+                attrs: extents,
+                ..Default::default()
+            },
             &[],
             true,
         )
@@ -1111,6 +1127,30 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
         std::fs::write(&path, held).unwrap();
     }
     assert!(open(&extents).is_ok(), "restored, it composes again");
+}
+
+/// An extent as a publication hands one over. Only the column name, the values path and the two
+/// readers are composed from; the rest of the entry is what the manifest carries.
+fn opened(
+    column: &str,
+    values_rel: &str,
+    values: Arc<tessera_filter::ValueColumn>,
+    dict: Option<Arc<tessera_filter::SortedDict>>,
+) -> OpenedExtent {
+    OpenedExtent {
+        extent: tessera_store::manifest::AttrExtent {
+            column: column.to_string(),
+            view: None,
+            incarnation: None,
+            values: values_rel.to_string(),
+            presence: format!("{values_rel}.roaring"),
+            dict: dict.is_some().then(|| format!("{values_rel}.dict")),
+            postings: None,
+            offsets: None,
+        },
+        values,
+        dict,
+    }
 }
 
 /// A keyword extent built in this process: the ordinal column and the dictionary that numbers it.
@@ -1168,9 +1208,9 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     let err = fx
         .columns
         .with_extents(
-            &[(
-                "title".to_string(),
-                "attrs/title/extents/overlapping.arrow".to_string(),
+            &[opened(
+                "title",
+                "attrs/title/extents/overlapping.arrow",
                 overlapping,
                 Some(dict),
             )],
@@ -1179,7 +1219,10 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
             &[],
         )
         .expect_err("an extent claiming entity 0 overlaps the base column");
-    assert!(format!("{err}").contains("I9"), "{err}");
+    assert!(
+        matches!(&err, ComposeError::Overlap { column } if column == "title"),
+        "{err:?}"
+    );
 
     // And an extent for a column the schema does not declare filterable is refused too: it would
     // otherwise be silently dropped, which is a value column quietly going missing.
@@ -1187,9 +1230,9 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     assert!(fx
         .columns
         .with_extents(
-            &[(
-                "no_such_column".to_string(),
-                "attrs/no_such_column/extents/stray.arrow".to_string(),
+            &[opened(
+                "no_such_column",
+                "attrs/no_such_column/extents/stray.arrow",
                 stray,
                 Some(stray_dict),
             )],
@@ -1222,13 +1265,14 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
-        // The schema declares five columns.
+        // The schema declares six columns.
         scalars: vec![
             WalScalar::Utf8("eng".to_string()),
             WalScalar::Utf8("xx".to_string()),
             WalScalar::Utf8("paper-97".to_string()),
             WalScalar::I32(43),
             WalScalar::Null,
+            WalScalar::Utf8("shared p97".to_string()),
             WalScalar::I32(1),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
@@ -1241,8 +1285,8 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         matches!(
             err,
             tessera_engine::AcceptError::ScalarArity {
-                expected: 5,
-                got: 6,
+                expected: 6,
+                got: 7,
                 ..
             }
         ),
@@ -1929,14 +1973,10 @@ fn a_negation_spanning_two_columns_is_refused_and_composes_instead() {
         .columns
         .evaluate(&spanning, &cand)
         .expect_err("a negation over two columns is refused");
-    let text = format!("{err}");
     assert!(
-        text.contains("department") && text.contains("title"),
-        "{text}"
-    );
-    assert!(
-        text.contains("all_of"),
-        "the refusal names the way to say it: {text}"
+        matches!(&err, FilterError::NegationSpansColumns { columns }
+            if columns == &["department".to_string(), "title".to_string()]),
+        "{err:?}"
     );
 
     // And the composition it points at is accepted, and is the intersection of the two negations.
@@ -2051,8 +2091,10 @@ fn an_over_deep_expression_is_refused() {
         expr = FilterExpr::AllOf(vec![expr]);
     }
     let err = fx.columns.evaluate(&expr, &cand).expect_err("too deep");
-    assert!(matches!(err, FilterError::TooDeep { .. }), "{err:?}");
-    assert!(format!("{err}").contains("rather than flattened"));
+    assert!(
+        matches!(err, FilterError::TooDeep { depth, max } if depth == 9 && max == MAX_FILTER_DEPTH),
+        "{err:?}"
+    );
 }
 
 /// A disjunction whose branches a principal cannot see is empty, not an error — and costs the same
@@ -2304,21 +2346,17 @@ fn postings_path(fx: &Fixture, column: &str) -> std::path::PathBuf {
 
 /// Reopen the fixture's columns from disk — used after a test has rewritten a postings file, since
 /// the route is decided and the file mapped at open.
-fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
+fn reopen(fx: &Fixture) -> Result<FilterColumns, tessera_engine::filter::ComposeError> {
     FilterColumns::open(
         &fx.bundle.join(&fx.prefix),
         &fx.phash,
-        &fx.declared,
-        // No group-scoped family: this fixture declares no view group (`views.md` §5), so no
-        // incarnation is ever asked for.
-        &[],
-        &|_view: &str| None,
-        &fx.vocabularies,
-        &fx.extents,
-        &[],
-        &[],
-        &[],
-        &[],
+        // The manifest as it stood at the build: this fixture declares no view group
+        // (`views.md` §5), so no incarnation is ever asked for.
+        &fx.manifest,
+        tessera_engine::filter::PartitionExtents {
+            attrs: &fx.extents,
+            ..Default::default()
+        },
         &[],
         true,
     )
@@ -3709,6 +3747,140 @@ fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
     }
 }
 
+/// Everything one generation's filter columns hold and answer, as one comparable value: per
+/// declared column the layer counts and the placement, one representative operand per family, and
+/// the record stack's depth.
+fn composition_reading(
+    engine: &tessera_engine::Engine,
+    fx: &Fixture,
+) -> BTreeMap<String, String> {
+    let (generation, cand) = live_candidate(engine);
+    let columns = &generation.filter_columns;
+    let mut out = BTreeMap::new();
+    out.insert("candidate".to_string(), cand.cardinality().to_string());
+    out.insert(
+        "record layers".to_string(),
+        columns.record_layers().to_string(),
+    );
+    for column in ["department", "archive", "title", "score", "bonus"] {
+        out.insert(
+            format!("{column}: layers"),
+            format!(
+                "{:?} value, {:?} text",
+                columns.layer_count(column),
+                columns.text_layer_count(column)
+            ),
+        );
+        let placement = columns.placement(column).expect("a filterable column");
+        out.insert(
+            format!("{column}: placement"),
+            format!(
+                "entity={} row={} family={}",
+                placement.entity,
+                placement.row,
+                placement.family.as_str()
+            ),
+        );
+    }
+    // The analysed column, which has no value column and so no placement: what it holds is its
+    // text layers, and what it answers is a `match`.
+    out.insert(
+        "prose: layers".to_string(),
+        format!("{:?} text", columns.text_layer_count("prose")),
+    );
+    for (family, column, operand) in [
+        (
+            "category",
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        ),
+        (
+            "category",
+            "archive",
+            FilterOperand::Equals(AttrLocalId::new(fx.archive_codes["xx"])),
+        ),
+        (
+            "keyword",
+            "title",
+            FilterOperand::TextPrefix("differential-title-".into()),
+        ),
+        (
+            "keyword",
+            "title",
+            FilterOperand::TextContains("title-0".into()),
+        ),
+        (
+            "numeric",
+            "score",
+            FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(1_000),
+                    inclusive: true,
+                }),
+                hi: None,
+            },
+        ),
+        // A word of the build's own prose, and one only the flushed items carry: a layer lost at
+        // the reopen shows in one of the two and not the other.
+        (
+            "text",
+            "prose",
+            FilterOperand::Match {
+                query: "p05".to_string(),
+                minimum: None,
+            },
+        ),
+        (
+            "text",
+            "prose",
+            FilterOperand::Match {
+                query: "differential".to_string(),
+                minimum: None,
+            },
+        ),
+    ] {
+        let answer = columns.resolve(column, &operand, &cand).expect("answers");
+        let members = as_vec(&answer);
+        assert!(
+            !members.is_empty(),
+            "{family} {column}: the fixture answers nothing, so the comparison is vacuous"
+        );
+        out.insert(
+            format!("{family} {column} {operand:?}"),
+            format!("{members:?}"),
+        );
+    }
+    out
+}
+
+/// **A build is an ingest into an empty database**, so a live generation's filter columns and a
+/// reopen of the same bundle are the same database — which nothing pinned as a whole.
+///
+/// A window's worth of flushes and the coalesce they trigger make a generation the build alone
+/// cannot: a base, a coalesced layer, and the manifest entries that say so. What is compared is
+/// what each composition *holds* — the value and text layer counts per column, each column's
+/// placement, the record stack's depth — and what it *answers*, one representative operand per
+/// family under a candidate taken the same way from each.
+///
+/// A publication that edited the manifest without replacing the live layers differs in the counts;
+/// one that replaced the live layers without committing the entries differs in them the other way;
+/// a merge that paired values with the wrong entities differs in the answers.
+#[test]
+fn a_live_generation_and_a_reopen_of_the_same_bundle_hold_and_answer_alike() {
+    let fx = fixture();
+    let live = {
+        let engine = engine_for_coalesce(&fx, "differential");
+        flush_a_window(&engine, "differential", 0);
+        assert!(
+            engine.write_executor_stats().coalesces >= 1,
+            "the reading is of a generation a coalesce has published into"
+        );
+        composition_reading(&engine, &fx)
+    };
+    let reopened = engine_for_coalesce(&fx, "differential-reopen");
+    assert_eq!(live, composition_reading(&reopened, &fx));
+}
+
 /// The keys the keyword tests below ingest, one per flush of a window. Repeated across flushes and
 /// out of sorted order, so each flush's dictionary numbers its key 0 and the merged dictionary
 /// numbers five keys another way: a replacement read against any consumed layer's dictionary, or
@@ -4046,18 +4218,8 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
         .columns
         .with_extents(
             &[
-                (
-                    "bonus".to_string(),
-                    first.clone(),
-                    extent(&[100, 101]),
-                    None,
-                ),
-                (
-                    "bonus".to_string(),
-                    second.clone(),
-                    extent(&[200, 201]),
-                    None,
-                ),
+                opened("bonus", &first, extent(&[100, 101]), None),
+                opened("bonus", &second, extent(&[200, 201]), None),
             ],
             &[],
             &[],
@@ -4067,16 +4229,24 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
 
     let window =
         |values: Arc<tessera_filter::ValueColumn>| tessera_engine::filter::CoalescedWindow {
-            column: "bonus".to_string(),
             consumed: vec![first.clone(), second.clone()],
-            values_rel: "coalesced/c-1/attrs/bonus/values.arrow".to_string(),
-            values,
-            dict: None,
+            replacement: opened("bonus", "coalesced/c-1/attrs/bonus/values.arrow", values, None),
         };
     let err = columns
         .with_coalesced(&[window(extent(&[100, 101, 200]))], &[], None, None)
         .expect_err("a coalesced layer short of its window is refused");
-    assert!(format!("{err}").contains("coverage"), "{err}");
+    assert!(
+        matches!(
+            &err,
+            ComposeError::CoverageMismatch {
+                column,
+                replacement: 3,
+                consumed: 2,
+                covered: 4,
+            } if column == "bonus"
+        ),
+        "{err:?}"
+    );
 
     // And one naming a layer this generation does not hold: the plan and the process disagree
     // about what the bundle is, which is a refusal rather than a no-op.

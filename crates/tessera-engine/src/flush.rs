@@ -579,15 +579,16 @@ pub(crate) struct CompletedFlush {
     /// `Some` iff this flush promoted; its digest is already in `files`.
     pub(crate) dict_extent: Option<DictExtent>,
     /// One entry per filterable column: this flush's values for the entities it published.
-    pub(crate) filter_extents: Vec<FlushedExtent>,
+    pub(crate) filter_extents: Vec<crate::filter::OpenedExtent>,
     /// This flush's record-blob extent, or `None` where the schema declares no blob-resident column.
     pub(crate) record_extent: Option<RecordExtent>,
     /// This flush's slice of the entity-to-term transpose. Never absent, unlike the record extent.
     pub(crate) entity_terms_extent: tessera_store::manifest::EntityTermsExtent,
     /// The `(family, view)` pairs this flush gave a column; a view left off this list renders nothing on restart.
     pub(crate) scoped_columns: Vec<(String, String)>,
-    /// The incarnation of [`FlushContext::view`] this flush wrote under.
-    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
+    /// The incarnation of the view [`CompletedFlush::scoped_columns`] names, which under a
+    /// sharing door is the owning group's rather than the flushing view's.
+    pub(crate) scoped_incarnation: tessera_types::view::ViewIncarnation,
     /// This flush's text layers, one per indexed `text` column, composed onto the live generation at publication.
     pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
     /// Every file this flush wrote, prefix-relative, with its digest — computed on the pool.
@@ -758,9 +759,9 @@ fn execute_flush_stages(
     let filter_extents = write_filter_extents(&plan, &ctx)?;
     for extent in &filter_extents {
         // The dictionary is digested with the values: a keyword extent's ordinals need it to be read.
-        for rel in [&extent.values_rel, &extent.presence_rel]
+        for rel in [&extent.extent.values, &extent.extent.presence]
             .into_iter()
-            .chain(extent.dict_rel.as_ref())
+            .chain(extent.extent.dict.as_ref())
         {
             to_digest.push(rel.clone());
         }
@@ -781,9 +782,9 @@ fn execute_flush_stages(
         created: scoped_columns,
     } = write_scoped_extents(&plan, &ctx)?;
     for extent in &scoped_extents {
-        for rel in [&extent.values_rel, &extent.presence_rel]
+        for rel in [&extent.extent.values, &extent.extent.presence]
             .into_iter()
-            .chain(extent.dict_rel.as_ref())
+            .chain(extent.extent.dict.as_ref())
         {
             to_digest.push(rel.clone());
         }
@@ -905,7 +906,7 @@ fn execute_flush_stages(
         entity_terms_extent,
         text_extents,
         scoped_columns,
-        incarnation: ctx.incarnation,
+        scoped_incarnation: ctx.scoped_incarnation,
         files,
         dict: promotion.dict,
         promoted_from_dict_len: promoted_from,
@@ -1070,22 +1071,6 @@ pub(crate) struct FilterColumnSpec {
     pub(crate) category: bool,
 }
 
-/// One flush's extent for one column: durable, digested by the caller, and open. The three paths
-/// travel together because the layer's files must swap atomically.
-pub(crate) struct FlushedExtent {
-    pub(crate) column: String,
-    /// The view whose column of a group-scoped family this extends, or `None` for an entity-scoped column.
-    pub(crate) view: Option<String>,
-    pub(crate) values_rel: String,
-    pub(crate) presence_rel: String,
-    /// The extent's own sorted dictionary — keyword columns only.
-    pub(crate) dict_rel: Option<String>,
-    /// Opened here on the pool, so publication is a pointer push on the executor thread.
-    pub(crate) values: Arc<tessera_filter::ValueColumn>,
-    /// The dictionary those values are ordinals into. Publication takes the pair or neither.
-    pub(crate) dict: Option<Arc<tessera_filter::SortedDict>>,
-}
-
 /// Write one extent per filterable column, covering exactly the entities this flush publishes.
 /// Every declared filter column gets one, even a column no flushed entity carries a value in, so
 /// the file set is predictable from the manifest alone. A deleted entity acquires no slot here.
@@ -1093,7 +1078,7 @@ pub(crate) struct FlushedExtent {
 fn write_filter_extents(
     plan: &FlushPlan,
     ctx: &FlushContext,
-) -> Result<Vec<FlushedExtent>, MaintenanceFailed> {
+) -> Result<Vec<crate::filter::OpenedExtent>, MaintenanceFailed> {
     let mut out = Vec::with_capacity(ctx.filter_schema.len());
     for spec in &ctx.filter_schema {
         let column = extent_values(spec, entity_scoped_rows(spec, plan)?)?;
@@ -1118,7 +1103,7 @@ fn write_value_extent(
     name: &str,
     view: Option<String>,
     column: &ExtentColumn<'_>,
-) -> Result<FlushedExtent, MaintenanceFailed> {
+) -> Result<crate::filter::OpenedExtent, MaintenanceFailed> {
     let scoped = view.is_some();
     let what = if scoped { "scoped extent" } else { "filter extent" };
     let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
@@ -1156,12 +1141,23 @@ fn write_value_extent(
                 })
         })
         .transpose()?;
-    Ok(FlushedExtent {
-        column: name.to_string(),
-        view,
-        values_rel: rel(&values_path)?,
-        presence_rel: rel(&presence_path)?,
-        dict_rel: dict_path.as_ref().map(|p| rel(p)).transpose()?,
+    Ok(crate::filter::OpenedExtent {
+        extent: tessera_store::manifest::AttrExtent {
+            column: name.to_string(),
+            // `None` for an entity-scoped column, which belongs to no view: the incarnation
+            // follows the view exactly, and a view here is the owner's rather than the flushing
+            // one's.
+            incarnation: view.as_ref().map(|_| ctx.scoped_incarnation),
+            view,
+            values: rel(&values_path)?,
+            presence: rel(&presence_path)?,
+            // One record, so the layer's files swap as one: an extent's ordinals are positions in
+            // that extent's dictionary, and a reader that saw a new dictionary beside old
+            // ordinals would recolour the window.
+            dict: dict_path.as_ref().map(|p| rel(p)).transpose()?,
+            postings: None,
+            offsets: None,
+        },
         values: Arc::new(values),
         dict,
     })
@@ -1454,7 +1450,9 @@ fn write_text_extents(
 struct TextTarget<'a> {
     prefix_dir: &'a Path,
     seg_id: &'a str,
-    incarnation: tessera_types::view::ViewIncarnation,
+    /// Stamped on a layer that names a view, which is the owning group's rather than the
+    /// flushing one's; an entity-scoped layer names none and carries no incarnation.
+    scoped_incarnation: tessera_types::view::ViewIncarnation,
 }
 
 impl<'a> TextTarget<'a> {
@@ -1462,7 +1460,7 @@ impl<'a> TextTarget<'a> {
         TextTarget {
             prefix_dir: &ctx.prefix_dir,
             seg_id: &ctx.seg_id,
-            incarnation: ctx.incarnation,
+            scoped_incarnation: ctx.scoped_incarnation,
         }
     }
 }
@@ -1546,7 +1544,7 @@ fn write_text_layer(
     Ok(Some(tessera_store::manifest::TextExtent {
         column: column.to_string(),
         // `None` for the same rows `view` is: an entity-scoped column belongs to no view.
-        incarnation: view.as_ref().map(|_| target.incarnation),
+        incarnation: view.as_ref().map(|_| target.scoped_incarnation),
         view,
         dict: dict_rel,
         postings: postings_rel,
@@ -1646,7 +1644,7 @@ fn write_scoped_extents(
 /// What [`write_scoped_extents`] produced: this flush's extents for the families of its view's
 /// group, their text layers, and the `(family, view)` pairs whose base it had to write.
 pub(crate) struct ScopedWrite {
-    pub(crate) extents: Vec<FlushedExtent>,
+    pub(crate) extents: Vec<crate::filter::OpenedExtent>,
     pub(crate) texts: Vec<tessera_store::manifest::TextExtent>,
     pub(crate) created: Vec<(String, String)>,
 }
@@ -2237,7 +2235,7 @@ mod tests {
             TextTarget {
                 prefix_dir: dir.path(),
                 seg_id: "flush-1-0",
-                incarnation: tessera_types::view::DECLARED_INCARNATION,
+                scoped_incarnation: tessera_types::view::DECLARED_INCARNATION,
             },
             None,
         )

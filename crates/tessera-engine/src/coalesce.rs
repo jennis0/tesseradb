@@ -369,7 +369,7 @@ pub(crate) struct CompletedCoalesce {
     pub(crate) dict: Option<DictExtent>,
     /// One coalesced extent per window the attribute axis took, already opened, so publication is
     /// a pointer push on the executor and cannot fail on IO after the manifest edit.
-    pub(crate) attrs: Vec<CoalescedAttr>,
+    pub(crate) attrs: Vec<crate::filter::OpenedExtent>,
     /// The record window collapsed into one extent, or `None` if the axis did not run. The
     /// entry only; the live stack is re-derived from the manifest at publication.
     pub(crate) record: Option<RecordExtent>,
@@ -379,15 +379,6 @@ pub(crate) struct CompletedCoalesce {
     pub(crate) terms: Option<EntityTermsExtent>,
     /// Every file this pass wrote, prefix-relative, with its digest.
     pub(crate) files: BTreeMap<String, FileDigest>,
-}
-
-/// One column's window collapsed into one extent: the manifest entry it becomes, and the reader.
-pub(crate) struct CoalescedAttr {
-    pub(crate) extent: AttrExtent,
-    pub(crate) values: Arc<tessera_filter::ValueColumn>,
-    /// The merged dictionary `values` are ordinals into, `Some` exactly when [`Self::extent`]
-    /// names one and `None` for a family whose values file carries the values themselves.
-    pub(crate) dict: Option<Arc<tessera_filter::SortedDict>>,
 }
 
 /// Turn a plan into durable files. Runs on the background pool, over immutable inputs.
@@ -531,7 +522,7 @@ fn coalesce_attr_window(
     window: &ColumnWindow<AttrExtent>,
     ctx: &CoalesceContext,
     files: &mut BTreeMap<String, FileDigest>,
-) -> Result<CoalescedAttr, MaintenanceFailed> {
+) -> Result<crate::filter::OpenedExtent, MaintenanceFailed> {
     // Which merge runs is decided by whether the window's extents all name a dictionary or
     // all do not: a keyword layer's values are ordinals into its dictionary, and any other
     // family's values are the values themselves, so a window that mixes the two has no single
@@ -641,7 +632,7 @@ fn coalesce_attr_window(
         })
         .transpose()
         .map_err(|e| MaintenanceFailed(format!("the coalesced dictionary does not reopen: {e}")))?;
-    Ok(CoalescedAttr {
+    Ok(crate::filter::OpenedExtent {
         extent: AttrExtent {
             column: window.column.clone(),
             view: window.view.clone(),
@@ -1417,13 +1408,13 @@ mod tests {
     /// standing in for the merged one. The reader is real — an empty extent is still a column —
     /// because `CompletedCoalesce` carries the opened reader and a double there would be a second
     /// definition of what an extent is.
-    fn completed_attrs(plan: &CoalescePlan, out_rel: &str) -> Vec<CoalescedAttr> {
+    fn completed_attrs(plan: &CoalescePlan, out_rel: &str) -> Vec<crate::filter::OpenedExtent> {
         plan.attrs
             .iter()
             .map(|window| {
                 let column_rel =
                     coalesced_column_rel(out_rel, &window.column, window.view.as_deref());
-                CoalescedAttr {
+                crate::filter::OpenedExtent {
                     extent: AttrExtent {
                         incarnation: window.incarnation,
                         column: window.column.clone(),
@@ -1981,7 +1972,7 @@ mod tests {
     /// through the coalesced pair — through the opened readers the executor installs, and again
     /// through the files the rebased manifest names, which is what a restart opens.
     ///
-    /// **Mutation this kills:** leave `dict` off the `CoalescedAttr` or the `AttrExtent` and the
+    /// **Mutation this kills:** leave `dict` off the `OpenedExtent` or the `AttrExtent` and the
     /// entry names ordinals with nothing to read them against; run the byte-preserving merge on
     /// the window and entity 30 reads `alpha` where it carried `gamma`.
     #[test]
