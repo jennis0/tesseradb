@@ -22,10 +22,9 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use croaring::{Bitmap, BitmapView, Frozen};
-use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 
 use tessera_types::TermId;
@@ -442,82 +441,25 @@ impl CacheWeight for FrozenFragment {
     }
 }
 
-/// The most `auth_data_hash → canonical_key` memoisations kept before the map is cleared.
+/// Frozen fragments, held in memory and persisted under a directory.
 ///
-/// **This bound closes an unbounded, attacker-driven allocation that the byte bound does not
-/// reach.** `key_memo` is keyed by `SHA-256(auth_data)`, so its growth is driven by the number of
-/// distinct *credentials* presented, not by the number of distinct grant sets. A caller holding the
-/// session credential can POST `/session/authorise` with random `auth_data` whose descriptors are
-/// all unknown to the dictionary: `Engine::authorise` drops unknown descriptors silently, so
-/// `satisfied` is empty, the canonical key is identical every time, [`Self::slots`] takes a `Ready`
-/// hit and builds nothing — while this map grows by a fresh 64-byte entry plus overhead on every
-/// call, for ever. No fragment build, no disk IO, and nothing in the byte accounting moves.
+/// An entry is named by its canonical key: SHA-256 over the bundle identity, the auth plugin's
+/// hash, the watermark and the sorted, deduplicated granted terms. Term ids are ordinals of one
+/// bundle, so a key narrower than that would serve one bundle's entity set under another's.
 ///
-/// **Clearing the whole map rather than evicting one entry is deliberate and cheap.** This map is
-/// *pure memoisation* of [`canonical_key`] (see this type's doc): discarding it costs one re-derive
-/// — a sort, a dedup and a SHA-256 over the granted term list — and never a wrong answer. An LRU
-/// here would be a second recency structure to keep in step for no correctness gain.
+/// On disk an entry is `<hex key>.frag`, the `Frozen` bitmap bytes, and `<hex key>.meta`, which
+/// holds `watermark: u64 LE ‖ frozen_len: u64 LE ‖ sha256(frozen_bytes)`. The directory and the
+/// files are owner-only on unix. Each file is written to a temporary sibling, synced and renamed,
+/// and [`FrozenFragment::open`] checks the length and the digest before it views the bytes, so a
+/// truncated, corrupt or altered entry is a miss.
 ///
-/// 4096 is sized as "comfortably more distinct credentials than a single-node deployment presents
-/// between clears" — assumed, not measured; at ~80 B per entry it caps this map at ~330 KB.
-const KEY_MEMO_MAX_ENTRIES: usize = 4096;
-
-/// What a canonical key is memoised against: the credential, the **generation stamp its terms were
-/// resolved against**, and the watermark the fragment covers. All three, because each of them alone
-/// changes what the same credential's fragment contains over time — see
-/// [`FragmentCache::get_or_build`].
-type KeyMemoKey = ([u8; 32], u64, u64);
-
-/// Directory-backed frozen fragment store.
-///
-/// Cache key: SHA-256 over `bundle_identity ‖ auth_plugin_hash ‖ sorted term_id u32 LEs`
-/// (deduplicated) — see [`canonical_key`]'s doc for why the key must be wider than the granted
-/// term set. `bundle_identity` is the generation's MANIFEST digest and `auth_plugin_hash` is the
-/// active auth plugin's hash (design §2.3 requires the plugin version in the key; SA §3 adds the
-/// bundle identity: term IDs are bundle-relative ordinals, so reusing a cache dir across a bundle
-/// rebuild — or an auth plugin change — with a stale key would otherwise serve a frozen fragment
-/// naming a *different* entity set).
-///
-/// On-disk layout (flat, under `dir`, one pair per canonical key, hex-encoded; `dir` and every
-/// file in it are created with owner-only permissions on unix — see
-/// [`create_private_dir_all`]/[`create_private_file`]):
-/// - `<hex key>.frag` — the exact `Frozen`-format bitmap bytes, written at file offset 0 (the
-///   mmap base is page-aligned, satisfying `Frozen::REQUIRED_ALIGNMENT = 32` on reopen).
-/// - `<hex key>.meta` — a [`META_LEN`]-byte sidecar: `watermark: u64 LE ‖ frozen_len: u64 LE ‖
-///   sha256(frozen_bytes)`. `watermark` restores the generation's SEGMENTS watermark at build
-///   time across process restarts; `frozen_len` and the digest let [`FrozenFragment::open`]
-///   verify the mapped file's length *and content* before ever calling the unsafe `Frozen` view
-///   deserialiser — fail-closed on a truncated, corrupted, or tampered cache entry, not just a
-///   short one (a length-only check would pass right-length garbage, e.g. from a torn write after
-///   power loss).
-///
-/// Both files are written via write-then-rename (`<name>.<pid>.<n>.tmp` → `<name>`), each
-/// `fsync`ed before its rename and the containing directory `fsync`ed after, so a crash mid-write
-/// or immediately after never leaves a partial or not-yet-durable file visible at the looked-up
-/// name.
-///
-/// An in-memory `FxHashMap<auth_data_hash, canonical_key>` gives repeat sessions presenting the
-/// same credential a fast path that skips re-sorting and re-hashing the granted term list; it is
-/// pure memoisation of [`canonical_key`]'s computation; it is not itself a source of authorisation
-/// decisions and holds nothing that must survive a restart (the on-disk `.frag`/`.meta` pair is
-/// the durable cache; this map is not). Because the fast path skips recomputation, it trusts that
-/// **`auth_data_hash` determines `satisfied`** — see [`get_or_build`](Self::get_or_build)'s doc.
-///
-/// **D-G slot-state single-flight (lifecycle §3.3).** A second map, [`Self::slots`], is keyed by
-/// the CANONICAL key (never `auth_data_hash` — see [`get_or_build`](Self::get_or_build)'s doc for
-/// why the fast-path key would be an I2 hazard here) and holds each key's build state: `Building`
-/// while a build is in flight, `Ready(Arc<FrozenFragment>)` once it lands. `Ready` doubles as the
-/// in-memory cache — a warm `get_or_build` call returns straight from this map without any file
-/// IO (no mmap, no SHA-256 verify), which is the fix for the other half of this cache's defect
-/// (every warm authorise previously re-mmapped and re-verified the frozen file on every hit). A
-/// concurrent arrival on a key already `Building` does not wait for it (D-G's non-blocking-waiters
-/// rule); it gets `FragmentCacheError::Building` immediately. A failed build never publishes
-/// `Ready` and never leaves `Building` behind — see [`crate::single_flight`]'s module doc.
+/// In memory, a slot per canonical key is either building or ready. A ready hit does no file IO.
+/// An arrival on a key that is building does not wait; it gets
+/// [`FragmentCacheError::Building`]. A failed build leaves the key absent.
 pub struct FragmentCache {
     dir: PathBuf,
     bundle_identity: [u8; 32],
     auth_plugin_hash: [u8; 32],
-    key_memo: Mutex<FxHashMap<KeyMemoKey, [u8; 32]>>,
     slots: SingleFlightCache<[u8; 32], FrozenFragment>,
     rebuilds: AtomicU64,
 }
@@ -588,39 +530,20 @@ impl FragmentCache {
             dir: dir.to_path_buf(),
             bundle_identity,
             auth_plugin_hash,
-            key_memo: Mutex::new(FxHashMap::default()),
             slots: SingleFlightCache::new(u64::MAX),
             rebuilds: AtomicU64::new(0),
         }
     }
 
-    /// A cache over the same directory and the same auth plugin, under a **new bundle identity**
-    /// — what a compaction's publication installs, and the only way this identity ever changes.
-    ///
-    /// **Rotation is a fresh cache, never a mutation of this one, because both maps are keyed
-    /// under the old identity.** `slots` is keyed by the canonical key, which hashes the identity;
-    /// `key_memo` maps a credential to a canonical key it computed under the identity. Storing a
-    /// new identity in place would leave every entry in both maps reachable by a key no live
-    /// lookup can produce for `slots`, and — the fail-open — reachable by exactly the key a live
-    /// lookup *does* produce for `key_memo`, which returns the memoised canonical key without
-    /// re-deriving it. A post-fold authorise would then be handed the pre-fold fragment: every
-    /// folded-away entity back in the mask, with no error. Starting empty makes that unexpressible
-    /// rather than forbidden.
-    ///
-    /// The persisted `.frag`/`.meta` pairs are left alone and become unreachable for the same
-    /// reason — their names are the old identity's keys, and nothing will ever compute one again.
-    /// Sweeping them is reclamation's (compaction §8), not this call's.
-    ///
-    /// **The byte bound is carried across**, because it is a validated deployment setting that
-    /// arrives once at startup ([`Self::set_memory_bound`]) and nothing would re-apply it. A
-    /// rotation that silently unbounded the cache would undo the startup refusal
-    /// `tessera_server::prepare` exists to enforce.
+    /// An empty cache over the same directory and auth plugin under a new bundle identity, which
+    /// is what a compaction's publication installs. Every slot of this cache is keyed under the
+    /// old identity, so none carries over; the persisted pairs become unreachable and are left to
+    /// [`Self::sweep`]. The byte bound carries over.
     pub fn rotate(&self, bundle_identity: [u8; 32]) -> Self {
         FragmentCache {
             dir: self.dir.clone(),
             bundle_identity,
             auth_plugin_hash: self.auth_plugin_hash,
-            key_memo: Mutex::new(FxHashMap::default()),
             slots: SingleFlightCache::new(self.slots.stats().bound_bytes),
             rebuilds: AtomicU64::new(0),
         }
@@ -752,23 +675,6 @@ impl FragmentCache {
         self.slots.len()
     }
 
-    /// Entries currently memoised in `key_memo` — the observable that makes
-    /// [`KEY_MEMO_MAX_ENTRIES`] a tested bound rather than a stated one.
-    ///
-    /// It exists because the round-1 review found that deleting the `memo.clear()` was caught by
-    /// nothing **and could not have been**: there was no accessor, so no test could be written
-    /// against the bound on one of the two attacker-driven allocation paths this task closes.
-    ///
-    /// `cfg(test)` rather than `pub`: this is a memoisation detail with no operator meaning — its
-    /// size says how many distinct *credentials* have been presented since the last clear, not
-    /// anything about the cache's memory or hit rate — and the surface an operator needs is
-    /// [`Self::stats`]. Widening the public API to test an internal bound is the trade
-    /// `crate::single_flight::SingleFlightCache::is_locked_now` refuses for the same reason.
-    #[cfg(test)]
-    fn key_memo_len(&self) -> usize {
-        self.key_memo.lock().unwrap().len()
-    }
-
     /// Entries live flat in `dir`, named by their canonical key.
     ///
     /// **No format version and no orphan sweep** (owner ruling, 2026-08-02; write-path §4.6). Both existed
@@ -798,129 +704,24 @@ impl FragmentCache {
         ))
     }
 
-    /// Return the frozen fragment for `satisfied` (the terms a viewer's credential grants),
-    /// building and persisting it if this is the first time this exact `(bundle_identity,
-    /// auth_plugin_hash, satisfied)` combination has been seen — by *any* process sharing this
-    /// cache directory, not just this one.
+    /// The frozen fragment for `satisfied`, the terms a credential grants, at `watermark`.
     ///
-    /// **Caller obligation:** `auth_data_hash` must identify the *credential* whose evaluation
-    /// produced `satisfied` — i.e. it must be a (collision-resistant) function of the same
-    /// `auth_data` that the auth plugin evaluated to obtain `satisfied`; and `resolved_at` must be
-    /// the generation stamp that resolution ran against. Together they must never arrive paired
-    /// with two different term sets.
+    /// A ready slot answers from memory. Otherwise the persisted pair is opened if it verifies,
+    /// whichever process wrote it, and failing that the fragment is built from `postings` and
+    /// `deltas` and persisted.
     ///
-    /// **`resolved_at` is in the memo key because the same credential legitimately resolves to
-    /// different term sets over time.** A flush promotes a novel descriptor to a durable ordinal
-    /// (§3.2), so a credential naming it resolves to *more* terms after that flush than before —
-    /// and `auth_data_hash` alone would then map to the older, smaller set, silently defeating the
-    /// promotion and, if a dictionary could ever renumber, returning a fragment for the wrong grant
-    /// set outright.
-    ///
-    /// **It is the generation's own stamp rather than the dictionary's length, and the difference
-    /// is what the obligation rests on** (#112, 2026-08-14). Length was the natural proxy and is a
-    /// faithful one only while three separate things hold: that a dictionary grows by appending
-    /// within a prefix, that nothing but a fold removes or renumbers a term, and that a fold
-    /// rotates this cache and so empties this map. The third does all the work — compaction sweeps
-    /// terms, so a fold *can* leave a dictionary of a length it held before meaning something
-    /// different — and it is exactly the fact a later change would break by keeping the cache warm
-    /// across a rotation, which is an obvious thing to want. A monotone generation stamp needs none
-    /// of them: the engine refuses any publication that does not strictly increase it, so a
-    /// dictionary that changes at all changes this, and the dictionary may then be rebuilt however
-    /// compaction likes. `dict_len` also carried an obligation on compaction to keep it monotone;
-    /// that obligation is discharged rather than inherited.
-    ///
-    /// The in-memory canonical-key fast path trusts this: on a memo hit it returns the
-    /// previously-computed canonical key *without* re-deriving it from `satisfied`, so a caller
-    /// that violates the obligation would silently get back a fragment built for a *different*
-    /// grant set — an I2 disclosure if that other set happens to be a superset. Debug builds catch
-    /// a violation via a `debug_assert_eq!` against a freshly recomputed key; release builds do not
-    /// re-check on the fast path (that would defeat its purpose), so this obligation is
-    /// load-bearing in release too.
-    ///
-    /// `postings` and `deltas` supply the union inputs on a cache miss.
-    ///
-    /// **`watermark` is part of the key, because it is what identifies a tier set** (§9). Two
-    /// builds over the same grant and different live tiers must not collide: they differ by the
-    /// entities the newer tiers carry, and under one key which of them a session gets would be
-    /// decided by whoever wrote last — a disclosure, not merely staleness. It is also what makes
-    /// `tmp_sibling`'s "both writers wrote byte-identical content" argument hold again, which is
-    /// the thing that makes a concurrent write-then-rename safe here.
-    ///
-    /// **A merge needs nothing of its own**, and that is why the watermark suffices rather than
-    /// merely helping: a merge coalesces tiers as a content-preserving re-encode (§5.2), so the
-    /// fragment it would produce is identical and reusing the pre-merge entry is correct. Only a
-    /// flush changes what a build returns, and a flush moves the watermark.
-    ///
-    /// For the compaction author: a persisted fragment surviving a restart at a **pre-flush** stamp
-    /// would falsify lifecycle §3.2's "the cache restarts cold" premise, which is what scopes the
-    /// future retirement floor worker-locally. With the watermark in the key a pre-flush fragment
-    /// is never found by a post-flush lookup, and the premise holds.
-    ///
-    /// **D-G slot-state single-flight (lifecycle §3.3).** The single-flight map is keyed by the
-    /// canonical key computed just below — never by `auth_data_hash` — so two different
-    /// credentials that happen to satisfy the same term set correctly single-flight onto the same
-    /// build, and (more importantly for I2) a fast-path `auth_data_hash` collision could never be
-    /// mistaken for a build-in-flight signal on the wrong key. On a hit against `Ready`, this
-    /// returns straight from memory: no file open, no mmap, no SHA-256 verify (the "warm authorise
-    /// does no file IO" fix). On a miss, the closure below still tries the on-disk pair first (a
-    /// **different** process, or an earlier run of this one before this map existed in memory, may
-    /// already have persisted it) before falling back to [`build_fragment`]. A concurrent arrival
-    /// on the same canonical key while a build is in flight gets `Err(FragmentCacheError::
-    /// Building)` immediately — it does not wait (D-G's non-blocking-waiters rule) — and a failed
-    /// build (`Err` or panic) leaves the key absent rather than wedged or cached (I13a).
+    /// The watermark is in the key because it names the set of live tiers: two builds over one
+    /// grant and different tiers differ by the entities the newer tiers carry. A merge re-encodes
+    /// tiers without changing their content and does not move the watermark, so its fragment is
+    /// the one already cached.
     pub fn get_or_build(
         &self,
         satisfied: &[TermId],
-        auth_data_hash: [u8; 32],
-        resolved_at: u64,
         postings: &PostingsReader,
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        let memo_key = (auth_data_hash, resolved_at, watermark);
-        let key = {
-            let cached = self.key_memo.lock().unwrap().get(&memo_key).copied();
-            match cached {
-                Some(key) => {
-                    debug_assert_eq!(
-                        key,
-                        canonical_key(
-                            &self.bundle_identity,
-                            &self.auth_plugin_hash,
-                            satisfied,
-                            watermark
-                        ),
-                        "get_or_build: auth_data_hash {auth_data_hash:02x?} at generation stamp \
-                         {resolved_at} was previously associated with a different term set than \
-                         `satisfied` now hashes to — callers must derive auth_data_hash from the \
-                         same auth_data that produced `satisfied`, and resolved_at from the \
-                         generation it resolved against (see this method's doc: a violation \
-                         silently returns a fragment for the wrong grant set, an I2 disclosure \
-                         risk)"
-                    );
-                    key
-                }
-                None => {
-                    let key = canonical_key(
-                        &self.bundle_identity,
-                        &self.auth_plugin_hash,
-                        satisfied,
-                        watermark,
-                    );
-                    let mut memo = self.key_memo.lock().unwrap();
-                    // Bounded by clearing rather than by evicting: this map is pure memoisation, so
-                    // discarding it costs a re-derive and never an answer. See
-                    // `KEY_MEMO_MAX_ENTRIES` for the unbounded-growth path this closes — it is
-                    // driven by distinct *credentials*, which the byte bound below does not see at
-                    // all, because a credential granting nothing still produces a `Ready` hit.
-                    if memo.len() >= KEY_MEMO_MAX_ENTRIES {
-                        memo.clear();
-                    }
-                    memo.insert(memo_key, key);
-                    key
-                }
-            }
-        };
+        let key = self.canonical_key_for(satisfied, watermark);
 
         self.slots
             .get_or_try_build(key, || {
@@ -1122,62 +923,4 @@ mod tests {
         }
     }
 
-    /// **The `key_memo` bound, closed against its attacker.** `key_memo` is keyed by
-    /// `SHA-256(auth_data)`, so a caller holding the session credential grows it by one entry per
-    /// call with random `auth_data` whose descriptors the dictionary does not know: `satisfied` is
-    /// empty, the canonical key is identical every time, [`FragmentCache::slots`] takes a `Ready`
-    /// hit, **nothing in the byte accounting moves**, and the map grows for ever.
-    ///
-    /// This is one of the two allocation paths the byte bound does not reach, and deleting the
-    /// `memo.clear()` was caught by nothing before this test existed (round-1 review, MX3).
-    ///
-    /// The assertion is on the bound, not on the clear's exact schedule: what must hold is that the
-    /// map never exceeds [`KEY_MEMO_MAX_ENTRIES`] however many distinct credentials are presented.
-    /// Asserting "it is exactly 1 after the (n+1)th call" would pin the *policy* (clear-all rather
-    /// than evict-one), which this type's doc deliberately leaves free to change.
-    #[test]
-    fn key_memo_is_bounded_however_many_distinct_credentials_arrive() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let postings_path = temp.path().join("postings.arrow");
-        crate::postings::write_postings(&postings_path, &[vec![1u32, 2, 3]], 32).unwrap();
-        let reader = PostingsReader::open(&postings_path, false).unwrap();
-
-        let cache = FragmentCache::new(&temp.path().join("frag"), [7u8; 32], [9u8; 32]);
-
-        // Every call presents a *distinct* credential digest and an empty grant set — the exact
-        // shape the doc describes: one canonical key, one build, unbounded distinct hashes.
-        let calls = KEY_MEMO_MAX_ENTRIES + KEY_MEMO_MAX_ENTRIES / 2;
-        let mut high_water = 0usize;
-        for n in 0..calls {
-            let mut auth_data_hash = [0u8; 32];
-            auth_data_hash[..8].copy_from_slice(&(n as u64).to_le_bytes());
-            cache
-                .get_or_build(&[], auth_data_hash, 0, &reader, &[], 0)
-                .expect("an empty grant set builds once and hits thereafter");
-            high_water = high_water.max(cache.key_memo_len());
-            assert!(
-                cache.key_memo_len() <= KEY_MEMO_MAX_ENTRIES,
-                "key_memo exceeded its bound after {} calls: {} > {KEY_MEMO_MAX_ENTRIES}",
-                n + 1,
-                cache.key_memo_len()
-            );
-        }
-
-        assert_eq!(
-            cache.rebuild_count(),
-            1,
-            "the attack costs the server no fragment builds at all — which is why the byte bound \
-             never sees it"
-        );
-        assert!(
-            high_water > KEY_MEMO_MAX_ENTRIES / 2,
-            "the test must actually have driven the map up to its bound, not merely stayed small"
-        );
-        assert!(
-            cache.key_memo_len() < calls,
-            "the map must have been cleared at least once: {} entries after {calls} distinct \
-             credentials",
-            cache.key_memo_len()
-        );
-    }
 }

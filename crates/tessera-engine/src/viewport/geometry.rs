@@ -356,7 +356,6 @@ impl Engine {
                     projection: Arc::new(projection),
                     satisfied_sorted: Arc::clone(session.satisfied_sorted()),
                     auth_data_hash: session.auth_data_hash(),
-                    satisfied_at: session.segments_version_at_authorise(),
                 }
             })
             .map_err(|ended| match ended {

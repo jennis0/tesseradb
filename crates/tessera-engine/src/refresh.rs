@@ -141,11 +141,6 @@ pub(crate) fn refresh_resident(
         // value would cache it (I13a).
         let fragment = match generation.fragments.get_or_build(
             &previous.satisfied_sorted,
-            previous.auth_data_hash,
-            // The generation that term set was resolved against, never this one — see
-            // `SessionGeometry::satisfied_at`, and `Engine::fragment_for` for the same rule at the
-            // request-path call site.
-            previous.satisfied_at,
             &generation.postings,
             &generation.delta_postings,
             generation.watermark,
@@ -222,7 +217,6 @@ pub(crate) fn refresh_resident(
                 projection: Arc::new(projection),
                 satisfied_sorted: Arc::clone(&previous.satisfied_sorted),
                 auth_data_hash: previous.auth_data_hash,
-                satisfied_at: previous.satisfied_at,
             }
         });
         if built.is_ok() {

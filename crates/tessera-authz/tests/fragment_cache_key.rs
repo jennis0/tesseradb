@@ -49,14 +49,11 @@ fn the_watermark_is_part_of_the_disk_key() {
     let cache = cache(&dir);
     let base = base(dir.path());
     let terms = [TermId::new(0)];
-    let hash = [3u8; 32];
 
-    let early = cache.get_or_build(&terms, hash, 1, &base, &[], 10).unwrap();
+    let early = cache.get_or_build(&terms, &base, &[], 10).unwrap();
     let late = cache
         .get_or_build(
             &terms,
-            hash,
-            1,
             &base,
             &[tier(dir.path(), "t.arrow", &[9])],
             20,
@@ -101,7 +98,6 @@ fn coalescing_tiers_leaves_the_fragment_unchanged() {
     let dir = TempDir::new().unwrap();
     let base = base(dir.path());
     let terms = [TermId::new(0)];
-    let hash = [3u8; 32];
 
     let t1 = tier_path(dir.path(), "t1.arrow", &[7]);
     let t2 = tier_path(dir.path(), "t2.arrow", &[9]);
@@ -120,8 +116,6 @@ fn coalescing_tiers_leaves_the_fragment_unchanged() {
     let separate = separate_cache
         .get_or_build(
             &terms,
-            hash,
-            1,
             &base,
             &[
                 Arc::new(DeltaTier::open(&t1).unwrap()),
@@ -133,8 +127,6 @@ fn coalescing_tiers_leaves_the_fragment_unchanged() {
     let coalesced = coalesced_cache
         .get_or_build(
             &terms,
-            hash,
-            1,
             &base,
             &[Arc::new(DeltaTier::open(&merged).unwrap())],
             20,
@@ -158,13 +150,13 @@ fn an_entry_survives_a_reopen_of_the_cache() {
     let terms = [TermId::new(0)];
 
     let built = cache(&dir)
-        .get_or_build(&terms, [3u8; 32], 1, &base, &[], 10)
+        .get_or_build(&terms, &base, &[], 10)
         .unwrap()
         .view()
         .to_vec();
 
     let reopened = cache(&dir)
-        .get_or_build(&terms, [3u8; 32], 1, &base, &[], 10)
+        .get_or_build(&terms, &base, &[], 10)
         .unwrap();
     assert_eq!(reopened.view().to_vec(), built);
     assert_eq!(reopened.watermark, 10);

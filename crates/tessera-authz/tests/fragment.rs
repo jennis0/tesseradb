@@ -100,7 +100,6 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
     let auth_plugin_hash = [7u8; 32];
 
     let terms: Vec<TermId> = (0..10u32).map(TermId::new).collect();
-    let auth_data_hash = [1u8; 32];
 
     let mut expected: HashSet<u32> = HashSet::new();
     for t in &terms {
@@ -112,7 +111,7 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
         assert_eq!(cache.rebuild_count(), 0);
 
         let frozen = cache
-            .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 42)
+            .get_or_build(&terms, &reader, &[], 42)
             .unwrap();
         assert_eq!(cache.rebuild_count(), 1);
         assert_eq!(frozen.watermark, 42);
@@ -121,7 +120,7 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
 
         // Second call, same process, same key: must not rebuild.
         let frozen2 = cache
-            .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 42)
+            .get_or_build(&terms, &reader, &[], 42)
             .unwrap();
         assert_eq!(
             cache.rebuild_count(),
@@ -138,7 +137,7 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
         assert_eq!(cache.rebuild_count(), 0);
 
         let frozen = cache
-            .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 42)
+            .get_or_build(&terms, &reader, &[], 42)
             .unwrap();
         assert_eq!(
             cache.rebuild_count(),
@@ -172,12 +171,11 @@ fn stale_bundle_identity_misses_the_cache() {
     let cache_dir = TempDir::new().unwrap();
     let auth_plugin_hash = [7u8; 32];
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
-    let auth_data_hash = [1u8; 32];
 
     {
         let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], auth_plugin_hash);
         cache
-            .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
+            .get_or_build(&terms, &reader, &[], 1)
             .unwrap();
         assert_eq!(cache.rebuild_count(), 1);
     }
@@ -187,7 +185,7 @@ fn stale_bundle_identity_misses_the_cache() {
     {
         let cache = FragmentCache::new(cache_dir.path(), [10u8; 32], auth_plugin_hash);
         cache
-            .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
+            .get_or_build(&terms, &reader, &[], 1)
             .unwrap();
         assert_eq!(
             cache.rebuild_count(),
@@ -206,12 +204,11 @@ fn stale_auth_plugin_hash_misses_the_cache() {
     let cache_dir = TempDir::new().unwrap();
     let bundle_identity = [9u8; 32];
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
-    let auth_data_hash = [1u8; 32];
 
     {
         let cache = FragmentCache::new(cache_dir.path(), bundle_identity, [7u8; 32]);
         cache
-            .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
+            .get_or_build(&terms, &reader, &[], 1)
             .unwrap();
         assert_eq!(cache.rebuild_count(), 1);
     }
@@ -222,7 +219,7 @@ fn stale_auth_plugin_hash_misses_the_cache() {
     {
         let cache = FragmentCache::new(cache_dir.path(), bundle_identity, [8u8; 32]);
         cache
-            .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
+            .get_or_build(&terms, &reader, &[], 1)
             .unwrap();
         assert_eq!(
             cache.rebuild_count(),
@@ -247,7 +244,6 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     let bundle_identity = [3u8; 32];
     let auth_plugin_hash = [4u8; 32];
     let terms: Vec<TermId> = (0..8u32).map(TermId::new).collect();
-    let auth_data_hash = [2u8; 32];
 
     let mut expected: HashSet<u32> = HashSet::new();
     for t in &terms {
@@ -258,7 +254,7 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     {
         let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
         cache
-            .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 5)
+            .get_or_build(&terms, &reader, &[], 5)
             .unwrap();
         assert_eq!(cache.rebuild_count(), 1);
     }
@@ -281,7 +277,7 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     {
         let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
         let frozen = cache
-            .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 5)
+            .get_or_build(&terms, &reader, &[], 5)
             .expect("a corrupted cache entry must fail closed to a rebuild, not an error");
         assert_eq!(
             cache.rebuild_count(),
@@ -313,7 +309,6 @@ fn concurrent_cold_builds_single_flight_to_one_real_build() {
     let cache_dir = TempDir::new().unwrap();
     let cache = Arc::new(FragmentCache::new(cache_dir.path(), [1u8; 32], [2u8; 32]));
     let terms: Vec<TermId> = (0..20u32).map(TermId::new).collect();
-    let auth_data_hash = [9u8; 32];
 
     const THREADS: usize = 8;
     let barrier = Arc::new(std::sync::Barrier::new(THREADS));
@@ -333,7 +328,7 @@ fn concurrent_cold_builds_single_flight_to_one_real_build() {
                         "get_or_build never converged out of Building -- looks like a D-G \
                          regression (a stuck waiter), not an ordinary race"
                     );
-                    match cache.get_or_build(&terms, auth_data_hash, 0, &reader, &[], 7) {
+                    match cache.get_or_build(&terms, &reader, &[], 7) {
                         Ok(frozen) => return frozen,
                         Err(FragmentCacheError::Building) => {
                             // Yield rather than busy-spin: a losing arrival retrying this tightly
@@ -379,7 +374,6 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
     let cache_dir = TempDir::new().unwrap();
     let cache = FragmentCache::new(cache_dir.path(), [3u8; 32], [4u8; 32]);
     let terms: Vec<TermId> = (0..6u32).map(TermId::new).collect();
-    let auth_data_hash = [5u8; 32];
 
     let mut expected: HashSet<u32> = HashSet::new();
     for t in &terms {
@@ -387,7 +381,7 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
     }
 
     let first = cache
-        .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 11)
+        .get_or_build(&terms, &reader, &[], 11)
         .unwrap();
     assert_eq!(cache.rebuild_count(), 1);
 
@@ -397,7 +391,7 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
     }
 
     let second = cache
-        .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 11)
+        .get_or_build(&terms, &reader, &[], 11)
         .expect("a warm in-memory hit must succeed even with the backing files gone");
     assert!(
         Arc::ptr_eq(&first, &second),
@@ -431,9 +425,8 @@ fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
 
     let cache = FragmentCache::new(&cache_dir, [6u8; 32], [7u8; 32]);
     let terms: Vec<TermId> = (0..4u32).map(TermId::new).collect();
-    let auth_data_hash = [8u8; 32];
 
-    let result = cache.get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1);
+    let result = cache.get_or_build(&terms, &reader, &[], 1);
     assert!(
         matches!(result, Err(FragmentCacheError::Io(_))),
         "expected an Io error from a cache dir whose parent is a plain file, got {:?}",
@@ -455,7 +448,7 @@ fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
         expected.extend(per_term[t.raw() as usize].iter().copied());
     }
     let frozen = cache
-        .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
+        .get_or_build(&terms, &reader, &[], 1)
         .expect("retry after repair must succeed");
     assert_eq!(cache.rebuild_count(), 1);
     let got: HashSet<u32> = frozen.view().iter().collect();
@@ -480,12 +473,11 @@ fn a_rotation_starts_empty_and_keeps_the_byte_bound() {
 
     let cache_dir = TempDir::new().unwrap();
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
-    let auth_data_hash = [1u8; 32];
 
     let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], [7u8; 32]);
     cache.set_memory_bound(64 * 1024 * 1024);
     cache
-        .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
+        .get_or_build(&terms, &reader, &[], 1)
         .unwrap();
     assert_eq!(cache.rebuild_count(), 1);
     assert_eq!(cache.slot_count(), 1);
@@ -504,7 +496,7 @@ fn a_rotation_starts_empty_and_keeps_the_byte_bound() {
     // key, unchanged by a fold. A carried memo would answer `key_before` here, find the persisted
     // pre-rotation `.frag` under that name, and return it having rebuilt nothing.
     rotated
-        .get_or_build(&terms, auth_data_hash, 0, &reader, &[], 1)
+        .get_or_build(&terms, &reader, &[], 1)
         .unwrap();
     assert_eq!(
         rotated.rebuild_count(),
@@ -527,7 +519,7 @@ fn a_fragment_carries_the_identity_it_was_built_under() {
 
     let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], [7u8; 32]);
     let built = cache
-        .get_or_build(&terms, [1u8; 32], 0, &reader, &[], 1)
+        .get_or_build(&terms, &reader, &[], 1)
         .unwrap();
     assert_eq!(built.identity, [9u8; 32]);
     assert_eq!(cache.bundle_identity(), [9u8; 32]);
@@ -535,13 +527,13 @@ fn a_fragment_carries_the_identity_it_was_built_under() {
     // And a fragment reopened from the persisted pair carries it too, so the comparison survives a
     // restart rather than holding only for the process that built it.
     let reopened = FragmentCache::new(cache_dir.path(), [9u8; 32], [7u8; 32])
-        .get_or_build(&terms, [1u8; 32], 0, &reader, &[], 1)
+        .get_or_build(&terms, &reader, &[], 1)
         .unwrap();
     assert_eq!(reopened.identity, [9u8; 32]);
 
     let rotated = cache.rotate([10u8; 32]);
     let rebuilt = rotated
-        .get_or_build(&terms, [1u8; 32], 0, &reader, &[], 1)
+        .get_or_build(&terms, &reader, &[], 1)
         .unwrap();
     assert_eq!(rebuilt.identity, [10u8; 32]);
 }

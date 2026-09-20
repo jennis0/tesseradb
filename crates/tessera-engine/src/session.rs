@@ -71,11 +71,6 @@ pub struct Session {
     unresolved_count: usize,
     /// See [`Self::unresolved_count`].
     dict_len_at_authorise: u32,
-    /// The generation `satisfied` was resolved against, which [`Engine::fragment_for`] must pass to
-    /// `FragmentCache::get_or_build` alongside the frozen term set. Distinct from
-    /// [`Self::dict_len_at_authorise`], which answers whether the dictionary has grown: a fold does
-    /// not grow the dictionary length, so it needs this field instead.
-    segments_version_at_authorise: u64,
 }
 
 impl Session {
@@ -114,15 +109,11 @@ impl Session {
         &self.satisfied_descriptors
     }
 
-    /// `sha256(auth_data)`, the rest of the fragment-cache key.
+    /// `sha256(auth_data)`.
     pub(crate) fn auth_data_hash(&self) -> [u8; 32] {
         self.auth_data_hash
     }
 
-    /// The generation [`Self::satisfied`] was resolved against.
-    pub(crate) fn segments_version_at_authorise(&self) -> u64 {
-        self.segments_version_at_authorise
-    }
 
     /// Whether this session's mask may be behind the corpus: true iff the credential named a
     /// descriptor the dictionary did not carry at authorise, and the dictionary has grown since.
@@ -202,8 +193,6 @@ impl Engine {
             .fragments
             .get_or_build(
                 &satisfied_sorted,
-                auth_data_hash,
-                generation.segments_version,
                 &generation.postings,
                 &generation.delta_postings,
                 generation.watermark,
@@ -237,7 +226,6 @@ impl Engine {
             expires_at,
             unresolved_count,
             dict_len_at_authorise: generation.dict.len(),
-            segments_version_at_authorise: generation.segments_version,
         })
     }
 
@@ -307,12 +295,6 @@ impl Engine {
             .fragments
             .get_or_build(
                 &session.satisfied_sorted,
-                session.auth_data_hash,
-                // The generation `satisfied` was resolved against, not the live one: passing the
-                // live watermark would pair this session's frozen `satisfied` with a generation
-                // that has moved past it, and poison the cache entry for the next authorise of the
-                // same credential, which would then be served this session's pre-flush grant set.
-                session.segments_version_at_authorise,
                 &generation.postings,
                 &generation.delta_postings,
                 generation.watermark,

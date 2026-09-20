@@ -253,8 +253,6 @@ impl Fixture {
         let fragment = cache
             .get_or_build(
                 &sorted,
-                [3u8; 32],
-                0,
                 &self.postings,
                 std::slice::from_ref(&self.tier),
                 u64::from(FLUSHED_HI),
