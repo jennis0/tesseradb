@@ -467,6 +467,69 @@ mod tests {
         true
     }
 
+    /// The middle of the moon's bite, in grid coordinates.
+    const IN_THE_BITE: [u32; 2] = [2_000_600, 2_000_000];
+
+    /// Twice the signed area of a ring — positive for counter-clockwise. Exact in `i128`.
+    fn double_area(poly: &[[u32; 2]]) -> i128 {
+        let n = poly.len();
+        (0..n)
+            .map(|i| {
+                let (a, b) = (poly[i], poly[(i + 1) % n]);
+                a[0] as i128 * b[1] as i128 - b[0] as i128 * a[1] as i128
+            })
+            .sum()
+    }
+
+    /// Every pair of edges meets only where the ring says it should: adjacent ones at their shared
+    /// vertex, and no others anywhere.
+    fn is_simple(poly: &[[u32; 2]]) -> bool {
+        let n = poly.len();
+        if n < 3 {
+            return true;
+        }
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let (a0, a1) = (poly[i], poly[(i + 1) % n]);
+                let (b0, b1) = (poly[j], poly[(j + 1) % n]);
+                let adjacent = j == i + 1 || (i == 0 && j == n - 1);
+                if adjacent {
+                    let shared = if j == i + 1 { a1 } else { a0 };
+                    // Collinear overlap past the shared vertex is the failure adjacency hides.
+                    let far_b = if j == i + 1 { b1 } else { b0 };
+                    let far_a = if j == i + 1 { a0 } else { a1 };
+                    if on_segment(shared, far_a, far_b) || on_segment(shared, far_b, far_a) {
+                        return false;
+                    }
+                } else if segments_meet(a0, a1, b0, b1) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// The single ring of a membership that is one α-group, with that being asserted rather than
+    /// assumed — a test that silently accepted a second ring would stop testing what it says.
+    fn one_ring(members: &[[u32; 2]]) -> Vec<[u32; 2]> {
+        let rings = concave_rings(members, None);
+        assert_eq!(rings.len(), 1, "expected one group, got {}", rings.len());
+        rings.into_iter().next().unwrap()
+    }
+
+    /// How far `m` lies outside every ring of `rings`, in grid units; zero when it is inside one.
+    fn escape(rings: &[Vec<[u32; 2]>], m: [u32; 2]) -> f64 {
+        if rings.iter().any(|r| contains(r, m)) {
+            return 0.0;
+        }
+        rings
+            .iter()
+            .flat_map(|r| {
+                (0..r.len()).map(move |i| point_to_segment(r[i], r[(i + 1) % r.len()], m))
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
     /// **The box around the dig triangle is a filter and not a rule.** An edge it retires is one
     /// that cannot meet the two new edges at all, so the admissible set is the one the full pass
     /// finds — which is what keeps the ring simple, the property the wire's fill depends on.

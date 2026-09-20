@@ -1,5 +1,4 @@
-use super::dig::concave_rings;
-use super::geometry::{on_segment, segments_meet};
+use super::geometry::on_segment;
 
 /// A deterministic sample of `count` positions from `region`, drawn over the box
 /// `[-span, span]²` and offset into the unsigned grid.
@@ -37,9 +36,6 @@ pub(super) fn moon() -> Vec<[u32; 2]> {
     })
 }
 
-/// The middle of the moon's bite, in grid coordinates.
-pub(super) const IN_THE_BITE: [u32; 2] = [2_000_600, 2_000_000];
-
 /// Seven lobes on a common centre, so the wrap bridges seven separate voids and the budget has
 /// somewhere to be spent. Sampled finely enough that no single dig finishes a valley.
 pub(super) fn flower() -> Vec<[u32; 2]> {
@@ -48,17 +44,6 @@ pub(super) fn flower() -> Vec<[u32; 2]> {
         let r = (fx * fx + fy * fy).sqrt();
         r <= 400.0 + 550.0 * (7.0 * fy.atan2(fx)).cos()
     })
-}
-
-/// Twice the signed area of a ring — positive for counter-clockwise. Exact in `i128`.
-pub(super) fn double_area(poly: &[[u32; 2]]) -> i128 {
-    let n = poly.len();
-    (0..n)
-        .map(|i| {
-            let (a, b) = (poly[i], poly[(i + 1) % n]);
-            a[0] as i128 * b[1] as i128 - b[0] as i128 * a[1] as i128
-        })
-        .sum()
 }
 
 /// `p` is inside the ring or on its boundary. Crossing number, exact in `i128`, with the
@@ -91,42 +76,6 @@ pub(super) fn contains(poly: &[[u32; 2]], p: [u32; 2]) -> bool {
     inside
 }
 
-/// Every pair of edges meets only where the ring says it should: adjacent ones at their shared
-/// vertex, and no others anywhere.
-pub(super) fn is_simple(poly: &[[u32; 2]]) -> bool {
-    let n = poly.len();
-    if n < 3 {
-        return true;
-    }
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let (a0, a1) = (poly[i], poly[(i + 1) % n]);
-            let (b0, b1) = (poly[j], poly[(j + 1) % n]);
-            let adjacent = j == i + 1 || (i == 0 && j == n - 1);
-            if adjacent {
-                let shared = if j == i + 1 { a1 } else { a0 };
-                // Collinear overlap past the shared vertex is the failure adjacency hides.
-                let far_b = if j == i + 1 { b1 } else { b0 };
-                let far_a = if j == i + 1 { a0 } else { a1 };
-                if on_segment(shared, far_a, far_b) || on_segment(shared, far_b, far_a) {
-                    return false;
-                }
-            } else if segments_meet(a0, a1, b0, b1) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// The single ring of a membership that is one α-group, with that being asserted rather than
-/// assumed — a test that silently accepted a second ring would stop testing what it says.
-pub(super) fn one_ring(members: &[[u32; 2]]) -> Vec<[u32; 2]> {
-    let rings = concave_rings(members, None);
-    assert_eq!(rings.len(), 1, "expected one group, got {}", rings.len());
-    rings.into_iter().next().unwrap()
-}
-
 /// Two disks of radius 400 whose centres are 3,000 apart — a membership that is honestly two
 /// clouds, with a gap far wider than any α its own wrap can produce.
 pub(super) fn two_clouds() -> Vec<[u32; 2]> {
@@ -150,19 +99,6 @@ pub(super) fn point_to_segment(a: [u32; 2], b: [u32; 2], p: [u32; 2]) -> f64 {
         (((px - ax) * vx + (py - ay) * vy) / len_sq).clamp(0.0, 1.0)
     };
     ((px - (ax + t * vx)).powi(2) + (py - (ay + t * vy)).powi(2)).sqrt()
-}
-
-/// How far `m` lies outside every ring of `rings`, in grid units; zero when it is inside one.
-pub(super) fn escape(rings: &[Vec<[u32; 2]>], m: [u32; 2]) -> f64 {
-    if rings.iter().any(|r| contains(r, m)) {
-        return 0.0;
-    }
-    rings
-        .iter()
-        .flat_map(|r| {
-            (0..r.len()).map(move |i| point_to_segment(r[i], r[(i + 1) % r.len()], m))
-        })
-        .fold(f64::INFINITY, f64::min)
 }
 
 /// The furthest a member can be from its own shape: the diagonal of one quantising cell.
