@@ -31,7 +31,7 @@
 //! identical to the evicted one — the key fixes the mask, the column and the generation, all three
 //! of which the sweep is a function of. That is what makes the bound a residency policy rather than
 //! a correctness one, and it is [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
-//! byte budget applied to this cache exactly as `crate::derived_cache` applies it to shapes.
+//! byte budget applied to this cache exactly as `crate::derived::cache` applies it to shapes.
 //!
 //! **Nothing is materialised per session in advance**, which is 0093's actual rule: the first
 //! suggest on a `(session, column)` pair dispatches the sweep on the pool and is itself answered by
@@ -46,9 +46,9 @@ use croaring::{Bitmap, Portable};
 /// What one session's visible-value set is a function of. See the module doc: every term is a
 /// reason the composed mask or the vocabulary's membership moved.
 ///
-/// **Named fields rather than a tuple**, on `crate::derived_cache::DerivedKey`'s argument: three of
-/// the four are `u64`, so a transposition at the construction site would compile, run, and key one
-/// principal's visible values under another's.
+/// **Named fields rather than a tuple**, on `crate::derived::cache::DerivedKey`'s argument: three
+/// of the four are `u64`, so a transposition at the construction site would compile, run, and key
+/// one principal's visible values under another's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SuggestSetKey {
     /// The session's process-local identity, never the bearer token itself. Never reused within a
@@ -105,7 +105,7 @@ impl SuggestSet {
 
     fn weight_bytes(&self) -> u64 {
         // A floor for the key, the map slot and the `Arc`, so a bound bounds a number of entries
-        // and not only their payloads — `crate::derived_cache::weight_bytes`' argument.
+        // and not only their payloads — the derived cache's argument.
         const FLOOR: u64 = 256;
         FLOOR + self.serialized_bytes()
     }
@@ -113,7 +113,7 @@ impl SuggestSet {
 
 /// The default resident-byte ceiling.
 ///
-/// **64 MiB, and no configuration key for it**, on `crate::derived_cache`'s argument: a set's size
+/// **64 MiB, and no configuration key for it**, on `crate::derived::cache`'s argument: a set's size
 /// is bounded by the *vocabulary* and not by the corpus — `V` bits, a **measured** 1.25 MB at 10⁷
 /// values once a fifth of them are visible and 13 KB at 0.06%
 /// (`probes/2026-09-02-value-suggestion/` arm 3) — so the figure an operator would type is one
@@ -122,7 +122,7 @@ impl SuggestSet {
 const DEFAULT_BOUND_BYTES: u64 = 64 * 1024 * 1024;
 
 /// An eviction pass frees this fraction of the bound, so a full cache pays one pass per batch of
-/// inserts rather than one per insert (`crate::derived_cache::LOW_WATER_DIVISOR`'s argument).
+/// inserts rather than one per insert.
 const LOW_WATER_DIVISOR: u64 = 8;
 
 /// The operator gauges. Counts of structures, naming no principal and no value.

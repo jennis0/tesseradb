@@ -116,7 +116,7 @@ pub struct Engine {
     >,
     /// One artifact's derived centroid, box and hull, per principal. Per *session*: the values are
     /// functions of the principal's own visible members.
-    pub(crate) derived_geometry: Arc<crate::derived_cache::DerivedCache>,
+    pub(crate) derived_geometry: Arc<crate::derived::cache::DerivedCache>,
     /// One session's visible values per category column, keyed on the generation and the overlay
     /// so a set taken before a suppression cannot keep offering a value with no visible members.
     pub(crate) suggest_sets: Arc<crate::suggest_set::SuggestSets>,
@@ -884,7 +884,7 @@ impl Engine {
             shapes: Arc::clone(&shapes),
             masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
             occupancy: Arc::clone(&occupancy),
-            derived_geometry: Arc::new(crate::derived_cache::DerivedCache::default()),
+            derived_geometry: Arc::new(crate::derived::cache::DerivedCache::default()),
             suggest_sets: Arc::new(crate::suggest_set::SuggestSets::default()),
             lineages: Arc::new(crate::cut::Lineages::new()),
             level_contents: Arc::new(crate::artifact_content::LevelContents::new()),
