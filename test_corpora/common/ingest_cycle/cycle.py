@@ -7,8 +7,12 @@ except ModuleNotFoundError:  # 3.10 on this box
 import base64
 import concurrent.futures
 import json
+import os
+import random
+import secrets
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -18,7 +22,7 @@ import pyarrow.parquet as pq
 import requests
 
 from .. import serve_battery
-from ..deployment import Deployment
+from ..deployment import Deployment, read_env_file
 from .census import census, compare_census
 from .control import Control, wait_for
 from .holdout import HoldOut
@@ -75,20 +79,64 @@ def executor_laps(before: dict, after: dict, rows: int) -> dict:
     }
 
 
+def full_box(quant: dict) -> list[float]:
+    """A view's whole extent as a bbox, from its quantisation."""
+    return [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
+
+
 class Cycle:
     def __init__(self, args):
         self.args = args
         self.rung = Path(args.rung_dir)
+        #: The bundle built from every row of the rung: the census reference, and the frame
+        #: `--state-extent` states. A rung's `tessera.toml` may name its own bundle anything.
+        self.all_in = Path(args.all_in_bundle) if args.all_in_bundle else self.rung / "bundle"
         self.work = Path(args.work)
         self.binary = Path(args.binary)
         self.result: dict = {
             "fraction": args.fraction,
             "concurrency": args.concurrency,
             "seed": args.seed,
+            "all_in_bundle": str(self.all_in),
         }
         #: The served deployment's `limits` block, read once the server is up
         #: ([`Cycle.served_limits`]); every request is sized from it.
         self.limits: dict | None = None
+        #: Every declared view, the anchor first, as `{"name", "points"}`; and each one's frame off
+        #: `/v1/meta` once the server is up.
+        self.views: list[dict] = []
+        self.frames: dict[str, dict] = {}
+        #: Credentials minted for this run, by variable name — see [`Cycle.credentials`].
+        self.minted: dict[str, str] = {}
+        self.ladder: list[dict] | None = None
+
+    @property
+    def view_names(self) -> list[str]:
+        return [view["name"] for view in self.views]
+
+    @property
+    def anchor(self) -> str:
+        return self.views[0]["name"]
+
+    def credentials(self) -> dict[str, str]:
+        """A value for every credential variable the rung's deployment names that the environment
+        does not carry, minted for this run and this run only.
+
+        A rung's `.env` may hold the identity key alone, and a server with no value for its session
+        or operator credential refuses to start. The variable *names* are the rung's and are
+        recorded; no value is printed or written to the result.
+        """
+        serve = tomllib.loads((self.rung / "tessera.toml").read_text())["serve"]
+        env = dict(os.environ) | read_env_file(self.rung / ".env")
+        self.minted = {
+            serve[f"{which}_credential_env"]: secrets.token_urlsafe(32)
+            for which in ("session", "operator")
+            if not env.get(serve[f"{which}_credential_env"])
+        }
+        self.result["minted_credentials"] = sorted(self.minted)
+        if self.minted:
+            self.log(f"minted a value for {', '.join(sorted(self.minted))} for this run")
+        return self.minted
 
     def log(self, message: str) -> None:
         print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
@@ -128,9 +176,7 @@ class Cycle:
             # which runs beside this process and needs the memory more.
             pa.default_memory_pool().release_unused()
         if self.args.state_extent:
-            self.result["stated_extent"] = state_extent(
-                base_dir / "corpus.toml", self.rung / "bundle"
-            )
+            self.result["stated_extent"] = state_extent(base_dir / "corpus.toml", self.all_in)
             self.log(f"stated the all-in frame in the base declaration: {self.result['stated_extent']}")
         stages = base_dir / "stage-timings.json"
         t0 = time.perf_counter()
@@ -148,6 +194,11 @@ class Cycle:
                 "--mint-external-ids",
                 "--deployment",
                 str(base_dir / "tessera.toml"),
+                # **Where this driver serves from, not where the rung's deployment file points.**
+                # A rung may name its bundle anything (`bundle-final`), and a base built there is a
+                # base the run then serves an empty directory in place of.
+                "--out",
+                str(bundle),
                 "--stage-timings-json",
                 str(stages),
                 "--stage-timings",
@@ -185,7 +236,9 @@ class Cycle:
         Every cap this driver sizes a request by is read from here and from nowhere else: the
         ingest route's `max_batch_rows` and `max_batch_bytes`, the publication route's
         `max_body_bytes` and `max_artifacts_per_request`, the growth route's `max_body_bytes`
-        and `max_members_per_request`. A value carried by the driver, from a flag or a constant,
+        and `max_members_per_request`, the change route's `max_changes_per_request`. Every one is
+        read here, so a route this driver pages by is missing at the start rather than mid-run. A
+        value carried by the driver, from a flag or a constant,
         would be a second number that can disagree with the one the route refuses over. To
         exercise the ingest split on a rung whose bodies are under 16 MiB, lower the server's own
         cap with `--ingest-config '{"ingest_max_batch_bytes": 262144}'`. A status without the
@@ -196,6 +249,7 @@ class Cycle:
             "ingest": ("max_batch_rows", "max_batch_bytes"),
             "publish": ("max_body_bytes", "max_artifacts_per_request"),
             "grow": ("max_body_bytes", "max_members_per_request"),
+            "changes": ("max_changes_per_request",),
         }.items():
             for key in keys:
                 int(limits[route][key])
@@ -213,7 +267,7 @@ class Cycle:
         acks: list[float] = []
         statuses: dict[str, int] = {}
         totals = {"accepted": 0, "minted": 0, "offered": 0, "batches": 0}
-        lock = __import__("threading").Lock()
+        lock = threading.Lock()
 
         def one(item):
             start, body, rows = item
@@ -275,35 +329,44 @@ class Cycle:
     # -- the whole thing ------------------------------------------------------------------
 
     def run(self) -> dict:
+        """[`Cycle._run`], and a `failures` list whatever happened to it."""
+        try:
+            self._run()
+        except Exception as e:  # noqa: BLE001 — a driver failure is a recorded outcome
+            self.result["driver_failure"] = f"{type(e).__name__}: {e}"[:2000]
+            self.log(f"DRIVER FAILED: {type(e).__name__}: {e}")
+        self.result["failures"] = self.failures()
+        return self.result
+
+    def _run(self) -> None:
         args = self.args
         base_dir = self.build_base()
         if self.result.get("blocked"):
             self.log("BLOCKED at the base build; the refusal is in the result")
-            return self.result
+            return
         self.result["driver_rss"] = {"after_base": driver_rss()}
 
         scratch = self.work / f"serve-{args.fraction:g}"
-        # **A run that flushes writes into the bundle it serves.** Every publication adds a side
-        # manifest, so a base is a *different* base after one cell has ingested into it — the next
-        # `--reuse-base` run 409s on the hold-out its predecessor published. Serving a copy is what
-        # makes the flag mean what it says; without it only the first cell over a given base is the
-        # cell that was intended.
-        bundle = base_dir / "bundle"
-        if args.copy_base:
-            bundle = scratch / "bundle"
-            if bundle.exists():
-                shutil.rmtree(bundle)
-            scratch.mkdir(parents=True, exist_ok=True)
-            t0 = time.perf_counter()
-            shutil.copytree(base_dir / "bundle", bundle)
-            self.result["base_copy_s"] = round(time.perf_counter() - t0, 2)
-            self.log(f"copied the base bundle in {self.result['base_copy_s']} s")
+        # **A served deployment is a copy of the base bundle, always.** Every publication adds a
+        # side manifest and every flush writes rows, so a base served directly is a *different*
+        # base afterwards and the next `--reuse-base` run 409s on the hold-out its predecessor
+        # already ingested.
+        bundle = scratch / "bundle"
+        if bundle.exists():
+            shutil.rmtree(bundle)
+        scratch.mkdir(parents=True, exist_ok=True)
+        t0 = time.perf_counter()
+        shutil.copytree(base_dir / "bundle", bundle)
+        self.result["base_copy_s"] = round(time.perf_counter() - t0, 2)
+        self.log(f"copied the base bundle in {self.result['base_copy_s']} s")
         served = Deployment(
             base_dir,
             bundle,
             scratch,
             (args.port0, args.port0 + 1, args.port0 + 2),
             self.binary,
+            cap_bytes=args.cap_bytes,
+            env=self.credentials(),
             ingest=json.loads(args.ingest_config) if args.ingest_config else None,
         )
         self.result["ingest_config"] = served.ingest
@@ -314,58 +377,105 @@ class Cycle:
         except Exception as e:  # a zero-row bundle that cannot be opened is the finding
             self.result["blocked"] = {"at": "serve", "refusal": str(e)[:2000]}
             self.log(f"BLOCKED at serve: {e}")
-            return self.result
+            return
         self.result["open_s"] = round(time.perf_counter() - t0, 2)
         self.log(f"served pid={served.pid} open={self.result['open_s']} s")
 
         try:
-            # The anchor view: the hold-out's rows are that row space's, and a bundle carrying
-            # more than one refuses an unlabelled batch. Named from the declaration rather than
-            # from `/v1/meta`'s order, which is creation order and not the anchor.
+            # **Every declared view, the anchor first.** The hold-out's rows are ingested into each
+            # view from that view's own points file, and the anchor goes first because a row in a
+            # second view joins an entity that must already exist. A bundle carrying more than one
+            # view refuses an unlabelled batch, so each pass names its own.
             declared = tomllib.loads((self.rung / "corpus.toml").read_text())
-            views = [v["name"] for v in declared.get("view", [])]
-            anchor = declared.get("allocation_view") or (views[0] if views else None)
-            control = Control(
-                served.control, served.credential("operator"),
-                view=anchor if len(views) > 1 else None,
-            )
-            self.result["ingested_view"] = control.view
+            named = declared.get("sources", {})
+            default_source = declared.get("defaults", {}).get("source", "points")
+            self.views = [
+                {
+                    "name": view["name"],
+                    "points": self.rung
+                    / named.get(
+                        view.get("source", default_source), view.get("source", default_source)
+                    ),
+                }
+                for view in declared.get("view", [])
+            ]
+            anchor = declared.get("allocation_view") or self.views[0]["name"]
+            self.views.sort(key=lambda view: view["name"] != anchor)
+            self.result["views"] = self.view_names
             session_cred = served.credential("session")
             ranks = json.loads(ranks_file(self.rung).read_text())
             all_terms = sorted(r["term"] for r in ranks)
             token, _ = serve_battery.authorise(served.session, session_cred, all_terms)
             m = serve_battery.meta(served.viewer, token)
-            view = m["views"][0]["id"]
-            quant = m["views"][0]["quantisation"]
+            self.frames = {v["id"]: v["quantisation"] for v in m["views"]}
+            view = self.anchor
+            quant = self.frames[view]
             self.result["base_visible"] = serve_battery.viewport(
-                served.viewer, token, view, 0,
-                [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]], k=1
+                served.viewer, token, view, 0, full_box(quant), k=1
             )["counts"]["visible"]
 
             head = 3 * args.write_cycle_n if args.write_cycle else 0
+            control = Control(
+                served.control,
+                served.credential("operator"),
+                view=anchor if len(self.views) > 1 else None,
+            )
+            self.result["ingested_view"] = control.view
             status = control.status()
             self.limits = self.served_limits(status)
             cap = int(self.limits["ingest"]["max_batch_bytes"])
             batch_rows = int(self.limits["ingest"]["max_batch_rows"])
             self.result["batch_rows"] = batch_rows
-            hold = HoldOut(self.rung, self.held, cap, batch_rows, head_rows=head, log=self.log)
-            self.log(
-                f"ingesting {len(self.held):,} rows at C={args.concurrency}, bodies of at most "
-                f"{batch_rows:,} rows under {cap:,} B (the served deployment's limits)"
-            )
             before = status["write_executor"]
-            self.result["ingest"] = self.run_ingest(control, hold.batches(), "cycle")
-            self.result["ingest"]["membership_columns"] = hold.member_stats
-            self.result["ingest"]["max_body_bytes"] = cap
-            self.result["ingest"]["bodies_split"] = hold.body_stats["bodies_split"]
-            self.result["ingest"]["largest_body_bytes"] = hold.body_stats["largest_body_bytes"]
-            self.result["ingest"]["bodies_over_cap"] = hold.body_stats["over_cap"]
+            # Every key a batch's membership column names must already resolve, so a layer whose
+            # roster is published rather than minted is published first.
+            self.result["publish_rosters"] = self.publish_rosters(control)
+            hold = None
+            self.result["ingest_by_view"] = {}
+            for entry in self.views:
+                name = entry["name"]
+                first = hold is None
+                source = HoldOut(
+                    self.rung,
+                    self.held,
+                    cap,
+                    batch_rows,
+                    head_rows=head if first else 0,
+                    log=self.log,
+                    points=entry["points"],
+                    members=first,
+                )
+                self.log(
+                    f"ingesting {len(self.held):,} rows into {name} from "
+                    f"{entry['points'].name} at C={args.concurrency}, bodies of at most "
+                    f"{batch_rows:,} rows under {cap:,} B (the served deployment's limits)"
+                )
+                figures = self.run_ingest(
+                    Control(
+                        served.control,
+                        served.credential("operator"),
+                        view=name if len(self.views) > 1 else None,
+                    ),
+                    source.batches(),
+                    f"cycle-{name}",
+                )
+                figures["membership_columns"] = source.member_stats
+                figures["max_body_bytes"] = cap
+                figures["bodies_split"] = source.body_stats["bodies_split"]
+                figures["largest_body_bytes"] = source.body_stats["largest_body_bytes"]
+                figures["bodies_over_cap"] = source.body_stats["over_cap"]
+                self.result["ingest_by_view"][name] = figures
+                self.log(f"  {name}: {figures['items_per_s']} items/s")
+                if first:
+                    hold = source
+                    # The anchor's figures are the phase's: the entities are allocated here, and a
+                    # second view's pass joins rows to them.
+                    self.result["ingest"] = figures
             self.result["executor_laps"] = executor_laps(
                 before,
                 control.status()["write_executor"],
-                self.result["ingest"]["accepted"],
+                sum(f["accepted"] for f in self.result["ingest_by_view"].values()),
             )
-            self.log(f"  {self.result['ingest']['items_per_s']} items/s")
             self.result["driver_rss"]["after_ingest"] = driver_rss()
             if args.stop_after_ingest:
                 # **The attribution cell, not the cycle.** Everything after this measures
@@ -373,7 +483,7 @@ class Cycle:
                 # pays ~an hour for figures it is not reading. The equivalence census is
                 # therefore *absent* from such a run's result, not passed — see `stop_after`.
                 self.result["stop_after"] = "ingest"
-                return self.result
+                return
 
             # **Every artifact, after every point it depends on.** Before the flush, deliberately:
             # an ingested row is resolvable by its external id from the moment it is acked
@@ -398,18 +508,51 @@ class Cycle:
                 served, session_cred, view, quant, all_terms
             ))
             phase("fold", lambda: self.do_fold(control))
-            phase("equivalence", lambda: self.do_equivalence(served, session_cred, view, quant, ranks))
+            phase("equivalence", lambda: self.do_equivalence(served, session_cred, ranks))
             if args.write_cycle:
                 phase("write_cycle", lambda: self.do_write_cycle(
                     control, served, session_cred, view, quant, all_terms, hold
                 ))
+                phase("restart", lambda: self.do_restart(served, session_cred, ranks))
         finally:
             self.result["status_at_end"] = safe(lambda: Control(served.control, served.credential("operator")).status())
             self.result["driver_rss"]["end"] = driver_rss()
             served.stop()
-        return self.result
 
     # -- the artifacts, on the wire --------------------------------------------------------
+
+    def publish_rosters(self, control: Control) -> dict:
+        """A column-route layer's roster — keys, content and parents, **no members** — before the
+        ingest.
+
+        Membership on that route arrives as the ingest batch's column named for the layer, and a key
+        the level does not hold is minted there only where the layer's declaration allows minting. A
+        layer declaring supplied content allows none, so every key the hold-out's rows name must
+        exist before the first batch: an artifact whose only points are held back exists nowhere
+        else. A key the base build already minted is held, and a record restating its content with
+        no members joins nothing and changes nothing.
+        """
+        out: dict = {}
+        work = self.work / f"roster-{self.args.fraction:g}"
+        for layer in declared_layers(self.rung):
+            if layer["route"] != "column" or layer["roster"] is None:
+                continue
+            name = layer["name"]
+            if not layer["roster"].exists():
+                out[name] = {
+                    "failed": True,
+                    "reason": f"roster {layer['roster'].name} is not in the rung directory",
+                }
+                continue
+            self.log(f"  {name}: publishing the roster before the ingest, members empty")
+            try:
+                out[name] = self.publish_layer(
+                    control, name, {**layer, "members": None}, work / name.replace("/", "__")
+                )
+            except Exception as e:  # noqa: BLE001 — the failure is the layer's record
+                out[name] = {"failed": True, "reason": f"{type(e).__name__}: {e}"[:1500]}
+                self.log(f"  {name}: ROSTER FAILED, {type(e).__name__}: {str(e)[:200]}")
+        return out
 
     def publish_layers(self, control: Control) -> dict:
         """Publish every declared layer, or record why it was not. Its own figure.
@@ -440,10 +583,11 @@ class Cycle:
             name = layer["name"]
             if layer["route"] == "column":
                 out["on_column"][name] = {
-                    "reason": "no supplied content and no roster: the base build read the member "
-                    "table over the base's rows, and every hold-out row carried its member list as "
-                    "the ingest batch's column named for the layer (decision 0128)",
+                    "reason": "a per-point member table: the base build read it over the base's "
+                    "rows, and every hold-out row carried its own member list as the ingest "
+                    "batch's column named for the layer",
                     "member_rows": pq.ParquetFile(layer["members"]).metadata.num_rows,
+                    "roster": (self.result.get("publish_rosters") or {}).get(name),
                     "holdout": (self.result.get("ingest") or {}).get("membership_columns", {}).get(name),
                 }
                 self.log(f"  {name}: nothing to publish, membership travelled on the ingest column")
@@ -477,13 +621,16 @@ class Cycle:
                 self.log(f"  {name}: NOT PUBLISHED, {reason.split(':')[0]}")
                 continue
             if not layer["roster"].exists():
-                out["declined"][name] = {"reason": f"roster {layer['roster'].name} is not in the rung directory"}
+                out["declined"][name] = {
+                    "failed": True,
+                    "reason": f"roster {layer['roster'].name} is not in the rung directory",
+                }
                 self.log(f"  {name}: NOT PUBLISHED, {layer['roster'].name} absent")
                 continue
             try:
                 entry = self.publish_layer(control, name, layer, work / name.replace("/", "__"))
             except Exception as e:  # noqa: BLE001 — the failure is the layer's record
-                out["declined"][name] = {"reason": f"{type(e).__name__}: {e}"[:1500]}
+                out["declined"][name] = {"failed": True, "reason": f"{type(e).__name__}: {e}"[:1500]}
                 self.log(f"  {name}: FAILED, {type(e).__name__}: {str(e)[:200]}")
                 continue
             out["layers"][name] = entry
@@ -518,7 +665,7 @@ class Cycle:
         refusal = None
         refusals = 0
         first_by_status: dict[str, dict] = {}
-        published = {"artifacts": 0, "members": 0, "edges": 0}
+        published = {"artifacts": 0, "members": 0, "edges": 0, "created": 0}
         grown = {"requests": 0, "members": 0, "joined": 0}
         prepared_s = 0.0
         wall_s = 0.0
@@ -553,10 +700,18 @@ class Cycle:
                         grown["joined"] += sum(int(a.get("joined") or 0) for a in r.json()["artifacts"])
                     except (ValueError, KeyError, TypeError):
                         pass
-                elif key is None and r.status_code == 201:
+                elif key is None and r.status_code in (200, 201):
+                    # **201 where the batch created an artifact, 200 where the level held every
+                    # key.** A held key is compared part by part and its membership joins, so a
+                    # batch of keys the base build already minted is a 200 and is not a refusal;
+                    # `created` says how many of the batch were new.
                     published["artifacts"] += artifacts
                     published["members"] += members_n
                     published["edges"] += edges
+                    try:
+                        published["created"] += int(r.json().get("created") or 0)
+                    except (ValueError, KeyError, TypeError):
+                        pass
                 else:
                     # **Never quiet.** Each status is logged with its detail the first time it
                     # appears, and every refusal is counted into the record and the summary line.
@@ -582,6 +737,7 @@ class Cycle:
                 "wall_s": round(wall_s, 2),
                 "phase_s": round(phase_s, 2),
                 "published_artifacts": published["artifacts"],
+                "created_artifacts": published["created"],
                 "published_members": published["members"],
                 "edges_published": published["edges"],
                 "artifacts_per_s": round(published["artifacts"] / wall_s, 1) if wall_s else None,
@@ -604,7 +760,8 @@ class Cycle:
                 f"members did not join — the route already held them, or refused them"
             )
         self.log(
-            f"  {name}: {published['artifacts']:,} of {stats['artifacts']:,} artifacts, "
+            f"  {name}: {published['artifacts']:,} of {stats['artifacts']:,} artifacts "
+            f"({published['created']:,} created), "
             f"{published['members']:,} members in {wall_s:.1f} s ({entry['artifacts_per_s']} "
             f"artifacts/s, {entry['members_per_s']} members/s), {requests_n} requests, "
             f"{refusals} refused; {stats['grown_artifacts']:,} artifact(s) grown by "
@@ -715,61 +872,130 @@ class Cycle:
             "live_rows": compaction.get("live_rows"),
         }
 
-    def do_equivalence(self, served, session_cred, view, quant, ranks) -> dict:
-        """The folded deployment's census against the all-in build's, on the same boxes."""
-        targets = [float(t) for t in self.args.targets.split(",")]
-        token, _ = serve_battery.authorise(
-            served.session, session_cred, sorted(r["term"] for r in ranks)
-        )
-        total = serve_battery.viewport(
-            served.viewer, token, view, 0,
-            [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]], k=1
-        )["counts"]["visible"]
-        ladder = serve_battery.compose_ladder(ranks, total or 1, targets)
-        import random as _random
+    def boxes(self, quant: dict) -> list[tuple[int, list[float]]]:
+        """The census's boxes in one view's frame: `--equivalence-boxes` at each of zoom 3, 6, 9.
 
-        rng = _random.Random(self.args.seed)
-        boxes = []
-        for zoom in (3, 6, 9):
-            for box in serve_battery.candidate_boxes(quant, zoom, self.args.equivalence_boxes, rng):
-                boxes.append((zoom, box))
-        folded = census(served.viewer, served.session, session_cred, view, quant, ladder, boxes)
-        folded_frame = quant
+        Drawn from the seed, so the two deployments are asked the same questions, and drawn in the
+        frame of the view they are asked of — a box is a region of a layout, and a second view is a
+        second layout over the same entities.
+        """
+        rng = random.Random(self.args.seed)
+        return [
+            (zoom, box)
+            for zoom in (3, 6, 9)
+            for box in serve_battery.candidate_boxes(quant, zoom, self.args.equivalence_boxes, rng)
+        ]
+
+    def census_views(self, deployment, cred: str, ladder, frames: dict) -> dict:
+        """One census per declared view of a deployment, keyed by view."""
+        return {
+            name: census(
+                deployment.viewer,
+                deployment.session,
+                cred,
+                name,
+                frames[name],
+                ladder,
+                self.boxes(frames[name]),
+            )
+            for name in self.view_names
+        }
+
+    def visible(self, served, session_cred: str, terms) -> int:
+        """The anchor view's masked count at zoom 0 over its whole extent, under `terms`."""
+        token, _ = serve_battery.authorise(served.session, session_cred, terms)
+        return serve_battery.viewport(
+            served.viewer, token, self.anchor, 0, full_box(self.frames[self.anchor]), k=1,
+            layers=None,
+        )["counts"]["visible"]
+
+    def do_equivalence(self, served, session_cred, ranks) -> dict:
+        """The folded deployment's census against the all-in build's, **per view**, same boxes.
+
+        One entry per declared view, each carrying its own frames, its own boxes and its own
+        differences; `equal` is every view agreeing.
+        """
+        terms = sorted(r["term"] for r in ranks)
+        targets = [float(t) for t in self.args.targets.split(",")]
+        total = self.visible(served, session_cred, terms)
+        ladder = serve_battery.compose_ladder(ranks, total or 1, targets)
+        self.ladder = ladder
+        folded = self.census_views(served, session_cred, ladder, self.frames)
 
         # The all-in deployment, served beside it on its own ports and scratch: the three ports
         # after the folded deployment's, so a cycle takes six consecutive ports from `--port0`.
-        scratch = self.work / "serve-allin"
         allin = Deployment(
             self.rung,
-            self.rung / "bundle",
-            scratch,
+            self.all_in,
+            self.work / "serve-allin",
             (self.args.port0 + 3, self.args.port0 + 4, self.args.port0 + 5),
             self.binary,
+            cap_bytes=self.args.cap_bytes,
+            env=self.minted,
         )
         allin.clear_scratch()
         allin.start()
         try:
             reference_token, _ = serve_battery.authorise(
-                allin.session, allin.credential("session"), sorted(r["term"] for r in ranks)
+                allin.session, allin.credential("session"), terms
             )
             all_in_meta = serve_battery.meta(allin.viewer, reference_token)
-            all_in_frame = next(
-                v for v in all_in_meta["views"] if v["id"] == view
-            )["quantisation"]
-            reference = census(
-                allin.viewer, allin.session, allin.credential("session"), view, quant, ladder, boxes
+            all_in_frames = {v["id"]: v["quantisation"] for v in all_in_meta["views"]}
+            reference = self.census_views(
+                allin, allin.credential("session"), ladder, self.frames
             )
         finally:
             allin.stop()
-        out = compare_census(folded, reference)
-        # **The frames, side by side.** Under `extent = "auto"` they differ, and that difference
-        # is what a box-level disagreement of a handful of rows is; recording them is what stops
-        # the next reader attributing it to the write path.
-        out["frames"] = {"folded": folded_frame, "all_in": all_in_frame}
-        out["frames_equal"] = folded_frame == all_in_frame
-        out["ladder"] = [{"target": r["target"], "terms": r["terms"]} for r in ladder]
-        out["folded"] = folded
-        out["all_in"] = reference
+        out: dict = {
+            "ladder": [{"target": r["target"], "terms": r["terms"]} for r in ladder],
+            "views": {},
+        }
+        for name in self.view_names:
+            compared = compare_census(folded[name], reference[name])
+            # **The frames, side by side.** Under `extent = "auto"` they differ, and that difference
+            # is what a box-level disagreement of a handful of rows is; recording them is what stops
+            # the next reader attributing it to the write path.
+            compared["frames"] = {"folded": self.frames[name], "all_in": all_in_frames.get(name)}
+            compared["frames_equal"] = self.frames[name] == all_in_frames.get(name)
+            compared["folded"] = folded[name]
+            compared["all_in"] = reference[name]
+            out["views"][name] = compared
+        out["equal"] = all(v["equal"] for v in out["views"].values())
+        out["frames_equal"] = all(v["frames_equal"] for v in out["views"].values())
+        return out
+
+    def do_restart(self, served, session_cred, ranks) -> dict:
+        """Stop the server and open it again over the same bundle, cache and WAL.
+
+        A deletion is folded into the rows and a suppression is a stored deny, so both survive the
+        close: the anchor's masked count and every view's census must be the ones the deployment
+        answered before it was stopped. The census is compared against *itself* across the restart
+        rather than against the all-in build, the write cycle having suppressed rows the all-in
+        deployment still serves.
+        """
+        terms = sorted(r["term"] for r in ranks)
+        ladder = self.ladder or serve_battery.compose_ladder(
+            ranks,
+            self.visible(served, session_cred, terms) or 1,
+            [float(t) for t in self.args.targets.split(",")],
+        )
+        before = self.census_views(served, session_cred, ladder, self.frames)
+        visible_before = self.visible(served, session_cred, terms)
+        served.stop()
+        t0 = time.perf_counter()
+        served.start()
+        open_s = round(time.perf_counter() - t0, 2)
+        self.log(f"reopened pid={served.pid} in {open_s} s")
+        after = self.census_views(served, session_cred, ladder, self.frames)
+        out = {
+            "open_s": open_s,
+            "visible": self.visible(served, session_cred, terms),
+            "visible_before": visible_before,
+            "views": {
+                name: compare_census(after[name], before[name]) for name in self.view_names
+            },
+        }
+        out["census_equal"] = all(v["equal"] for v in out["views"].values())
         return out
 
     def do_write_cycle(self, control, served, session_cred, view, quant, all_terms, hold) -> dict:
@@ -791,16 +1017,14 @@ class Cycle:
             return {"skipped": "hold-out too small for a write cycle"}
         deletes = ids[:n]
         suppressions = ids[n : 2 * n]
-        full = [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
 
         def visible() -> int:
-            token, _ = serve_battery.authorise(served.session, session_cred, all_terms)
-            return serve_battery.viewport(
-                served.viewer, token, view, 0, full, k=1, layers=None
-            )["counts"]["visible"]
+            return self.visible(served, session_cred, all_terms)
 
         start_visible = visible()
-        out: dict = {"n": n, "visible_before": start_visible}
+        # The deleted rows come back and the suppressed ones do not, so the count this cycle ends
+        # at is the count it started at less the suppressions.
+        out: dict = {"n": n, "visible_before": start_visible, "expected_after_cycle": start_visible - n}
 
         assert self.limits is not None, "the limits block is read before any change is sent"
         per_page = int(self.limits["changes"]["max_changes_per_request"])
@@ -857,9 +1081,118 @@ class Cycle:
             "observed_s": round(wall, 2),
             "fold_s": compaction.get("last_secs"),
             "fold_peak_rss_bytes": compaction.get("last_rss_bytes"),
+            "fold_failures": compaction.get("fold_failures"),
         }
         out["visible_after_cycle"] = visible()
         out["overlay"] = control.status()["overlay"]
+        return out
+
+    # -- what did not hold -----------------------------------------------------------------
+
+    def failures(self) -> list[str]:
+        """One short sentence per way this run did not hold; empty is a cycle that held.
+
+        A run is a measurement and records numbers rather than assertions, but a *blocked* run, a
+        layer that was not published, a census that disagrees, a write cycle that never reached its
+        counts, a batch refused for something other than backpressure and a fold that did not
+        complete are all findings the exit code carries, so a campaign script does not have to read
+        the JSON to know.
+        """
+        out: list[str] = []
+        result = self.result
+        if result.get("driver_failure"):
+            out.append(f"the driver stopped: {result['driver_failure']}")
+        if result.get("blocked"):
+            blocked = result["blocked"]
+            refusal = " ".join(str(blocked.get("refusal", "")).split())[:300]
+            out.append(f"the run was blocked at {blocked['at']}: {refusal}")
+        for name, phase in (result.get("ingest_by_view") or {}).items():
+            unexpected = {
+                status: count
+                for status, count in (phase.get("statuses") or {}).items()
+                if status not in ("200", "429")
+            }
+            if unexpected:
+                out.append(f"ingest into {name} was refused: {unexpected}")
+            if phase.get("accepted") != phase.get("rows_offered"):
+                out.append(
+                    f"ingest into {name} accepted {phase.get('accepted')} of "
+                    f"{phase.get('rows_offered')} rows offered"
+                )
+        for where in ("publish_rosters", "publish"):
+            published = result.get(where) or {}
+            groups = [published] if where == "publish_rosters" else [
+                published.get("layers") or {},
+                published.get("declined") or {},
+            ]
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                for layer, entry in group.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("failed"):
+                        out.append(f"{layer} was not published: {entry.get('reason')}")
+                    elif entry.get("refusals"):
+                        out.append(
+                            f"{layer}: {entry['refusals']} publication request(s) were refused "
+                            f"{entry.get('first_refusal', {}).get('status')}"
+                        )
+        for name in ("flush", "layers_after_ingest", "fold", "equivalence", "write_cycle", "restart"):
+            phase = result.get(name)
+            if isinstance(phase, dict) and phase.get("failed"):
+                out.append(f"the {name} phase failed: {phase['failed']}")
+        flush = result.get("flush") or {}
+        if isinstance(flush, dict) and flush.get("visibility_reached") is False:
+            out.append(
+                f"the flush never reached the expected visible count: {flush.get('visible')} of "
+                f"{flush.get('expected_visible')}"
+            )
+        for name in ("fold", "write_cycle"):
+            fold = (result.get(name) or {}) if name == "fold" else (result.get(name) or {}).get("fold") or {}
+            if not isinstance(fold, dict) or not fold:
+                continue
+            if fold.get("completed") is False:
+                out.append(f"the {name}'s fold did not complete")
+            if fold.get("fold_failures"):
+                out.append(f"the {name}'s fold reported {fold['fold_failures']} failure(s)")
+        equivalence = result.get("equivalence") or {}
+        for name, compared in (equivalence.get("views") or {}).items():
+            if not compared.get("equal"):
+                out.append(
+                    f"the census on {name} is unequal: {compared.get('differences_by_surface')}"
+                )
+        cycle = result.get("write_cycle") or {}
+        if isinstance(cycle, dict) and cycle and not cycle.get("skipped") and not cycle.get("failed"):
+            for op in ("delete", "suppress"):
+                step = cycle.get(op) or {}
+                if step.get("status") != 200:
+                    out.append(f"the write cycle's {op} was refused {step.get('status')}")
+                if step.get("visibility_reached") is False:
+                    out.append(
+                        f"the write cycle's {op} never reached its expected visible count "
+                        f"({step.get('visible_after')} visible)"
+                    )
+            reingest = cycle.get("reingest") or {}
+            if reingest.get("accepted") != reingest.get("rows_offered"):
+                out.append(
+                    f"the write cycle's re-ingest accepted {reingest.get('accepted')} of "
+                    f"{reingest.get('rows_offered')} rows offered"
+                )
+            if cycle.get("visible_after_cycle") != cycle.get("expected_after_cycle"):
+                out.append(
+                    f"the write cycle ended at {cycle.get('visible_after_cycle')} visible, "
+                    f"expecting {cycle.get('expected_after_cycle')}"
+                )
+        restart = result.get("restart") or {}
+        if isinstance(restart, dict) and restart and not restart.get("failed"):
+            if restart.get("visible") != restart.get("visible_before"):
+                out.append(
+                    f"the restart answers {restart.get('visible')} visible where the deployment "
+                    f"answered {restart.get('visible_before')} before it"
+                )
+            if not restart.get("census_equal"):
+                out.append("the census after the restart is not the census before it")
         return out
 
 

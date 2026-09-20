@@ -10,43 +10,37 @@ deployment assembled either way must answer identically.
 Which route a layer's membership takes
 --------------------------------------
 
-**The base bundle carries the points, the declarations, and the member table of any layer whose
-membership the build mints from a column.** The rung's `corpus.toml` is copied with every
-`[[layer]]`'s `source` removed, so each layer is declared — kind, levels, visibility rules, content
-kinds — and the route its membership takes follows from what it declares:
+**The shape of the layer's member table decides the route, and nothing else does.** The rung's
+`corpus.toml` is copied with the publication route's rosters removed, so every layer is declared —
+kind, levels, visibility rules, content kinds — and each one's membership travels one of three
+ways:
 
-* **A layer with supplied content** (rung 3's MeSH descriptors, every `clusters/kmeans`) is
-  declared and empty at the base: `[layer.members]` is removed with the roster. Its artifacts,
-  their memberships and their supplied content are published through
-  `PUT /control/layers/{name}/artifacts` **after every point they depend on has been ingested**
-  (owner ruling, 2026-09-03). A key naming no artifact yet is minted, and
-  `LayerRegistry::resolve_or_mint` refuses to mint on a layer that declares supplied content — an
-  artifact served without content its layer declared cannot be told apart from one whose content
-  was withheld — so a membership column at either entry point would always arrive first and
-  always be refused. Membership arrives with the artifact that holds it, and the driver drops such
-  a layer's column from the base points file for the same reason.
-* **A layer with no supplied content and no roster** (rung 5's `taxonomy/tree`: an open value set
-  with computed content, minted from a list column) keeps `[layer.members]` at the base build,
-  over the base's rows only, and its hold-out rows carry the same list on the wire as the ingest
-  batch's column named for the layer — one entry per declared level, an unknown key minting the
-  artifact that carries its name and the computed content its points give it
-  ([decision 0128](../../docs/decisions/0128-a-layer-with-no-supplied-content-travels-as-a-column-at-ingest.md);
-  contracts §3.4). Both entry points read that column by one rule (decision 0091), and this is
-  where the ingest cycle exercises the mint-from-column path at scale. The member table is read in
-  lockstep with the points file, both ascending by entity and a row group at a time, so it is
-  never held whole.
+* **A member table of one row per (artifact, entity)** (every `clusters/*`, rung 3's MeSH
+  descriptors) addresses artifacts, and a row with a `rank` is the generating set of that ranked
+  content rather than membership. Such a layer is declared and empty at the base — its roster and
+  its `[layer.members]` are both removed, and any membership column is dropped from the base points
+  file — and its artifacts, their whole memberships and their supplied content are published
+  through `PUT /control/layers/{name}/artifacts` **after every point they name has been ingested**.
+  Content requiring every member visible is served only against a generating set, which is a set of
+  points, so it can only arrive with the artifact.
+* **A member table of one row per point**, a list of keys with one entry per declared level
+  (`features/taxonomy`, `admin/hierarchy`), is read beside the points file at a build and arrives at
+  a running service as the ingest batch's column named for the layer. Both entry points read it by
+  one rule, so `[layer.members]` stays at the base build over the base's rows and every hold-out row
+  carries its own list on the wire; a null entry is *in no artifact at that level*. The table is
+  read in lockstep with the points file, both ascending by entity and a row group at a time, so it
+  is never held whole.
+  **Where such a layer declares supplied content its roster stays too**, and is published — keys
+  and content, members empty — *before* the ingest: an artifact of a layer declaring supplied
+  content is never minted from a key alone, at either entry point, so every key a batch's column
+  names must already exist, and a key no base row names exists nowhere else. A key the base build
+  already holds is compared part by part and its restated content changes nothing.
 * **An attribute-membership layer** (`publishers/source`) carries nothing: its membership is
   evaluated against the indexed column every batch already sends.
 
-An artifact cannot depend on a point that does not exist yet, and that ordering is the only
-constraint: it holds at every fraction, so at *f* = 10% the base is 90% of the points and none of
-the published artifacts.
-
-⊘ **What this drops, deliberately.** An earlier driver built the base *with* the rung's artifact
-roster. That put the layers on the build side of the split and made the *f* = 100% cell impossible
-for a layer whose content requires every member visible: an artifact with no members names an empty
-generating set, which is satisfied by everyone and is refused at both entry points. A published
-artifact names its generating set, so the case does not arise.
+An artifact cannot name a point that does not exist yet, and that ordering is the only constraint on
+the publication route: it holds at every fraction, so at *f* = 10% the base is 90% of the points and
+none of the published artifacts.
 
 What it measures, in order
 --------------------------
@@ -57,7 +51,9 @@ What it measures, in order
 2. **Online ingest** — Arrow IPC batches of 10,000 rows at *C* concurrent callers, `items/s`
    acked, ack p50/p99, and every refusal counted by status (429 backpressure, 409 duplicate or
    batch-id conflict, 422 bounds or contract). The batches carry the points, their labels as a
-   list, and the member list of any layer on the column route — see above.
+   list, and the member list of any layer on the column route — see above. **One pass per declared
+   view**, the anchor first, each from that view's own points file: a second view's row for an
+   entity the anchor's pass allocated joins it there under the identity it already has.
 3. **Publication** — every layer's whole roster, in batches under a byte cap, with each artifact's
    whole member set (base and hold-out alike, by external addressing), its ranked content with its
    generating set, and its `parent` list. Its own figure: artifacts/s and members/s.
@@ -68,9 +64,12 @@ What it measures, in order
    `/control/status`'s own `compaction` block rather than timed from outside: the route answers
    202 immediately, so an outside timer would measure the request and not the fold.
 6. **Equivalence** — the ladder's masked counts on the folded deployment against the all-in build,
-   at zoom 0, on a set of boxes, and **per layer**: artifact count and summed masked count off the
-   kind-5 artifact frame, per principal. Exact zero difference, or a listed one.
-7. **The write cycle** — deletes, suppressions, re-ingests, another fold and the census again.
+   **on every declared view**: at zoom 0, on a set of boxes drawn in that view's own frame, and per
+   layer — artifact count, summed masked count and the parent links by key off the kind-5 artifact
+   frame, per principal. Exact zero difference, or a listed one.
+7. **The write cycle** — deletes, suppressions, re-ingests, another fold and the census again; then
+   a **restart** over the same bundle, cache and WAL, which must answer the same counts and the same
+   census as the deployment answered before it was stopped.
 
 ⊘ **A hold-out is not a random sample of the map.** Entity ids are assigned in signature-sorted
 order at a build and above the high-water at ingest (0091's own stated internal difference), so
@@ -119,7 +118,7 @@ from .split import (
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(prog="ingest_cycle", description=__doc__.splitlines()[0])
     ap.add_argument("--rung-dir", required=True)
     ap.add_argument("--work", required=True)
     ap.add_argument("--binary", required=True)
@@ -134,10 +133,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--write-cycle-n", type=int, default=1000)
     ap.add_argument("--reuse-base", action="store_true")
     ap.add_argument(
-        "--copy-base",
-        action="store_true",
-        help="serve a copy of the base bundle under the scratch instead of the base itself, so a "
-        "cell that publishes does not change the base the next `--reuse-base` cell starts from",
+        "--all-in-bundle",
+        default=None,
+        help="the bundle built from every row of the rung: the census reference, and the frame "
+        "`--state-extent` states. Default `<rung>/bundle`",
     )
     ap.add_argument(
         "--ingest-config",
@@ -178,6 +177,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "range of the publication order holding at most this many rows, or one artifact where that "
         "artifact alone is larger. 16e6 rows is ~220 MB on disk and under 1 GB read back and sorted",
     )
+    ap.add_argument(
+        "--cap-bytes",
+        type=int,
+        default=None,
+        help="`MemoryMax` on every served deployment's transient scope, in bytes. Absent is a "
+        "scope with no cap, which on a rung whose bundle does not fit in memory is the box's own "
+        "memory as the limit",
+    )
     ap.add_argument("--flush-timeout", type=float, default=900.0)
     ap.add_argument("--fold-timeout", type=float, default=7200.0)
     args = ap.parse_args(argv)
@@ -187,6 +194,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     # `VmHWM` of the driver itself, whichever phase set it: the split, the hold-out's batches,
     # the publication's buckets or the census. Beside the server's own fold peak in the cell.
     result["driver_peak_rss"] = driver_rss()["peak"]
+    # **The result is written whatever happened**, and the exit code says whether the cycle held:
+    # a blocked run, a layer that was not published, an unequal census, a write cycle that did not
+    # reach its counts, an unexpected refusal or a failed fold each leave a sentence in `failures`.
     Path(args.out).write_text(json.dumps(result, indent=2, default=str))
     print(f"wrote {args.out}")
-    return 0
+    for sentence in result["failures"]:
+        print(f"FAILED: {sentence}")
+    return 1 if result["failures"] else 0
