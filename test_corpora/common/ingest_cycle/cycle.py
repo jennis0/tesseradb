@@ -380,9 +380,7 @@ class Cycle:
         token, _ = serve_battery.authorise(served.session, self.session_cred, self.all_terms)
         m = serve_battery.meta(served.viewer, token)
         self.frames = {v["id"]: v["quantisation"] for v in m["views"]}
-        self.result["base_visible"] = serve_battery.viewport(
-            served.viewer, token, self.anchor, 0, full_box(self.frames[self.anchor]), k=1
-        )["counts"]["visible"]
+        self.result["base_visible"] = self.visible()
 
     def control_for(self, served: Deployment, view: str | None) -> Control:
         """A control client for one view's batches, unlabelled where the bundle has one view."""

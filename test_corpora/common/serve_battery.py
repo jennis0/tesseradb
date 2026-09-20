@@ -599,7 +599,7 @@ def percentiles(values: Sequence[float]) -> dict:
     a small n, and an interpolated p99 over 40 samples reports a number no request took.
     """
     if not values:
-        return {f"p{p}": None for p in PERCENTILES} | {"max": None, "n": 0}
+        return {f"p{p}": None for p in PERCENTILES} | {"max": None, "mean": None, "n": 0}
     s = sorted(values)
     out = {}
     for p in PERCENTILES:
