@@ -463,13 +463,7 @@ impl Runs<'_> {
         // the representatives can make it.
         let mut best: [Option<(i64, [u32; 2])>; 8] = [None; 8];
         for rep in reps {
-            let (x, y) = (rep[0] as i64, rep[1] as i64);
-            for (slot, (wx, wy)) in best.iter_mut().zip(OCTAGON_DIRECTIONS) {
-                let score = wx * x + wy * y;
-                if slot.is_none_or(|(s, b)| score > s || (score == s && *rep < b)) {
-                    *slot = Some((score, *rep));
-                }
-            }
+            offer(&mut best, *rep);
         }
         let s1 = self.side as i64 - 1;
         for i in 0..self.len() {
@@ -491,16 +485,24 @@ impl Runs<'_> {
                 continue;
             }
             for q in self.members(i) {
-                let (x, y) = (q[0] as i64, q[1] as i64);
-                for (slot, (wx, wy)) in best.iter_mut().zip(OCTAGON_DIRECTIONS) {
-                    let score = wx * x + wy * y;
-                    if slot.is_none_or(|(s, b)| score > s || (score == s && *q < b)) {
-                        *slot = Some((score, *q));
-                    }
-                }
+                offer(&mut best, *q);
             }
         }
         octagon_of(best)
+    }
+}
+
+/// `q` against each of the eight running extremes, kept where it scores higher.
+///
+/// Ties are broken on the position, so the octagon is a function of the member positions rather
+/// than of the order they were gathered in.
+fn offer(best: &mut [Option<(i64, [u32; 2])>; 8], q: [u32; 2]) {
+    let (x, y) = (q[0] as i64, q[1] as i64);
+    for (slot, (wx, wy)) in best.iter_mut().zip(OCTAGON_DIRECTIONS) {
+        let score = wx * x + wy * y;
+        if slot.is_none_or(|(s, b)| score > s || (score == s && q < b)) {
+            *slot = Some((score, q));
+        }
     }
 }
 
@@ -577,15 +579,7 @@ fn extreme_octagon(points: &[[u32; 2]]) -> Octagon {
     // construction is about.
     let mut best: [Option<(i64, [u32; 2])>; 8] = [None; 8];
     for q in points {
-        let (x, y) = (q[0] as i64, q[1] as i64);
-        for (slot, (wx, wy)) in best.iter_mut().zip(OCTAGON_DIRECTIONS) {
-            let score = wx * x + wy * y;
-            // Ties broken on the position, so the octagon is a function of the member positions
-            // rather than of the order they were gathered in.
-            if slot.is_none_or(|(s, b)| score > s || (score == s && *q < b)) {
-                *slot = Some((score, *q));
-            }
-        }
+        offer(&mut best, *q);
     }
     octagon_of(best)
 }
