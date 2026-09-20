@@ -44,7 +44,7 @@ from .timing import Steps
 #: `MemoryMax` on every deployment this run serves.
 CAP_BYTES = 16 * 1024**3
 
-#: The checkout this module lives in, which is where the binary is built and the bench is run.
+#: The checkout this module lives in, which is where the binary is built.
 CHECKOUT = Path(__file__).resolve().parents[2]
 
 
@@ -408,22 +408,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         cycle_out = work / "cycle.json"
         result["ingest"] = json.loads(cycle_out.read_text()) if cycle_out.exists() else None
         failures += list(dig(result, "ingest", "failures", default=[]))
-
-        # `viewport_latency` opens the bundle with the engine directly, on its own fixture's
-        # view and frame rather than the rung's; it never gates.
-        if not args.quick:
-            with steps.step("viewport_latency"):
-                result["viewport_latency"] = run(
-                    ["cargo", "run", "--release", "-p", "tessera-bench", "--bin",
-                     "viewport_latency", "--", "--bundle", bundle],
-                    CHECKOUT,
-                    dict(os.environ, CARGO_PROFILE_RELEASE_DEBUG="0"),
-                )
-            if result["viewport_latency"]["returncode"] != 0:
-                print(
-                    "viewport_latency could not measure this bundle and is not a gate: "
-                    f"{result['viewport_latency']['stderr_tail'].strip().splitlines()[-1:]}"
-                )
 
     result["failures"] = failures
     result["total_wall_s"] = steps.total()
