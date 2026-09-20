@@ -6,31 +6,16 @@
 /// mismatch from a missing layer.
 #[derive(Debug)]
 pub enum ComposeError {
-    /// An extent names a column the schema holds no value column for.
+    /// An extent names a column this generation holds no layers of its kind for.
     UnknownColumn { column: String },
     /// An extent claims entities an earlier layer already holds values for.
     Overlap { column: String },
     /// A flush wrote a base for a group-scoped family this bundle does not declare.
     UndeclaredScopedFamily { column: String, view: String },
-    /// A flush published a text extent for a column this generation holds no text index for.
-    UnknownTextColumn { column: String },
-    /// A coalesce names a column this generation does not hold.
-    UnknownCoalescedColumn { column: String },
-    /// A coalesce names a text column this generation does not hold.
-    UnknownCoalescedTextColumn { column: String },
     /// A coalesce consumed an extent this generation holds no layer for.
     MissingLayer { column: String, rel: String },
-    /// A coalesce consumed a text extent this generation holds no layer for.
-    MissingTextLayer { column: String, rel: String },
     /// A coalesced extent stands for a different entity set from the layers it replaces.
     CoverageMismatch {
-        column: String,
-        replacement: u64,
-        consumed: usize,
-        covered: u64,
-    },
-    /// A coalesced text extent stands for a different entity set from the layers it replaces.
-    TextCoverageMismatch {
         column: String,
         replacement: u64,
         consumed: usize,
@@ -66,8 +51,7 @@ impl std::fmt::Display for ComposeError {
         match self {
             ComposeError::UnknownColumn { column } => write!(
                 f,
-                "a filter extent names column '{column}', which the schema does not declare \
-                 filterable"
+                "an extent names column '{column}', which this generation holds no layers for"
             ),
             ComposeError::Overlap { column } => write!(
                 f,
@@ -79,28 +63,10 @@ impl std::fmt::Display for ComposeError {
                 "a flush wrote a base for the group-scoped column family '{column}' under view \
                  '{view}', which this bundle does not declare"
             ),
-            ComposeError::UnknownTextColumn { column } => write!(
-                f,
-                "a flush published a text extent for column '{column}', which this generation \
-                 does not hold"
-            ),
-            ComposeError::UnknownCoalescedColumn { column } => write!(
-                f,
-                "a coalesce names column '{column}', which this generation does not hold"
-            ),
-            ComposeError::UnknownCoalescedTextColumn { column } => write!(
-                f,
-                "a coalesce names text column '{column}', which this generation does not hold"
-            ),
             ComposeError::MissingLayer { column, rel } => write!(
                 f,
                 "a coalesce for column '{column}' consumed extent '{rel}', which this generation \
                  holds no layer for"
-            ),
-            ComposeError::MissingTextLayer { column, rel } => write!(
-                f,
-                "a coalesce for text column '{column}' consumed extent '{rel}', which this \
-                 generation holds no layer for"
             ),
             ComposeError::CoverageMismatch {
                 column,
@@ -111,16 +77,6 @@ impl std::fmt::Display for ComposeError {
                 f,
                 "the coalesced extent for column '{column}' is present for {replacement} entities \
                  where the {consumed} layers it replaces cover {covered}"
-            ),
-            ComposeError::TextCoverageMismatch {
-                column,
-                replacement,
-                consumed,
-                covered,
-            } => write!(
-                f,
-                "the coalesced text extent for column '{column}' is present for {replacement} \
-                 entities where the {consumed} layers it replaces cover {covered}"
             ),
             ComposeError::EntityTermsCoverage { replacement, held } => write!(
                 f,

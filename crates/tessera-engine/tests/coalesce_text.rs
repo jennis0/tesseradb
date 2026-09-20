@@ -464,7 +464,7 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
     assert!(
         matches!(
             &err,
-            tessera_engine::filter::ComposeError::TextCoverageMismatch {
+            tessera_engine::filter::ComposeError::CoverageMismatch {
                 column,
                 replacement,
                 consumed: 1,

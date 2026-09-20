@@ -265,7 +265,7 @@ impl FilterColumns {
                 .get_mut(text.column.as_str())
                 .and_then(super::Column::text_layers_mut)
             else {
-                return Err(ComposeError::UnknownTextColumn {
+                return Err(ComposeError::UnknownColumn {
                     column: text.column.clone(),
                 });
             };
@@ -374,48 +374,24 @@ impl FilterColumns {
             let replacement = &window.replacement;
             let column = replacement.column_name();
             let Some(held) = next.columns.get_mut(&column) else {
-                return Err(ComposeError::UnknownCoalescedColumn { column });
+                return Err(ComposeError::UnknownColumn { column });
             };
             check_dictionary_pairing(held.family, &column, replacement.dict.is_some())?;
             let Some(layers) = held.value_layers_mut() else {
-                return Err(ComposeError::UnknownCoalescedColumn { column });
+                return Err(ComposeError::UnknownColumn { column });
             };
-            let mut union = Bitmap::new();
-            for rel in &window.consumed {
-                let Some(layer) = layers
-                    .iter()
-                    .find(|l| l.values_rel.as_deref() == Some(rel.as_str()))
-                else {
-                    return Err(ComposeError::MissingLayer {
-                        column,
-                        rel: rel.clone(),
-                    });
-                };
-                union |= layer.values.present();
-            }
-            if union != replacement.values.present() {
-                return Err(ComposeError::CoverageMismatch {
-                    column,
-                    replacement: replacement.values.present().cardinality(),
-                    consumed: window.consumed.len(),
-                    covered: union.cardinality(),
-                });
-            }
-            layers.retain(|l| {
-                l.values_rel
-                    .as_ref()
-                    .is_none_or(|rel| !window.consumed.contains(rel))
-            });
             // One push of one struct: the coalesced ordinals and the dictionary that numbers
-            // them enter together, checked as a pair above, and the consumed layers left with
-            // their own dictionaries in the `retain` above.
-            layers.push(Layer {
-                values_rel: Some(replacement.extent.values.clone()),
-                values: Arc::clone(&replacement.values),
-                dict: replacement.dict.clone(),
-            });
-            // `covered` is unchanged by construction — the equality above is what says so — so it
-            // is neither recomputed nor adjusted here.
+            // them enter together, checked as a pair above, and the consumed layers leave with
+            // their own dictionaries.
+            replace_window(layers, &column, &window.consumed, || {
+                Ok(Layer {
+                    values_rel: Some(replacement.extent.values.clone()),
+                    values: Arc::clone(&replacement.values),
+                    dict: replacement.dict.clone(),
+                })
+            })?;
+            // `covered` is unchanged by construction — the coverage equality is what says so — so
+            // it is neither recomputed nor adjusted here.
         }
         for window in texts {
             let column = &window.paths.column;
@@ -424,54 +400,94 @@ impl FilterColumns {
                 .get_mut(column)
                 .and_then(super::Column::text_layers_mut)
             else {
-                return Err(ComposeError::UnknownCoalescedTextColumn {
+                return Err(ComposeError::UnknownColumn {
                     column: column.clone(),
                 });
             };
-            let mut union = Bitmap::new();
-            for rel in &window.consumed {
-                let Some(layer) = layers
-                    .iter()
-                    .find(|l| l.dict_rel.as_deref() == Some(rel.as_str()))
-                else {
-                    return Err(ComposeError::MissingTextLayer {
-                        column: column.clone(),
-                        rel: rel.clone(),
-                    });
-                };
-                union |= &layer.present;
-            }
-            // Opened before anything is removed, so a replacement that will not open leaves the
-            // consumed layers standing rather than a column short of a window's worth of terms.
-            let replacement = TextLayer::open(
-                column,
-                &window.paths.dict_rel,
-                &window.paths.dict,
-                &window.paths.postings,
-                &window.paths.presence,
-                self.access,
-            )?;
-            // The attribute axis's replacement rule, and this family can state it because a text
-            // extent stores presence: the replacement must stand for **exactly** the entities its
-            // inputs did. A merge that dropped a layer answers every later `match` short of that
-            // layer's documents, silently, and no cardinality anywhere else would move.
-            if union != replacement.present {
-                return Err(ComposeError::TextCoverageMismatch {
-                    column: column.clone(),
-                    replacement: replacement.present.cardinality(),
-                    consumed: window.consumed.len(),
-                    covered: union.cardinality(),
-                });
-            }
-            layers.retain(|l| {
-                l.dict_rel
-                    .as_ref()
-                    .is_none_or(|rel| !window.consumed.contains(rel))
-            });
-            layers.push(replacement);
+            replace_window(layers, column, &window.consumed, || {
+                TextLayer::open(
+                    column,
+                    &window.paths.dict_rel,
+                    &window.paths.dict,
+                    &window.paths.postings,
+                    &window.paths.presence,
+                    self.access,
+                )
+            })?;
         }
         Ok(next)
     }
+}
+
+/// What a replace needs of a layer, on either axis: the manifest path that is its identity, and
+/// the entities it stands for.
+trait WindowLayer {
+    fn identity(&self) -> Option<&str>;
+    fn presence(&self) -> Bitmap;
+}
+
+impl WindowLayer for Layer {
+    fn identity(&self) -> Option<&str> {
+        self.values_rel.as_deref()
+    }
+
+    fn presence(&self) -> Bitmap {
+        self.values.present()
+    }
+}
+
+impl WindowLayer for TextLayer {
+    fn identity(&self) -> Option<&str> {
+        self.dict_rel.as_deref()
+    }
+
+    fn presence(&self) -> Bitmap {
+        self.present.clone()
+    }
+}
+
+/// Replace one window of a column's layers with the layer that carries their values — the one
+/// walk both axes take, over the identity and presence each spells its own way.
+///
+/// A consumed layer this generation does not hold is a refusal rather than a no-op, and the
+/// replacement stands for **exactly** the entities its inputs did or it does not enter: a merge
+/// that lost a layer answers every later request short of that layer's entities, and no
+/// cardinality anywhere else would move.
+///
+/// **Nothing is removed until the replacement is in hand and checked**, so one that will not open
+/// leaves the consumed layers standing rather than a column short of a window.
+fn replace_window<L: WindowLayer>(
+    layers: &mut Vec<L>,
+    column: &str,
+    consumed: &[String],
+    open_replacement: impl FnOnce() -> Result<L, ComposeError>,
+) -> Result<(), ComposeError> {
+    let mut union = Bitmap::new();
+    for rel in consumed {
+        let Some(layer) = layers.iter().find(|l| l.identity() == Some(rel.as_str())) else {
+            return Err(ComposeError::MissingLayer {
+                column: column.to_string(),
+                rel: rel.clone(),
+            });
+        };
+        union |= layer.presence();
+    }
+    let replacement = open_replacement()?;
+    let presence = replacement.presence();
+    if union != presence {
+        return Err(ComposeError::CoverageMismatch {
+            column: column.to_string(),
+            replacement: presence.cardinality(),
+            consumed: consumed.len(),
+            covered: union.cardinality(),
+        });
+    }
+    layers.retain(|l| {
+        l.identity()
+            .is_none_or(|rel| !consumed.iter().any(|c| c == rel))
+    });
+    layers.push(replacement);
+    Ok(())
 }
 
 #[cfg(test)]
