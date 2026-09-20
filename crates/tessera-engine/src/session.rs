@@ -61,7 +61,8 @@ pub struct Session {
     /// 404 to this session until it re-authorises. `Arc` because every request path reads it and
     /// none may clone the set.
     visible_views: Arc<crate::gate::VisibleViews>,
-    /// `sha256(auth_data)`, which the fragment cache asks for. The credential itself is not kept.
+    /// `sha256(auth_data)`, part of the identity a client's held frames are keyed on. The
+    /// credential itself is not kept.
     auth_data_hash: [u8; 32],
     /// Unix timestamp (seconds) after which this session is no longer valid.
     expires_at: u64,

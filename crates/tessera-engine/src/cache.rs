@@ -132,9 +132,9 @@ pub(crate) enum Peek {
 /// unexpressible instead of forbidden.
 ///
 /// **What the refresh needs to produce the next one**, so a background pass needs no session
-/// registry — the engine has none, sessions being values the server holds. `satisfied_sorted` and
-/// `auth_data_hash` are the [`tessera_authz::FragmentCache`] key's caller half; both are already
-/// held per session, both are per-token, and neither is a credential (the hash is a digest of one).
+/// registry — the engine has none, sessions being values the server holds. `satisfied_sorted` is
+/// what the [`tessera_authz::FragmentCache`] is asked with; `auth_data_hash` is a digest of the
+/// credential, never the credential.
 pub(crate) struct SessionGeometry {
     /// The fragment `projection` was taken over — never the live one, unless they coincide.
     pub(crate) fragment: Arc<FrozenFragment>,
@@ -332,8 +332,7 @@ impl RowProjectionCache {
     /// ~200 ms per credential — `probes/2026-08-04-refresh-ladder/`).
     ///
     /// **The fragment is not view-scoped**, so any of this token's entries answers: the fragment
-    /// cache keys on `(satisfied, auth_data_hash, dict_len, watermark)` and none of those is a
-    /// view. The freshest is taken because a later watermark is a strictly better answer to an
+    /// cache keys on the satisfied terms and the watermark, and neither is a view. The freshest is taken because a later watermark is a strictly better answer to an
     /// entity-space question.
     ///
     /// **Per token, never per entity** — the scan cost cannot depend on which identifier was
