@@ -17,6 +17,8 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 - Unverified, from reading: a flush that publishes just after its view is dropped lists and composes its extents under the dropped view; they stay until a fold.
 - An entity-scoped fill whose view is dropped waits for a flush of some surviving view. If the drop leaves no view at all, it holds the log until one is created.
 - `DELETE /control/views/{group}/{key}` is in the HTTP API only: not in `docs/openapi/tessera.yaml`, the Python client, the TypeScript client or the CLI.
+- A layer's `visibility` and `artifact_visibility.default` are checked for an empty word and for `inherited` at a build (`tessera_plugin::check_label`) and not when a layer is declared at a running service.
+- The build always labels with `builtin:passthrough`; the engine takes whichever plugin it is given. Five sites compare a manifest's hash with `Passthrough::new().data_plugin_hash()` and three of them are in the engine, which holds its own plugin (`containment.rs`, `generation.rs`, `write/schema.rs`, `artifact_pass.rs`, build `config.rs`).
 
 ## Structure
 
@@ -27,6 +29,8 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 
 - `coalesce_delta_tiers` (`tessera-authz/src/tier.rs`) gathers every term's entities from every input tier into a `Vec<u32>` per term before it writes anything, so its memory is the whole of the tiers it merges. The fold's sweep (`term_sweep.rs`) does the same job a term at a time through bitmaps and a spool. The coalesce has no budget and nothing measures it.
 - The Python oracle's `BUNDLE_FORMAT` (`reference/oracle/harness.py`) is 11 and the Rust constant is 16, so the oracle does not accept a current bundle.
+- `"public"` is defined twice, as `tessera_plugin::PUBLIC` and as `tessera_authz::PUBLIC_LABEL`. Neither crate depends on the other.
+- The word "gate" for a view's or layer's `visibility` is banned by `docs/writing.md` and is used about 1,160 times in `crates/` and 12 times in `docs/system`. It is gone from `tessera-plugin` only.
 
 ## Needs a decision
 
@@ -36,6 +40,7 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 - A request that waits for another request's fragment build (authorise, and the per-request fragment lookup) cannot be cancelled: the engine passes no cancel token there, so a client that disconnects holds its request slot until the build it waits on finishes or the wait budget runs out. `authorise` takes no token today; the viewport path has one and does not pass it to `fragment_for`.
 - A label's row on the artifacts frame still carries its cluster's two filter bits (`matched`, `highlighted`). The row now names its cluster in `target`, so a client can read them from the cluster's own row. Keep the copy or remove it.
 - How the `tessera` binary reaches a Python user at release. Measured 2026-09-18: 45 MiB, 12 MiB stripped and compressed. The options were a wheel per platform that the `[local]` extra depends on, or a download on first use.
+- A `text` column declared with no `analyser` is given `unicode` by `tessera_store::declaration`. Decide whether the server may choose that or must refuse.
 
 ## Clients and tests
 
