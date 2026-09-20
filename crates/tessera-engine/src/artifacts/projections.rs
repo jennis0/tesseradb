@@ -92,7 +92,55 @@ impl ProjectionKey {
 /// than by a capacity anyone has to tune.
 /// `(view, layer, level)` — what one cached projection is *for*, as against the
 /// [`ProjectionKey`] that says when it stops being valid.
+///
+/// **The view is here and not in [`PartitionAddress`]**, and that is the whole difference between
+/// the two structures: a containment expression names entities' terms, so no row space is involved
+/// in it and one file answers for every view; an extent is a pair of **rows**, so it answers for
+/// exactly the view it was projected through. The fold-written tile indexes and row-major columns
+/// are filed here for that reason.
 pub(super) type LevelAddress = (String, String, u32);
+
+/// **This level, of this layer, in this view, under this prefix, at this version** — the coordinate
+/// a level's derived structures are claimed, composed and filed at, made once at the entry point
+/// and handed to everything below it.
+///
+/// Borrows throughout, and it outlives nothing: what a map holds is the owned address and key this
+/// derives ([`Self::address`], [`Self::derived_key`]), which is the one place each is derived.
+pub(super) struct Coordinate<'a> {
+    pub(super) prefix: &'a str,
+    pub(super) view: &'a str,
+    pub(super) layer: &'a str,
+    pub(super) level: u32,
+    pub(super) level_version: u64,
+}
+
+impl Coordinate<'_> {
+    /// Where this level's row form, tile index and row column are filed.
+    pub(super) fn address(&self) -> LevelAddress {
+        (self.view.to_string(), self.layer.to_string(), self.level)
+    }
+
+    /// Where this level's containment partition is filed — see [`PartitionAddress`].
+    pub(super) fn partition_address(&self) -> PartitionAddress {
+        (self.layer.to_string(), self.level)
+    }
+
+    /// What a derived structure of this level is valid at — see [`DerivedKey`].
+    pub(super) fn derived_key(&self) -> DerivedKey {
+        DerivedKey::of(self.prefix, self.level_version)
+    }
+
+    /// What a row form of this level is valid at — see [`ProjectionKey`], whose `live` term is the
+    /// caller's because only the caller knows whether the level evaluates a value column.
+    pub(super) fn projection_key(&self, live: u64) -> ProjectionKey {
+        ProjectionKey {
+            prefix: self.prefix.to_string(),
+            view: self.view.to_string(),
+            level_version: self.level_version,
+            live,
+        }
+    }
+}
 
 /// `(layer, level)` — what one cached partition is *for*.
 ///
@@ -102,31 +150,26 @@ pub(super) type LevelAddress = (String, String, u32);
 /// instead of replacing them.
 pub(super) type PartitionAddress = (String, u32);
 
-/// What a cached [`ContainmentPartition`] was composed from. The view is deliberately absent — see
-/// [`ArtifactProjections::partitions_held`] — so the terms are the prefix, which fixes the
-/// postings, and the level's version, which fixes the records.
+/// What a cached [`ContainmentPartition`], an adopted [`TileIndex`] and an adopted [`RowColumn`]
+/// were composed or projected under — **one key for all three**, the address they are filed under
+/// saying which level and, for the two that are row-addressed, which view.
+///
+/// The prefix fixes the base row space (a fold renumbers it wholesale; a flush and a merge leave it
+/// alone, which is why the segments version is not a term — [`ProjectionKey`] argues it); the
+/// level's version fixes the records, and for a partition the postings it was composed from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PartitionKey {
+pub(super) struct DerivedKey {
     pub(super) prefix: String,
     pub(super) level_version: u64,
 }
 
-/// `(view, layer, level)` — what one fold-written tile index is *for*.
-///
-/// **The view is here and not in [`PartitionAddress`]**, and that is the whole difference between
-/// the two structures: a containment expression names entities' terms, so no row space is involved
-/// in it and one file answers for every view; an extent is a pair of **rows**, so it answers for
-/// exactly the view it was projected through.
-pub(super) type IndexAddress = (String, String, u32);
-
-/// What an adopted [`TileIndex`] was projected under — the same two validity terms
-/// [`PartitionKey`] carries, and for the same reasons. The prefix fixes the base row space (a fold
-/// renumbers it wholesale; a flush and a merge leave it alone, which is why the segments version is
-/// not a term — [`ProjectionKey`] argues it); the level's version fixes the memberships.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct IndexKey {
-    pub(super) prefix: String,
-    pub(super) level_version: u64,
+impl DerivedKey {
+    pub(super) fn of(prefix: &str, level_version: u64) -> Self {
+        DerivedKey {
+            prefix: prefix.to_string(),
+            level_version,
+        }
+    }
 }
 
 /// **What one accepted write did to a level**, held by the executor until the next flush tick and
@@ -251,7 +294,7 @@ pub struct ArtifactProjections {
     /// narrower than the one above rather than replacing it: a generating set that lost a member on
     /// the way into *this* view's row space can never be contained, and that question is asked of
     /// the row form at serving time.
-    pub(super) partitions_held: Mutex<BTreeMap<PartitionAddress, (PartitionKey, ContainmentPartition)>>,
+    pub(super) partitions_held: Mutex<BTreeMap<PartitionAddress, (DerivedKey, ContainmentPartition)>>,
     /// The fold-written tile indexes adopted at open, waiting for the level's first request to
     /// claim one.
     ///
@@ -260,7 +303,7 @@ pub struct ArtifactProjections {
     /// not; an index belongs to one view, so once that view's row form has taken it there is
     /// nothing left for a second reader — and keeping a second `Arc` to eighty megabytes per level
     /// for the process's life is the retention bug `forget` exists to fix, one map along.
-    pub(super) indexes_held: Mutex<BTreeMap<IndexAddress, (IndexKey, TileIndex)>>,
+    pub(super) indexes_held: Mutex<BTreeMap<LevelAddress, (DerivedKey, TileIndex)>>,
     /// The fold-written row-major columns adopted at open, waiting for the level's first request to
     /// claim one.
     ///
@@ -269,7 +312,7 @@ pub struct ArtifactProjections {
     /// row space it was written over, and the level's version is what says whether it still
     /// describes that level. Claimed once and then dropped, because a column belongs to one view's
     /// row form.
-    pub(super) columns_held: Mutex<BTreeMap<IndexAddress, (IndexKey, RowColumn)>>,
+    pub(super) columns_held: Mutex<BTreeMap<LevelAddress, (DerivedKey, RowColumn)>>,
     /// The **base** half of an attribute predicate's row column, per `(view, layer, level)`.
     ///
     /// **Held rather than claimed**, which is the difference from [`Self::columns_held`]: a
@@ -277,7 +320,7 @@ pub struct ArtifactProjections {
     /// copy. A predicate's base is taken again at *every flush* — the form above it is rebuilt when
     /// the geometry moves and the base is not — so it stays here, replaced when its coordinate
     /// moves, and `with_tail` shares it rather than copying four bytes a row per flush.
-    pub(super) predicate_bases: Mutex<BTreeMap<IndexAddress, (IndexKey, Arc<RowColumn>)>>,
+    pub(super) predicate_bases: Mutex<BTreeMap<LevelAddress, (DerivedKey, Arc<RowColumn>)>>,
     /// How many forms this has built since the engine opened. **The cadence, counted** — what
     /// §8.1 is about is not the cost of one build but how many a write provokes, and that is a
     /// number nothing reported until the grain changed. Read by the fold's own log line and by
@@ -511,13 +554,7 @@ impl ArtifactProjections {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
                     (extent.layer.clone(), extent.level),
-                    (
-                        PartitionKey {
-                            prefix: prefix.to_string(),
-                            level_version,
-                        },
-                        partition,
-                    ),
+                    (DerivedKey::of(prefix, level_version), partition),
                 );
         }
     }
@@ -592,13 +629,7 @@ impl ArtifactProjections {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
                     (view.to_string(), extent.layer.clone(), extent.level),
-                    (
-                        IndexKey {
-                            prefix: prefix.to_string(),
-                            level_version,
-                        },
-                        index,
-                    ),
+                    (DerivedKey::of(prefix, level_version), index),
                 );
         }
     }
@@ -671,13 +702,7 @@ impl ArtifactProjections {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
                     (view.to_string(), extent.layer.clone(), extent.level),
-                    (
-                        IndexKey {
-                            prefix: prefix.to_string(),
-                            level_version,
-                        },
-                        column,
-                    ),
+                    (DerivedKey::of(prefix, level_version), column),
                 );
         }
     }

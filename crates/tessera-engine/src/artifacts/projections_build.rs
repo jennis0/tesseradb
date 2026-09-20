@@ -56,18 +56,20 @@ impl ArtifactProjections {
         segments_version: u64,
         column_only: bool,
     ) -> (Arc<ArtifactRows>, u64) {
-        let key = ProjectionKey {
-            prefix: prefix.to_string(),
-            view: view.to_string(),
+        let at = Coordinate {
+            prefix,
+            view,
+            layer,
+            level,
             level_version: store.level_version(layer, level),
-            // See [`ProjectionKey::live`]: a value column is evaluated against the geometry; a
-            // stored membership and a spatial one are brought forward with it.
-            live: match predicate {
-                Some(PredicateSource::Attribute(_)) => segments_version,
-                _ => 0,
-            },
         };
-        let map_key = (view.to_string(), layer.to_string(), level);
+        // See [`ProjectionKey::live`]: a value column is evaluated against the geometry; a
+        // stored membership and a spatial one are brought forward with it.
+        let key = at.projection_key(match predicate {
+            Some(PredicateSource::Attribute(_)) => segments_version,
+            _ => 0,
+        });
+        let map_key = at.address();
 
         if let Some(held) = self
             .cached
@@ -119,7 +121,7 @@ impl ArtifactProjections {
         // derivation that has a correct fallback.
         let partition = source
             .filter(|source| source.signature_shaped())
-            .and_then(|source| self.partition_for(prefix, layer, level, store, source));
+            .and_then(|source| self.partition_for(&at, store, source));
         // **A spatial level's membership is assembled from its segments' resolutions**
         // (`crate::shapes`), in this generation's whole row space, once: open and the fold stage
         // every segment's piece before this runs, so what happens here is an O(containers) union
@@ -150,15 +152,7 @@ impl ArtifactProjections {
             let column = if !layout.is_row_major() {
                 None
             } else if space.extent_count() == 0 {
-                self.column_for(
-                    prefix,
-                    view,
-                    layer,
-                    level,
-                    key.level_version,
-                    layout,
-                    &built,
-                )
+                self.column_for(&at, layout, &built)
             } else {
                 let composed = RowColumn::compose_over_base(
                     built.membership(),
@@ -216,7 +210,7 @@ impl ArtifactProjections {
             );
             return (rows, version);
         }
-        let mut adopted = self.claim_index(prefix, view, layer, level, key.level_version);
+        let mut adopted = self.claim_index(&at);
         let from_prefix = adopted.is_some();
         // **A level recorded row-major whose column this prefix holds is transposed, not projected
         // twice** (§5.1). The column *is* the level's membership addressed by row, so the
@@ -232,7 +226,7 @@ impl ArtifactProjections {
             Some(PredicateSource::Attribute(_)) => None,
             _ if !layout.is_row_major() => None,
             _ => self
-                .claim_column(prefix, view, layer, level, key.level_version)
+                .claim_column(&at)
                 .filter(|claimed| claimed.layout() == layout)
                 .map(Arc::new),
         };
@@ -278,16 +272,7 @@ impl ArtifactProjections {
             // **The membership *is* the column** (§5.1): the labels come from the value column the
             // predicate names rather than from any stored membership, and the level's own records
             // supply only the ordinal each value's artifact sits at.
-            Some(PredicateSource::Attribute(attribute)) => self.attribute_column(
-                prefix,
-                view,
-                layer,
-                level,
-                key.level_version,
-                store,
-                space,
-                attribute,
-            ),
+            Some(PredicateSource::Attribute(attribute)) => self.attribute_column(&at, store, space, attribute),
             // The claim above already took it, where the prefix held one: `column_for` would
             // find nothing there and recompose what is in hand.
             // **A fold-written column is served only while row space has no extents.** It is
@@ -302,15 +287,7 @@ impl ArtifactProjections {
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     Some(claimed)
                 }
-                _ => self.column_for(
-                    prefix,
-                    view,
-                    layer,
-                    level,
-                    key.level_version,
-                    layout,
-                    &built,
-                ),
+                _ => self.column_for(&at, layout, &built),
             },
         };
         let from_column = column.is_some();
@@ -422,21 +399,14 @@ impl ArtifactProjections {
     /// replace. Only a same-prefix version mismatch drops an entry, and [`Self::adopt_indexes`]
     /// purges whatever was held for a prefix other than the one it adopts under, so an entry
     /// still cannot outlive its prefix.
-    fn claim_index(
-        &self,
-        prefix: &str,
-        view: &str,
-        layer: &str,
-        level: u32,
-        level_version: u64,
-    ) -> Option<TileIndex> {
-        let map_key = (view.to_string(), layer.to_string(), level);
+    fn claim_index(&self, at: &Coordinate<'_>) -> Option<TileIndex> {
+        let map_key = at.address();
         let mut held = self.indexes_held.lock().unwrap_or_else(|e| e.into_inner());
         let (key, _) = held.get(&map_key)?;
-        if key.prefix != prefix {
+        if key.prefix != at.prefix {
             return None;
         }
-        if key.level_version != level_version {
+        if key.level_version != at.level_version {
             // The coordinate has moved under the entry, so nothing will ever claim it. Dropped
             // here rather than left: what makes it stale is what makes it dead weight.
             held.remove(&map_key);
@@ -469,14 +439,9 @@ impl ArtifactProjections {
     /// whose value names no artifact of this level — a code minted after this level's records were
     /// written, or one whose artifact a fold has retired — is a hole, which contributes to nobody's
     /// count. That is the same answer a member row with a null key gets on an enumerated layer.
-    #[allow(clippy::too_many_arguments)]
     fn attribute_column(
         &self,
-        prefix: &str,
-        view: &str,
-        layer: &str,
-        level: u32,
-        level_version: u64,
+        at: &Coordinate<'_>,
         store: &ArtifactStore,
         space: &RowSpace,
         source: &AttributeSource<'_>,
@@ -493,7 +458,7 @@ impl ArtifactProjections {
         let mut ordinal_of_code: std::collections::BTreeMap<u32, u32> =
             std::collections::BTreeMap::new();
         let mut ordinals = 0u32;
-        for (ordinal, record) in store.level(layer, level) {
+        for (ordinal, record) in store.level(at.layer, at.level) {
             ordinals = ordinals.max(ordinal + 1);
             if let Some(code) = record.key.as_deref().and_then(source.code_of_key) {
                 ordinal_of_code.insert(code, ordinal);
@@ -501,11 +466,8 @@ impl ArtifactProjections {
         }
 
         let base_rows = space.base_rows();
-        let map_key = (view.to_string(), layer.to_string(), level);
-        let base_key = IndexKey {
-            prefix: prefix.to_string(),
-            level_version,
-        };
+        let map_key = at.address();
+        let base_key = at.derived_key();
         let held = {
             let bases = self
                 .predicate_bases
@@ -588,21 +550,16 @@ impl ArtifactProjections {
     /// `None` where the level is artifact-major — which has no column — and where a label column
     /// declined to compose because the memberships do not partition. Both are absences rather than
     /// errors: the artifact-major route answers every question the column would have.
-    #[allow(clippy::too_many_arguments)]
     fn column_for(
         &self,
-        prefix: &str,
-        view: &str,
-        layer: &str,
-        level: u32,
-        level_version: u64,
+        at: &Coordinate<'_>,
         layout: ServingLayout,
         rows: &ArtifactRows,
     ) -> Option<Arc<RowColumn>> {
         if !layout.is_row_major() {
             return None;
         }
-        if let Some(claimed) = self.claim_column(prefix, view, layer, level, level_version) {
+        if let Some(claimed) = self.claim_column(at) {
             // **The adopted form has to be the recorded one.** A file adopted under one tag and
             // recorded under another would serve a list where a label column belongs — the
             // manifest's own claim, which `RowColumn::open` already checked against the magic. This
@@ -638,21 +595,14 @@ impl ArtifactProjections {
     /// view's row form, and leaving the entry behind would hold a second copy of four bytes a row
     /// for the process's life. An entry held for another prefix is left, for that method's other
     /// reason, and [`Self::adopt_columns`] purges what another prefix held.
-    fn claim_column(
-        &self,
-        prefix: &str,
-        view: &str,
-        layer: &str,
-        level: u32,
-        level_version: u64,
-    ) -> Option<RowColumn> {
-        let map_key = (view.to_string(), layer.to_string(), level);
+    fn claim_column(&self, at: &Coordinate<'_>) -> Option<RowColumn> {
+        let map_key = at.address();
         let mut held = self.columns_held.lock().unwrap_or_else(|e| e.into_inner());
         let (key, _) = held.get(&map_key)?;
-        if key.prefix != prefix {
+        if key.prefix != at.prefix {
             return None;
         }
-        if key.level_version != level_version {
+        if key.level_version != at.level_version {
             held.remove(&map_key);
             return None;
         }
@@ -669,17 +619,12 @@ impl ArtifactProjections {
     /// that has a correct fallback.
     fn partition_for(
         &self,
-        prefix: &str,
-        layer: &str,
-        level: u32,
+        at: &Coordinate<'_>,
         store: &ArtifactStore,
         source: &PartitionSource<'_>,
     ) -> Option<ContainmentPartition> {
-        let key = PartitionKey {
-            prefix: prefix.to_string(),
-            level_version: store.level_version(layer, level),
-        };
-        let map_key = (layer.to_string(), level);
+        let key = at.derived_key();
+        let map_key = at.partition_address();
         if let Some((held, partition)) = self
             .partitions_held
             .lock()
@@ -690,12 +635,13 @@ impl ArtifactProjections {
                 return Some(partition.clone());
             }
         }
-        let partition = match ContainmentPartition::compose(store, layer, level, source.postings) {
+        let partition = match ContainmentPartition::compose(store, at.layer, at.level, source.postings)
+        {
             Ok(partition) => partition,
             Err(error) => {
                 tracing::warn!(
-                    layer = %layer,
-                    level,
+                    layer = %at.layer,
+                    level = at.level,
                     %error,
                     "the containment partition could not be composed from the postings; \
                      containment stays on the masked-count route for this level"
