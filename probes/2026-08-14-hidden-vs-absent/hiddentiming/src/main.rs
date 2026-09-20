@@ -174,8 +174,38 @@ fn run(abstracts: &[String]) {
         index: true,
         render: false,
     }];
-    let columns = FilterColumns::open(tmp.path(), PARTITION, &declared, &[], &[], &[], &[], true)
-        .expect("the text column opens");
+    // The reader takes the whole manifest and the partition's extent lists; this harness writes
+    // one column's base and no extent, so the manifest carries the declaration alone.
+    let manifest: tessera_store::manifest::Manifest = serde_json::from_value(serde_json::json!({
+        "bundle_format": 1,
+        "created_at": "1970-01-01T00:00:00Z",
+        "data_plugin_hash": "probe",
+        "declared_scalars": declared,
+        "vocabularies": [],
+        "small_term_threshold": 4096,
+        "entity_id_high_water": 0,
+        "identity": {
+            "construction": "probe",
+            "rounds": 1,
+            "key": "000102030405060708090a0b0c0d0e0f",
+            "shard_id": 0,
+            "idset": 1
+        },
+        "views": [],
+        "groups": [],
+        "partitions": [],
+        "files": {}
+    }))
+    .expect("the probe's manifest");
+    let columns = FilterColumns::open(
+        tmp.path(),
+        PARTITION,
+        &manifest,
+        tessera_engine::filter::PartitionExtents::default(),
+        &[],
+        true,
+    )
+    .expect("the text column opens");
 
     // Strata by posting size: one term per decade, taken from the middle of each band so the
     // choice is not the extreme.

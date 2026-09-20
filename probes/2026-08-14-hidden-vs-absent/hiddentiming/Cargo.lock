@@ -51,9 +51,9 @@ dependencies = [
 
 [[package]]
 name = "arrow"
-version = "59.2.0"
+version = "59.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61d285d16bce7d0be61912f7928342b673067b6b7d7ef6cc179258ba7de1fecf"
+checksum = "b952ca5a8046ad741b60f142d6eca4aeebcad615694202bc64c5341f23e32c5b"
 dependencies = [
  "arrow-arith",
  "arrow-array",
@@ -1384,6 +1384,7 @@ version = "0.1.0"
 dependencies = [
  "icu_casemap",
  "icu_normalizer",
+ "icu_properties",
  "icu_segmenter",
 ]
 
@@ -1396,7 +1397,15 @@ dependencies = [
  "memmap2",
  "rustc-hash",
  "sha2",
+ "tessera-cache",
  "tessera-types",
+]
+
+[[package]]
+name = "tessera-cache"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash",
 ]
 
 [[package]]
@@ -1407,6 +1416,7 @@ dependencies = [
  "arrow",
  "croaring",
  "libc",
+ "memmap2",
  "rand",
  "rayon",
  "rustc-hash",
@@ -1414,10 +1424,12 @@ dependencies = [
  "sha2",
  "tessera-analyse",
  "tessera-authz",
+ "tessera-cache",
  "tessera-filter",
  "tessera-filter-write",
  "tessera-lifecycle",
  "tessera-plugin",
+ "tessera-roaring",
  "tessera-spatial",
  "tessera-store",
  "tessera-types",
@@ -1433,6 +1445,7 @@ dependencies = [
  "memchr",
  "memmap2",
  "tessera-authz",
+ "tessera-roaring",
  "tessera-types",
  "zstd",
 ]
@@ -1458,6 +1471,7 @@ dependencies = [
  "postcard",
  "rustc-hash",
  "serde",
+ "sha2",
  "tessera-authz",
  "tessera-types",
 ]
@@ -1469,6 +1483,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "tessera-roaring"
+version = "0.1.0"
+dependencies = [
+ "croaring",
 ]
 
 [[package]]
@@ -1491,6 +1512,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tessera-analyse",
+ "tessera-roaring",
  "tessera-spatial",
  "tessera-types",
  "tracing",
@@ -1500,6 +1523,7 @@ dependencies = [
 name = "tessera-types"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
 ]
 
