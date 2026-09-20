@@ -399,24 +399,16 @@ fn tally(pending: &[PendingItem]) -> FragmentationTally {
     if rows == 0 {
         return FragmentationTally::default();
     }
-    // `assign_sorted` issues one contiguous id block and assigns `start + rank`, so walking ranks
-    // ascending is walking ids ascending. `lo` is taken from the items rather than from the
-    // allocator: nothing here should depend on `Allocator`'s internals.
-    let lo = pending
-        .iter()
-        .filter_map(|p| p.entity_id)
-        .map(|e| e.raw())
-        .min()
-        .expect("every pending item is assigned an id before the tally runs");
-
-    let mut by_rank: Vec<usize> = vec![usize::MAX; pending.len()];
-    for (index, item) in pending.iter().enumerate() {
-        let id = item
+    // Ascending by id. A row that joins an existing entity keeps that entity's id, so a window's
+    // ids are not one contiguous block and cannot be addressed as `id - lowest`.
+    let id_of = |index: usize| {
+        pending[index]
             .entity_id
             .expect("every pending item is assigned an id before the tally runs")
-            .raw();
-        by_rank[(id - lo) as usize] = index;
-    }
+            .raw()
+    };
+    let mut by_rank: Vec<usize> = (0..pending.len()).collect();
+    by_rank.sort_unstable_by_key(|&index| id_of(index));
 
     // `(last id seen, postings so far)` per term. The second half is `k_t`, and it counts **rows**,
     // never occurrences: a plugin may return one term twice for one item (the built-in passthrough
@@ -958,6 +950,33 @@ mod tests {
         assert_eq!(t.baseline_runs_milli, 4_000, "4·3/6 = 2 runs per term");
         // And the ratio the endpoint publishes, from those two numbers alone.
         assert_eq!(t.baseline_runs_milli as f64 / 1000.0 / t.runs as f64, 2.0);
+    }
+
+    /// A row that joins an existing entity keeps that entity's id, so a window's ids need not be
+    /// one contiguous block: two joins far apart, and a new row allocated above them.
+    #[test]
+    fn a_window_of_joins_is_tallied_in_id_order_whatever_the_gaps() {
+        let joining = |external: &str, entity: u64, terms: &[u32]| UnallocatedRow {
+            join: Some(tessera_types::EntityId::new(entity)),
+            ..row(Some(external), terms)
+        };
+        let mut w: CommitWindow<&'static str> = CommitWindow::new(0);
+        w.push(entry(
+            "b1",
+            vec![
+                joining("far", 70_000, &[1]),
+                joining("near", 3, &[1]),
+                row(Some("new"), &[1]),
+            ],
+        ));
+        let (closed, t) = w.allocate(&mut Allocator::new(100_000)).unwrap();
+
+        let ids: Vec<u64> = closed[0].entity_ids.iter().map(|e| e.raw()).collect();
+        assert_eq!(ids, [70_000, 3, 100_000], "a join keeps its entity; the new row is allocated");
+        assert_eq!(t.rows, 3);
+        assert_eq!(t.postings, 3);
+        assert_eq!(t.runs, 3, "3, 70 000 and 100 000 are three runs");
+        assert_eq!(t.containers, 2, "3 is in block 0; 70 000 and 100 000 share block 1");
     }
 
     /// A term repeated within one row is **one** posting, and it is found however far apart the
