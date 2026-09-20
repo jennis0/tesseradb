@@ -20,8 +20,7 @@
 //! # Cases the generator always includes
 //!
 //! - Artifact 0 of every level holds exactly one member.
-//! - Artifact 1 holds a run drawn entirely from one term's complement, so a chosen grant sees zero
-//!   of it.
+//! - Artifact 1 of every level has no interval, so all of its members are scattered.
 //! - Level 1 of every layer is empty.
 //! - The own-term flag and the existence criterion are cycled independently, so all four
 //!   combinations occur at every size.
