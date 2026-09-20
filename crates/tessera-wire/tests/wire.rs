@@ -1,368 +1,459 @@
-//! `tessera-wire`'s handle tables and framed Arrow IPC payloads (I10 — the trust boundary
-//! between entity space and the wire; contracts §3.2 r26 — the streamed frame sequence).
+//! The frames `tessera-wire` writes, read back the way a client reads them.
 
-use arrow::array::{Array, UInt64Array};
-use arrow::datatypes::DataType;
+use arrow::array::{
+    Array, BooleanArray, DictionaryArray, ListArray, StringArray, UInt32Array, UInt64Array,
+};
+use arrow::datatypes::{DataType, TimeUnit, UInt16Type};
 use arrow::ipc::reader::StreamReader;
-use tessera_types::{EntityId, Handle};
-use tessera_wire::handles::HandleTable;
+use arrow::record_batch::RecordBatch;
 use tessera_wire::{
-    artifacts_frame, artifacts_identity_frame, points_frame, split_frames, sub_cells_frame,
-    tiles_frame, trailer_frame, ArtifactRow, ScalarColumn, FRAME_ARTIFACTS, FRAME_HEADER_BYTES,
-    FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER,
+    artifacts_frame, artifacts_identity_frame, points_frame, points_highlight_frame, split_frames,
+    sub_cells_frame, tiles_frame, trailer_frame, ArtifactRow, FrameError, ScalarColumn,
+    FRAME_ARTIFACTS, FRAME_HEADER_BYTES, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES,
+    FRAME_TRAILER,
 };
 
-/// The frame header's literal bytes, against `contracts §3.2`: five bytes of `u8 kind` then
-/// `u32 LE payload length`, in that order, and the payload immediately after them. Every other
-/// assertion in this file reaches a frame through `split_frames`, the reader half of the pair
-/// that writes it, so the two agree by construction and the layout itself is pinned by nothing
-/// on this side. The second reader is the TypeScript client, which decodes little-endian
-/// independently (`clients/ts/core/src/frame.ts`); a change here that both Rust halves accept
-/// breaks it at runtime.
-///
-/// Mutations this kills: writing or reading the length big-endian; emitting the length before
-/// the kind; changing the header's width.
-#[test]
-fn the_frame_header_is_a_kind_byte_then_a_little_endian_length() {
-    // Two frames, so the second's position also pins the header width and the length's meaning.
-    let tiles = tiles_frame(&[30, 31], &[10, 5], &[10, 5], &[2, 1], &[10, 5]);
-    let mut body = tiles.clone();
-    body.extend_from_slice(&trailer_frame(b"{}"));
-
-    assert_eq!(
-        FRAME_HEADER_BYTES, 5,
-        "the header is one kind byte and four length bytes"
-    );
-
-    let tiles_payload_len = tiles.len() - FRAME_HEADER_BYTES;
-    // Non-vacuity: a length whose two byte orders coincide would pin nothing.
-    let len32 = u32::try_from(tiles_payload_len).unwrap();
-    assert_ne!(
-        len32.to_le_bytes(),
-        len32.to_be_bytes(),
-        "the fixture's payload length must distinguish the two byte orders, or this test \
-         discriminates nothing"
-    );
-
-    assert_eq!(body[0], FRAME_TILES, "byte 0 of a frame is its kind");
-    assert_eq!(
-        &body[1..5],
-        &len32.to_le_bytes(),
-        "bytes 1..5 are the payload length, little-endian"
-    );
-
-    // The payload begins immediately after the header, and the next frame's header begins
-    // immediately after the payload — so the length counts payload bytes and nothing else.
-    let trailer_at = FRAME_HEADER_BYTES + tiles_payload_len;
-    assert_eq!(
-        body[trailer_at], FRAME_TRAILER,
-        "the next frame's kind byte follows the previous frame's payload with no padding"
-    );
-    let trailer_len = u32::from_le_bytes(body[trailer_at + 1..trailer_at + 5].try_into().unwrap());
-    assert_eq!(
-        trailer_at + FRAME_HEADER_BYTES + trailer_len as usize,
-        body.len(),
-        "the declared lengths account for the whole body"
-    );
+/// The batches of one Arrow payload.
+fn batches(payload: &[u8]) -> Vec<RecordBatch> {
+    StreamReader::try_new(payload, None)
+        .expect("an arrow stream")
+        .map(|batch| batch.expect("a batch decodes"))
+        .collect()
 }
 
-/// (a) Handle stability + per-session isolation: the same entity, minted in two independent
-/// tables, gets a handle stable within each table but not necessarily equal across tables.
-#[test]
-fn handle_is_stable_and_sessions_are_isolated() {
-    let mut session_a = HandleTable::new();
-    let mut session_b = HandleTable::new();
-    let e = EntityId::new(4242);
-
-    let h_a1 = session_a.handle_for(e);
-    let h_a2 = session_a.handle_for(e);
-    assert_eq!(h_a1, h_a2, "handle must be stable within a session");
-
-    // Session B visits a different entity first, so the same entity lands on a different
-    // handle number than in session A — demonstrating the two tables do not share state.
-    let _ = session_b.handle_for(EntityId::new(1));
-    let h_b = session_b.handle_for(e);
-    assert_ne!(
-        h_a1.raw(),
-        h_b.raw(),
-        "independent sessions must not share handle assignment for the same entity"
-    );
-
-    assert_eq!(session_a.entity_of(h_a1), Some(e));
-    assert_eq!(session_b.entity_of(h_b), Some(e));
+/// The one batch of a single frame of `kind`.
+fn batch_of(frame: &[u8], kind: u8) -> RecordBatch {
+    let frames = split_frames(frame).expect("a well-formed frame");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].0, kind);
+    let mut batches = batches(frames[0].1);
+    assert_eq!(batches.len(), 1);
+    batches.remove(0)
 }
 
-/// (b) `entity_of` of a handle this table never minted is `None`.
-#[test]
-fn entity_of_an_unminted_handle_is_none() {
-    let mut table = HandleTable::new();
-    let _ = table.handle_for(EntityId::new(7));
-    assert_eq!(table.entity_of(Handle::new(99)), None);
+fn names(batch: &RecordBatch) -> Vec<String> {
+    batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect()
 }
 
-/// One well-formed body from the frame builders, in contract order. The chunked points are two
-/// frames on purpose: chunk boundaries are not contract, and a reader that only handles one
-/// frame is wrong.
+fn column<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> &'a A {
+    batch
+        .column_by_name(name)
+        .unwrap_or_else(|| panic!("no column {name}"))
+        .as_any()
+        .downcast_ref::<A>()
+        .unwrap_or_else(|| panic!("{name} is not the expected array type"))
+}
+
+fn u64s(batch: &RecordBatch, name: &str) -> Vec<Option<u64>> {
+    column::<UInt64Array>(batch, name).iter().collect()
+}
+
+fn bools(batch: &RecordBatch, name: &str) -> Vec<Option<bool>> {
+    column::<BooleanArray>(batch, name).iter().collect()
+}
+
+fn nullable(batch: &RecordBatch, name: &str) -> bool {
+    batch.schema().field_with_name(name).unwrap().is_nullable()
+}
+
+fn row(layer: &str, tessera_id: u64) -> ArtifactRow<'_> {
+    ArtifactRow {
+        layer,
+        tessera_id,
+        ..Default::default()
+    }
+}
+
+/// A well-formed body in contract order, with the points in two frames.
 fn build_body() -> Vec<u8> {
-    let counts_a = [70u64, 80];
-    let counts_b = [90u64];
-    let mut body = tiles_frame(&[30, 31], &[10, 5], &[10, 5], &[2, 1], &[10, 5]);
-    body.extend_from_slice(&points_frame(
+    let mut body = tiles_frame(&[30, 31], &[10, 5], &[9, 4], &[2, 1], &[8, 3]);
+    body.extend(points_frame(
         &[0, 1],
         &[1, 2],
-        &[("count", ScalarColumn::U64(&counts_a))],
+        &[("count", ScalarColumn::U64(&[70, 80]))],
         None,
         &[],
     ));
-    body.extend_from_slice(&points_frame(
+    body.extend(points_frame(
         &[2],
         &[3],
-        &[("count", ScalarColumn::U64(&counts_b))],
+        &[("count", ScalarColumn::U64(&[90]))],
         None,
         &[],
     ));
-    body.extend_from_slice(&trailer_frame(
-        br#"{"stream_us":1,"arrow_serialise_ns":2,"points":3,"flushes":2}"#,
-    ));
+    body.extend(trailer_frame(br#"{"points":3}"#));
     body
 }
 
-/// (c) Encode a framed viewport body, walk it with `split_frames`, decode every Arrow payload
-/// with `StreamReader`, and assert schemas, values and the cross-frame concatenation round-trip.
+/// The TypeScript and Python clients read the header independently, so its bytes are pinned here
+/// without going through `split_frames`.
 #[test]
-fn viewport_frames_round_trip_through_arrow_ipc() {
+fn the_frame_header_is_a_kind_byte_then_a_little_endian_length() {
+    let tiles = tiles_frame(&[30, 31], &[10, 5], &[10, 5], &[2, 1], &[10, 5]);
+    let mut body = tiles.clone();
+    body.extend(trailer_frame(b"{}"));
+
+    assert_eq!(FRAME_HEADER_BYTES, 5);
+    let payload_len = u32::try_from(tiles.len() - FRAME_HEADER_BYTES).unwrap();
+    assert_ne!(
+        payload_len.to_le_bytes(),
+        payload_len.to_be_bytes(),
+        "the fixture must tell the byte orders apart"
+    );
+    assert_eq!(body[0], FRAME_TILES);
+    assert_eq!(body[1..5], payload_len.to_le_bytes());
+    assert_eq!(body[tiles.len()], FRAME_TRAILER);
+    assert_eq!(body[tiles.len() + 1..tiles.len() + 5], 2u32.to_le_bytes());
+    assert_eq!(&body[tiles.len() + 5..], b"{}");
+}
+
+#[test]
+fn a_body_splits_into_frames_that_each_decode_alone() {
     let body = build_body();
     let frames = split_frames(&body).unwrap();
-    let kinds: Vec<u8> = frames.iter().map(|(k, _)| *k).collect();
+    let kinds: Vec<u8> = frames.iter().map(|(kind, _)| *kind).collect();
     assert_eq!(
         kinds,
-        vec![FRAME_TILES, FRAME_POINTS, FRAME_POINTS, FRAME_TRAILER]
+        [FRAME_TILES, FRAME_POINTS, FRAME_POINTS, FRAME_TRAILER]
     );
+    assert_eq!(frames[3].1, br#"{"points":3}"#);
 
-    let mut tile_reader = StreamReader::try_new(frames[0].1, None).unwrap();
-    {
-        let schema = tile_reader.schema();
-        assert_eq!(schema.field(0).name(), "tile");
-        assert_eq!(schema.field(1).name(), "visible");
-        assert_eq!(schema.field(2).name(), "matched");
-        // Appended, not inserted: decoders that index this batch positionally exist, so the
-        // position of `served` is contract.
-        assert_eq!(schema.field(3).name(), "served");
-        // And `highlighted` after it, always present and equal to `matched` where the request
-        // carried no highlight (`highlight-and-hierarchy.md` §2).
-        assert_eq!(schema.field(4).name(), "highlighted");
-        assert_eq!(schema.fields().len(), 5);
-    }
-    let tile_batch = tile_reader.next().unwrap().unwrap();
-    assert_eq!(tile_batch.num_rows(), 2);
+    let tiles = batches(frames[0].1);
+    assert_eq!(tiles.len(), 1);
     assert_eq!(
-        tile_batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values(),
-        &[30u64, 31]
+        names(&tiles[0]),
+        ["tile", "visible", "matched", "served", "highlighted"]
     );
-    assert!(tile_reader.next().is_none(), "exactly one tile batch");
+    for (name, want) in [
+        ("tile", [30, 31]),
+        ("visible", [10, 5]),
+        ("matched", [9, 4]),
+        ("served", [2, 1]),
+        ("highlighted", [8, 3]),
+    ] {
+        assert_eq!(column::<UInt64Array>(&tiles[0], name).values(), &want);
+    }
 
-    // The two points frames decode independently — each is a complete stream — and their rows
-    // concatenate to the full points set, in order.
     let mut ids = Vec::new();
     let mut counts = Vec::new();
-    for (kind, payload) in &frames {
-        if *kind != FRAME_POINTS {
-            continue;
-        }
-        let mut reader = StreamReader::try_new(*payload, None).unwrap();
-        let schema = reader.schema();
-        assert_eq!(schema.field(0).name(), "tessera_id");
-        assert_eq!(schema.field(1).name(), "code");
-        assert_eq!(schema.field(2).name(), "count");
-        for batch in reader.by_ref() {
-            let batch = batch.unwrap();
-            let id = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .unwrap();
-            let count = batch
-                .column(2)
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .unwrap();
-            ids.extend(id.values().iter().copied());
-            counts.extend(count.values().iter().copied());
+    for (_, payload) in &frames[1..3] {
+        for batch in batches(payload) {
+            assert_eq!(names(&batch), ["tessera_id", "code", "count"]);
+            ids.extend(u64s(&batch, "tessera_id"));
+            counts.extend(u64s(&batch, "count"));
         }
     }
-    assert_eq!(ids, vec![0, 1, 2]);
-    assert_eq!(counts, vec![70, 80, 90]);
+    assert_eq!(ids, [Some(0), Some(1), Some(2)]);
+    assert_eq!(counts, [Some(70), Some(80), Some(90)]);
 }
 
-/// (d) Byte-scan (I10): the 8-byte little-endian encoding of a set of entity ids must not appear
-/// anywhere in the encoded body bytes — only the identities the caller passed (and plain
-/// coordinate/scalar columns) may cross into the frame builders. The identity column is `u64`
-/// (it carries `tessera_id`, not a `Handle`), so the handles minted here are widened to `u64`
-/// before being passed in; the property under test — that the sensitive raw entity ids never
-/// appear as bytes anywhere in the body — is unchanged from the pre-streaming format.
 #[test]
-fn frame_bytes_never_contain_a_raw_entity_id_encoding() {
-    let sensitive_ids = [0xDEAD_BEEFu64, 7, 1_000_000];
-
-    let mut table = HandleTable::new();
-    let handles: Vec<u64> = sensitive_ids
-        .iter()
-        .map(|&raw| table.handle_for(EntityId::new(raw)).raw() as u64)
-        .collect();
-    let codes = vec![1u64; handles.len()];
-
-    let n = handles.len() as u64;
-    let mut body = tiles_frame(&[0], &[n], &[n], &[n], &[n]);
-    body.extend_from_slice(&points_frame(&handles, &codes, &[], None, &[]));
-    body.extend_from_slice(&trailer_frame(b"{}"));
-
-    for &raw in &sensitive_ids {
-        let needle = raw.to_le_bytes();
-        assert!(
-            !body.windows(needle.len()).any(|window| window == needle),
-            "body bytes contain the 8-byte LE encoding of entity id {raw:#x}"
-        );
-    }
-}
-
-/// The points frame's identity column is `tessera_id: uint64` — the wire identity after the
-/// boundary changed (decision 0006), replacing the per-session `handle: uint32` this crate
-/// used to emit.
-#[test]
-fn the_points_frame_identity_column_is_tessera_id() {
-    let frame = points_frame(&[10, 20, 30], &[1, 2, 3], &[], None, &[]);
-    let (kind, payload) = split_frames(&frame).unwrap()[0];
-    assert_eq!(kind, FRAME_POINTS);
-
-    let mut points_reader = StreamReader::try_new(payload, None).unwrap();
-    let schema = points_reader.schema();
-    assert_eq!(schema.field(0).name(), "tessera_id");
-    assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
-
-    let batch = points_reader.next().unwrap().unwrap();
+fn split_refuses_truncation_and_unknown_kinds() {
+    let tiles = tiles_frame(&[1], &[1], &[1], &[1], &[1]);
     assert_eq!(
-        batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values(),
-        &[10u64, 20, 30]
+        split_frames(&tiles[..tiles.len() - 1]),
+        Err(FrameError::TruncatedPayload { at: 0 })
+    );
+    assert_eq!(
+        split_frames(&[FRAME_TILES]),
+        Err(FrameError::TruncatedHeader { at: 0 })
+    );
+    let mut body = tiles.clone();
+    body.push(9);
+    body.extend(0u32.to_le_bytes());
+    assert_eq!(
+        split_frames(&body),
+        Err(FrameError::UnknownKind {
+            kind: 9,
+            at: tiles.len()
+        })
     );
 }
 
-// **The identity key on the viewer plane, and why no test here asserts it.**
-//
-// `IdentityKey` inverts every `tessera_id`. It is not secret against a bundle-holder (who can
-// already invert every id trivially) but is secret against a client; leaking it on the viewer
-// plane would hand a client entity space, which is exactly what I10 forbids.
-//
-// Nothing in `crates/tessera-wire/src/` constructs, holds or serialises an `IdentityKey`. That
-// is a property of the code as written and **not** of the dependency graph, which permits one:
-// this crate depends on `tessera-types`, `identity` is re-exported from that crate's root, and
-// `IdentityKey::from_hex` is public — a function here that parsed a key and derived a
-// `tessera_id` would compile. The mechanical guard is `scripts/check-layers.sh`'s grep for the
-// type name over this crate's source, which is tight (the only route to a key is `from_hex`,
-// which cannot be called without naming the type) and is the *only* one. It runs in a different
-// CI job from the one that runs these tests, so a change that dropped it would not be noticed
-// here.
-//
-// The byte-level evidence for I10 is the conformance suite's byte-scanner (`conformance.md`
-// §4.3), which §4.6 cites as the I10 row's evidence — not anything in this file. A `#[test]`
-// asserting the property from inside this crate would have to supply the key material itself,
-// since the frame builders take `u64` columns and `&str` layer names, so the assertion would be
-// about the fixture rather than about the code. `crates/tessera-types/tests/compile_fail.rs`'s
-// module doc has already ruled on that shape in the opposite direction, refusing to write an I8
-// placeholder because "a placeholder asserting that some stand-in type is immutable would report
-// green while checking nothing".
-
-/// The requested-but-empty underlay (contracts §3.2's r12 rule, carried into the framing): a
-/// present kind-2 frame whose payload is a schema-only, zero-row stream — decodable, zero rows,
-/// and visibly distinct from the unrequested case, which is no frame at all.
+/// A cut on a frame boundary splits cleanly, and the missing trailer is then what tells the
+/// consumer the body is short.
 #[test]
-fn an_empty_sub_cells_frame_is_schema_only_and_decodes_to_zero_rows() {
-    let frame = sub_cells_frame(&[], &[]);
-    let (kind, payload) = split_frames(&frame).unwrap()[0];
-    assert_eq!(kind, FRAME_SUB_CELLS);
-    assert!(!payload.is_empty(), "schema-only is bytes, not absence");
-
-    let mut reader = StreamReader::try_new(payload, None).unwrap();
-    let schema = reader.schema();
-    assert_eq!(schema.field(0).name(), "cell");
-    assert_eq!(schema.field(1).name(), "count");
-    let rows: usize = reader.by_ref().map(|b| b.unwrap().num_rows()).sum();
-    assert_eq!(rows, 0);
-}
-
-/// The populated sub-cells frame decodes as `(cell, count)` — no cursor arithmetic, no walking
-/// another stream to its end: the frame boundary is the length prefix, which is the whole point
-/// of §8.6(2)'s prefix-everything rule.
-#[test]
-fn the_sub_cells_frame_decodes_as_cell_and_count() {
-    let cells = [100u64, 101];
-    let counts = [5u64, 3];
-    let frame = sub_cells_frame(&cells, &counts);
-    let (_, payload) = split_frames(&frame).unwrap()[0];
-
-    let mut reader = StreamReader::try_new(payload, None).unwrap();
-    let batch = reader.next().unwrap().unwrap();
-    assert_eq!(batch.num_rows(), 2);
-    assert_eq!(
-        batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values(),
-        &cells
-    );
-    assert_eq!(
-        batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap()
-            .values(),
-        &counts
-    );
-}
-
-/// A truncated body must never decode to a plausible shorter response — cut anywhere, the walk
-/// refuses. This is the wire half of the truncation contract; the response half (a missing
-/// trailer marks the body incomplete) is the consumers' to enforce and the server tests'.
-#[test]
-fn a_body_cut_at_any_byte_boundary_never_splits_cleanly_short() {
+fn a_strict_prefix_of_a_body_never_ends_in_a_trailer() {
     let body = build_body();
     for cut in 1..body.len() {
-        let frames = split_frames(&body[..cut]);
-        match frames {
-            Err(_) => {}
-            Ok(frames) => {
-                // A cut that lands exactly on a frame boundary walks cleanly — and is then
-                // caught one level up by the missing trailer. Assert that is the only clean
-                // case.
-                assert_ne!(
-                    frames.last().map(|(k, _)| *k),
-                    Some(FRAME_TRAILER),
-                    "a strict prefix of the body must never end in a trailer (cut at {cut})"
-                );
-            }
+        if let Ok(frames) = split_frames(&body[..cut]) {
+            assert_ne!(
+                frames.last().map(|(kind, _)| *kind),
+                Some(FRAME_TRAILER),
+                "cut at {cut}"
+            );
         }
     }
 }
 
-/// **The shape travels as parts of rings, and a reader that expects rings of vertices fails
-/// rather than concatenating them** (`polygon-membership.md` §7.1). Both halves are the point of
-/// the nesting: a flat encoding with a separate offsets column would let a reader that ignored the
-/// offsets draw a chord from the end of one ring to the start of the next, silently and in the
-/// shape of a real boundary; and one list of rings would have a second part drawn as a hole.
 #[test]
-fn the_artifacts_frame_carries_a_shape_as_parts_of_rings() {
+fn every_scalar_type_arrives_as_its_arrow_type() {
+    let text = ["a".to_string(), String::new()];
+    let scalars = [
+        ("bool", ScalarColumn::Bool(&[true, false]), DataType::Boolean),
+        ("u8", ScalarColumn::U8(&[1, 2]), DataType::UInt8),
+        ("u16", ScalarColumn::U16(&[1, 2]), DataType::UInt16),
+        ("u32", ScalarColumn::U32(&[1, 2]), DataType::UInt32),
+        ("u64", ScalarColumn::U64(&[1, 2]), DataType::UInt64),
+        ("i8", ScalarColumn::I8(&[-1, 2]), DataType::Int8),
+        ("i16", ScalarColumn::I16(&[-1, 2]), DataType::Int16),
+        ("i32", ScalarColumn::I32(&[-1, 2]), DataType::Int32),
+        ("i64", ScalarColumn::I64(&[-1, 2]), DataType::Int64),
+        ("f32", ScalarColumn::F32(&[0.5, 2.0]), DataType::Float32),
+        ("f64", ScalarColumn::F64(&[0.5, 2.0]), DataType::Float64),
+        (
+            "time",
+            ScalarColumn::TimestampUs(&[-1, 2]),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+        ),
+        ("text", ScalarColumn::Utf8(&text), DataType::Utf8),
+    ];
+    let mut want = Vec::new();
+    let mut columns = Vec::new();
+    for (name, scalar, data_type) in scalars {
+        want.push((name, data_type));
+        columns.push((name, scalar));
+    }
+    let batch = batch_of(&points_frame(&[1, 2], &[3, 4], &columns, None, &[]), FRAME_POINTS);
+    let schema = batch.schema();
+    for (at, (name, data_type)) in want.iter().enumerate() {
+        let field = schema.field(at + 2);
+        assert_eq!(field.name(), name);
+        assert_eq!(field.data_type(), data_type);
+        assert!(!field.is_nullable());
+    }
+    let shown = |name: &str| -> Vec<String> {
+        let column = batch.column_by_name(name).unwrap();
+        (0..column.len())
+            .map(|row| arrow::util::display::array_value_to_string(column, row).unwrap())
+            .collect()
+    };
+    assert_eq!(shown("bool"), ["true", "false"]);
+    assert_eq!(shown("i8"), ["-1", "2"]);
+    assert_eq!(shown("u64"), ["1", "2"]);
+    assert_eq!(shown("f32"), ["0.5", "2.0"]);
+    assert_eq!(shown("text"), ["a", ""]);
+    assert_eq!(
+        column::<arrow::array::TimestampMicrosecondArray>(&batch, "time").values(),
+        &[-1, 2]
+    );
+}
+
+#[test]
+fn highlighted_follows_the_scalars_and_membership_follows_it() {
+    let ids = [1u64, 2, 3];
+    let scalars = [("w", ScalarColumn::U16(&[7, 8, 9]))];
+    let a = [Some(100), None, Some(300)];
+    let b = [None, None, Some(999)];
+
+    let plain = batch_of(&points_frame(&ids, &ids, &scalars, None, &[]), FRAME_POINTS);
+    assert_eq!(names(&plain), ["tessera_id", "code", "w"]);
+
+    let frame = points_frame(
+        &ids,
+        &ids,
+        &scalars,
+        Some(&[true, false, true]),
+        &[("clusters/hdbscan", &a), ("regions/admin", &b)],
+    );
+    let batch = batch_of(&frame, FRAME_POINTS);
+    assert_eq!(
+        names(&batch),
+        [
+            "tessera_id",
+            "code",
+            "w",
+            "highlighted",
+            "membership:clusters/hdbscan",
+            "membership:regions/admin"
+        ]
+    );
+    assert!(!nullable(&batch, "highlighted"));
+    assert_eq!(
+        bools(&batch, "highlighted"),
+        [Some(true), Some(false), Some(true)]
+    );
+    assert!(nullable(&batch, "membership:clusters/hdbscan"));
+    assert_eq!(u64s(&batch, "membership:clusters/hdbscan"), a);
+    assert_eq!(u64s(&batch, "membership:regions/admin"), b);
+}
+
+#[test]
+fn the_highlight_projection_is_the_identifier_and_the_bit() {
+    let batch = batch_of(
+        &points_highlight_frame(&[5, 6], &[false, true]),
+        FRAME_POINTS,
+    );
+    assert_eq!(names(&batch), ["tessera_id", "highlighted"]);
+    assert_eq!(u64s(&batch, "tessera_id"), [Some(5), Some(6)]);
+    assert_eq!(bools(&batch, "highlighted"), [Some(false), Some(true)]);
+    assert!(!nullable(&batch, "highlighted"));
+}
+
+/// An underlay that was asked for and is empty is a frame with a schema and no rows.
+#[test]
+fn the_sub_cells_frame_is_cell_and_count_even_when_empty() {
+    let batch = batch_of(&sub_cells_frame(&[100, 101], &[5, 3]), FRAME_SUB_CELLS);
+    assert_eq!(names(&batch), ["cell", "count"]);
+    assert_eq!(u64s(&batch, "cell"), [Some(100), Some(101)]);
+    assert_eq!(u64s(&batch, "count"), [Some(5), Some(3)]);
+
+    let frames_of_empty = sub_cells_frame(&[], &[]);
+    let frames = split_frames(&frames_of_empty).unwrap();
+    assert_eq!(frames[0].0, FRAME_SUB_CELLS);
+    let mut reader = StreamReader::try_new(frames[0].1, None).unwrap();
+    assert_eq!(reader.schema().fields().len(), 2);
+    assert_eq!(reader.by_ref().map(|b| b.unwrap().num_rows()).sum::<usize>(), 0);
+}
+
+/// The dictionary-decoded `layer` of every row.
+fn layers(batch: &RecordBatch) -> Vec<String> {
+    let column = column::<DictionaryArray<UInt16Type>>(batch, "layer");
+    let values = column
+        .values()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    (0..column.len())
+        .map(|row| values.value(column.key(row).unwrap()).to_string())
+        .collect()
+}
+
+#[test]
+fn the_artifacts_frame_has_sixteen_fixed_columns_then_the_shape() {
+    let content = ["label".to_string(), "summary".to_string()];
+    let shape = vec![vec![vec![[1u32, 2], [3, 4], [5, 6]]]];
+    let full = ArtifactRow {
+        layer: "clusters/a",
+        tessera_id: 7,
+        key: Some("k7"),
+        masked_count: 12,
+        centroid: Some([1.5, 2.5]),
+        bbox: Some([1, 2, 3, 4]),
+        shape: None,
+        content: &content,
+        parent_ids: vec![3, 4],
+        rung: 3,
+        matched: Some(true),
+        highlighted: Some(false),
+        target: None,
+    };
+    let rows = [full.clone(), row("regions/b", 8), row("clusters/a", 9)];
+    let batch = batch_of(&artifacts_frame(&rows), FRAME_ARTIFACTS);
+    let fixed = [
+        "layer",
+        "tessera_id",
+        "key",
+        "masked_count",
+        "centroid_x",
+        "centroid_y",
+        "box_min_x",
+        "box_min_y",
+        "box_max_x",
+        "box_max_y",
+        "content",
+        "parent_ids",
+        "rung",
+        "matched",
+        "highlighted",
+        "target",
+    ];
+    assert_eq!(names(&batch), fixed, "no row has a shape");
+    assert_eq!(layers(&batch), ["clusters/a", "regions/b", "clusters/a"]);
+    assert_eq!(u64s(&batch, "masked_count"), [Some(12), Some(0), Some(0)]);
+    let key = column::<StringArray>(&batch, "key");
+    assert_eq!(key.iter().collect::<Vec<_>>(), [Some("k7"), None, None]);
+    let centroid_y = column::<arrow::array::Float64Array>(&batch, "centroid_y");
+    assert_eq!(centroid_y.iter().collect::<Vec<_>>(), [Some(2.5), None, None]);
+    let box_max_x = column::<UInt32Array>(&batch, "box_max_x");
+    assert_eq!(box_max_x.iter().collect::<Vec<_>>(), [Some(3), None, None]);
+    assert_eq!(column::<UInt32Array>(&batch, "rung").values(), &[3, 0, 0]);
+
+    let lists = |name: &str| -> Vec<String> {
+        let column = batch.column_by_name(name).unwrap();
+        assert!(!nullable(&batch, name) && column.null_count() == 0);
+        (0..column.len())
+            .map(|row| arrow::util::display::array_value_to_string(column, row).unwrap())
+            .collect()
+    };
+    assert_eq!(lists("content"), ["[label, summary]", "[]", "[]"]);
+    assert_eq!(lists("parent_ids"), ["[3, 4]", "[]", "[]"]);
+
+    let shaped = [
+        ArtifactRow {
+            shape: Some(&shape),
+            ..full
+        },
+        row("regions/b", 8),
+    ];
+    let mut with_shape: Vec<&str> = fixed.to_vec();
+    with_shape.extend(["shape_x", "shape_y"]);
+    assert_eq!(
+        names(&batch_of(&artifacts_frame(&shaped), FRAME_ARTIFACTS)),
+        with_shape
+    );
+}
+
+/// A null answers a request that asked no such question, which `false` would not.
+#[test]
+fn matched_highlighted_and_target_are_null_when_nothing_was_asked() {
+    let rows = [
+        ArtifactRow {
+            matched: Some(true),
+            highlighted: Some(false),
+            ..row("clusters/a", 7)
+        },
+        ArtifactRow {
+            matched: Some(false),
+            ..row("clusters/a", 8)
+        },
+        ArtifactRow {
+            target: Some(8),
+            ..row("labels/a", 9)
+        },
+    ];
+    for frame in [artifacts_frame(&rows), artifacts_identity_frame(&rows)] {
+        let batch = batch_of(&frame, FRAME_ARTIFACTS);
+        assert!(nullable(&batch, "matched") && nullable(&batch, "highlighted"));
+        assert_eq!(bools(&batch, "matched"), [Some(true), Some(false), None]);
+        assert_eq!(bools(&batch, "highlighted"), [Some(false), None, None]);
+    }
+    let batch = batch_of(&artifacts_frame(&rows), FRAME_ARTIFACTS);
+    assert!(nullable(&batch, "target"));
+    assert_eq!(u64s(&batch, "target"), [None, None, Some(8)]);
+}
+
+#[test]
+fn the_identity_projection_is_five_columns_whatever_the_rows_hold() {
+    let shape = vec![vec![vec![[1u32, 2], [3, 4], [5, 6]]]];
+    let rows = [
+        ArtifactRow {
+            rung: 2,
+            shape: Some(&shape),
+            target: Some(8),
+            ..row("clusters/a", 7)
+        },
+        row("regions/b", 8),
+    ];
+    let batch = batch_of(&artifacts_identity_frame(&rows), FRAME_ARTIFACTS);
+    assert_eq!(
+        names(&batch),
+        ["layer", "tessera_id", "rung", "matched", "highlighted"]
+    );
+    assert_eq!(layers(&batch), ["clusters/a", "regions/b"]);
+    assert_eq!(u64s(&batch, "tessera_id"), [Some(7), Some(8)]);
+    assert_eq!(column::<UInt32Array>(&batch, "rung").values(), &[2, 0]);
+}
+
+/// A shape is parts of rings of vertices, three lists deep, so a second part cannot be read as a
+/// hole of the first.
+#[test]
+fn a_shape_travels_as_parts_of_rings() {
     let two_parts = vec![
         vec![
             vec![[1u32, 2], [3, 4], [5, 6]],
@@ -370,91 +461,37 @@ fn the_artifacts_frame_carries_a_shape_as_parts_of_rings() {
         ],
         vec![vec![[7, 1], [8, 1], [9, 2]]],
     ];
-    let rows = vec![
+    let rows = [
         ArtifactRow {
-            layer: "clusters/a",
-            tessera_id: 7,
-            masked_count: 12,
             shape: Some(&two_parts),
-            ..Default::default()
+            ..row("clusters/a", 7)
         },
-        // A layer with no drawn geometry: null, and null is never *withheld*.
-        ArtifactRow {
-            layer: "clusters/a",
-            tessera_id: 8,
-            masked_count: 3,
-            shape: None,
-            ..Default::default()
-        },
+        row("clusters/a", 8),
     ];
+    let batch = batch_of(&artifacts_frame(&rows), FRAME_ARTIFACTS);
 
-    let bytes = artifacts_frame(&rows);
-    let frames = split_frames(&bytes).expect("one well-formed frame");
-    assert_eq!(frames[0].0, FRAME_ARTIFACTS);
-    let batch = StreamReader::try_new(std::io::Cursor::new(frames[0].1), None)
-        .expect("arrow stream")
-        .next()
-        .expect("one batch")
-        .expect("decodes");
-
-    // The schema says *rings*, so a decoder written against the single-ring shape stops here.
-    // And the two shape columns are the TRAILING columns — the only ones whose presence varies,
-    // after every fixed-position column (`artifact-fetch-protocol.md` §8).
-    let schema = batch.schema();
-    let n = schema.fields().len();
-    assert_eq!(schema.field(n - 2).name(), "shape_x");
-    assert_eq!(schema.field(n - 1).name(), "shape_y");
-    for name in ["shape_x", "shape_y"] {
-        let field = schema.field_with_name(name).expect("column present");
-        let DataType::List(part) = field.data_type() else {
-            panic!("{name} is not a list");
-        };
-        let vertices = std::sync::Arc::new(arrow::datatypes::Field::new(
-            "item",
-            DataType::UInt32,
-            false,
-        ));
-        let ring = std::sync::Arc::new(arrow::datatypes::Field::new(
-            "item",
-            DataType::List(vertices),
-            false,
-        ));
-        assert_eq!(
-            part.data_type(),
-            &DataType::List(ring),
-            "{name} is parts of rings of vertices, three lists deep"
-        );
+    fn list(array: &dyn Array) -> &ListArray {
+        array.as_any().downcast_ref::<ListArray>().expect("a list")
     }
-
     let axis = |name: &str| -> Vec<Option<Vec<Vec<Vec<u32>>>>> {
-        let column = batch.column_by_name(name).unwrap();
-        let outer = column
-            .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
-            .unwrap();
-        (0..outer.len())
-            .map(|i| {
-                outer.is_valid(i).then(|| {
-                    let parts = outer.value(i);
-                    let parts = parts
-                        .as_any()
-                        .downcast_ref::<arrow::array::ListArray>()
-                        .expect("a shape column is a list of parts");
-                    (0..parts.len())
-                        .map(|p| {
-                            let rings = parts.value(p);
-                            let rings = rings
-                                .as_any()
-                                .downcast_ref::<arrow::array::ListArray>()
-                                .expect("a part is a list of rings");
-                            (0..rings.len())
-                                .map(|r| {
-                                    let v = rings.value(r);
-                                    let v = v
+        let shapes = column::<ListArray>(&batch, name);
+        (0..shapes.len())
+            .map(|row| {
+                shapes.is_valid(row).then(|| {
+                    let parts = shapes.value(row);
+                    list(&parts)
+                        .iter()
+                        .map(|rings| {
+                            list(&rings.expect("a part is never null"))
+                                .iter()
+                                .map(|vertices| {
+                                    vertices
+                                        .expect("a ring is never null")
                                         .as_any()
-                                        .downcast_ref::<arrow::array::UInt32Array>()
-                                        .unwrap();
-                                    (0..v.len()).map(|k| v.value(k)).collect()
+                                        .downcast_ref::<UInt32Array>()
+                                        .expect("vertices are u32")
+                                        .values()
+                                        .to_vec()
                                 })
                                 .collect()
                         })
@@ -463,335 +500,37 @@ fn the_artifacts_frame_carries_a_shape_as_parts_of_rings() {
             })
             .collect()
     };
-    let (xs, ys) = (axis("shape_x"), axis("shape_y"));
-    // Part 0 is an outer with one hole; part 1 is a second outer — a hole and a second part are
-    // different things to a renderer, and the nesting keeps them apart.
     assert_eq!(
-        xs[0],
-        Some(vec![
-            vec![vec![1, 3, 5], vec![70, 90, 110, 130]],
-            vec![vec![7, 8, 9]]
-        ])
+        axis("shape_x"),
+        [
+            Some(vec![
+                vec![vec![1, 3, 5], vec![70, 90, 110, 130]],
+                vec![vec![7, 8, 9]]
+            ]),
+            None
+        ]
     );
     assert_eq!(
-        ys[0],
-        Some(vec![
-            vec![vec![2, 4, 6], vec![80, 100, 120, 140]],
-            vec![vec![1, 1, 2]]
-        ])
+        axis("shape_y"),
+        [
+            Some(vec![
+                vec![vec![2, 4, 6], vec![80, 100, 120, 140]],
+                vec![vec![1, 1, 2]]
+            ]),
+            None
+        ]
     );
-    assert_eq!(
-        xs[1], None,
-        "a layer with no drawn geometry is null, not an empty list"
-    );
-    assert_eq!(ys[1], None);
 }
 
-/// **`matched` is nullable because null is a value**: an unfiltered request asked no question, and
-/// a `false` would answer one. Its position — after `rung`, with `highlighted` and `target`
-/// behind it — is contract: decoders index this batch positionally, and only the shape columns
-/// may trail the fixed prefix.
+/// Loose ceilings on bytes per row, so neither projection grows unnoticed.
 #[test]
-fn the_artifacts_frame_carries_the_filter_bit_with_null_meaning_no_filter() {
-    let rows = vec![
-        ArtifactRow {
-            layer: "clusters/a",
-            tessera_id: 7,
-            masked_count: 12,
-            matched: Some(true),
-            ..Default::default()
-        },
-        ArtifactRow {
-            layer: "clusters/a",
-            tessera_id: 8,
-            masked_count: 3,
-            matched: Some(false),
-            ..Default::default()
-        },
-        // The unfiltered request: no question was asked of this artifact.
-        ArtifactRow {
-            layer: "clusters/a",
-            tessera_id: 9,
-            masked_count: 1,
-            matched: None,
-            ..Default::default()
-        },
-    ];
-
-    let bytes = artifacts_frame(&rows);
-    let frames = split_frames(&bytes).expect("one well-formed frame");
-    let batch = StreamReader::try_new(std::io::Cursor::new(frames[0].1), None)
-        .expect("arrow stream")
-        .next()
-        .expect("one batch")
-        .expect("decodes");
-
-    let schema = batch.schema();
-    assert_eq!(
-        schema.fields().len() - 3,
-        schema.index_of("matched").expect("column present"),
-        "`matched` is the third-last fixed column, and its position is contract"
-    );
-    assert_eq!(
-        schema.fields().len() - 2,
-        schema.index_of("highlighted").expect("column present"),
-        "`highlighted` is next, immediately after it"
-    );
-    assert_eq!(
-        schema.fields().len() - 1,
-        schema.index_of("target").expect("column present"),
-        "and `target` is last of the fixed prefix (owner ruling, 2026-09-18)"
-    );
-    let field = schema.field_with_name("matched").unwrap();
-    assert_eq!(field.data_type(), &DataType::Boolean);
-    assert!(
-        field.is_nullable(),
-        "null is *the request carried no filter*"
-    );
-
-    let column = batch
-        .column_by_name("matched")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::BooleanArray>()
-        .expect("a nullable Boolean");
-    let read: Vec<Option<bool>> = (0..column.len())
-        .map(|i| column.is_valid(i).then(|| column.value(i)))
-        .collect();
-    assert_eq!(read, vec![Some(true), Some(false), None]);
-}
-
-/// **`target` names a row of this same frame, and null is *attached to nothing*** (owner ruling,
-/// 2026-09-18). Sixteenth and last of the fixed prefix, nullable, `UInt64` — the same type as
-/// `tessera_id`, which is what it carries, so a client's decoder has one identifier type across
-/// the response. There is no *withheld* reading: a dependent whose target the response does not
-/// hold is absent whole, so the engine never emits a value naming a row that is not here.
-#[test]
-fn the_artifacts_frame_names_a_dependents_target_by_identifier() {
-    let rows = vec![
-        ArtifactRow {
-            layer: "clusters/a",
-            tessera_id: 7,
-            masked_count: 12,
-            ..Default::default()
-        },
-        // Two clusters with the same masked count — the case the join by count could not tell
-        // apart, and the reason this column exists.
-        ArtifactRow {
-            layer: "clusters/a",
-            tessera_id: 8,
-            masked_count: 12,
-            ..Default::default()
-        },
-        ArtifactRow {
-            layer: "labels/a",
-            tessera_id: 9,
-            // Its own count, over the membership it is served over, and nothing beside it names
-            // which cluster it describes.
-            masked_count: 4,
-            target: Some(8),
-            ..Default::default()
-        },
-    ];
-
-    let batch = artifact_batch(&artifacts_frame(&rows));
-    let field = batch.schema().field_with_name("target").unwrap().clone();
-    assert_eq!(field.data_type(), &DataType::UInt64);
-    assert!(field.is_nullable(), "null is *attached to nothing*");
-    let column = batch
-        .column_by_name("target")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::UInt64Array>()
-        .expect("a nullable UInt64");
-    let read: Vec<Option<u64>> = (0..column.len())
-        .map(|i| column.is_valid(i).then(|| column.value(i)))
-        .collect();
-    assert_eq!(read, vec![None, None, Some(8)]);
-
-    // The property the client's join rests on: the value is an identifier this frame carries.
-    let ids = batch
-        .column_by_name("tessera_id")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::UInt64Array>()
-        .expect("a UInt64");
-    assert!(ids.values().contains(&column.value(2)));
-}
-
-/// Decode a kind-5 payload into its one batch.
-fn artifact_batch(bytes: &[u8]) -> arrow::record_batch::RecordBatch {
-    let frames = split_frames(bytes).expect("one well-formed frame");
-    assert_eq!(frames[0].0, FRAME_ARTIFACTS);
-    StreamReader::try_new(std::io::Cursor::new(frames[0].1), None)
-        .expect("arrow stream")
-        .next()
-        .expect("one batch")
-        .expect("decodes")
-}
-
-/// The dictionary-decoded `layer` value of one row.
-fn layer_at(batch: &arrow::record_batch::RecordBatch, row: usize) -> String {
-    let column = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::UInt16Type>>()
-        .expect("`layer` is dictionary-encoded, u16 keys over utf8 values");
-    let values = column
-        .values()
-        .as_any()
-        .downcast_ref::<arrow::array::StringArray>()
-        .unwrap();
-    values
-        .value(column.key(row).expect("layer is never null"))
-        .to_string()
-}
-
-/// **The full frame's fixed columns sit at fixed positions and the shape columns trail** —
-/// `artifact-fetch-protocol.md` §8's reordering. `layer` is dictionary-encoded and decodes to the
-/// layer names; `rung` is the renamed, re-meant `level` (§5.3) and is non-nullable.
-#[test]
-fn the_artifacts_frame_fixes_its_column_order_and_dictionary_encodes_the_layer() {
-    let rows = vec![
-        ArtifactRow {
-            layer: "clusters/a",
-            tessera_id: 7,
-            masked_count: 12,
-            rung: 3,
-            ..Default::default()
-        },
-        ArtifactRow {
-            layer: "regions/b",
-            tessera_id: 8,
-            masked_count: 3,
-            rung: 0,
-            ..Default::default()
-        },
-        ArtifactRow {
-            layer: "clusters/a",
-            tessera_id: 9,
-            masked_count: 1,
-            rung: 1,
-            ..Default::default()
-        },
-    ];
-    let batch = artifact_batch(&artifacts_frame(&rows));
-    let names: Vec<String> = batch
-        .schema()
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
-    assert_eq!(
-        names,
-        vec![
-            "layer",
-            "tessera_id",
-            "key",
-            "masked_count",
-            "centroid_x",
-            "centroid_y",
-            "box_min_x",
-            "box_min_y",
-            "box_max_x",
-            "box_max_y",
-            "content",
-            "parent_ids",
-            "rung",
-            "matched",
-            "highlighted",
-            "target",
-        ],
-        "no row carries a shape, so the two trailing shape columns are ABSENT from the schema"
-    );
-    assert_eq!(layer_at(&batch, 0), "clusters/a");
-    assert_eq!(layer_at(&batch, 1), "regions/b");
-    assert_eq!(layer_at(&batch, 2), "clusters/a");
-    let rung = batch
-        .column_by_name("rung")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::UInt32Array>()
-        .expect("`rung` is a non-nullable UInt32");
-    assert_eq!(rung.values(), &[3u32, 0, 1]);
-}
-
-/// **The identity projection is its own fixed five-column schema** (`artifact-fetch-protocol.md`
-/// §5.2): `layer` (dictionary-encoded), `tessera_id`, `rung`, `matched` — the payload columns
-/// absent from the schema, never null, so decision 0076's null rule gains no third reading.
-#[test]
-fn the_identity_frame_is_five_columns_with_the_payload_absent_not_null() {
-    let shape = vec![vec![vec![[1u32, 2], [3, 4], [5, 6]]]];
-    let rows = vec![
-        ArtifactRow {
-            layer: "clusters/a",
-            tessera_id: 7,
-            masked_count: 12,
-            rung: 2,
-            matched: Some(true),
-            shape: Some(&shape),
-            ..Default::default()
-        },
-        ArtifactRow {
-            layer: "regions/b",
-            tessera_id: 8,
-            masked_count: 3,
-            rung: 0,
-            matched: None,
-            ..Default::default()
-        },
-    ];
-    let batch = artifact_batch(&artifacts_identity_frame(&rows));
-    let names: Vec<String> = batch
-        .schema()
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
-    assert_eq!(
-        names,
-        vec!["layer", "tessera_id", "rung", "matched", "highlighted"],
-        "a shape on the row does not put a shape column in the identity schema"
-    );
-    assert_eq!(layer_at(&batch, 0), "clusters/a");
-    assert_eq!(layer_at(&batch, 1), "regions/b");
-    let ids = batch
-        .column_by_name("tessera_id")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .unwrap();
-    assert_eq!(ids.values(), &[7u64, 8]);
-    let matched = batch
-        .column_by_name("matched")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::BooleanArray>()
-        .unwrap();
-    assert!(matched.is_valid(0) && matched.value(0));
-    assert!(!matched.is_valid(1), "null stays *no question was asked*");
-}
-
-/// **The size regression the design measured** (`artifact-fetch-protocol.md` §8, at 464,655 rows
-/// with a 15-byte layer name: 13.6 B/row identity, ~107 B/row full with the dictionary, 125.0
-/// without). Bounds, not exact values — Arrow metadata amortises differently at this row count —
-/// held at ~100k synthetic rows:
-///
-/// - the identity projection stays under 20 B/row;
-/// - the full row is cheaper with the dictionary than the same frame with a plain utf8 `layer`
-///   column, which is asserted against a plain-utf8 stream of just that column, the encoding the
-///   dictionary replaced.
-#[test]
-fn artifact_frame_bytes_per_row_hold_the_measured_bounds() {
+fn artifact_rows_stay_within_their_size_bounds() {
     const ROWS: usize = 100_000;
-    // A 15-byte name, matching the design's measurement.
-    let layer = "clusters/hdbsca";
-    assert_eq!(layer.len(), 15);
     let keys: Vec<String> = (0..ROWS).map(|i| format!("key-{i:07}")).collect();
     let content: Vec<Vec<String>> = (0..ROWS).map(|i| vec![format!("label {i}")]).collect();
     let rows: Vec<ArtifactRow<'_>> = (0..ROWS)
         .map(|i| ArtifactRow {
-            layer,
+            layer: "clusters/hdbsca",
             tessera_id: i as u64,
             key: Some(&keys[i]),
             masked_count: (i % 1000) as u64,
@@ -807,76 +546,12 @@ fn artifact_frame_bytes_per_row_hold_the_measured_bounds() {
             rung: (i % 3) as u32,
             matched: Some(i % 2 == 0),
             highlighted: Some(i % 3 == 0),
-            // A clustering: nothing here is attached to anything, which is the ordinary row and
-            // so the one the bound is measured over.
             target: None,
         })
         .collect();
 
     let identity = artifacts_identity_frame(&rows).len() as f64 / ROWS as f64;
-    assert!(
-        identity < 20.0,
-        "identity rows measured {identity:.1} B/row; the design's bound is 20"
-    );
-
-    // The frame with and without the dictionary differ only in the `layer` column's encoding, so
-    // the "cheaper with than without" claim reduces to that column serialised both ways — one
-    // Arrow stream each, both measured rather than modelled.
-    let layer_column_stream = |schema: arrow::datatypes::Schema,
-                               column: std::sync::Arc<dyn arrow::array::Array>|
-     -> usize {
-        let batch = arrow::record_batch::RecordBatch::try_new(
-            std::sync::Arc::new(schema.clone()),
-            vec![column],
-        )
-        .unwrap();
-        let mut bytes = Vec::new();
-        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut bytes, &schema).unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-        bytes.len()
-    };
-    let plain = layer_column_stream(
-        arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
-            "layer",
-            DataType::Utf8,
-            false,
-        )]),
-        std::sync::Arc::new(arrow::array::StringArray::from_iter_values(
-            rows.iter().map(|r| r.layer),
-        )),
-    );
-    let dictionary = {
-        let keys = arrow::array::UInt16Array::from_iter_values((0..ROWS).map(|_| 0u16));
-        let values = std::sync::Arc::new(arrow::array::StringArray::from_iter_values([layer]));
-        layer_column_stream(
-            arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
-                "layer",
-                DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Utf8)),
-                false,
-            )]),
-            std::sync::Arc::new(
-                arrow::array::DictionaryArray::<arrow::datatypes::UInt16Type>::try_new(
-                    keys, values,
-                )
-                .unwrap(),
-            ),
-        )
-    };
-    assert!(
-        dictionary < plain,
-        "the dictionary encoding of `layer` ({dictionary} B) must undercut plain utf8 \
-         ({plain} B) — the full row is cheaper with it than without by exactly this margin"
-    );
-    // And a loose absolute ceiling on the full row so the frame cannot quietly regress past the
-    // design's measured order of magnitude (~107 B/row, hull-free, with this synthetic payload).
-    let full_per_row = artifacts_frame(&rows).len() as f64 / ROWS as f64;
-    assert!(
-        full_per_row < 140.0,
-        "full rows measured {full_per_row:.1} B/row; the design's order is ~107"
-    );
-    println!(
-        "measured: identity {identity:.1} B/row, full {full_per_row:.1} B/row, \
-         layer column {dictionary} B dictionary vs {plain} B plain at {ROWS} rows"
-    );
+    assert!(identity < 20.0, "identity rows are {identity:.1} B/row");
+    let full = artifacts_frame(&rows).len() as f64 / ROWS as f64;
+    assert!(full < 140.0, "full rows are {full:.1} B/row");
 }

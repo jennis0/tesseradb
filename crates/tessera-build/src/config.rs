@@ -6207,8 +6207,7 @@ fn attribute_payload(
         attribute
             .analyser
             .as_deref()
-            .and_then(|identity| identity.split('/').next())
-            .map(str::to_string),
+            .map(|identity| tessera_analyse::declared_name(identity).to_string()),
     );
     body.insert("index".to_string(), attribute.index.into());
     body.insert("render".to_string(), attribute.render.into());

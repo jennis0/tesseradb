@@ -90,13 +90,13 @@ pub fn check_attribute(
     let analyser = match (ty, spec.analyser) {
         (ScalarType::Text, analyser) => {
             let analyser = analyser.unwrap_or(tessera_analyse::UNICODE);
-            let resolved = tessera_analyse::analyser(analyser).ok_or_else(|| {
+            let identity = tessera_analyse::identity_of(analyser).ok_or_else(|| {
                 format!(
                     "attribute '{name}': no analyser named '{analyser}'. Available: {}",
                     tessera_analyse::ANALYSER_NAMES.join(", ")
                 )
             })?;
-            Some(resolved.identity())
+            Some(identity)
         }
         (_, Some(_)) => {
             return Err(format!(

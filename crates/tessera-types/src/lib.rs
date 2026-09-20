@@ -74,7 +74,6 @@ define_id_newtype!(TermId, u32);
 // (`tessera_authz::PostingsReader::posting_at`): typing it in one crate's newtype would force the
 // other to convert at every call, reintroducing the crossing as boilerplate.
 define_id_newtype!(AttrLocalId, u32);
-define_id_newtype!(Handle, u32);
 define_id_newtype!(Priority, u16);
 define_id_newtype!(MortonCode, u32);
 

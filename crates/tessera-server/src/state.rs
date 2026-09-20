@@ -15,14 +15,7 @@ use tessera_engine::{Engine, Session};
 
 use crate::error::ApiError;
 
-/// One authorised session: the engine's [`Session`], and nothing else.
-///
-/// **No per-session handle table is held here.** The viewer plane carries `tessera_id` directly
-/// and mints no handles, so there is nothing to put in one
-/// (docs/decisions/0032-delete-the-dead-handle-table.md). Node handles, which genuinely are
-/// per-session, want exactly this seam — held alongside, not inside, `Session`, because
-/// `tessera-wire` must not depend on `tessera-engine`'s `EntityId` — and the type they need, with
-/// the constraint it records, is `tessera_wire::handles::HandleTable`.
+/// One authorised session: the engine's [`Session`].
 pub struct SessionEntry {
     pub session: Session,
 }

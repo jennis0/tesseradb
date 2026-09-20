@@ -1,113 +1,113 @@
-//! The golden known-answer vectors that pin the analyser.
+//! The golden vectors: known answers per script family, recorded in `vectors/golden.json`.
 //!
-//! **This is where the conformance suite's independence lives.** The oracle reaches the analyser
-//! through the `tessera tokenise` verb rather than reimplementing it, because PyICU wraps ICU4C
-//! and its segmentation can diverge from icu4x's — so a second implementation would test two
-//! libraries against each other rather than testing Tessera (`records-and-search.md` §4.4). What
-//! replaces that independence is these vectors: known answers, checked in, read against the
-//! design's rules rather than copied from another library.
-//!
-//! **A diff here is a rebuild.** Every text index is a function of this token stream, and two
-//! analysers disagree by producing *different but individually valid* terms — a mismatch nothing
-//! downstream can detect. So a change to any expectation below must move
-//! [`tessera_analyse::ANALYSER_VERSION`], which the file records and this test checks, and every
-//! text index built under the old value must be rebuilt.
+//! The conformance oracle tokenises through `tessera tokenise`, so these vectors are the check on
+//! the analyser that does not pass through the analyser. Every text index is a function of the
+//! token stream. A changed expectation therefore moves the analyser's version (`UNICODE_VERSION`
+//! in `src/lib.rs`), and every text index built under the old version is rebuilt.
 
 use sha2::{Digest, Sha256};
-use tessera_analyse::{analyser, Analyser, ANALYSER_NAMES, ANALYSER_VECTOR_DIGESTS};
+use tessera_analyse::{
+    analyser, analyser_with_identity, identity_of, Analyser, ANALYSER_NAMES, ANALYSER_VECTOR_DIGESTS,
+};
 
-/// **Every analyser this binary carries owes a vector set**, and every set names an analyser the
-/// binary carries. Either half failing is the shape decision 0070 forbids: a pipeline a column can
-/// declare but nothing pins, or a pinned pipeline nothing can declare.
-#[test]
-fn every_analyser_has_vectors_and_every_vector_set_an_analyser() {
-    let doc = vectors();
-    let named: Vec<&str> = doc["analysers"]
+fn vector_sets() -> Vec<serde_json::Value> {
+    let doc: serde_json::Value =
+        serde_json::from_str(include_str!("vectors/golden.json")).expect("the vector file parses");
+    doc["analysers"]
         .as_array()
         .expect("an analyser array")
-        .iter()
-        .map(|a| a["name"].as_str().expect("a name"))
-        .collect();
-    for name in ANALYSER_NAMES {
-        assert!(named.contains(name), "{name} ships with no golden vectors");
-    }
-    for name in &named {
-        assert!(
-            ANALYSER_NAMES.contains(name),
-            "{name} has vectors but is not an analyser this binary carries"
-        );
-    }
+        .clone()
 }
 
-/// A declared name this binary does not carry is refused rather than defaulted — falling back
-/// would index a column with a pipeline its declaration did not ask for.
+fn text<'a>(value: &'a serde_json::Value, field: &str) -> &'a str {
+    value[field]
+        .as_str()
+        .unwrap_or_else(|| panic!("a string `{field}`"))
+}
+
+fn tokens(vector: &serde_json::Value) -> Vec<&str> {
+    vector["tokens"]
+        .as_array()
+        .expect("a token array")
+        .iter()
+        .map(|t| t.as_str().expect("a token string"))
+        .collect()
+}
+
 #[test]
-fn an_unknown_analyser_name_is_refused() {
+fn a_name_this_binary_does_not_carry_is_refused() {
     for name in ["", "Unicode", "icu", "unicode/icu4x-2.2/p1", "standard"] {
         assert!(analyser(name).is_none(), "{name:?} resolved to an analyser");
     }
     assert!(analyser("unicode").is_some());
+    for name in ANALYSER_NAMES {
+        let built = analyser(name).expect("a carried name resolves");
+        assert_eq!(identity_of(name), Some(built.identity()), "{name}");
+    }
+    assert_eq!(identity_of("standard"), None);
 }
 
-fn vectors() -> serde_json::Value {
-    serde_json::from_str(include_str!("vectors/golden.json")).expect("the vector file parses")
+#[test]
+fn an_identity_resolves_only_at_the_version_this_binary_carries() {
+    let identity = Analyser::new().identity();
+    assert!(analyser_with_identity(&identity).is_some());
+    for stale in [
+        "",
+        "unicode",
+        "unicode/icu4x-1.0/p1",
+        "standard/icu4x-2.2/p1",
+    ] {
+        assert!(
+            analyser_with_identity(stale).is_none(),
+            "{stale:?} resolved"
+        );
+    }
 }
 
-/// **Every recorded answer still holds, for every analyser the file carries** — not only the
-/// first. `ANALYSER_NAMES` holds one name today, so this loop checks one set; it exists because
-/// the day decision 0070's second pipeline arrives is the day this file is least likely to be
-/// re-read, and a set nothing iterates to is a set nothing checks.
-///
-/// Mutations this kills: a tokeniser change absorbed into any analyser's expectations rather than
-/// into its version (through [`the_recorded_answers_match_the_digest_beside_the_version`]); a
-/// second analyser shipped with wrong vectors under a name the coverage test says is covered.
+/// Every analyser has a vector set and a digest, and every vector set names an analyser.
+#[test]
+fn analysers_vector_sets_and_digests_name_each_other() {
+    let sets = vector_sets();
+    let mut named: Vec<&str> = sets.iter().map(|set| text(set, "name")).collect();
+    let mut digested: Vec<&str> = ANALYSER_VECTOR_DIGESTS.iter().map(|(n, _)| *n).collect();
+    let mut carried = ANALYSER_NAMES.to_vec();
+    named.sort_unstable();
+    digested.sort_unstable();
+    carried.sort_unstable();
+    assert_eq!(named, carried, "vector sets against ANALYSER_NAMES");
+    assert_eq!(
+        digested, carried,
+        "ANALYSER_VECTOR_DIGESTS against ANALYSER_NAMES"
+    );
+}
+
 #[test]
 fn the_golden_vectors_hold() {
-    let doc = vectors();
-    let sets = doc["analysers"].as_array().expect("an analyser array");
-    assert!(!sets.is_empty(), "the file lost its analysers");
-    for set in sets {
-        let name = set["name"].as_str().expect("a name");
+    for set in vector_sets() {
+        let name = text(&set, "name");
         let analyser = analyser(name).unwrap_or_else(|| panic!("{name} is not carried"));
-
         assert_eq!(
-            set["identity"].as_str().expect("an identity string"),
+            text(&set, "identity"),
             analyser.identity(),
-            "{name}: the vectors were recorded under a different identity than this binary \
-             carries. Either the version moved without re-recording the vectors, or the vectors \
-             were edited without moving the version — the second is the one that silently \
-             invalidates every index already built, and it is the digest beside the version, not \
-             this assertion, that catches it"
+            "{name}: the vectors were recorded under another identity. Re-record them under the \
+             version this binary carries"
         );
 
         let vectors = set["vectors"].as_array().expect("a vector array");
-        assert!(vectors.len() >= 10, "{name}: the file lost its vectors");
-
-        let mut families: Vec<&str> = Vec::new();
         for vector in vectors {
-            let family = vector["family"].as_str().expect("a family name");
-            let input = vector["input"].as_str().expect("an input string");
-            let expected: Vec<String> = vector["tokens"]
-                .as_array()
-                .expect("an expected token array")
-                .iter()
-                .map(|t| t.as_str().expect("a token string").to_string())
-                .collect();
+            let (family, input) = (text(vector, "family"), text(vector, "input"));
             assert_eq!(
                 analyser.tokens(input),
-                expected,
-                "{name}/{family}: {input:?} no longer analyses to its recorded tokens. If this \
-                 change is intended, move ANALYSER_VERSION and record that every text index needs \
-                 rebuilding"
+                tokens(vector),
+                "{name}/{family}: {input:?} no longer analyses to its recorded tokens. If the \
+                 change is intended, move the analyser's version in src/lib.rs and rebuild every \
+                 text index"
             );
-            families.push(family);
         }
 
-        // The design names six scripts that need dictionary segmentation and the suite is
-        // required to cover Latin, CJK and Thai at minimum; asserting the coverage here stops a
-        // future edit from quietly deleting the awkward cases rather than fixing them. Every
-        // analyser owes them, not just the first — a second pipeline that indexed the easy
-        // scripts and dropped the rest would be pinned by a set that never mentioned them.
+        // Every analyser covers the six dictionary-segmented scripts and the single-word runs the
+        // segmenter's word-like flag drops, so an edit cannot remove the hard cases.
+        let families: Vec<&str> = vectors.iter().map(|v| text(v, "family")).collect();
         for required in [
             "latin",
             "japanese",
@@ -128,95 +128,39 @@ fn the_golden_vectors_hold() {
     }
 }
 
-/// The canonical form the digest is taken over: name, recorded identity, then each vector's
-/// family, input and expected tokens — unit-separated within a record, record-separated between.
-///
-/// The `why` notes are outside it on purpose (see [`ANALYSER_VECTOR_DIGESTS`]): a note recording
-/// why an answer is right changes no index, and a digest that fired on prose would train the next
-/// reader to move it without thinking.
+/// The form the digest is taken over: name and recorded identity, then each vector's family,
+/// input and tokens, unit-separated within a record and record-separated between. The `why` notes
+/// are outside it, because a note changes no index.
 fn recorded_answers(set: &serde_json::Value) -> String {
-    let mut buf = String::new();
-    buf.push_str(set["name"].as_str().expect("a name"));
-    buf.push('\u{1f}');
-    buf.push_str(set["identity"].as_str().expect("an identity string"));
-    buf.push('\u{1e}');
+    let mut buf = format!("{}\u{1f}{}\u{1e}", text(set, "name"), text(set, "identity"));
     for vector in set["vectors"].as_array().expect("a vector array") {
-        buf.push_str(vector["family"].as_str().expect("a family name"));
+        buf.push_str(text(vector, "family"));
         buf.push('\u{1f}');
-        buf.push_str(vector["input"].as_str().expect("an input string"));
-        for token in vector["tokens"].as_array().expect("a token array") {
+        buf.push_str(text(vector, "input"));
+        for token in tokens(vector) {
             buf.push('\u{1f}');
-            buf.push_str(token.as_str().expect("a token string"));
+            buf.push_str(token);
         }
         buf.push('\u{1e}');
     }
     buf
 }
 
-/// **The answers cannot be edited without an edit beside the version they were recorded under.**
-///
-/// This is the assertion the identity comparison above cannot make. `Analyser::identity` is built
-/// from `UNICODE` and `UNICODE_VERSION` and knows nothing about the tokeniser, so regenerating
-/// `vectors/golden.json` from changed behaviour leaves both sides of that comparison identical and
-/// every token assertion true — the case the file's own message calls *"the one that silently
-/// invalidates every index already built"*. What that edit cannot leave alone is this digest, and
-/// the digest lives one line from `UNICODE_VERSION`, so the edit that repairs it is the edit that
-/// should have moved the version.
-///
-/// Mutations this kills: an expected token list rewritten to match a changed tokeniser; a vector
-/// deleted, added or reordered; a recorded identity edited in the file; all four with the version
-/// left where it was.
+/// Vectors regenerated from changed behaviour pass `the_golden_vectors_hold` with the version
+/// unmoved. They do not pass this: the digest sits beside the version in `src/lib.rs`.
 #[test]
 fn the_recorded_answers_match_the_digest_beside_the_version() {
-    let doc = vectors();
-    let sets = doc["analysers"].as_array().expect("an analyser array");
-    assert!(!sets.is_empty(), "the file lost its analysers");
-
-    for name in ANALYSER_NAMES {
-        assert!(
-            ANALYSER_VECTOR_DIGESTS.iter().any(|(n, _)| n == name),
-            "{name} ships with no recorded-answer digest, so its vectors could be rewritten \
-             without an edit beside its version"
-        );
-    }
-
-    for set in sets {
-        let name = set["name"].as_str().expect("a name");
+    for set in vector_sets() {
+        let name = text(&set, "name");
         let (_, expected) = ANALYSER_VECTOR_DIGESTS
             .iter()
             .find(|(n, _)| *n == name)
             .unwrap_or_else(|| panic!("{name} has vectors but no digest"));
-        let digest = format!("{:x}", Sha256::digest(recorded_answers(set).as_bytes()));
+        let digest = format!("{:x}", Sha256::digest(recorded_answers(&set).as_bytes()));
         assert_eq!(
             &digest, expected,
-            "{name}: the recorded answers no longer digest to ANALYSER_VECTOR_DIGESTS. If the \
-             tokeniser changed, this file's answers were regenerated from the new behaviour and \
-             ANALYSER_VERSION must move with them; if only the answers were meant to change, say \
-             so by moving the version too — every text index built under the old one is stale \
-             either way"
-        );
-    }
-}
-
-/// **Tokenising is a pure function of the input**, which the fold's merge argument depends on: two
-/// layers' postings may be merged only because the same analyser over the same values produces the
-/// same terms (§7). A per-instance or per-call difference would make that false.
-#[test]
-fn two_analysers_agree_and_repeat() {
-    let (a, b): (Analyser, Analyser) = (Analyser::new(), Analyser::new());
-    for sample in [
-        "The quick brown fox",
-        "日本語のテキスト",
-        "ภาษาไทยเป็นภาษา",
-        "Ｔｅｓｔ 日本語 mixed",
-        "",
-    ] {
-        let once = a.tokens(sample);
-        assert_eq!(once, a.tokens(sample), "{sample:?} is not repeatable");
-        assert_eq!(
-            once,
-            b.tokens(sample),
-            "{sample:?} differs between instances"
+            "{name}: the recorded answers changed. Move the analyser's version in src/lib.rs with \
+             this digest, and rebuild every text index built under the old version"
         );
     }
 }

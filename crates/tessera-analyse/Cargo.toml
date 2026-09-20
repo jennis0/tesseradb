@@ -4,31 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# **The analyser is icu4x, and that is the capability rather than an interface**
-# (`records-and-search.md` §4.4). Supporting a range of languages is a requirement of this design,
-# which is what rules out the obvious tokeniser: split-on-non-alphanumerics is Latin-only and
-# produces garbage for every script without inter-word spaces. These three crates are Unicode's own
-# pure-Rust implementation of the three stages, with no JVM (decision 0021).
-#
-# `icu_normalizer` and `icu_properties` are already in the tree transitively (via `idna` → `url`);
-# `icu_casemap` and `icu_segmenter` are new, and `icu_segmenter`'s compiled data carries the
-# dictionaries for the scripts with no inter-word spaces. Promoting icu4x to a direct dependency of
-# an indexing crate is stated here rather than hidden — the `memchr` precedent.
-#
-# **All four, because the token rule is a property lookup and not only a segmentation.**
-# `icu_properties` supplies `Alphabetic` and `General_Category`, which decide whether a segment
-# becomes a token; that decision came from std's tables until 2026-08-14 and so moved with the
-# toolchain rather than with the pin below (`UNICODE_VERSION`, and #125).
-#
-# **Pinned to the minor, not the major, and the identity string is why.** `UNICODE_VERSION` records
-# `icu4x-2.2` in every bundle's manifest, and both readers refuse a bundle whose recorded identity
-# they cannot reproduce — but they compare the *string*, which a caret range lets drift. A `cargo
-# update` to `icu_segmenter` 2.3 with revised dictionary data would change the token stream while
-# leaving the identity untouched: the base build's index and the next flush's would disagree about
-# where a word ends, and a `match` would find it in the newer documents and silently miss it in the
-# older ones. That is precisely the failure decision 0070's per-column identity exists to catch, and
-# the identity cannot catch it about itself. `=2.2` turns the drift into a build-time bump that has
-# to move the constant with it.
+# Pinned to the minor. `UNICODE_VERSION` in src/lib.rs records `icu4x-2.2` in every bundle's
+# manifest and readers compare that string, so a caret range would let `cargo update` change the
+# segmenter's dictionary data, and with it the token stream, under an unchanged identity. Moving
+# these four moves that constant.
 icu_normalizer = "=2.2"
 icu_casemap = "=2.2"
 icu_properties = "=2.2"
@@ -36,6 +15,4 @@ icu_segmenter = "=2.2"
 
 [dev-dependencies]
 serde_json = "1"
-# The golden vectors are digested against `ANALYSER_VECTOR_DIGESTS` rather than only read, so the
-# test needs the workspace hash. Dev-only: nothing in the analyser itself hashes anything.
 sha2 = { workspace = true }

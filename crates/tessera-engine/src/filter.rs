@@ -1653,8 +1653,7 @@ fn resolve_analyser(
             ),
         )
     })?;
-    tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
-        .filter(|a| a.identity() == identity)
+    tessera_analyse::analyser_with_identity(identity)
         .map(Arc::new)
         .ok_or_else(|| {
             std::io::Error::new(
