@@ -2,13 +2,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use croaring::Bitmap;
 use tessera_filter::{ColumnPostings, RecordExtentPaths, RecordStack, SortedDict, ValueColumn};
 use tessera_store::manifest::Visibility;
 
-use super::{
-    record_open_error, request_access, text_layer, Column, FilterColumns, Layer, Route, TextLayer,
-};
+use super::{record_open_error, request_access, Column, FilterColumns, Layer, Route, TextLayer};
 use crate::filter::declared::{resolve_analyser, visibility_of};
 use crate::filter::{
     blob_resident, carries_live_view, extent_column_name, owes_postings, owes_value_column,
@@ -79,41 +76,24 @@ pub(super) fn open_scoped_column(
         // carry is the same refusal an entity-scoped text column's is — a `match` answered from a
         // different segmentation is a wrong answer wearing a correct one's clothes.
         let analyser = resolve_analyser(&family.name, family.analyser.as_deref())?;
-        let text = vec![text_layer(
-            SortedDict::open_dir(&dir, request_access(mmap))?,
-            ColumnPostings::open(&dir.join("postings.arrow"), mmap)?,
-            &name,
-            "base",
-            // The base writes no presence file of its own, here for the same reason the
-            // entity-scoped base writes none: see `TextLayer::present`.
-            Bitmap::new(),
-            None,
-        )?];
+        let text = vec![TextLayer::open_base(&name, &dir, request_access(mmap))?];
         return Ok((
             name,
             placement,
             Column::text(declared_index, filterable, analyser, text),
         ));
     }
-    let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
-    let dict = (scoped_family == Family::Keyword)
-        .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
-        .transpose()?;
-    // A category's keyed postings, in this view's own directory — opened on the declaration rather
-    // than probed for, the rule every open here keeps.
-    let postings = scoped_owes_postings(family)
-        .then(|| ColumnPostings::open_keyed(&dir.join("postings.arrow")).map(Arc::new))
-        .transpose()?;
-    // The same routing the entity-scoped family takes, and for decision 0063's reason rather than
-    // a tuning one: a `derived` vocabulary's postings answer *membership* and must not answer the
-    // filter, whose work would then be a function of the value named.
-    let route = if postings.is_some()
-        && scoped_visibility_of(family, vocabularies) == Some(Visibility::Public)
-    {
-        Route::Postings
-    } else {
-        Route::Scan
-    };
+    // The same artefacts and the same routing the entity-scoped family takes, in this view's own
+    // directory, and for decision 0063's reason rather than a tuning one: a `derived` vocabulary's
+    // postings answer *membership* and must not answer the filter, whose work would then be a
+    // function of the value named.
+    let (base, postings, route) = open_value_base(
+        &dir,
+        scoped_family,
+        scoped_owes_postings(family),
+        scoped_visibility_of(family, vocabularies),
+        mmap,
+    )?;
     Ok((
         name,
         placement,
@@ -126,14 +106,50 @@ pub(super) fn open_scoped_column(
             declared_index,
             filterable,
             scoped_family,
-            Some(Layer {
-                values_rel: None,
-                values: base,
-                dict,
-            }),
+            Some(base),
             postings,
             route,
         ),
+    ))
+}
+
+/// A column's **base** value layer, the derived postings where they are owed, and the route the
+/// vocabulary's visibility fixes — what an entity-scoped column and one view's column of a
+/// group-scoped family each open from their own directory.
+///
+/// Everything here is opened on the declaration rather than probed for, which is the rule every
+/// open keeps: a column the manifest says is indexed and whose artefacts are absent is a bundle
+/// that is not what its manifest says, and reading that as "no entity carries a value" would
+/// answer wrongly while looking right. A keyword column's dictionary sits beside its values under
+/// the canonical name, and its ordinals have no reading without it; a routed column that silently
+/// fell back to the scan would hide an unreadable accelerator.
+fn open_value_base(
+    dir: &Path,
+    family: Family,
+    owes_postings: bool,
+    visibility: Option<Visibility>,
+    mmap: bool,
+) -> std::io::Result<(Layer, Option<Arc<ColumnPostings>>, Route)> {
+    let values = Arc::new(ValueColumn::open_dir(dir, request_access(mmap))?);
+    let dict = (family == Family::Keyword)
+        .then(|| SortedDict::open_dir(dir, request_access(mmap)).map(Arc::new))
+        .transpose()?;
+    let postings = owes_postings
+        .then(|| ColumnPostings::open_keyed(&dir.join("postings.arrow")).map(Arc::new))
+        .transpose()?;
+    let route = if postings.is_some() && visibility == Some(Visibility::Public) {
+        Route::Postings
+    } else {
+        Route::Scan
+    };
+    Ok((
+        Layer {
+            values_rel: None,
+            values,
+            dict,
+        },
+        postings,
+        route,
     ))
 }
 
@@ -149,15 +165,13 @@ fn text_extent_layers<'a>(
 ) -> std::io::Result<Vec<TextLayer>> {
     extents
         .map(|extent| {
-            text_layer(
-                SortedDict::open(&prefix_dir.join(&extent.dict), request_access(mmap))?,
-                ColumnPostings::open(&prefix_dir.join(&extent.postings), mmap)?,
+            TextLayer::open(
                 column,
                 &extent.dict,
-                Bitmap::deserialize::<croaring::Portable>(&std::fs::read(
-                    prefix_dir.join(&extent.presence),
-                )?),
-                Some(extent.dict.clone()),
+                &prefix_dir.join(&extent.dict),
+                &prefix_dir.join(&extent.postings),
+                &prefix_dir.join(&extent.presence),
+                request_access(mmap),
             )
         })
         .collect()
@@ -172,6 +186,9 @@ pub(super) fn runtime_layers(
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
 ) -> std::io::Result<Option<Column>> {
     let family = Family::of(scalar);
+    // The filter surface this declaration affords, which is where a column's own licence comes
+    // from — `None` for a column on none of it.
+    let filterable = Placement::of(scalar, vocabularies).is_some_and(|placement| placement.entity);
     if family == Family::Text {
         if !scalar.index {
             return Ok(None);
@@ -179,7 +196,7 @@ pub(super) fn runtime_layers(
         let analyser = resolve_analyser(&scalar.name, scalar.analyser.as_deref())?;
         return Ok(Some(Column::text(
             declared_index,
-            true,
+            filterable,
             analyser,
             Vec::new(),
         )));
@@ -187,10 +204,9 @@ pub(super) fn runtime_layers(
     if !owes_value_column(scalar, vocabularies) {
         return Ok(None);
     }
-    let row = scalar.render && family.reaches_hot_column();
     Ok(Some(Column::values(
         declared_index,
-        scalar.index || row,
+        filterable,
         family,
         None,
         None,
@@ -252,31 +268,14 @@ impl FilterColumns {
         let mut columns = BTreeMap::new();
         let mut placements = BTreeMap::new();
         for (declared_index, scalar) in declared.iter().enumerate() {
-            // The route affordances, from the compiled declaration alone (decision 0068). A
-            // rendered column always affords the row route — its values are in the hot column,
-            // and both families that reach it can express absence there. The entity route needs an
-            // entity-space value column AND a licence to answer a filter from it — `index`, or
-            // 0068's "render implies filterable" over the per-viewer vocabulary floor. A
-            // `derived` column with neither flag keeps its value column for membership and
-            // stays unfilterable, exactly as before.
+            // The route affordances, from the compiled declaration alone (decision 0068).
             let family = Family::of(scalar);
-            let row = scalar.render && family.reaches_hot_column();
-            // Text is entity-space filterable without a value column: its `match` is answered from
-            // postings, which is the one route in this system that reads no per-entity slot.
-            let entity = if family == Family::Text {
-                scalar.index
-            } else {
-                owes_value_column(scalar, vocabularies) && (scalar.index || row)
-            };
-            if row || entity {
-                placements.insert(
-                    scalar.name.clone(),
-                    Placement {
-                        entity,
-                        row,
-                        family,
-                    },
-                );
+            let placement = Placement::of(scalar, vocabularies);
+            // The licence to answer a filter from the entity-space column, which is the entity
+            // half of the placement and nothing else.
+            let entity = placement.is_some_and(|placement| placement.entity);
+            if let Some(placement) = placement {
+                placements.insert(scalar.name.clone(), placement);
             }
             // **A column declared at a running service and not yet folded has no base**
             // (`ingest.md` §6.3): its stack starts empty and the extents the flushes since the
@@ -300,18 +299,10 @@ impl FilterColumns {
                 }
                 let dir = partition_dir.join("attrs").join(&scalar.name);
                 // The base build's layer, then one per published extent, oldest first.
-                let mut text_layers = vec![text_layer(
-                    SortedDict::open_dir(&dir, request_access(mmap))?,
-                    // Positional, not keyed: a token ordinal is a dense position in this
-                    // dictionary, where a category's code is a scattered vocabulary entry (§2.5).
-                    ColumnPostings::open(&dir.join("postings.arrow"), mmap)?,
+                let mut text_layers = vec![TextLayer::open_base(
                     &scalar.name,
-                    "base",
-                    // The base writes no presence file of its own — the build writes none and the
-                    // fold therefore writes none — so nothing here can say which entities carry a
-                    // value. See `TextLayer::present`.
-                    Bitmap::new(),
-                    None,
+                    &dir,
+                    request_access(mmap),
                 )?];
                 text_layers.extend(text_extent_layers(
                     prefix_dir,
@@ -332,45 +323,16 @@ impl FilterColumns {
                 continue;
             }
             let dir = partition_dir.join("attrs").join(&scalar.name);
-            let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
-            // The base layer's dictionary sits in the column's own directory under the canonical
-            // name, exactly where the values do. Opened on the declaration rather than probed for:
-            // a keyword column whose dictionary is missing is a bundle that is not what its
-            // manifest says, and reading its ordinal column without one would answer every string
-            // predicate with the empty set — a wrong answer wearing a correct one's clothes, the
-            // failure every open in this function refuses instead.
-            let base_dict = (family == Family::Keyword)
-                .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
-                .transpose()?;
-            // Opened whenever the build owed them, and a missing file is an error for the same
-            // reason a missing value column is: the manifest digests them, so absence means the
-            // bundle is not what its manifest says. A column routed through postings that silently
-            // fell back to the scan would answer correctly and hide a broken artefact; one that
-            // read an absent file as the empty set would answer that no entity carries the value.
-            let postings = owes_postings(scalar, vocabularies)
-                .then(|| ColumnPostings::open_keyed(&dir.join("postings.arrow")).map(Arc::new))
-                .transpose()?;
-            let route = if postings.is_some()
-                && visibility_of(scalar, vocabularies) == Some(Visibility::Public)
-            {
-                Route::Postings
-            } else {
-                Route::Scan
-            };
+            let (base, postings, route) = open_value_base(
+                &dir,
+                family,
+                owes_postings(scalar, vocabularies),
+                visibility_of(scalar, vocabularies),
+                mmap,
+            )?;
             columns.insert(
                 scalar.name.clone(),
-                Column::values(
-                    declared_index,
-                    entity,
-                    family,
-                    Some(Layer {
-                        values_rel: None,
-                        values: base,
-                        dict: base_dict,
-                    }),
-                    postings,
-                    route,
-                ),
+                Column::values(declared_index, entity, family, Some(base), postings, route),
             );
         }
         // ---- the group-scoped column families (`views.md` §5) ------------------------------

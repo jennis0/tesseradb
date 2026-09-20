@@ -44,16 +44,7 @@ impl Family {
     /// and answering the same request differently against the base and against a flush extent,
     /// none of it visible.
     pub fn of(scalar: &tessera_store::manifest::DeclaredScalar) -> Family {
-        if scalar.vocabulary.is_some() {
-            return Family::Category;
-        }
-        if is_numeric(scalar.arrow_type) {
-            return Family::Numeric;
-        }
-        if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Text {
-            return Family::Text;
-        }
-        Family::Keyword
+        family_of(scalar.vocabulary.as_deref(), scalar.arrow_type)
     }
 
     /// One **group-scoped** column family's family (`views.md` §5) — the same derivation as
@@ -61,16 +52,7 @@ impl Family {
     /// scalar's. The two read the same two fields, and a scope changes only which column file a
     /// predicate reads, never how its values are read.
     pub fn of_scoped(scoped: &tessera_store::manifest::ScopedScalar) -> Family {
-        if scoped.vocabulary.is_some() {
-            return Family::Category;
-        }
-        if is_numeric(scoped.arrow_type) {
-            return Family::Numeric;
-        }
-        if scoped.arrow_type == tessera_spatial::tiler::ScalarType::Text {
-            return Family::Text;
-        }
-        Family::Keyword
+        family_of(scoped.vocabulary.as_deref(), scoped.arrow_type)
     }
 
     /// The operator names this family accepts, in the order `/v1/meta` publishes them.
@@ -110,6 +92,21 @@ impl Family {
             Family::Keyword | Family::Text => false,
         }
     }
+}
+
+/// The family a declaration's two deciding fields name — what [`Family::of`] and
+/// [`Family::of_scoped`] each ask, over the two declaration types.
+fn family_of(vocabulary: Option<&str>, arrow_type: tessera_spatial::tiler::ScalarType) -> Family {
+    if vocabulary.is_some() {
+        return Family::Category;
+    }
+    if is_numeric(arrow_type) {
+        return Family::Numeric;
+    }
+    if arrow_type == tessera_spatial::tiler::ScalarType::Text {
+        return Family::Text;
+    }
+    Family::Keyword
 }
 
 /// The types whose values are numbers — every integer width, both floats, `timestamp_us` and
@@ -152,6 +149,39 @@ pub struct Placement {
     pub entity: bool,
     pub row: bool,
     pub family: Family,
+}
+
+impl Placement {
+    /// The spaces one declared column affords, or `None` where it affords neither — a column
+    /// stored and served at the drill-down and on no filter surface at all.
+    ///
+    /// **The single derivation**, so the placement a restart's `open` records, the one a runtime
+    /// declaration takes and the licence a column's own `filterable` carries (which is `entity`)
+    /// cannot come to disagree about one declaration.
+    pub(in crate::filter) fn of(
+        scalar: &tessera_store::manifest::DeclaredScalar,
+        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    ) -> Option<Placement> {
+        // A rendered column always affords the row route — its values are in the hot column, and
+        // both families that reach it can express absence there. The entity route needs an
+        // entity-space value column AND a licence to answer a filter from it: `index`, or 0068's
+        // "render implies filterable" over the per-viewer vocabulary floor. A `derived` column
+        // with neither flag keeps its value column for membership and stays unfilterable.
+        let family = Family::of(scalar);
+        let row = scalar.render && family.reaches_hot_column();
+        // Text is entity-space filterable without a value column: its `match` is answered from
+        // postings, which is the one route in this system that reads no per-entity slot.
+        let entity = if family == Family::Text {
+            scalar.index
+        } else {
+            owes_value_column(scalar, vocabularies) && (scalar.index || row)
+        };
+        (row || entity).then_some(Placement {
+            entity,
+            row,
+            family,
+        })
+    }
 }
 
 /// Is this column filterable at all under decision 0068 — `index = true`, or rendered?
@@ -292,7 +322,16 @@ pub(crate) fn scoped_visibility_of(
     scoped: &tessera_store::manifest::ScopedScalar,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
 ) -> Option<Visibility> {
-    let name = scoped.vocabulary.as_deref()?;
+    visibility_of_vocabulary(scoped.vocabulary.as_deref(), vocabularies)
+}
+
+/// The `visibility` of the vocabulary a declaration names, or `None` where it names none — what
+/// [`visibility_of`] and [`scoped_visibility_of`] each ask, over the two declaration types.
+fn visibility_of_vocabulary(
+    vocabulary: Option<&str>,
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+) -> Option<Visibility> {
+    let name = vocabulary?;
     vocabularies
         .iter()
         .find(|v| v.name == name)
@@ -308,11 +347,7 @@ pub(in crate::filter) fn visibility_of(
     scalar: &tessera_store::manifest::DeclaredScalar,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
 ) -> Option<Visibility> {
-    let name = scalar.vocabulary.as_deref()?;
-    vocabularies
-        .iter()
-        .find(|v| v.name == name)
-        .map(|v| v.visibility)
+    visibility_of_vocabulary(scalar.vocabulary.as_deref(), vocabularies)
 }
 
 /// Does the build write a value column for this column?

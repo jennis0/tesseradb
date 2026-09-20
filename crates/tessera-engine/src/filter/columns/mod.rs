@@ -3,6 +3,7 @@ mod open;
 pub(in crate::filter) mod successor;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use croaring::Bitmap;
@@ -381,6 +382,46 @@ struct TextLayer {
 /// nobody: an under-report with no symptom, which is the shape this codebase refuses everywhere
 /// else. The fold makes the same check on its inputs before merging them, and a reader that did not
 /// would be trusting an artefact the writer's own consumer will not.
+impl TextLayer {
+    /// A text column's **base** index, from the column's own directory: the token dictionary and
+    /// the positional postings over it. Positional, not keyed: a token ordinal is a dense position
+    /// in this dictionary, where a category's code is a scattered vocabulary entry (§2.5).
+    ///
+    /// The base writes no presence file of its own — the build writes none and the fold therefore
+    /// writes none — so nothing here can say which entities carry a value. See [`TextLayer::present`].
+    fn open_base(column: &str, dir: &Path, access: tessera_filter::Access) -> std::io::Result<TextLayer> {
+        text_layer(
+            SortedDict::open_dir(dir, access)?,
+            ColumnPostings::open(&dir.join("postings.arrow"), access != tessera_filter::Access::Read)?,
+            column,
+            "base",
+            Bitmap::new(),
+            None,
+        )
+    }
+
+    /// One **published** text layer, from the three files the manifest names it by — a flush's
+    /// extent and a coalesce's replacement alike. `dict_rel` is the manifest's own path, which is
+    /// the layer's identity.
+    fn open(
+        column: &str,
+        dict_rel: &str,
+        dict: &Path,
+        postings: &Path,
+        presence: &Path,
+        access: tessera_filter::Access,
+    ) -> std::io::Result<TextLayer> {
+        text_layer(
+            SortedDict::open(dict, access)?,
+            ColumnPostings::open(postings, access != tessera_filter::Access::Read)?,
+            column,
+            dict_rel,
+            Bitmap::deserialize::<croaring::Portable>(&std::fs::read(presence)?),
+            Some(dict_rel.to_string()),
+        )
+    }
+}
+
 fn text_layer(
     dict: SortedDict,
     postings: ColumnPostings,

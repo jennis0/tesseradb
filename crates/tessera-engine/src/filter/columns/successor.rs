@@ -2,16 +2,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use tessera_filter::{ColumnPostings, RecordExtentPaths, RecordStack, SortedDict, ValueColumn};
+use tessera_filter::{RecordExtentPaths, RecordStack, SortedDict, ValueColumn};
 
 use super::open::{open_scoped_column, runtime_layers};
 use super::{
-    check_dictionary_pairing, record_open_error, text_layer, unknown_filter_column, FilterColumns,
-    Layer,
+    check_dictionary_pairing, record_open_error, unknown_filter_column, FilterColumns, Layer,
+    TextLayer,
 };
 use crate::filter::{
-    owes_value_column, scoped_column_name, scoped_has_value_column, scoped_is_filterable, Family,
-    Placement, PIN,
+    scoped_column_name, scoped_has_value_column, scoped_is_filterable, Placement, PIN,
 };
 
 /// The three files one published text extent names, resolved to paths.
@@ -76,6 +75,22 @@ pub struct CoalescedTextWindow {
 pub type PublishedExtent = (String, String, Arc<ValueColumn>, Option<Arc<SortedDict>>);
 
 impl FilterColumns {
+    /// The next generation's columns before anything is added to them: this generation's, with
+    /// every layer shared rather than re-opened.
+    ///
+    /// Cheap by construction — the base columns and the two stacks are `Arc`s, so a flush that
+    /// published one entity clones pointers rather than a memory-mapped column per declared
+    /// attribute.
+    fn successor(&self) -> FilterColumns {
+        FilterColumns {
+            columns: self.columns.clone(),
+            placements: self.placements.clone(),
+            access: self.access,
+            records: Arc::clone(&self.records),
+            entity_terms: Arc::clone(&self.entity_terms),
+        }
+    }
+
     /// Add one flush's extent to the column it names, refusing a name this composition does not
     /// hold a value column for — see [`Column::push_extent`] for what the column itself refuses.
     pub(in crate::filter) fn compose(
@@ -101,32 +116,12 @@ impl FilterColumns {
         declared_index: usize,
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
     ) -> std::io::Result<FilterColumns> {
-        let mut next = FilterColumns {
-            columns: self.columns.clone(),
-            placements: self.placements.clone(),
-            access: self.access,
-            records: Arc::clone(&self.records),
-            entity_terms: Arc::clone(&self.entity_terms),
-        };
-        let family = Family::of(scalar);
-        let row = scalar.render && family.reaches_hot_column();
-        let entity = if family == Family::Text {
-            scalar.index
-        } else {
-            owes_value_column(scalar, vocabularies) && (scalar.index || row)
-        };
-        if row || entity {
-            next.placements.insert(
-                scalar.name.clone(),
-                Placement {
-                    entity,
-                    row,
-                    family,
-                },
-            );
+        let mut next = self.successor();
+        if let Some(placement) = Placement::of(scalar, vocabularies) {
+            next.placements.insert(scalar.name.clone(), placement);
         }
-        if let Some(layers) = runtime_layers(scalar, declared_index, vocabularies)? {
-            next.columns.insert(scalar.name.clone(), layers);
+        if let Some(column) = runtime_layers(scalar, declared_index, vocabularies)? {
+            next.columns.insert(scalar.name.clone(), column);
         }
         Ok(next)
     }
@@ -147,13 +142,7 @@ impl FilterColumns {
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
         mmap: bool,
     ) -> std::io::Result<FilterColumns> {
-        let mut next = FilterColumns {
-            columns: self.columns.clone(),
-            placements: self.placements.clone(),
-            access: self.access,
-            records: Arc::clone(&self.records),
-            entity_terms: Arc::clone(&self.entity_terms),
-        };
+        let mut next = self.successor();
         for (column, view, incarnation) in columns {
             let Some(family) = scoped.iter().find(|f| f.name == *column) else {
                 return std::io::Result::Err(std::io::Error::new(
@@ -192,13 +181,7 @@ impl FilterColumns {
             name.split_once(PIN)
                 .is_some_and(|(_, view)| views.iter().any(|dropped| dropped == view))
         };
-        let mut next = FilterColumns {
-            columns: self.columns.clone(),
-            placements: self.placements.clone(),
-            access: self.access,
-            records: Arc::clone(&self.records),
-            entity_terms: Arc::clone(&self.entity_terms),
-        };
+        let mut next = self.successor();
         next.columns.retain(|name, _| !dead(name));
         next.placements.retain(|name, _| !dead(name));
         next
@@ -248,11 +231,9 @@ impl FilterColumns {
                 })?)
             };
         let mut next = FilterColumns {
-            columns: self.columns.clone(),
-            placements: self.placements.clone(),
-            access: self.access,
             records,
             entity_terms,
+            ..self.successor()
         };
         // A text extent appends a layer: its own dictionary, its own postings, and the entities it
         // covers. Composed here for the same reason a filter extent is — a published layer the live
@@ -272,13 +253,13 @@ impl FilterColumns {
                     ),
                 ));
             };
-            layers.push(text_layer(
-                SortedDict::open(&text.dict, self.access)?,
-                ColumnPostings::open(&text.postings, self.access != tessera_filter::Access::Read)?,
+            layers.push(TextLayer::open(
                 &text.column,
                 &text.dict_rel,
-                Bitmap::deserialize::<croaring::Portable>(&std::fs::read(&text.presence)?),
-                Some(text.dict_rel.clone()),
+                &text.dict,
+                &text.postings,
+                &text.presence,
+                self.access,
             )?);
         }
         for (column, values_rel, extent, dict) in extents {
@@ -376,11 +357,9 @@ impl FilterColumns {
             Some(next) => next,
         };
         let mut next = FilterColumns {
-            columns: self.columns.clone(),
-            placements: self.placements.clone(),
-            access: self.access,
             records,
             entity_terms,
+            ..self.successor()
         };
         for window in windows {
             let Some(held) = next.columns.get_mut(&window.column) else {
@@ -480,16 +459,13 @@ impl FilterColumns {
             }
             // Opened before anything is removed, so a replacement that will not open leaves the
             // consumed layers standing rather than a column short of a window's worth of terms.
-            let replacement = text_layer(
-                SortedDict::open(&window.paths.dict, self.access)?,
-                ColumnPostings::open(
-                    &window.paths.postings,
-                    self.access != tessera_filter::Access::Read,
-                )?,
+            let replacement = TextLayer::open(
                 column,
                 &window.paths.dict_rel,
-                Bitmap::deserialize::<croaring::Portable>(&std::fs::read(&window.paths.presence)?),
-                Some(window.paths.dict_rel.clone()),
+                &window.paths.dict,
+                &window.paths.postings,
+                &window.paths.presence,
+                self.access,
             )?;
             // The attribute axis's replacement rule, and this family can state it because a text
             // extent stores presence: the replacement must stand for **exactly** the entities its
@@ -522,7 +498,7 @@ impl FilterColumns {
 mod tests {
     use super::*;
     use crate::filter::test_support::*;
-    use crate::filter::FilterOperand;
+    use crate::filter::{Family, FilterOperand};
     use tessera_filter::RecordValue;
 
     // -------------------------------------------------------------------------------------
