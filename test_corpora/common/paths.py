@@ -1,17 +1,11 @@
-"""Where the three kinds of file live, so that moving one is an environment variable.
+"""Where the three kinds of file live, so moving one is an environment variable.
 
-**Staged** sources are the publisher's own bytes, read-only, on the share. **Derived** files are
-what a `prepare.py` writes and what `tessera build` reads, and they are regenerable by definition.
-**Declarations** live in git beside the script that produces their inputs, because the declaration
-is the thing that gets reviewed.
+Staged sources are the publisher's own bytes, read-only, on the share. Derived files are what a
+`prepare.py` writes and what `tessera build` reads, and are regenerable. Declarations live in
+git beside the script that produces their inputs.
 
-The derived root is a variable rather than a path because the ladder's top two rungs do not fit on
-this machine's root volume (`docs/evidence/memos/2026-08-27-ingest-campaign-plan.md` §4). When a
-second volume appears, it is this one value that moves and not every script.
-
-⊘ **Never build or serve against a bundle on the share.** It is SMB at ~67 MB/s, so a page fault is
-a network round trip and any residency figure taken there measures the network. Staged sources are
-read from it once; everything else is local.
+Never build or serve a bundle from the share: it is SMB, so a page fault is a network round
+trip. Staged sources are read from it once; everything else is local.
 """
 
 from __future__ import annotations
@@ -29,7 +23,7 @@ LADDER_ROOT = Path(os.environ.get("TESSERA_LADDER", _REPO_ROOT / "data" / "ladde
 
 
 def staged(dataset: str, vintage: str) -> Path:
-    """One staged acquisition. Refuses a path that is not there rather than reading nothing."""
+    """One staged acquisition. Raises if the vintage is not present."""
     path = STAGED_ROOT / dataset / vintage
     if not path.is_dir():
         available = (

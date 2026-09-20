@@ -1,0 +1,389 @@
+from __future__ import annotations
+
+try:  # 3.11+
+    import tomllib
+except ModuleNotFoundError:  # 3.10 on this box
+    import tomli as tomllib
+import json
+import shutil
+import subprocess
+import time
+from pathlib import Path
+from typing import Sequence
+
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+# ---------------------------------------------------------------------------------------------
+# The split
+# ---------------------------------------------------------------------------------------------
+
+
+def split_entities(points: Path, fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """`(base entity ids, hold-out entity ids)` — a seeded uniform hold-out of `fraction`, over
+    entities rather than rows, which differ once a rung has several views.
+    """
+    ids = pq.read_table(points, columns=["entity_id"]).column("entity_id").to_numpy()
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(ids))
+    cut = int(round(fraction * len(ids)))
+    held = np.sort(ids[order[:cut]])
+    base = np.sort(ids[order[cut:]])
+    return base, held
+
+
+def in_sorted(values: np.ndarray, sorted_ids: np.ndarray) -> np.ndarray:
+    """Membership of `values` in `sorted_ids`, by binary search against a sorted array rather
+    than `np.isin`, which builds an intermediate the size of both inputs.
+    """
+    if len(sorted_ids) == 0:
+        # At f = 1.0 nothing is kept for the base: an empty `keep` is a real case, a build over
+        # a zero-row points file.
+        return np.zeros(len(values), dtype=bool)
+    idx = np.searchsorted(sorted_ids, values)
+    idx[idx >= len(sorted_ids)] = 0
+    return sorted_ids[idx] == values
+
+
+def filter_parquet(
+    source: Path, out: Path, column: str, keep: np.ndarray, drop: Sequence[str] = ()
+) -> int:
+    """Copy `source` to `out`, keeping rows whose `column` is in `keep`, a row group at a time
+    through `read_row_group`, for the reason `HoldOut.batches` gives, and under the source's own
+    compression rather than `ParquetWriter`'s default. `drop` names columns to leave behind.
+    """
+    reader = pq.ParquetFile(source)
+    codec = reader.metadata.row_group(0).column(0).compression.lower()
+    if codec == "uncompressed":
+        codec = "none"
+    writer = None
+    kept = 0
+    try:
+        wanted = [name for name in reader.schema_arrow.names if name not in set(drop)]
+        for index in range(reader.metadata.num_row_groups):
+            table = reader.read_row_group(index, columns=wanted)
+            mask = pa.array(in_sorted(table.column(column).to_numpy(), keep))
+            table = table.filter(mask)
+            if writer is None:
+                writer = pq.ParquetWriter(out, table.schema, compression=codec)
+            if table.num_rows:
+                writer.write_table(table)
+                kept += table.num_rows
+    finally:
+        if writer is not None:
+            writer.close()
+    if writer is None:  # an empty source still needs a file with the right schema
+        schema = pa.schema([f for f in reader.schema_arrow if f.name not in set(drop)])
+        pq.write_table(schema.empty_table(), out, compression=codec)
+    return kept
+
+
+def ranks_file(rung: Path) -> Path:
+    """The rung's principal ladder — `[{"term": ..., "pairs": ...}, ...]`, richest term first,
+    read from whichever `<axis>-ranks.json` is present.
+    """
+    named = rung / "branch-ranks.json"
+    if named.exists():
+        return named
+    candidates = sorted(rung.glob("*-ranks.json"))
+    if not candidates:
+        raise FileNotFoundError(f"no <axis>-ranks.json in {rung}")
+    return candidates[0]
+
+
+def bundle_manifest(bundle: Path) -> tuple[str, dict] | None:
+    """`(version prefix, manifest)` of the bundle's current version, or None for no bundle: the
+    version `CURRENT` names, not the lexicographically last `v*`, which can be abandoned.
+    """
+    current = bundle / "CURRENT"
+    if not current.is_file():
+        return None
+    named = json.loads(current.read_text())
+    prefix = named["prefix"] if isinstance(named, dict) else str(named)
+    return prefix, json.loads((bundle / prefix / "MANIFEST.json").read_text())
+
+
+def state_extent(corpus_toml: Path, bundle: Path) -> dict | None:
+    """Rewrite each `[[view]]`'s `extent = "auto"` as that view's own frame in the all-in bundle:
+    `auto` refuses a zero-row build and quantises a complement build onto a slightly different
+    grid. Changes the declaration the measurement builds from, never the rung's committed one."""
+    read = bundle_manifest(bundle)
+    if read is None:
+        return None
+    prefix, meta = read
+    frames = {view["id"]: view["quantisation"] for view in meta["views"]}
+    lines = corpus_toml.read_text().splitlines(keepends=True)
+    heads = [i for i, line in enumerate(lines) if line.lstrip().startswith("[")]
+    stated: dict[str, dict] = {}
+    for n, start in enumerate(heads):
+        if lines[start].strip() != "[[view]]":
+            continue
+        end = heads[n + 1] if n + 1 < len(heads) else len(lines)
+        name = None
+        at = None
+        for i in range(start, end):
+            head = lines[i].strip()
+            if name is None and head.startswith("name") and "=" in head:
+                name = head.split("=", 1)[1].strip().strip('"')
+            if head.startswith("extent") and "=" in head:
+                at = i
+        if name is None or at is None or lines[at].split("=", 1)[1].strip() != '"auto"':
+            continue
+        if name not in frames:
+            raise ValueError(
+                f"the all-in bundle at {bundle} declares no view named {name!r}; state "
+                f"--all-in-bundle as the bundle this rung's declaration was built into"
+            )
+        q = frames[name]
+        pad = lines[at].split("=", 1)[0]
+        lines[at] = (
+            f'{pad}= {{ x = [{q["x_min"]!r}, {q["x_max"]!r}], '
+            f'y = [{q["y_min"]!r}, {q["y_max"]!r}] }}\n'
+        )
+        stated[name] = q
+    if not stated:
+        return None
+    corpus_toml.write_text("".join(lines))
+    return {"views": stated, "from_version": prefix}
+
+
+def base_declaration(
+    text: str, keep_members: Sequence[str] = (), keep_sources: Sequence[str] = ()
+) -> tuple[str, list[dict]]:
+    """The rung's `corpus.toml` as the base's: every layer stated, and only a column-route
+    layer's member table kept. A `[[layer]]`'s `source` and `[layer.members]` are build-only
+    acquisition, removed except where `keep_members` or `keep_sources` names the layer. Returns
+    the rewritten text and one record per layer, saying what was removed."""
+    out: list[str] = []
+    removed: list[dict] = []
+    section: str | None = None
+    layer: dict | None = None
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        head = line.strip()
+        if head.startswith("[") and not head.startswith("[["):
+            section = head
+        elif head.startswith("[["):
+            section = head
+        if head.startswith("[[layer]]"):
+            layer = {"layer": None, "removed": []}
+            removed.append(layer)
+        if head.startswith("[") and not head.startswith("[layer.members]"):
+            skipping = False
+        if head.startswith("[layer.members]"):
+            if layer is not None and layer["layer"] in keep_members:
+                layer["kept"] = f"{layer.get('kept', '')} [layer.members]".strip()
+                out.append(line)
+                continue
+            # The block runs to the next table header at any indent, or to the end of the file.
+            skipping = True
+            if layer is not None:
+                layer["removed"].append("[layer.members]")
+            continue
+        if skipping:
+            continue
+        if layer is not None and head.startswith("name") and layer["layer"] is None:
+            layer["layer"] = head.split("=", 1)[1].strip().strip('"')
+        if section == "[[layer]]" and head.startswith("source") and "=" in head:
+            if layer is None or layer["layer"] not in keep_sources:
+                if layer is not None:
+                    layer["removed"].append(head)
+                continue
+            layer["kept"] = f"{layer.get('kept', '')} {head}".strip()
+        out.append(line)
+    return "".join(out), removed
+
+
+def source_path(rung: Path, named: dict, key: str | None) -> Path | None:
+    """The file a `source` names: a key into `[sources]` or a file name, as `Config::layer_sources`
+    reads it. None for no source at all."""
+    return None if key is None else rung / named.get(key, key)
+
+
+def declared_layers(rung: Path) -> list[dict]:
+    """Every `[[layer]]` of the rung's declaration, with the files its acquisition names and its
+    `route`: `attribute` for a predicate layer, `column` for a per-point member table,
+    `publication` for a per (artifact, entity) one.
+    """
+    declared = tomllib.loads((rung / "corpus.toml").read_text())
+    named = declared.get("sources", {})
+    out = []
+    for layer in declared.get("layer", []):
+        membership = layer.get("membership")
+        attribute = membership.get("attribute") if isinstance(membership, dict) else None
+        roster = source_path(rung, named, layer.get("source"))
+        members = source_path(rung, named, (layer.get("members") or {}).get("source"))
+        supplied = bool((layer.get("content") or {}).get("supplied"))
+        if attribute is not None:
+            route = "attribute"
+        elif members is not None and members.exists() and per_point_member_table(members):
+            route = "column"
+        else:
+            route = "publication"
+        out.append(
+            {
+                "name": layer["name"],
+                "roster": roster,
+                "members": members,
+                "attribute": attribute,
+                "supplied": supplied,
+                "route": route,
+                "value_set": layer.get("value_set"),
+                "hierarchy": (layer.get("hierarchy") or {}).get("kind"),
+            }
+        )
+    return out
+
+
+def per_point_member_table(path: Path) -> bool:
+    """Whether a member table names a point's artifacts in a list column — one row per point, one
+    entry per declared level — rather than one row per (artifact, entity), which is read artifact
+    by artifact and sent with the artifact it belongs to.
+    """
+    key = pq.ParquetFile(path).schema_arrow.field("key")
+    return pa.types.is_list(key.type) or pa.types.is_large_list(key.type)
+
+
+def member_table_columns(schema: pa.Schema) -> tuple[str, str]:
+    """`(entity column, key column)` of a member table, as the build reads one: `entity` (or
+    `entity_id`) and `key`."""
+    names = set(schema.names)
+    entity = next((name for name in ("entity", "entity_id") if name in names), None)
+    if entity is None or "key" not in names:
+        raise ValueError(
+            f"a member table needs an `entity` (or `entity_id`) column and a `key` column; this one "
+            f"has {schema.names}"
+        )
+    return entity, "key"
+
+
+def build_bundle(
+    binary: Path,
+    cwd: Path,
+    out: Path,
+    stages_json: Path,
+    extra: Sequence[str] = (),
+    env: dict[str, str] | None = None,
+) -> dict:
+    """`tessera build` into `out`, and what it cost. `peak_rss_kib` is the largest stage's own
+    high-water, as the build reports it, rather than the driver's `getrusage`, a high-water over
+    every child it has reaped."""
+    t0 = time.perf_counter()
+    proc = subprocess.run(
+        [
+            str(binary),
+            "build",
+            *extra,
+            "--out",
+            str(out),
+            "--stage-timings-json",
+            str(stages_json),
+            "--stage-timings",
+        ],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    wall = time.perf_counter() - t0
+    stages = json.loads(stages_json.read_text()) if stages_json.exists() else None
+    return {
+        "wall_s": round(wall, 2),
+        "returncode": proc.returncode,
+        "stdout": proc.stdout[-4000:],
+        "stderr_tail": proc.stderr[-4000:],
+        "stages": stages,
+        "peak_rss_kib": max((s["peak_rss_kib"] for s in stages or []), default=None),
+        "bundle_bytes": sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
+        if out.exists()
+        else 0,
+    }
+
+
+def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
+    """The complement's inputs: the points, the declaration, and a column-route layer's member
+    table over the base's rows. Nothing else: a publication-route layer's artifacts are
+    published on the wire after the points they depend on have been ingested. `corpus.toml` is
+    rewritten by [`base_declaration`]."""
+    out.mkdir(parents=True, exist_ok=True)
+    layers = declared_layers(rung)
+    published = [layer["name"] for layer in layers if layer["route"] == "publication"]
+    on_column = [layer for layer in layers if layer["route"] == "column"]
+    kept: dict = {
+        "points": filter_parquet(
+            rung / "points.parquet", out / "points.parquet", "entity_id", base_ids, drop=published
+        ),
+        "dropped_membership_columns": [
+            name
+            for name in pq.ParquetFile(rung / "points.parquet").schema_arrow.names
+            if name in set(published)
+        ],
+    }
+    kept["member_tables"], rosters = write_base_members(out, on_column, base_ids)
+    if rosters:
+        kept["rosters"] = rosters
+    kept.update(copy_declared_inputs(rung, out, base_ids, published))
+    declaration, removed = base_declaration(
+        (rung / "corpus.toml").read_text(),
+        keep_members=[layer["name"] for layer in on_column],
+        keep_sources=[layer["name"] for layer in on_column if layer["roster"] is not None],
+    )
+    (out / "corpus.toml").write_text(declaration)
+    kept["declaration_only"] = removed
+    (out / "tessera.toml").write_text((rung / "tessera.toml").read_text())
+    return kept
+
+
+def write_base_members(
+    out: Path, on_column: Sequence[dict], base_ids: np.ndarray
+) -> tuple[dict, list[str]]:
+    """Each column-route layer's member table, filtered to the base's rows and written under the
+    name the declaration gives it, and its roster, where the layer declares supplied content,
+    copied beside it whole.
+    """
+    tables: dict = {}
+    rosters: list[str] = []
+    for layer in on_column:
+        members = layer["members"]
+        entity, _ = member_table_columns(pq.ParquetFile(members).schema_arrow)
+        tables[layer["name"]] = {
+            "file": members.name,
+            "rows": filter_parquet(members, out / members.name, entity, base_ids),
+        }
+        if layer["roster"] is not None and layer["roster"].exists():
+            shutil.copy2(layer["roster"], out / layer["roster"].name)
+            rosters.append(layer["roster"].name)
+    return tables, rosters
+
+
+def copy_declared_inputs(
+    rung: Path, out: Path, base_ids: np.ndarray, published: Sequence[str]
+) -> dict:
+    """Every other file the declaration still names, read off the declaration rather than listed
+    here: a vocabulary is copied whole, and any other view's points file is filtered by entity id
+    exactly as the anchor's is.
+    """
+    declared = tomllib.loads((rung / "corpus.toml").read_text())
+    named = declared.get("sources", {})
+    anchor = declared.get("defaults", {}).get("source", "points")
+    kept: dict = {}
+    for vocabulary in declared.get("vocabulary", []):
+        got = source_path(rung, named, vocabulary.get("source"))
+        if got is not None and got.exists():
+            shutil.copy2(got, out / got.name)
+            kept.setdefault("vocabularies", []).append(got.name)
+    for view in declared.get("view", []):
+        source = view.get("source", anchor)
+        if source == anchor:
+            continue
+        got = source_path(rung, named, source)
+        if got.exists():
+            kept.setdefault("views", {})[got.name] = filter_parquet(
+                got, out / got.name, "entity_id", base_ids, drop=published
+            )
+    for name in ("branch.parquet", ".env"):
+        source = rung / name
+        if source.exists() and not (out / name).exists():
+            shutil.copy2(source, out / name)
+    return kept

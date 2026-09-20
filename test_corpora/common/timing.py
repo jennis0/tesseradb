@@ -1,10 +1,4 @@
-"""A step timer, so a rung's manifest says what the run actually cost.
-
-Every `prepare.py` writes a manifest, and the useful thing in it is not the total but the
-breakdown: at the arXiv rung the difference between a two-minute run and a two-hour one is one
-step (seeded UMAP), and at the geographic rungs it is the projection. A timing recorded per step
-makes that readable without instrumenting a rerun.
-"""
+"""A step timer, so a rung's manifest records cost per step rather than only a total."""
 
 from __future__ import annotations
 

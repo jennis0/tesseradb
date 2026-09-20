@@ -1474,7 +1474,7 @@ The battery's `k = 30` understates a client's request, which carries a 1 to 2 mi
 - **`run_demo.sh --terms / --ranks / --label`**, and `custom` on ports of its own — see §6.
 - **The measurement drivers** (2026-09-03) — `tessera build --stage-timings-json`,
   [`../test_corpora/common/serve_battery.py`](../test_corpora/common/serve_battery.py) and
-  [`../test_corpora/common/ingest_cycle.py`](../test_corpora/common/ingest_cycle.py), booted by
+  [`../test_corpora/common/ingest_cycle/`](../test_corpora/common/ingest_cycle/), booted by
   [`../test_corpora/common/deployment.py`](../test_corpora/common/deployment.py) and collated by
   [`../scripts/campaign_report.py`](../scripts/campaign_report.py). Every rung records build time
   per stage, view latency across a principal ladder, and online ingest through flush and
