@@ -1,15 +1,11 @@
-"""Boot a `tessera serve` for a measurement, on ports and scratch state of its own.
+"""Boot a `tessera serve` for a measurement, on ports and scratch state of its own, for
+`serve_battery.py` and `ingest_cycle.py`.
 
-`serve_battery.py` measures view latency against a running server; `ingest_cycle.py` ingests into
-one. Both start it through this module.
+Never the rung's own `tessera.toml`, since another session usually serves the same bundle from
+it: a measurement writes a copy with its own ports, cache and WAL under a scratch directory.
 
-Never the rung's own `tessera.toml`: another session usually serves the same bundle from it. A
-measurement writes a copy with the same bundle, its own ports, and its own cache and WAL under a
-scratch directory.
-
-Always inside a `systemd-run --user --scope` transient scope, capped or not. It needs no root, and
-gives a cgroup directory that `memory.events`, `memory.stat` and `memory.reclaim` read from. The
-cgroup path is read from the served process's own `/proc/<pid>/cgroup` rather than constructed.
+Always inside a `systemd-run --user --scope` transient scope, capped or not: it needs no root,
+and gives a cgroup directory that `memory.events`, `memory.stat` and `memory.reclaim` read from.
 """
 
 from __future__ import annotations
@@ -30,9 +26,8 @@ except ModuleNotFoundError:  # 3.10 on this box
 
 import requests
 
-#: The `[serve]` keys of a rung that name this machine rather than what a viewer is served. Every
-#: other key of the rung's `[serve]` is copied into the measurement's own deployment file, so a
-#: rung that declares `max_k`, a cache size or a stream deadline is measured under it.
+#: The `[serve]` keys of a rung that name this machine. Every other key is copied into the
+#: measurement's own deployment file.
 MACHINE_SPECIFIC_SERVE = frozenset(
     {
         "viewer",
@@ -69,10 +64,7 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 def minted_credentials(source_dir: Path) -> dict[str, str]:
     """A value for every credential variable this deployment names that the environment and the
-    deployment's own `.env` do not carry, minted for this run and this run only.
-
-    A rung's `.env` may hold the identity key alone, and a server with no value for its session or
-    operator credential refuses to start.
+    deployment's own `.env` do not carry, minted for this run only.
     """
     serve = tomllib.loads((source_dir / "tessera.toml").read_text())["serve"]
     env = dict(os.environ) | read_env_file(source_dir / ".env")
@@ -107,8 +99,6 @@ class Deployment:
         #: `[ingest]` keys written into the copy. Empty means the server's own defaults.
         self.ingest = dict(ingest or {})
         #: Extra `[serve]` keys written into the copy, beside the ports and the credentials.
-        #: Empty means the server's own defaults. A measurement that needs an extreme value, such
-        #: as `stream_deadline_ms = 1`, sets it here.
         self.serve = dict(serve or {})
         self.env = dict(os.environ)
         self.env.update(read_env_file(self.source_dir / ".env"))
@@ -138,10 +128,8 @@ class Deployment:
         return self.scratch / "cache"
 
     def credential(self, which: str) -> str:
-        """The `session` or `operator` credential's value, from the environment.
-
-        The deployment file carries only the credential's variable name; the value comes from the
-        rung's `.env` or the process environment, never from the copy this class writes.
+        """The `session` or `operator` credential's value, from the environment, never from the
+        copy this class writes, which carries only the variable's name.
         """
         source = tomllib.loads((self.source_dir / "tessera.toml").read_text())["serve"]
         return self.env[source[f"{which}_credential_env"]]
@@ -186,18 +174,15 @@ env = "{source.get('identity', {}).get('env', 'TESSERA_IDENTITY_KEY')}"
     def start(self, log: Path | None = None, timeout: float = 900.0) -> None:
         log = log or (self.scratch / "serve.log")
         # Always a transient scope, capped or not: its cgroup gives `memory.reclaim`, the only
-        # eviction here that can drop pages the server holds mapped. `posix_fadvise(DONTNEED)`
-        # skips a page held in any process's page tables, which on a mapped-column design is
-        # nearly all of them.
+        # eviction here that can drop pages the server holds mapped.
         scope = [
             "systemd-run",
             "--user",
             "--scope",
             "--collect",
             "--quiet",
-            # Swap off: `memory.reclaim` reclaims anonymous memory as well as file pages, so with
-            # swap available a cold-page figure would include swap-ins. With it off, reclaim can
-            # only drop file pages.
+            # Swap off, so `memory.reclaim` can only drop file pages rather than swap anonymous
+            # memory out.
             "-p",
             "MemorySwapMax=0",
         ]
@@ -242,8 +227,7 @@ env = "{source.get('identity', {}).get('env', 'TESSERA_IDENTITY_KEY')}"
             text=True,
         ).stdout.split()
         # `pgrep` also matches the systemd-run wrapper; the served process is the one whose
-        # `/proc/<pid>/comm` is the binary's name, compared truncated to `TASK_COMM_LEN` (15
-        # characters plus a NUL), so a longer binary name never matches its own.
+        # `/proc/<pid>/comm` matches the binary's name, truncated to `TASK_COMM_LEN`.
         want = self.binary.name[:15]
         for pid in out:
             try:

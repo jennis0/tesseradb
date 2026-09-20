@@ -1,14 +1,11 @@
 """Where the three kinds of file live, so moving one is an environment variable.
 
 Staged sources are the publisher's own bytes, read-only, on the share. Derived files are what a
-`prepare.py` writes and what `tessera build` reads, and are regenerable. Declarations live in git
-beside the script that produces their inputs.
+`prepare.py` writes and what `tessera build` reads, and are regenerable. Declarations live in
+git beside the script that produces their inputs.
 
-The derived root is a variable rather than a fixed path so a script does not need editing when it
-moves to another volume.
-
-Never build or serve a bundle from the share: it is SMB, so a page fault is a network round trip.
-Staged sources are read from it once; everything else is local.
+Never build or serve a bundle from the share: it is SMB, so a page fault is a network round
+trip. Staged sources are read from it once; everything else is local.
 """
 
 from __future__ import annotations

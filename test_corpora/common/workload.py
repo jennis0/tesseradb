@@ -1,19 +1,17 @@
 """One rung's whole workload: build it, verify it, serve it, ingest into it, and say what happened.
 
-Every figure is the one the driver that measured it wrote — the build's own stage timings,
-`serve_battery`'s result, `ingest_cycle`'s result — kept whole in the run file under its own key.
-This module decides the order, the ports and the cap, and reports two sections: whether the run
-held, and what it cost against the last run of the same rung and shape.
+Every figure is the one the driver that measured it wrote, kept whole in the run file under its
+own key. This module decides the order, the ports and the cap, and reports two sections: whether
+the run held, and what it cost against the last run of the same rung and shape.
 
     python3 -m test_corpora.common.workload --rung arxiv --work <scratch> [--quick]
 
-`--quick` is the shape for a change under review: three zooms, three deciles, ten samples a cell,
-and a 2% hold-out. Full mode is every driver's own default and a 10% hold-out. The two shapes are
-compared only against each other.
+`--quick` is the shape for a change under review: three zooms, three deciles, ten samples a
+cell, and a 2% hold-out. Full mode is every driver's own default and a 10% hold-out.
 
-The exit code is the correctness section's: a refused check, a failed verify, an OOM kill, a dead
-server, a failed request, an unequal census or a rejected batch each make it non-zero. The cost
-section never affects it: a timing here depends on what else is running on the machine.
+The exit code is the correctness section's: a refused check, a failed verify, an OOM kill, a
+dead server, a failed request, an unequal census or a rejected batch each make it non-zero. The
+cost section never affects it, since a timing here depends on the machine.
 """
 
 from __future__ import annotations
@@ -71,11 +69,8 @@ def run(command: Sequence[str], cwd: Path, env: dict[str, str] | None = None) ->
 
 
 def text_column(rung_dir: Path) -> str | None:
-    """The rung's first indexed text attribute — what the battery's `match` asks on.
-
-    Read from the declaration rather than defaulted: arXiv indexes `title` and GeoNames `name`, and
-    a `match` on a column a rung does not declare is a failed request in every cell.
-    """
+    """The rung's first indexed text attribute — what the battery's `match` asks on, read from
+    the declaration rather than defaulted."""
     declared = tomllib.loads((rung_dir / "corpus.toml").read_text())
     for attribute in declared.get("attribute", []):
         if attribute.get("type") == "text" and attribute.get("index"):
@@ -141,8 +136,7 @@ def cycle_argv(args, rung_dir: Path, bundle: Path, work: Path, binary: Path) -> 
         "--all-in-bundle", str(bundle),
         "--write-cycle",
         "--state-extent",
-        # The battery holds `port0`..`port0 + 2`; a cycle serves the folded deployment and the
-        # all-in one, so it takes six consecutive ports of its own.
+        # The battery holds `port0`..`port0 + 2`; a cycle takes six ports of its own.
         "--port0", str(args.port0 + 3),
         "--cap-bytes", str(args.cap_bytes),
         "--fraction", "0.02" if args.quick else "0.10",
@@ -231,8 +225,7 @@ def cost(result: dict) -> dict[str, float | None]:
     cells = principal.get("cells") or []
     for zoom in sorted({cell["zoom"] for cell in cells}):
         at_zoom = [cell["conditions"]["hot"]["wall_ms"] for cell in cells if cell["zoom"] == zoom]
-        # The median of the cells' own p50s, and the worst cell's p99: a battery-level percentile is
-        # over cells rather than over pooled samples (`serve_battery.battery_figures`).
+        # The median of the cells' own p50s, and the worst cell's p99.
         p50s = [hot["p50"] for hot in at_zoom if hot["p50"] is not None]
         p99s = [hot["p99"] for hot in at_zoom if hot["p99"] is not None]
         figures[f"hot p50 z{zoom} (ms)"] = statistics.median(p50s) if p50s else None
@@ -398,9 +391,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         result["ingest"] = json.loads(cycle_out.read_text()) if cycle_out.exists() else None
         failures += list(dig(result, "ingest", "failures", default=[]))
 
-        # `viewport_latency` opens a bundle with the engine directly, on the view `s0` and the
-        # identity Morton extent its own fixture is built with. A rung's views are named and framed
-        # otherwise, so this says so and carries on; it never gates.
+        # `viewport_latency` opens the bundle with the engine directly, on its own fixture's
+        # view and frame rather than the rung's; it never gates.
         if not args.quick:
             with steps.step("viewport_latency"):
                 result["viewport_latency"] = run(
