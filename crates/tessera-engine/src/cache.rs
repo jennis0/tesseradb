@@ -4,10 +4,10 @@
 //! to projections: a byte bound, LRU eviction, and removal of entries whose key no request can
 //! produce.
 //!
-//! The single-flight state machine, the four eviction rules and the counted choke point all live in
-//! [`crate::single_flight`] and are argued there. What lives *here* is what is specific to
-//! projections: the key, the weight function, the two pruners' safety argument, and the arithmetic
-//! an operator needs to size a box.
+//! The single-flight state machine, the eviction rules and the counted choke point live in
+//! `tessera-cache` and are argued there. What lives here is specific to projections: the key, the
+//! weight function, the two pruners' safety argument, and the arithmetic an operator needs to size
+//! a box.
 //!
 //! # What removal can and cannot do (I3's cache half)
 //!
@@ -32,7 +32,7 @@ use tessera_types::TermId;
 
 use crate::cancel::CancelToken;
 use crate::projection::RowProjection;
-use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
+use tessera_cache::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 
 /// `(token_id, view, segments_version)` — the row-projection cache's key (shared-context
 /// constraint 8). `token_id` rather than the token string so the cache never has to hash or
@@ -94,14 +94,14 @@ pub(crate) struct RowProjectionKey {
 /// A losing arrival's outcome: another caller is already building this key, and this call did not
 /// wait for it. Carries nothing — the caller only needs to know to retry.
 ///
-/// Distinct from `single_flight::Building` so the wrapper's callers depend on this module's
-/// contract rather than on the generic cache's internals.
+/// Distinct from `tessera_cache::Building` so the wrapper's callers depend on this module's
+/// contract rather than on the generic cache's.
 #[derive(Debug)]
 pub(crate) struct CacheBusy;
 
 /// Why a waiting caller ([`RowProjectionCache::get_or_derive_waiting`]) gave up: the wait budget
-/// expired, or the client disconnected. Distinct from `single_flight::WaitEnded` for the reason
-/// [`CacheBusy`] is distinct from `single_flight::Building`.
+/// expired, or the client disconnected. Distinct from `tessera_cache::WaitEnded` for the reason
+/// [`CacheBusy`] is distinct from `tessera_cache::Building`.
 #[derive(Debug)]
 pub(crate) enum CacheWaitEnded {
     Budget,
@@ -141,18 +141,8 @@ pub(crate) struct SessionGeometry {
     pub(crate) projection: Arc<RowProjection>,
     /// The credential's granted terms, sorted — the fragment cache's key component.
     pub(crate) satisfied_sorted: Arc<Vec<TermId>>,
-    /// `sha256(auth_data)`, the fragment cache's caller obligation.
+    /// `sha256(auth_data)`, part of the mask identity.
     pub(crate) auth_data_hash: [u8; 32],
-    /// **The generation `satisfied_sorted` was resolved against** — carried so the background
-    /// refresh can discharge the other half of that obligation (#112).
-    ///
-    /// The refresh rebuilds a fragment from a term set frozen at some earlier authorise, so it must
-    /// name the generation that term set belongs to and never the one it happens to be running
-    /// against. Pairing the two wrongly poisons `FragmentCache`'s canonical-key memo for every
-    /// later authorise of the same credential — and this pass runs automatically after every
-    /// flush, for every resident session, which is what made the defect look like it had no
-    /// trigger.
-    pub(crate) satisfied_at: u64,
 }
 
 impl CacheWeight for SessionGeometry {
@@ -182,7 +172,7 @@ impl CacheWeight for RowProjection {
     /// container is converted only where the run form is smaller — so the 125.12 MB above stays an
     /// upper bound at that coverage, and an entry that runs well is charged what it costs.
     ///
-    /// The floor applied on top of this (`single_flight::PER_ENTRY_FLOOR_BYTES`) is what stops the
+    /// The floor applied on top of this (`tessera_cache::PER_ENTRY_FLOOR_BYTES`) is what stops the
     /// *opposite* error — a bound that charges a near-empty projection its true handful of bytes
     /// bounds no number of entries.
     fn cache_weight_bytes(&self) -> u64 {
@@ -322,9 +312,9 @@ impl RowProjectionCache {
     /// and nothing else.
     pub(crate) fn peek(&self, key: &RowProjectionKey) -> Peek {
         match self.inner.peek(key) {
-            crate::single_flight::Peek::Ready(value) => Peek::Ready(value),
-            crate::single_flight::Peek::Building => Peek::Building,
-            crate::single_flight::Peek::Absent => Peek::Absent,
+            tessera_cache::Peek::Ready(value) => Peek::Ready(value),
+            tessera_cache::Peek::Building => Peek::Building,
+            tessera_cache::Peek::Absent => Peek::Absent,
         }
     }
 
@@ -418,9 +408,8 @@ impl RowProjectionCache {
     /// `spawn_blocking`, so a batch of expired sessions costs one pass on a blocking thread rather
     /// than `victims` passes on the thread answering requests. A
     /// secondary `token_id → keys` index would make the pass O(victims); it is declined here
-    /// because a second index is a second bijection to keep in step — the failure
-    /// `crate::single_flight`'s rule 1 exists to prevent — and the exposure above does not justify
-    /// it. Recorded so the trade is visible rather than rediscovered.
+    /// because a second index is a second bijection to keep in step — the failure `tessera-cache`'s
+    /// rule 1 exists to prevent — and the exposure above does not justify it.
     pub(crate) fn prune_token(&self, token_id: u64) -> usize {
         self.inner.retain_keys(|key| key.token_id != token_id)
     }

@@ -2047,10 +2047,9 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
 // 0058); the two are not in tension, because what F4 requires is that *distinct* keys do not
 // serialise, and same-key callers serialising is what single-flight is.
 //
-// The state machine itself (waiting, the four wake paths, panic safety) is proven
-// deterministically — no sleeps, no timing slack — by `tessera-engine`'s own `single_flight`
-// unit tests, which control a build's start and finish with channels because the map is directly
-// reachable there. The tests below instead exercise the real, public `Engine::viewport` path
+// The state machine itself (waiting, the wake paths, panic safety) is proven deterministically —
+// no sleeps, no timing slack — by `tessera-cache`'s unit tests, which control a build's start and
+// finish with channels because the map is directly reachable there. The tests below instead exercise the real, public `Engine::viewport` path
 // end to end, which cannot inject a pause into `RowProjection::new`; they use a large enough
 // synthetic fixture that a cold build takes tens of milliseconds even unoptimised, well above OS
 // thread-wake jitter.

@@ -88,7 +88,7 @@ pub struct Engine {
     /// A region leaf's decomposition per `(view, generation, canonical shape, stop depth)`. Not
     /// keyed on principal: rows inside the shape are tested under each request's own mask instead.
     pub(crate) region_cache: Arc<
-        crate::single_flight::SingleFlightCache<
+        tessera_cache::SingleFlightCache<
             crate::region::RegionKey,
             crate::region::RegionDecomposition,
         >,
@@ -109,7 +109,7 @@ pub struct Engine {
     /// not walk the mask again. Per *session*, since `N_occ` is counted inside one principal's own
     /// composed mask.
     pub(crate) occupancy: Arc<
-        crate::single_flight::SingleFlightCache<
+        tessera_cache::SingleFlightCache<
             crate::occupancy::OccupancyKey,
             crate::occupancy::OccupiedTiles,
         >,
@@ -872,13 +872,13 @@ impl Engine {
             adopt_derived_structures(cache_dir, &readers, &bundle, &state);
 
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
-        let region_cache = Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX));
+        let region_cache = Arc::new(tessera_cache::SingleFlightCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
         let switches = Arc::new(TestSwitches::default());
         let counters = Arc::new(ServeCounters::default());
         // Bounded from construction, unlike the caches `tessera_server::prepare` bounds after
         // `open`: entries are fixed-size, so there is no figure a deployment would set.
-        let occupancy = Arc::new(crate::single_flight::SingleFlightCache::new(
+        let occupancy = Arc::new(tessera_cache::SingleFlightCache::new(
             crate::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES,
         ));
         let stage = crate::stage::StageDeps {

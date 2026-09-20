@@ -2658,6 +2658,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "sha2",
  "tempfile",
+ "tessera-cache",
  "tessera-types",
 ]
 
@@ -2730,6 +2731,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessera-cache"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash 1.1.0",
+]
+
+[[package]]
 name = "tessera-cli"
 version = "0.1.0"
 dependencies = [
@@ -2784,6 +2792,7 @@ dependencies = [
  "tessera-analyse",
  "tessera-authz",
  "tessera-build",
+ "tessera-cache",
  "tessera-corpus",
  "tessera-engine",
  "tessera-filter",

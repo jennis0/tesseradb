@@ -117,9 +117,9 @@ for m in $members; do
   # module path it has. A crate whose own listing already contains that final segment did not lose
   # anything — the missing spelling belongs to the other member. Without this the source grep alone
   # reports a false positive for every duplicated test name, which it did:
-  # `an_undersized_bound_does_not_livelock` exists in `tessera-authz/src`, `tessera-engine/src` and
-  # `tessera-engine/tests/cache.rs`, and the bare spelling from the last was attributed to authz,
-  # whose own listing carries it under `single_flight::tests::`.
+  # `an_undersized_bound_does_not_livelock` exists in both `tessera-cache/src` and
+  # `tessera-engine/tests/cache.rs`, and the bare spelling from the second was attributed to the
+  # first, whose own listing carries it under `tests::`.
   #
   # The trade is deliberate: a crate that genuinely lost a test *and* still lists another test of
   # the same final segment is filtered out too. That is the rarer error, and this is a diagnostic —

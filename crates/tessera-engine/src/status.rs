@@ -234,13 +234,13 @@ impl Engine {
     }
 
     /// The region cache's gauges, beside the row-projection cache's.
-    pub fn region_cache_stats(&self) -> crate::single_flight::CacheStats {
+    pub fn region_cache_stats(&self) -> tessera_cache::CacheStats {
         self.region_cache.stats()
     }
 
     /// The occupancy memo's gauges, one entry per `(session, view, depth, generation)` rung.
     /// `evictions` rising is the memo removing rungs taken against a superseded generation.
-    pub fn occupancy_cache_stats(&self) -> crate::single_flight::CacheStats {
+    pub fn occupancy_cache_stats(&self) -> tessera_cache::CacheStats {
         self.occupancy.stats()
     }
 
@@ -250,7 +250,7 @@ impl Engine {
     }
 
     /// How long a request parks on another request's in-flight row-projection build before it is
-    /// refused (`serve.single_flight_wait_ms`). Unset, an embedder gets `single_flight::DEFAULT_WAIT_BUDGET_MS`.
+    /// refused (`serve.single_flight_wait_ms`). Unset, an embedder gets [`crate::DEFAULT_SINGLE_FLIGHT_WAIT_MS`].
     pub fn set_single_flight_wait_ms(&self, wait_budget_ms: u64) {
         self.row_projection_cache.set_wait_budget_ms(wait_budget_ms);
     }
@@ -318,7 +318,7 @@ impl Engine {
 
     /// The row-projection cache's operator gauges, published as `projection_cache`. The fragment
     /// tier's twin is [`Self::fragment_cache_stats`].
-    pub fn row_projection_cache_stats(&self) -> crate::single_flight::CacheStats {
+    pub fn row_projection_cache_stats(&self) -> tessera_cache::CacheStats {
         self.row_projection_cache.stats()
     }
 

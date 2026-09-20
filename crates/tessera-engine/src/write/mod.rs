@@ -1144,7 +1144,7 @@ pub(crate) struct MaintenanceDeps {
     /// geometry swap exactly as the row-projection cache is: a row-space artefact keyed on a
     /// generation is unusable after it, and only retention is left to do.
     pub(crate) region_cache: Arc<
-        crate::single_flight::SingleFlightCache<
+        tessera_cache::SingleFlightCache<
             crate::region::RegionKey,
             crate::region::RegionDecomposition,
         >,

@@ -1,7 +1,5 @@
 //! Byte-identity tests for the streaming writers: `DictStreamWriter` against `DictWriter`, and
-//! `PostingsSpool` against `write_posting_records`. Byte-for-byte equality is the contract —
-//! the streaming writers replace the buffered ones in the build pipeline, and bundles must not
-//! change by a byte.
+//! `PostingsSpool` against `write_posting_records`.
 
 use std::fs;
 use tempfile::TempDir;
@@ -10,8 +8,7 @@ use tessera_authz::{
 };
 
 /// Distinct descriptors of varied lengths, including one empty descriptor. Distinctness is the
-/// streaming writer's caller contract; without it `DictWriter` would deduplicate and the two
-/// outputs would legitimately differ.
+/// streaming writer's caller contract; without it `DictWriter` would deduplicate.
 fn descriptors(n: usize) -> Vec<Vec<u8>> {
     let mut out = vec![Vec::new()];
     for i in 0..n.saturating_sub(1) {
@@ -22,9 +19,6 @@ fn descriptors(n: usize) -> Vec<Vec<u8>> {
     out
 }
 
-// DictWriter writes a single `terms-0.dict` extent unconditionally — there is no extent-split
-// boundary to cover; if a split rule is ever introduced there, DictStreamWriter must replicate
-// it and this test must gain a case that crosses the boundary.
 #[test]
 fn dict_stream_writer_matches_dict_writer_bytes() {
     let descriptors = descriptors(1000);
@@ -133,21 +127,10 @@ fn postings_spool_matches_for_a_single_record() {
     assert_spool_matches_buffered(&posting_records(1));
 }
 
-/// **`encode_posting_bitmap` and `encode_posting` agree byte for byte, across the tag boundary.**
-///
-/// The bitmap encoder is compaction's pass 2 primitive: the fold's term sweep works in Roaring
-/// throughout (union the tiers, subtract the tombstones) and must not materialise a `Vec<u32>` to
-/// encode the result — the widest term is a measured 125.12 MB as portable Roaring against 2 GB as
-/// `u32`s at 10⁹, per term, on a pass that visits every term in the dictionary.
-///
-/// Being a *second producer* rather than a second format is the whole property, so this sweeps the
-/// tag rule's boundary explicitly: cardinalities either side of `small_term_threshold` take
-/// different arms (tag 0 raw `u32` LEs, tag 1 run-optimised portable Roaring), and both arms must
-/// match. The empty set and the singleton are included because they are the cases where a
-/// cardinality comparison is easiest to get off by one.
-///
-/// **Mutation:** drop the `run_optimize` from the bitmap arm, or compare `<` rather than `<=`
-/// against the threshold, and the tag-1 or boundary cases stop matching.
+/// `encode_posting_bitmap` and `encode_posting` agree byte for byte, across the tag boundary.
+/// This sweeps the boundary explicitly: cardinalities either side of `small_term_threshold` take
+/// different arms, tag 0 raw `u32` LEs and tag 1 run-optimised portable Roaring, and both arms
+/// must match.
 #[test]
 fn the_bitmap_and_slice_encoders_agree_byte_for_byte() {
     use croaring::Bitmap;
@@ -155,8 +138,6 @@ fn the_bitmap_and_slice_encoders_agree_byte_for_byte() {
 
     const THRESHOLD: u32 = 8;
 
-    // Sets chosen around the threshold, plus a run-heavy one (where `run_optimize` actually fires)
-    // and a scattered one (where it does not).
     let cases: Vec<Vec<u32>> = vec![
         vec![],
         vec![7],

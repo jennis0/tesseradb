@@ -2,9 +2,8 @@
 //! bundle `tests/pins.rs` uses.
 //!
 //! **These cases go through the real request path on purpose.** The single-flight state machine,
-//! the four eviction rules and the lock accounting are unit-tested in
-//! `crates/tessera-engine/src/single_flight.rs`, where
-//! a synthetic `V` makes every interleaving schedulable. What cannot be tested there is the thing
+//! the eviction rules and the lock accounting are unit-tested in `tessera-cache`, where a
+//! synthetic `V` makes every interleaving schedulable. What cannot be tested there is the thing
 //! that matters most here: that a *rebuilt* projection is the same projection. A test that
 //! constructed two `RowProjection`s in-process and compared them would never exercise the hit path
 //! at all, and would therefore pass under a hit path that widened — which is the disclosure
@@ -336,7 +335,7 @@ fn eviction_never_widens_a_mask() {
 /// A bound below the working set costs rebuilds, never refusals, and never a wrong answer. *The
 /// bound holding is not the risk; the bound biting is.*
 ///
-/// The engine-level companion to `single_flight`'s unit test of the same name, which covers the
+/// The engine-level companion to `tessera-cache`'s unit test of the same name, which covers the
 /// refusal accounting deterministically. What this adds is that a real `RowProjection` round-robin
 /// under a biting bound still serves correct responses to every session.
 ///

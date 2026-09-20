@@ -1,13 +1,12 @@
-//! CSR postings writer and reader for `terms/postings.arrow` (contracts §2.4).
+//! CSR postings writer and reader for `terms/postings.arrow`.
 //!
 //! `terms/postings.arrow` is one Arrow IPC FILE holding a single record batch with one
 //! `LargeBinaryArray` column named `posting`; row ordinal = term_id. Each record is
-//! `u8 tag ‖ payload`: tag 0 is a sorted `u32` little-endian entity array (used when
-//! `count <= small_term_threshold`, including the empty case); tag 1 is portable-serialised
+//! `u8 tag ‖ payload`: tag 0 is a sorted `u32` little-endian entity array, used when
+//! `count <= small_term_threshold` including the empty case; tag 1 is portable-serialised
 //! Roaring bitmap bytes.
 //!
-//! This crate never depends on `tessera-store` or `tessera-spatial`, and `RowId` never
-//! appears here — postings are entity-space only.
+//! Postings are entity-space only; `RowId` never appears here.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -15,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use arrow::array::{Array, LargeBinaryArray, LargeBinaryBuilder};
+use arrow::array::{Array, ArrayRef, LargeBinaryArray, LargeBinaryBuilder};
 use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::ipc::reader::{read_footer_length, FileDecoder};
@@ -29,16 +28,13 @@ use tessera_types::TermId;
 const POSTING_COLUMN_NAME: &str = "posting";
 
 /// Write `postings.arrow`: `per_term[t]` is term *t*'s sorted entity list. A record uses tag 0
-/// (raw little-endian `u32` array) when `per_term[t].len() <= small_term_threshold as usize`
-/// (including the empty case), and tag 1 (portable Roaring bytes) otherwise.
+/// (raw little-endian `u32` array) when `per_term[t].len() <= small_term_threshold as usize`,
+/// including the empty case, and tag 1 (portable Roaring bytes) otherwise.
 ///
-/// `per_term[t]` must already be sorted strictly ascending (no duplicates) — this is a CSR
-/// postings writer, not a sort step; callers are expected to hand it term-ordered, sorted entity
-/// lists (e.g. from the build pipeline's grouping pass). This is checked unconditionally
-/// (not just in debug builds): these are authorisation masks, and an unsorted/duplicated input
-/// would otherwise silently diverge in content depending only on which side of
-/// `small_term_threshold` a term's count lands (tag 0 stores input verbatim; tag 1 sorts and
-/// dedups via the Roaring bitmap) — a content-integrity bug, not merely a style one.
+/// `per_term[t]` must already be sorted strictly ascending with no duplicates. The check runs
+/// unconditionally, not just in debug builds: these are authorisation masks, and an unsorted or
+/// duplicated input would otherwise silently diverge in content depending on which side of
+/// `small_term_threshold` a term's count lands.
 pub fn write_postings(
     path: &Path,
     per_term: &[Vec<u32>],
@@ -52,9 +48,8 @@ pub fn write_postings(
 }
 
 /// Encode term `t`'s sorted entity list into its on-disk record (`u8 tag ‖ payload`), applying
-/// exactly the tag rule [`write_postings`] documents and the same unconditional sortedness
-/// check. Split out so a build that cannot hold every term's entity list at once can encode
-/// each term as soon as its list is complete and keep only the (compressed) records.
+/// the same tag rule and sortedness check as [`write_postings`]. Split out so a build can encode
+/// each term as soon as its list is complete and keep only the compressed records.
 pub fn encode_posting(
     t: usize,
     entities: &[u32],
@@ -85,38 +80,23 @@ pub fn encode_posting(
     Ok(record)
 }
 
-/// [`encode_posting`] from a `Bitmap` rather than a `&[u32]` — compaction's pass 2 primitive
-/// (compaction §3).
+/// [`encode_posting`] from a `Bitmap` rather than a `&[u32]`, avoiding materialising a large
+/// term's bitmap as a `Vec<u32>` first. Byte-identical to [`encode_posting`] over the same set:
+/// both apply the same tag rule, tag 0 writes the same ascending `u32` LEs, and tag 1 runs the
+/// same `run_optimize` before the same `Portable` serialisation.
 ///
-/// **Why this exists at all: the `&[u32]` signature is a memory bound in disguise.** A fold's term
-/// sweep unions the base posting with every live tier's and subtracts the tombstone set, all in
-/// Roaring, and then has to encode the result. Going through `encode_posting` means materialising
-/// that bitmap as a `Vec<u32>` first — and the largest term plausibly covers 25–50% of all points
-/// (§3), which at 10⁹ is **2 GB as `u32`s against a measured 125.12 MB as the portable Roaring the
-/// tag-1 record already holds** (`probes/results.md` §4.2). The fold would pay that per term, on
-/// the one pass that sweeps every term in the dictionary.
-///
-/// **Byte-identical to [`encode_posting`] over the same set**, which is what makes this a second
-/// producer rather than a second format: both apply the same tag rule against
-/// `small_term_threshold`, tag 0 writes the same ascending `u32` LEs, and tag 1 runs the same
-/// `run_optimize` before the same `Portable` serialisation. Pinned by
-/// `postings::the_bitmap_and_slice_encoders_agree_byte_for_byte`.
-///
-/// No sortedness check, and none is possible or needed: a `Bitmap` *is* a sorted, deduplicated
-/// set, which is the invariant [`encode_posting`] has to verify on a slice it did not build.
+/// No sortedness check, and none is needed: a `Bitmap` is already a sorted, deduplicated set.
 pub fn encode_posting_bitmap(bitmap: &Bitmap, small_term_threshold: u32) -> io::Result<Vec<u8>> {
     let cardinality = bitmap.cardinality();
     let mut record = Vec::new();
     if cardinality <= small_term_threshold as u64 {
         record.push(0u8);
-        // Ascending by construction — `Bitmap`'s iterator is ordered — so this is the same byte
-        // sequence `encode_posting` writes from an ascending slice.
+        // Ascending by construction, since `Bitmap`'s iterator is ordered.
         for entity in bitmap.iter() {
             record.extend_from_slice(&entity.to_le_bytes());
         }
     } else {
-        // Cloned because `run_optimize` mutates, and the caller's bitmap is the sweep's own
-        // working set. The clone is the compressed representation, not an expansion.
+        // Cloned because `run_optimize` mutates the caller's own working set.
         let mut optimised = bitmap.clone();
         optimised.run_optimize();
         record.push(1u8);
@@ -135,68 +115,78 @@ pub fn write_posting_records(path: &Path, records: &[Vec<u8>]) -> io::Result<()>
     write_posting_array(path, builder.finish())
 }
 
-/// The single schema/batch/IPC-writer invocation behind [`write_posting_records`] and
-/// [`PostingsSpool::finish`]. Byte-identity between the buffered and spooled paths requires
-/// this to be literally the same code, not two copies that could drift. The column carries no
-/// validity buffer: the builder path appends no nulls (so its null buffer is `None`) and the
-/// spool path passes `None` explicitly — a spurious all-valid buffer would change the file
-/// bytes.
+/// The single schema/batch/IPC-writer invocation behind every file this crate writes, so a
+/// buffered and a spooled path stay byte-identical.
+pub(crate) fn write_single_batch(
+    path: &Path,
+    schema: SchemaRef,
+    columns: Vec<ArrayRef>,
+) -> io::Result<()> {
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| invalid_data(e.to_string()))?;
+
+    let file = File::create(path)?;
+    let mut writer = FileWriter::try_new(BufWriter::new(file), &schema)
+        .map_err(|e| invalid_data(e.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|e| invalid_data(e.to_string()))?;
+    writer.finish().map_err(|e| invalid_data(e.to_string()))?;
+    Ok(())
+}
+
+/// [`write_single_batch`] with the positional postings schema. The column carries no validity
+/// buffer: a spurious all-valid buffer would change the file bytes.
 fn write_posting_array(path: &Path, array: LargeBinaryArray) -> io::Result<()> {
     let schema = Arc::new(Schema::new(vec![Field::new(
         POSTING_COLUMN_NAME,
         DataType::LargeBinary,
         false,
     )]));
-    let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(array)])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-    let file = File::create(path)?;
-    let mut writer = FileWriter::try_new(BufWriter::new(file), &schema)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    writer
-        .write(&batch)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    writer
-        .finish()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    Ok(())
+    write_single_batch(path, schema, vec![Arc::new(array)])
 }
 
-/// Streaming counterpart to [`write_posting_records`]: encoded records (see [`encode_posting`])
-/// are spooled to a temporary file as they arrive — record ordinal = term id — with only the
-/// Arrow offset table held in memory (one `i64` per record, plus a leading zero). `finish`
-/// memory-maps the spool as the column's values buffer and writes `postings.arrow` through the
-/// same IPC-writer invocation as [`write_posting_records`], so the output is byte-for-byte the
-/// file that function would write from the same records; the reader's single-record-batch
-/// layout constraint (see [`PostingsReader`]) is met the same way, with one batch.
-pub struct PostingsSpool {
+/// Memory-map `file` whole as an Arrow buffer, without copying.
+pub(crate) fn mapped_buffer(file: &File) -> io::Result<Buffer> {
+    let mapping = unsafe { memmap2::Mmap::map(file) }?;
+    let len = mapping.len();
+    let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
+    // SAFETY: `arc` owns the mapping for as long as any Buffer built from it is alive, and the
+    // mapping is valid for `len` bytes for its entire lifetime.
+    let ptr = NonNull::new(arc.as_ptr() as *mut u8)
+        .expect("memmap2::Mmap never returns a null base pointer");
+    Ok(unsafe { Buffer::from_custom_allocation(ptr, len, arc) })
+}
+
+/// The spool file behind [`PostingsSpool`] and [`crate::KeyedPostingsSpool`], so a build does not
+/// hold every record in memory at once: encoded records are appended to a temporary file as they
+/// arrive, and only the Arrow offset table is held. [`Self::finish`] maps the spool as the
+/// column's values buffer, byte-for-byte what a buffered writer would produce.
+pub(crate) struct RecordSpool {
     spool_path: PathBuf,
     writer: BufWriter<File>,
-    // Arrow LargeBinary offsets: offsets[t]..offsets[t + 1] bounds record t; leading 0.
+    // Arrow LargeBinary offsets: offsets[i]..offsets[i + 1] bounds record i; leading 0.
     offsets: Vec<i64>,
 }
 
-impl PostingsSpool {
+impl RecordSpool {
     /// Create (truncating) the spool file at `spool_path`.
-    pub fn create(spool_path: &Path) -> io::Result<Self> {
-        // Read access is required as well as write: `finish` memory-maps the spool through this
-        // same handle, and mapping a write-only descriptor fails with EACCES.
+    pub(crate) fn create(spool_path: &Path) -> io::Result<Self> {
+        // Read access is required too: `finish` memory-maps the spool through this same handle.
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .open(spool_path)?;
-        Ok(PostingsSpool {
+        Ok(RecordSpool {
             spool_path: spool_path.to_path_buf(),
             writer: BufWriter::new(file),
             offsets: vec![0],
         })
     }
 
-    /// Append the next term's encoded record. Records must arrive in term order; ordinal in the
-    /// finished file = term id.
-    pub fn append(&mut self, record: &[u8]) -> io::Result<()> {
+    pub(crate) fn append(&mut self, record: &[u8]) -> io::Result<()> {
         let last = *self
             .offsets
             .last()
@@ -207,15 +197,18 @@ impl PostingsSpool {
         Ok(())
     }
 
-    /// Flush and fsync the spool, write `postings.arrow` at `postings_path` from it, and delete
-    /// the spool file on success.
-    pub fn finish(self, postings_path: &Path) -> io::Result<()> {
+    /// Flush and fsync the spool, build the posting column over a map of it, hand that column to
+    /// `write`, and delete the spool file once `write` has succeeded.
+    pub(crate) fn finish(
+        self,
+        write: impl FnOnce(LargeBinaryArray) -> io::Result<()>,
+    ) -> io::Result<()> {
         let file = self
             .writer
             .into_inner()
             .map_err(io::IntoInnerError::into_error)?;
-        // The spool is about to be read back through a memory map; its bytes must be durable
-        // and visible before the map is taken.
+        // The spool is read back through a memory map; its bytes must be durable before the map
+        // is taken. The mapping outlives this file handle, dropped below.
         file.sync_all()?;
 
         let total = *self
@@ -226,36 +219,55 @@ impl PostingsSpool {
             .map_err(|_| invalid_data("postings spool total exceeds usize on this platform"))?;
 
         let values = if total == 0 {
-            // memmap2 rejects zero-length maps; an empty values buffer is what the builder
-            // path produces for zero records (and for all-empty records) anyway.
+            // memmap2 rejects zero-length maps.
             Buffer::from_vec(Vec::<u8>::new())
         } else {
-            let mapping = unsafe { memmap2::Mmap::map(&file) }?;
-            if mapping.len() != total {
+            let buffer = mapped_buffer(&file)?;
+            if buffer.len() != total {
                 return Err(invalid_data(format!(
                     "postings spool is {} bytes but the offset table accounts for {total}",
-                    mapping.len()
+                    buffer.len()
                 )));
             }
-            let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
-            // SAFETY: same argument as `PostingsReader::open`'s mmap arm — `arc` owns the
-            // mapping for as long as any Buffer built from it is alive (captured as the
-            // buffer's `Allocation`), the mapping is valid for `total` bytes for its entire
-            // lifetime, and memmap2::Mmap never returns a null base pointer.
-            let ptr = NonNull::new(arc.as_ptr() as *mut u8)
-                .expect("memmap2::Mmap never returns a null base pointer");
-            unsafe { Buffer::from_custom_allocation(ptr, total, arc) }
+            buffer
         };
         drop(file);
 
         let offsets = OffsetBuffer::new(ScalarBuffer::from(self.offsets));
         let array = LargeBinaryArray::try_new(offsets, values, None)
             .map_err(|e| invalid_data(e.to_string()))?;
-        write_posting_array(postings_path, array)?;
-
-        // The map over the spool was dropped with the array inside `write_posting_array`;
-        // the spool is only removed once `postings.arrow` is fully written.
+        write(array)?;
         std::fs::remove_file(&self.spool_path)
+    }
+}
+
+/// Streaming counterpart to [`write_posting_records`]: encoded records are spooled to a
+/// temporary file as they arrive, record ordinal = term id, with only the Arrow offset table
+/// held in memory. `finish` writes `postings.arrow` byte-for-byte the same as
+/// [`write_posting_records`] would from the same records.
+pub struct PostingsSpool {
+    spool: RecordSpool,
+}
+
+impl PostingsSpool {
+    /// Create (truncating) the spool file at `spool_path`.
+    pub fn create(spool_path: &Path) -> io::Result<Self> {
+        Ok(PostingsSpool {
+            spool: RecordSpool::create(spool_path)?,
+        })
+    }
+
+    /// Append the next term's encoded record. Records must arrive in term order; ordinal in the
+    /// finished file = term id.
+    pub fn append(&mut self, record: &[u8]) -> io::Result<()> {
+        self.spool.append(record)
+    }
+
+    /// Flush and fsync the spool, write `postings.arrow` at `postings_path` from it, and delete
+    /// the spool file on success.
+    pub fn finish(self, postings_path: &Path) -> io::Result<()> {
+        self.spool
+            .finish(|array| write_posting_array(postings_path, array))
     }
 }
 
@@ -282,40 +294,75 @@ fn next_offset(last: i64, record_len: usize) -> io::Result<i64> {
 pub enum PostingRef<'a> {
     /// Tag 0: raw little-endian `u32` entity ids, sorted ascending.
     Array(&'a [u8]),
-    /// Tag 1: a Roaring bitmap view deserialised (no-copy, no-alignment-required) from the
-    /// portable wire format.
+    /// Tag 1: a Roaring bitmap view deserialised, no-copy, from the portable wire format.
     Roaring(BitmapView<'a>),
 }
 
-/// Reads `postings.arrow`. Holds the backing bytes (either an owned buffer or a memory map);
-/// [`PostingRef`]s returned by [`PostingsReader::posting`] borrow from that backing storage
-/// without copying.
+impl PostingRef<'_> {
+    /// How many entities this posting holds.
+    pub fn cardinality(&self) -> u64 {
+        match self {
+            PostingRef::Array(bytes) => (bytes.len() / 4) as u64,
+            PostingRef::Roaring(view) => view.cardinality(),
+        }
+    }
+
+    /// Append this posting's entities to `out`, ascending.
+    pub fn extend_into(&self, out: &mut Vec<u32>) {
+        match self {
+            PostingRef::Array(bytes) => {
+                // Validated as a multiple of 4 once, at open time; not re-checked per lookup.
+                debug_assert!(
+                    bytes.len() % 4 == 0,
+                    "tag-0 posting payload length must be a multiple of 4 (validated at open)"
+                );
+                for chunk in bytes.chunks_exact(4) {
+                    out.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+                }
+            }
+            PostingRef::Roaring(view) => out.extend(view.iter()),
+        }
+    }
+}
+
+/// Union `postings` into one bitmap: Roaring sources through [`Bitmap::fast_or`], tag-0 arrays
+/// decoded, concatenated, sorted and folded in with `add_many`. Not `run_optimize`d; a caller
+/// that persists the result does that itself.
+pub(crate) fn union_postings<'a>(postings: impl IntoIterator<Item = PostingRef<'a>>) -> Bitmap {
+    let mut views: Vec<BitmapView<'a>> = Vec::new();
+    let mut small: Vec<u32> = Vec::new();
+    for posting in postings {
+        match posting {
+            PostingRef::Roaring(view) => views.push(view),
+            array => array.extend_into(&mut small),
+        }
+    }
+
+    let refs: Vec<&Bitmap> = views.iter().map(|view| &**view).collect();
+    let mut union = if refs.is_empty() {
+        Bitmap::new()
+    } else {
+        Bitmap::fast_or(&refs)
+    };
+    small.sort_unstable();
+    union.add_many(&small);
+    union
+}
+
+/// Reads `postings.arrow`. Holds the backing bytes, either an owned buffer or a memory map;
+/// [`PostingRef`]s returned by [`PostingsReader::posting`] borrow from it without copying.
 #[derive(Debug)]
 pub struct PostingsReader {
     array: LargeBinaryArray,
 }
 
 impl PostingsReader {
-    /// Open `path`. When `mmap` is `true`, the file is memory-mapped and the record batch is
-    /// decoded zero-copy from the map; when `false`, the file is read into an owned buffer and
-    /// decoded zero-copy from that buffer instead. Either way, no per-record copy happens on
-    /// open or on lookup.
+    /// Open `path`. When `mmap` is `true`, the file is memory-mapped and decoded zero-copy from
+    /// the map; when `false`, it is read into an owned buffer and decoded zero-copy from that.
+    /// Either way, no per-record copy happens on open or on lookup.
     pub fn open(path: &Path, mmap: bool) -> io::Result<Self> {
         let buffer = if mmap {
-            let file = File::open(path)?;
-            let mapping = unsafe { memmap2::Mmap::map(&file) }?;
-            let len = mapping.len();
-            let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
-            // SAFETY: `arc` owns the mapping for as long as any Buffer built from it is alive
-            // (the Arc is captured as the buffer's `Allocation`), and the mapping is valid for
-            // `len` bytes for its entire lifetime.
-            // memmap2::Mmap never returns a null base pointer (even the zero-length map case
-            // uses a valid, non-null dangling-style allocation internally) — see memmap2's
-            // `MmapInner` construction, which always goes through a real `mmap(2)`/`VirtualAlloc`
-            // call or a dedicated empty-map sentinel address, never a null pointer.
-            let ptr = NonNull::new(arc.as_ptr() as *mut u8)
-                .expect("memmap2::Mmap never returns a null base pointer");
-            unsafe { Buffer::from_custom_allocation(ptr, len, arc) }
+            mapped_buffer(&File::open(path)?)?
         } else {
             let data = std::fs::read(path)?;
             Buffer::from_vec(data)
@@ -358,35 +405,15 @@ impl PostingsReader {
 
     /// Return term `t`'s postings, or `None` if this file carries no record for it.
     ///
-    /// **`None` is an ordinary answer, not a failure, and that is what makes a delta tier
-    /// possible.** A flush publishes a *sparse* tier — only the terms present in its flushed set
-    /// — so a term the tier does not carry is simply one it contributes nothing for. The same
-    /// answer covers a promoted descriptor against the base file: promotion assigns an ordinal at
-    /// or above the base's term count (§3.2), and the base has nothing for it because the items
-    /// carrying it live in the flush segment.
-    ///
-    /// The corruption this once guarded against is caught elsewhere and earlier: `open` validates
-    /// every record, and a term id that should have been in range but is not is a dictionary/
-    /// postings disagreement, which no per-lookup error here could repair. What it *did* do was
-    /// make an absent term fatal, which is the wrong answer for every tiered read.
+    /// `None` is an ordinary answer, not a failure: a flush publishes a sparse tier holding only
+    /// the terms present in its flushed set, and a promoted descriptor's ordinal sits at or
+    /// above the base's term count, so the base has nothing for it either.
     pub fn posting(&self, t: TermId) -> io::Result<Option<PostingRef<'_>>> {
         self.posting_at(t.raw())
     }
 
-    /// The same lookup, addressed by a bare record ordinal.
-    ///
-    /// **This is the format core, and [`Self::posting`] is the authorisation index's typed view of
-    /// it.** The CSR postings format is shared with the attribute index
-    /// (`docs/design/filter-index.md` §2.1), whose ordinals are a different space: an attribute
-    /// ordinal is local to one column and may only narrow `M_sel` (I12), while a `TermId` gates
-    /// label containment (I3). The two must not be interconvertible, so the shared format cannot be
-    /// typed in either crate's newtype — it takes the raw ordinal, and each consumer wraps it at its
-    /// own boundary. A single typed API would force the other consumer to convert at every call
-    /// site, which is exactly the cross-wire the newtypes exist to forbid, reintroduced as
-    /// boilerplate.
-    ///
-    /// Prefer [`Self::posting`] inside this crate: passing a bare `u32` where a `TermId` belongs is
-    /// what the newtype prevents, and there is no reason to give that up here.
+    /// The same lookup, addressed by a bare record ordinal. Prefer [`Self::posting`] inside this
+    /// crate.
     pub fn posting_at(&self, ordinal: u32) -> io::Result<Option<PostingRef<'_>>> {
         let idx = ordinal as usize;
         if idx >= self.array.len() {
@@ -396,11 +423,8 @@ impl PostingsReader {
     }
 }
 
-/// Decode record `idx` of a validated posting column into a borrowed [`PostingRef`].
-///
-/// Shared by [`PostingsReader`] and [`crate::DeltaTier`]: the two files differ in how a term is
-/// *found* — an ordinal index against a binary search — and not in what a posting *is*. One
-/// decoder means the `unsafe` below is discharged in one place, against one validation.
+/// Decode record `idx` of a validated posting column into a borrowed [`PostingRef`]. Shared by
+/// [`PostingsReader`] and [`crate::DeltaTier`], so the `unsafe` below is discharged in one place.
 pub(crate) fn read_posting(array: &LargeBinaryArray, idx: usize) -> io::Result<PostingRef<'_>> {
     let bytes = array.value(idx);
     let (tag, payload) = bytes
@@ -411,12 +435,8 @@ pub(crate) fn read_posting(array: &LargeBinaryArray, idx: usize) -> io::Result<P
         0 => Ok(PostingRef::Array(payload)),
         1 => {
             // SAFETY: every tag-1 payload was validated once, at open time, by
-            // `validate_records` — which round-trips it through
-            // `Bitmap::try_deserialize::<Portable>` (bounds-checked, internally validated) and
-            // confirms the payload is *exactly* the bitmap's serialised size with no truncation
-            // or trailing garbage. `BitmapView::deserialize`'s own safety contract (valid
-            // portable bytes, no length mismatch) is therefore already discharged before we ever
-            // reach this unsafe block. Both callers validate on open; a third must too.
+            // `validate_records`, which confirms the payload is exactly the bitmap's serialised
+            // size with no truncation or trailing garbage.
             let view = unsafe { BitmapView::deserialize::<Portable>(payload) };
             Ok(PostingRef::Roaring(view))
         }
@@ -426,11 +446,9 @@ pub(crate) fn read_posting(array: &LargeBinaryArray, idx: usize) -> io::Result<P
     }
 }
 
-/// Validate every record in `array` once, at `open` time, so that later lookups (which use the
-/// unsafe zero-copy `BitmapView::deserialize` for tag-1 records) never operate on unchecked
-/// bytes. A malformed record here — corrupt file, truncated write, wrong tag — fails `open`
-/// closed (`InvalidData`) rather than causing undefined behaviour or a panic deep inside
-/// CRoaring on first lookup.
+/// Validate every record in `array` once, at `open` time, so later lookups never hand unchecked
+/// bytes to the unsafe zero-copy `BitmapView::deserialize` for tag-1 records. A malformed record
+/// fails `open` closed rather than causing undefined behaviour on first lookup.
 pub(crate) fn validate_records(array: &LargeBinaryArray) -> io::Result<()> {
     for idx in 0..array.len() {
         let bytes = array.value(idx);
@@ -476,13 +494,9 @@ pub(crate) fn validate_records(array: &LargeBinaryArray) -> io::Result<()> {
     Ok(())
 }
 
-/// Decode the (single) record batch of an Arrow IPC FILE held in `buffer`, without copying its
-/// buffers (subject to alignment — see [`FileDecoder::with_require_alignment`]'s default).
-///
-/// `what` names the artefact in error messages. It is public because the attribute value column is
-/// read the same way and by the same argument — a mapped file whose values must not be copied on
-/// open — and one decoder read by two crates is worth more than a second copy of this footer
-/// arithmetic (`tessera_filter::values::read_values`).
+/// Decode the single record batch of an Arrow IPC FILE held in `buffer`, without copying its
+/// buffers, subject to alignment. `what` names the artefact in error messages. Public because
+/// the attribute value column is read the same way, for the same reason.
 pub fn decode_single_batch(buffer: &Buffer, what: &str) -> io::Result<RecordBatch> {
     const FOOTER_TRAILER_LEN: usize = 10; // 4-byte footer length + 6-byte "ARROW1" magic
     if buffer.len() < FOOTER_TRAILER_LEN {
@@ -541,10 +555,9 @@ pub fn decode_single_batch(buffer: &Buffer, what: &str) -> io::Result<RecordBatc
 }
 
 /// Validate a footer `Block`'s `(offset, bodyLength + metaDataLength)` against the file length,
-/// returning them as checked `usize`s. `Block`'s fields are `i64` in the flatbuffer schema; a
-/// corrupt or adversarial footer could report a negative value, an overflowing sum, or a range
-/// past end-of-file — `Buffer::slice_with_length` panics on out-of-bounds input, so every field
-/// must be checked here before it ever reaches that call (fail closed, not a panic).
+/// returning them as checked `usize`s. A corrupt footer could report a negative value or an
+/// overflowing sum, and `Buffer::slice_with_length` panics on out-of-bounds input, so every
+/// field is checked here first.
 fn checked_block_range(block: &arrow::ipc::Block, buffer_len: usize) -> io::Result<(usize, usize)> {
     let offset = usize::try_from(block.offset())
         .map_err(|_| invalid_data("postings.arrow: block offset is negative"))?;
@@ -620,7 +633,6 @@ mod tests {
                 while set.len() < size {
                     set.insert(rand::Rng::gen_range(&mut rng, 0..1_000_000u32));
                 }
-                // BTreeSet iterates in ascending order already — no shuffle-then-sort needed.
                 per_term.push(set.into_iter().collect::<Vec<u32>>());
             }
 
@@ -644,8 +656,6 @@ mod tests {
         }
     }
 
-    /// The i64 offset overflow cannot be reached with real writes (it needs > 8 EiB of spool),
-    /// so the guard is exercised directly.
     #[test]
     fn next_offset_rejects_i64_overflow() {
         assert_eq!(next_offset(i64::MAX - 4, 4).unwrap(), i64::MAX);
@@ -671,9 +681,6 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
-    /// Cross-check the on-disk bytes for the singleton (tag 0) and large (tag 1) records against
-    /// an independent Arrow reader (not `PostingsReader`) — proves the writer's byte layout,
-    /// not just that our own reader agrees with itself.
     #[test]
     fn record_bytes_match_the_tagged_format_exactly() {
         let temp = TempDir::new().unwrap();
@@ -697,8 +704,6 @@ mod tests {
         // Term 0: tag 0 ‖ u32 LE 5 -> exactly [0, 5, 0, 0, 0].
         assert_eq!(array.value(0), &[0u8, 5, 0, 0, 0]);
 
-        // Term 1: tag 1, first payload byte is a portable-format control byte, not asserted
-        // further here (that's what the round-trip test is for) — just the tag.
         assert_eq!(array.value(1)[0], 1u8);
     }
 
@@ -732,15 +737,6 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
-    /// **A term this file does not carry is absent, not an error, and the change from the latter
-    /// to the former was deliberate.** A delta tier is sparse by construction — a flush publishes
-    /// postings only for the terms its flushed set carried — and a promoted descriptor's ordinal
-    /// sits at or above the base file's term count (§3.2). Under the old answer, every tiered read
-    /// of an unheld term, and every authorise carrying a promoted descriptor, failed outright.
-    ///
-    /// Nothing is lost by it: `open` validates every record this file *does* hold, and a term id
-    /// that ought to have been in range but is not is a dictionary/postings disagreement that no
-    /// per-lookup error could repair.
     #[test]
     fn a_term_this_file_does_not_carry_reads_as_absent() {
         let temp = TempDir::new().unwrap();
@@ -759,9 +755,6 @@ mod tests {
         let large: Vec<u32> = (1..=1000u32).collect();
         write_postings(&valid_path, &[large], 32).unwrap();
 
-        // Pull out a genuine tag-1 payload, then truncate it before re-embedding it as a
-        // hand-built record — this must fail `open`, not walk off the end of the slice inside
-        // CRoaring.
         let file = File::open(&valid_path).unwrap();
         let mut reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
         let batch = reader.next().unwrap().unwrap();
@@ -781,8 +774,6 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
-    /// Build a `postings.arrow`-shaped file with arbitrary raw record bytes (bypassing
-    /// `write_postings`'s tag encoding entirely), so tests can construct malformed records.
     fn write_raw_records(path: &Path, records: &[&[u8]]) -> io::Result<()> {
         let mut builder = LargeBinaryBuilder::new();
         for record in records {
@@ -809,9 +800,6 @@ mod tests {
         Ok(())
     }
 
-    /// Build a `postings.arrow`-shaped file whose single column is named `posting` but has the
-    /// wrong Arrow type (`UInt32` instead of `LargeBinary`) — exercises the schema check in
-    /// `open`.
     fn write_wrong_type_column(path: &Path) -> io::Result<()> {
         use arrow::array::UInt32Array;
 
