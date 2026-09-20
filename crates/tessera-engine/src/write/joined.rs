@@ -104,15 +104,18 @@ pub(crate) fn flushed_terms_of(generation: &Generation, entity: EntityId) -> Opt
 
 /// One already-flushed `(entity, attribute, key)` cell's value, at the shape a batch carries it
 /// in. `owner_view` is the cell's address, so a value written through a sharing group's door and
-/// one through the owner's are read from the one column. A family with no store, or a `text`
-/// family (no per-entity value), answers `None`.
+/// one through the owner's are read from the one column. A family with no value column, or a
+/// `text` family (no per-entity value), answers `None`.
+///
+/// The condition is the **value column**, not the filter licence: a family declaring neither
+/// `index` nor `render` still has one, so its cell holds a value to compare against.
 pub(crate) fn flushed_scoped_of(
     generation: &Generation,
     entity: EntityId,
     family: &tessera_store::manifest::ScopedScalar,
     owner_view: &str,
 ) -> Option<tessera_lifecycle::WalScalar> {
-    if !crate::filter::scoped_is_filterable(family) {
+    if !crate::filter::scoped_has_value_column(family) {
         return None;
     }
     let entity = u32::try_from(entity.raw()).ok()?;

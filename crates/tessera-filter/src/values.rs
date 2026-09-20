@@ -75,6 +75,7 @@ use arrow::buffer::{Buffer, ScalarBuffer};
 use croaring::{Bitmap, Portable};
 
 use crate::pack;
+use crate::record::RecordValue;
 use tessera_types::AttrLocalId;
 
 /// Matched entities, folded into the result bitmap in bounded chunks.
@@ -498,6 +499,24 @@ impl Codes {
             _ => u32::MAX,
         }
     }
+
+    /// The value at `slot` at the width it is stored at — the one place the ten widths become the
+    /// ten [`RecordValue`] kinds. `timestamp_us` is stored and read back as the `i64` it is; the
+    /// unit is the manifest's, not the value's.
+    fn record_at(&self, slot: usize) -> RecordValue {
+        match self {
+            Codes::U8(v) => RecordValue::U8(v[slot]),
+            Codes::U16(v) => RecordValue::U16(v[slot]),
+            Codes::U32(v) => RecordValue::U32(v[slot]),
+            Codes::U64(v) => RecordValue::U64(v[slot]),
+            Codes::I8(v) => RecordValue::I8(v[slot]),
+            Codes::I16(v) => RecordValue::I16(v[slot]),
+            Codes::I32(v) => RecordValue::I32(v[slot]),
+            Codes::I64(v) => RecordValue::I64(v[slot]),
+            Codes::F32(v) => RecordValue::F32(v[slot]),
+            Codes::F64(v) => RecordValue::F64(v[slot]),
+        }
+    }
 }
 
 /// A numeric bound or comparand, carried in a form that does not lose the column's precision.
@@ -731,10 +750,16 @@ impl ValueColumn {
         // Counted here, once, for the same reason the traversal is here once: a range reaches a
         // predicate only through this call, so this is the one place that can see all of the work
         // and none of what a caller does with it. Nothing in release builds — see the header.
-        let mut f = |slot0: usize, count: usize, entity0: u32| {
+        self.walk_slot_runs(candidate, len, |slot0, count, entity0| {
             record_slot_run(count);
             f(slot0, count, entity0);
-        };
+        });
+    }
+
+    /// The traversal itself, without the counter — see [`Self::for_each_slot_run`], which is it
+    /// counted and is what every predicate reaches its values through.
+    #[inline]
+    fn walk_slot_runs(&self, candidate: &Bitmap, len: usize, mut f: impl FnMut(usize, usize, u32)) {
         match &self.presence {
             // The entity id is the slot, so a candidate **run** is a contiguous slice of the value
             // array. The run structure is the *candidate's*, so a scattered candidate degenerates
@@ -1127,6 +1152,47 @@ impl ValueColumn {
             }
             _ => false,
         }
+    }
+
+    /// Every code the candidate's entities carry, one per carrying entity in slot order, for a
+    /// reader outside this crate that wants the values themselves rather than a verdict on them.
+    ///
+    /// **Not counted by [`take_scan_work`]**, and soundly so: it decides no predicate. A caller
+    /// collects the codes and reaches its answer through a counted scan, or asks no filter question
+    /// at all. The width is matched once per run, and a width that carries no code reads as
+    /// [`Codes::at`] reads it — `u32::MAX` per present candidate entity, which no dictionary and no
+    /// category can mint.
+    pub fn for_each_code_in(&self, candidate: &Bitmap, mut f: impl FnMut(u32)) {
+        macro_rules! codes {
+            ($values:expr, $widen:expr) => {{
+                let values = $values;
+                self.walk_slot_runs(candidate, values.len(), |slot0, count, _entity0| {
+                    for value in &values[slot0..slot0 + count] {
+                        f($widen(*value));
+                    }
+                });
+            }};
+        }
+        match &self.codes {
+            Codes::U8(v) => codes!(v.as_ref(), u32::from),
+            Codes::U16(v) => codes!(v.as_ref(), u32::from),
+            Codes::U32(v) => codes!(v.as_ref(), std::convert::identity),
+            other => {
+                let len = other.len();
+                self.walk_slot_runs(candidate, len, |_slot0, count, _entity0| {
+                    for _ in 0..count {
+                        f(u32::MAX);
+                    }
+                });
+            }
+        }
+    }
+
+    /// The value an entity carries at its storage type, or `None` where it carries none — the
+    /// whole-value read [`Self::value_of`] narrows to a code.
+    pub fn record_value_of(&self, entity: u32) -> Option<RecordValue> {
+        let slot = self.slot_of(entity)?;
+        Some(self.codes.record_at(slot))
     }
 
     /// The value an entity carries, or `None` where it carries none.
@@ -1844,6 +1910,88 @@ mod tests {
             Some(B - 2),
             "nothing beyond the candidate"
         );
+    }
+
+    /// The uncounted code reader visits each present candidate entity once, in slot order, under
+    /// both addressings — and a candidate reaching past the presence contributes nothing.
+    #[test]
+    fn the_code_reader_visits_each_present_candidate_entity_once() {
+        fn codes_in(column: &ValueColumn, candidate: &Bitmap) -> Vec<u32> {
+            let mut got = Vec::new();
+            column.for_each_code_in(candidate, |code| got.push(code));
+            got
+        }
+
+        let dense = ValueColumn::universal(Codes::U16(vec![10, 20, 30, 40].into()));
+        // Entities 1, 5 and 9 carry values; everything else carries none.
+        let sparse = ValueColumn::partial(
+            Codes::U16(vec![10, 20, 30].into()),
+            candidate([1, 5, 9]),
+        )
+        .unwrap();
+
+        let cases: [(&str, &ValueColumn, Bitmap, Vec<u32>); 8] = [
+            ("universal, every entity", &dense, candidate(0..4), vec![10, 20, 30, 40]),
+            ("universal, a scattered candidate", &dense, candidate([1, 3]), vec![20, 40]),
+            ("universal, an empty candidate", &dense, Bitmap::new(), vec![]),
+            ("universal, past the column", &dense, candidate([9, 40]), vec![]),
+            ("partial, every entity", &sparse, candidate(0..12), vec![10, 20, 30]),
+            ("partial, one present entity", &sparse, candidate([5]), vec![20]),
+            ("partial, outside the presence", &sparse, candidate([2, 3, 11]), vec![]),
+            ("partial, an empty candidate", &sparse, Bitmap::new(), vec![]),
+        ];
+        for (label, column, cand, want) in cases {
+            assert_eq!(codes_in(column, &cand), want, "{label}");
+        }
+
+        // One column per width family. The three that carry codes widen; the rest read as
+        // `value_of` reads them, which is the reserved `u32::MAX` per present candidate entity.
+        let all = candidate(0..2);
+        for (label, codes, want) in [
+            ("u8", Codes::U8(vec![1, 2].into()), vec![1u32, 2]),
+            ("u16", Codes::U16(vec![1, 2].into()), vec![1, 2]),
+            ("u32", Codes::U32(vec![1, 2].into()), vec![1, 2]),
+            ("u64", Codes::U64(vec![1, 2].into()), vec![u32::MAX; 2]),
+            ("i32", Codes::I32(vec![-1, 2].into()), vec![u32::MAX; 2]),
+            ("i64", Codes::I64(vec![-1, 2].into()), vec![u32::MAX; 2]),
+            ("f32", Codes::F32(vec![1.5, 2.5].into()), vec![u32::MAX; 2]),
+            ("f64", Codes::F64(vec![1.5, 2.5].into()), vec![u32::MAX; 2]),
+        ] {
+            let column = ValueColumn::universal(codes);
+            assert_eq!(codes_in(&column, &all), want, "{label}");
+            let per_entity: Vec<u32> = all
+                .iter()
+                .filter_map(|e| column.value_of(e).map(|v| v.raw()))
+                .collect();
+            assert_eq!(per_entity, want, "{label}: the two readers agree");
+        }
+    }
+
+    /// The whole-value read answers at the column's own width, and only for an entity the column
+    /// holds a value for.
+    #[test]
+    fn the_stored_value_reads_at_the_columns_own_width() {
+        for (label, codes, want) in [
+            ("u8", Codes::U8(vec![7, 8].into()), RecordValue::U8(8)),
+            ("u16", Codes::U16(vec![7, 8].into()), RecordValue::U16(8)),
+            ("u32", Codes::U32(vec![7, 8].into()), RecordValue::U32(8)),
+            ("u64", Codes::U64(vec![7, 8].into()), RecordValue::U64(8)),
+            ("i8", Codes::I8(vec![7, -8].into()), RecordValue::I8(-8)),
+            ("i16", Codes::I16(vec![7, -8].into()), RecordValue::I16(-8)),
+            ("i32", Codes::I32(vec![7, -8].into()), RecordValue::I32(-8)),
+            ("i64", Codes::I64(vec![7, -8].into()), RecordValue::I64(-8)),
+            ("f32", Codes::F32(vec![7.0, -8.5].into()), RecordValue::F32(-8.5)),
+            ("f64", Codes::F64(vec![7.0, -8.5].into()), RecordValue::F64(-8.5)),
+        ] {
+            let dense = ValueColumn::universal(codes.clone());
+            assert_eq!(dense.record_value_of(1), Some(want.clone()), "{label}");
+            assert_eq!(dense.record_value_of(2), None, "{label}: past the column");
+
+            // The same two values, carried by entities 3 and 7 instead of 0 and 1.
+            let sparse = ValueColumn::partial(codes, candidate([3, 7])).unwrap();
+            assert_eq!(sparse.record_value_of(7), Some(want), "{label}: by rank");
+            assert_eq!(sparse.record_value_of(4), None, "{label}: no value held");
+        }
     }
 
     #[test]

@@ -461,5 +461,16 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
     let err = columns
         .with_coalesced(&[], &[window], None, None)
         .expect_err("a replacement short of its window is refused");
-    assert!(format!("{err}").contains("present for"), "{err}");
+    assert!(
+        matches!(
+            &err,
+            tessera_engine::filter::ComposeError::CoverageMismatch {
+                column,
+                replacement,
+                consumed: 1,
+                covered,
+            } if column == "prose" && *replacement + 1 == *covered
+        ),
+        "{err:?}"
+    );
 }
