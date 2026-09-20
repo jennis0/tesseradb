@@ -1906,12 +1906,12 @@ impl Executor {
             Arc::clone(&live.filter_columns)
         } else {
             let partition_dir = record_dir.join("partitions").join(&completed.partition);
-            // Stamped with the flush's own incarnation, which is what places the base it just
-            // wrote.
+            // Stamped with the incarnation of the view the pair names, which is what places the
+            // base the flush just wrote.
             let opening: Vec<(String, String, tessera_types::view::ViewIncarnation)> = completed
                 .scoped_columns
                 .iter()
-                .map(|(column, view)| (column.clone(), view.clone(), completed.incarnation))
+                .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
                 .collect();
             match live.filter_columns.with_scoped_columns(
                 &partition_dir,
@@ -1999,10 +1999,10 @@ impl Executor {
             let entry = tessera_store::manifest::ScopedColumn {
                 column: column.clone(),
                 view: view.clone(),
-                // The incarnation this flush wrote under. The list is carried forward
+                // The incarnation of the view the entry names. The list is carried forward
                 // indefinitely, so an entry outlives the drop that orphaned its column; the stamp
                 // is what keeps a key created again from publishing it as its own.
-                incarnation: completed.incarnation,
+                incarnation: completed.scoped_incarnation,
             };
             if !manifest.scoped_columns.contains(&entry) {
                 manifest.scoped_columns.push(entry);
@@ -2083,12 +2083,12 @@ impl Executor {
             .health
             .flush_lap(crate::flush::FlushStage::Commit, *mark);
 
-        // Stamped with the flush's own incarnation for `Manifest::with_scoped_columns`, which
-        // publishes a pair only where it is the live one.
+        // Stamped with the incarnation of the view the pair names, for
+        // `Manifest::with_scoped_columns`, which publishes a pair only where it is the live one.
         let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> = completed
             .scoped_columns
             .iter()
-            .map(|(column, view)| (column.clone(), view.clone(), completed.incarnation))
+            .map(|(column, view)| (column.clone(), view.clone(), completed.scoped_incarnation))
             .collect();
         let published = tessera_store::read::PublishedManifest {
             manifest,
