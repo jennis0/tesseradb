@@ -24,9 +24,7 @@ use tempfile::TempDir;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::select::{decode_tier, DecodeTier};
 use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
-use tessera_engine::{
-    CancelToken, Engine, EngineConfig, EngineError,
-};
+use tessera_engine::{CancelToken, Engine, EngineConfig, EngineError, ViewportOut};
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
 use tessera_plugin::Passthrough;
 use tessera_spatial::{morton_of, tiles_for_bbox, Bounds};
@@ -2083,6 +2081,71 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 // Concurrency — intra-request rayon parallelism
 // ---------------------------------------------------------------------------------------------
 
+/// Two engines over one bundle, differing only in `compute_threads`, each answering `request`
+/// once. `items` sizes the fixture; `force_parallel` drops both thresholds to 0 so both take
+/// `pool.install` rather than the serial fold.
+fn viewport_at_one_and_eight_threads(
+    items: u64,
+    force_parallel: bool,
+    request: impl Fn() -> ViewportRequest<'static>,
+) -> (ViewportOut, ViewportOut) {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_n(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        items,
+    );
+
+    // Separate cache/WAL directories per engine (same read-only bundle) — two independent
+    // `Engine::open`s over the same bundle, differing only in `compute_threads`. `open_engine_with`
+    // joins `cache`/`wal.log` onto the directory it is given, and `Wal::open` does not create that
+    // directory itself (unlike `tmp.path()`, which `TempDir::new` already created), so each must
+    // be made first.
+    let dir_1 = tmp.path().join("a");
+    let dir_8 = tmp.path().join("b");
+    std::fs::create_dir_all(&dir_1).unwrap();
+    std::fs::create_dir_all(&dir_8).unwrap();
+    let engine_1 = open_engine_with(
+        &bundle_root,
+        &dir_1,
+        EngineConfig {
+            compute_threads: 1,
+            ..config()
+        },
+    );
+    let engine_8 = open_engine_with(
+        &bundle_root,
+        &dir_8,
+        EngineConfig {
+            compute_threads: 8,
+            ..config()
+        },
+    );
+
+    // `should_fold_serially(_, 0)` is unconditionally `false` — pinned directly by
+    // `viewport::tests::should_fold_serially_honours_an_arbitrary_threshold_not_just_the_constant`
+    // in `src/viewport.rs`. `#[cfg]`, not `if`, because the method does not exist at all without
+    // `bench-timing` — see `Engine::set_serial_fallback_max_rows_for_test`'s doc.
+    #[cfg(feature = "bench-timing")]
+    if force_parallel {
+        engine_1.set_serial_fallback_max_rows_for_test(0);
+        engine_8.set_serial_fallback_max_rows_for_test(0);
+    }
+    // Without `bench-timing` there is no override and both engines take the serial fold, whatever
+    // the caller asked for.
+    #[cfg(not(feature = "bench-timing"))]
+    let _ = force_parallel;
+
+    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
+    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
+
+    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
+    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+    (out_1, out_8)
+}
+
 /// THE HEADLINE TEST (D-D/D-F): the same fixture and the same request produce a byte-for-byte
 /// identical `ViewportOut` (`PartialEq` ignores only `timings` — see its hand-written impl)
 /// whether the engine's shared pool has one worker or eight.
@@ -2121,62 +2184,9 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 /// there is nothing in this response for them to disagree about.
 #[test]
 fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
-
-    // Separate cache/WAL directories per engine (same read-only bundle) — two independent
-    // `Engine::open`s over the same bundle, differing only in `compute_threads`. `open_engine_with`
-    // joins `cache`/`wal.log` onto the directory it is given, and `Wal::open` does not create that
-    // directory itself (unlike `tmp.path()`, which `TempDir::new` already created), so each must
-    // be made first.
-    let dir_1 = tmp.path().join("a");
-    let dir_8 = tmp.path().join("b");
-    std::fs::create_dir_all(&dir_1).unwrap();
-    std::fs::create_dir_all(&dir_8).unwrap();
-    let engine_1 = open_engine_with(
-        &bundle_root,
-        &dir_1,
-        EngineConfig {
-            compute_threads: 1,
-            ..config()
-        },
-    );
-    let engine_8 = open_engine_with(
-        &bundle_root,
-        &dir_8,
-        EngineConfig {
-            compute_threads: 8,
-            ..config()
-        },
-    );
-
-    // Force BOTH engines to take the genuine `pool.install` branch regardless of
-    // this fixture's actual row count, by setting each one's threshold to 0
-    // (`should_fold_serially(_, 0)` is unconditionally `false` — pinned directly by
-    // `viewport::tests::should_fold_serially_honours_an_arbitrary_threshold_not_just_the_constant`
-    // in `src/viewport.rs`). Deterministic by construction, so nothing below needs to re-measure
-    // it at runtime. `#[cfg]`, not `if`, because the method does not exist at all without
-    // `bench-timing` — see `Engine::set_serial_fallback_max_rows_for_test`'s doc.
-    #[cfg(feature = "bench-timing")]
-    {
-        engine_1.set_serial_fallback_max_rows_for_test(0);
-        engine_8.set_serial_fallback_max_rows_for_test(0);
-    }
-
-    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
-    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
-
     let request =
         || ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 50).underlay_offset(Some(2));
-
-    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
-    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+    let (out_1, out_8) = viewport_at_one_and_eight_threads(PARALLEL_HEADLINE_ITEMS, true, request);
 
     assert!(
         out_1.tiles.len() > 1,
@@ -2219,54 +2229,11 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
 /// produces the occupied/empty tile MIX this test is actually for.
 #[test]
 fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
-
-    let dir_1 = tmp.path().join("a");
-    let dir_8 = tmp.path().join("b");
-    std::fs::create_dir_all(&dir_1).unwrap();
-    std::fs::create_dir_all(&dir_8).unwrap();
-    let engine_1 = open_engine_with(
-        &bundle_root,
-        &dir_1,
-        EngineConfig {
-            compute_threads: 1,
-            ..config()
-        },
-    );
-    let engine_8 = open_engine_with(
-        &bundle_root,
-        &dir_8,
-        EngineConfig {
-            compute_threads: 8,
-            ..config()
-        },
-    );
-
-    // Force the genuine parallel branch — see the headline test's identical
-    // comment for the full argument.
-    #[cfg(feature = "bench-timing")]
-    {
-        engine_1.set_serial_fallback_max_rows_for_test(0);
-        engine_8.set_serial_fallback_max_rows_for_test(0);
-    }
-
-    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
-    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
-
     let bbox = [0.0, 0.0, 1000.0, 1000.0];
     let zoom = 8;
     let request = || ViewportRequest::new("s0", zoom, bbox, 50);
     let candidate_tiles = tiles_for_bbox(bbox, zoom, &extent()).len();
-
-    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
-    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+    let (out_1, out_8) = viewport_at_one_and_eight_threads(PARALLEL_HEADLINE_ITEMS, true, request);
 
     assert!(
         !out_1.tiles.is_empty(),
@@ -2297,45 +2264,11 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empt
 #[test]
 fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_below_the_serial_fallback_threshold(
 ) {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let dir_1 = tmp.path().join("a");
-    let dir_8 = tmp.path().join("b");
-    std::fs::create_dir_all(&dir_1).unwrap();
-    std::fs::create_dir_all(&dir_8).unwrap();
-    let engine_1 = open_engine_with(
-        &bundle_root,
-        &dir_1,
-        EngineConfig {
-            compute_threads: 1,
-            ..config()
-        },
-    );
-    let engine_8 = open_engine_with(
-        &bundle_root,
-        &dir_8,
-        EngineConfig {
-            compute_threads: 8,
-            ..config()
-        },
-    );
-
-    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
-    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
-
     // Same request shape as the headline test (multi-tile, underlay) — only the fixture size
     // differs, which is the whole point of this variant.
     let request =
         || ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 50).underlay_offset(Some(2));
-
-    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
-    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+    let (out_1, out_8) = viewport_at_one_and_eight_threads(N_ITEMS, false, request);
 
     assert!(out_1.tiles.len() > 1, "need more than one non-empty tile");
     if out_8.timings.enabled {
