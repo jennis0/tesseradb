@@ -106,6 +106,7 @@ from .publication import (
 )
 from .split import (
     base_declaration,
+    build_bundle,
     declared_layers,
     filter_parquet,
     in_sorted,

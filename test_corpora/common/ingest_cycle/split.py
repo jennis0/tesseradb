@@ -6,6 +6,8 @@ except ModuleNotFoundError:  # 3.10 on this box
     import tomli as tomllib
 import json
 import shutil
+import subprocess
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -333,6 +335,52 @@ def member_table_columns(schema: pa.Schema) -> tuple[str, str]:
             f"has {schema.names}"
         )
     return entity, "key"
+
+
+def build_bundle(
+    binary: Path,
+    cwd: Path,
+    out: Path,
+    stages_json: Path,
+    extra: Sequence[str] = (),
+    env: dict[str, str] | None = None,
+) -> dict:
+    """`tessera build` into `out`, and what it cost.
+
+    `peak_rss_kib` is the largest stage's own high-water, which the build reports per stage. The
+    driver's `getrusage(RUSAGE_CHILDREN)` is a high-water over every child it has reaped — a
+    `cargo build` among them — and cannot be attributed to this build.
+    """
+    t0 = time.perf_counter()
+    proc = subprocess.run(
+        [
+            str(binary),
+            "build",
+            *extra,
+            "--out",
+            str(out),
+            "--stage-timings-json",
+            str(stages_json),
+            "--stage-timings",
+        ],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    wall = time.perf_counter() - t0
+    stages = json.loads(stages_json.read_text()) if stages_json.exists() else None
+    return {
+        "wall_s": round(wall, 2),
+        "returncode": proc.returncode,
+        "stdout": proc.stdout[-4000:],
+        "stderr_tail": proc.stderr[-4000:],
+        "stages": stages,
+        "peak_rss_kib": max((s["peak_rss_kib"] for s in stages or []), default=None),
+        "bundle_bytes": sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
+        if out.exists()
+        else 0,
+    }
 
 
 def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:

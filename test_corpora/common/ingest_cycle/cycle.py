@@ -9,9 +9,7 @@ import concurrent.futures
 import json
 import os
 import random
-import secrets
 import shutil
-import subprocess
 import threading
 import time
 import uuid
@@ -22,12 +20,13 @@ import pyarrow.parquet as pq
 import requests
 
 from .. import serve_battery
-from ..deployment import Deployment, read_env_file
+from ..deployment import Deployment, minted_credentials
 from .census import census, compare_census
 from .control import Control, wait_for
 from .holdout import HoldOut
 from .publication import Publication
 from .split import (
+    build_bundle,
     declared_layers,
     ranks_file,
     split_entities,
@@ -126,13 +125,7 @@ class Cycle:
         or operator credential refuses to start. The variable *names* are the rung's and are
         recorded; no value is printed or written to the result.
         """
-        serve = tomllib.loads((self.rung / "tessera.toml").read_text())["serve"]
-        env = dict(os.environ) | read_env_file(self.rung / ".env")
-        self.minted = {
-            serve[f"{which}_credential_env"]: secrets.token_urlsafe(32)
-            for which in ("session", "operator")
-            if not env.get(serve[f"{which}_credential_env"])
-        }
+        self.minted = minted_credentials(self.rung)
         self.result["minted_credentials"] = sorted(self.minted)
         if self.minted:
             self.log(f"minted a value for {', '.join(sorted(self.minted))} for this run")
@@ -178,51 +171,28 @@ class Cycle:
         if self.args.state_extent:
             self.result["stated_extent"] = state_extent(base_dir / "corpus.toml", self.all_in)
             self.log(f"stated the all-in frame in the base declaration: {self.result['stated_extent']}")
-        stages = base_dir / "stage-timings.json"
-        t0 = time.perf_counter()
         # **A zero-row base is a real case and it is the point of the f = 1.0 cell**: nothing is
         # held for the build at all, so this is `tessera build` over an empty points file, and
         # whether a deployment can start from one is the first thing this driver finds out.
-        proc = subprocess.run(
-            [
-                str(self.binary),
-                "build",
-                # **The base's rows must be addressable by external id**, because the artifacts
-                # published after the ingest name their members that way and most of those members
-                # are base rows. The flag mints one per item from its source entity id
-                # (`ExternalIdRow`), which is the form [`encode_batch`] sends for the hold-out.
-                "--mint-external-ids",
-                "--deployment",
-                str(base_dir / "tessera.toml"),
-                # **Where this driver serves from, not where the rung's deployment file points.**
-                # A rung may name its bundle anything (`bundle-final`), and a base built there is a
-                # base the run then serves an empty directory in place of.
-                "--out",
-                str(bundle),
-                "--stage-timings-json",
-                str(stages),
-                "--stage-timings",
-            ],
-            cwd=base_dir,
-            capture_output=True,
-            text=True,
+        #
+        # `--mint-external-ids`, because the artifacts published after the ingest name their
+        # members that way and most of those members are base rows. The flag mints one per item
+        # from its source entity id (`ExternalIdRow`), which is the form [`encode_batch`] sends for
+        # the hold-out. `--out` is where this driver serves from rather than where the rung's
+        # deployment file points: a rung may name its bundle anything (`bundle-final`), and a base
+        # built there is a base the run then serves an empty directory in place of.
+        self.result["build"] = build_bundle(
+            self.binary,
+            base_dir,
+            bundle,
+            base_dir / "stage-timings.json",
+            extra=["--mint-external-ids", "--deployment", str(base_dir / "tessera.toml")],
         )
-        wall = time.perf_counter() - t0
-        self.result["build"] = {
-            "wall_s": round(wall, 2),
-            "returncode": proc.returncode,
-            "stdout": proc.stdout[-4000:],
-            "stderr_tail": proc.stderr[-4000:],
-            "stages": json.loads(stages.read_text()) if stages.exists() else None,
-            "bundle_bytes": sum(p.stat().st_size for p in bundle.rglob("*") if p.is_file())
-            if bundle.exists()
-            else 0,
-        }
-        if proc.returncode != 0:
+        if self.result["build"]["returncode"] != 0:
             self.result["blocked"] = {
                 "at": "base build",
                 "fraction": self.args.fraction,
-                "refusal": proc.stderr[-2000:],
+                "refusal": self.result["build"]["stderr_tail"][-2000:],
             }
         return base_dir
 

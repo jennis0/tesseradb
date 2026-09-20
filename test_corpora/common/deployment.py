@@ -20,7 +20,9 @@ cold.
 
 from __future__ import annotations
 
+import json
 import os
+import secrets
 import shutil
 import signal
 import subprocess
@@ -33,6 +35,28 @@ except ModuleNotFoundError:  # 3.10 on this box
     import tomli as tomllib
 
 import requests
+
+#: The `[serve]` keys of a rung that name this machine rather than what a viewer is served. Every
+#: other key of the rung's `[serve]` is copied into the measurement's own deployment file, so a
+#: rung that declares `max_k`, a cache size or a stream deadline is measured under it.
+MACHINE_SPECIFIC_SERVE = frozenset(
+    {
+        "viewer",
+        "session",
+        "control",
+        "dev_cors_origins",
+        "cors_origins",
+        "cors_loopback",
+        "session_credential_file",
+        "operator_credential_file",
+    }
+)
+
+
+def toml_lines(table: dict) -> str:
+    """A flat TOML table's `key = value` lines. JSON and TOML spell every scalar and array here
+    the same way."""
+    return "".join(f"{key} = {json.dumps(value)}\n" for key, value in table.items())
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -47,6 +71,22 @@ def read_env_file(path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         out[key.strip()] = value.strip()
     return out
+
+
+def minted_credentials(source_dir: Path) -> dict[str, str]:
+    """A value for every credential variable this deployment names that the environment and the
+    deployment's own `.env` do not carry, minted for this run and this run only.
+
+    A rung's `.env` may hold the identity key alone, and a server with no value for its session or
+    operator credential refuses to start.
+    """
+    serve = tomllib.loads((source_dir / "tessera.toml").read_text())["serve"]
+    env = dict(os.environ) | read_env_file(source_dir / ".env")
+    return {
+        serve[f"{which}_credential_env"]: secrets.token_urlsafe(32)
+        for which in ("session", "operator")
+        if not env.get(serve[f"{which}_credential_env"])
+    }
 
 
 class Deployment:
@@ -117,7 +157,15 @@ class Deployment:
 
     def _write_toml(self) -> None:
         source = tomllib.loads((self.source_dir / "tessera.toml").read_text())
-        source_serve = source["serve"]
+        serve = {
+            key: value
+            for key, value in source["serve"].items()
+            if key not in MACHINE_SPECIFIC_SERVE
+        }
+        serve["viewer"] = f"127.0.0.1:{self.ports[0]}"
+        serve["session"] = f"127.0.0.1:{self.ports[1]}"
+        serve["control"] = f"127.0.0.1:{self.ports[2]}"
+        serve.update(self.serve)
         body = f"""# Written by test_corpora/common/deployment.py for a measurement run. Not committed with a
 # rung: the ports and the scratch paths are this run's, the bundle is the rung's, and the
 # credential *values* are in the environment as `configuration.md` requires.
@@ -137,23 +185,11 @@ module = "{source.get('plugin', {}).get('module', 'builtin:passthrough')}"
 env = "{source.get('identity', {}).get('env', 'TESSERA_IDENTITY_KEY')}"
 
 [disclosure]
-token_max_lifetime = {source.get('disclosure', {}).get('token_max_lifetime', 3600)}
-
+{toml_lines(source.get("disclosure") or {"token_max_lifetime": 3600})}
 [serve]
-viewer  = "127.0.0.1:{self.ports[0]}"
-session = "127.0.0.1:{self.ports[1]}"
-control = "127.0.0.1:{self.ports[2]}"
-max_k   = {source_serve.get('max_k', 5000)}
-session_credential_env  = "{source_serve['session_credential_env']}"
-operator_credential_env = "{source_serve['operator_credential_env']}"
-"""
-        body += "".join(
-            f"{key} = {value!r}\n".replace("'", '"') for key, value in self.serve.items()
-        )
+{toml_lines(serve)}"""
         if self.ingest:
-            body += "\n[ingest]\n" + "".join(
-                f"{key} = {value!r}\n".replace("'", '"') for key, value in self.ingest.items()
-            )
+            body += "\n[ingest]\n" + toml_lines(self.ingest)
         self.toml.write_text(body)
 
     def start(self, log: Path | None = None, timeout: float = 900.0) -> None:
