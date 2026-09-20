@@ -149,7 +149,9 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn hold_next_projection_build_for_test(&self) {
-        self.switches.projection_build_held.store(true, Ordering::SeqCst);
+        self.switches
+            .projection_build_held
+            .store(true, Ordering::SeqCst);
         self.switches
             .projection_build_hold_wanted
             .store(true, Ordering::SeqCst);
@@ -158,7 +160,9 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn release_projection_build_for_test(&self) {
-        self.switches.projection_build_held.store(false, Ordering::SeqCst);
+        self.switches
+            .projection_build_held
+            .store(false, Ordering::SeqCst);
     }
 
     /// Turn the row-space merge off.
