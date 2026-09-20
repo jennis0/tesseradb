@@ -179,9 +179,6 @@ pub(in crate::filter) fn text_extent_layers<'a>(
         .collect()
 }
 
-/// A record-blob open failure, in the `io::Result` this opener speaks. Fail-closed either way:
-/// a missing, short or malformed layer refuses the whole open (records §3), never "those
-/// entities have no record".
 /// The stack a column declared at a running service opens with before any fold: no base, no
 /// postings, the extents composed later (`ingest.md` §6.3). `None` for a column with no
 /// entity-space home, which holds no stack at all.

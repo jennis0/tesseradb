@@ -199,13 +199,6 @@ impl FilterColumns {
         ))
     }
 
-    /// Which space `expr` evaluates in, given each leaf's placement and the request's preference.
-    ///
-    /// `Entity` means the whole sub-tree can be answered by the existing entity-space evaluation;
-    /// anything else means at least one leaf must be tested against the hot column. A `none_of`
-    /// takes its single column's space whole — `check_negations` has already established there is
-    /// exactly one — because its presence half and its matched half must be computed in the same
-    /// space or the subtraction would mix domains.
     /// One column's routed space — **the single transcription of the leaf-routing rule**, called
     /// for a leaf and for a `none_of`'s one column alike, so the two cannot drift.
     fn leaf_space(&self, column: &str, prefer_row: bool) -> Result<Space, FilterError> {
@@ -235,6 +228,13 @@ impl FilterColumns {
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))
     }
 
+    /// Which space `expr` evaluates in, given each leaf's placement and the request's preference.
+    ///
+    /// `Entity` means the whole sub-tree can be answered by the existing entity-space evaluation;
+    /// anything else means at least one leaf must be tested against the hot column. A `none_of`
+    /// takes its single column's space whole — `check_negations` has already established there is
+    /// exactly one — because its presence half and its matched half must be computed in the same
+    /// space or the subtraction would mix domains.
     fn space_of(&self, expr: &FilterExpr, prefer_row: bool) -> Result<Space, FilterError> {
         match expr {
             FilterExpr::Leaf { column, .. } => self.leaf_space(column, prefer_row),

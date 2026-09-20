@@ -349,6 +349,7 @@ impl FilterColumns {
     /// ever held one. `texts` carries those windows; the coverage equality above is checked for
     /// them too, against `TextLayer::present`, which is exactly what a flush extent stores and
     /// what makes the check expressible for this family.
+    ///
     /// **The transpose is replaced whole rather than patched**, and `entity_terms` is the stack
     /// the caller re-derived from the rebased manifest — `None` where the axis did not run, in
     /// which case the live stack rides through unchanged. Its ordinals need no attention either

@@ -218,6 +218,23 @@ pub(crate) fn carries_live_view(
     }
 }
 
+/// Does this family have an entity-space **value column** — the artefact a flush writes an extent
+/// into and the drill-down reads a value out of?
+///
+/// **Every family but `text`**, whose extent is a token dictionary and positional postings and
+/// holds nothing per entity. This is deliberately *wider* than [`scoped_is_filterable`]: a family
+/// declaring neither `index` nor `render` is stored and served at the drill-down without being
+/// searchable or drawn (owner ruling), so its column is opened and its extents composed while its
+/// leaf stays the unknown-column refusal — `EngineMeta::resolve_filter_column` requires
+/// [`scoped_is_filterable`] and answers `Unknown` before any column is looked up, so opening one
+/// here puts nothing on the filter surface.
+///
+/// The rule itself is [`ScopedScalar::has_value_column`], one crate down beside its licence
+/// sibling; this is the engine's name for it and nothing more.
+pub fn scoped_has_value_column(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
+    scoped.has_value_column()
+}
+
 /// Is this group-scoped family on the filter surface — published by `/v1/meta`'s
 /// `filter_operands` and resolvable by a leaf (`views.md` §5)?
 ///
@@ -242,23 +259,6 @@ pub(crate) fn carries_live_view(
 /// declaration, so the combination reaches no manifest a build wrote — and a manifest that
 /// carried it would name a token index no pass produced, which this predicate would otherwise
 /// demand at open.
-/// Does this family have an entity-space **value column** — the artefact a flush writes an extent
-/// into and the drill-down reads a value out of?
-///
-/// **Every family but `text`**, whose extent is a token dictionary and positional postings and
-/// holds nothing per entity. This is deliberately *wider* than [`scoped_is_filterable`]: a family
-/// declaring neither `index` nor `render` is stored and served at the drill-down without being
-/// searchable or drawn (owner ruling), so its column is opened and its extents composed while its
-/// leaf stays the unknown-column refusal — `EngineMeta::resolve_filter_column` requires
-/// [`scoped_is_filterable`] and answers `Unknown` before any column is looked up, so opening one
-/// here puts nothing on the filter surface.
-///
-/// The rule itself is [`ScopedScalar::has_value_column`], one crate down beside its licence
-/// sibling; this is the engine's name for it and nothing more.
-pub fn scoped_has_value_column(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
-    scoped.has_value_column()
-}
-
 ///
 /// **The rule itself is `ScopedScalar::is_filterable`**, one crate down, because the build decides
 /// what to *write* on the same licence and `check-layers.sh` denies the build this crate. This is

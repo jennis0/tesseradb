@@ -187,16 +187,6 @@ pub(in crate::filter) struct Layers {
     pub(in crate::filter) family: Family,
 }
 
-/// One layer of a column, and the manifest entry it came from.
-///
-/// **The path is carried because a coalesce replaces layers by name** (`filter-index.md` §5.2). A
-/// `ValueColumn` has no identity of its own, so a pass that consumed eight of a column's extents
-/// could not otherwise say which eight of the live generation's layers its output stands for —
-/// and matching them by presence instead would be circular, since presence equality is exactly the
-/// property [`FilterColumns::with_coalesced`] is checking.
-///
-/// `None` is the build's base column, which is named in `MANIFEST.files` rather than in
-/// `attr_extents` and which no entity-space pass may take (`crate::coalesce`'s module doc).
 /// One `text` layer: its own dictionary, its own postings over that dictionary, and the entities
 /// it holds a value for.
 ///
@@ -260,6 +250,16 @@ pub(in crate::filter) fn text_layer(
     })
 }
 
+/// One layer of a column, and the manifest entry it came from.
+///
+/// **The path is carried because a coalesce replaces layers by name** (`filter-index.md` §5.2). A
+/// `ValueColumn` has no identity of its own, so a pass that consumed eight of a column's extents
+/// could not otherwise say which eight of the live generation's layers its output stands for —
+/// and matching them by presence instead would be circular, since presence equality is exactly the
+/// property [`FilterColumns::with_coalesced`] is checking.
+///
+/// `None` is the build's base column, which is named in `MANIFEST.files` rather than in
+/// `attr_extents` and which no entity-space pass may take (`crate::coalesce`'s module doc).
 #[derive(Debug, Clone)]
 pub(in crate::filter) struct Layer {
     pub(in crate::filter) values_rel: Option<String>,
@@ -285,6 +285,9 @@ pub(in crate::filter) fn request_access(mmap: bool) -> tessera_filter::Access {
     }
 }
 
+/// A record-blob open failure, in the `io::Result` this opener speaks. Fail-closed either way:
+/// a missing, short or malformed layer refuses the whole open (records §3), never "those
+/// entities have no record".
 pub(in crate::filter) fn record_open_error(e: tessera_filter::RecordError) -> std::io::Error {
     match e {
         tessera_filter::RecordError::Io(io) => io,
@@ -367,18 +370,6 @@ impl FilterColumns {
         self.placements.get(column).copied()
     }
 
-    /// The entity-space value `column` stores for `entity`, at its storage type, or `None` where
-    /// no layer holds one — drill-down's entity-space home (records §3).
-    ///
-    /// **Every column with a value column answers, filterable or not**: a `derived` category
-    /// with neither flag still stores its codes here, and the caller has already established the
-    /// *item* visible, which is exactly the membership condition §3.3 derives value visibility
-    /// from — a visible entity carrying the value is the witness that offers it.
-    ///
-    /// The slot arithmetic is the presence-rank rule of `filter-index.md` §2.1, computed through
-    /// the column's own public surface: the count of present entities strictly below this one is
-    /// its slot, for a universal column (where it degenerates to the entity id) and a partial one
-    /// alike. O(containers below the entity) per read — drill-down cadence, never per mark.
     /// Does any **flushed** `text` layer of `column` hold prose for `entity`?
     ///
     /// **The scoped cell arm's fail-closed source for a text family** (`views.md` §5, decision
@@ -403,6 +394,18 @@ impl FilterColumns {
             .any(|layer| layer.present.contains(entity))
     }
 
+    /// The entity-space value `column` stores for `entity`, at its storage type, or `None` where
+    /// no layer holds one — drill-down's entity-space home (records §3).
+    ///
+    /// **Every column with a value column answers, filterable or not**: a `derived` category
+    /// with neither flag still stores its codes here, and the caller has already established the
+    /// *item* visible, which is exactly the membership condition §3.3 derives value visibility
+    /// from — a visible entity carrying the value is the witness that offers it.
+    ///
+    /// The slot arithmetic is the presence-rank rule of `filter-index.md` §2.1, computed through
+    /// the column's own public surface: the count of present entities strictly below this one is
+    /// its slot, for a universal column (where it degenerates to the entity id) and a partial one
+    /// alike. O(containers below the entity) per read — drill-down cadence, never per mark.
     pub(crate) fn stored_value(&self, column: &str, entity: u32) -> Option<RecordValue> {
         let layers = self.columns.get(column)?;
         let probe = Bitmap::of(&[entity]);
