@@ -1,20 +1,19 @@
 """One rung's whole workload: build it, verify it, serve it, ingest into it, and say what happened.
 
-Assembly, and nothing else. Every figure is the figure the driver that measured it wrote — the
-build's own stage timings, `serve_battery`'s result, `ingest_cycle`'s result — kept whole in the run
-file under its own key. What this module decides is the order, the ports, the cap, and the two
-sections a rerun is read for: whether the run held, and what it cost beside the last run of the same
-rung.
+Every figure is the one the driver that measured it wrote — the build's own stage timings,
+`serve_battery`'s result, `ingest_cycle`'s result — kept whole in the run file under its own key.
+This module decides the order, the ports and the cap, and reports two sections: whether the run
+held, and what it cost against the last run of the same rung and shape.
 
     python3 -m test_corpora.common.workload --rung arxiv --work <scratch> [--quick]
 
 `--quick` is the shape for a change under review: three zooms, three deciles, ten samples a cell,
-and a 2% hold-out. Full mode is every driver's own default and a 10% hold-out. The two are compared
-only against runs of the same shape.
+and a 2% hold-out. Full mode is every driver's own default and a 10% hold-out. The two shapes are
+compared only against each other.
 
 The exit code is the correctness section's: a refused check, a failed verify, an OOM kill, a dead
 server, a failed request, an unequal census or a rejected batch each make it non-zero. The cost
-section never touches it, because a timing on this machine depends on what else is running.
+section never affects it: a timing here depends on what else is running on the machine.
 """
 
 from __future__ import annotations
