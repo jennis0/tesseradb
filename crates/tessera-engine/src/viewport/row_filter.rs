@@ -1,6 +1,7 @@
 //! A filter evaluated in row space: the hot-column scan, the crossing, and the leaf resolvers.
 
 use super::*;
+use crate::filter::{as_f64, narrow_hi, narrow_lo, Narrowed};
 
 impl Engine {
     /// Cross a filter's entity-space result into one view's row space, by whichever of the two
@@ -570,17 +571,9 @@ fn code_present_run(
     }
 }
 
-/// A number's value lies within the bounds — the row-space transcription of
-/// `ValueColumn::scan_range`, and it must stay one.
-///
-/// **A deliberate second copy of the narrowing, across a crate boundary.** `tessera-filter`'s is
-/// private to the entity-space column, and the two routes must agree exactly over the domain or
-/// 0068's licence to choose a route on cost alone fails. The rules copied here are the ones that
-/// are wrong in silence if they drift: an exclusive integer bound is folded by one step; a
-/// fractional bound rounds *into* the constraint (`> 3.2` and `>= 3.2` both admit 4); a NaN bound
-/// satisfies nothing; a bound past the type's floor or ceiling is no constraint or no match rather
-/// than a wrapped comparison. `the_row_route_and_the_entity_route_agree_over_the_domain` is what
-/// holds the copies together, over a numeric predicate as well as a category one.
+/// A number's value lies within the bounds — the row-space half of `ValueColumn::scan_range`,
+/// narrowing each endpoint to the column's own type through the filter crate's [`narrow_lo`] and
+/// [`narrow_hi`], which is the rule the entity route narrows by.
 #[inline]
 fn range_run(
     slice: &HotSlice<'_>,
@@ -767,95 +760,6 @@ fn bool_matching(
                 buf.clear();
             }
         }
-    }
-}
-
-/// What a range bound becomes once narrowed to the column's own type — see [`range_run`] for why
-/// this mirrors `tessera-filter`'s private original rather than calling it.
-enum Narrowed<T> {
-    /// No constraint on this side — the bound lies beyond the type's range in the permissive
-    /// direction, or was absent.
-    Unbounded,
-    /// Nothing can satisfy it: the bound lies beyond the type's range in the excluding direction.
-    Unsatisfiable,
-    /// An inclusive native bound. Exclusivity is folded in by moving the bound one step, which is
-    /// exact for integers.
-    At(T),
-}
-
-/// The integer widths' extremes as `i128`, so the narrowing can tell "below the floor" (no
-/// constraint) from "above the ceiling" (nothing matches) without a per-type arm.
-trait NativeBound {
-    fn min_i128() -> i128;
-    fn max_i128() -> i128;
-}
-macro_rules! native_bound {
-    ($($t:ty),*) => { $(impl NativeBound for $t {
-        fn min_i128() -> i128 { <$t>::MIN as i128 }
-        fn max_i128() -> i128 { <$t>::MAX as i128 }
-    })* };
-}
-native_bound!(u8, u16, u32, u64, i8, i16, i32, i64);
-
-/// The lower bound as an **inclusive** native value.
-fn narrow_lo<T>(e: Option<Endpoint>) -> Narrowed<T>
-where
-    T: TryFrom<i128> + NativeBound,
-{
-    let Some(e) = e else {
-        return Narrowed::Unbounded;
-    };
-    // `gt x` over integers is `gte x+1`; the saturating add keeps the shift exact at the ceiling,
-    // where `x+1` would not exist and the answer is "nothing above it".
-    let want = match e.value {
-        Scalar::Int(i) if e.inclusive => i,
-        Scalar::Int(i) => i.saturating_add(1),
-        // A fractional lower bound rounds *up* to the next integer the column can hold: `> 3.2`
-        // and `>= 3.2` both admit 4 and exclude 3.
-        Scalar::Float(f) => {
-            if f.is_nan() {
-                return Narrowed::Unsatisfiable;
-            }
-            f.ceil() as i128
-        }
-    };
-    match T::try_from(want) {
-        Ok(v) => Narrowed::At(v),
-        // Below the floor: every value satisfies it. Above the ceiling: none does.
-        Err(_) if want < T::min_i128() => Narrowed::Unbounded,
-        Err(_) => Narrowed::Unsatisfiable,
-    }
-}
-
-/// The upper bound as an **inclusive** native value.
-fn narrow_hi<T>(e: Option<Endpoint>) -> Narrowed<T>
-where
-    T: TryFrom<i128> + NativeBound,
-{
-    let Some(e) = e else {
-        return Narrowed::Unbounded;
-    };
-    let want = match e.value {
-        Scalar::Int(i) if e.inclusive => i,
-        Scalar::Int(i) => i.saturating_sub(1),
-        Scalar::Float(f) => {
-            if f.is_nan() {
-                return Narrowed::Unsatisfiable;
-            }
-            f.floor() as i128
-        }
-    };
-    match T::try_from(want) {
-        Ok(v) => Narrowed::At(v),
-        Err(_) if want > T::max_i128() => Narrowed::Unbounded,
-        Err(_) => Narrowed::Unsatisfiable,
-    }
-}
-
-fn as_f64(s: Scalar) -> f64 {
-    match s {
-        Scalar::Int(i) => i as f64,
-        Scalar::Float(f) => f,
     }
 }
 
@@ -1924,12 +1828,13 @@ mod tests {
         );
     }
 
-    /// The bounds are the entity route's, endpoint for endpoint: exclusivity folded by one step
-    /// over integers, a bound past the type's ceiling excluding everything and one past its floor
-    /// constraining nothing, a NaN bound satisfying nothing, and a fractional bound rounding *into*
-    /// the constraint. These are the rules that are wrong in silence if the two copies drift.
+    /// **The bounds are narrowed to the width the hot column stores.** What an endpoint means is
+    /// `tessera-filter`'s rule and is tested beside it; what this pins is that the row route hands
+    /// that rule each column's own stored type — so a bound outside the type is no constraint or no
+    /// match rather than a wrapped comparison — and that a float column is compared as floats, with
+    /// NaN unordered.
     #[test]
-    fn a_range_over_the_hot_column_reads_its_endpoints_as_the_entity_route_does() {
+    fn a_range_over_the_hot_column_is_narrowed_to_the_columns_own_width() {
         let values = [0u8, 1, 2, 254, 255];
         let slice = HotSlice::U8(&values);
         let at = |v: i128, inclusive: bool| {
@@ -1943,11 +1848,6 @@ mod tests {
         assert_eq!(
             run(&slice, &range(at(1, true), at(2, true)), None),
             vec![1, 2]
-        );
-        assert_eq!(
-            run(&slice, &range(at(0, false), at(254, false)), None),
-            vec![1, 2],
-            "an exclusive integer bound is the next value along"
         );
         // Beyond the type in either direction, which is where a wrapped comparison would show.
         assert_eq!(
@@ -1970,22 +1870,12 @@ mod tests {
             "`> 255` over a u8 is nothing, not everything wrapped"
         );
 
-        // A fractional bound rounds into the constraint, on both sides.
         let fractional = |v: f64, inclusive: bool| {
             Some(Endpoint {
                 value: Scalar::Float(v),
                 inclusive,
             })
         };
-        assert_eq!(
-            run(
-                &slice,
-                &range(fractional(0.5, true), fractional(2.5, true)),
-                None
-            ),
-            vec![1, 2]
-        );
-
         // NaN is unordered: it satisfies nothing as a bound, and matches nothing as a value.
         assert_eq!(
             run(&slice, &range(fractional(f64::NAN, true), None), None),
