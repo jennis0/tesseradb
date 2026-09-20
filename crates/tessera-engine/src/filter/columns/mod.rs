@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use tessera_filter::{Codes, ColumnPostings, RecordStack, RecordValue, SortedDict, ValueColumn};
+use tessera_filter::{ColumnPostings, RecordStack, RecordValue, SortedDict, ValueColumn};
 
 use super::declared::{Family, Placement};
 use super::error::ComposeError;
@@ -594,18 +594,20 @@ impl FilterColumns {
     /// *item* visible, which is exactly the membership condition §3.3 derives value visibility
     /// from — a visible entity carrying the value is the witness that offers it.
     ///
-    /// The slot arithmetic is the presence-rank rule of `filter-index.md` §2.1, computed through
-    /// the column's own public surface: the count of present entities strictly below this one is
-    /// its slot, for a universal column (where it degenerates to the entity id) and a partial one
-    /// alike. O(containers below the entity) per read — drill-down cadence, never per mark.
+    /// The slot arithmetic is the column's own: `ValueColumn::record_value_of` resolves the entity
+    /// through the presence rank, for a universal column (where it degenerates to the entity id)
+    /// and a partial one alike. O(containers below the entity) per read — drill-down cadence,
+    /// never per mark.
     pub(crate) fn stored_value(&self, column: &str, entity: u32) -> Option<RecordValue> {
         let column = self.columns.get(column)?;
-        let probe = Bitmap::of(&[entity]);
         for layer in column.value_layers() {
             let values = &layer.values;
-            if values.present_in(&probe).is_empty() {
-                continue;
-            }
+            // The layers are disjoint in entity space (I9, checked at compose), so the first
+            // layer holding the entity is the only one.
+            let read = match values.record_value_of(entity) {
+                Some(read) => read,
+                None => continue,
+            };
             // **A keyword's ordinal never crosses the trust boundary**, so drill-down is served the
             // key it names rather than the number (records §4.3; **I10**). Decoded against *this*
             // layer's dictionary, which is the only one that numbers it. A dictionary that refuses
@@ -619,23 +621,6 @@ impl FilterColumns {
                     .ok()
                     .map(|key| RecordValue::Utf8(key.to_string()));
             }
-            // The layers are disjoint in entity space (I9, checked at compose), so the first
-            // layer holding the entity is the only one.
-            let slot = values
-                .present_in(&Bitmap::from_range(0..entity))
-                .cardinality() as usize;
-            let read = match values.codes() {
-                Codes::U8(v) => RecordValue::U8(v[slot]),
-                Codes::U16(v) => RecordValue::U16(v[slot]),
-                Codes::U32(v) => RecordValue::U32(v[slot]),
-                Codes::U64(v) => RecordValue::U64(v[slot]),
-                Codes::I8(v) => RecordValue::I8(v[slot]),
-                Codes::I16(v) => RecordValue::I16(v[slot]),
-                Codes::I32(v) => RecordValue::I32(v[slot]),
-                Codes::I64(v) => RecordValue::I64(v[slot]),
-                Codes::F32(v) => RecordValue::F32(v[slot]),
-                Codes::F64(v) => RecordValue::F64(v[slot]),
-            };
             return Some(read);
         }
         None

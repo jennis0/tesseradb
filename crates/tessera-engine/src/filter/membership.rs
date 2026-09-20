@@ -50,12 +50,9 @@ impl FilterColumns {
         // of a value's count add rather than overlapping.
         let mut from_extents: FxHashMap<u32, u64> = FxHashMap::default();
         for layer in layers.iter().filter(|l| l.values_rel.is_some()) {
-            let layer = &layer.values;
-            for entity in layer.present().and(candidate).iter() {
-                if let Some(code) = layer.value_of(entity) {
-                    *from_extents.entry(code.raw()).or_default() += 1;
-                }
-            }
+            layer.values.for_each_code_in(candidate, |code| {
+                *from_extents.entry(code).or_default() += 1;
+            });
         }
         // **The one thing a count may not assume**, checked where it is cheap rather than argued
         // where it is not: `intersection_cardinality` is exact per source and cardinality does not

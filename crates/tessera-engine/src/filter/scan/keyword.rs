@@ -343,11 +343,9 @@ fn contains_narrow(
     let Codes::U32(ordinals) = values.codes() else {
         return Ok(Bitmap::new());
     };
-    let present = values.present();
-    let mut wanted: Vec<u32> = Vec::new();
-    for_each_slot_run(&present, candidate, ordinals.len(), |slot0, count, _| {
-        wanted.extend_from_slice(&ordinals[slot0..slot0 + count]);
-    });
+    let held = ordinals.len().min(candidate.cardinality() as usize);
+    let mut wanted: Vec<u32> = Vec::with_capacity(held);
+    values.for_each_code_in(candidate, |ordinal| wanted.push(ordinal));
     wanted.sort_unstable();
     wanted.dedup();
 
@@ -362,99 +360,6 @@ fn contains_narrow(
     // candidate slot exactly as a full one does, so "no key the candidate carries matched" needs
     // no sentinel to say it.
     Ok(values.scan_ordinal_set(candidate, &matched))
-}
-
-/// Walk `candidate ∩ present` as `(slot0, count, entity0)` runs — a layer's values are addressed by
-/// **rank**, and this is what turns an entity id into the slot holding its ordinal.
-///
-/// **Deliberately a second copy of `tessera_filter`'s own slot walk, which is private to the scan.**
-/// The narrow `contains` route needs the same mapping outside that crate, and the two obvious
-/// alternatives are worse than a duplicate: `ValueColumn::value_of` per entity pays a bitmap rank
-/// per read — drill-down cadence, and O(containers below the entity), which at 10⁹ is thousands of
-/// container steps per candidate entity — while stepping the presence bitmap one bit at a time
-/// costs O(present) however small the candidate is, defeating the route's whole reason to exist.
-///
-/// Rank is **affine inside a run**: an entity `e` in a presence run starting at `ps`, with `base`
-/// bits set before that run, is at slot `base + (e − ps)`. Merging the two bitmaps' runs therefore
-/// gives every slot by arithmetic at O(runs).
-///
-/// Being a second copy, this walk is **not** seen by `tessera_filter::take_scan_work`, which counts
-/// the scan's own traversal. What it collects is a set of ordinals, not an answer: both `contains`
-/// routes end in one `OrdinalPredicate::In` scan over the candidate, and it is that scan the
-/// harness counts. So the traversal this function performs is uncounted, and the traversal that
-/// decides the answer is asserted for both routes alike.
-fn for_each_slot_run(
-    present: &Bitmap,
-    candidate: &Bitmap,
-    len: usize,
-    mut f: impl FnMut(usize, usize, u32),
-) {
-    let live = candidate.and(present);
-    let mut pres = RunIter::new(present);
-    let mut liv = RunIter::new(&live);
-    let mut base: u64 = 0;
-    let mut p = pres.next();
-    let mut l = liv.next();
-    while let (Some((ps, pl)), Some((ls, ll))) = (p, l) {
-        if pl < ls {
-            base += u64::from(pl - ps) + 1;
-            p = pres.next();
-            continue;
-        }
-        if ll < ps {
-            l = liv.next();
-            continue;
-        }
-        let lo = ls.max(ps);
-        let hi = ll.min(pl);
-        let slot0 = (base + u64::from(lo - ps)) as usize;
-        let count = (hi - lo) as usize + 1;
-        if slot0 < len {
-            f(slot0, count.min(len - slot0), lo);
-        }
-        if ll <= pl {
-            l = liv.next();
-        } else {
-            base += u64::from(pl - ps) + 1;
-            p = pres.next();
-        }
-    }
-}
-
-/// How many runs one bulk read from a bitmap cursor collects.
-const RUN_BUF: usize = 64;
-
-/// One run at a time from a bitmap, buffered through the cursor's bulk read.
-struct RunIter<'a> {
-    cursor: croaring::bitmap::BitmapCursor<'a>,
-    buf: [croaring::RangeInclusive<u32>; RUN_BUF],
-    filled: usize,
-    at: usize,
-}
-
-impl<'a> RunIter<'a> {
-    fn new(bitmap: &'a Bitmap) -> Self {
-        RunIter {
-            cursor: bitmap.cursor(),
-            buf: [croaring::RangeInclusive::<u32> { start: 0, last: 0 }; RUN_BUF],
-            filled: 0,
-            at: 0,
-        }
-    }
-
-    /// The next run as `(start, last)`, inclusive.
-    fn next(&mut self) -> Option<(u32, u32)> {
-        if self.at == self.filled {
-            self.filled = self.cursor.read_many_ranges(&mut self.buf);
-            self.at = 0;
-            if self.filled == 0 {
-                return None;
-            }
-        }
-        let r = self.buf[self.at];
-        self.at += 1;
-        Some((r.start, r.last))
-    }
 }
 
 #[cfg(test)]
@@ -546,18 +451,6 @@ mod tests {
                 "{predicate:?} must reach the slot holding the reserved ordinal"
             );
         }
-    }
-
-    /// The reserved ordinal names no key, which is what makes it safe to scan for rather than
-    /// merely unlikely to collide.
-    ///
-    /// That a dictionary's ordinals run `0..key_count` with `key_count` a `u32` puts `u32::MAX`
-    /// outside them **as a type-level tautology** — clippy says so if it is asserted — so what is
-    /// worth checking is the reader's own answer to it.
-    #[test]
-    fn no_dictionary_holds_the_reserved_ordinal() {
-        let d = dict(&["alpha", "beta"]);
-        assert!(d.key_of(NO_SUCH_ORDINAL, &mut Vec::new()).is_err());
     }
 
     /// `in` hands the scan one ordinal per needle the caller named, misses included, so the list's
