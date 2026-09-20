@@ -126,26 +126,6 @@ impl FilterColumns {
         self.verify_phrase(name, declared_index, analyser, &ordered, out, candidate)
     }
 
-    /// Compose several operands: `candidate ∧ op₁ ∧ … ∧ opₙ`.
-    ///
-    /// **Intersection is the only top-level operator** (§8.2), and each operand is evaluated under
-    /// the *running* result rather than under the original candidate — so a selective first operand
-    /// makes every later one cheaper, and no intermediate is ever wider than the candidate.
-    pub fn resolve_all<'a>(
-        &self,
-        operands: impl IntoIterator<Item = (&'a str, &'a FilterOperand)>,
-        candidate: &Bitmap,
-    ) -> Result<Bitmap, FilterError> {
-        let mut live = candidate.clone();
-        for (column, operand) in operands {
-            live = self.resolve(column, operand, &live)?;
-            if live.is_empty() {
-                break;
-            }
-        }
-        Ok(live)
-    }
-
     /// Evaluate a filter expression against `candidate`.
     ///
     /// **Every node is evaluated under the candidate, never over the column at large.** A
