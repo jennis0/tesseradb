@@ -1,5 +1,5 @@
 //! Perf harness (not a test): open the 2.4M-item bundle at `/tmp/tessera-2m4` (built by
-//! `viewport.rs`'s `latency_sanity_at_2_4m_p99_under_50ms`, reused here) and then block, so
+//! `tessera-bench`'s `viewport_latency` binary, reused here) and then block, so
 //! `/usr/bin/time -v` (or any external RSS sampler) can read this process's peak/resident memory
 //! after `Engine::open` returns. Used to measure the external-id index's memory contribution
 //! before/after the mmap'd binary-search rewrite (perf-extid task).

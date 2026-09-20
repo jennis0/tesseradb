@@ -217,8 +217,8 @@ for scale in "${SCALES[@]}"; do
   done
 done
 
-# Alias the 2.4M categories-subclass bundle to the path `benches/viewport.rs` and the ignored
-# `latency_sanity_at_2_4m_p99_under_50ms` test both hardcode, so existing tooling keeps working
+# Alias the 2.4M categories-subclass bundle to the path `benches/viewport.rs` and
+# `tessera-bench`'s `viewport_latency` binary both default to, so existing tooling keeps working
 # against the same bytes rather than building a second copy.
 canonical="$FIXTURES/2422486/categories-subclass"
 if [[ -f "$canonical/CURRENT" && ! -e /tmp/tessera-2m4 ]]; then

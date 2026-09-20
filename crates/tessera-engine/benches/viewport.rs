@@ -1,9 +1,10 @@
 //! Criterion micro-benches at 2.4M items — the regression gate ahead of the
 //! 10⁹ exit measurement (`scripts/bench_p99.py`, run once, out of scope for `cargo bench`).
 //!
-//! Reuses `/tmp/tessera-2m4` (built by `tessera-engine/tests/viewport.rs`'s ignored
-//! `latency_sanity_at_2_4m_p99_under_50ms` test, or rebuilt here if missing — shared-context
-//! 2.4M is the "validate" scale; 10⁹ is exit-only).
+//! Reuses `/tmp/tessera-2m4` (built by `tessera-bench`'s `viewport_latency` binary, or rebuilt
+//! here if missing — shared-context 2.4M is the "validate" scale; 10⁹ is exit-only). The
+//! builder below is a second copy of that binary's: `scripts/check-layers.sh` keeps
+//! `tessera-bench` a leaf, so nothing — including this bench — may depend on it.
 //!
 //! Four groups:
 //! 1. `fragment_build` — `tessera_authz::build_fragment` directly against the real postings, for
