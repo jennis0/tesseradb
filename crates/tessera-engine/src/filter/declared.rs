@@ -284,7 +284,7 @@ pub fn scoped_has_value_column(scoped: &tessera_store::manifest::ScopedScalar) -
 /// rendered one is answered from it by the ordinary scan, which is what makes a **pin** work:
 /// a leaf naming another view's column is read where it lives rather than from rows the request
 /// does not hold. The row tail a rendered family also occupies answers no filter at all
-/// ([`crate::filter::columns::open::open_scoped_column`]'s placement).
+/// (the scoped column's own placement, fixed where it is opened).
 ///
 /// **`text` is excluded from the render arm** rather than assumed away, as [`is_filterable`]
 /// excludes the string families from its own: `render` on a scoped `text` family is refused at the

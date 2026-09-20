@@ -37,7 +37,7 @@
 //!
 //! **The route is fixed at open from the declaration**, never chosen per request, per principal or
 //! from a statistic: §8.2 forbids a statistics-driven route because it makes execution time a
-//! function of how much the principal can see. [`crate::filter::columns::Layers::route`] is therefore a field, not an
+//! function of how much the principal can see. A column's route is therefore a field, not an
 //! argument.
 //!
 //! **Postings cover the base build and nothing since**, so the routed answer is
