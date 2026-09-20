@@ -446,6 +446,9 @@ fn a_zero_coverage_principal_matches_nothing() {
     }
 }
 
+/// One keyword case: what to call it, the operand, and the corpus predicate it must agree with.
+type KeywordCase = (&'static str, FilterOperand, fn(u64) -> bool);
+
 /// Every keyword operand over a real mask, against the corpus: equality, a set, a prefix and a
 /// substring, on the built `title` column. The set names a key nobody carries beside two that are
 /// carried, so a miss inside an `in` is answered rather than refused.
@@ -455,12 +458,8 @@ fn string_filters_agree_with_the_corpus_under_a_real_mask() {
     let (_engine, cand) = candidate_for(&fx, &subset_credential());
     let terms = [SUBSET_TERM];
 
-    let cases: Vec<(&str, FilterOperand, Box<dyn Fn(u64) -> bool>)> = vec![
-        (
-            "eq",
-            FilterOperand::TextEquals(title_of(3)),
-            Box::new(|e| e == 3),
-        ),
+    let cases: [KeywordCase; 4] = [
+        ("eq", FilterOperand::TextEquals(title_of(3)), |e| e == 3),
         (
             "in",
             FilterOperand::TextIn(vec![
@@ -468,22 +467,22 @@ fn string_filters_agree_with_the_corpus_under_a_real_mask() {
                 title_of(9),
                 "paper-no-such-thing".to_string(),
             ]),
-            Box::new(|e| e == 3 || e == 9),
+            |e| e == 3 || e == 9,
         ),
         (
             "prefix",
             FilterOperand::TextPrefix("paper-1".into()),
-            Box::new(|e| title_of(e).starts_with("paper-1")),
+            |e| title_of(e).starts_with("paper-1"),
         ),
         (
             "contains",
             FilterOperand::TextContains("-2".into()),
-            Box::new(|e| title_of(e).contains("-2")),
+            |e| title_of(e).contains("-2"),
         ),
     ];
     for (label, operand, carries) in cases {
         let got = fx.columns.resolve("title", &operand, &cand).unwrap();
-        let want = expected(&fx, &terms, &carries);
+        let want = expected(&fx, &terms, carries);
         assert!(!want.is_empty(), "{label}: the fixture selects nothing");
         assert_eq!(as_vec(&got), want, "{label}");
     }
