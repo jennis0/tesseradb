@@ -58,8 +58,12 @@ pub struct ArtifactShape {
 }
 
 impl Corpus {
-    /// How many artifacts level `level` of `layer` holds. Population scales with the corpus, so
-    /// the same seed at a smaller `n` gives this level truncated.
+    /// How many artifacts level `level` of `layer` holds: about one for every hundred items.
+    ///
+    /// This kind of artifact is not prefix-stable. The interval stride is `n / count` and the
+    /// scatter is a permutation of `[0, n)`, so an artifact's members depend on `n`. Only
+    /// [`Corpus::artifact_shape`] is the same at every size. A fixture is written and checked at
+    /// one `n`, and no per-item column is derived from these artifacts.
     pub fn artifacts_in(&self, layer: u64, level: u32) -> u64 {
         if level == EMPTY_LEVEL {
             return 0;
@@ -277,10 +281,8 @@ mod tests {
         }
     }
 
-    /// Every property of an artifact is independent of the corpus size, so a smaller `n` gives the
-    /// same level truncated.
     #[test]
-    fn an_artifacts_membership_does_not_depend_on_the_corpus_size() {
+    fn an_artifacts_shape_does_not_depend_on_the_corpus_size() {
         let small = corpus(4_000);
         let large = corpus(40_000);
         for a in 0..8 {
