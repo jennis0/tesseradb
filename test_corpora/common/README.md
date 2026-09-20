@@ -11,7 +11,7 @@ files. **The table is generated; do not hand-edit the marked block.**
 |---|---|
 | [`deployment.py`](deployment.py) | boots a `tessera serve` over an existing bundle, on its own ports and scratch state, always inside a transient cgroup scope |
 | [`serve_battery.py`](serve_battery.py) | the view-latency battery — a principal ladder, density-decile locations, three conditions |
-| [`ingest_cycle.py`](ingest_cycle.py) | the ingest cycle — split, build the complement's **points and declarations**, ingest the hold-out, publish every layer's artifacts, flush, fold, and decision 0091's equivalence test |
+| [`ingest_cycle/`](ingest_cycle/) | the ingest cycle — split, build the complement's **points and declarations**, ingest the hold-out, publish every layer's artifacts, flush, fold, and decision 0091's equivalence test |
 | `scripts/campaign_report.py assemble` | collates a rung's driver outputs into `measurements.json` on the schema below |
 
 ## Running one rung

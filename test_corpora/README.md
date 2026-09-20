@@ -50,7 +50,7 @@ on this machine's root volume, and when a second one appears it is one value tha
 deployment built from part of the corpus quantises onto a slightly different grid and its cells do
 not line up with the whole corpus's. Every later deployment of a rung therefore states the frame
 the rung's first all-in build recorded — `MANIFEST.views[].quantisation`, which
-[`common/ingest_cycle.py`](common/ingest_cycle.py)'s `state_extent` copies out of that manifest and
+[`common/ingest_cycle/`](common/ingest_cycle/)'s `state_extent` copies out of that manifest and
 writes into the measurement's own copy of the declaration. The rung's committed `corpus.toml` is
 never edited; what changes is the copy the measurement builds from, and the run records the frame it
 stated.
