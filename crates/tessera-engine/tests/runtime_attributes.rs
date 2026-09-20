@@ -24,7 +24,8 @@ use parquet::arrow::ArrowWriter;
 use common::*;
 use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
 use tessera_engine::{
-    AcceptError, AttributeRequest, CategoryQuery, Engine, ScalarOut, Session, ViewportRequest,
+    AcceptError, AttributeRequest, CategoryQuery, Engine, EngineConfig, ScalarOut, Session,
+    ViewportRequest,
 };
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalScalar;
@@ -1049,4 +1050,95 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         ["band", "score", "sentiment"],
         "a refusal declares nothing"
     );
+}
+
+/// **A record coalesce publishes over a blob whose only column was declared at a running
+/// service.** The build declared no blob-resident column, so the prefix has no `attrs/record`
+/// base and the stack is the flushes' extents alone — which is what `FilterColumns::open` opens
+/// at a restart. A publication that demanded a base the schema does not owe would discard every
+/// coalesce of such a bundle, so the record stack would grow one layer per flush until a fold.
+#[test]
+fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
+    let fx = fixture();
+    let mut engine = Engine::open(
+        &fx.root,
+        &fx.tmp.path().join("cache"),
+        &fx.tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            // Every flush below is one this case asked for, and two extents are enough to select
+            // a window — so the pass fires on a fixture of four.
+            flush_max_age_secs: 3600,
+            flush_max_items: usize::MAX,
+            coalesce_width: Some(2),
+            ..config_uncapped()
+        },
+    )
+    .expect("the engine opens");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    engine.set_merge_for_test(false);
+
+    // Neither flag: blob-resident, and the only such column in the schema.
+    assert!(
+        !engine
+            .declare_attribute(request("memo", "u16"))
+            .expect("the declaration is accepted"),
+        "'memo' is a new column"
+    );
+
+    let flushes = 4u16;
+    let mut ingested: Vec<EntityId> = Vec::new();
+    for i in 0..flushes {
+        let mut scalars = build_columns("mid", 1.0);
+        scalars.push(WalScalar::U16(i + 1));
+        let batch = format!("memo-{i}");
+        ingested.push(ingest(&engine, &batch, vec![row(&format!("m{i}"), &engine, scalars)])[0]);
+        flush(&engine);
+    }
+    let before = engine.generation().filter_columns.record_layers();
+    assert_eq!(
+        before, flushes as usize,
+        "one record extent per flush, and no base: the build wrote none"
+    );
+
+    let stats = engine.write_executor_stats();
+    engine.request_flush();
+    wait_until(
+        "a coalesce to publish or be discarded",
+        std::time::Duration::from_secs(60),
+        || {
+            let now = engine.write_executor_stats();
+            now.coalesces > stats.coalesces || now.coalesce_failures > stats.coalesce_failures
+        },
+    );
+    assert_eq!(
+        engine.write_executor_stats().coalesce_failures,
+        0,
+        "the coalesce was discarded rather than published"
+    );
+
+    let after = engine.generation().filter_columns.record_layers();
+    assert!(
+        after < before,
+        "the live record stack still holds {after} layers of {before}, so the bound arrives only \
+         at the next restart"
+    );
+    let served = |engine: &Engine| {
+        let session = session(engine);
+        ingested
+            .iter()
+            .map(|entity| fields_of(engine, &session, *entity)["memo"].clone())
+            .collect::<Vec<_>>()
+    };
+    let expected: Vec<ScalarOut> = (0..flushes).map(|i| ScalarOut::U16(i + 1)).collect();
+    assert_eq!(served(&engine), expected, "a coalesced blob row reads back");
+
+    let engine = restart(&fx, engine);
+    assert_eq!(
+        engine.generation().filter_columns.record_layers(),
+        after,
+        "the reopened bundle holds exactly the layers its manifest names"
+    );
+    assert_eq!(served(&engine), expected);
 }
