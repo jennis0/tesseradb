@@ -1139,486 +1139,620 @@ impl Engine {
         sets: &ViewportSets<'_>,
         dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
     ) -> Result<Walked> {
-        let (session, generation) = (served.session, served.generation);
-        let (view, view_data) = (served.name, served.data);
-        let (mask, denied) = (sets.mask, served.denied);
-        let mask_identity = served.mask_identity;
         // Built once per request rather than per layer: it is the same view's segment list for
         // every artifact in the response, and a layer declaring no derived content never asks it
         // anything.
         let locator = crate::derived::RowLocator::new(served.segments.clone());
-        let shard = generation.bundle.manifest.identity.shard_id;
         // Built once for the whole response: the postings and the manifest's plugin are the
         // generation's, not the layer's, and the gate they carry is one decision per request.
-        let source = generation.partition_source();
+        let source = served.generation.partition_source();
+        let pass = ArtifactPass {
+            served,
+            req,
+            sets,
+            dependency_served,
+            locator: &locator,
+            source: &source,
+            shard: served.generation.bundle.manifest.identity.shard_id,
+        };
 
-        let mut out = Vec::new();
-        // The layers whose rung is the response-local chain depth rather than the declared level —
-        // the treed (nested) ones, decision 0082's edges-not-levels shape. Collected during the
-        // walk, applied after the response's row set is final (below).
-        let mut treed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        // Where each served artifact ended up, and what each points at — collected during the walk
-        // and reconciled after it.
-        let mut served_at: std::collections::BTreeMap<(String, u32, u32), TesseraId> =
-            std::collections::BTreeMap::new();
-        let mut placed: Vec<Placement> = Vec::new();
-        // Every level this pass walked, with the structures the membership column reads the
-        // served set back through — the same row form and the same lineage the verdicts and the
-        // cut used, so the column cannot describe a level the artifacts frame did not.
-        let mut served_layers: Vec<ServedLayer> = Vec::new();
+        let mut walked = Walked::default();
         for name in names {
-            let Some(layer) = self.write.live().registered_layer(&name) else {
-                // Dropped between the resolution and here. Absent is the right answer and the same
-                // one a gate failure gives.
+            let Some(layer) = self.layer_pass(&pass, name, &mut walked) else {
                 continue;
             };
-            // A layer declares which views it lives in; one it did not declare has no membership
-            // in this row space to project.
-            if !layer.declaration.views.iter().any(|s| s == view) {
-                continue;
-            }
-            // **The live half, asked per request.** A layer's own entity carries its suppression,
-            // and a resolution may cache reachability but never the verdict — see
-            // `Engine::visible_layers`, which takes the same two steps in the same order.
-            if generation.overlay.is_deleted(layer.entity)
-                || generation.overlay.is_suppressed(layer.entity)
-            {
-                continue;
-            }
-            if lineage_kind(layer.declaration.hierarchy.kind).is_some() {
-                treed.insert(name.clone());
-            }
-
-            // Parsed once per layer. A name outside the vocabulary cannot reach here — the
-            // declaration was refused at registration — so an unparseable one is dropped rather
-            // than erroring the whole response.
-            //
-            // **The request narrows it, and only ever narrows it.** The intersection is taken here
-            // so that a property the request did not ask for is never computed at all — the point
-            // of the field is the work it does not do, and filtering the *result* would keep the
-            // hull's cost while dropping its bytes.
-            let declared_derived: Vec<crate::derived::ComputedProperty> = layer
-                .declaration
-                .content
-                .computed
-                .iter()
-                .filter_map(|name| crate::derived::ComputedProperty::parse(name))
-                .filter(|property| req.computed.selects(*property))
-                .collect();
-
-            // **The predicate's inputs, resolved per level.** An attribute layer's every level
-            // reads the same column; a spatial layer's held structures are per level, because
-            // each level holds its own shapes. A layer with a stored membership resolves nothing.
-            let vocabulary = predicate_vocabulary(generation, &layer.declaration);
-            let code_of_key = |key: &str| match vocabulary {
-                Some(vocabulary) => vocabulary.code_of(key),
-                None => key.parse::<u32>().ok(),
-            };
-
             let mut served_levels: Vec<ServedLevel> = Vec::new();
-            for (level, runs) in layer.runs.iter().enumerate() {
-                let level = level as u32;
+            for (number, runs) in layer.registered.runs.iter().enumerate() {
+                let number = number as u32;
                 // **Skipped before the projection is built, not after it is served.** A level the
                 // request did not ask for costs nothing at all here: no `get_or_build`, no
                 // candidate walk, no masked probe and no derived geometry over its members. That is
                 // the whole point of the field — a whole-layer response over a five-level
                 // administrative hierarchy pays a pass over every member at every level, and the
                 // levels a client was never going to draw dominate it.
-                if !level_is_selected(req.levels, &layer.declaration.levels, level, req.zoom) {
+                if !level_is_selected(
+                    req.levels,
+                    &layer.registered.declaration.levels,
+                    number,
+                    req.zoom,
+                ) {
                     continue;
                 }
-                let recorded = layer.layout_of(level);
-                let ((rows, level_version), lineage_version) = self.write.live().with_artifacts(|store| {
-                    let predicate = predicate_source(
-                        &layer.declaration,
-                        generation,
-                        view,
-                        view_data,
-                        &served.segments,
-                        &code_of_key,
-                        &self.shapes,
-                        store,
-                        level,
-                    );
-                    (
-                        // **The form and the version it is of, from the one call.** A form still
-                        // waiting for a tick's delta stands at the earlier level version, and the
-                        // masked-count histogram below decides candidacy on a row-major level —
-                        // so a histogram of this form filed under the store's later version would
-                        // be read, after the tick, as though it had counted the grown column
-                        // (`ArtifactProjections::get_or_build`).
-                        self.artifact_projections.get_or_build(
-                            &generation.prefix,
-                            view,
-                            &name,
-                            level,
-                            store,
-                            &view_data.row_space,
-                            Some(&source),
-                            recorded,
-                            predicate.as_ref(),
-                            generation.segments_version,
-                            crate::artifacts::serves_column_only(&layer.declaration),
-                        ),
-                        store.lineage_version(&name, level),
-                    )
-                });
-                // **The count's route, decided by the level's layout and by nothing about the
-                // request.** An artifact-major level counts per served artifact; a row-major one has
-                // no per-artifact membership to intersect and reads the histogram, which is built
-                // once per session per generation and cached under a key that moves with every
-                // accepted deny (`crate::histogram`).
-                let counts = self.masked_counts(
-                    &mask_identity,
-                    view,
-                    &name,
-                    level,
-                    level_version,
-                    &rows,
-                    mask,
-                    crate::artifacts::derives_accumulated_geometry(&layer.declaration)
-                        .then_some(&served.segments[..]),
-                );
-                // Kept beside the view below, which takes the `Arc` — the derived geometry reads
-                // the accumulation this same entry carries.
-                let accumulated = counts.clone();
-                let containment = rows.partition().map(|p| p.answers(session.satisfied()));
-                // Captured before the shadow below: `view` becomes the artifact predicate's value,
-                // and the derived-geometry key needs the view's *name*.
-                let view_name = view;
-                // **Built after the candidacy route and never as part of it**: the filter decides
-                // nothing about which artifacts are served (decision 0104), so this is computed
-                // beside the verdict rather than inside it, and is skipped whole on an unfiltered
-                // request.
-                let matched = sets.matched_here.as_ref().map(|here| rows.matched(here));
-                let highlighted = sets
-                    .highlighted_here
-                    .as_ref()
-                    .map(|here| rows.matched(here));
-                let view = crate::artifacts::ArtifactView {
-                    declaration: &layer.declaration,
-                    overlay: &generation.overlay,
-                    satisfied: session.satisfied(),
-                    layer_reachable: true,
-                    rows: &rows,
-                    mask,
-                    dependency_served: &dependency_served,
-                    containment,
-                    denied,
-                    counts,
-                };
-                // **Every candidate is tested before any is cut**, and the two passes are separate
-                // for a reason that is not performance: the verdict is a per-artifact question
-                // with no lineage input (decision 0080), and a loop that decided *and* pruned in
-                // one step would have the shape that lets a node's neighbours reach its verdict.
-                let mut passing = Vec::new();
-                // **The walk replaces the sweep over every ordinal.** Cost is the viewport's
-                // perimeter in the hierarchy rather than the level's population: an artifact in no
-                // node the viewport touches has no member there, so it cannot have a *visible* one
-                // and skipping it withholds nothing (`crate::tile_index`, and §4.1 on why this is a
-                // candidate generator and never an answer). Holes and artifacts whose membership
-                // projects to nothing are in no node either, so neither reaches the predicate here
-                // — and both remain live on the identifier route, which walks no index.
-                //
-                // **Or the scan, where the level is served row-major**: one pass over
-                // `viewport ∩ M_auth` marking labels, which answers the same question at a cost in
-                // *points* rather than in artifacts (`ArtifactRows::candidacy`). Which route is
-                // taken is a property of the level and never of the request.
-                let candidates = rows.candidacy(&sets.viewport, accumulated.as_deref());
-                for ordinal in candidates.iter() {
-                    // **Every candidate pays a masked probe**, on whichever of the three routes the
-                    // classification makes cheapest — see `ArtifactRows::candidate_in`, which is
-                    // the one place the choice is made and the one the differential drives.
-                    if !rows.candidate_in(ordinal, &candidates, &sets.viewport, mask) {
-                        continue;
-                    }
-                    let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
-                        continue;
-                    };
-                    // ⊘ **No artifact carries its own terms yet**, so a layer whose
-                    // `artifact_visibility` names a field serves nothing here — fail-closed, and
-                    // visibly so. The per-artifact label arrives with content (Stage 3); until then
-                    // the named field has nothing to satisfy, and admitting the artifact instead
-                    // would make a missing declaration a grant to everyone.
-                    let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-                        view.verdict(entity, ordinal, None)
-                    else {
-                        continue;
-                    };
-                    passing.push((ordinal, entity, masked_count, rank));
-                }
-
-                // The level's lineage, read from the parent lists of **every** artifact and not
-                // only the passing ones, because the edges are a property of the level and one
-                // lineage serves every viewer. **What the cut is taken over is the passing nodes
-                // alone** (decision 0117 E): the plan counts depth in them and climbs through the
-                // rest, so a withheld ancestor is not in this viewer's tree.
-                //
-                // **Within-level edges only, and that is the whole of the tiered shape's
-                // treatment here** (owner ruling, 2026-08-18). A tiered layer's edges run
-                // between levels and are *information* — what contains what, so a client can nest
-                // what it draws or filter to one subtree — rather than a ladder to coarsen along.
-                // Climbing them would substitute a state for its counties and draw one large
-                // polygon across a region whose neighbours are still counties. So the cut does not
-                // see them, such a layer's lineage is empty here, and its budget is inert exactly
-                // as a flat layer's is.
-                //
-                // **Held per generation, not derived per request.** The pointers depend on neither
-                // the mask nor the viewport, so a request that rebuilds them is doing generation
-                // work: ~96 ms at a level of ten million, against the ~3 ms the cut over them now
-                // costs.
-                //
-                // **Read from the row form, whose records and versions were taken inside one hold
-                // of the artifacts lock** (above), which is what makes the cached lineage the
-                // lineage *of* the version it is filed under: read separately, a write landing
-                // between the two would file the new level's edges under the old level's version,
-                // and the next request would serve a cut through a tree that has moved.
-                //
-                // **Filed under the level's lineage version, not its record version**
-                // (`ingest.md` §1.5, §4.1): a page of members joining moves the records and not
-                // the edges, so it leaves this lineage held; a publication, a parent fill and a
-                // retirement move both.
-                let lineage = self
-                    .lineages
-                    .get_or_build(&name, level, lineage_version, || {
-                        let records = rows.records();
-                        let edges = (0..records.len() as u32).map(|ordinal| {
-                            let within = records
-                                .parents(ordinal)
-                                .iter()
-                                .filter(move |parent| parent.level == level)
-                                .map(|parent| parent.ordinal);
-                            (ordinal, within)
-                        });
-                        match lineage_kind(layer.declaration.hierarchy.kind) {
-                            Some(true) => crate::cut::Lineage::dag(edges),
-                            _ => crate::cut::Lineage::new(edges),
-                        }
-                    });
-                let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
-                // Ascending and deduplicated, which the cut guarantees — so the membership test in
-                // the emit loop below is a binary search rather than a scan of the served set once
-                // per candidate.
-                //
-                // **`prune_children` is the layer's, and it is a rendering choice rather than a
-                // disclosure one.** Pruned, a passing parent is dropped where a passing child sits
-                // beneath it; unpruned, both are served and the client receives the whole visible
-                // tree — which is what lets it nest what it draws, or filter to one subtree while
-                // still drawing the rest. Every artifact in either set cleared its own criterion,
-                // so neither is the safer answer.
-                let served = crate::cut::cut(
-                    &lineage,
-                    &ordinals,
-                    req.artifact_budget,
-                    layer.declaration.hierarchy.prune_children,
-                );
-                // **The level's supplied content, read once for the level rather than once per
-                // served artifact** (`crate::artifact_content`, which carries the measurement that
-                // put it here: 408 ms of a response whose points half is 1.3 ms, all of it one
-                // zstd block decompressed per artifact served — 6.7 ms once the level's contents
-                // are read together). Built after the cut, so a level whose artifacts all failed
-                // their verdict reads nothing at all, and skipped whole where the layer declares no
-                // supplied content — which is most layers.
-                let contents = if layer.declaration.content.supplied.is_empty() || served.is_empty()
-                {
-                    None
-                } else {
-                    Some(self.level_contents.get_or_build(
-                        &name,
-                        level,
-                        level_version,
-                        generation.segments_version,
-                        || {
-                            crate::artifact_content::LevelContent::build(
-                                generation.filter_columns.records(),
-                                runs,
-                            )
-                        },
-                    ))
-                };
+                let level = self.level_pass(&layer, number, runs);
+                let passing = self.gate_candidates(&level);
+                let (lineage, cut) = self.cut_level(&level, &passing);
                 served_levels.push(ServedLevel {
-                    level,
-                    rows: Arc::clone(&rows),
+                    level: number,
+                    rows: Arc::clone(&level.rows),
                     lineage: Arc::clone(&lineage),
                     // Filled once the response's membership is settled, below.
                     served: std::collections::HashMap::new(),
                 });
-
-                for (ordinal, entity, masked_count, rank) in passing {
-                    if served.binary_search(&ordinal).is_err() {
-                        continue;
-                    }
-                    // D-C: checked once per artifact served. The derived sweep is the response's
-                    // dominant CPU and it runs between two flushes, so without a checkpoint here a
-                    // client that has gone — or a stream the server has shed — is discovered only
-                    // when the whole frame is ready to send: three abandoned GeoNames requests each
-                    // held a worker for minutes (2026-08-28), deriving geometry nobody would read.
-                    check_cancelled(&req.cancel)?;
-                    // The one content this viewer contains, entire. ⊘ A content restored from a
-                    // packed extent carries no values yet (its content belongs in the record blob,
-                    // decision 0077, and that write is unbuilt), and is **withheld** rather than
-                    // served with its description missing.
-                    //
-                    // **Asked under the identity projection too, and deliberately** — with
-                    // `materialise = false`, so the values are not copied but the *servability*
-                    // test is identical. Content-cannot-be-served withholds the artifact, so
-                    // skipping the probe here would let an identity response carry a row the full
-                    // response withholds, breaking §5.2's row-set contract sentence.
-                    let Some(content) = self.supplied_content(
-                        generation,
-                        &name,
-                        level,
-                        ordinal,
-                        entity,
-                        layer.declaration.content.supplied.len(),
-                        rank,
-                        req.artifact_rows == ArtifactRows::Full,
-                        contents.as_deref(),
-                    ) else {
-                        continue;
-                    };
-                    // The blinding is total over the space the allocator issues, so this cannot
-                    // fail for an entity that came out of the runs above; a failure would mean the
-                    // manifest and the allocator disagree, and dropping the artifact is the
-                    // fail-closed reading of that.
-                    let Ok(tessera_id) = self.identity_key.forward(shard, entity) else {
-                        continue;
-                    };
-                    // **From the composed mask, and only from it.** The visible rows are the
-                    // artifact's membership intersected with what this principal may see, so every
-                    // property below is a function of `membership ∩ M_auth` and nothing else
-                    // (`annotations.md` §4.2). Skipped entirely where the layer declares nothing,
-                    // which is what keeps a count-only layer at count-only cost — and skipped
-                    // whole under the identity projection, which is that projection's point: the
-                    // derived sweep is the response's dominant CPU and decides nothing about
-                    // which rows are served (`artifact-fetch-protocol.md` §5.2).
-                    //
-                    // **Held per principal between requests** (`crate::derived_cache`): a pan
-                    // re-serves mostly the same artifacts to the same viewer, and a shape is the
-                    // most expensive thing this loop does. The key names the principal, so a hit
-                    // answers the request that would have derived the same value.
-                    let derived = if req.artifact_rows == ArtifactRows::Identity
-                        || declared_derived.is_empty()
-                    {
-                        crate::derived::DerivedContent::default()
-                    } else {
-                        let key = crate::derived_cache::DerivedKey {
-                            token_id: mask_identity.token_id,
-                            view: view_name.to_string(),
-                            layer: name.clone(),
-                            level,
-                            ordinal,
-                            level_version,
-                            segments_version: mask_identity.segments_version,
-                            overlay_version: mask_identity.overlay_version,
-                            fragment_identity: mask_identity.fragment_identity,
-                            fragment_watermark: mask_identity.fragment_watermark,
-                            properties: crate::derived_cache::properties_bits(&declared_derived),
-                        };
-                        // **The accumulation where the level has one** — see
-                        // `crate::histogram::MaskedGeometry`. It was built with this request's
-                        // counts, under the same key, so nothing here walks the mask again.
-                        match accumulated.as_ref().and_then(|c| c.geometry()) {
-                            Some(geometry) => crate::derived::accumulated(
-                                &declared_derived,
-                                geometry,
-                                ordinal,
-                            ),
-                            None => (*self.derived_geometry.get_or_derive(key, || {
-                                let visible = rows.visible_rows(ordinal, mask);
-                                crate::derived::compute(&declared_derived, &visible, &locator)
-                            }))
-                            .clone(),
-                        }
-                    };
-                    // The predicate or the authored shape, **only where the request asked for the
-                    // shape** (`polygon-membership.md` §7.1) and the row is materialised — the
-                    // identity projection carries no geometry and no content at all.
-                    let mut content = content;
-                    let mut derived = derived;
-                    let shape_guard_fired = if req.artifact_rows == ArtifactRows::Full
-                        && req.computed.selects(crate::derived::ComputedProperty::Hull)
-                    {
-                        self.drawn_shape(
-                            &layer.declaration,
-                            view_name,
-                            &name,
-                            level,
-                            ordinal,
-                            &mut content,
-                            &mut derived,
-                            Some(req.zoom),
-                        )
-                    } else {
-                        false
-                    };
-                    // **The parents come from the level's own records and the key from the
-                    // store.** Both are per-ordinal facts of one generation, but only one of them
-                    // is held in the row form: a key is a caller's string, one per artifact, and
-                    // copying ten million of them into a cached structure buys nothing the
-                    // store's own lookup does not already answer. The key is payload, so the
-                    // identity projection skips the lookup.
-                    let parents: Vec<(String, u32, u32)> = rows
-                        .parents(ordinal)
-                        .iter()
-                        .map(|p| (name.clone(), p.level, p.ordinal))
-                        .collect();
-                    let key = match req.artifact_rows {
-                        ArtifactRows::Identity => None,
-                        ArtifactRows::Full => self
-                            .write
-                            .live()
-                            .with_artifacts(|store| store.get(&name, level, ordinal)?.key.clone()),
-                    };
-                    // Recorded, not resolved: which artifacts this response holds is not known
-                    // until every layer and level has been walked, and a parent — or the artifact
-                    // a dependent hangs from — may sit in a level this loop has not reached.
-                    served_at.insert((name.clone(), level, ordinal), tessera_id);
-                    placed.push(Placement {
-                        at: (name.clone(), level, ordinal),
-                        parents,
-                        attached_to: rows
-                            .attachment(ordinal)
-                            .map(|a| (a.layer.clone(), a.level, a.ordinal)),
-                    });
-                    out.push(ArtifactOut {
-                        content,
-                        layer: name.clone(),
-                        tessera_id,
-                        key,
-                        masked_count,
-                        derived,
-                        // The declared level. On a treed layer — where every artifact sits at
-                        // level 0 and the rung is the response-local chain depth — this is
-                        // recomputed below, once the response's row set is final.
-                        rung: level,
-                        // Both filled in below, once the response's own membership is settled.
-                        parent_ids: Vec::new(),
-                        target: None,
-                        // Asked only of the artifacts that survived the cut: the bit describes what
-                        // is served, and an artifact the response drops has no row to carry one.
-                        matched: matched.as_ref().map(|m| rows.matches(m, ordinal)),
-                        // 0104's probe with the highlight's crossed set in place of the filter's
-                        // — the same early-exiting intersection, over `all_of[filters, highlight]`
-                        // (`highlight-and-hierarchy.md` §2).
-                        highlighted: highlighted.as_ref().map(|m| rows.matches(m, ordinal)),
-                        shape_guard_fired,
-                    });
-                }
+                self.assemble_level(&level, passing, &cut, &mut walked)?;
             }
-            served_layers.push(ServedLayer {
-                name,
+            walked.served_layers.push(ServedLayer {
+                name: layer.name,
                 levels: served_levels,
             });
         }
-        Ok(Walked {
-            out,
-            treed,
-            served_at,
-            placed,
-            served_layers,
+        Ok(walked)
+    }
+
+    /// One requested layer, resolved for this request: the registration this walk reads it
+    /// through, what is parsed once for it, and the three dispositions that drop it whole.
+    fn layer_pass<'a>(
+        &self,
+        pass: &'a ArtifactPass<'a>,
+        name: String,
+        walked: &mut Walked,
+    ) -> Option<LayerPass<'a>> {
+        let generation = pass.served.generation;
+        let Some(registered) = self.write.live().registered_layer(&name) else {
+            // Dropped between the resolution and here. Absent is the right answer and the same
+            // one a gate failure gives.
+            return None;
+        };
+        // A layer declares which views it lives in; one it did not declare has no membership
+        // in this row space to project.
+        if !registered
+            .declaration
+            .views
+            .iter()
+            .any(|s| s == pass.served.name)
+        {
+            return None;
+        }
+        // **The live half, asked per request.** A layer's own entity carries its suppression,
+        // and a resolution may cache reachability but never the verdict — see
+        // `Engine::visible_layers`, which takes the same two steps in the same order.
+        if generation.overlay.is_deleted(registered.entity)
+            || generation.overlay.is_suppressed(registered.entity)
+        {
+            return None;
+        }
+        if lineage_kind(registered.declaration.hierarchy.kind).is_some() {
+            walked.treed.insert(name.clone());
+        }
+
+        // Parsed once per layer. A name outside the vocabulary cannot reach here — the
+        // declaration was refused at registration — so an unparseable one is dropped rather
+        // than erroring the whole response.
+        //
+        // **The request narrows it, and only ever narrows it.** The intersection is taken here
+        // so that a property the request did not ask for is never computed at all — the point
+        // of the field is the work it does not do, and filtering the *result* would keep the
+        // hull's cost while dropping its bytes.
+        let declared_derived: Vec<crate::derived::ComputedProperty> = registered
+            .declaration
+            .content
+            .computed
+            .iter()
+            .filter_map(|name| crate::derived::ComputedProperty::parse(name))
+            .filter(|property| pass.req.computed.selects(*property))
+            .collect();
+
+        let vocabulary = predicate_vocabulary(generation, &registered.declaration);
+        Some(LayerPass {
+            pass,
+            name,
+            registered,
+            declared_derived,
+            vocabulary,
         })
     }
+
+    /// **Stage one: this level, resolved for this request** — the row form and the version it is
+    /// of, the level's masked counts, and the two filter sets. Everything the gate, the cut and the
+    /// assembly read of the level is settled here and read from there.
+    fn level_pass<'a>(
+        &self,
+        layer: &'a LayerPass<'a>,
+        level: u32,
+        runs: &'a tessera_types::layer::ReservedRuns,
+    ) -> LevelPass<'a> {
+        let (pass, served) = (layer.pass, layer.pass.served);
+        let generation = served.generation;
+        let code_of_key = |key: &str| match layer.vocabulary {
+            Some(vocabulary) => vocabulary.code_of(key),
+            None => key.parse::<u32>().ok(),
+        };
+        let recorded = layer.registered.layout_of(level);
+        let ((rows, level_version), lineage_version) = self.write.live().with_artifacts(|store| {
+            let predicate = predicate_source(
+                &layer.registered.declaration,
+                generation,
+                served.name,
+                served.data,
+                &served.segments,
+                &code_of_key,
+                &self.shapes,
+                store,
+                level,
+            );
+            (
+                // **The form and the version it is of, from the one call.** A form still
+                // waiting for a tick's delta stands at the earlier level version, and the
+                // masked-count histogram below decides candidacy on a row-major level —
+                // so a histogram of this form filed under the store's later version would
+                // be read, after the tick, as though it had counted the grown column
+                // (`ArtifactProjections::get_or_build`).
+                self.artifact_projections.get_or_build(
+                    &generation.prefix,
+                    served.name,
+                    &layer.name,
+                    level,
+                    store,
+                    &served.data.row_space,
+                    Some(pass.source),
+                    recorded,
+                    predicate.as_ref(),
+                    generation.segments_version,
+                    crate::artifacts::serves_column_only(&layer.registered.declaration),
+                ),
+                store.lineage_version(&layer.name, level),
+            )
+        });
+        // **The count's route, decided by the level's layout and by nothing about the
+        // request.** An artifact-major level counts per served artifact; a row-major one has
+        // no per-artifact membership to intersect and reads the histogram, which is built
+        // once per session per generation and cached under a key that moves with every
+        // accepted deny (`crate::histogram`).
+        let counts = self.masked_counts(
+            &served.mask_identity,
+            served.name,
+            &layer.name,
+            level,
+            level_version,
+            &rows,
+            pass.sets.mask,
+            crate::artifacts::derives_accumulated_geometry(&layer.registered.declaration)
+                .then_some(&served.segments[..]),
+        );
+        // **Built after the candidacy route and never as part of it**: the filter decides
+        // nothing about which artifacts are served (decision 0104), so this is computed
+        // beside the verdict rather than inside it, and is skipped whole on an unfiltered
+        // request.
+        let matched = pass
+            .sets
+            .matched_here
+            .as_ref()
+            .map(|here| rows.matched(here));
+        let highlighted = pass
+            .sets
+            .highlighted_here
+            .as_ref()
+            .map(|here| rows.matched(here));
+        LevelPass {
+            layer,
+            level,
+            runs,
+            rows,
+            level_version,
+            lineage_version,
+            counts,
+            matched,
+            highlighted,
+        }
+    }
+
+    /// **Stage two: the verdict, for every candidate the viewport touches** — the ordinals that
+    /// pass, with the two outputs their verdict carried.
+    fn gate_candidates(&self, level: &LevelPass<'_>) -> Vec<Passing> {
+        let (layer, pass) = (level.layer, level.layer.pass);
+        let served = pass.served;
+        let rows: &crate::artifacts::ArtifactRows = &level.rows;
+        let containment = rows
+            .partition()
+            .map(|p| p.answers(served.session.satisfied()));
+        let view = crate::artifacts::ArtifactView {
+            declaration: &layer.registered.declaration,
+            overlay: &served.generation.overlay,
+            satisfied: served.session.satisfied(),
+            layer_reachable: true,
+            rows,
+            mask: pass.sets.mask,
+            dependency_served: pass.dependency_served,
+            containment,
+            denied: served.denied,
+            // Kept on the level beside this, which takes the `Arc` — the derived geometry reads
+            // the accumulation this same entry carries.
+            counts: level.counts.clone(),
+        };
+        // **Every candidate is tested before any is cut**, and the two passes are separate
+        // for a reason that is not performance: the verdict is a per-artifact question
+        // with no lineage input (decision 0080), and a loop that decided *and* pruned in
+        // one step would have the shape that lets a node's neighbours reach its verdict.
+        let mut passing = Vec::new();
+        // **The walk replaces the sweep over every ordinal.** Cost is the viewport's
+        // perimeter in the hierarchy rather than the level's population: an artifact in no
+        // node the viewport touches has no member there, so it cannot have a *visible* one
+        // and skipping it withholds nothing (`crate::tile_index`, and §4.1 on why this is a
+        // candidate generator and never an answer). Holes and artifacts whose membership
+        // projects to nothing are in no node either, so neither reaches the predicate here
+        // — and both remain live on the identifier route, which walks no index.
+        //
+        // **Or the scan, where the level is served row-major**: one pass over
+        // `viewport ∩ M_auth` marking labels, which answers the same question at a cost in
+        // *points* rather than in artifacts (`ArtifactRows::candidacy`). Which route is
+        // taken is a property of the level and never of the request.
+        let candidates = rows.candidacy(&pass.sets.viewport, level.counts.as_deref());
+        for ordinal in candidates.iter() {
+            // **Every candidate pays a masked probe**, on whichever of the three routes the
+            // classification makes cheapest — see `ArtifactRows::candidate_in`, which is
+            // the one place the choice is made and the one the differential drives.
+            if !rows.candidate_in(ordinal, &candidates, &pass.sets.viewport, pass.sets.mask) {
+                continue;
+            }
+            let Some(entity) = level.runs.entity_of(ordinal as u64).map(EntityId::new) else {
+                continue;
+            };
+            // ⊘ **No artifact carries its own terms yet**, so a layer whose
+            // `artifact_visibility` names a field serves nothing here — fail-closed, and
+            // visibly so. The per-artifact label arrives with content (Stage 3); until then
+            // the named field has nothing to satisfy, and admitting the artifact instead
+            // would make a missing declaration a grant to everyone.
+            let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
+                view.verdict(entity, ordinal, None)
+            else {
+                continue;
+            };
+            passing.push((ordinal, entity, masked_count, rank));
+        }
+        passing
+    }
+
+    /// **Stage three: the level's lineage and the cut through it** — which of the passing ordinals
+    /// the budget leaves, ascending, and the lineage the membership column reads the level back
+    /// through.
+    fn cut_level(
+        &self,
+        level: &LevelPass<'_>,
+        passing: &[Passing],
+    ) -> (Arc<crate::cut::Lineage>, Vec<u32>) {
+        let layer = level.layer;
+        let number = level.level;
+        // The level's lineage, read from the parent lists of **every** artifact and not
+        // only the passing ones, because the edges are a property of the level and one
+        // lineage serves every viewer. **What the cut is taken over is the passing nodes
+        // alone** (decision 0117 E): the plan counts depth in them and climbs through the
+        // rest, so a withheld ancestor is not in this viewer's tree.
+        //
+        // **Within-level edges only, and that is the whole of the tiered shape's
+        // treatment here** (owner ruling, 2026-08-18). A tiered layer's edges run
+        // between levels and are *information* — what contains what, so a client can nest
+        // what it draws or filter to one subtree — rather than a ladder to coarsen along.
+        // Climbing them would substitute a state for its counties and draw one large
+        // polygon across a region whose neighbours are still counties. So the cut does not
+        // see them, such a layer's lineage is empty here, and its budget is inert exactly
+        // as a flat layer's is.
+        //
+        // **Held per generation, not derived per request.** The pointers depend on neither
+        // the mask nor the viewport, so a request that rebuilds them is doing generation
+        // work: ~96 ms at a level of ten million, against the ~3 ms the cut over them now
+        // costs.
+        //
+        // **Read from the row form, whose records and versions were taken inside one hold
+        // of the artifacts lock** (stage one), which is what makes the cached lineage the
+        // lineage *of* the version it is filed under: read separately, a write landing
+        // between the two would file the new level's edges under the old level's version,
+        // and the next request would serve a cut through a tree that has moved.
+        //
+        // **Filed under the level's lineage version, not its record version**
+        // (`ingest.md` §1.5, §4.1): a page of members joining moves the records and not
+        // the edges, so it leaves this lineage held; a publication, a parent fill and a
+        // retirement move both.
+        let lineage = self
+            .lineages
+            .get_or_build(&layer.name, number, level.lineage_version, || {
+                let records = level.rows.records();
+                let edges = (0..records.len() as u32).map(|ordinal| {
+                    let within = records
+                        .parents(ordinal)
+                        .iter()
+                        .filter(move |parent| parent.level == number)
+                        .map(|parent| parent.ordinal);
+                    (ordinal, within)
+                });
+                match lineage_kind(layer.registered.declaration.hierarchy.kind) {
+                    Some(true) => crate::cut::Lineage::dag(edges),
+                    _ => crate::cut::Lineage::new(edges),
+                }
+            });
+        let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
+        // Ascending and deduplicated, which the cut guarantees — so the membership test in
+        // the assembly below is a binary search rather than a scan of the served set once
+        // per candidate.
+        //
+        // **`prune_children` is the layer's, and it is a rendering choice rather than a
+        // disclosure one.** Pruned, a passing parent is dropped where a passing child sits
+        // beneath it; unpruned, both are served and the client receives the whole visible
+        // tree — which is what lets it nest what it draws, or filter to one subtree while
+        // still drawing the rest. Every artifact in either set cleared its own criterion,
+        // so neither is the safer answer.
+        let served = crate::cut::cut(
+            &lineage,
+            &ordinals,
+            layer.pass.req.artifact_budget,
+            layer.registered.declaration.hierarchy.prune_children,
+        );
+        (lineage, served)
+    }
+
+    /// **Stage four: the row every survivor is served as** — its content, its derived shape, its
+    /// two edges recorded for the reconciliation after the walk, and the placement they resolve
+    /// against.
+    fn assemble_level(
+        &self,
+        level: &LevelPass<'_>,
+        passing: Vec<Passing>,
+        cut: &[u32],
+        walked: &mut Walked,
+    ) -> Result<()> {
+        let (layer, pass) = (level.layer, level.layer.pass);
+        let (served, req) = (pass.served, pass.req);
+        let generation = served.generation;
+        let declaration = &layer.registered.declaration;
+        let (name, number) = (&layer.name, level.level);
+        let rows: &crate::artifacts::ArtifactRows = &level.rows;
+        // **The level's supplied content, read once for the level rather than once per
+        // served artifact** (`crate::artifact_content`, which carries the measurement that
+        // put it here: 408 ms of a response whose points half is 1.3 ms, all of it one
+        // zstd block decompressed per artifact served — 6.7 ms once the level's contents
+        // are read together). Built after the cut, so a level whose artifacts all failed
+        // their verdict reads nothing at all, and skipped whole where the layer declares no
+        // supplied content — which is most layers.
+        let contents = if declaration.content.supplied.is_empty() || cut.is_empty() {
+            None
+        } else {
+            Some(self.level_contents.get_or_build(
+                name,
+                number,
+                level.level_version,
+                generation.segments_version,
+                || {
+                    crate::artifact_content::LevelContent::build(
+                        generation.filter_columns.records(),
+                        level.runs,
+                    )
+                },
+            ))
+        };
+
+        for (ordinal, entity, masked_count, rank) in passing {
+            if cut.binary_search(&ordinal).is_err() {
+                continue;
+            }
+            // D-C: checked once per artifact served. The derived sweep is the response's
+            // dominant CPU and it runs between two flushes, so without a checkpoint here a
+            // client that has gone — or a stream the server has shed — is discovered only
+            // when the whole frame is ready to send: three abandoned GeoNames requests each
+            // held a worker for minutes (2026-08-28), deriving geometry nobody would read.
+            check_cancelled(&req.cancel)?;
+            // The one content this viewer contains, entire. ⊘ A content restored from a
+            // packed extent carries no values yet (its content belongs in the record blob,
+            // decision 0077, and that write is unbuilt), and is **withheld** rather than
+            // served with its description missing.
+            //
+            // **Asked under the identity projection too, and deliberately** — with
+            // `materialise = false`, so the values are not copied but the *servability*
+            // test is identical. Content-cannot-be-served withholds the artifact, so
+            // skipping the probe here would let an identity response carry a row the full
+            // response withholds, breaking §5.2's row-set contract sentence.
+            let Some(content) = self.supplied_content(
+                generation,
+                name,
+                number,
+                ordinal,
+                entity,
+                declaration.content.supplied.len(),
+                rank,
+                req.artifact_rows == ArtifactRows::Full,
+                contents.as_deref(),
+            ) else {
+                continue;
+            };
+            // The blinding is total over the space the allocator issues, so this cannot
+            // fail for an entity that came out of the runs above; a failure would mean the
+            // manifest and the allocator disagree, and dropping the artifact is the
+            // fail-closed reading of that.
+            let Ok(tessera_id) = self.identity_key.forward(pass.shard, entity) else {
+                continue;
+            };
+            // **From the composed mask, and only from it.** The visible rows are the
+            // artifact's membership intersected with what this principal may see, so every
+            // property below is a function of `membership ∩ M_auth` and nothing else
+            // (`annotations.md` §4.2). Skipped entirely where the layer declares nothing,
+            // which is what keeps a count-only layer at count-only cost — and skipped
+            // whole under the identity projection, which is that projection's point: the
+            // derived sweep is the response's dominant CPU and decides nothing about
+            // which rows are served (`artifact-fetch-protocol.md` §5.2).
+            //
+            // **Held per principal between requests** (`crate::derived_cache`): a pan
+            // re-serves mostly the same artifacts to the same viewer, and a shape is the
+            // most expensive thing this loop does. The key names the principal, so a hit
+            // answers the request that would have derived the same value.
+            let derived = if req.artifact_rows == ArtifactRows::Identity
+                || layer.declared_derived.is_empty()
+            {
+                crate::derived::DerivedContent::default()
+            } else {
+                let key = crate::derived_cache::DerivedKey {
+                    token_id: served.mask_identity.token_id,
+                    view: served.name.to_string(),
+                    layer: name.clone(),
+                    level: number,
+                    ordinal,
+                    level_version: level.level_version,
+                    segments_version: served.mask_identity.segments_version,
+                    overlay_version: served.mask_identity.overlay_version,
+                    fragment_identity: served.mask_identity.fragment_identity,
+                    fragment_watermark: served.mask_identity.fragment_watermark,
+                    properties: crate::derived_cache::properties_bits(&layer.declared_derived),
+                };
+                // **The accumulation where the level has one** — see
+                // `crate::histogram::MaskedGeometry`. It was built with this request's
+                // counts, under the same key, so nothing here walks the mask again.
+                match level.counts.as_ref().and_then(|c| c.geometry()) {
+                    Some(geometry) => {
+                        crate::derived::accumulated(&layer.declared_derived, geometry, ordinal)
+                    }
+                    None => (*self.derived_geometry.get_or_derive(key, || {
+                        let visible = rows.visible_rows(ordinal, pass.sets.mask);
+                        crate::derived::compute(&layer.declared_derived, &visible, pass.locator)
+                    }))
+                    .clone(),
+                }
+            };
+            // The predicate or the authored shape, **only where the request asked for the
+            // shape** (`polygon-membership.md` §7.1) and the row is materialised — the
+            // identity projection carries no geometry and no content at all.
+            let mut content = content;
+            let mut derived = derived;
+            let shape_guard_fired = if req.artifact_rows == ArtifactRows::Full
+                && req.computed.selects(crate::derived::ComputedProperty::Hull)
+            {
+                self.drawn_shape(
+                    declaration,
+                    served.name,
+                    name,
+                    number,
+                    ordinal,
+                    &mut content,
+                    &mut derived,
+                    Some(req.zoom),
+                )
+            } else {
+                false
+            };
+            // **The parents come from the level's own records and the key from the
+            // store.** Both are per-ordinal facts of one generation, but only one of them
+            // is held in the row form: a key is a caller's string, one per artifact, and
+            // copying ten million of them into a cached structure buys nothing the
+            // store's own lookup does not already answer. The key is payload, so the
+            // identity projection skips the lookup.
+            let parents: Vec<(String, u32, u32)> = rows
+                .parents(ordinal)
+                .iter()
+                .map(|p| (name.clone(), p.level, p.ordinal))
+                .collect();
+            let key = match req.artifact_rows {
+                ArtifactRows::Identity => None,
+                ArtifactRows::Full => self
+                    .write
+                    .live()
+                    .with_artifacts(|store| store.get(name, number, ordinal)?.key.clone()),
+            };
+            // Recorded, not resolved: which artifacts this response holds is not known
+            // until every layer and level has been walked, and a parent — or the artifact
+            // a dependent hangs from — may sit in a level this loop has not reached.
+            walked
+                .served_at
+                .insert((name.clone(), number, ordinal), tessera_id);
+            walked.placed.push(Placement {
+                at: (name.clone(), number, ordinal),
+                parents,
+                attached_to: rows
+                    .attachment(ordinal)
+                    .map(|a| (a.layer.clone(), a.level, a.ordinal)),
+            });
+            walked.out.push(ArtifactOut {
+                content,
+                layer: name.clone(),
+                tessera_id,
+                key,
+                masked_count,
+                derived,
+                // The declared level. On a treed layer — where every artifact sits at
+                // level 0 and the rung is the response-local chain depth — this is
+                // recomputed below, once the response's row set is final.
+                rung: number,
+                // Both filled in below, once the response's own membership is settled.
+                parent_ids: Vec::new(),
+                target: None,
+                // Asked only of the artifacts that survived the cut: the bit describes what
+                // is served, and an artifact the response drops has no row to carry one.
+                matched: level.matched.as_ref().map(|m| rows.matches(m, ordinal)),
+                // 0104's probe with the highlight's crossed set in place of the filter's
+                // — the same early-exiting intersection, over `all_of[filters, highlight]`
+                // (`highlight-and-hierarchy.md` §2).
+                highlighted: level.highlighted.as_ref().map(|m| rows.matches(m, ordinal)),
+                shape_guard_fired,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// One artifact the gate admitted: its ordinal, its entity, the masked count its verdict carried
+/// and the rank of the content that verdict chose.
+type Passing = (u32, EntityId, u64, Option<u32>);
+
+/// **The artifacts pass of one request**: what every layer and every level of it is answered
+/// against, resolved once before the walk.
+struct ArtifactPass<'a> {
+    served: &'a ServedView<'a>,
+    req: &'a ViewportRequest<'a>,
+    sets: &'a ViewportSets<'a>,
+    /// The dependency prerequisite, closed over this request's state — one closure for the
+    /// response, called per attached candidate.
+    dependency_served: &'a dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
+    locator: &'a crate::derived::RowLocator<'a>,
+    source: &'a crate::containment::PartitionSource<'a>,
+    shard: u32,
+}
+
+/// One layer of that pass: the registration this walk reads it through, and what is parsed once
+/// for it.
+struct LayerPass<'a> {
+    pass: &'a ArtifactPass<'a>,
+    name: String,
+    registered: tessera_types::layer::RegisteredLayer,
+    /// The derived properties this layer declares **and** this request asked for.
+    declared_derived: Vec<crate::derived::ComputedProperty>,
+    /// **The predicate's inputs, resolved per level.** An attribute layer's every level
+    /// reads the same column; a spatial layer's held structures are per level, because
+    /// each level holds its own shapes. A layer with a stored membership resolves nothing.
+    vocabulary: Option<&'a tessera_store::vocabulary::VocabularyMinter>,
+}
+
+/// One level of one layer, as [`Engine::level_pass`] settles it: the values the gate, the cut and
+/// the assembly all read, so that none of them resolves one of its own.
+struct LevelPass<'a> {
+    layer: &'a LayerPass<'a>,
+    level: u32,
+    /// The level's reserved entity runs — ordinal to entity.
+    runs: &'a tessera_types::layer::ReservedRuns,
+    /// This view's row form of the level's membership, and the version it is of.
+    rows: Arc<crate::artifacts::ArtifactRows>,
+    level_version: u64,
+    lineage_version: u64,
+    /// The level's masked counts where it has them, and the accumulated geometry with them where
+    /// the layer derives one — `None` on an artifact-major level.
+    counts: Option<Arc<crate::histogram::MaskedCounts>>,
+    /// The filter's and the highlight's answers over this level, each taken from the one set the
+    /// request composed and so borrowed from it rather than from the row form.
+    matched: Option<crate::artifacts::Matched<'a>>,
+    highlighted: Option<crate::artifacts::Matched<'a>>,
 }
 
 /// The row-space sets one response is answered over, composed once for every layer in it.
@@ -1680,12 +1814,23 @@ fn viewport_sets<'a>(
 
 /// What one walk of the requested layers produced, before the response's own membership settles
 /// which of it is served.
+///
+/// **Held outside the level it is written from**, which is what lets the assembly write here while
+/// the level's row form, counts and contents are still borrowed.
+#[derive(Default)]
 struct Walked {
     out: Vec<ArtifactOut>,
+    /// The layers whose rung is the response-local chain depth rather than the declared level —
+    /// the treed (nested) ones, decision 0082's edges-not-levels shape. Collected during the
+    /// walk, applied after the response's row set is final.
     treed: std::collections::BTreeSet<String>,
+    /// Where each served artifact ended up — collected during the walk and reconciled after it.
     served_at: std::collections::BTreeMap<(String, u32, u32), TesseraId>,
     /// Positionally aligned with `out`: where each artifact sits, and what it points at.
     placed: Vec<Placement>,
+    /// Every level this pass walked, with the structures the membership column reads the served
+    /// set back through — the same row form and the same lineage the verdicts and the cut used, so
+    /// the column cannot describe a level the artifacts frame did not.
     served_layers: Vec<ServedLayer>,
 }
 
