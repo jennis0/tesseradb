@@ -23,6 +23,9 @@ fault-injection = ["tessera-lifecycle/fault-injection"]
 [dependencies]
 tessera-types = { path = "../tessera-types" }
 tessera-authz = { path = "../tessera-authz" }
+# The single-flight cache behind the row-projection, region and occupancy caches. Shared with
+# tessera-authz, which sits below this crate.
+tessera-cache = { path = "../tessera-cache" }
 tessera-store = { path = "../tessera-store" }
 tessera-spatial = { path = "../tessera-spatial" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }

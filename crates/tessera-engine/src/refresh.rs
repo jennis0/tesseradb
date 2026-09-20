@@ -260,7 +260,7 @@ pub(crate) struct RefreshDeps {
     ///
     /// A fold inverts the rule by two orders (a ~180 s pass against a 1.3 s build), so arming this would refuse
     /// every session for minutes to avoid a burst that clears in seconds — and the burst is already
-    /// bounded by `ComputeGate`, by `single_flight`, and by `RowProjection::new` fanning out across
+    /// bounded by `ComputeGate`, by the single-flight cache, and by `RowProjection::new` fanning out across
     /// the whole pool so concurrent rebuilds contend rather than multiply. After a fold, a missing
     /// projection is an ordinary cache miss.
     ///

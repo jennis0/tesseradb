@@ -65,7 +65,7 @@
 //! *(**That mutex no longer exists.** The paragraph above is the measurement as taken, kept
 //! because the re-measurement below is only meaningful against it — but the code it describes is
 //! gone: D-G replaced the global lock with the per-key slot-state single flight in
-//! `tessera-engine/src/single_flight.rs`, wrapped as `RowProjectionCache` in `cache.rs`, whose map
+//! `tessera-cache`, wrapped as `RowProjectionCache` in the engine's `cache.rs`, whose map
 //! lock is held only for the O(1) `Building`/`Ready` transition and never across
 //! `RowProjection::new`. Read `viewport.rs`'s cache-lookup comment for the guardrail that keeps it
 //! that way.)*

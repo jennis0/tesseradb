@@ -42,7 +42,6 @@ pub mod row_column;
 pub mod select;
 pub mod session;
 pub mod shapes;
-mod single_flight;
 mod stage;
 mod status;
 pub mod suggest;
@@ -82,21 +81,12 @@ pub use engine::Engine;
 pub use error::EngineError;
 pub use session::Session;
 pub use status::{GenerationStatus, PartitionStatus, ViewSegments};
-// The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
-// state machine and its four eviction rules are engine-internal — but the numbers
-// `/control/status` publishes have to cross the crate boundary.
-pub use single_flight::{CacheStats, DEFAULT_WAIT_BUDGET_MS as DEFAULT_SINGLE_FLIGHT_WAIT_MS};
-// The fragment tier's gauges, under a distinguishing name because the two are the same shape and a
-// bare second `CacheStats` in one namespace would be a coin toss at every call site.
-//
-// **This re-export is what makes `Engine::fragment_cache_stats`'s return type nameable at all.**
-// `tessera-server` may not depend on `tessera-authz` (SA §3; `scripts/check-layers.sh` has
-// `deny tessera-server tessera-authz`), and `tessera_authz::CacheStats` is not a public path even
-// for a crate that could — its module is private there. Whoever wires `/control/status`
-// writes `use tessera_engine::FragmentCacheStats;` and nothing else.
+pub use tessera_cache::{CacheStats, DEFAULT_WAIT_BUDGET_MS as DEFAULT_SINGLE_FLIGHT_WAIT_MS};
 pub use derived::ComputedProperty;
 pub use membership_column::MembershipColumn;
 pub use region::{RegionRows, RegionVerdict, DEFAULT_MAX_REGION_CELLS};
+// The fragment tier's gauges. Renamed because they are the same type as `CacheStats` above, and a
+// bare second `CacheStats` in one namespace would be a coin toss at every call site.
 pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{

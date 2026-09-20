@@ -11,6 +11,13 @@ deny() { # deny <crate> <forbidden-DIRECT-dep>
 }
 deny tessera-authz tessera-store
 deny tessera-authz tessera-spatial
+# The single-flight cache sits below both tessera-authz and tessera-engine so the two hold one
+# copy of the state machine. It must stay at the bottom: a workspace edge out of it would put a
+# crate above it below itself.
+if cargo tree -p tessera-cache --prefix none -e normal --depth 1 | tail -n +2 | grep '^tessera-'; then
+  echo "FORBIDDEN: tessera-cache may depend on no other crate in the workspace"
+  fail=1
+fi
 deny tessera-server tessera-store     # server sees engine API types only
 deny tessera-server tessera-authz
 deny tessera-wire tessera-store
@@ -83,7 +90,7 @@ fi
 # `tessera-bench` sits ABOVE every other crate: it reaches across authz + store + spatial +
 # engine + build + server together, which no shipped crate may do. The edge must stay one-way, so
 # nothing may depend on it.
-for c in types plugin authz store spatial lifecycle engine wire server build cli; do
+for c in types plugin cache authz store spatial lifecycle engine wire server build cli; do
   # Match a dependency declaration (`tessera-bench = ...` or a path to it), not prose -- these
   # manifests discuss the harness in comments, and a substring grep flags its own documentation.
   if grep -nE '^[[:space:]]*tessera-bench[[:space:]]*=|\.\./tessera-bench' "crates/tessera-$c/Cargo.toml" >/dev/null 2>&1; then

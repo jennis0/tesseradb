@@ -30,22 +30,16 @@ use sha2::{Digest, Sha256};
 use tessera_types::TermId;
 
 use crate::postings::{invalid_data, union_postings, PostingRef, PostingsReader};
-use crate::single_flight::{CacheWeight, SingleFlightCache, SingleFlightError};
+use tessera_cache::{CacheWeight, SingleFlightCache, SingleFlightError};
 use crate::tier::DeltaTier;
 
 /// The in-memory tier's operator gauges, re-exported here so that [`FragmentCache::stats`]'s
-/// return type is **nameable** by a caller outside this crate.
-///
-/// `crate::single_flight` is a private module, so `tessera_authz::CacheStats` is not a public path
-/// at all: a caller could invoke `stats()` and infer the type, but could not write it in a
-/// signature, a struct field or a `use`. So `Engine::fragment_cache().stats() ->
-/// tessera_authz::CacheStats` does not compile, and its obvious repair — adding a `tessera-authz`
-/// dependency to `tessera-server` — is a layering violation `scripts/check-layers.sh` refuses
-/// (`deny tessera-server tessera-authz`).
+/// return type is nameable at this path.
 ///
 /// The path a server-plane caller should use is `tessera_engine::FragmentCacheStats`, which
-/// re-exports this one.
-pub use crate::single_flight::CacheStats;
+/// re-exports this one: `tessera-server` may not depend on `tessera-authz` at all
+/// (`scripts/check-layers.sh` has `deny tessera-server tessera-authz`).
+pub use tessera_cache::CacheStats;
 
 /// Union the postings of every term in `terms` into one bitmap: this *is* the authorisation
 /// decision (I2). Partitions the granted postings into Roaring views (unioned in bulk via

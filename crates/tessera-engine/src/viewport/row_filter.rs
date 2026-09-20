@@ -1362,7 +1362,7 @@ impl Engine {
                     // and answered from a fresh, unretained decomposition (selection-operand §5).
                     Ok(entry) if entry.is_of(&canonical) => entry,
                     Ok(_) => Arc::new(build()),
-                    Err(crate::single_flight::WaitEnded::Cancelled) => {
+                    Err(tessera_cache::WaitEnded::Cancelled) => {
                         return Err(FilterError::RegionUnavailable(
                             "the request was cancelled while its region was being decomposed"
                                 .to_string(),
@@ -1371,7 +1371,7 @@ impl Engine {
                     // A wait that ran out is answered by building here, unretained: the
                     // decomposition is a perimeter's worth of work, and refusing it would make a
                     // second viewer's identical lasso a 429.
-                    Err(crate::single_flight::WaitEnded::Budget) => Arc::new(build()),
+                    Err(tessera_cache::WaitEnded::Budget) => Arc::new(build()),
                 };
                 Ok(RegionRows {
                     rows: entry.rows_under(mask, segments),
