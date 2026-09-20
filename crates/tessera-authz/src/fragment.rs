@@ -23,7 +23,9 @@ use sha2::{Digest, Sha256};
 use tessera_types::TermId;
 
 use crate::postings::{invalid_data, union_postings, PostingRef, PostingsReader};
-use tessera_cache::{CacheWeight, SingleFlightCache, SingleFlightError};
+use tessera_cache::{
+    Cancel, CacheWeight, SingleFlightCache, SingleFlightError, WaitEnded, WaitingBuildError,
+};
 use crate::tier::DeltaTier;
 
 /// The in-memory tier's operator gauges, re-exported so [`FragmentCache::stats`]'s return type
@@ -372,9 +374,11 @@ pub struct FragmentCache {
 /// [`FragmentCache::get_or_build`]'s failure modes. Neither variant is ever cached.
 #[derive(Debug)]
 pub enum FragmentCacheError {
-    /// Another caller is already building this exact canonical key. This call did not wait for
-    /// it; retry shortly.
+    /// Another caller is building this fragment, and this call did not wait or its wait budget
+    /// ran out.
     Building,
+    /// The caller's request went away while it waited.
+    Cancelled,
     /// The build itself failed. The failing canonical key was removed before this was returned,
     /// so a failure does not permanently wedge a credential.
     Io(io::Error),
@@ -385,9 +389,11 @@ impl std::fmt::Display for FragmentCacheError {
         match self {
             FragmentCacheError::Building => write!(
                 f,
-                "fragment build already in progress for this credential's canonical key; retry \
-                 shortly"
+                "another request is building this fragment; retry shortly"
             ),
+            FragmentCacheError::Cancelled => {
+                write!(f, "the request was cancelled while it waited for a fragment build")
+            }
             FragmentCacheError::Io(e) => write!(f, "fragment cache: {e}"),
         }
     }
@@ -396,7 +402,7 @@ impl std::fmt::Display for FragmentCacheError {
 impl std::error::Error for FragmentCacheError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            FragmentCacheError::Building => None,
+            FragmentCacheError::Building | FragmentCacheError::Cancelled => None,
             FragmentCacheError::Io(e) => Some(e),
         }
     }
@@ -429,13 +435,17 @@ impl FragmentCache {
     /// An empty cache over the same directory and auth plugin under a new bundle identity, which
     /// is what a compaction's publication installs. Every slot is keyed under the old identity,
     /// so none carries over; the persisted pairs become unreachable and are left to
-    /// [`Self::sweep`]. The byte bound carries over.
+    /// [`Self::sweep`]. The byte bound and the wait budget carry over.
     pub fn rotate(&self, bundle_identity: [u8; 32]) -> Self {
         FragmentCache {
             dir: self.dir.clone(),
             bundle_identity,
             auth_plugin_hash: self.auth_plugin_hash,
-            slots: SingleFlightCache::new(self.slots.stats().bound_bytes),
+            slots: {
+                let slots = SingleFlightCache::new(self.slots.stats().bound_bytes);
+                slots.set_wait_budget_ms(self.slots.wait_budget_ms());
+                slots
+            },
             rebuilds: AtomicU64::new(0),
         }
     }
@@ -489,6 +499,11 @@ impl FragmentCache {
     /// by it; see [`Self::evict`].
     pub fn set_memory_bound(&self, bytes: u64) {
         self.slots.set_bound_bytes(bytes);
+    }
+
+    /// How long [`Self::get_or_build_waiting`] waits for another caller's build.
+    pub fn set_wait_budget_ms(&self, wait_budget_ms: u64) {
+        self.slots.set_wait_budget_ms(wait_budget_ms);
     }
 
     /// The canonical cache key for `satisfied` under this cache's bundle and plugin identity, the
@@ -567,36 +582,65 @@ impl FragmentCache {
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
         let key = self.canonical_key_for(satisfied, watermark);
-
         self.slots
             .get_or_try_build(key, || {
-                let frag_path = self.frag_path(&key);
-                let meta_path = self.meta_path(&key);
-
-                // No existence pre-check: `open()` fails closed on anything short of a fully
-                // valid, digest-matching pair, so a missing file and a corrupt one are both a
-                // miss here.
-                if let Ok(frozen) =
-                    FrozenFragment::open(&frag_path, &meta_path, self.bundle_identity)
-                {
-                    return Ok(frozen);
-                }
-
-                create_private_dir_all(&self.dir)?;
-                let bitmap = build_fragment_with_deltas(satisfied, postings, deltas)?;
-                self.rebuilds.fetch_add(1, Ordering::Relaxed);
-                FrozenFragment::build_and_persist(
-                    &frag_path,
-                    &meta_path,
-                    &bitmap,
-                    watermark,
-                    self.bundle_identity,
-                )
+                self.open_or_build(&key, satisfied, postings, deltas, watermark)
             })
             .map_err(|e| match e {
                 SingleFlightError::Building => FragmentCacheError::Building,
                 SingleFlightError::Build(io_err) => FragmentCacheError::Io(io_err),
             })
+    }
+
+    /// [`Self::get_or_build`], waiting up to the wait budget for another caller's build of the
+    /// same fragment. [`FragmentCacheError::Building`] then means the budget ran out.
+    pub fn get_or_build_waiting(
+        &self,
+        satisfied: &[TermId],
+        postings: &PostingsReader,
+        deltas: &[Arc<DeltaTier>],
+        watermark: u64,
+        cancel: &dyn Cancel,
+    ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
+        let key = self.canonical_key_for(satisfied, watermark);
+        self.slots
+            .get_or_try_build_waiting(key, cancel, || {
+                self.open_or_build(&key, satisfied, postings, deltas, watermark)
+            })
+            .map_err(|e| match e {
+                WaitingBuildError::Wait(WaitEnded::Budget) => FragmentCacheError::Building,
+                WaitingBuildError::Wait(WaitEnded::Cancelled) => FragmentCacheError::Cancelled,
+                WaitingBuildError::Build(io_err) => FragmentCacheError::Io(io_err),
+            })
+    }
+
+    /// The persisted pair if it verifies, whichever process wrote it; otherwise a fresh build,
+    /// persisted.
+    fn open_or_build(
+        &self,
+        key: &[u8; 32],
+        satisfied: &[TermId],
+        postings: &PostingsReader,
+        deltas: &[Arc<DeltaTier>],
+        watermark: u64,
+    ) -> io::Result<FrozenFragment> {
+        let frag_path = self.frag_path(key);
+        let meta_path = self.meta_path(key);
+        // `open` refuses anything short of a valid, digest-matching pair, so a missing file and
+        // a corrupt one are both a miss.
+        if let Ok(frozen) = FrozenFragment::open(&frag_path, &meta_path, self.bundle_identity) {
+            return Ok(frozen);
+        }
+        create_private_dir_all(&self.dir)?;
+        let bitmap = build_fragment_with_deltas(satisfied, postings, deltas)?;
+        self.rebuilds.fetch_add(1, Ordering::Relaxed);
+        FrozenFragment::build_and_persist(
+            &frag_path,
+            &meta_path,
+            &bitmap,
+            watermark,
+            self.bundle_identity,
+        )
     }
 }
 

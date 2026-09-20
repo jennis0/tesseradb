@@ -254,6 +254,8 @@ impl Engine {
                 // scale. This call supplies the same shared pool the tile sweep uses.
                 probe.mark_projection_built();
                 self.counters.full_projection_builds.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "fault-injection")]
+                self.switches.hold_projection_build_if_wanted();
                 // Chosen from this principal's own grant, before any route runs; every route
                 // returns the identical projection. Nothing is cached across sessions.
                 let inputs = crate::projection::ProjectionInputs {

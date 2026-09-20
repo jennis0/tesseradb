@@ -249,10 +249,14 @@ impl Engine {
         self.occupancy.set_bound_bytes(bytes);
     }
 
-    /// How long a request parks on another request's in-flight row-projection build before it is
-    /// refused (`serve.single_flight_wait_ms`). Unset, an embedder gets [`crate::DEFAULT_SINGLE_FLIGHT_WAIT_MS`].
+    /// How long a request waits on another request's in-flight row-projection or fragment build
+    /// before it is refused (`serve.single_flight_wait_ms`). Unset, an embedder gets [`crate::DEFAULT_SINGLE_FLIGHT_WAIT_MS`].
     pub fn set_single_flight_wait_ms(&self, wait_budget_ms: u64) {
         self.row_projection_cache.set_wait_budget_ms(wait_budget_ms);
+        self.generation
+            .load()
+            .fragments
+            .set_wait_budget_ms(wait_budget_ms);
     }
 
     /// The row count at which a commit window closes (`ingest.commit_window_max_items`, which

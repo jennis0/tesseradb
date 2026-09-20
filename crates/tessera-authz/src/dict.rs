@@ -80,13 +80,9 @@ impl DictWriter {
 /// Caller contract: descriptors must be distinct and arrive in term-id order; `append` assigns
 /// sequential ids from 0 and never deduplicates. `finish` produces the same single
 /// `terms-0.dict` extent of `u32 LE length ‖ descriptor` records that [`DictWriter`] would.
-///
-/// `append` is infallible by signature; an IO error it hits is held and returned by
-/// [`DictStreamWriter::finish`], which must be called for errors to be observed.
 pub struct DictStreamWriter {
     dict_path: PathBuf,
     writer: Option<BufWriter<File>>,
-    pending_err: Option<io::Error>,
     next_term_id: u32,
 }
 
@@ -97,22 +93,17 @@ impl DictStreamWriter {
         DictStreamWriter {
             dict_path: dir.join("terms-0.dict"),
             writer: None,
-            pending_err: None,
             next_term_id: 0,
         }
     }
 
     /// Append the next descriptor and return its term ID, sequential from 0. The caller
     /// guarantees distinctness and term-id order; violations are not detected here.
-    pub fn append(&mut self, descriptor: &[u8]) -> TermId {
+    pub fn append(&mut self, descriptor: &[u8]) -> io::Result<TermId> {
+        self.write_record(descriptor)?;
         let term_id = TermId::new(self.next_term_id);
         self.next_term_id += 1;
-        if self.pending_err.is_none() {
-            if let Err(e) = self.write_record(descriptor) {
-                self.pending_err = Some(e);
-            }
-        }
-        term_id
+        Ok(term_id)
     }
 
     fn write_record(&mut self, descriptor: &[u8]) -> io::Result<()> {
@@ -135,12 +126,8 @@ impl DictStreamWriter {
         self.next_term_id == 0
     }
 
-    /// Finish writing: flush the extent and return the paths written. Surfaces any IO error
-    /// deferred from `append`.
+    /// Flush the extent and return the paths written.
     pub fn finish(mut self) -> io::Result<Vec<PathBuf>> {
-        if let Some(e) = self.pending_err.take() {
-            return Err(e);
-        }
         match self.writer.take() {
             Some(mut writer) => writer.flush()?,
             None => {
@@ -372,7 +359,7 @@ mod tests {
         fs::create_dir_all(dir).unwrap();
         let mut writer = DictStreamWriter::new(dir);
         for d in descriptors {
-            writer.append(d);
+            writer.append(d).unwrap();
         }
         writer.finish().unwrap()
     }

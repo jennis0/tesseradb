@@ -24,6 +24,26 @@ pub(crate) struct TestSwitches {
     /// The effective serial/parallel fan-out threshold every `viewport` call reads. Exists so
     /// `set_serial_fallback_max_rows_for_test` has something per-`Engine` to override.
     pub(crate) serial_fallback_max_rows: AtomicU64,
+    /// Whether the next row-projection build waits, inside the build, until this is cleared.
+    /// The build that takes the hold clears `projection_build_hold_wanted` and waits on
+    /// `projection_build_held`, so later builds run.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) projection_build_hold_wanted: AtomicBool,
+    #[cfg(feature = "fault-injection")]
+    pub(crate) projection_build_held: AtomicBool,
+}
+
+impl TestSwitches {
+    /// Called inside a row-projection build. Waits if a test asked for the next build to be held.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn hold_projection_build_if_wanted(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.projection_build_hold_wanted.swap(false, SeqCst) {
+            while self.projection_build_held.load(SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
 }
 
 impl Default for TestSwitches {
@@ -38,6 +58,10 @@ impl Default for TestSwitches {
             merge_publication_paused: AtomicBool::new(false),
             occupancy_stage_enabled: AtomicBool::new(true),
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
+            #[cfg(feature = "fault-injection")]
+            projection_build_hold_wanted: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            projection_build_held: AtomicBool::new(false),
         }
     }
 }

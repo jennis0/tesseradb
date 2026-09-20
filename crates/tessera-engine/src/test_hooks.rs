@@ -144,6 +144,27 @@ impl Engine {
         self.switches.refresh_paused.store(paused, Ordering::SeqCst);
     }
 
+    /// Hold the next row-projection build open, inside the build, until
+    /// [`Self::release_projection_build_for_test`]. Builds that start after it are not held.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn hold_next_projection_build_for_test(&self) {
+        self.switches
+            .projection_build_held
+            .store(true, Ordering::SeqCst);
+        self.switches
+            .projection_build_hold_wanted
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn release_projection_build_for_test(&self) {
+        self.switches
+            .projection_build_held
+            .store(false, Ordering::SeqCst);
+    }
+
     /// Turn the row-space merge off.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
