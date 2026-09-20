@@ -2,8 +2,8 @@ use croaring::Bitmap;
 use tessera_filter::{resolve_union, RecordValue};
 use tessera_types::AttrLocalId;
 
-use super::{FilterColumns, Layers, Route};
-use crate::filter::declared::{Family, Placement};
+use super::{ColumnLayers, FilterColumns, Route, TextLayer};
+use crate::filter::declared::Placement;
 use crate::filter::error::FilterError;
 use crate::filter::expr::{
     FilterExpr, FilterOperand, RoutedFilter, RowExpr, RowLeafResolvers, MAX_FILTER_DEPTH,
@@ -40,61 +40,30 @@ impl FilterColumns {
         let column = self
             .columns
             .get(name)
-            .filter(|layers| layers.filterable)
+            .filter(|column| column.filterable)
             .ok_or_else(|| FilterError::UndeclaredColumn(name.to_string()))?;
 
         // **Text answers from postings and nothing else**, because it has nothing else: no value
         // column and no scan. Every layer is asked and the answers are unioned — the base build's
         // index plus one per flush — which is sound because the layers are disjoint in entity space
         // (I9) and each holds its own entities' terms whole.
-        if column.family == Family::Text {
-            let Some(analyser) = column.analyser.as_ref() else {
-                // Unreachable: `open` inserts a text column only with both, and refuses if either
-                // is absent. Empty is the fail-safe reading — it narrows.
-                return Ok(Bitmap::new());
-            };
-            // An operator outside this family is refused at the parse gate, which asks
-            // `Family::operands` — the same list `/v1/meta` publishes. Empty here is the second
-            // line of defence and the direction that narrows.
-            let (query, minimum, phrase) = match operand {
-                FilterOperand::Match { query, minimum } => (query, *minimum, false),
-                FilterOperand::Phrase { query } => (query, None, true),
-                // An operator outside this family is refused at the parse gate, which asks
-                // `Family::operands` — the same list `/v1/meta` publishes. Empty here is the second
-                // line of defence and the direction that narrows.
-                _ => return Ok(Bitmap::new()),
-            };
-            // **Order and duplicates survive the analyser, and a phrase needs both** — which is why
-            // the sort and the deduplication happen here, on the copy the postings take, rather
-            // than in `Analyser::tokens`.
-            let ordered = analyser.tokens(query);
-            let mut tokens = ordered.clone();
-            tokens.sort();
-            tokens.dedup();
-            let minimum = minimum.unwrap_or(tokens.len() as u32);
-            let mut out = Bitmap::new();
-            for layer in &column.text {
-                out |= text_match(&layer.dict, &layer.postings, &tokens, minimum, candidate)
-                    .map_err(|e| FilterError::PostingsUnreadable {
-                        column: name.to_string(),
-                        detail: e.to_string(),
-                    })?;
+        let (layers, postings, route) = match &column.layers {
+            ColumnLayers::Text { layers, analyser } => {
+                return self.resolve_text(name, column.declared_index, layers, analyser, operand, candidate);
             }
-            // A one-word phrase *is* a `match`, and short-circuiting it is worth stating: the
-            // verify below decompresses a record block per survivor, and for the commonest phrase
-            // shape there is nothing for it to establish that the conjunction has not.
-            if !phrase || ordered.len() < 2 {
-                return Ok(out);
-            }
-            return self.verify_phrase(name, column, &ordered, out, candidate);
-        }
+            ColumnLayers::Values {
+                layers,
+                postings,
+                route,
+                ..
+            } => (layers, postings.as_deref(), *route),
+        };
 
         // **The routed pair, and the split between them is the whole of decision 0063.** The base
         // build's answer comes from the postings; every extent layer is scanned, because no flush
         // writes postings and an answer from the postings alone would omit every entity ingested
         // since the build.
-        if let (Route::Postings, Some(postings), Some(values)) =
-            (column.route, column.postings.as_ref(), codes_of(operand))
+        if let (Route::Postings, Some(postings), Some(values)) = (route, postings, codes_of(operand))
         {
             let mut out = resolve_union(postings, values)
                 .map_err(|e| FilterError::PostingsUnreadable {
@@ -106,17 +75,62 @@ impl FilterColumns {
             // the absence of a manifest path rather than by position: a coalesce replaces a window
             // of extents with one layer appended at the end, so "the base is layer 0" would hold
             // today and stop holding the first time the list is rewritten.
-            for layer in column.layers.iter().filter(|l| l.values_rel.is_some()) {
+            for layer in layers.iter().filter(|l| l.values_rel.is_some()) {
                 out |= scan(&layer.values, operand, candidate);
             }
             return Ok(out);
         }
 
         let mut out = Bitmap::new();
-        for layer in &column.layers {
+        for layer in layers {
             out |= scan_layer(name, layer, operand, candidate)?;
         }
         Ok(out)
+    }
+
+    /// A `match` or a `phrase` over one text column's layers — [`FilterColumns::resolve`]'s text
+    /// half, split out because the two families share nothing but the column lookup.
+    fn resolve_text(
+        &self,
+        name: &str,
+        declared_index: usize,
+        text: &[TextLayer],
+        analyser: &tessera_analyse::Analyser,
+        operand: &FilterOperand,
+        candidate: &Bitmap,
+    ) -> Result<Bitmap, FilterError> {
+        // An operator outside this family is refused at the parse gate, which asks
+        // `Family::operands` — the same list `/v1/meta` publishes. Empty here is the second
+        // line of defence and the direction that narrows.
+        let (query, minimum, phrase) = match operand {
+            FilterOperand::Match { query, minimum } => (query, *minimum, false),
+            FilterOperand::Phrase { query } => (query, None, true),
+            _ => return Ok(Bitmap::new()),
+        };
+        // **Order and duplicates survive the analyser, and a phrase needs both** — which is why
+        // the sort and the deduplication happen here, on the copy the postings take, rather
+        // than in `Analyser::tokens`.
+        let ordered = analyser.tokens(query);
+        let mut tokens = ordered.clone();
+        tokens.sort();
+        tokens.dedup();
+        let minimum = minimum.unwrap_or(tokens.len() as u32);
+        let mut out = Bitmap::new();
+        for layer in text {
+            out |= text_match(&layer.dict, &layer.postings, &tokens, minimum, candidate).map_err(
+                |e| FilterError::PostingsUnreadable {
+                    column: name.to_string(),
+                    detail: e.to_string(),
+                },
+            )?;
+        }
+        // A one-word phrase *is* a `match`, and short-circuiting it is worth stating: the
+        // verify below decompresses a record block per survivor, and for the commonest phrase
+        // shape there is nothing for it to establish that the conjunction has not.
+        if !phrase || ordered.len() < 2 {
+            return Ok(out);
+        }
+        self.verify_phrase(name, declared_index, analyser, &ordered, out, candidate)
     }
 
     /// Compose several operands: `candidate ∧ op₁ ∧ … ∧ opₙ`.
@@ -355,7 +369,8 @@ impl FilterColumns {
     fn verify_phrase(
         &self,
         name: &str,
-        column: &Layers,
+        declared_index: usize,
+        analyser: &tessera_analyse::Analyser,
         phrase: &[String],
         survivors: Bitmap,
         candidate: &Bitmap,
@@ -367,10 +382,7 @@ impl FilterColumns {
                     .to_string(),
             });
         }
-        let Some(analyser) = column.analyser.as_ref() else {
-            return Ok(Bitmap::new());
-        };
-        let tag = u16::try_from(column.declared_index).unwrap_or(u16::MAX);
+        let tag = u16::try_from(declared_index).unwrap_or(u16::MAX);
         let mut out = Bitmap::new();
         for entity in survivors.iter() {
             // **A row that will not read excludes the item rather than refusing the request.** The
@@ -402,31 +414,33 @@ impl FilterColumns {
     /// intersection per layer — and it would answer it only for the base, since no flush writes
     /// postings.
     fn present_in(&self, column: &str, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
-        let layers = self
+        let held = self
             .columns
             .get(column)
-            .filter(|layers| layers.filterable)
+            .filter(|held| held.filterable)
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
         // **A column with no value column has no presence set, and answering the empty one is a
-        // wrong answer wearing a right one's clothes.** `Layers::layers` holds value columns; a
-        // `text` column has none — its index is postings over words and its prose is a blob row —
-        // so this loop would union nothing and every negation over it would return no entities, for
-        // every principal and every corpus, with a 200. Narrowing, so no disclosure; simply wrong,
-        // and silently.
+        // wrong answer wearing a right one's clothes.** A `text` column holds no value layers at
+        // all — its index is postings over words and its prose is a blob row — and a column
+        // declared at a running service holds none until its first flush composes one, so this
+        // loop would union nothing and every negation over it would return no entities, for every
+        // principal and every corpus, with a 200. Narrowing, so no disclosure; simply wrong, and
+        // silently.
         //
         // Refused rather than answered from the postings. The presence a negation needs is *carries
         // a value*, and for prose that is not derivable from the index: text analysing to no terms
         // at all — an empty string, a line of punctuation — carries a value and appears in no
         // posting. A flush extent stores a presence bitmap for exactly that reason; the base build
         // writes none, so there is nothing to answer from until it does.
-        if layers.layers.is_empty() {
+        let layers = held.value_layers();
+        if layers.is_empty() {
             return Err(FilterError::NegationWithoutPresence {
                 column: column.to_string(),
-                family: layers.family.as_str().to_string(),
+                family: held.family.as_str().to_string(),
             });
         }
         let mut out = Bitmap::new();
-        for layer in &layers.layers {
+        for layer in layers {
             out |= layer.values.present_in(candidate);
         }
         Ok(out)

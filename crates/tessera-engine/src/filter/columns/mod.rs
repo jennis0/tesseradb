@@ -1,5 +1,5 @@
-pub(in crate::filter) mod evaluate;
-pub(in crate::filter) mod open;
+mod evaluate;
+mod open;
 pub(in crate::filter) mod successor;
 
 use std::collections::BTreeMap;
@@ -18,9 +18,9 @@ use super::declared::{Family, Placement};
 /// **Membership is not filterability.** The map holds every column the build wrote a value column
 /// for — which includes a `visibility = "derived"` category that is not declared filterable, since
 /// its postings are what `/v1/categories` derives value visibility from. [`FilterColumns::resolve`]
-/// gates on [`Layers::filterable`] rather than on presence, so such a column is refused exactly as
-/// an undeclared one is: an *undeclared* column is a caller error, where an unresolvable *value* is
-/// an empty operand (`filter-surface.md` §2.1).
+/// gates on a column's declared filterability rather than on presence, so such a column is refused
+/// exactly as an undeclared one is: an *undeclared* column is a caller error, where an unresolvable
+/// *value* is an empty operand (`filter-surface.md` §2.1).
 ///
 /// **Why the record blob rides here.** The stack (records §3) is not a filter column — no query
 /// ever reads it (records §3's rule: a column the scan reads is never compressed; the blob is
@@ -31,7 +31,7 @@ use super::declared::{Family, Placement};
 /// parallel field threaded through every generation constructor for a reader only drill-down
 /// takes.
 pub struct FilterColumns {
-    pub(in crate::filter) columns: BTreeMap<String, Layers>,
+    pub(in crate::filter) columns: BTreeMap<String, Column>,
     /// The evaluation space(s) each filterable column affords — including a rendered category
     /// with no entity-space layers at all, which [`FilterColumns::columns`] cannot represent.
     pub(in crate::filter) placements: BTreeMap<String, Placement>,
@@ -133,58 +133,215 @@ pub(in crate::filter) enum Route {
     Postings,
 }
 
-/// One column as it is served: the build's base column, then one layer per flush that has
-/// published since (see this module's header), plus the derived postings where the column has them.
+/// One column as it is served: what the declaration says about it, and the layers it is served
+/// from.
 ///
-/// `Arc` per layer because a publication builds the next generation's columns from the live ones —
-/// the base is a memory map of a multi-gigabyte file, and the flush that added one entity must not
-/// re-open it.
+/// Built only by [`Column::values`] and [`Column::text`], which is what keeps the two kinds of
+/// column from being written out half each.
 #[derive(Debug, Clone)]
-pub(in crate::filter) struct Layers {
+pub(in crate::filter) struct Column {
     /// This column's position in the manifest's `declared_scalars`.
     ///
     /// **An index internal, and the record blob's addressing key**: a blob row tags each field by
     /// this number rather than by name, so a route that must read a column's *value* out of the
     /// blob — the phrase verify — has no other way to pick its field out of a row. Never
     /// serialised anywhere; drill-down resolves the same tag against the same list.
-    pub(in crate::filter) declared_index: usize,
-    pub(in crate::filter) layers: Vec<Layer>,
-    /// Every entity any layer holds a value for. Kept so a new extent's disjointness can be
-    /// checked in one bitmap operation — see [`FilterColumns::compose`] — rather than trusted.
-    pub(in crate::filter) covered: Bitmap,
+    declared_index: usize,
     /// **Declared `index = true`.** A column may be held here without being filterable: a
     /// `visibility = "derived"` category owes membership postings whatever its `index` says
     /// (`filter-index.md` §2.3), and `/v1/categories` reads them from here. [`FilterColumns::resolve`]
     /// refuses such a column exactly as it refuses an undeclared one, so holding it opens no
     /// operand the schema did not declare.
-    pub(in crate::filter) filterable: bool,
-    /// The base build's per-value postings, where the column has them: every category column whose
-    /// vocabulary is `derived`, and every category column declared filterable.
-    ///
-    /// Held whatever the route, because the membership question `/v1/categories` asks is answered
-    /// from these on a `derived` column that the *filter* route deliberately does not use them
-    /// for.
-    pub(in crate::filter) postings: Option<Arc<ColumnPostings>>,
-    /// The analyser this column was **indexed** with, resolved from the manifest's recorded
-    /// identity rather than from a default. A query is analysed with it, which is what makes the
-    /// two token streams the same one.
-    pub(in crate::filter) analyser: Option<Arc<tessera_analyse::Analyser>>,
+    filterable: bool,
+    /// The family whose rules this column's values are read by — carried so a layer's storage can
+    /// be checked against its declaration rather than inferred from it. A `keyword` column's layers
+    /// each owe a dictionary, and [`Column::push_extent`] refuses one that arrives without it:
+    /// a `u32` ordinal column read as though it were a category's codes would answer every string
+    /// predicate with the empty set, which under-reports silently rather than failing.
+    family: Family,
+    layers: ColumnLayers,
+}
+
+/// What a column is served from — a value column per layer, or a text index per layer. Never both
+/// and never neither: the half a column does not have is absent rather than empty.
+///
+/// `Arc` per layer because a publication builds the next generation's columns from the live ones —
+/// the base is a memory map of a multi-gigabyte file, and the flush that added one entity must not
+/// re-open it.
+#[derive(Debug, Clone)]
+enum ColumnLayers {
+    /// The build's base column, then one layer per flush that has published since (see this
+    /// module's header), plus the derived postings where the column has them.
+    Values {
+        layers: Vec<Layer>,
+        /// Every entity any layer holds a value for. Kept so a new extent's disjointness can be
+        /// checked in one bitmap operation — see [`Column::push_extent`] — rather than trusted.
+        covered: Bitmap,
+        /// The base build's per-value postings, where the column has them: every category column
+        /// whose vocabulary is `derived`, and every category column declared filterable.
+        ///
+        /// Held whatever the route, because the membership question `/v1/categories` asks is
+        /// answered from these on a `derived` column that the *filter* route deliberately does not
+        /// use them for.
+        postings: Option<Arc<ColumnPostings>>,
+        route: Route,
+    },
     /// A `text` column's layers: the base build's index first, then one per flush extent, oldest
-    /// first. Held here rather than on a [`Layer`] because that type is a value column and its
-    /// dictionary, and this family has neither — its terms are postings and its prose is a blob
-    /// row.
+    /// first. A [`Layer`] is a value column and its dictionary, and this family has neither — its
+    /// terms are postings and its prose is a blob row.
     ///
     /// **Disjoint in entity space by I9**, so a `match` unions across them and order decides
     /// nothing; there is no coverage check to keep, because an entity id is never reused and no
     /// two layers can hold the same entity's terms.
-    pub(in crate::filter) text: Vec<TextLayer>,
-    pub(in crate::filter) route: Route,
-    /// The family whose rules this column's values are read by — carried so a layer's storage can
-    /// be checked against its declaration rather than inferred from it. A `keyword` column's layers
-    /// each owe a dictionary, and [`FilterColumns::compose`] refuses one that arrives without it:
-    /// a `u32` ordinal column read as though it were a category's codes would answer every string
-    /// predicate with the empty set, which under-reports silently rather than failing.
-    pub(in crate::filter) family: Family,
+    Text {
+        layers: Vec<TextLayer>,
+        /// The analyser this column was **indexed** with, resolved from the manifest's recorded
+        /// identity rather than from a default. A query is analysed with it, which is what makes
+        /// the two token streams the same one.
+        analyser: Arc<tessera_analyse::Analyser>,
+    },
+}
+
+impl Column {
+    /// A column served from value columns, holding its base alone — what a build's column opens
+    /// as, and what a column declared at a running service opens as with no base at all
+    /// (`ingest.md` §6.3). Every extent arrives through [`Column::push_extent`].
+    pub(in crate::filter) fn values(
+        declared_index: usize,
+        filterable: bool,
+        family: Family,
+        base: Option<Layer>,
+        postings: Option<Arc<ColumnPostings>>,
+        route: Route,
+    ) -> Column {
+        let covered = base
+            .as_ref()
+            .map(|layer| layer.values.present())
+            .unwrap_or_default();
+        Column {
+            declared_index,
+            filterable,
+            family,
+            layers: ColumnLayers::Values {
+                layers: base.into_iter().collect(),
+                covered,
+                postings,
+                route,
+            },
+        }
+    }
+
+    /// A column served from a text index: its analyser, and the layers the manifest names — the
+    /// base build's index first where there is one, then one per published extent.
+    fn text(
+        declared_index: usize,
+        filterable: bool,
+        analyser: Arc<tessera_analyse::Analyser>,
+        layers: Vec<TextLayer>,
+    ) -> Column {
+        Column {
+            declared_index,
+            filterable,
+            family: Family::Text,
+            layers: ColumnLayers::Text { layers, analyser },
+        }
+    }
+
+    /// The value layers, base first — empty for a text column, which has none.
+    pub(in crate::filter) fn value_layers(&self) -> &[Layer] {
+        match &self.layers {
+            ColumnLayers::Values { layers, .. } => layers,
+            ColumnLayers::Text { .. } => &[],
+        }
+    }
+
+    /// The text layers, oldest first — empty for a value column, which has none.
+    fn text_layers(&self) -> &[TextLayer] {
+        match &self.layers {
+            ColumnLayers::Text { layers, .. } => layers,
+            ColumnLayers::Values { .. } => &[],
+        }
+    }
+
+    /// The base build's derived postings, where this column has them.
+    pub(in crate::filter) fn postings(&self) -> Option<&ColumnPostings> {
+        match &self.layers {
+            ColumnLayers::Values { postings, .. } => postings.as_deref(),
+            ColumnLayers::Text { .. } => None,
+        }
+    }
+
+    /// The value layers, to be replaced by a coalesce — `None` for a text column.
+    fn value_layers_mut(&mut self) -> Option<&mut Vec<Layer>> {
+        match &mut self.layers {
+            ColumnLayers::Values { layers, .. } => Some(layers),
+            ColumnLayers::Text { .. } => None,
+        }
+    }
+
+    /// The text layers, to be appended to by a flush or replaced by a coalesce — `None` for a
+    /// value column.
+    fn text_layers_mut(&mut self) -> Option<&mut Vec<TextLayer>> {
+        match &mut self.layers {
+            ColumnLayers::Text { layers, .. } => Some(layers),
+            ColumnLayers::Values { .. } => None,
+        }
+    }
+
+    /// Add one flush's extent, refusing an entity an earlier layer already holds a value for.
+    ///
+    /// **The refusal is what keeps a layered column a function.** Entity ids are permanent and
+    /// issued from the high-water (**I9**), so an extent's entities belong to no earlier layer and
+    /// the overlap is unreachable — which is exactly why it is checked here rather than reasoned
+    /// about at the call site: if I9 ever failed, the symptom would be an entity matching two
+    /// values at once and a filter naming either returning it, with nothing to notice.
+    ///
+    /// **A keyword extent must bring its own dictionary, and one that does not is refused rather
+    /// than composed** ([`check_dictionary_pairing`]). Its values are ordinals into a dictionary
+    /// this flush minted, so a layer without one has no reading at all: scanned as codes it would
+    /// answer every string predicate with the empty set, and resolved against the base's keys it
+    /// would return another value's entities.
+    pub(in crate::filter) fn push_extent(
+        &mut self,
+        column: &str,
+        values_rel: &str,
+        extent: Arc<ValueColumn>,
+        dict: Option<Arc<SortedDict>>,
+    ) -> std::io::Result<()> {
+        check_dictionary_pairing(self.family, column, dict.is_some())?;
+        let ColumnLayers::Values {
+            layers, covered, ..
+        } = &mut self.layers
+        else {
+            return Err(unknown_filter_column(column));
+        };
+        let present = extent.present();
+        if covered.and_cardinality(&present) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "a filter extent for column '{column}' claims entities an earlier layer \
+                     already holds values for; entity ids are permanent (I9) and an extent may \
+                     only add ids no layer holds"
+                ),
+            ));
+        }
+        *covered |= present;
+        layers.push(Layer {
+            values_rel: Some(values_rel.to_string()),
+            values: extent,
+            dict,
+        });
+        Ok(())
+    }
+}
+
+/// An extent naming a column this composition has no value layers for.
+fn unknown_filter_column(column: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("a filter extent names column '{column}', which the schema does not declare filterable"),
+    )
 }
 
 /// One `text` layer: its own dictionary, its own postings over that dictionary, and the entities
@@ -194,9 +351,9 @@ pub(in crate::filter) struct Layers {
 /// read against another layer's terms would answer every `match` from the wrong words with no
 /// symptom, which is why the manifest names them as one record.
 #[derive(Debug, Clone)]
-pub(in crate::filter) struct TextLayer {
-    pub(in crate::filter) dict: Arc<SortedDict>,
-    pub(in crate::filter) postings: Arc<ColumnPostings>,
+struct TextLayer {
+    dict: Arc<SortedDict>,
+    postings: Arc<ColumnPostings>,
     /// The entities this layer holds a value for. **Stored rather than derived from the postings**:
     /// text that analyses to no terms — an empty string, a field of pure punctuation — carries a
     /// value and appears in no posting.
@@ -210,10 +367,10 @@ pub(in crate::filter) struct TextLayer {
     /// ⊘ **Empty for the base**, which writes no presence file — so it is a layer's coverage and
     /// not the column's. The day a text column gains a presence predicate the base owes one too
     /// ([#123](https://github.com/jennis0/tessera-index/issues/123)).
-    pub(in crate::filter) present: Bitmap,
+    present: Bitmap,
     /// The manifest path that named this layer, or `None` for the base build's index — the identity
     /// a coalesce or fold names a layer by, for [`Layer::values_rel`]'s reason.
-    pub(in crate::filter) dict_rel: Option<String>,
+    dict_rel: Option<String>,
 }
 
 /// One text layer's two halves, checked against each other before the layer is served.
@@ -224,7 +381,7 @@ pub(in crate::filter) struct TextLayer {
 /// nobody: an under-report with no symptom, which is the shape this codebase refuses everywhere
 /// else. The fold makes the same check on its inputs before merging them, and a reader that did not
 /// would be trusting an artefact the writer's own consumer will not.
-pub(in crate::filter) fn text_layer(
+fn text_layer(
     dict: SortedDict,
     postings: ColumnPostings,
     column: &str,
@@ -277,7 +434,7 @@ pub(in crate::filter) struct Layer {
 
 /// The request path's two modes, and only those: `MappedSequential` is the fold's and is
 /// deliberately unreachable from here (decision 0052).
-pub(in crate::filter) fn request_access(mmap: bool) -> tessera_filter::Access {
+fn request_access(mmap: bool) -> tessera_filter::Access {
     if mmap {
         tessera_filter::Access::Mapped
     } else {
@@ -288,7 +445,7 @@ pub(in crate::filter) fn request_access(mmap: bool) -> tessera_filter::Access {
 /// A record-blob open failure, in the `io::Result` this opener speaks. Fail-closed either way:
 /// a missing, short or malformed layer refuses the whole open (records §3), never "those
 /// entities have no record".
-pub(in crate::filter) fn record_open_error(e: tessera_filter::RecordError) -> std::io::Error {
+fn record_open_error(e: tessera_filter::RecordError) -> std::io::Error {
     match e {
         tessera_filter::RecordError::Io(io) => io,
         malformed => std::io::Error::new(std::io::ErrorKind::InvalidData, malformed.to_string()),
@@ -307,7 +464,7 @@ pub(in crate::filter) fn record_open_error(e: tessera_filter::RecordError) -> st
 /// refused rather than scanned as codes, which would answer every string predicate with the empty
 /// set; a dictionary on another family's layer is refused because the caller and the schema
 /// disagree about what the values are.
-pub(in crate::filter) fn check_dictionary_pairing(family: Family, column: &str, has_dict: bool) -> std::io::Result<()> {
+fn check_dictionary_pairing(family: Family, column: &str, has_dict: bool) -> std::io::Result<()> {
     match (family == Family::Keyword, has_dict) {
         (true, false) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -385,11 +542,11 @@ impl FilterColumns {
     /// build reads as empty here. Closing that needs the base's presence bitmap, not a change to
     /// this rule.
     pub(crate) fn text_present(&self, column: &str, entity: u32) -> bool {
-        let Some(layers) = self.columns.get(column) else {
+        let Some(column) = self.columns.get(column) else {
             return false;
         };
-        layers
-            .text
+        column
+            .text_layers()
             .iter()
             .any(|layer| layer.present.contains(entity))
     }
@@ -407,9 +564,9 @@ impl FilterColumns {
     /// its slot, for a universal column (where it degenerates to the entity id) and a partial one
     /// alike. O(containers below the entity) per read — drill-down cadence, never per mark.
     pub(crate) fn stored_value(&self, column: &str, entity: u32) -> Option<RecordValue> {
-        let layers = self.columns.get(column)?;
+        let column = self.columns.get(column)?;
         let probe = Bitmap::of(&[entity]);
-        for layer in &layers.layers {
+        for layer in column.value_layers() {
             let values = &layer.values;
             if values.present_in(&probe).is_empty() {
                 continue;
@@ -460,7 +617,7 @@ impl FilterColumns {
     /// the next restart, which is exactly what `tessera_engine`'s tier-list assertion exists to
     /// catch on the delta axis.
     pub fn layer_count(&self, column: &str) -> Option<usize> {
-        self.columns.get(column).map(|c| c.layers.len())
+        self.columns.get(column).map(|c| c.value_layers().len())
     }
 
     /// How many **text** layers this generation serves `column` from — the base plus one per live
@@ -472,7 +629,7 @@ impl FilterColumns {
     /// edited the manifest without replacing the live layers is a bound that arrives at the next
     /// restart.
     pub fn text_layer_count(&self, column: &str) -> Option<usize> {
-        self.columns.get(column).map(|c| c.text.len())
+        self.columns.get(column).map(|c| c.text_layers().len())
     }
 
     /// **One indexed column's value layers, for a reader that wants the values themselves rather
@@ -483,8 +640,8 @@ impl FilterColumns {
     /// column with no entity-space storage. A caller that finds none serves the layer with no
     /// column, which is the fail-closed answer: no artifact of it is a candidate anywhere.
     pub(crate) fn value_layers(&self, column: &str) -> Option<ValueLayers<'_>> {
-        self.columns.get(column).map(|layers| ValueLayers {
-            layers: &layers.layers,
+        self.columns.get(column).map(|column| ValueLayers {
+            layers: column.value_layers(),
         })
     }
 }

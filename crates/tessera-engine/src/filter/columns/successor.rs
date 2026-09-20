@@ -5,7 +5,10 @@ use croaring::Bitmap;
 use tessera_filter::{ColumnPostings, RecordExtentPaths, RecordStack, SortedDict, ValueColumn};
 
 use super::open::{open_scoped_column, runtime_layers};
-use super::{check_dictionary_pairing, record_open_error, text_layer, FilterColumns, Layer};
+use super::{
+    check_dictionary_pairing, record_open_error, text_layer, unknown_filter_column, FilterColumns,
+    Layer,
+};
 use crate::filter::{
     owes_value_column, scoped_column_name, scoped_has_value_column, scoped_is_filterable, Family,
     Placement, PIN,
@@ -73,19 +76,8 @@ pub struct CoalescedTextWindow {
 pub type PublishedExtent = (String, String, Arc<ValueColumn>, Option<Arc<SortedDict>>);
 
 impl FilterColumns {
-    /// Add one flush's extent to a column, refusing an entity two layers both claim.
-    ///
-    /// **The refusal is what keeps a layered column a function.** Entity ids are permanent and
-    /// issued from the high-water (**I9**), so an extent's entities belong to no earlier layer and
-    /// the overlap is unreachable — which is exactly why it is checked here rather than reasoned
-    /// about at the call site: if I9 ever failed, the symptom would be an entity matching two
-    /// values at once and a filter naming either returning it, with nothing to notice.
-    ///
-    /// **A keyword extent must bring its own dictionary, and one that does not is refused rather
-    /// than composed** ([`check_dictionary_pairing`]). Its values are ordinals into a dictionary
-    /// this flush minted, so a layer without one has no reading at all: scanned as codes it would
-    /// answer every string predicate with the empty set, and resolved against the base's keys it
-    /// would return another value's entities.
+    /// Add one flush's extent to the column it names, refusing a name this composition does not
+    /// hold a value column for — see [`Column::push_extent`] for what the column itself refuses.
     pub(in crate::filter) fn compose(
         &mut self,
         column: &str,
@@ -93,34 +85,10 @@ impl FilterColumns {
         extent: Arc<ValueColumn>,
         dict: Option<Arc<SortedDict>>,
     ) -> std::io::Result<()> {
-        let Some(layers) = self.columns.get_mut(column) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "a filter extent names column '{column}', which the schema does not declare \
-                     filterable"
-                ),
-            ));
+        let Some(held) = self.columns.get_mut(column) else {
+            return Err(unknown_filter_column(column));
         };
-        check_dictionary_pairing(layers.family, column, dict.is_some())?;
-        let present = extent.present();
-        if layers.covered.and_cardinality(&present) != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "a filter extent for column '{column}' claims entities an earlier layer \
-                     already holds values for; entity ids are permanent (I9) and an extent may \
-                     only add ids no layer holds"
-                ),
-            ));
-        }
-        layers.covered |= present;
-        layers.layers.push(Layer {
-            values_rel: Some(values_rel.to_string()),
-            values: extent,
-            dict,
-        });
-        Ok(())
+        held.push_extent(column, values_rel, extent, dict)
     }
 
     /// This generation's columns with an attribute column declared at a running service added,
@@ -290,7 +258,11 @@ impl FilterColumns {
         // covers. Composed here for the same reason a filter extent is — a published layer the live
         // generation does not hold answers no `match` until the next fold.
         for text in texts {
-            let Some(layers) = next.columns.get_mut(text.column.as_str()) else {
+            let Some(layers) = next
+                .columns
+                .get_mut(text.column.as_str())
+                .and_then(super::Column::text_layers_mut)
+            else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
@@ -300,7 +272,7 @@ impl FilterColumns {
                     ),
                 ));
             };
-            layers.text.push(text_layer(
+            layers.push(text_layer(
                 SortedDict::open(&text.dict, self.access)?,
                 ColumnPostings::open(&text.postings, self.access != tessera_filter::Access::Read)?,
                 &text.column,
@@ -411,7 +383,7 @@ impl FilterColumns {
             entity_terms,
         };
         for window in windows {
-            let Some(layers) = next.columns.get_mut(&window.column) else {
+            let Some(held) = next.columns.get_mut(&window.column) else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
@@ -420,11 +392,19 @@ impl FilterColumns {
                     ),
                 ));
             };
-            check_dictionary_pairing(layers.family, &window.column, window.dict.is_some())?;
+            check_dictionary_pairing(held.family, &window.column, window.dict.is_some())?;
+            let Some(layers) = held.value_layers_mut() else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "a coalesce names column '{}', which this generation does not hold",
+                        window.column
+                    ),
+                ));
+            };
             let mut union = Bitmap::new();
             for rel in &window.consumed {
                 let Some(layer) = layers
-                    .layers
                     .iter()
                     .find(|l| l.values_rel.as_deref() == Some(rel.as_str()))
                 else {
@@ -454,7 +434,7 @@ impl FilterColumns {
                     ),
                 ));
             }
-            layers.layers.retain(|l| {
+            layers.retain(|l| {
                 l.values_rel
                     .as_ref()
                     .is_none_or(|rel| !window.consumed.contains(rel))
@@ -462,7 +442,7 @@ impl FilterColumns {
             // One push of one struct: the coalesced ordinals and the dictionary that numbers
             // them enter together, checked as a pair above, and the consumed layers left with
             // their own dictionaries in the `retain` above.
-            layers.layers.push(Layer {
+            layers.push(Layer {
                 values_rel: Some(window.values_rel.clone()),
                 values: Arc::clone(&window.values),
                 dict: window.dict.clone(),
@@ -472,7 +452,11 @@ impl FilterColumns {
         }
         for window in texts {
             let column = &window.paths.column;
-            let Some(layers) = next.columns.get_mut(column) else {
+            let Some(layers) = next
+                .columns
+                .get_mut(column)
+                .and_then(super::Column::text_layers_mut)
+            else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("a coalesce names text column '{column}', which this generation does not hold"),
@@ -481,7 +465,6 @@ impl FilterColumns {
             let mut union = Bitmap::new();
             for rel in &window.consumed {
                 let Some(layer) = layers
-                    .text
                     .iter()
                     .find(|l| l.dict_rel.as_deref() == Some(rel.as_str()))
                 else {
@@ -524,12 +507,12 @@ impl FilterColumns {
                     ),
                 ));
             }
-            layers.text.retain(|l| {
+            layers.retain(|l| {
                 l.dict_rel
                     .as_ref()
                     .is_none_or(|rel| !window.consumed.contains(rel))
             });
-            layers.text.push(replacement);
+            layers.push(replacement);
         }
         Ok(next)
     }

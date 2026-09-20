@@ -25,18 +25,19 @@ impl FilterColumns {
         column: &str,
         candidate: &'a Bitmap,
     ) -> Result<CategoryMembership<'a>, FilterError> {
-        let layers = self
+        let held = self
             .columns
             .get(column)
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
+        let layers = held.value_layers();
         // A column declared at a running service holds no base until the fold (`ingest.md`
         // §6.3): its layers are the flushes' extents, every member is in them, and the sweep
         // below is the whole answer. A column that holds a **base** layer (the one opened with no
         // `values_rel`) and no postings is one whose member sets cannot be read, since the base's
         // members are in the postings and nowhere else; answering from the extents alone would
         // offer a value to nobody who sees only its base members.
-        let holds_base = layers.layers.iter().any(|l| l.values_rel.is_none());
-        let postings: Option<&ColumnPostings> = match layers.postings.as_deref() {
+        let holds_base = layers.iter().any(|l| l.values_rel.is_none());
+        let postings: Option<&ColumnPostings> = match held.postings() {
             Some(postings) => Some(postings),
             None if !holds_base => None,
             None => return Err(FilterError::MembershipUnavailable(column.to_string())),
@@ -48,7 +49,7 @@ impl FilterColumns {
         // covers the base build and an extent covers entities ingested since it — so the two halves
         // of a value's count add rather than overlapping.
         let mut from_extents: FxHashMap<u32, u64> = FxHashMap::default();
-        for layer in layers.layers.iter().filter(|l| l.values_rel.is_some()) {
+        for layer in layers.iter().filter(|l| l.values_rel.is_some()) {
             let layer = &layer.values;
             for entity in layer.present().and(candidate).iter() {
                 if let Some(code) = layer.value_of(entity) {

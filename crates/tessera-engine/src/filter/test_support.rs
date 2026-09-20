@@ -4,7 +4,7 @@ use std::sync::Arc;
 use croaring::Bitmap;
 use tessera_filter::{Codes, SortedDict, SortedDictWriter, ValueColumn};
 
-use super::columns::{empty_record_stack, FilterColumns, Layer, Layers, Route};
+use super::columns::{empty_record_stack, Column, FilterColumns, Layer, Route};
 use super::declared::{Family, Placement};
 
 /// A dictionary over already-sorted distinct keys, read back from memory.
@@ -45,33 +45,29 @@ pub(super) fn keyword_column(
     name: &str,
     layers: Vec<(Option<&str>, Arc<ValueColumn>, Arc<SortedDict>)>,
 ) -> FilterColumns {
-    let mut covered = Bitmap::new();
-    let layers: Vec<Layer> = layers
-        .into_iter()
-        .map(|(values_rel, values, dict)| {
-            covered |= values.present();
-            Layer {
-                values_rel: values_rel.map(str::to_string),
-                values,
-                dict: Some(dict),
-            }
-        })
-        .collect();
-    let mut columns = BTreeMap::new();
-    columns.insert(
-        name.to_string(),
-        Layers {
-            declared_index: 0,
-            layers,
-            covered,
-            filterable: true,
-            postings: None,
-            analyser: None,
-            text: Vec::new(),
-            route: Route::Scan,
-            family: Family::Keyword,
-        },
+    let mut layers = layers.into_iter();
+    let (base_rel, base_values, base_dict) = layers.next().expect("a column has at least a base");
+    assert!(base_rel.is_none(), "the first layer is the base");
+    let mut column = Column::values(
+        0,
+        true,
+        Family::Keyword,
+        Some(Layer {
+            values_rel: None,
+            values: base_values,
+            dict: Some(base_dict),
+        }),
+        None,
+        Route::Scan,
     );
+    for (values_rel, values, dict) in layers {
+        let values_rel = values_rel.expect("every layer after the base is an extent");
+        column
+            .push_extent(name, values_rel, values, Some(dict))
+            .expect("the extents of a fixture are disjoint and bring their dictionaries");
+    }
+    let mut columns = BTreeMap::new();
+    columns.insert(name.to_string(), column);
     let mut placements = BTreeMap::new();
     placements.insert(
         name.to_string(),

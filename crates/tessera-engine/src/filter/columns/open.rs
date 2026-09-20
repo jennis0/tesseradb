@@ -7,7 +7,7 @@ use tessera_filter::{ColumnPostings, RecordExtentPaths, RecordStack, SortedDict,
 use tessera_store::manifest::Visibility;
 
 use super::{
-    record_open_error, request_access, text_layer, FilterColumns, Layer, Layers, Route, TextLayer,
+    record_open_error, request_access, text_layer, Column, FilterColumns, Layer, Route, TextLayer,
 };
 use crate::filter::declared::{resolve_analyser, visibility_of};
 use crate::filter::{
@@ -31,27 +31,21 @@ use crate::filter::{
 /// onto the live generation through [`FilterColumns::with_scoped_columns`]. The two must produce
 /// the same reader, or a running process and the same bundle reopened would disagree about what a
 /// pin resolves to.
-pub(in crate::filter) fn open_scoped_column(
+pub(super) fn open_scoped_column(
     partition_dir: &Path,
     family: &tessera_store::manifest::ScopedScalar,
     view_id: &str,
     incarnation: tessera_types::view::ViewIncarnation,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
     mmap: bool,
-) -> std::io::Result<(String, Placement, Layers)> {
+) -> std::io::Result<(String, Placement, Column)> {
     let scoped_family = Family::of_scoped(family);
     // **A family with neither flag is opened and is not filterable** (owner ruling 2026-09-01).
     // Its per-view column is on disc exactly as an indexed one's is, and the drill-down reads one
     // entity's value out of it — so the column is held here, `filterable: false`, which is the
     // same standing an entity-scoped `derived` category with neither flag already has: `resolve`
     // refuses it by name and `FilterColumns::stored_value` answers from it.
-    let filterable = family.is_filterable();
-    // The analyser a text family's terms were produced by: an analyser this binary does not carry
-    // is the same refusal an entity-scoped text column's is — a `match` answered from a different
-    // segmentation is a wrong answer wearing a correct one's clothes.
-    let analyser = (scoped_family == Family::Text)
-        .then(|| resolve_analyser(&family.name, family.analyser.as_deref()))
-        .transpose()?;
+    let filterable = scoped_is_filterable(family);
     // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the one place a
     // view id becomes a path, so the opener cannot drift from the writer. Above the declared
     // incarnation the key carries its own suffix (decision 0115): a recreated key opens its own
@@ -81,6 +75,10 @@ pub(in crate::filter) fn open_scoped_column(
     // opened here; each caller appends the published extents this view's column has taken since —
     // [`FilterColumns::open`] from the manifest, and a flush from what it wrote.
     if scoped_family == Family::Text {
+        // The analyser a text family's terms were produced by: an analyser this binary does not
+        // carry is the same refusal an entity-scoped text column's is — a `match` answered from a
+        // different segmentation is a wrong answer wearing a correct one's clothes.
+        let analyser = resolve_analyser(&family.name, family.analyser.as_deref())?;
         let text = vec![text_layer(
             SortedDict::open_dir(&dir, request_access(mmap))?,
             ColumnPostings::open(&dir.join("postings.arrow"), mmap)?,
@@ -94,24 +92,13 @@ pub(in crate::filter) fn open_scoped_column(
         return Ok((
             name,
             placement,
-            Layers {
-                declared_index,
-                layers: Vec::new(),
-                covered: Bitmap::new(),
-                filterable,
-                postings: None,
-                analyser,
-                text,
-                route: Route::Postings,
-                family: scoped_family,
-            },
+            Column::text(declared_index, filterable, analyser, text),
         ));
     }
     let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
     let dict = (scoped_family == Family::Keyword)
         .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
         .transpose()?;
-    let covered = base.present();
     // A category's keyed postings, in this view's own directory — opened on the declaration rather
     // than probed for, the rule every open here keeps.
     let postings = scoped_owes_postings(family)
@@ -130,26 +117,23 @@ pub(in crate::filter) fn open_scoped_column(
     Ok((
         name,
         placement,
-        Layers {
+        // **The licence, not the fact that it opened.** A family carrying neither flag is opened
+        // so the drill-down can read a value out of it, and `evaluate` gates on that flag — so a
+        // leaf that somehow reached it is refused exactly as an unfilterable entity-scoped
+        // column's is. `EngineMeta::resolve_filter_column` refuses such a leaf one layer earlier,
+        // before any column is looked up; this is the second of the two.
+        Column::values(
             declared_index,
-            layers: vec![Layer {
+            filterable,
+            scoped_family,
+            Some(Layer {
                 values_rel: None,
                 values: base,
                 dict,
-            }],
-            covered,
-            // **The licence, not the fact that it opened.** A family carrying neither flag is
-            // opened so the drill-down can read a value out of it, and `evaluate` gates on this
-            // flag — so a leaf that somehow reached it is refused exactly as an unfilterable
-            // entity-scoped column's is. `EngineMeta::resolve_filter_column` refuses such a leaf
-            // one layer earlier, before any column is looked up; this is the second of the two.
-            filterable: scoped_is_filterable(family),
+            }),
             postings,
-            analyser: None,
-            text: Vec::new(),
             route,
-            family: scoped_family,
-        },
+        ),
     ))
 }
 
@@ -157,7 +141,7 @@ pub(in crate::filter) fn open_scoped_column(
 /// what a column's base is followed by at [`FilterColumns::open`], entity-scoped and group-scoped
 /// alike. `column` is the name the column is held under, which for a group-scoped family is
 /// [`scoped_column_name`]'s resolved form.
-pub(in crate::filter) fn text_extent_layers<'a>(
+fn text_extent_layers<'a>(
     prefix_dir: &Path,
     extents: impl Iterator<Item = &'a tessera_store::manifest::TextExtent>,
     column: &str,
@@ -182,45 +166,37 @@ pub(in crate::filter) fn text_extent_layers<'a>(
 /// The stack a column declared at a running service opens with before any fold: no base, no
 /// postings, the extents composed later (`ingest.md` §6.3). `None` for a column with no
 /// entity-space home, which holds no stack at all.
-pub(in crate::filter) fn runtime_layers(
+pub(super) fn runtime_layers(
     scalar: &tessera_store::manifest::DeclaredScalar,
     declared_index: usize,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
-) -> std::io::Result<Option<Layers>> {
+) -> std::io::Result<Option<Column>> {
     let family = Family::of(scalar);
     if family == Family::Text {
         if !scalar.index {
             return Ok(None);
         }
-        let analyser = Some(resolve_analyser(&scalar.name, scalar.analyser.as_deref())?);
-        return Ok(Some(Layers {
+        let analyser = resolve_analyser(&scalar.name, scalar.analyser.as_deref())?;
+        return Ok(Some(Column::text(
             declared_index,
-            layers: Vec::new(),
-            covered: Bitmap::new(),
-            filterable: true,
-            postings: None,
+            true,
             analyser,
-            text: Vec::new(),
-            route: Route::Postings,
-            family,
-        }));
+            Vec::new(),
+        )));
     }
     if !owes_value_column(scalar, vocabularies) {
         return Ok(None);
     }
     let row = scalar.render && family.reaches_hot_column();
-    Ok(Some(Layers {
+    Ok(Some(Column::values(
         declared_index,
-        layers: Vec::new(),
-        covered: Bitmap::new(),
-        filterable: scalar.index || row,
-        postings: None,
-        analyser: None,
-        text: Vec::new(),
-        // Every operand is a scan until the fold rebuilds the postings from the folded column.
-        route: Route::Scan,
+        scalar.index || row,
         family,
-    }))
+        None,
+        None,
+        // Every operand is a scan until the fold rebuilds the postings from the folded column.
+        Route::Scan,
+    )))
 }
 
 impl FilterColumns {
@@ -345,20 +321,10 @@ impl FilterColumns {
                     &scalar.name,
                     mmap,
                 )?);
-                let analyser = Some(resolve_analyser(&scalar.name, scalar.analyser.as_deref())?);
+                let analyser = resolve_analyser(&scalar.name, scalar.analyser.as_deref())?;
                 columns.insert(
                     scalar.name.clone(),
-                    Layers {
-                        declared_index,
-                        layers: Vec::new(),
-                        covered: Bitmap::new(),
-                        filterable: true,
-                        postings: None,
-                        analyser,
-                        text: text_layers,
-                        route: Route::Postings,
-                        family,
-                    },
+                    Column::text(declared_index, true, analyser, text_layers),
                 );
                 continue;
             }
@@ -376,7 +342,6 @@ impl FilterColumns {
             let base_dict = (family == Family::Keyword)
                 .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
                 .transpose()?;
-            let covered = base.present();
             // Opened whenever the build owed them, and a missing file is an error for the same
             // reason a missing value column is: the manifest digests them, so absence means the
             // bundle is not what its manifest says. A column routed through postings that silently
@@ -394,21 +359,18 @@ impl FilterColumns {
             };
             columns.insert(
                 scalar.name.clone(),
-                Layers {
+                Column::values(
                     declared_index,
-                    layers: vec![Layer {
+                    entity,
+                    family,
+                    Some(Layer {
                         values_rel: None,
                         values: base,
                         dict: base_dict,
-                    }],
-                    covered,
-                    filterable: entity,
+                    }),
                     postings,
-                    analyser: None,
-                    text: Vec::new(),
                     route,
-                    family,
-                },
+                ),
             );
         }
         // ---- the group-scoped column families (`views.md` §5) ------------------------------
@@ -443,7 +405,7 @@ impl FilterColumns {
                 let Some(incarnation) = view_incarnation(view_id) else {
                     continue;
                 };
-                let (name, placement, mut layers) = open_scoped_column(
+                let (name, placement, mut column) = open_scoped_column(
                     &partition_dir,
                     family,
                     view_id,
@@ -454,8 +416,8 @@ impl FilterColumns {
                 // A text family's flushed layers are added here; every other family's arrive
                 // through `compose` below. A key created again shares `(column, view)` with its
                 // predecessor, whose extents stay listed until a fold.
-                if layers.family == Family::Text {
-                    layers.text.extend(text_extent_layers(
+                if let Some(text) = column.text_layers_mut() {
+                    text.extend(text_extent_layers(
                         prefix_dir,
                         text_extents.iter().filter(|e| {
                             e.column == family.name
@@ -474,7 +436,7 @@ impl FilterColumns {
                     placements.insert(name.clone(), placement);
                 }
 
-                columns.insert(name, layers);
+                columns.insert(name, column);
             }
         }
         // The record blob's base is owed exactly when the compiled schema has a blob-resident
