@@ -14,10 +14,7 @@ class Control:
     def __init__(self, base: str, cred: str, view: str | None = None):
         self.base = base
         self.headers = {"Authorization": f"Bearer {cred}"}
-        # **`x-tessera-view` where the bundle has more than one.** A batch carries one row space,
-        # and which one it belongs to is not inferable from its columns, so a multi-view deployment
-        # refuses an unlabelled batch outright (contracts §3.4). One view is the header's absence,
-        # which is what every rung below rung 5 sends.
+        # `x-tessera-view` where the bundle has more than one; one view is the header's absence.
         self.view = view
 
     def status(self) -> dict:
@@ -56,8 +53,7 @@ class Control:
         )
 
     def grow(self, layer: str, body: bytes, session: requests.Session, timeout=1800):
-        """`PATCH /control/layers/{name}/artifacts` (decision 0127): more members for artifacts the
-        level already holds, the body already serialised, as [`Control.publish`] sends its own."""
+        """`PATCH /control/layers/{name}/artifacts`: more members for artifacts already held."""
         t0 = time.perf_counter()
         r = session.patch(
             f"{self.base}/control/layers/{urllib.parse.quote(layer, safe='')}/artifacts",
@@ -68,16 +64,9 @@ class Control:
         return r, time.perf_counter() - t0
 
     def publish(self, layer: str, body: bytes, session: requests.Session, timeout=1800):
-        """`PUT /control/layers/{name}/artifacts`, with the body already serialised.
-
-        Sent as bytes under an explicit content type rather than through `json=`: the body is
-        assembled once as bytes by [`Publication`], and handing `requests` a dict would serialise
-        a 10⁶-member artifact a second time.
-
-        **The layer name is percent-encoded**, because the route matches one path segment and this
-        rung's names are path-shaped: `clusters/kmeans` unencoded is a 404 at the router rather
-        than a refusal from the handler, which reads as an empty publication rather than as an
-        error.
+        """`PUT /control/layers/{name}/artifacts`, with the body already serialised as bytes by
+        [`Publication`] rather than through `json=`. The layer name is percent-encoded, since
+        this rung's names are path-shaped and would otherwise 404 at the router.
         """
         t0 = time.perf_counter()
         r = session.put(

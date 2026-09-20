@@ -21,12 +21,7 @@ def census(
     ladder: Sequence[dict],
     boxes: Sequence[tuple[int, list[float]]],
 ) -> dict:
-    """Masked counts per principal: zoom 0 over the whole extent, then each given box.
-
-    **Per principal and per layer**, because a single total passes any defect that moves rows
-    between principals while preserving the sum — the same argument `tessera corpus census` makes
-    for per-tile counts (correctness-suite §9.2).
-    """
+    """Masked counts per principal and per layer: zoom 0 over the whole extent, then each box."""
     full = serve_battery.full_box(quant)
     out: dict = {}
     for rung in ladder:
@@ -43,9 +38,7 @@ def census(
             row["boxes"].append(
                 {"zoom": zoom, "box": box, "visible": s["counts"]["visible"]}
             )
-        # The artifact frames ride the ordinary viewport response when `layers` is asked for, so
-        # the per-layer census is the whole-extent request with `layers: "all"` and the frames
-        # counted off it.
+        # The per-layer census is the whole-extent request with `layers: "all"`.
         r = requests.post(
             f"{viewer}/v1/viewport",
             headers={"Authorization": f"Bearer {token}"},
@@ -60,10 +53,8 @@ def census(
 
 
 def artifact_frame_rows(content: bytes):
-    """Every kind-5 artifact frame of a viewport response, as Arrow tables.
-
-    The wire is a sequence of `(u8 kind, u32 LE length, payload)` frames, and kind 5 is one row per
-    served artifact (`tessera-wire/src/payload.rs`).
+    """Every kind-5 artifact frame of a viewport response, as Arrow tables: kind 5 is one row
+    per served artifact.
     """
     offset = 0
     while offset + 5 <= len(content):
@@ -76,15 +67,9 @@ def artifact_frame_rows(content: bytes):
 
 
 def artifact_frame_census(content: bytes) -> dict:
-    """The served artifacts **per layer**: how many, and their summed masked count.
-
-    The `layer` column is dictionary-encoded and `masked_count` is what the viewer is shown, so
-    grouping the rows by layer gives how many artifacts this principal is served on each layer and
-    how many documents those artifacts count for them.
-
-    **Two numbers per layer, not one.** An artifact count alone passes a defect that serves the
-    right artifacts with the wrong memberships; a summed masked count alone passes one that moves
-    members between artifacts of the same layer.
+    """The served artifacts per layer: how many, and their summed masked count. Two numbers, not
+    one, since an artifact count alone passes a defect that serves the right artifacts with the
+    wrong memberships.
     """
     out: dict = {}
     for table in artifact_frame_rows(content):
@@ -98,19 +83,9 @@ def artifact_frame_census(content: bytes) -> dict:
 
 
 def artifact_frame_parents(content: bytes) -> dict:
-    """The served parent links **per layer**, as sorted `[child, parent]` pairs of artifact keys.
-
-    `parent_ids` carries the `tessera_id` of each parent that is a row of this same frame, and a
-    `tessera_id` is a blinding permutation of an entity — a number of *this* deployment, which the
-    same artifact in another deployment has no reason to share. The frame's own `key` column is the
-    caller's name for the artifact and is the same on both sides of the split, so every id is read
-    back through the frame's `tessera_id → key` map and the pairs are compared by key.
-
-    An artifact whose key the wire did not carry falls back to its `tessera_id` as a string, so a
-    layer whose keys are withheld is listed as differing rather than passed quietly.
-
-    A count and a masked count say nothing about the shape of a hierarchy: a deployment that served
-    every artifact of a `dag` layer with no edges at all agrees with one that served them all.
+    """The served parent links per layer, as sorted `[child, parent]` pairs of artifact keys,
+    read back through the frame's `tessera_id -> key` map since a `tessera_id` is specific to
+    this deployment.
     """
     out: dict = {}
     for table in artifact_frame_rows(content):
@@ -128,23 +103,9 @@ def artifact_frame_parents(content: bytes) -> dict:
 
 
 def compare_census(folded: dict, all_in: dict) -> dict:
-    """The 0091 test's answer: exact zero difference, or a listed one.
-
-    **Three surfaces, reported separately**, because they are not equally comparable:
-
-    * `zoom0` — the whole extent under each principal. Frame-independent: every row of the corpus
-      is in the box whatever the frame is, so this is the surface on which "the two deployments
-      agree" is a claim about the *data* and nothing else.
-    * `boxes` — a box at zoom 3, 6 and 9. Frame-**dependent**, and on a rung declaring
-      `extent = "auto"` the base build's frame is computed from the rows it saw, so a base built
-      from the complement quantises onto a slightly different grid than the all-in build does and
-      the margins of a box disagree by a handful of rows. That is a property of `auto`, not of
-      ingest, and the frames are recorded beside the counts so a reader can see it.
-    * `layers` — the kind-5 artifact frame, per layer: how many artifacts this principal is
-      served on it and what they count for them. One entry per layer that differs.
-    * `parents` — the same frame's parent links, by key, per layer: which artifact names which.
-      Frame-independent and membership-independent, and the only surface on which a hierarchy that
-      arrived without its edges differs from one that arrived with them.
+    """The equivalence check's answer: exact zero difference, or a listed one, over `zoom0`,
+    `boxes`, `layers` and `parents`, reported separately since they are not equally comparable
+    (`boxes` is frame-dependent, so `extent = "auto"` can disagree at the margins).
     """
     differences = []
     for key in sorted(set(folded) | set(all_in)):
@@ -171,9 +132,7 @@ def compare_census(folded: dict, all_in: dict) -> dict:
                         "all_in": y["visible"],
                     }
                 )
-        # **One difference per layer**, not one per principal: a layer the wire declined and a
-        # layer whose masked counts moved are different findings, and a single blob comparison
-        # reports them as one.
+        # One difference per layer, not one per principal.
         for layer in sorted(set(a["layers"]) | set(b["layers"])):
             folded_layer = a["layers"].get(layer)
             all_in_layer = b["layers"].get(layer)
@@ -199,8 +158,7 @@ def compare_census(folded: dict, all_in: dict) -> dict:
                         "layer": layer,
                         "folded_edges": len(mine),
                         "all_in_edges": len(theirs),
-                        # The pairs themselves, capped: a layer with 10⁵ edges would otherwise
-                        # write the whole hierarchy into the result twice.
+                        # Capped, so a large layer does not write its whole hierarchy twice.
                         "only_folded": sorted(set(mine) - set(theirs))[:20],
                         "only_all_in": sorted(set(theirs) - set(mine))[:20],
                     }

@@ -1,81 +1,30 @@
-"""The ingest cycle — decision 0091's test, run as a measurement rather than as an assertion.
+"""The ingest cycle: build is ingest into an empty database, checked as a measurement.
 
-A rung is built from *all* of its rows. This driver holds a seeded, uniform fraction *f* of the
-entities back, builds the complement, serves it, and puts the hold-out through `/control/ingest`
-— then flushes, folds, and asks whether the two deployments give the same masked counts. That is
-[decision 0091](../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)'s claim
-stated as a number instead of a principle: *build is ingest into an empty database*, so a
-deployment assembled either way must answer identically.
+Holds back a seeded fraction of the entities, builds the complement as the base, serves it, and
+ingests the hold-out through `/control/ingest`. After flush and fold, checks whether the two
+assemblies give the same masked counts.
 
-Which route a layer's membership takes
---------------------------------------
+A layer's membership takes one of three routes, by the shape of its member table:
 
-**The shape of the layer's member table decides the route, and nothing else does.** The rung's
-`corpus.toml` is copied with the publication route's rosters removed, so every layer is declared —
-kind, levels, visibility rules, content kinds — and each one's membership travels one of three
-ways:
+* One row per (artifact, entity): declared and empty at the base, and published only after every
+  point it names has been ingested.
+* One row per point, one entry per declared level: read beside the points file at a build, and an
+  ingest batch's column at a running service. A null entry means no membership at that level.
+* Attribute-membership: evaluated against an indexed column every batch already sends.
 
-* **A member table of one row per (artifact, entity)** (every `clusters/*`, rung 3's MeSH
-  descriptors) addresses artifacts, and a row with a `rank` is the generating set of that ranked
-  content rather than membership. Such a layer is declared and empty at the base — its roster and
-  its `[layer.members]` are both removed, and any membership column is dropped from the base points
-  file — and its artifacts, their whole memberships and their supplied content are published
-  through `PUT /control/layers/{name}/artifacts` **after every point they name has been ingested**.
-  Content requiring every member visible is served only against a generating set, which is a set of
-  points, so it can only arrive with the artifact.
-* **A member table of one row per point**, a list of keys with one entry per declared level
-  (`features/taxonomy`, `admin/hierarchy`), is read beside the points file at a build and arrives at
-  a running service as the ingest batch's column named for the layer. Both entry points read it by
-  one rule, so `[layer.members]` stays at the base build over the base's rows and every hold-out row
-  carries its own list on the wire; a null entry is *in no artifact at that level*. The table is
-  read in lockstep with the points file, both ascending by entity and a row group at a time, so it
-  is never held whole.
-  **Where such a layer declares supplied content its roster stays too**, and is published — keys
-  and content, members empty — *before* the ingest: an artifact of a layer declaring supplied
-  content is never minted from a key alone, at either entry point, so every key a batch's column
-  names must already exist, and a key no base row names exists nowhere else. A key the base build
-  already holds is compared part by part and its restated content changes nothing.
-* **An attribute-membership layer** (`publishers/source`) carries nothing: its membership is
-  evaluated against the indexed column every batch already sends.
+What it measures, in order:
 
-An artifact cannot name a point that does not exist yet, and that ordering is the only constraint on
-the publication route: it holds at every fraction, so at *f* = 10% the base is 90% of the points and
-none of the published artifacts.
+1. The split and the base build.
+2. Online ingest: batches at N concurrent callers, ack latency, refusals by status.
+3. Publication: every layer's roster, member sets, ranked content and parent list.
+4. Flush: wall time and time to visibility.
+5. The fold: wall and RSS, read from `/control/status`.
+6. Equivalence: masked counts against the all-in build, per view and per layer.
+7. The write cycle: deletes, suppressions, re-ingests, another fold and census, then a restart
+   that must answer the same counts.
 
-What it measures, in order
---------------------------
-
-1. **The split and the base build** — `tessera build --stage-timings-json` over the complement's
-   points and the declaration-only `corpus.toml`, so the base's per-stage record is on the same
-   schema as the whole-corpus build's.
-2. **Online ingest** — Arrow IPC batches of 10,000 rows at *C* concurrent callers, `items/s`
-   acked, ack p50/p99, and every refusal counted by status (429 backpressure, 409 duplicate or
-   batch-id conflict, 422 bounds or contract). The batches carry the points, their labels as a
-   list, and the member list of any layer on the column route — see above. **One pass per declared
-   view**, the anchor first, each from that view's own points file: a second view's row for an
-   entity the anchor's pass allocated joins it there under the identity it already has.
-3. **Publication** — every layer's whole roster, in batches under a byte cap, with each artifact's
-   whole member set (base and hold-out alike, by external addressing), its ranked content with its
-   generating set, and its `parent` list. Its own figure: artifacts/s and members/s.
-4. **Flush** — the wall of `POST /control/flush`, and *time to visibility*: when a zoom-0 viewport
-   under the 100% principal reaches the expected count. Those are two different numbers and the
-   second is the one a viewer experiences.
-5. **The fold** — `POST /control/compact`, its wall and its RSS, both read from
-   `/control/status`'s own `compaction` block rather than timed from outside: the route answers
-   202 immediately, so an outside timer would measure the request and not the fold.
-6. **Equivalence** — the ladder's masked counts on the folded deployment against the all-in build,
-   **on every declared view**: at zoom 0, on a set of boxes drawn in that view's own frame, and per
-   layer — artifact count, summed masked count and the parent links by key off the kind-5 artifact
-   frame, per principal. Exact zero difference, or a listed one.
-7. **The write cycle** — deletes, suppressions, re-ingests, another fold and the census again; then
-   a **restart** over the same bundle, cache and WAL, which must answer the same counts and the same
-   census as the deployment answered before it was stopped.
-
-⊘ **A hold-out is not a random sample of the map.** Entity ids are assigned in signature-sorted
-order at a build and above the high-water at ingest (0091's own stated internal difference), so
-the ingested rows land in a different place in entity space than the build would have put them.
-That is *expected* and is not what the equivalence test checks: it checks the masked counts a
-principal is served, which is what a client can observe.
+A hold-out is not a random sample: entity ids are assigned differently at ingest than at a build,
+so equivalence compares masked counts, not ids.
 """
 
 from __future__ import annotations
@@ -192,12 +141,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     started = time.time()
     result = Cycle(args).run()
     result["ran_s"] = round(time.time() - started, 1)
-    # `VmHWM` of the driver itself, whichever phase set it: the split, the hold-out's batches,
-    # the publication's buckets or the census. Beside the server's own fold peak in the cell.
+    # `VmHWM` of the driver itself, whichever phase set it, beside the server's own fold peak.
     result["driver_peak_rss"] = driver_rss()["peak"]
-    # **The result is written whatever happened**, and the exit code says whether the cycle held:
-    # a blocked run, a layer that was not published, an unequal census, a write cycle that did not
-    # reach its counts, an unexpected refusal or a failed fold each leave a sentence in `failures`.
+    # The result is written whatever happened; the exit code says whether the cycle held. A
+    # blocked run, an unpublished layer, an unequal census, a write cycle short of its counts, an
+    # unexpected refusal or a failed fold each leave a sentence in `failures`.
     Path(args.out).write_text(json.dumps(result, indent=2, default=str))
     print(f"wrote {args.out}")
     for sentence in result["failures"]:
