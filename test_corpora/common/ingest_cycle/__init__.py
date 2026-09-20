@@ -10,6 +10,8 @@ A layer's membership takes one of three routes, by the shape of its member table
   point it names has been ingested.
 * One row per point, one entry per declared level: read beside the points file at a build, and an
   ingest batch's column at a running service. A null entry means no membership at that level.
+  Where the layer supplies content, its roster is published with empty member lists before the
+  ingest, because a key that names no artifact is refused rather than minted without its content.
 * Attribute-membership: evaluated against an indexed column every batch already sends.
 
 What it measures, in order:
