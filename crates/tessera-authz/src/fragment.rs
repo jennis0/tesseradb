@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 
 use tessera_types::TermId;
 
-use crate::postings::{PostingRef, PostingsReader};
+use crate::postings::{invalid_data, union_postings, PostingRef, PostingsReader};
 use crate::single_flight::{CacheWeight, SingleFlightCache, SingleFlightError};
 use crate::tier::DeltaTier;
 
@@ -78,55 +78,39 @@ pub fn build_fragment_with_deltas(
     postings: &PostingsReader,
     deltas: &[Arc<DeltaTier>],
 ) -> io::Result<Bitmap> {
-    let mut views: Vec<BitmapView<'_>> = Vec::new();
-    let mut small: Vec<u32> = Vec::new();
-
     // The base and the tiers are read by one loop over one `PostingRef` shape: the two files
     // differ in how a term is *found* (an ordinal index against a binary search) and not in what
     // a posting is, and the union does not care which file an entity came from — only that the
     // term is satisfied.
-    for term in terms.iter().copied() {
-        let base = postings.posting(term)?;
-        for posting in base.into_iter().chain(
-            deltas
-                .iter()
-                .map(|tier| tier.posting(term))
-                .collect::<io::Result<Vec<_>>>()?
-                .into_iter()
-                .flatten(),
-        ) {
-            match posting {
-                PostingRef::Roaring(view) => views.push(view),
-                PostingRef::Array(bytes) => {
-                    // `PostingsReader::open` validates every tag-0 payload's length is a
-                    // multiple of 4 once, at open time — this is not re-checked per lookup, so a
-                    // violation here would mean that validation was bypassed, not that this call
-                    // site needs its own fail-closed handling.
-                    debug_assert!(
-                        bytes.len() % 4 == 0,
-                        "tag-0 posting payload length must be a multiple of 4 (validated at \
-                         PostingsReader::open)"
-                    );
-                    for chunk in bytes.chunks_exact(4) {
-                        small.push(u32::from_le_bytes(chunk.try_into().unwrap()));
-                    }
-                }
-            }
-        }
-    }
+    let mut sources = Vec::new();
+    collect_postings(&mut sources, terms, Some(postings), deltas)?;
 
-    let refs: Vec<&Bitmap> = views.iter().map(|view| &**view).collect();
-    let mut fragment = if refs.is_empty() {
-        Bitmap::new()
-    } else {
-        Bitmap::fast_or(&refs)
-    };
-
-    small.sort_unstable();
-    fragment.add_many(&small);
+    let mut fragment = union_postings(sources);
     fragment.run_optimize();
 
     Ok(fragment)
+}
+
+/// Append each of `terms`' postings — the base's, where `base` is given, then every tier's — to
+/// `sources`.
+///
+/// The union is over `terms` and never over a tier's whole term set (I2): a tier carries the
+/// postings of every term its flushed items held, including terms this session was never granted.
+fn collect_postings<'a>(
+    sources: &mut Vec<PostingRef<'a>>,
+    terms: &[TermId],
+    base: Option<&'a PostingsReader>,
+    deltas: &'a [Arc<DeltaTier>],
+) -> io::Result<()> {
+    for term in terms.iter().copied() {
+        if let Some(base) = base {
+            sources.extend(base.posting(term)?);
+        }
+        for tier in deltas {
+            sources.extend(tier.posting(term)?);
+        }
+    }
+    Ok(())
 }
 
 /// **S for the split route** (`architecture.md` §6.3): the
@@ -155,8 +139,11 @@ pub fn residual_fragment(
     deltas: &[Arc<DeltaTier>],
     fragment: &Bitmap,
 ) -> io::Result<Bitmap> {
-    let mut residual = build_fragment_with_deltas(unkept, postings, deltas)?;
-    or_delta_postings(&mut residual, kept, deltas)?;
+    let mut sources = Vec::new();
+    collect_postings(&mut sources, unkept, Some(postings), deltas)?;
+    collect_postings(&mut sources, kept, None, deltas)?;
+
+    let mut residual = union_postings(sources);
     residual.and_inplace(fragment);
     residual.run_optimize();
     Ok(residual)
@@ -172,48 +159,12 @@ pub fn delta_entities(terms: &[TermId], deltas: &[Arc<DeltaTier>]) -> io::Result
     let mut entities = 0u64;
     for term in terms.iter().copied() {
         for tier in deltas {
-            match tier.posting(term)? {
-                Some(PostingRef::Roaring(view)) => entities += view.cardinality(),
-                Some(PostingRef::Array(bytes)) => entities += (bytes.len() / 4) as u64,
-                None => {}
+            if let Some(posting) = tier.posting(term)? {
+                entities += posting.cardinality();
             }
         }
     }
     Ok(entities)
-}
-
-/// Union `terms`' postings **in the delta tiers only** into `into`, leaving the base unread.
-///
-/// The union is over `terms` and never over a tier's whole term set, for
-/// [`build_fragment_with_deltas`]' reason: a tier carries the postings of every term its flushed
-/// items held, including terms this session was never granted.
-fn or_delta_postings(
-    into: &mut Bitmap,
-    terms: &[TermId],
-    deltas: &[Arc<DeltaTier>],
-) -> io::Result<()> {
-    let mut small: Vec<u32> = Vec::new();
-    for term in terms.iter().copied() {
-        for tier in deltas {
-            match tier.posting(term)? {
-                Some(PostingRef::Roaring(view)) => into.or_inplace(&view),
-                Some(PostingRef::Array(bytes)) => {
-                    debug_assert!(
-                        bytes.len() % 4 == 0,
-                        "tag-0 posting payload length must be a multiple of 4 (validated at \
-                         DeltaTier::open)"
-                    );
-                    for chunk in bytes.chunks_exact(4) {
-                        small.push(u32::from_le_bytes(chunk.try_into().unwrap()));
-                    }
-                }
-                None => {}
-            }
-        }
-    }
-    small.sort_unstable();
-    into.add_many(&small);
-    Ok(())
 }
 
 /// Compute the canonical cache key: SHA-256 over
@@ -307,10 +258,6 @@ fn create_private_file(path: &Path) -> io::Result<File> {
         .create(true)
         .truncate(true)
         .open(path)
-}
-
-fn invalid_data(msg: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
 /// A frozen, memory-mapped fragment reopened from the cache directory. `view()` borrows straight

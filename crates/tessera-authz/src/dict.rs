@@ -37,17 +37,17 @@ impl DictWriter {
         }
     }
 
-    /// Intern a descriptor, returning its term ID (deduplicating).
+    /// Intern a descriptor, returning its term ID (deduplicating). The key is allocated only when
+    /// the descriptor is new.
     pub fn intern(&mut self, descriptor: &[u8]) -> TermId {
-        let key = descriptor.to_vec().into_boxed_slice();
-        if let Some(&term_id) = self.interner.get(&key) {
-            term_id
-        } else {
-            let term_id = TermId::new(self.next_term_id);
-            self.next_term_id += 1;
-            self.interner.insert(key, term_id);
-            term_id
+        if let Some(&term_id) = self.interner.get(descriptor) {
+            return term_id;
         }
+        let term_id = TermId::new(self.next_term_id);
+        self.next_term_id += 1;
+        self.interner
+            .insert(descriptor.to_vec().into_boxed_slice(), term_id);
+        term_id
     }
 
     /// The number of distinct descriptors interned so far — equivalently, the number of records
@@ -72,12 +72,9 @@ impl DictWriter {
         let mut terms: Vec<_> = self.interner.iter().collect();
         terms.sort_by_key(|(_, &term_id)| term_id);
 
-        // Write the file: each record is u32 LE length ‖ descriptor bytes
         let mut data = Vec::new();
         for (descriptor, _) in terms {
-            let len = descriptor.len() as u32;
-            data.extend_from_slice(&len.to_le_bytes());
-            data.extend_from_slice(descriptor);
+            write_dict_record(&mut data, descriptor)?;
         }
 
         std::fs::write(&dict_path, data)?;
@@ -139,20 +136,7 @@ impl DictStreamWriter {
                 .writer
                 .insert(BufWriter::new(File::create(&self.dict_path)?)),
         };
-        // The extent record length field is u32; a descriptor over u32::MAX bytes cannot be
-        // represented and must fail closed, not truncate.
-        let len = u32::try_from(descriptor.len()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "dictionary descriptor of {} bytes exceeds the u32 record length field",
-                    descriptor.len()
-                ),
-            )
-        })?;
-        writer.write_all(&len.to_le_bytes())?;
-        writer.write_all(descriptor)?;
-        Ok(())
+        write_dict_record(writer, descriptor)
     }
 
     /// The number of descriptors appended so far — equivalently, the next term ID that would be
@@ -183,6 +167,60 @@ impl DictStreamWriter {
     }
 }
 
+/// Write one extent record: `u32 LE length ‖ descriptor`.
+///
+/// The length field is a `u32`; a descriptor over `u32::MAX` bytes cannot be represented and must
+/// fail closed, not truncate.
+fn write_dict_record(out: &mut impl Write, descriptor: &[u8]) -> io::Result<()> {
+    let len = u32::try_from(descriptor.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "dictionary descriptor of {} bytes exceeds the u32 record length field",
+                descriptor.len()
+            ),
+        )
+    })?;
+    out.write_all(&len.to_le_bytes())?;
+    out.write_all(descriptor)?;
+    Ok(())
+}
+
+/// Walk the extent at `path`, handing each whole record — its `u32 LE` length prefix included, so
+/// the descriptor is `record[4..]` — to `on_record` in file order.
+fn walk_dict_records(
+    path: &Path,
+    mut on_record: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    let data = std::fs::read(path)?;
+    let mut offset = 0;
+    while offset < data.len() {
+        if offset + 4 > data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "dictionary extent {}: incomplete length field",
+                    path.display()
+                ),
+            ));
+        }
+        let len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        let end = offset + 4 + len;
+        if end > data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "dictionary extent {}: incomplete descriptor",
+                    path.display()
+                ),
+            ));
+        }
+        on_record(&data[offset..end])?;
+        offset = end;
+    }
+    Ok(())
+}
+
 /// Concatenate `inputs` into one extent at `out`, and return how many records it carries.
 ///
 /// **Ordinal-preserving by construction, which is the whole of its correctness argument.** A
@@ -205,38 +243,11 @@ pub fn coalesce_dict_extents(inputs: &[PathBuf], out: &Path) -> io::Result<u64> 
     let mut writer = BufWriter::new(File::create(out)?);
     let mut records: u64 = 0;
     for path in inputs {
-        let data = std::fs::read(path)?;
-        let mut offset = 0;
-        while offset < data.len() {
-            if offset + 4 > data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "dictionary extent {}: incomplete length field",
-                        path.display()
-                    ),
-                ));
-            }
-            let len = u32::from_le_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]) as usize;
-            offset += 4;
-            if offset + len > data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "dictionary extent {}: incomplete descriptor",
-                        path.display()
-                    ),
-                ));
-            }
-            writer.write_all(&data[offset - 4..offset + len])?;
-            offset += len;
+        walk_dict_records(path, |record| {
+            writer.write_all(record)?;
             records += 1;
-        }
+            Ok(())
+        })?;
     }
     writer.flush()?;
     Ok(records)
@@ -270,53 +281,21 @@ impl Dict {
     /// differs only in the case a writer is forbidden to produce (`flush::promote` resolves
     /// against the live dictionary before interning anything).
     pub fn load(paths: &[PathBuf]) -> io::Result<Dict> {
-        let mut lookup_map: FxHashMap<Box<[u8]>, TermId> = FxHashMap::default();
-        let mut term_id: u32 = 0;
-
-        for path in paths {
-            let data = std::fs::read(path)?;
-            let mut offset = 0;
-
-            while offset < data.len() {
-                if offset + 4 > data.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "incomplete length field",
-                    ));
-                }
-
-                let len_bytes = [
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ];
-                let len = u32::from_le_bytes(len_bytes) as usize;
-                offset += 4;
-
-                if offset + len > data.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "incomplete descriptor",
-                    ));
-                }
-
-                let descriptor = &data[offset..offset + len];
-                offset += len;
-
-                // Skip-if-present, not insert-and-count — see this function's doc.
-                let key: Box<[u8]> = descriptor.to_vec().into_boxed_slice();
-                if let std::collections::hash_map::Entry::Vacant(slot) = lookup_map.entry(key) {
-                    slot.insert(TermId::new(term_id));
-                    term_id += 1;
-                }
-            }
+        Dict {
+            lookup_map: FxHashMap::default(),
+            len: 0,
         }
+        .load_extending(paths)
+    }
 
-        Ok(Dict {
-            len: term_id,
-            lookup_map,
-        })
+    /// Give `descriptor` the next ordinal unless it already has one — skip-if-present, not
+    /// insert-and-count; see [`Dict::load`]'s doc for why the distinction is load-bearing.
+    fn intern(&mut self, descriptor: &[u8]) {
+        if !self.lookup_map.contains_key(descriptor) {
+            self.lookup_map
+                .insert(descriptor.to_vec().into_boxed_slice(), TermId::new(self.len));
+            self.len += 1;
+        }
     }
 
     /// A dictionary covering this one's descriptors plus the extents at `paths`, whose ordinals
@@ -334,25 +313,17 @@ impl Dict {
     /// original ordinal stands, so a promotion that races another promotion of the same
     /// descriptor cannot produce two ids for one term.
     pub fn load_extending(&self, paths: &[PathBuf]) -> io::Result<Dict> {
-        let extension = Dict::load(paths)?;
-        let mut lookup_map = self.lookup_map.clone();
-        let mut len = self.len;
-        // Bounds order is ordinal order, so walk it in that order rather than iterating the
-        // extension's own (unordered) map, or the ids assigned here would depend on hash order.
-        let mut by_ordinal: Vec<(&Box<[u8]>, TermId)> = extension
-            .lookup_map
-            .iter()
-            .map(|(d, &id)| (d, id))
-            .collect();
-        by_ordinal.sort_unstable_by_key(|(_, id)| id.raw());
-        for (descriptor, _) in by_ordinal {
-            if lookup_map.contains_key(descriptor) {
-                continue;
-            }
-            lookup_map.insert(descriptor.clone(), TermId::new(len));
-            len += 1;
+        let mut extended = Dict {
+            lookup_map: self.lookup_map.clone(),
+            len: self.len,
+        };
+        for path in paths {
+            walk_dict_records(path, |record| {
+                extended.intern(&record[4..]);
+                Ok(())
+            })?;
         }
-        Ok(Dict { lookup_map, len })
+        Ok(extended)
     }
 
     /// The same extension as [`Dict::load_extending`], from descriptors already in memory — and
@@ -368,16 +339,14 @@ impl Dict {
     /// `descriptors` are appended in the order given, and that order is the caller's contract:
     /// they must be the same sequence, in the same order, that the extent file records.
     pub fn extended_with(&self, descriptors: &[Vec<u8>]) -> Dict {
-        let mut lookup_map = self.lookup_map.clone();
-        let mut len = self.len;
+        let mut extended = Dict {
+            lookup_map: self.lookup_map.clone(),
+            len: self.len,
+        };
         for descriptor in descriptors {
-            let key: Box<[u8]> = descriptor.clone().into_boxed_slice();
-            if let std::collections::hash_map::Entry::Vacant(slot) = lookup_map.entry(key) {
-                slot.insert(TermId::new(len));
-                len += 1;
-            }
+            extended.intern(descriptor);
         }
-        Dict { lookup_map, len }
+        extended
     }
 
     /// Look up a descriptor and return its term ID if present.

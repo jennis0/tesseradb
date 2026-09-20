@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use arrow::array::{Array, LargeBinaryArray, LargeBinaryBuilder};
+use arrow::array::{Array, ArrayRef, LargeBinaryArray, LargeBinaryBuilder};
 use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::ipc::reader::{read_footer_length, FileDecoder};
@@ -135,50 +135,71 @@ pub fn write_posting_records(path: &Path, records: &[Vec<u8>]) -> io::Result<()>
     write_posting_array(path, builder.finish())
 }
 
-/// The single schema/batch/IPC-writer invocation behind [`write_posting_records`] and
-/// [`PostingsSpool::finish`]. Byte-identity between the buffered and spooled paths requires
-/// this to be literally the same code, not two copies that could drift. The column carries no
-/// validity buffer: the builder path appends no nulls (so its null buffer is `None`) and the
-/// spool path passes `None` explicitly — a spurious all-valid buffer would change the file
-/// bytes.
+/// The single schema/batch/IPC-writer invocation behind every file this crate writes. Byte-identity
+/// between a buffered and a spooled path requires this to be literally the same code, not two copies
+/// that could drift.
+pub(crate) fn write_single_batch(
+    path: &Path,
+    schema: SchemaRef,
+    columns: Vec<ArrayRef>,
+) -> io::Result<()> {
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| invalid_data(e.to_string()))?;
+
+    let file = File::create(path)?;
+    let mut writer = FileWriter::try_new(BufWriter::new(file), &schema)
+        .map_err(|e| invalid_data(e.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|e| invalid_data(e.to_string()))?;
+    writer.finish().map_err(|e| invalid_data(e.to_string()))?;
+    Ok(())
+}
+
+/// [`write_single_batch`] with the positional postings schema. The column carries no validity
+/// buffer: the builder path appends no nulls (so its null buffer is `None`) and the spool path
+/// passes `None` explicitly — a spurious all-valid buffer would change the file bytes.
 fn write_posting_array(path: &Path, array: LargeBinaryArray) -> io::Result<()> {
     let schema = Arc::new(Schema::new(vec![Field::new(
         POSTING_COLUMN_NAME,
         DataType::LargeBinary,
         false,
     )]));
-    let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(array)])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-    let file = File::create(path)?;
-    let mut writer = FileWriter::try_new(BufWriter::new(file), &schema)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    writer
-        .write(&batch)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    writer
-        .finish()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    Ok(())
+    write_single_batch(path, schema, vec![Arc::new(array)])
 }
 
-/// Streaming counterpart to [`write_posting_records`]: encoded records (see [`encode_posting`])
-/// are spooled to a temporary file as they arrive — record ordinal = term id — with only the
-/// Arrow offset table held in memory (one `i64` per record, plus a leading zero). `finish`
-/// memory-maps the spool as the column's values buffer and writes `postings.arrow` through the
-/// same IPC-writer invocation as [`write_posting_records`], so the output is byte-for-byte the
-/// file that function would write from the same records; the reader's single-record-batch
-/// layout constraint (see [`PostingsReader`]) is met the same way, with one batch.
-pub struct PostingsSpool {
+/// Memory-map `file` whole as an Arrow buffer, without copying.
+pub(crate) fn mapped_buffer(file: &File) -> io::Result<Buffer> {
+    let mapping = unsafe { memmap2::Mmap::map(file) }?;
+    let len = mapping.len();
+    let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
+    // SAFETY: `arc` owns the mapping for as long as any Buffer built from it is alive (the Arc is
+    // captured as the buffer's `Allocation`), and the mapping is valid for `len` bytes for its
+    // entire lifetime.
+    // memmap2::Mmap never returns a null base pointer (even the zero-length map case uses a valid,
+    // non-null dangling-style allocation internally) — see memmap2's `MmapInner` construction,
+    // which always goes through a real `mmap(2)`/`VirtualAlloc` call or a dedicated empty-map
+    // sentinel address, never a null pointer.
+    let ptr = NonNull::new(arc.as_ptr() as *mut u8)
+        .expect("memmap2::Mmap never returns a null base pointer");
+    Ok(unsafe { Buffer::from_custom_allocation(ptr, len, arc) })
+}
+
+/// The spool file behind [`PostingsSpool`] and [`crate::KeyedPostingsSpool`]: encoded records are
+/// appended to a temporary file as they arrive, and only the Arrow offset table is held in memory
+/// (one `i64` per record, plus a leading zero). [`Self::finish`] maps the spool as the column's
+/// values buffer, so the assembled file is byte-for-byte what a buffered writer would produce from
+/// the same records.
+pub(crate) struct RecordSpool {
     spool_path: PathBuf,
     writer: BufWriter<File>,
-    // Arrow LargeBinary offsets: offsets[t]..offsets[t + 1] bounds record t; leading 0.
+    // Arrow LargeBinary offsets: offsets[i]..offsets[i + 1] bounds record i; leading 0.
     offsets: Vec<i64>,
 }
 
-impl PostingsSpool {
+impl RecordSpool {
     /// Create (truncating) the spool file at `spool_path`.
-    pub fn create(spool_path: &Path) -> io::Result<Self> {
+    pub(crate) fn create(spool_path: &Path) -> io::Result<Self> {
         // Read access is required as well as write: `finish` memory-maps the spool through this
         // same handle, and mapping a write-only descriptor fails with EACCES.
         let file = std::fs::OpenOptions::new()
@@ -187,16 +208,14 @@ impl PostingsSpool {
             .create(true)
             .truncate(true)
             .open(spool_path)?;
-        Ok(PostingsSpool {
+        Ok(RecordSpool {
             spool_path: spool_path.to_path_buf(),
             writer: BufWriter::new(file),
             offsets: vec![0],
         })
     }
 
-    /// Append the next term's encoded record. Records must arrive in term order; ordinal in the
-    /// finished file = term id.
-    pub fn append(&mut self, record: &[u8]) -> io::Result<()> {
+    pub(crate) fn append(&mut self, record: &[u8]) -> io::Result<()> {
         let last = *self
             .offsets
             .last()
@@ -207,9 +226,12 @@ impl PostingsSpool {
         Ok(())
     }
 
-    /// Flush and fsync the spool, write `postings.arrow` at `postings_path` from it, and delete
-    /// the spool file on success.
-    pub fn finish(self, postings_path: &Path) -> io::Result<()> {
+    /// Flush and fsync the spool, build the posting column over a map of it, hand that column to
+    /// `write`, and delete the spool file once `write` has succeeded.
+    pub(crate) fn finish(
+        self,
+        write: impl FnOnce(LargeBinaryArray) -> io::Result<()>,
+    ) -> io::Result<()> {
         let file = self
             .writer
             .into_inner()
@@ -230,32 +252,58 @@ impl PostingsSpool {
             // path produces for zero records (and for all-empty records) anyway.
             Buffer::from_vec(Vec::<u8>::new())
         } else {
-            let mapping = unsafe { memmap2::Mmap::map(&file) }?;
-            if mapping.len() != total {
+            let buffer = mapped_buffer(&file)?;
+            if buffer.len() != total {
                 return Err(invalid_data(format!(
                     "postings spool is {} bytes but the offset table accounts for {total}",
-                    mapping.len()
+                    buffer.len()
                 )));
             }
-            let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
-            // SAFETY: same argument as `PostingsReader::open`'s mmap arm — `arc` owns the
-            // mapping for as long as any Buffer built from it is alive (captured as the
-            // buffer's `Allocation`), the mapping is valid for `total` bytes for its entire
-            // lifetime, and memmap2::Mmap never returns a null base pointer.
-            let ptr = NonNull::new(arc.as_ptr() as *mut u8)
-                .expect("memmap2::Mmap never returns a null base pointer");
-            unsafe { Buffer::from_custom_allocation(ptr, total, arc) }
+            buffer
         };
         drop(file);
 
         let offsets = OffsetBuffer::new(ScalarBuffer::from(self.offsets));
         let array = LargeBinaryArray::try_new(offsets, values, None)
             .map_err(|e| invalid_data(e.to_string()))?;
-        write_posting_array(postings_path, array)?;
+        write(array)?;
 
-        // The map over the spool was dropped with the array inside `write_posting_array`;
-        // the spool is only removed once `postings.arrow` is fully written.
+        // The map over the spool was dropped with the array inside `write`; the spool is only
+        // removed once the file it fed is fully written.
         std::fs::remove_file(&self.spool_path)
+    }
+}
+
+/// Streaming counterpart to [`write_posting_records`]: encoded records (see [`encode_posting`])
+/// are spooled to a temporary file as they arrive — record ordinal = term id — with only the
+/// Arrow offset table held in memory (one `i64` per record, plus a leading zero). `finish`
+/// memory-maps the spool as the column's values buffer and writes `postings.arrow` through the
+/// same IPC-writer invocation as [`write_posting_records`], so the output is byte-for-byte the
+/// file that function would write from the same records; the reader's single-record-batch
+/// layout constraint (see [`PostingsReader`]) is met the same way, with one batch.
+pub struct PostingsSpool {
+    spool: RecordSpool,
+}
+
+impl PostingsSpool {
+    /// Create (truncating) the spool file at `spool_path`.
+    pub fn create(spool_path: &Path) -> io::Result<Self> {
+        Ok(PostingsSpool {
+            spool: RecordSpool::create(spool_path)?,
+        })
+    }
+
+    /// Append the next term's encoded record. Records must arrive in term order; ordinal in the
+    /// finished file = term id.
+    pub fn append(&mut self, record: &[u8]) -> io::Result<()> {
+        self.spool.append(record)
+    }
+
+    /// Flush and fsync the spool, write `postings.arrow` at `postings_path` from it, and delete
+    /// the spool file on success.
+    pub fn finish(self, postings_path: &Path) -> io::Result<()> {
+        self.spool
+            .finish(|array| write_posting_array(postings_path, array))
     }
 }
 
@@ -287,6 +335,61 @@ pub enum PostingRef<'a> {
     Roaring(BitmapView<'a>),
 }
 
+impl PostingRef<'_> {
+    /// How many entities this posting holds.
+    pub fn cardinality(&self) -> u64 {
+        match self {
+            PostingRef::Array(bytes) => (bytes.len() / 4) as u64,
+            PostingRef::Roaring(view) => view.cardinality(),
+        }
+    }
+
+    /// Append this posting's entities to `out`, ascending.
+    pub fn extend_into(&self, out: &mut Vec<u32>) {
+        match self {
+            PostingRef::Array(bytes) => {
+                // A tag-0 payload's length is validated as a multiple of 4 once, at open time, and
+                // is not re-checked per lookup: a violation here would mean that validation was
+                // bypassed, not that this call site needs its own fail-closed handling.
+                debug_assert!(
+                    bytes.len() % 4 == 0,
+                    "tag-0 posting payload length must be a multiple of 4 (validated at open)"
+                );
+                for chunk in bytes.chunks_exact(4) {
+                    out.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+                }
+            }
+            PostingRef::Roaring(view) => out.extend(view.iter()),
+        }
+    }
+}
+
+/// Union `postings` into one bitmap: Roaring sources through [`Bitmap::fast_or`] — croaring's
+/// binding for `roaring_bitmap_or_many` — and tag-0 arrays decoded, concatenated, sorted and folded
+/// in with `add_many`, so a Roaring posting is never materialised as a `Vec<u32>`.
+///
+/// The result is not `run_optimize`d; a caller that persists it does that itself.
+pub(crate) fn union_postings<'a>(postings: impl IntoIterator<Item = PostingRef<'a>>) -> Bitmap {
+    let mut views: Vec<BitmapView<'a>> = Vec::new();
+    let mut small: Vec<u32> = Vec::new();
+    for posting in postings {
+        match posting {
+            PostingRef::Roaring(view) => views.push(view),
+            array => array.extend_into(&mut small),
+        }
+    }
+
+    let refs: Vec<&Bitmap> = views.iter().map(|view| &**view).collect();
+    let mut union = if refs.is_empty() {
+        Bitmap::new()
+    } else {
+        Bitmap::fast_or(&refs)
+    };
+    small.sort_unstable();
+    union.add_many(&small);
+    union
+}
+
 /// Reads `postings.arrow`. Holds the backing bytes (either an owned buffer or a memory map);
 /// [`PostingRef`]s returned by [`PostingsReader::posting`] borrow from that backing storage
 /// without copying.
@@ -302,20 +405,7 @@ impl PostingsReader {
     /// open or on lookup.
     pub fn open(path: &Path, mmap: bool) -> io::Result<Self> {
         let buffer = if mmap {
-            let file = File::open(path)?;
-            let mapping = unsafe { memmap2::Mmap::map(&file) }?;
-            let len = mapping.len();
-            let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
-            // SAFETY: `arc` owns the mapping for as long as any Buffer built from it is alive
-            // (the Arc is captured as the buffer's `Allocation`), and the mapping is valid for
-            // `len` bytes for its entire lifetime.
-            // memmap2::Mmap never returns a null base pointer (even the zero-length map case
-            // uses a valid, non-null dangling-style allocation internally) — see memmap2's
-            // `MmapInner` construction, which always goes through a real `mmap(2)`/`VirtualAlloc`
-            // call or a dedicated empty-map sentinel address, never a null pointer.
-            let ptr = NonNull::new(arc.as_ptr() as *mut u8)
-                .expect("memmap2::Mmap never returns a null base pointer");
-            unsafe { Buffer::from_custom_allocation(ptr, len, arc) }
+            mapped_buffer(&File::open(path)?)?
         } else {
             let data = std::fs::read(path)?;
             Buffer::from_vec(data)

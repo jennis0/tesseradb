@@ -63,11 +63,11 @@
 use std::io;
 use std::sync::Arc;
 
-use croaring::{Bitmap, BitmapView};
+use croaring::Bitmap;
 
 use tessera_types::TermId;
 
-use crate::postings::{encode_posting_bitmap, PostingRef, PostingsReader, PostingsSpool};
+use crate::postings::{encode_posting_bitmap, union_postings, PostingsReader, PostingsSpool};
 use crate::tier::DeltaTier;
 
 /// Run the sweep: ascending term ordinals `0..dict_len`.
@@ -113,40 +113,13 @@ where
         // a descriptor was promoted after the last build, both rely on this. `base.posting` and
         // `DeltaTier::posting` already answer it that way; this loop just has to not treat `None`
         // as anything but "contributes nothing".
-        let base_posting = base.posting(term)?;
-        let tier_postings: Vec<Option<PostingRef<'_>>> = tiers
-            .iter()
-            .map(|tier| tier.posting(term))
-            .collect::<io::Result<Vec<_>>>()?;
-
-        let mut views: Vec<BitmapView<'_>> = Vec::new();
-        let mut small: Vec<u32> = Vec::new();
-        for posting in base_posting
-            .into_iter()
-            .chain(tier_postings.into_iter().flatten())
-        {
-            match posting {
-                PostingRef::Roaring(view) => views.push(view),
-                PostingRef::Array(bytes) => {
-                    debug_assert!(
-                        bytes.len() % 4 == 0,
-                        "tag-0 posting payload length must be a multiple of 4 (validated at open)"
-                    );
-                    for chunk in bytes.chunks_exact(4) {
-                        small.push(u32::from_le_bytes(chunk.try_into().unwrap()));
-                    }
-                }
-            }
+        let mut sources = Vec::new();
+        sources.extend(base.posting(term)?);
+        for tier in tiers {
+            sources.extend(tier.posting(term)?);
         }
 
-        let refs: Vec<&Bitmap> = views.iter().map(|view| &**view).collect();
-        let mut union = if refs.is_empty() {
-            Bitmap::new()
-        } else {
-            Bitmap::fast_or(&refs)
-        };
-        small.sort_unstable();
-        union.add_many(&small);
+        let mut union = union_postings(sources);
 
         // The one tombstone operand, applied whole — never a per-term walk of its members.
         union -= tombstones;

@@ -27,21 +27,18 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arrow::array::{Array, LargeBinaryArray, LargeBinaryBuilder, UInt32Array};
-use arrow::buffer::Buffer;
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::writer::FileWriter;
-use arrow::record_batch::RecordBatch;
 
 use tessera_types::TermId;
 
 use crate::postings::{
-    decode_single_batch, encode_posting, invalid_data, read_posting, PostingRef,
+    decode_single_batch, encode_posting, invalid_data, mapped_buffer, read_posting,
+    write_single_batch, PostingRef, RecordSpool,
 };
 
 const TERM_COLUMN_NAME: &str = "term_id";
@@ -102,8 +99,11 @@ pub fn write_delta_tier(
     entries: &[(TermId, Vec<u32>)],
     small_term_threshold: u32,
 ) -> io::Result<()> {
-    let raw: Vec<(u32, Vec<u32>)> = entries.iter().map(|(t, e)| (t.raw(), e.clone())).collect();
-    write_delta_tier_at(path, &raw, small_term_threshold)
+    write_tier_entries(
+        path,
+        entries.iter().map(|(t, e)| (t.raw(), e.as_slice())),
+        small_term_threshold,
+    )
 }
 
 /// The same writer, addressed by bare record ordinals — the format core
@@ -113,19 +113,32 @@ pub fn write_delta_tier_at(
     entries: &[(u32, Vec<u32>)],
     small_term_threshold: u32,
 ) -> io::Result<()> {
-    if !entries.windows(2).all(|w| w[0].0 < w[1].0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "write_delta_tier: term ids must be strictly ascending (sorted, no duplicates)",
-        ));
-    }
+    write_tier_entries(
+        path,
+        entries.iter().map(|(t, e)| (*t, e.as_slice())),
+        small_term_threshold,
+    )
+}
 
-    let mut terms: Vec<u32> = Vec::with_capacity(entries.len());
+/// Both public writers' body, over whatever they have to iterate: neither holds a `Vec` of its own,
+/// so a `TermId`-keyed caller costs no copy of its entity lists.
+fn write_tier_entries<'a>(
+    path: &Path,
+    entries: impl IntoIterator<Item = (u32, &'a [u32])>,
+    small_term_threshold: u32,
+) -> io::Result<()> {
+    let mut terms: Vec<u32> = Vec::new();
     let mut postings = LargeBinaryBuilder::new();
     for (term, entities) in entries {
-        terms.push(*term);
+        if terms.last().is_some_and(|last| term <= *last) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "write_delta_tier: term ids must be strictly ascending (sorted, no duplicates)",
+            ));
+        }
+        terms.push(term);
         postings.append_value(encode_posting(
-            *term as usize,
+            term as usize,
             entities,
             small_term_threshold,
         )?);
@@ -134,14 +147,9 @@ pub fn write_delta_tier_at(
     write_keyed_array(path, UInt32Array::from(terms), postings.finish())
 }
 
-/// The single schema/batch/IPC-writer invocation behind [`write_delta_tier_at`] and
-/// [`KeyedPostingsSpool::finish`].
-///
-/// Byte-identity between the buffered and spooled paths requires this to be literally the same
-/// code, not two copies that could drift — the same argument [`crate::PostingsSpool`] and
-/// `write_posting_records` share `write_posting_array` under. Neither column carries a validity
-/// buffer: the builder path appends no nulls, the spool path passes `None` explicitly, and a
-/// spurious all-valid buffer would change the file's bytes.
+/// [`crate::postings::write_single_batch`] with the keyed tier schema. Neither column carries a
+/// validity buffer: the builder path appends no nulls, the spool path passes `None` explicitly, and
+/// a spurious all-valid buffer would change the file's bytes.
 fn write_keyed_array(
     path: &Path,
     terms: UInt32Array,
@@ -151,17 +159,7 @@ fn write_keyed_array(
         Field::new(TERM_COLUMN_NAME, DataType::UInt32, false),
         Field::new(POSTING_COLUMN_NAME, DataType::LargeBinary, false),
     ]));
-    let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(terms), Arc::new(postings)])
-        .map_err(|e| invalid_data(e.to_string()))?;
-
-    let file = File::create(path)?;
-    let mut writer = FileWriter::try_new(std::io::BufWriter::new(file), &schema)
-        .map_err(|e| invalid_data(e.to_string()))?;
-    writer
-        .write(&batch)
-        .map_err(|e| invalid_data(e.to_string()))?;
-    writer.finish().map_err(|e| invalid_data(e.to_string()))?;
-    Ok(())
+    write_single_batch(path, schema, vec![Arc::new(terms), Arc::new(postings)])
 }
 
 /// A keyed postings file written key by key, across as many bands as its producer needs.
@@ -182,10 +180,7 @@ fn write_keyed_array(
 /// `None` for keys it holds and a duplicate makes one record unreachable, and a disappeared posting
 /// is items a viewer is entitled to simply not being there.
 pub struct KeyedPostingsSpool {
-    spool_path: PathBuf,
-    writer: std::io::BufWriter<File>,
-    /// Arrow LargeBinary offsets: `offsets[i]..offsets[i + 1]` bounds record `i`; leading 0.
-    offsets: Vec<i64>,
+    spool: RecordSpool,
     keys: Vec<u32>,
     small_term_threshold: u32,
 }
@@ -193,18 +188,8 @@ pub struct KeyedPostingsSpool {
 impl KeyedPostingsSpool {
     /// Create (truncating) the spool file at `spool_path`.
     pub fn create(spool_path: &Path, small_term_threshold: u32) -> io::Result<Self> {
-        // Read access is required as well as write: `finish` memory-maps the spool through this
-        // same handle, and mapping a write-only descriptor fails with EACCES.
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(spool_path)?;
         Ok(KeyedPostingsSpool {
-            spool_path: spool_path.to_path_buf(),
-            writer: std::io::BufWriter::new(file),
-            offsets: vec![0],
+            spool: RecordSpool::create(spool_path)?,
             keys: Vec::new(),
             small_term_threshold,
         })
@@ -226,21 +211,7 @@ impl KeyedPostingsSpool {
             }
         }
         let record = encode_posting(key as usize, entities, self.small_term_threshold)?;
-        let last = *self
-            .offsets
-            .last()
-            .expect("offsets holds a leading 0 from create");
-        let len = i64::try_from(record.len()).map_err(|_| {
-            invalid_data(format!(
-                "posting record of {} bytes is too large",
-                record.len()
-            ))
-        })?;
-        let next = last
-            .checked_add(len)
-            .ok_or_else(|| invalid_data("keyed postings spool exceeds i64::MAX total bytes"))?;
-        self.writer.write_all(&record)?;
-        self.offsets.push(next);
+        self.spool.append(&record)?;
         self.keys.push(key);
         Ok(())
     }
@@ -256,54 +227,8 @@ impl KeyedPostingsSpool {
 
     /// Assemble the file at `path` from the spool, and delete the spool on success.
     pub fn finish(self, path: &Path) -> io::Result<()> {
-        let file = self
-            .writer
-            .into_inner()
-            .map_err(io::IntoInnerError::into_error)?;
-        // The spool is about to be read back through a memory map; its bytes must be durable and
-        // visible before the map is taken.
-        file.sync_all()?;
-
-        let total = *self
-            .offsets
-            .last()
-            .expect("offsets holds a leading 0 from create");
-        let total = usize::try_from(total).map_err(|_| {
-            invalid_data("keyed postings spool total exceeds usize on this platform")
-        })?;
-
-        let values = if total == 0 {
-            // memmap2 rejects zero-length maps; an empty values buffer is what the builder path
-            // produces for zero records (and for all-empty records) anyway.
-            Buffer::from_vec(Vec::<u8>::new())
-        } else {
-            let mapping = unsafe { memmap2::Mmap::map(&file) }?;
-            if mapping.len() != total {
-                return Err(invalid_data(format!(
-                    "keyed postings spool is {} bytes but the offset table accounts for {total}",
-                    mapping.len()
-                )));
-            }
-            let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
-            // SAFETY: the same argument as `PostingsSpool::finish`'s — `arc` owns the mapping for
-            // as long as any Buffer built from it is alive (captured as the buffer's
-            // `Allocation`), the mapping is valid for `total` bytes for its entire lifetime, and
-            // memmap2::Mmap never returns a null base pointer.
-            let ptr = NonNull::new(arc.as_ptr() as *mut u8)
-                .expect("memmap2::Mmap never returns a null base pointer");
-            unsafe { Buffer::from_custom_allocation(ptr, total, arc) }
-        };
-        drop(file);
-
-        let offsets =
-            arrow::buffer::OffsetBuffer::new(arrow::buffer::ScalarBuffer::from(self.offsets));
-        let postings = LargeBinaryArray::try_new(offsets, values, None)
-            .map_err(|e| invalid_data(e.to_string()))?;
-        write_keyed_array(path, UInt32Array::from(self.keys), postings)?;
-
-        // The map over the spool was dropped with the array inside `write_keyed_array`; the spool
-        // is only removed once the file is fully written.
-        std::fs::remove_file(&self.spool_path)
+        let KeyedPostingsSpool { spool, keys, .. } = self;
+        spool.finish(|postings| write_keyed_array(path, UInt32Array::from(keys), postings))
     }
 }
 
@@ -325,16 +250,7 @@ pub struct DeltaTier {
 
 impl DeltaTier {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let file = File::open(path)?;
-        let mapping = unsafe { memmap2::Mmap::map(&file) }?;
-        let len = mapping.len();
-        let arc: Arc<memmap2::Mmap> = Arc::new(mapping);
-        // SAFETY: identical to `PostingsReader::open`'s — `arc` owns the mapping for as long as
-        // any `Buffer` built from it is alive, the mapping is valid for `len` bytes for its whole
-        // lifetime, and memmap2 never returns a null base pointer.
-        let ptr = NonNull::new(arc.as_ptr() as *mut u8)
-            .expect("memmap2::Mmap never returns a null base pointer");
-        let buffer = unsafe { Buffer::from_custom_allocation(ptr, len, arc) };
+        let buffer = mapped_buffer(&File::open(path)?)?;
 
         let batch = decode_single_batch(&buffer, "delta tier")?;
         if batch.num_columns() != 2 {
@@ -494,19 +410,11 @@ pub fn coalesce_delta_tiers(
     let mut by_term: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for path in inputs {
         let tier = DeltaTier::open(path)?;
-        for term in tier.terms().collect::<Vec<_>>() {
+        for term in tier.terms() {
             let Some(posting) = tier.posting(term)? else {
                 continue;
             };
-            let entities = by_term.entry(term.raw()).or_default();
-            match posting {
-                PostingRef::Roaring(view) => entities.extend(view.iter()),
-                PostingRef::Array(bytes) => {
-                    for chunk in bytes.chunks_exact(4) {
-                        entities.push(u32::from_le_bytes(chunk.try_into().unwrap()));
-                    }
-                }
-            }
+            posting.extend_into(by_term.entry(term.raw()).or_default());
         }
     }
 
