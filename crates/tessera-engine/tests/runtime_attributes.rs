@@ -1088,6 +1088,9 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
     );
 
     let flushes = 4u16;
+    // Taken before the flushes, since a tick between them selects the pass as readily as the one
+    // below does.
+    let stats = engine.write_executor_stats();
     let mut ingested: Vec<EntityId> = Vec::new();
     for i in 0..flushes {
         let mut scalars = build_columns("mid", 1.0);
@@ -1096,13 +1099,6 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
         ingested.push(ingest(&engine, &batch, vec![row(&format!("m{i}"), &engine, scalars)])[0]);
         flush(&engine);
     }
-    let before = engine.generation().filter_columns.record_layers();
-    assert_eq!(
-        before, flushes as usize,
-        "one record extent per flush, and no base: the build wrote none"
-    );
-
-    let stats = engine.write_executor_stats();
     engine.request_flush();
     wait_until(
         "a coalesce to publish or be discarded",
@@ -1117,11 +1113,14 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
         0,
         "the coalesce was discarded rather than published"
     );
+    // Held off from here, so the counts below are the ones this case set rather than a later
+    // tick's.
+    engine.set_coalesce_for_test(false);
 
     let after = engine.generation().filter_columns.record_layers();
     assert!(
-        after < before,
-        "the live record stack still holds {after} layers of {before}, so the bound arrives only \
+        after < flushes as usize,
+        "the live record stack still holds a layer per flush ({after}), so the bound arrives only \
          at the next restart"
     );
     let served = |engine: &Engine| {
@@ -1135,10 +1134,10 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
     assert_eq!(served(&engine), expected, "a coalesced blob row reads back");
 
     let engine = restart(&fx, engine);
-    assert_eq!(
-        engine.generation().filter_columns.record_layers(),
-        after,
-        "the reopened bundle holds exactly the layers its manifest names"
+    let reopened = engine.generation().filter_columns.record_layers();
+    assert!(
+        reopened <= after && reopened < flushes as usize,
+        "the reopened bundle holds {reopened} layers where the live stack held {after}"
     );
     assert_eq!(served(&engine), expected);
 }

@@ -177,6 +177,7 @@ pub use columns::successor::{
     CoalescedTextWindow, CoalescedWindow, PublishedExtent, TextExtentPaths,
 };
 pub use columns::{FilterColumns, ValueLayers};
+pub(crate) use columns::{open_entity_terms_stack, open_record_stack};
 pub(crate) use declared::{
     blob_resident, carries_live_view, owes_postings, owes_value_column, scoped_owes_postings,
     scoped_visibility_of,

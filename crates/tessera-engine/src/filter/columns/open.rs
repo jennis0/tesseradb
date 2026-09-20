@@ -178,6 +178,49 @@ fn text_extent_layers<'a>(
         .collect()
 }
 
+/// The record blob's stack for one partition: the base the schema owes, plus every extent named.
+///
+/// **The base is owed exactly when the compiled schema has a blob-resident column** — one with no
+/// other home ([`blob_resident`], records §3) — and a column declared at a running service has
+/// extents alone until a fold writes the base, so `unfolded` names the columns that owe none.
+/// Derived from the schema rather than probed for on disk, so a missing base is a refusal, never
+/// "those entities have no record".
+///
+/// **Two callers, one rule.** [`FilterColumns::open`] composes the stack at a restart, and a
+/// coalesce's publication re-derives it from the rebased manifest; a rule written twice would have
+/// one of them demand a base the other does not, and the coalesce would be discarded every time.
+pub(crate) fn open_record_stack(
+    partition_dir: &Path,
+    declared: &[tessera_store::manifest::DeclaredScalar],
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    unfolded: &[String],
+    extents: &[RecordExtentPaths],
+    access: tessera_filter::Access,
+) -> Result<RecordStack, tessera_filter::RecordError> {
+    let owes_base = declared
+        .iter()
+        .any(|d| !unfolded.iter().any(|name| name == &d.name) && blob_resident(d, vocabularies));
+    let record_dir = partition_dir.join("attrs").join("record");
+    RecordStack::open(owes_base.then_some(record_dir.as_path()), extents, access)
+}
+
+/// The entity→term transpose's stack for one partition: the base and every extent named.
+///
+/// **The base is unconditional**, where the blob's is schema-dependent: every entity has a label
+/// set, so a build always writes one. A bundle that lacks it refuses the open rather than reading
+/// as "no entity carries a term" — the fail-open direction on the write path, where the join
+/// rule's label arm compares against it (`views.md` §4). [`open_record_stack`]'s two callers open
+/// this one too, and for the same reason.
+pub(crate) fn open_entity_terms_stack(
+    partition_dir: &Path,
+    extents: &[tessera_store::EntityTermsExtentPaths],
+) -> Result<tessera_store::EntityTermsStack, tessera_store::StoreError> {
+    tessera_store::EntityTermsStack::open(
+        Some(&partition_dir.join(tessera_store::ENTITY_TERMS_DIR)),
+        extents,
+    )
+}
+
 /// The stack a column declared at a running service opens with before any fold: no base, no
 /// postings, the extents composed later (`ingest.md` §6.3). `None` for a column with no
 /// entity-space home, which holds no stack at all.
@@ -402,16 +445,6 @@ impl FilterColumns {
                 columns.insert(name, column);
             }
         }
-        // The record blob's base is owed exactly when the compiled schema has a blob-resident
-        // column — one with no other home ([`blob_resident`], records §3). Derived from the schema
-        // rather than probed for on disk, so a missing base is a refusal at open, never "those
-        // entities have no record".
-        // A column declared at a running service has extents alone until a fold writes the
-        // base, so only a column the build or a fold declared makes the base owed.
-        let blob_resident = declared.iter().any(|d| {
-            !unfolded.iter().any(|name| name == &d.name) && blob_resident(d, vocabularies)
-        });
-        let record_dir = partition_dir.join("attrs").join("record");
         // **Both lists, one stack.** Artifact content extents hold the same format and the same
         // reader as a point's; they are listed separately because their *ownership* differs (see
         // `SegmentsManifest::artifact_record_extents`), not their bytes. Opening them together is
@@ -426,18 +459,17 @@ impl FilterColumns {
                 directory: prefix_dir.join(&e.directory),
             })
             .collect();
-        let records = RecordStack::open(
-            blob_resident.then_some(record_dir.as_path()),
+        let records = open_record_stack(
+            &partition_dir,
+            declared,
+            vocabularies,
+            unfolded,
             &extent_paths,
             request_access(mmap),
         )
         .map_err(record_open_error)?;
-        // **The transpose's base is unconditional**, where the blob's is schema-dependent: every
-        // entity has a label set, so a build always writes one. A bundle that lacks it refuses the
-        // open rather than reading as "no entity carries a term" — the fail-open direction on the
-        // write path, where the join rule's label arm compares against it (`views.md` §4).
-        let entity_terms = tessera_store::EntityTermsStack::open(
-            Some(&partition_dir.join(tessera_store::ENTITY_TERMS_DIR)),
+        let entity_terms = open_entity_terms_stack(
+            &partition_dir,
             &entity_terms_extents
                 .iter()
                 .map(|e| tessera_store::EntityTermsExtentPaths {

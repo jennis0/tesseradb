@@ -765,10 +765,7 @@ impl Executor {
                 .iter()
                 .map(|e| entity_terms_extent_paths(&prefix_dir, e))
                 .collect();
-            match tessera_store::EntityTermsStack::open(
-                Some(&partition_dir.join(tessera_store::ENTITY_TERMS_DIR)),
-                &extents,
-            ) {
+            match crate::filter::open_entity_terms_stack(&partition_dir, &extents) {
                 Ok(stack) => Some(Arc::new(stack)),
                 Err(e) => {
                     discard(&format!(
@@ -792,15 +789,6 @@ impl Executor {
                 let partition_dir = prefix_dir
                     .join("partitions")
                     .join(&completed.plan.partition);
-                // The schema decides whether there is a base, exactly as it does at open: a build
-                // writes `attrs/record` only where a column has no other home. Derived rather than
-                // probed for, so a missing base refuses instead of reading as "those entities have no
-                // record".
-                let blob_resident =
-                    live.bundle.manifest.declared_scalars.iter().any(|d| {
-                        crate::filter::blob_resident(d, &live.bundle.manifest.vocabularies)
-                    });
-                let record_dir = partition_dir.join("attrs").join("record");
                 // Both lists, one stack, as the open composes them: an artifact's content extents
                 // hold the same format and the same reader, and the two never share an entity.
                 let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
@@ -809,8 +797,15 @@ impl Executor {
                     .chain(manifest.artifact_record_extents.iter())
                     .map(|e| record_extent_paths(&prefix_dir, e))
                     .collect();
-                match tessera_filter::RecordStack::open(
-                    blob_resident.then_some(record_dir.as_path()),
+                // The columns whose base no fold has written yet, which the schema owes no base
+                // for — the list `Engine::open` passes, so this stack and the one a restart opens
+                // are the same stack.
+                let unfolded = self.live.with_attributes(|a| a.entity_names());
+                match crate::filter::open_record_stack(
+                    &partition_dir,
+                    &live.bundle.manifest.declared_scalars,
+                    &live.bundle.manifest.vocabularies,
+                    &unfolded,
                     &extents,
                     live.filter_columns.access(),
                 ) {
