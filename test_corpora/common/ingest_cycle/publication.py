@@ -85,6 +85,28 @@ def json_list(entities: np.ndarray) -> bytes:
     return b"[" + cell.tobytes()[:-1] + b"]"
 
 
+def roster_table(path: Path) -> pa.Table:
+    """A roster, with `parent` as a **list of keys** whichever way the file spells it.
+
+    A rung writes one parent per artifact as a string column and several as a list, and an artifact
+    with none is null in both. Read as it is written, a string is a sequence of characters: every
+    edge is then counted once per character, declared against keys no layer holds, and none is
+    published. Normalised here, where the file is read, so every reader below sees one shape.
+    """
+    table = pq.read_table(path)
+    if "parent" not in table.schema.names:
+        return table
+    at = table.schema.get_field_index("parent")
+    kind = table.schema.field(at).type
+    if pa.types.is_list(kind) or pa.types.is_large_list(kind):
+        return table
+    listed = pa.array(
+        [[] if parent is None else [parent] for parent in table.column("parent").to_pylist()],
+        pa.list_(pa.string()),
+    )
+    return table.set_column(at, pa.field("parent", listed.type), listed)
+
+
 def in_parent_order(table: pa.Table) -> pa.Table:
     """A roster's rows reordered so that no artifact precedes a parent of its own.
 
@@ -288,7 +310,7 @@ class Publication:
         bucket_rows: int,
         limits: dict,
     ):
-        self.table = in_parent_order(pq.read_table(roster))
+        self.table = in_parent_order(roster_table(roster))
         self.rows = self.table.to_pylist()
         self.keys = [row["key"] for row in self.rows]
         self.held = set(self.keys)
