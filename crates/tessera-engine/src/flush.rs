@@ -586,10 +586,8 @@ pub(crate) struct CompletedFlush {
     pub(crate) entity_terms_extent: tessera_store::manifest::EntityTermsExtent,
     /// The `(family, view)` pairs this flush gave a column; a view left off this list renders nothing on restart.
     pub(crate) scoped_columns: Vec<(String, String)>,
-    /// The incarnation of [`FlushContext::view`] this flush wrote under.
-    pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     /// The incarnation of the view [`CompletedFlush::scoped_columns`] names, which under a
-    /// sharing door is not [`CompletedFlush::incarnation`].
+    /// sharing door is the owning group's rather than the flushing view's.
     pub(crate) scoped_incarnation: tessera_types::view::ViewIncarnation,
     /// This flush's text layers, one per indexed `text` column, composed onto the live generation at publication.
     pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
@@ -908,7 +906,6 @@ fn execute_flush_stages(
         entity_terms_extent,
         text_extents,
         scoped_columns,
-        incarnation: ctx.incarnation,
         scoped_incarnation: ctx.scoped_incarnation,
         files,
         dict: promotion.dict,
@@ -2238,7 +2235,7 @@ mod tests {
             TextTarget {
                 prefix_dir: dir.path(),
                 seg_id: "flush-1-0",
-                incarnation: tessera_types::view::DECLARED_INCARNATION,
+                scoped_incarnation: tessera_types::view::DECLARED_INCARNATION,
             },
             None,
         )

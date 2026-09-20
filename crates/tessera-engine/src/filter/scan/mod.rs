@@ -32,7 +32,11 @@ pub(in crate::filter) fn scan_layer(
 }
 
 /// One operand against one layer's value column. The dispatch is on the operand, never the value.
-pub(in crate::filter) fn scan(values: &ValueColumn, operand: &FilterOperand, candidate: &Bitmap) -> Bitmap {
+pub(in crate::filter) fn scan(
+    values: &ValueColumn,
+    operand: &FilterOperand,
+    candidate: &Bitmap,
+) -> Bitmap {
     match operand {
         FilterOperand::Equals(v) => values.scan_eq(candidate, *v),
         FilterOperand::In(vs) => values.scan_in(candidate, vs),

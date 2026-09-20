@@ -94,7 +94,11 @@ pub(in crate::filter) fn keyword_ordinals(
 /// The ordinals are handed to the value column as `AttrLocalId`, minted from this layer's
 /// dictionary and consumed by this layer's column alone: a comparand for the width of one call,
 /// not an identity.
-pub(in crate::filter) fn scan_ordinals(values: &ValueColumn, predicate: &OrdinalPredicate, candidate: &Bitmap) -> Bitmap {
+pub(in crate::filter) fn scan_ordinals(
+    values: &ValueColumn,
+    predicate: &OrdinalPredicate,
+    candidate: &Bitmap,
+) -> Bitmap {
     match predicate {
         OrdinalPredicate::Eq(ordinal) => values.scan_eq(candidate, AttrLocalId::new(*ordinal)),
         OrdinalPredicate::In(ordinals) => {
@@ -162,7 +166,10 @@ const NARROW_PROBE_NS: u64 = 100;
 /// dictionary's key count is a property of the bundle, identical for every principal. Neither
 /// depends on the needle: the same request over the same mask takes the same route whether the
 /// value exists or not.
-pub(in crate::filter) fn contains_route(candidate_entities: u64, dictionary_keys: u64) -> ContainsRoute {
+pub(in crate::filter) fn contains_route(
+    candidate_entities: u64,
+    dictionary_keys: u64,
+) -> ContainsRoute {
     if candidate_entities.saturating_mul(NARROW_PROBE_NS)
         < dictionary_keys.saturating_mul(BROAD_KEY_NS)
     {
