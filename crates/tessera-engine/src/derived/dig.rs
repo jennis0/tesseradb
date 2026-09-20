@@ -131,21 +131,9 @@ pub fn dig_rings(points: &[[u32; 2]], budget: usize) -> (Vec<Vec<[u32; 2]>>, boo
     dig_rings_within(points, budget, QUANTISE_DIVISIONS, None)
 }
 
-/// [`dig_rings`] over a set that is **already reduced**: the same dig with no quantising step at
-/// all.
-///
-/// `hull_cost` holds the reduction to a binning written from the definition, and the claim it makes
-/// is that the two sets dig to byte-identical rings. That needs a dig over a set the caller
-/// supplies, because [`dig_rings`] reduces what it is given — it does, on two of one layer's 192
-/// artifacts — and would then be comparing two different clouds.
-#[doc(hidden)]
-pub fn dig_rings_of(representatives: &[[u32; 2]], budget: usize) -> Vec<Vec<[u32; 2]>> {
-    dig_rings_within(representatives, budget, 0, None).0
-}
-
 /// [`dig_rings`] at a quantising resolution the caller names, `0` meaning none, and with
 /// `points`'s own bounding box already in hand — see [`concave_rings`].
-fn dig_rings_within(
+pub(super) fn dig_rings_within(
     points: &[[u32; 2]],
     budget: usize,
     divisions: u32,

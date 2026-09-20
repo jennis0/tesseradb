@@ -618,7 +618,7 @@ const OCTAGON_MARGIN: f64 = 65_536.0;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::derived::dig::{bridge_threshold, concave_rings, dig_rings_of, DIG_BUDGET};
+    use crate::derived::dig::{bridge_threshold, concave_rings, dig_rings_within, DIG_BUDGET};
     use crate::derived::geometry::convex_hull;
     use crate::derived::test_support::*;
 
@@ -793,7 +793,7 @@ mod tests {
         assert!(quantise(&members, QUANTISE_DIVISIONS, REDUCTION_FLOOR, None).is_none());
         assert_eq!(
             concave_rings(&members, None),
-            dig_rings_of(&members, DIG_BUDGET)
+            dig_rings_within(&members, DIG_BUDGET, 0, None).0
         );
     }
 

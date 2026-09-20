@@ -68,7 +68,7 @@ use croaring::Bitmap;
 pub use tessera_types::layer::ComputedProperty;
 
 use dig::concave_rings;
-pub use dig::{dig_rings, dig_rings_of};
+pub use dig::dig_rings;
 pub use locator::RowLocator;
 pub use reduce::quantised;
 

@@ -17,9 +17,9 @@
 //!
 //! **It also asserts, and exits non-zero.** While real memberships are in hand it holds the
 //! engine's run-folding reduction to a plain hash-map binning that shares no code with it: the
-//! representative sets must be equal and the rings dug from each byte-identical. That is a
-//! correctness differential rather than a measurement, and it is here because this is the only
-//! place a million-member cell arrives.
+//! representative sets must be equal, and the shapes follow, because the dig sorts and
+//! deduplicates the set it is given. That is a correctness differential rather than a measurement,
+//! and it is here because this is the only place a million-member cell arrives.
 //!
 //! Single-threaded throughout — `tessera_engine::derived` is, deliberately, and a timed section
 //! that was not would be measuring a different program.
@@ -38,9 +38,7 @@ use std::time::Instant;
 use clap::Parser;
 use croaring::Bitmap;
 
-use tessera_engine::derived::{
-    compute, dig_rings, dig_rings_of, quantised, ComputedProperty, RowLocator,
-};
+use tessera_engine::derived::{compute, dig_rings, quantised, ComputedProperty, RowLocator};
 use tessera_store::read::{open_bundle, Bundle, SegmentData};
 
 /// The resolution the engine reduces at, **written out here rather than read from it**. This
@@ -405,10 +403,8 @@ one artifact's",
 /// every member into a hash map keyed on the cell and tests every member against the octagon on
 /// its own.
 ///
-/// Two things are checked, and the second is why the first is not enough on its own: the
-/// representative **sets** are equal, and the **rings** the dig produces from each are
-/// byte-identical. Both digs run over the set as it stands ([`dig_rings_of`]), so neither side is
-/// reduced a second time and the two are the one construction over two sets.
+/// What is checked is that the representative **sets** are equal, and the rings follow from that:
+/// the dig sorts and deduplicates what it is given, so two equal sets dig to one shape.
 fn reduction_is_the_definition(
     ordinal: u32,
     positions: &[[u32; 2]],
@@ -439,12 +435,6 @@ fn reduction_is_the_definition(
             engine_set.len(),
             oracle_set.len()
         );
-        return false;
-    }
-    // Unbounded, so the budget cannot mask a difference by stopping both digs at the same vertex
-    // count, and over each set as it stands, so neither is reduced a second time.
-    if dig_rings_of(&engine_set, usize::MAX) != dig_rings_of(&oracle_set, usize::MAX) {
-        eprintln!("artifact {ordinal}: the rings are not byte-identical");
         return false;
     }
     true
