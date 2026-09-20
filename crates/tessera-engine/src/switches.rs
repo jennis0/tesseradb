@@ -37,9 +37,10 @@ impl TestSwitches {
     /// Called inside a row-projection build. Waits if a test asked for the next build to be held.
     #[cfg(feature = "fault-injection")]
     pub(crate) fn hold_projection_build_if_wanted(&self) {
-        use std::sync::atomic::Ordering::SeqCst;
-        if self.projection_build_hold_wanted.swap(false, SeqCst) {
-            while self.projection_build_held.load(SeqCst) {
+        // The ordering is spelled on each line: `check-layers.sh` tells an atomic from a generation
+        // publication by the `Ordering::` beside the call.
+        if self.projection_build_hold_wanted.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            while self.projection_build_held.load(std::sync::atomic::Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
