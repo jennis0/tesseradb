@@ -227,8 +227,7 @@ struct Fixture {
     /// deliberately corrupted a *file* can still reopen the columns: `open_bundle` verifies every
     /// digest, so it refuses first and the reader under test is never reached.
     phash: String,
-    declared: Vec<tessera_store::manifest::DeclaredScalar>,
-    vocabularies: Vec<tessera_store::manifest::ManifestVocabulary>,
+    manifest: tessera_store::manifest::Manifest,
     extents: Vec<tessera_store::manifest::AttrExtent>,
 }
 
@@ -287,16 +286,9 @@ fn fixture() -> Fixture {
     let columns = FilterColumns::open(
         &bundle.join(&prefix),
         &phash,
-        &opened.manifest.declared_scalars,
-        &opened.manifest.scoped_scalars(),
-        &|view: &str| opened.manifest.incarnation_of(view),
-        &opened.manifest.vocabularies,
+        &opened.manifest,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
-        &opened.partitions[&phash].manifest.attr_extents,
-        &opened.partitions[&phash].manifest.record_extents,
-        &opened.partitions[&phash].manifest.artifact_record_extents,
-        &[],
-        &opened.partitions[&phash].manifest.text_extents,
+        tessera_engine::filter::PartitionExtents::of(Some(&opened.partitions[&phash].manifest)),
         &[],
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
@@ -327,8 +319,7 @@ fn fixture() -> Fixture {
         archive_codes,
         prefix,
         phash: phash.clone(),
-        declared: opened.manifest.declared_scalars.clone(),
-        vocabularies: opened.manifest.vocabularies.clone(),
+        manifest: opened.manifest.clone(),
         extents: opened.partitions[&phash].manifest.attr_extents.clone(),
     }
 }
@@ -1085,15 +1076,11 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
         FilterColumns::open(
             &prefix,
             &phash,
-            &opened.manifest.declared_scalars,
-            &opened.manifest.scoped_scalars(),
-            &|view: &str| opened.manifest.incarnation_of(view),
-            &opened.manifest.vocabularies,
-            extents,
-            &[],
-            &[],
-            &[],
-            &[],
+            &opened.manifest,
+            tessera_engine::filter::PartitionExtents {
+                attrs: extents,
+                ..Default::default()
+            },
             &[],
             true,
         )
@@ -2334,17 +2321,13 @@ fn reopen(fx: &Fixture) -> Result<FilterColumns, tessera_engine::filter::Compose
     FilterColumns::open(
         &fx.bundle.join(&fx.prefix),
         &fx.phash,
-        &fx.declared,
-        // No group-scoped family: this fixture declares no view group (`views.md` §5), so no
-        // incarnation is ever asked for.
-        &[],
-        &|_view: &str| None,
-        &fx.vocabularies,
-        &fx.extents,
-        &[],
-        &[],
-        &[],
-        &[],
+        // The manifest as it stood at the build: this fixture declares no view group
+        // (`views.md` §5), so no incarnation is ever asked for.
+        &fx.manifest,
+        tessera_engine::filter::PartitionExtents {
+            attrs: &fx.extents,
+            ..Default::default()
+        },
         &[],
         true,
     )

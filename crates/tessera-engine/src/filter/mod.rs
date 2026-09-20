@@ -176,7 +176,7 @@ use tessera_lifecycle::overlay::Overlay;
 pub use columns::successor::{
     CoalescedTextWindow, CoalescedWindow, OpenedExtent, TextExtentPaths,
 };
-pub use columns::{FilterColumns, ValueLayers};
+pub use columns::{FilterColumns, PartitionExtents, ValueLayers};
 pub(crate) use columns::{open_entity_terms_stack, open_record_stack};
 pub(crate) use declared::{
     blob_resident, carries_live_view, owes_postings, owes_value_column, scoped_owes_postings,

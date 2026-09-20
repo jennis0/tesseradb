@@ -258,6 +258,41 @@ pub(super) fn runtime_layers(
     )))
 }
 
+/// Every extent list one partition's side-manifest names, as [`FilterColumns::open`] reads them:
+/// the base each artefact class owes plus whatever has been published since, always the full
+/// shape, so a restart composes what was published even while no flush writes one.
+///
+/// Borrowed rather than taken from the manifest inside, because a caller may hold a list the
+/// manifest does not — a test reopening one corrupted extent, and the empty default a freshly
+/// built bundle has for every class.
+#[derive(Default, Clone, Copy)]
+pub struct PartitionExtents<'a> {
+    pub attrs: &'a [tessera_store::manifest::AttrExtent],
+    pub records: &'a [tessera_store::manifest::RecordExtent],
+    /// An artifact's content extents, listed apart from a point's because their *ownership*
+    /// differs rather than their bytes.
+    pub artifact_records: &'a [tessera_store::manifest::RecordExtent],
+    pub entity_terms: &'a [tessera_store::manifest::EntityTermsExtent],
+    pub texts: &'a [tessera_store::manifest::TextExtent],
+}
+
+impl<'a> PartitionExtents<'a> {
+    /// The lists one partition's side-manifest names. `None` is a bundle carrying no partition,
+    /// which names none.
+    pub fn of(manifest: Option<&'a tessera_store::manifest::SegmentsManifest>) -> Self {
+        let Some(manifest) = manifest else {
+            return PartitionExtents::default();
+        };
+        PartitionExtents {
+            attrs: &manifest.attr_extents,
+            records: &manifest.record_extents,
+            artifact_records: &manifest.artifact_record_extents,
+            entity_terms: &manifest.entity_terms_extents,
+            texts: &manifest.text_extents,
+        }
+    }
+}
+
 impl FilterColumns {
     /// Open every filter column the manifest declares, with every extent the partition's
     /// side-manifest names.
@@ -282,24 +317,11 @@ impl FilterColumns {
     /// rules that it belongs only to mappings the fold owns and must never be applied to these —
     /// which are the request path's. A `bool` here cannot express it, so the rule is enforced by the
     /// signature rather than by a comment asking the next caller to remember it.
-    #[allow(clippy::too_many_arguments)] // One argument per artefact class the manifest names;
-                                         // bundling them into a struct would be a second shape to keep in step with the manifest.
     pub fn open(
         prefix_dir: &Path,
         partition: &str,
-        declared: &[tessera_store::manifest::DeclaredScalar],
-        // Every group's scoped column families, in manifest order (`views.md` §5).
-        scoped: &[tessera_store::manifest::ScopedScalar],
-        // Which incarnation each view is, from the roster (`Manifest::incarnation_of`,
-        // decision 0115). A family names the views that have a column; this is what places one on
-        // disc, a recreated key's base living beside its predecessor's rather than over it.
-        view_incarnation: &dyn Fn(&str) -> Option<tessera_types::view::ViewIncarnation>,
-        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
-        extents: &[tessera_store::manifest::AttrExtent],
-        record_extents: &[tessera_store::manifest::RecordExtent],
-        artifact_record_extents: &[tessera_store::manifest::RecordExtent],
-        entity_terms_extents: &[tessera_store::manifest::EntityTermsExtent],
-        text_extents: &[tessera_store::manifest::TextExtent],
+        manifest: &tessera_store::manifest::Manifest,
+        extents: PartitionExtents<'_>,
         // The entity-scoped columns declared at a running service that no fold has written a
         // base for: the side manifest's `attributes`, by name (`ingest.md` §6.3). Each opens as
         // an empty stack the extents compose onto; every other declared column's base is
@@ -307,6 +329,14 @@ impl FilterColumns {
         unfolded: &[String],
         mmap: bool,
     ) -> Result<Self, ComposeError> {
+        let declared = &manifest.declared_scalars;
+        let vocabularies = &manifest.vocabularies;
+        // Every group's scoped column families, in manifest order (`views.md` §5).
+        let scoped = manifest.scoped_scalars();
+        // Which incarnation each view is, from the roster (decision 0115). A family names the
+        // views that have a column; this is what places one on disc, a recreated key's base living
+        // beside its predecessor's rather than over it.
+        let view_incarnation = &|view: &str| manifest.incarnation_of(view);
         let partition_dir = prefix_dir.join("partitions").join(partition);
         let mut columns = BTreeMap::new();
         let mut placements = BTreeMap::new();
@@ -349,7 +379,8 @@ impl FilterColumns {
                 )?];
                 text_layers.extend(text_extent_layers(
                     prefix_dir,
-                    text_extents
+                    extents
+                        .texts
                         .iter()
                         .filter(|e| e.column == scalar.name && e.view.is_none()),
                     &scalar.name,
@@ -399,7 +430,7 @@ impl FilterColumns {
         // no per-entity value slot at all, so no drill-down could serve it either. An unindexed
         // scoped `text` column is refused at the declaration, so a text family here is always
         // filterable and always takes the branch below.
-        for family in scoped {
+        for family in &scoped {
             if !family.has_value_column() && !scoped_is_filterable(family) {
                 continue;
             }
@@ -424,7 +455,7 @@ impl FilterColumns {
                 if let Some(text) = column.text_layers_mut() {
                     text.extend(text_extent_layers(
                         prefix_dir,
-                        text_extents.iter().filter(|e| {
+                        extents.texts.iter().filter(|e| {
                             e.column == family.name
                                 && e.view.as_deref() == Some(view_id.as_str())
                                 && carries_live_view(
@@ -449,9 +480,10 @@ impl FilterColumns {
         // `SegmentsManifest::artifact_record_extents`), not their bytes. Opening them together is
         // what makes `fields_of` answer for an artifact entity, and it is safe because the two
         // never share one: artifact ids descend from the ceiling, point ids ascend from zero.
-        let extent_paths: Vec<RecordExtentPaths> = record_extents
+        let extent_paths: Vec<RecordExtentPaths> = extents
+            .records
             .iter()
-            .chain(artifact_record_extents.iter())
+            .chain(extents.artifact_records.iter())
             .map(|e| RecordExtentPaths {
                 blocks: prefix_dir.join(&e.blocks),
                 hasrow: prefix_dir.join(&e.hasrow),
@@ -469,7 +501,8 @@ impl FilterColumns {
         .map_err(record_open_error)?;
         let entity_terms = open_entity_terms_stack(
             &partition_dir,
-            &entity_terms_extents
+            &extents
+                .entity_terms
                 .iter()
                 .map(|e| tessera_store::EntityTermsExtentPaths {
                     hasrow: prefix_dir.join(&e.hasrow),
@@ -487,7 +520,7 @@ impl FilterColumns {
             records: Arc::new(records),
             entity_terms: Arc::new(entity_terms),
         };
-        for extent in extents {
+        for extent in extents.attrs {
             // A key created again shares `(column, view)` with its predecessor, whose extents
             // stay listed until a fold.
             if !carries_live_view(view_incarnation, extent.view.as_deref(), extent.incarnation) {
