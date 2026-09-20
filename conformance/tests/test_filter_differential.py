@@ -32,8 +32,9 @@ What this module covers:
 
 What it deliberately does **not** cover, so the next reader is not left inferring it:
 
-- **I12's frontier half and I3.** There is no label service, no frontier and no
-  `min_visible_members` in the tree, so labels-gate-on-`M_auth` has nothing to gate.
+- **I12's frontier half and I3.** There is no label service and no frontier in the tree, so
+  labels-gate-on-`M_auth` has nothing to gate here. The gate that does decide an artifact, a
+  layer's own `require_member_visibility`, belongs to the artifact surface and not to this one.
   `test_i3_has_no_surface_to_test` pins the absence: the day `/v1/labels` answers, it fails and
   this module owes the coverage.
 - **Rule S over filter results** — a suppressed entity absent from every filter count although

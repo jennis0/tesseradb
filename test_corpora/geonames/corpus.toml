@@ -253,10 +253,10 @@ zoom  = [5, 16]
 source = "members_feature"
 
 # 463,283 artifacts across five levels, against 698 for the taxonomy above — and average members
-# per artifact of 52,979 · 2,784 · 189 · 22.8 · 3.6. The fourth level sits almost entirely under a
-# `min_visible_members` floor of 10, so it is suppressed for nearly every principal. That is
-# correct and it is worth knowing: the level is declared because a boundary ladder that stops at
-# admin3 is not the ladder GeoNames publishes, not because it is expected to serve.
+# per artifact of 52,979 · 2,784 · 189 · 22.8 · 3.6. With 3.6 members each, most of the finest
+# level is served to hardly any principal: a narrow grant reaches a member of few of them. The
+# level is declared because a boundary ladder that stops at admin3 is not the ladder GeoNames
+# publishes, not because it is expected to serve widely.
 #
 # `require_member_visibility = { count = 1 }` with `artifact_visibility = "inherited"` is what makes
 # containment structural rather than declared: a French region is served only to a principal who
