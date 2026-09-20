@@ -286,12 +286,6 @@ impl Engine {
         // Visible. Now — and only now — find the row, so the cost below is never reachable by
         // an identifier the principal may not see.
         //
-        // **The record is assembled from its three homes** (records §3): render fields from the
-        // row's scalar tail, indexed and category fields from their entity-space structures — a
-        // category's code resolved to its vocabulary key — and everything else from one record
-        // blob read. Field identity is the declared *name*, resolved engine-side from the blob's
-        // positional tag; no tag, no entity id and no blob internal reaches the wire (I10).
-        //
         // **Every read below sits strictly after the visibility verdict, so C4 stays closed by
         // construction, not by measure.** The verdict above is the same three constant-time
         // entity-space probes for an identifier that names nothing and one that names an
@@ -301,90 +295,14 @@ impl Engine {
         // decompression is therefore not a probe-able cost: no attacker-drivable path reaches it
         // for an item the principal cannot see (X1's surface, bounded the same way the sidecar's
         // is).
-        let manifest = &generation.bundle.manifest;
-        // **Render columns only in the row read.** The compiled schema includes entity-space and
-        // blob-resident columns, which are absent from `columns.arrow` by design; those are
-        // homes 2 and 3 below, never a column of nulls under a name a client can see.
-        let render_scalars: Vec<_> = manifest.render_scalars().cloned().collect();
+        //
         // The allocator caps entity ids at `u32::MAX` (I9), and inversion produced this one from
         // a 32-bit half; checked rather than cast so a violated invariant fails loudly.
         let entity_raw =
             u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
-        // **Every view this item holds a row in, resolved in one pass.** The `views` array is the
-        // gate-filtered part of this list and the record below is assembled from one row of it, so
-        // a second walk would be a second chance to disagree about which rows exist.
-        //
-        // **Proportionate for one point**: the permutation is the only entity→row bridge (I4,
-        // §5.1) — an O(1) bounds-checked slot read per view, not a scan — and a view holds more
-        // than one segment once anything has flushed, so the *view*-space row must be resolved to
-        // the segment that owns it and to that segment's local index before anything is read
-        // ([`segment_row_of`], which is that resolution's one definition). A position is then two
-        // indexed reads and a bit permutation. So the whole `views` array costs O(views), with no
-        // per-view file read at all, and membership is never served without its position.
-        let mut rows: Vec<(&str, &SegmentData, usize)> = Vec::new();
-        for partition in generation.bundle.partitions.values() {
-            for (view, view_data) in &partition.views {
-                let Some((segment, local)) = segment_row_of(view, view_data, entity)? else {
-                    continue;
-                };
-                rows.push((view.as_str(), segment, local));
-            }
-        }
-        // **Sorted, because the maps above are hash maps.** Both the partitions and a partition's
-        // views iterate in an arbitrary order, so without this the record's home view — and the
-        // `views` array's order — would differ between two identical requests to one process.
-        //
-        // **One entry per view id, without deduplicating for it.** A view id is a key of one
-        // partition's map, and an entity lives in exactly one partition (I5 splits entity space),
-        // so `segment_row_of` can answer for at most one partition and no id can appear twice. The
-        // sort is therefore a total order on distinct ids rather than a grouping, and `views` is a
-        // set. A partitioning that put one entity in two partitions would break that here as it
-        // would break every other entity-space read.
-        rows.sort_unstable_by(|a, b| a.0.cmp(b.0));
-
-        // **The positions, gate-filtered** (`views.md` §6, owner ruling 2026-09-01): one entry per
-        // view of this item's that the session may reach, and nothing at all for the views it may
-        // not. A view failing the gate is absent exactly as a view nobody declared is, so the
-        // array never becomes the one place a gate-failed view is named.
-        //
-        // The position is the view's own grid units — the 64-bit interleave the row stores split
-        // across `morton.u32` and the residual column, deinterleaved through the inverse of what
-        // wrote it. It decodes against the frame `/v1/meta` publishes **for that view** and no
-        // other (decision 0040), which is the whole reason a per-view position is a different
-        // quantity per view rather than one position repeated.
-        let views: Vec<ItemView> = rows
-            .iter()
-            .filter(|(view, _, _)| session.visible_views().contains_view(view))
-            .map(|&(view, segment, local)| {
-                let (x, y) = tessera_spatial::unsplit32(
-                    tessera_types::MortonCode::new(segment.morton.u32()[local]),
-                    segment.columns.residual()[local],
-                );
-                ItemView {
-                    id: view.to_string(),
-                    x,
-                    y,
-                }
-            })
-            .collect();
-
-        // **The record's three homes read a row of a view this principal may reach, where one
-        // exists.** Home 1 is a row read, and the rows are ordered by view id — so without this
-        // the field values would come from whichever view sorts first, a gate-failed one included,
-        // and a sealed view named `a…` would supply the record every principal is served.
-        //
-        // Nothing is disclosed either way: home 1 reads the *declared* render scalars, which are
-        // entity-scoped and hold the same value in every view (a scoped family has no slot in
-        // `declared_scalars`). What the choice buys is that the served record is a fact about a
-        // view the principal knows exists, so nothing about the answer traces back to a view they
-        // may not reach. The fallback is deliberate rather than a fail-closed refusal: a point
-        // held only in views this principal cannot reach is served today and stays served
-        // (`ItemOut::views`), and its record is what it always was.
-        let Some(&(_view, segment, local)) = rows
-            .iter()
-            .find(|(view, _, _)| session.visible_views().contains_view(view))
-            .or_else(|| rows.first())
-        else {
+        let rows = rows_of(&generation, entity)?;
+        let views = item_views(&rows, session.visible_views());
+        let Some(&(_view, segment, local)) = row_to_read(&rows, session.visible_views()) else {
             // Visible in entity space but with no row anywhere: a buffered item awaiting flush.
             // Same `Ok(None)`, same 404 — it has no geometry to return.
             return Ok(None);
@@ -393,92 +311,7 @@ impl Engine {
         // **The scoped values, gate-filtered by the same set and keyed by the group's key** — the
         // key being a view's only address (decision 0113). See [`scoped_values_of`].
         let scoped = scoped_values_of(&generation, session.visible_views(), entity_raw);
-
-        // One value slot per declared column, filled home by home; a column no home
-        // holds a value in stays `None` and is omitted — absence is absence.
-        let mut values: Vec<Option<ScalarOut>> = vec![None; manifest.declared_scalars.len()];
-
-        // Home 1: the row. The same `resolve_scalars` the viewport gather uses, so the
-        // two read paths cannot disagree about what a stored type decodes to.
-        let resolved = resolve_scalars(segment, &render_scalars);
-        for (slot, declared_index) in manifest.render_indices().enumerate() {
-            let Some(view) = &resolved[slot] else {
-                continue;
-            };
-            let d = &manifest.declared_scalars[declared_index];
-            // **Absence is the presence bitmap beside the column, never a zero in it** (decision
-            // 0064), on `flushed_row_scalar`'s rule: a row whose slot the writer marked absent
-            // holds the type's zero as a placeholder and carries no value. A category needs no
-            // bitmap: its absence is the reserved code, which `row_field_out` reads as none.
-            if d.vocabulary.is_none()
-                && !segment
-                    .columns
-                    .presence(&d.name)
-                    .contains(u32::try_from(local).expect("a segment holds fewer than 2^32 rows"))
-            {
-                continue;
-            }
-            values[declared_index] = row_field_out(view, local, d, &generation.vocabularies);
-        }
-
-        // Home 2: entity space — every non-rendered column with a value column (indexed
-        // columns, and the per-viewer vocabulary floor), at drill-down cadence.
-        for (declared_index, d) in manifest.declared_scalars.iter().enumerate() {
-            if d.render || values[declared_index].is_some() {
-                continue;
-            }
-            if let Some(stored) = generation.filter_columns.stored_value(&d.name, entity_raw) {
-                values[declared_index] = stored_field_out(
-                    stored,
-                    d.arrow_type,
-                    d.vocabulary.as_deref(),
-                    &generation.vocabularies,
-                );
-            }
-        }
-
-        // Home 3: the record blob — one block read, strictly after the verdict (see this
-        // method's doc). Fail-closed: a malformed row, a tag past the schema or an
-        // addressing defect refuses the request rather than serving a neighbour's field
-        // under this item's identity (records §3, review B6).
-        if let Some(blob_fields) = generation
-            .filter_columns
-            .records()
-            .fields_of(entity_raw)
-            .map_err(|e| EngineError::Malformed(e.to_string()))?
-        {
-            for field in blob_fields {
-                let declared_index = field.tag as usize;
-                let Some(d) = manifest.declared_scalars.get(declared_index) else {
-                    return Err(EngineError::Malformed(format!(
-                        "a record-blob row carries field tag {} where the schema \
-                         declares {} columns; the blob and the manifest disagree",
-                        field.tag,
-                        manifest.declared_scalars.len()
-                    )));
-                };
-                if values[declared_index].is_none() {
-                    values[declared_index] = stored_field_out(
-                        field.value,
-                        d.arrow_type,
-                        d.vocabulary.as_deref(),
-                        &generation.vocabularies,
-                    );
-                }
-            }
-        }
-
-        let fields = manifest
-            .declared_scalars
-            .iter()
-            .zip(values)
-            .filter_map(|(d, value)| {
-                value.map(|value| ItemField {
-                    name: d.name.clone(),
-                    value,
-                })
-            })
-            .collect();
+        let fields = record_fields(&generation, segment, local, entity_raw)?;
         Ok(Some(ItemOut {
             fields,
             labels: self.labels_for(&generation, session, entity_raw)?,
@@ -493,6 +326,203 @@ impl Engine {
                 .map_err(EngineError::Store)?,
         }))
     }
+}
+
+/// **Every view this item holds a row in, resolved in one pass**, sorted by view id.
+///
+/// The `views` array is the gate-filtered part of this list and the record is assembled from one
+/// row of it, so a second walk would be a second chance to disagree about which rows exist.
+///
+/// **Proportionate for one point**: the permutation is the only entity→row bridge (I4,
+/// §5.1) — an O(1) bounds-checked slot read per view, not a scan — and a view holds more
+/// than one segment once anything has flushed, so the *view*-space row must be resolved to
+/// the segment that owns it and to that segment's local index before anything is read
+/// ([`segment_row_of`], which is that resolution's one definition). A position is then two
+/// indexed reads and a bit permutation. So the whole `views` array costs O(views), with no
+/// per-view file read at all, and membership is never served without its position.
+///
+/// **Sorted, because the maps walked here are hash maps.** Both the partitions and a partition's
+/// views iterate in an arbitrary order, so without this the record's home view — and the
+/// `views` array's order — would differ between two identical requests to one process.
+///
+/// **One entry per view id, without deduplicating for it.** A view id is a key of one
+/// partition's map, and an entity lives in exactly one partition (I5 splits entity space),
+/// so `segment_row_of` can answer for at most one partition and no id can appear twice. The
+/// sort is therefore a total order on distinct ids rather than a grouping, and `views` is a
+/// set. A partitioning that put one entity in two partitions would break that here as it
+/// would break every other entity-space read.
+fn rows_of(
+    generation: &Generation,
+    entity: EntityId,
+) -> Result<Vec<(&str, &SegmentData, usize)>> {
+    let mut rows: Vec<(&str, &SegmentData, usize)> = Vec::new();
+    for partition in generation.bundle.partitions.values() {
+        for (view, view_data) in &partition.views {
+            let Some((segment, local)) = segment_row_of(view, view_data, entity)? else {
+                continue;
+            };
+            rows.push((view.as_str(), segment, local));
+        }
+    }
+    rows.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    Ok(rows)
+}
+
+/// **The positions, gate-filtered** (`views.md` §6, owner ruling 2026-09-01): one entry per
+/// view of this item's that the session may reach, and nothing at all for the views it may
+/// not. A view failing the gate is absent exactly as a view nobody declared is, so the
+/// array never becomes the one place a gate-failed view is named.
+///
+/// The position is the view's own grid units — the 64-bit interleave the row stores split
+/// across `morton.u32` and the residual column, deinterleaved through the inverse of what
+/// wrote it. It decodes against the frame `/v1/meta` publishes **for that view** and no
+/// other (decision 0040), which is the whole reason a per-view position is a different
+/// quantity per view rather than one position repeated.
+fn item_views(
+    rows: &[(&str, &SegmentData, usize)],
+    visible: &crate::gate::VisibleViews,
+) -> Vec<ItemView> {
+    rows.iter()
+        .filter(|(view, _, _)| visible.contains_view(view))
+        .map(|&(view, segment, local)| {
+            let (x, y) = tessera_spatial::unsplit32(
+                tessera_types::MortonCode::new(segment.morton.u32()[local]),
+                segment.columns.residual()[local],
+            );
+            ItemView {
+                id: view.to_string(),
+                x,
+                y,
+            }
+        })
+        .collect()
+}
+
+/// **The row the record's homes read: one of a view this principal may reach, where one
+/// exists.** Home 1 is a row read, and the rows are ordered by view id — so without this
+/// the field values would come from whichever view sorts first, a gate-failed one included,
+/// and a sealed view named `a…` would supply the record every principal is served.
+///
+/// Nothing is disclosed either way: home 1 reads the *declared* render scalars, which are
+/// entity-scoped and hold the same value in every view (a scoped family has no slot in
+/// `declared_scalars`). What the choice buys is that the served record is a fact about a
+/// view the principal knows exists, so nothing about the answer traces back to a view they
+/// may not reach. The fallback is deliberate rather than a fail-closed refusal: a point
+/// held only in views this principal cannot reach is served today and stays served
+/// (`ItemOut::views`), and its record is what it always was.
+fn row_to_read<'a>(
+    rows: &'a [(&str, &SegmentData, usize)],
+    visible: &crate::gate::VisibleViews,
+) -> Option<&'a (&'a str, &'a SegmentData, usize)> {
+    rows.iter()
+        .find(|(view, _, _)| visible.contains_view(view))
+        .or_else(|| rows.first())
+}
+
+/// **The record, assembled from its three homes** (records §3): render fields from the row's
+/// scalar tail, indexed and category fields from their entity-space structures — a category's
+/// code resolved to its vocabulary key — and everything else from one record blob read. Field
+/// identity is the declared *name*, resolved engine-side from the blob's positional tag; no tag,
+/// no entity id and no blob internal reaches the wire (I10).
+///
+/// Reached only after [`Engine::item`]'s visibility verdict, like every other read there.
+fn record_fields(
+    generation: &Generation,
+    segment: &SegmentData,
+    local: usize,
+    entity: u32,
+) -> Result<Vec<ItemField>> {
+    let manifest = &generation.bundle.manifest;
+    // **Render columns only in the row read.** The compiled schema includes entity-space and
+    // blob-resident columns, which are absent from `columns.arrow` by design; those are
+    // homes 2 and 3 below, never a column of nulls under a name a client can see.
+    let render_scalars: Vec<_> = manifest.render_scalars().cloned().collect();
+
+    // One value slot per declared column, filled home by home; a column no home
+    // holds a value in stays `None` and is omitted — absence is absence.
+    let mut values: Vec<Option<ScalarOut>> = vec![None; manifest.declared_scalars.len()];
+
+    // Home 1: the row. The same `resolve_scalars` the viewport gather uses, so the
+    // two read paths cannot disagree about what a stored type decodes to.
+    let resolved = resolve_scalars(segment, &render_scalars);
+    for (slot, declared_index) in manifest.render_indices().enumerate() {
+        let Some(view) = &resolved[slot] else {
+            continue;
+        };
+        let d = &manifest.declared_scalars[declared_index];
+        // **Absence is the presence bitmap beside the column, never a zero in it** (decision
+        // 0064), on `flushed_row_scalar`'s rule: a row whose slot the writer marked absent
+        // holds the type's zero as a placeholder and carries no value. A category needs no
+        // bitmap: its absence is the reserved code, which `row_field_out` reads as none.
+        if d.vocabulary.is_none()
+            && !segment
+                .columns
+                .presence(&d.name)
+                .contains(u32::try_from(local).expect("a segment holds fewer than 2^32 rows"))
+        {
+            continue;
+        }
+        values[declared_index] = row_field_out(view, local, d, &generation.vocabularies);
+    }
+
+    // Home 2: entity space — every non-rendered column with a value column (indexed
+    // columns, and the per-viewer vocabulary floor), at drill-down cadence.
+    for (declared_index, d) in manifest.declared_scalars.iter().enumerate() {
+        if d.render || values[declared_index].is_some() {
+            continue;
+        }
+        if let Some(stored) = generation.filter_columns.stored_value(&d.name, entity) {
+            values[declared_index] = stored_field_out(
+                stored,
+                d.arrow_type,
+                d.vocabulary.as_deref(),
+                &generation.vocabularies,
+            );
+        }
+    }
+
+    // Home 3: the record blob — one block read, strictly after the verdict (see
+    // [`Engine::item`]'s doc). Fail-closed: a malformed row, a tag past the schema or an
+    // addressing defect refuses the request rather than serving a neighbour's field
+    // under this item's identity (records §3, review B6).
+    if let Some(blob_fields) = generation
+        .filter_columns
+        .records()
+        .fields_of(entity)
+        .map_err(|e| EngineError::Malformed(e.to_string()))?
+    {
+        for field in blob_fields {
+            let declared_index = field.tag as usize;
+            let Some(d) = manifest.declared_scalars.get(declared_index) else {
+                return Err(EngineError::Malformed(format!(
+                    "a record-blob row carries field tag {} where the schema \
+                     declares {} columns; the blob and the manifest disagree",
+                    field.tag,
+                    manifest.declared_scalars.len()
+                )));
+            };
+            if values[declared_index].is_none() {
+                values[declared_index] = stored_field_out(
+                    field.value,
+                    d.arrow_type,
+                    d.vocabulary.as_deref(),
+                    &generation.vocabularies,
+                );
+            }
+        }
+    }
+
+    Ok(manifest
+        .declared_scalars
+        .iter()
+        .zip(values)
+        .filter_map(|(d, value)| {
+            value.map(|value| ItemField {
+                name: d.name.clone(),
+                value,
+            })
+        })
+        .collect())
 }
 
 /// One render column's drill-down value, read from the row: a category's code resolved to its
