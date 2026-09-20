@@ -304,7 +304,7 @@ impl FilterColumns {
     /// **A keyword window arrives with the dictionary its coalesce minted, and the two are
     /// installed as one layer.** A coalesce merges the window's dictionaries and renumbers every
     /// ordinal, so the replacement's ordinals name positions in a dictionary no consumed layer
-    /// held. [`CoalescedWindow::dict`] carries it beside the values, [`check_dictionary_pairing`]
+    /// held. [`OpenedExtent::dict`] carries it beside the values, [`check_dictionary_pairing`]
     /// refuses a keyword window without one (and a dictionary on any other family's window), and
     /// the pair becomes a single [`Layer`] in one push — the consumed layers leave and the
     /// replacement enters in the same generation, so no generation ever holds the new ordinals
