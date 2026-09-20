@@ -27,7 +27,7 @@ def census(
     between principals while preserving the sum — the same argument `tessera corpus census` makes
     for per-tile counts (correctness-suite §9.2).
     """
-    full = [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
+    full = serve_battery.full_box(quant)
     out: dict = {}
     for rung in ladder:
         token, _ = serve_battery.authorise(session_base, cred, rung["terms"])
