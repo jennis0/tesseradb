@@ -337,6 +337,17 @@ impl ArtifactRows {
     /// artifact-major, which answers identically, and the caller says so — the one place the
     /// recorded layout and the served one may differ, reached by [`Self::with_column`]'s route.
     pub(super) fn amend_derived(&mut self, added: &[(u32, u32)], row_count: u32) -> bool {
+        self.derived_over(None, added, row_count)
+    }
+
+    /// [`Self::amend_derived`] and [`Self::rebase_derived`]'s one walk: the tile index, and the
+    /// column amended at `added` — over a `span` the merge's rebase gives up first.
+    fn derived_over(
+        &mut self,
+        span: Option<(u32, u32)>,
+        added: &[(u32, u32)],
+        row_count: u32,
+    ) -> bool {
         // **A column-only form has no row form to re-derive from**, so the extents take the same
         // delta the column does: `added` is every `(row, ordinal)` this amendment gave the level,
         // and widening by it is exact where rows are only added ([`TileIndex::amend`]).
@@ -349,7 +360,11 @@ impl ArtifactRows {
         let Some(column) = &mut self.column else {
             return false;
         };
-        if Arc::make_mut(column).amend(added, row_count) {
+        let took = match span {
+            Some((lo, hi)) => Arc::make_mut(column).rebase(lo, hi, added, row_count),
+            None => Arc::make_mut(column).amend(added, row_count),
+        };
+        if took {
             return false;
         }
         self.lose_column();
@@ -434,20 +449,7 @@ impl ArtifactRows {
     pub(super) fn rebase_derived(&mut self, lo: u32, hi: u32, added: &[(u32, u32)], row_count: u32) -> bool {
         // [`Self::amend_derived`]'s rule; the merge is the one amendment whose widening is a
         // superset rather than an equality — see [`TileIndex::amend`].
-        if self.membership.rows_held() {
-            self.index = TileIndex::build(&self.membership, row_count);
-        } else {
-            self.index
-                .amend(added, self.membership.len() as u32, row_count);
-        }
-        let Some(column) = &mut self.column else {
-            return false;
-        };
-        if Arc::make_mut(column).rebase(lo, hi, added, row_count) {
-            return false;
-        }
-        self.lose_column();
-        true
+        self.derived_over(Some((lo, hi)), added, row_count)
     }
 
     /// **The refused amendment's posture, on a form that holds its own bitmaps**: the level goes

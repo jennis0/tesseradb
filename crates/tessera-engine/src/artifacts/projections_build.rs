@@ -56,54 +56,21 @@ impl ArtifactProjections {
         segments_version: u64,
         column_only: bool,
     ) -> (Arc<ArtifactRows>, u64) {
-        let key = ProjectionKey {
-            prefix: prefix.to_string(),
-            view: view.to_string(),
+        let at = Coordinate {
+            prefix,
+            view,
+            layer,
+            level,
             level_version: store.level_version(layer, level),
-            // See [`ProjectionKey::live`]: a value column is evaluated against the geometry; a
-            // stored membership and a spatial one are brought forward with it.
-            live: match predicate {
-                Some(PredicateSource::Attribute(_)) => segments_version,
-                _ => 0,
-            },
         };
-        let map_key = (view.to_string(), layer.to_string(), level);
-
-        if let Some(held) = self
-            .cached
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&map_key)
-        {
-            // **The key and the row space both**, and neither implies the other. The key says the
-            // form describes this level's records; [`ArtifactRows::covers`] says its rows are rows
-            // of this row space — which the key cannot, because a flush and a merge move no term
-            // of it. See that method for why the row space is not simply a fourth term here: a
-            // flush *extends the form* rather than invalidating it, so a form whose rows are one
-            // segment short is a form to extend and not one to rebuild.
-            //
-            // **The level version is a floor and not an equality** (`ingest.md` §1.3, §10 ruling
-            // 6). A write moves the version and the form takes the delta at the next tick, so
-            // between the two the held form is the level as last published: a request is served
-            // that, up to a tick stale, rather than building the level again on the request path.
-            // What it costs is a member not yet in an operator, which is not counted — a count
-            // understates and never the reverse — and a containment test reads the operator and
-            // the cardinality this form published together. Every other term of the key is an
-            // equality: a form under another prefix, or of another view, or of an attribute
-            // predicate whose value column the geometry has moved, describes something else.
-            // **And what it borrowed is still what it borrowed.** A level whose artifacts take
-            // their membership from another's is filed under its *own* version, which a target
-            // that grew did not move; without this term a label would answer over the membership
-            // its cluster had when the form was built (`ArtifactRows::inherited`).
-            if held.key.stale_form_of(&key)
-                && held.rows.covers(space)
-                && held.rows.inherited_current(store)
-            {
-                // **Its own version and not `key`'s**: see the doc above. A form still waiting for
-                // a tick's delta is the level at the earlier version, and that is what anything
-                // derived from it must be filed under.
-                return (Arc::clone(&held.rows), held.key.level_version);
-            }
+        // See [`ProjectionKey::live`]: a value column is evaluated against the geometry; a
+        // stored membership and a spatial one are brought forward with it.
+        let key = at.projection_key(match predicate {
+            Some(PredicateSource::Attribute(_)) => segments_version,
+            _ => 0,
+        });
+        if let Some(served) = self.cached_form(&at, &key, store, space) {
+            return served;
         }
 
         // **Both derivations, and the partition, from one borrow of the store at one level
@@ -119,104 +86,175 @@ impl ArtifactProjections {
         // derivation that has a correct fallback.
         let partition = source
             .filter(|source| source.signature_shaped())
-            .and_then(|source| self.partition_for(prefix, layer, level, store, source));
-        // **A spatial level's membership is assembled from its segments' resolutions**
-        // (`crate::shapes`), in this generation's whole row space, once: open and the fold stage
-        // every segment's piece before this runs, so what happens here is an O(containers) union
-        // per segment; a segment nothing staged is resolved here, which is this build paying for
-        // it and not a request-path fallback. The result is a per-row source and takes the same
-        // road an enumerated level's takes from here — the tile index, the column where the layout
-        // is row-major, the histogram — and from here on the form is maintained as an enumerated
-        // level's is.
-        //
-        // **The fold-written column is claimed only while the generation has no extents.** That
-        // column is over the base rows; a flushed segment's rows lie above them, and a column
-        // that does not label them would count every point ingested since the fold as in no
-        // shape — the staleness a spatial membership must not have. With extents the column is
-        // composed over the assembled form instead.
-        if let Some(PredicateSource::Spatial(spatial)) = predicate {
-            let (joined, assembly) = spatial.level.assemble(spatial.segments);
-            // **A spatial level is filtered by view exactly as an enumerated one is**
-            // (`ArtifactStore::level_in_view`, `views.md` §3.5): a shape belongs to one view of
-            // its group, and one resolved into every view's row space would draw a polygon
-            // published into one quarter on every quarter's map, with a real masked count.
-            let built = ArtifactRows::build_resolved(
-                store.level_in_view(layer, level, view_key(view)),
-                joined,
-                spatial.total_rows,
-                space,
-            )
-            .with_partition(partition);
-            let column = if !layout.is_row_major() {
-                None
-            } else if space.extent_count() == 0 {
-                self.column_for(
-                    prefix,
-                    view,
-                    layer,
-                    level,
-                    key.level_version,
-                    layout,
-                    &built,
-                )
-            } else {
-                let composed = RowColumn::compose_over_base(
-                    built.membership(),
-                    built.base_rows,
-                    built.index().row_count(),
-                    layout,
-                    self.scratch(),
-                )
-                .map(Arc::new);
-                if composed.is_some() {
-                    self.columns_composed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                composed
-            };
-            let from_column = column.is_some();
-            let rows = Arc::new(built.with_column(column));
-            if layout.is_row_major() && !from_column {
-                self.fallbacks
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::warn!(
-                    layer = %layer,
-                    level,
-                    view = %view,
-                    recorded = ?layout,
-                    "this spatial level is recorded row-major and its resolved memberships do \
-                     not partition, so it is served artifact-major. Every answer is unchanged; \
-                     the layout is not"
-                );
+            .and_then(|source| self.partition_for(&at, store, source));
+        let built = match predicate {
+            Some(PredicateSource::Spatial(spatial)) => {
+                self.assembled(&at, spatial, store, space, layout)
             }
-            tracing::info!(
-                layer = %layer,
-                level,
-                view = %view,
-                ordinals = rows.index().len(),
-                segments = spatial.segments.len(),
-                staged = assembly.staged,
-                resolved = assembly.resolved,
-                rows_tested = assembly.rows_tested,
-                resolve_ms = assembly.resolve_ms,
-                elapsed_ms = assembly.elapsed_ms,
-                layout = ?rows.layout(),
-                "a spatial level's row form is assembled from its segments' resolutions"
-            );
-            self.builds
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let version = key.level_version;
-            self.insert_newest(
-                map_key,
-                Held {
-                    key,
-                    at: segments_version,
-                    rows: Arc::clone(&rows),
-                },
-            );
-            return (rows, version);
+            Some(PredicateSource::Attribute(attribute)) => {
+                self.claimed_or_projected(&at, store, space, layout, Some(attribute), column_only)
+            }
+            None => self.claimed_or_projected(&at, store, space, layout, None, column_only),
+        };
+        self.filed(&at, key, segments_version, built.with_partition(partition))
+    }
+
+    /// The form held for this coordinate where it still answers for the caller's row space, and the
+    /// version it is the level at.
+    fn cached_form(
+        &self,
+        at: &Coordinate<'_>,
+        key: &ProjectionKey,
+        store: &ArtifactStore,
+        space: &RowSpace,
+    ) -> Option<(Arc<ArtifactRows>, u64)> {
+        let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        let held = cached.get(&at.address())?;
+        // **The key and the row space both**, and neither implies the other. The key says the
+        // form describes this level's records; [`ArtifactRows::covers`] says its rows are rows
+        // of this row space — which the key cannot, because a flush and a merge move no term
+        // of it. See that method for why the row space is not simply a fourth term here: a
+        // flush *extends the form* rather than invalidating it, so a form whose rows are one
+        // segment short is a form to extend and not one to rebuild.
+        //
+        // **The level version is a floor and not an equality** (`ingest.md` §1.3, §10 ruling
+        // 6). A write moves the version and the form takes the delta at the next tick, so
+        // between the two the held form is the level as last published: a request is served
+        // that, up to a tick stale, rather than building the level again on the request path.
+        // What it costs is a member not yet in an operator, which is not counted — a count
+        // understates and never the reverse — and a containment test reads the operator and
+        // the cardinality this form published together. Every other term of the key is an
+        // equality: a form under another prefix, or of another view, or of an attribute
+        // predicate whose value column the geometry has moved, describes something else.
+        // **And what it borrowed is still what it borrowed.** A level whose artifacts take
+        // their membership from another's is filed under its *own* version, which a target
+        // that grew did not move; without this term a label would answer over the membership
+        // its cluster had when the form was built (`ArtifactRows::inherited`).
+        if held.key.stale_form_of(key)
+            && held.rows.covers(space)
+            && held.rows.inherited_current(store)
+        {
+            // **Its own version and not `key`'s**: see the doc above. A form still waiting for
+            // a tick's delta is the level at the earlier version, and that is what anything
+            // derived from it must be filed under.
+            return Some((Arc::clone(&held.rows), held.key.level_version));
         }
-        let mut adopted = self.claim_index(prefix, view, layer, level, key.level_version);
+        None
+    }
+
+    /// **The build's tail**: the build counted, the form filed under this coordinate at the
+    /// generation it was built against, and handed back with the version it is the level *at* —
+    /// which is `key`'s and never the store's, for [`Self::get_or_build`]'s reason.
+    fn filed(
+        &self,
+        at: &Coordinate<'_>,
+        key: ProjectionKey,
+        segments_version: u64,
+        built: ArtifactRows,
+    ) -> (Arc<ArtifactRows>, u64) {
+        self.builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let version = key.level_version;
+        let rows = Arc::new(built);
+        self.insert_newest(
+            at.address(),
+            Held {
+                key,
+                at: segments_version,
+                rows: Arc::clone(&rows),
+            },
+        );
+        (rows, version)
+    }
+
+    /// **A spatial level's membership is assembled from its segments' resolutions**
+    /// (`crate::shapes`), in this generation's whole row space, once: open and the fold stage
+    /// every segment's piece before this runs, so what happens here is an O(containers) union
+    /// per segment; a segment nothing staged is resolved here, which is this build paying for
+    /// it and not a request-path fallback. The result is a per-row source and takes the same
+    /// road an enumerated level's takes from here — the tile index, the column where the layout
+    /// is row-major, the histogram — and from here on the form is maintained as an enumerated
+    /// level's is.
+    ///
+    /// **The fold-written column is claimed only while the generation has no extents.** That
+    /// column is over the base rows; a flushed segment's rows lie above them, and a column
+    /// that does not label them would count every point ingested since the fold as in no
+    /// shape — the staleness a spatial membership must not have. With extents the column is
+    /// composed over the assembled form instead.
+    fn assembled(
+        &self,
+        at: &Coordinate<'_>,
+        spatial: &SpatialSource<'_>,
+        store: &ArtifactStore,
+        space: &RowSpace,
+        layout: ServingLayout,
+    ) -> ArtifactRows {
+        let (joined, assembly) = spatial.level.assemble(spatial.segments);
+        // **A spatial level is filtered by view exactly as an enumerated one is**
+        // (`ArtifactStore::level_in_view`, `views.md` §3.5): a shape belongs to one view of
+        // its group, and one resolved into every view's row space would draw a polygon
+        // published into one quarter on every quarter's map, with a real masked count.
+        let built = ArtifactRows::build_resolved(
+            store.level_in_view(at.layer, at.level, view_key(at.view)),
+            joined,
+            spatial.total_rows,
+            space,
+        );
+        let column = if !layout.is_row_major() {
+            None
+        } else if space.extent_count() == 0 {
+            self.column_for(at, layout, &built)
+        } else {
+            self.composed_column(&built, layout)
+        };
+        let from_column = column.is_some();
+        let rows = built.with_column(column);
+        if layout.is_row_major() && !from_column {
+            self.fallbacks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                layer = %at.layer,
+                level = at.level,
+                view = %at.view,
+                recorded = ?layout,
+                "this spatial level is recorded row-major and its resolved memberships do \
+                 not partition, so it is served artifact-major. Every answer is unchanged; \
+                 the layout is not"
+            );
+        }
+        tracing::info!(
+            layer = %at.layer,
+            level = at.level,
+            view = %at.view,
+            ordinals = rows.index().len(),
+            segments = spatial.segments.len(),
+            staged = assembly.staged,
+            resolved = assembly.resolved,
+            rows_tested = assembly.rows_tested,
+            resolve_ms = assembly.resolve_ms,
+            elapsed_ms = assembly.elapsed_ms,
+            layout = ?rows.layout(),
+            "a spatial level's row form is assembled from its segments' resolutions"
+        );
+        rows
+    }
+
+    /// **This level's row form, transposed out of the column the prefix holds or projected from
+    /// the level's records** — every level but a spatial one, whose rows come from its shapes
+    /// ([`Self::assembled`]).
+    ///
+    /// `attribute` is the value column where this level's membership is one, which changes what is
+    /// claimed and where the served column comes from and nothing else.
+    fn claimed_or_projected(
+        &self,
+        at: &Coordinate<'_>,
+        store: &ArtifactStore,
+        space: &RowSpace,
+        layout: ServingLayout,
+        attribute: Option<&AttributeSource<'_>>,
+        column_only: bool,
+    ) -> ArtifactRows {
+        let mut adopted = self.claim_index(at);
         let from_prefix = adopted.is_some();
         // **A level recorded row-major whose column this prefix holds is transposed, not projected
         // twice** (§5.1). The column *is* the level's membership addressed by row, so the
@@ -228,17 +266,17 @@ impl ArtifactProjections {
         // attribute predicate's column is not a stored membership and is not a candidate for this,
         // and a column that turns out not to cover the level leaves `built` on the projecting
         // route with nothing lost but the walk of the records.
-        let claimed = match predicate {
-            Some(PredicateSource::Attribute(_)) => None,
+        let claimed = match attribute {
+            Some(_) => None,
             _ if !layout.is_row_major() => None,
             _ => self
-                .claim_column(prefix, view, layer, level, key.level_version)
+                .claim_column(at)
                 .filter(|claimed| claimed.layout() == layout)
                 .map(Arc::new),
         };
         let transposed = claimed.as_ref().and_then(|column| {
             ArtifactRows::build_from_column(
-                store.level_in_view(layer, level, view_key(view)),
+                store.level_in_view(at.layer, at.level, view_key(at.view)),
                 space,
                 column,
                 &mut adopted,
@@ -254,100 +292,35 @@ impl ArtifactProjections {
             .is_some_and(|rows| rows.membership().rows_held());
         if claimed.is_some() && !from_prefix_column {
             tracing::warn!(
-                layer = %layer,
-                level,
-                view = %view,
+                layer = %at.layer,
+                level = at.level,
+                view = %at.view,
                 "an adopted row-major column does not cover this level's row space or its \
                  ordinals, so the level's row form is projected; every answer is unchanged"
             );
         }
-        let built = transposed
-            .unwrap_or_else(|| {
-                ArtifactRows::build_over(
-                    store.level_in_view(layer, level, view_key(view)),
-                    space,
-                    adopted.take(),
-                )
-            })
-            .with_partition(partition);
+        let built = transposed.unwrap_or_else(|| {
+            ArtifactRows::build_over(
+                store.level_in_view(at.layer, at.level, view_key(at.view)),
+                space,
+                adopted.take(),
+            )
+        });
         // **The column, claimed from the prefix or composed from the form just built** — and the
         // one place the recorded layout and the served one may differ. A level recorded row-major
         // whose memberships turn out to overlap has no label column to compose, and the fallback is
         // the artifact-major route, which is correct and merely slower than the record asked for.
-        let column = match predicate {
+        let column = match attribute {
             // **The membership *is* the column** (§5.1): the labels come from the value column the
             // predicate names rather than from any stored membership, and the level's own records
             // supply only the ordinal each value's artifact sits at.
-            Some(PredicateSource::Attribute(attribute)) => self.attribute_column(
-                prefix,
-                view,
-                layer,
-                level,
-                key.level_version,
-                store,
-                space,
-                attribute,
-            ),
-            // The claim above already took it, where the prefix held one: `column_for` would
-            // find nothing there and recompose what is in hand.
-            // **A fold-written column is served only while row space has no extents.** It is
-            // addressed by row over the rows the fold folded; a flushed segment's rows lie above
-            // them, and a column that does not label them would count every point ingested since
-            // the fold as in no artifact — the staleness the form's own extension exists against.
-            // With extents the column is composed over the form the transpose just produced, which
-            // is the same choice the spatial branch above makes and for the same reason.
-            _ => match claimed {
-                Some(claimed) if space.extent_count() == 0 => {
-                    self.columns_adopted
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    Some(claimed)
-                }
-                _ => self.column_for(
-                    prefix,
-                    view,
-                    layer,
-                    level,
-                    key.level_version,
-                    layout,
-                    &built,
-                ),
-            },
+            Some(attribute) => self.attribute_column(at, store, space, attribute),
+            None => self.claimed_or_composed(at, claimed, layout, space, &built),
         };
         let from_column = column.is_some();
         let mut built = built.with_column(column);
-        // **A column-only form without its column is not a form at all.** The branch above takes
-        // the claimed column whenever the transpose was skipped — the two are decided by the same
-        // pair of terms — so this cannot fire; it is here because the alternative to firing is a
-        // level whose every membership reads as absent, and the transpose is the answer that costs
-        // rather than the answer that is wrong.
-        if !from_column && !built.membership().rows_held() {
-            tracing::error!(
-                layer = %layer,
-                level,
-                view = %view,
-                "ALARM: a level built from its column alone has no column to serve from; its rows \
-                 are transposed back"
-            );
-            built.membership =
-                MembershipRows::build(store.level_in_view(layer, level, view_key(view)), space);
-            built.index = TileIndex::build(&built.membership, total_rows(space));
-        }
-        // The borrowed memberships come last, after the form is otherwise complete. They replace
-        // the empty membership each record declared, and they invalidate the index derived over it.
-        // See [`ArtifactRows::inherit`].
-        let inherited = built.inherit(store, space, layer, level, view_key(view));
-        if inherited > 0 {
-            tracing::info!(
-                layer = %layer,
-                level,
-                view = %view,
-                artifacts = inherited,
-                borrowed = ?built.inherited,
-                "artifacts of this level declare no membership of their own and take the \
-                 membership of what they attach to; the level is served artifact-major"
-            );
-        }
-        let rows = Arc::new(built);
+        self.transpose_back(at, &mut built, store, space);
+        let inherited = self.inherited(at, &mut built, store, space);
         // **Not the fallback below**, where a recorded layout could not be honoured: a level that
         // borrows is served artifact-major because the borrowed rows are in no column, which the
         // line above has already said.
@@ -355,9 +328,9 @@ impl ArtifactProjections {
             self.fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
-                layer = %layer,
-                level,
-                view = %view,
+                layer = %at.layer,
+                level = at.level,
+                view = %at.view,
                 recorded = ?layout,
                 "this level is recorded row-major and has no column to scan, so it is served \
                  artifact-major: its memberships do not partition, or the fold's file would not \
@@ -374,37 +347,113 @@ impl ArtifactProjections {
         // layout pick reads, so an operator can see what the choice was made from. It is the mean
         // over the form just built, which is the same walk the report at publication makes.
         tracing::info!(
-            layer = %layer,
-            level,
-            view = %view,
-            ordinals = rows.index().len(),
-            everywhere = rows.index().everywhere(),
+            layer = %at.layer,
+            level = at.level,
+            view = %at.view,
+            ordinals = built.index().len(),
+            everywhere = built.index().everywhere(),
             adopted = from_prefix,
             transposed = from_transpose,
-            rows_held = rows.membership().rows_held(),
-            layout = ?rows.layout(),
+            rows_held = built.membership().rows_held(),
+            layout = ?built.layout(),
             // **Absent on a column-only form rather than reported as zero**: the figure is Roaring
             // containers per artifact over the row form, and a form that holds no bitmaps has none
             // to count. A zero there reads as *perfect locality*, which is the opposite of what it
             // would mean.
-            blocks_per_artifact = rows
+            blocks_per_artifact = built
                 .membership()
                 .rows_held()
-                .then(|| rows.membership().blocks_per_artifact()),
+                .then(|| built.membership().blocks_per_artifact()),
             "a level's row form and tile index are built"
         );
-        self.builds
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let version = key.level_version;
-        self.insert_newest(
-            map_key,
-            Held {
-                key,
-                at: segments_version,
-                rows: Arc::clone(&rows),
-            },
+        built
+    }
+
+    /// **The served column of a level whose membership is stored**: the one the prefix held, where
+    /// the claim above took one and the row space is the one it was written over, and otherwise the
+    /// column composed from the form just built.
+    ///
+    /// The claim above already took it, where the prefix held one: `column_for` would
+    /// find nothing there and recompose what is in hand.
+    /// **A fold-written column is served only while row space has no extents.** It is
+    /// addressed by row over the rows the fold folded; a flushed segment's rows lie above
+    /// them, and a column that does not label them would count every point ingested since
+    /// the fold as in no artifact — the staleness the form's own extension exists against.
+    /// With extents the column is composed over the form the transpose just produced, which
+    /// is the same choice the spatial branch above makes and for the same reason.
+    fn claimed_or_composed(
+        &self,
+        at: &Coordinate<'_>,
+        claimed: Option<Arc<RowColumn>>,
+        layout: ServingLayout,
+        space: &RowSpace,
+        built: &ArtifactRows,
+    ) -> Option<Arc<RowColumn>> {
+        match claimed {
+            Some(claimed) if space.extent_count() == 0 => {
+                self.columns_adopted
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(claimed)
+            }
+            _ => self.column_for(at, layout, built),
+        }
+    }
+
+    /// **A column-only form without its column is not a form at all**, so its rows are projected
+    /// back into it. [`Self::claimed_or_composed`] takes the claimed column whenever the transpose
+    /// was skipped — the two are decided by the same
+    /// pair of terms — so this cannot fire; it is here because the alternative to firing is a
+    /// level whose every membership reads as absent, and the transpose is the answer that costs
+    /// rather than the answer that is wrong.
+    fn transpose_back(
+        &self,
+        at: &Coordinate<'_>,
+        built: &mut ArtifactRows,
+        store: &ArtifactStore,
+        space: &RowSpace,
+    ) {
+        if built.column().is_some() || built.membership().rows_held() {
+            return;
+        }
+        tracing::error!(
+            layer = %at.layer,
+            level = at.level,
+            view = %at.view,
+            "ALARM: a level built from its column alone has no column to serve from; its rows \
+             are transposed back"
         );
-        (rows, version)
+        built.membership = MembershipRows::build(
+            store.level_in_view(at.layer, at.level, view_key(at.view)),
+            space,
+        );
+        built.index = TileIndex::build(&built.membership, total_rows(space));
+    }
+
+    /// How many of this level's artifacts took a membership that is not their own.
+    ///
+    /// The borrowed memberships come last, after the form is otherwise complete. They replace
+    /// the empty membership each record declared, and they invalidate the index derived over it.
+    /// See [`ArtifactRows::inherit`].
+    fn inherited(
+        &self,
+        at: &Coordinate<'_>,
+        built: &mut ArtifactRows,
+        store: &ArtifactStore,
+        space: &RowSpace,
+    ) -> usize {
+        let inherited = built.inherit(store, space, at.layer, at.level, view_key(at.view));
+        if inherited > 0 {
+            tracing::info!(
+                layer = %at.layer,
+                level = at.level,
+                view = %at.view,
+                artifacts = inherited,
+                borrowed = ?built.inherited,
+                "artifacts of this level declare no membership of their own and take the \
+                 membership of what they attach to; the level is served artifact-major"
+            );
+        }
+        inherited
     }
 
     /// Take the fold-written index for this `(view, layer, level)` if one was adopted and its
@@ -422,21 +471,14 @@ impl ArtifactProjections {
     /// replace. Only a same-prefix version mismatch drops an entry, and [`Self::adopt_indexes`]
     /// purges whatever was held for a prefix other than the one it adopts under, so an entry
     /// still cannot outlive its prefix.
-    fn claim_index(
-        &self,
-        prefix: &str,
-        view: &str,
-        layer: &str,
-        level: u32,
-        level_version: u64,
-    ) -> Option<TileIndex> {
-        let map_key = (view.to_string(), layer.to_string(), level);
+    fn claim_index(&self, at: &Coordinate<'_>) -> Option<TileIndex> {
+        let map_key = at.address();
         let mut held = self.indexes_held.lock().unwrap_or_else(|e| e.into_inner());
         let (key, _) = held.get(&map_key)?;
-        if key.prefix != prefix {
+        if key.prefix != at.prefix {
             return None;
         }
-        if key.level_version != level_version {
+        if key.level_version != at.level_version {
             // The coordinate has moved under the entry, so nothing will ever claim it. Dropped
             // here rather than left: what makes it stale is what makes it dead weight.
             held.remove(&map_key);
@@ -469,14 +511,9 @@ impl ArtifactProjections {
     /// whose value names no artifact of this level — a code minted after this level's records were
     /// written, or one whose artifact a fold has retired — is a hole, which contributes to nobody's
     /// count. That is the same answer a member row with a null key gets on an enumerated layer.
-    #[allow(clippy::too_many_arguments)]
     fn attribute_column(
         &self,
-        prefix: &str,
-        view: &str,
-        layer: &str,
-        level: u32,
-        level_version: u64,
+        at: &Coordinate<'_>,
         store: &ArtifactStore,
         space: &RowSpace,
         source: &AttributeSource<'_>,
@@ -493,7 +530,7 @@ impl ArtifactProjections {
         let mut ordinal_of_code: std::collections::BTreeMap<u32, u32> =
             std::collections::BTreeMap::new();
         let mut ordinals = 0u32;
-        for (ordinal, record) in store.level(layer, level) {
+        for (ordinal, record) in store.level(at.layer, at.level) {
             ordinals = ordinals.max(ordinal + 1);
             if let Some(code) = record.key.as_deref().and_then(source.code_of_key) {
                 ordinal_of_code.insert(code, ordinal);
@@ -501,11 +538,8 @@ impl ArtifactProjections {
         }
 
         let base_rows = space.base_rows();
-        let map_key = (view.to_string(), layer.to_string(), level);
-        let base_key = IndexKey {
-            prefix: prefix.to_string(),
-            level_version,
-        };
+        let map_key = at.address();
+        let base_key = at.derived_key();
         let held = {
             let bases = self
                 .predicate_bases
@@ -588,21 +622,16 @@ impl ArtifactProjections {
     /// `None` where the level is artifact-major — which has no column — and where a label column
     /// declined to compose because the memberships do not partition. Both are absences rather than
     /// errors: the artifact-major route answers every question the column would have.
-    #[allow(clippy::too_many_arguments)]
     fn column_for(
         &self,
-        prefix: &str,
-        view: &str,
-        layer: &str,
-        level: u32,
-        level_version: u64,
+        at: &Coordinate<'_>,
         layout: ServingLayout,
         rows: &ArtifactRows,
     ) -> Option<Arc<RowColumn>> {
         if !layout.is_row_major() {
             return None;
         }
-        if let Some(claimed) = self.claim_column(prefix, view, layer, level, level_version) {
+        if let Some(claimed) = self.claim_column(at) {
             // **The adopted form has to be the recorded one.** A file adopted under one tag and
             // recorded under another would serve a list where a label column belongs — the
             // manifest's own claim, which `RowColumn::open` already checked against the magic. This
@@ -613,9 +642,20 @@ impl ArtifactProjections {
                 return Some(Arc::new(claimed));
             }
         }
-        // **Over the base rows, with the extent rows as the amendment** — the split a merge's
-        // rebase rests on (`RowColumn::compose_over_base`). A pack composed over a row space that
-        // already carried extents would hold labels at rows the next merge renumbers.
+        self.composed_column(rows, layout)
+    }
+
+    /// This level's row-major column, composed from the form just built — `None` where the
+    /// memberships do not partition and there is no label column to compose.
+    ///
+    /// **Over the base rows, with the extent rows as the amendment** — the split a merge's
+    /// rebase rests on (`RowColumn::compose_over_base`). A pack composed over a row space that
+    /// already carried extents would hold labels at rows the next merge renumbers.
+    fn composed_column(
+        &self,
+        rows: &ArtifactRows,
+        layout: ServingLayout,
+    ) -> Option<Arc<RowColumn>> {
         let composed = RowColumn::compose_over_base(
             rows.membership(),
             rows.base_rows,
@@ -638,21 +678,14 @@ impl ArtifactProjections {
     /// view's row form, and leaving the entry behind would hold a second copy of four bytes a row
     /// for the process's life. An entry held for another prefix is left, for that method's other
     /// reason, and [`Self::adopt_columns`] purges what another prefix held.
-    fn claim_column(
-        &self,
-        prefix: &str,
-        view: &str,
-        layer: &str,
-        level: u32,
-        level_version: u64,
-    ) -> Option<RowColumn> {
-        let map_key = (view.to_string(), layer.to_string(), level);
+    fn claim_column(&self, at: &Coordinate<'_>) -> Option<RowColumn> {
+        let map_key = at.address();
         let mut held = self.columns_held.lock().unwrap_or_else(|e| e.into_inner());
         let (key, _) = held.get(&map_key)?;
-        if key.prefix != prefix {
+        if key.prefix != at.prefix {
             return None;
         }
-        if key.level_version != level_version {
+        if key.level_version != at.level_version {
             held.remove(&map_key);
             return None;
         }
@@ -669,17 +702,12 @@ impl ArtifactProjections {
     /// that has a correct fallback.
     fn partition_for(
         &self,
-        prefix: &str,
-        layer: &str,
-        level: u32,
+        at: &Coordinate<'_>,
         store: &ArtifactStore,
         source: &PartitionSource<'_>,
     ) -> Option<ContainmentPartition> {
-        let key = PartitionKey {
-            prefix: prefix.to_string(),
-            level_version: store.level_version(layer, level),
-        };
-        let map_key = (layer.to_string(), level);
+        let key = at.derived_key();
+        let map_key = at.partition_address();
         if let Some((held, partition)) = self
             .partitions_held
             .lock()
@@ -690,12 +718,13 @@ impl ArtifactProjections {
                 return Some(partition.clone());
             }
         }
-        let partition = match ContainmentPartition::compose(store, layer, level, source.postings) {
+        let partition = match ContainmentPartition::compose(store, at.layer, at.level, source.postings)
+        {
             Ok(partition) => partition,
             Err(error) => {
                 tracing::warn!(
-                    layer = %layer,
-                    level,
+                    layer = %at.layer,
+                    level = at.level,
                     %error,
                     "the containment partition could not be composed from the postings; \
                      containment stays on the masked-count route for this level"

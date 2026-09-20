@@ -86,23 +86,111 @@ impl ArtifactProjections {
         let Some(source) = source else {
             return;
         };
-        let map_key = (view.to_string(), layer.to_string(), level);
-        // **Read under the lock first, and taken out of the map only where there is an amendment
-        // to make.** A request arriving while the entry is out finds nothing held and projects the
-        // level whole, on the request path — the cost this whole mechanism exists to avoid — so
-        // the window is narrowed to the amendment itself (`elapsed_ms` in the line below, 15 ms at
-        // rung 3's `mesh/descriptors`) and a level with no delta to take never leaves the map at
-        // all.
-        //
-        // **Taking it is what makes the amendment cheap**: between requests this thread is then
-        // the `Arc`'s only holder, so `Arc::make_mut` copies nothing. Cloning the entry instead
-        // would leave the map holding a second reference and copy the level's records, generating
-        // sets and tile index on every publication.
+        let address = (view.to_string(), layer.to_string(), level);
+        let Some((Held { key, at, mut rows }, pending, now)) =
+            self.taken_to_publish(&address, prefix, space, deltas)
+        else {
+            return;
+        };
+
+        // **A copy only where a request is still reading this form** — the entry was taken from
+        // the map above, so between requests this thread is the `Arc`'s only holder and `make_mut`
+        // copies nothing. Where a reader does hold it, the copy is the memberships' pointers
+        // (`MembershipRows` holds one `Arc` per bitmap) plus the records, generating sets and tile
+        // index whole, and `cloned_ms` below is what that cost.
+        let started = std::time::Instant::now();
+        let shared = Arc::strong_count(&rows) > 1;
+        let amended = Arc::make_mut(&mut rows);
+        // **The copy alone.** Every arm below is timed by `elapsed_ms`; this is what a concurrent
+        // reader cost, and nothing else is inside it.
+        let cloned_ms = started.elapsed().as_millis() as u64;
+        let applied = Self::applied(amended, &address, store, space, &pending, source);
+        let lost = amended.amend_derived(&applied.added, total_rows(space));
+        amended.covering(space);
+        // **What the interval cost the executor thread**, which is the whole point of applying
+        // deltas rather than projecting the level: `cloned_ms` is the copy a concurrent reader
+        // forces (see above), `elapsed_ms` the amendment and the tile index beside it. Operator
+        // plane only — counts and durations, naming no artifact and no principal.
+        tracing::info!(
+            layer = %layer,
+            level,
+            view = %view,
+            deltas = pending.len(),
+            unions = applied.unions,
+            rederived = applied.rederived,
+            published = applied.published,
+            rows_added = applied.added.len(),
+            cloned = shared,
+            cloned_ms,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "a level's row forms are published from the deltas since the last tick"
+        );
+        // The entry is already out of the map, so a failure here drops it rather than putting it
+        // back.
+        if lost && !self.kept_without_a_column(&address, &mut rows, &applied.added, "amended") {
+            return;
+        }
+        let amended = Arc::make_mut(&mut rows);
+        // **A publication carries the containment partition over; a page of a generating set takes
+        // it away.** The partition is composed from the level's records at a version and answers
+        // per `(ordinal, rank)`. A membership join changes no set, and a publication only appends
+        // ordinals, which `ContainmentAnswers::covers` reports as uncovered and sends to the
+        // masked-count route. A page *does* change a set: against a set that has since grown the
+        // partition's answer is one about a smaller set, which passes for a principal who does not
+        // hold the new member. So the level gives the structure up and serves containment on the
+        // masked-count route, which asks `M_auth` itself.
+        if applied.sets_moved && amended.partition.is_some() {
+            amended.partition = None;
+            tracing::info!(
+                layer = %layer,
+                level,
+                view = %view,
+                "a generating set moved, so this level's containment partition is dropped and \
+                 containment is answered from the mask"
+            );
+        }
+        let key = ProjectionKey {
+            level_version: now,
+            ..key
+        };
+        // **Filed rather than offered.** This runs on the executor, which holds the newest of both
+        // versions: the form came out of the map a moment ago at the live row space, and the
+        // deltas are every write the store has taken. A build that straddled this publication
+        // describes fewer records over no newer a row space, so there is nothing here for
+        // [`Self::insert_newest`] to protect.
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(address, Held { key, at, rows });
+    }
+
+    /// **The form this publication amends, taken out of the map with the deltas it has not yet
+    /// taken** — `None` where nothing is held, where there is nothing to apply, and where what is
+    /// held describes something other than what these deltas follow, each of which this disposes of
+    /// itself.
+    ///
+    /// **Read under the lock first, and taken out of the map only where there is an amendment
+    /// to make.** A request arriving while the entry is out finds nothing held and projects the
+    /// level whole, on the request path — the cost this whole mechanism exists to avoid — so
+    /// the window is narrowed to the amendment itself (`elapsed_ms` in the line below, 15 ms at
+    /// rung 3's `mesh/descriptors`) and a level with no delta to take never leaves the map at
+    /// all.
+    ///
+    /// **Taking it is what makes the amendment cheap**: between requests the caller is then
+    /// the `Arc`'s only holder, so `Arc::make_mut` copies nothing. Cloning the entry instead
+    /// would leave the map holding a second reference and copy the level's records, generating
+    /// sets and tile index on every publication.
+    fn taken_to_publish<'d>(
+        &self,
+        address: &LevelAddress,
+        prefix: &str,
+        space: &RowSpace,
+        deltas: &'d [LevelDelta],
+    ) -> Option<(Held, Vec<&'d LevelDelta>, u64)> {
+        let (view, layer, level) = address;
         let (read_prefix, read_at, pending_from) = {
             let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(held) = cached.get(&map_key) else {
-                return;
-            };
+            let held = cached.get(address)?;
             (held.key.prefix.clone(), held.at, held.key.level_version)
         };
         // **The deltas this form has not taken**, which is those at or after the version it
@@ -120,17 +208,17 @@ impl ArtifactProjections {
         if pending.is_empty() && read_prefix == prefix {
             // The form was built from the store after every delta held here, and it is still the
             // form this prefix serves. Nothing to apply, and it never left the map.
-            return;
+            return None;
         }
-        let Some(Held { key, at, mut rows }) = self
+        let Some(Held { key, at, rows }) = self
             .cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&map_key)
+            .remove(address)
         else {
             // A request replaced or a drop removed the entry between the two locks. Whatever
             // stands there now was filed against the store this delta has already reached.
-            return;
+            return None;
         };
         if key.level_version != pending_from || at != read_at {
             // The same race one step in: the entry that came out is not the one that was read, so
@@ -139,15 +227,15 @@ impl ArtifactProjections {
             self.cached
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(map_key, Held { key, at, rows });
-            return;
+                .insert(address.clone(), Held { key, at, rows });
+            return None;
         }
         // **A form that borrowed is rebuilt rather than amended** ([`Self::drop_borrowed`]). The
         // entry is already out of the map, so returning here is what drops it.
         if !rows.inherited.is_empty() {
             drop(rows);
-            self.drop_borrowed(&map_key, view);
-            return;
+            self.drop_borrowed(address, view);
+            return None;
         }
         // **Every term that would make the amendment describe something other than what is held.**
         // A form from another prefix or at a version no delta follows has missed a write; a form
@@ -181,35 +269,35 @@ impl ArtifactProjections {
                 "a level's held row form could not be published and is dropped; the next \
                  request naming this level projects it whole"
             );
-            return;
+            return None;
         }
+        Some((Held { key, at, rows }, pending, now))
+    }
 
-        // **A copy only where a request is still reading this form** — the entry was taken from
-        // the map above, so between requests this thread is the `Arc`'s only holder and `make_mut`
-        // copies nothing. Where a reader does hold it, the copy is the memberships' pointers
-        // (`MembershipRows` holds one `Arc` per bitmap) plus the records, generating sets and tile
-        // index whole, and `cloned_ms` below is what that cost.
-        let started = std::time::Instant::now();
-        let shared = Arc::strong_count(&rows) > 1;
-        let amended = Arc::make_mut(&mut rows);
-        // **The copy alone.** Every arm below is timed by `elapsed_ms`; this is what a concurrent
-        // reader cost, and nothing else is inside it.
-        let cloned_ms = started.elapsed().as_millis() as u64;
-        // **The rows these deltas gave each artifact**, gathered as the membership takes them, so
-        // the column is amended at exactly those and the pack is never rewritten. Empty on an
-        // artifact-major level, which has no column to amend.
+    /// **Every pending delta applied to the form**, and the operators a page or a fill moved read
+    /// again from the store beside them.
+    ///
+    /// **The operator and the cardinality beside it, from one read of the store.** A
+    /// re-derivation projects the artifact's sets again; a refresh alone takes the declared
+    /// sizes the pages moved. Both read the record as it stands now, which is what makes the
+    /// pair a containment test reads a pair one moment produced.
+    fn applied(
+        amended: &mut ArtifactRows,
+        address: &LevelAddress,
+        store: &ArtifactStore,
+        space: &RowSpace,
+        pending: &[&LevelDelta],
+        source: &DeltaRows<'_>,
+    ) -> Applied {
+        let (view, layer, level) = address;
+        let level = *level;
         let row_major = amended.layout.is_row_major();
-        let mut added: Vec<(u32, u32)> = Vec::new();
-        // The three arms of `ingest.md` §4.1, counted for the line below: sets unioned into the
-        // served operator, operators re-derived whole, and ordinals published.
-        let mut unions = 0u64;
-        let mut published = 0u64;
+        let mut applied = Applied::default();
         // Ordinals whose records entry is read again — a fill's parts, and the stored cardinality
         // a page moved — and those whose operators are re-derived from entity truth.
         let mut refresh: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         let mut rederive: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-        let mut sets_moved = false;
-        for delta in &pending {
+        for delta in pending {
             match &delta.kind {
                 DeltaKind::Grown { joins, pages } => {
                     for (ordinal, joining) in joins {
@@ -217,16 +305,16 @@ impl ArtifactProjections {
                             continue;
                         }
                         let fresh = amended.grow_rows(*ordinal, joining, space);
-                        unions += 1;
+                        applied.unions += 1;
                         if row_major {
-                            added.extend(fresh.iter().map(|row| (row, *ordinal)));
+                            applied.added.extend(fresh.iter().map(|row| (row, *ordinal)));
                         }
                     }
                     for page in pages {
                         if drawn_record(store, layer, level, page.ordinal, view).is_none() {
                             continue;
                         }
-                        sets_moved = true;
+                        applied.sets_moved = true;
                         refresh.insert(page.ordinal);
                         if page.whole {
                             rederive.insert(page.ordinal);
@@ -235,7 +323,7 @@ impl ArtifactProjections {
                         // A join alone: the same set the projection would have produced, reached
                         // by one union over the page's own members.
                         if amended.grow_generating(page.ordinal, page.rank, &page.joining, space) {
-                            unions += 1;
+                            applied.unions += 1;
                         }
                     }
                 }
@@ -254,7 +342,7 @@ impl ArtifactProjections {
                                 if let Some(record) =
                                     drawn_record(store, layer, level, *ordinal, view)
                                 {
-                                    published += 1;
+                                    applied.published += 1;
                                     let fresh = amended.publish_resolved(
                                         *ordinal,
                                         record,
@@ -262,7 +350,7 @@ impl ArtifactProjections {
                                         space,
                                     );
                                     if row_major {
-                                        added.extend(fresh.iter().map(|row| (row, *ordinal)));
+                                        applied.added.extend(fresh.iter().map(|row| (row, *ordinal)));
                                     }
                                 }
                             }
@@ -272,7 +360,7 @@ impl ArtifactProjections {
                 DeltaKind::Published(ordinals) => {
                     for ordinal in ordinals {
                         if let Some(record) = drawn_record(store, layer, level, *ordinal, view) {
-                            published += 1;
+                            applied.published += 1;
                             let fresh = match source {
                                 DeltaRows::Projected => amended.publish_at(*ordinal, record, space),
                                 DeltaRows::Resolved(rows) => amended.publish_resolved(
@@ -283,107 +371,20 @@ impl ArtifactProjections {
                                 ),
                             };
                             if row_major {
-                                added.extend(fresh.iter().map(|row| (row, *ordinal)));
+                                applied.added.extend(fresh.iter().map(|row| (row, *ordinal)));
                             }
                         }
                     }
                 }
             }
         }
-        // **The operator and the cardinality beside it, from one read of the store.** A
-        // re-derivation projects the artifact's sets again; a refresh alone takes the declared
-        // sizes the pages moved. Both read the record as it stands now, which is what makes the
-        // pair a containment test reads a pair one moment produced.
         for ordinal in &refresh {
             if let Some(record) = drawn_record(store, layer, level, *ordinal, view) {
                 amended.refresh_sets(*ordinal, record, space, rederive.contains(ordinal));
             }
         }
-        let lost = amended.amend_derived(&added, total_rows(space));
-        amended.covering(space);
-        // **What the interval cost the executor thread**, which is the whole point of applying
-        // deltas rather than projecting the level: `cloned_ms` is the copy a concurrent reader
-        // forces (see above), `elapsed_ms` the amendment and the tile index beside it. Operator
-        // plane only — counts and durations, naming no artifact and no principal.
-        tracing::info!(
-            layer = %layer,
-            level,
-            view = %view,
-            deltas = pending.len(),
-            unions,
-            rederived = rederive.len(),
-            published,
-            rows_added = added.len(),
-            cloned = shared,
-            cloned_ms,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "a level's row forms are published from the deltas since the last tick"
-        );
-        if lost {
-            self.fallbacks
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // [`Self::extend_flushed`]'s arm: a form that holds no bitmaps takes the list form
-            // rather than falling back to a membership it does not have. The entry is already out
-            // of the map, so a failure here drops it rather than putting it back.
-            if !amended.membership().rows_held() {
-                let recomposed = std::time::Instant::now();
-                let scratch = self.scratch().to_path_buf();
-                if !amended.recompose_as_list(&added, &scratch) {
-                    self.drop_lost_column(&map_key, view);
-                    return;
-                }
-                self.columns_composed
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::warn!(
-                    layer = %layer,
-                    level,
-                    view = %view,
-                    elapsed_ms = recomposed.elapsed().as_millis() as u64,
-                    "this level's amended memberships no longer partition and it is served from \
-                     its column alone, so the column is recomposed in the list form. Every answer \
-                     is unchanged; the layout is not"
-                );
-            } else {
-                tracing::warn!(
-                    layer = %layer,
-                    level,
-                    view = %view,
-                    "this level's amended memberships no longer partition, so it is served \
-                     artifact-major. Every answer is unchanged; the layout is not"
-                );
-            }
-        }
-        // **A publication carries the containment partition over; a page of a generating set takes
-        // it away.** The partition is composed from the level's records at a version and answers
-        // per `(ordinal, rank)`. A membership join changes no set, and a publication only appends
-        // ordinals, which `ContainmentAnswers::covers` reports as uncovered and sends to the
-        // masked-count route. A page *does* change a set: against a set that has since grown the
-        // partition's answer is one about a smaller set, which passes for a principal who does not
-        // hold the new member. So the level gives the structure up and serves containment on the
-        // masked-count route, which asks `M_auth` itself.
-        if sets_moved && amended.partition.is_some() {
-            amended.partition = None;
-            tracing::info!(
-                layer = %layer,
-                level,
-                view = %view,
-                "a generating set moved, so this level's containment partition is dropped and \
-                 containment is answered from the mask"
-            );
-        }
-        let key = ProjectionKey {
-            level_version: now,
-            ..key
-        };
-        // **Filed rather than offered.** This runs on the executor, which holds the newest of both
-        // versions: the form came out of the map a moment ago at the live row space, and the
-        // deltas are every write the store has taken. A build that straddled this publication
-        // describes fewer records over no newer a row space, so there is nothing here for
-        // [`Self::insert_newest`] to protect.
-        self.cached
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(map_key, Held { key, at, rows });
+        applied.rederived = rederive.len();
+        applied
     }
 
     /// **Extend every stored level's held form in one view by the segment a flush has published.**
@@ -480,41 +481,8 @@ impl ArtifactProjections {
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "a level's held row form took a flush's segment"
             );
-            if lost {
-                self.fallbacks
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // **A form that holds no bitmaps takes the list form instead of falling back**:
-                // its column is its membership, so there is nothing to fall back *to*, and the
-                // list form is what a fold would choose for a level that has stopped partitioning
-                // (decision 0094). Composed through the disk-backed partition route from the
-                // column it already holds — nothing row-sized is held.
-                if !rows.membership().rows_held() {
-                    let started = std::time::Instant::now();
-                    let scratch = self.scratch().to_path_buf();
-                    if !Arc::make_mut(&mut rows).recompose_as_list(&added, &scratch) {
-                        self.drop_lost_column(&address, view);
-                        continue;
-                    }
-                    self.columns_composed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::warn!(
-                        layer = %layer,
-                        level,
-                        view = %view,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        "this level's extended memberships no longer partition and it is served from \
-                         its column alone, so the column is recomposed in the list form. Every \
-                         answer is unchanged; the layout is not"
-                    );
-                } else {
-                    tracing::warn!(
-                        layer = %layer,
-                        level,
-                        view = %view,
-                        "this level's extended memberships no longer partition, so it is served \
-                         artifact-major. Every answer is unchanged; the layout is not"
-                    );
-                }
+            if lost && !self.kept_without_a_column(&address, &mut rows, &added, "extended") {
+                continue;
             }
             self.insert_newest(address, Held { key, at, rows });
         }
@@ -613,44 +581,63 @@ impl ArtifactProjections {
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "a level's held row form took a merge's rebase"
             );
-            if lost {
-                self.fallbacks
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // **A form that holds no bitmaps takes the list form instead of falling back**:
-                // its column is its membership, so there is nothing to fall back *to*, and the
-                // list form is what a fold would choose for a level that has stopped partitioning
-                // (decision 0094). Composed through the disk-backed partition route from the
-                // column it already holds — nothing row-sized is held.
-                if !rows.membership().rows_held() {
-                    let started = std::time::Instant::now();
-                    let scratch = self.scratch().to_path_buf();
-                    if !Arc::make_mut(&mut rows).recompose_as_list(&added, &scratch) {
-                        self.drop_lost_column(&address, view);
-                        continue;
-                    }
-                    self.columns_composed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::warn!(
-                        layer = %layer,
-                        level,
-                        view = %view,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        "this level's rebased memberships no longer partition and it is served from \
-                         its column alone, so the column is recomposed in the list form. Every \
-                         answer is unchanged; the layout is not"
-                    );
-                } else {
-                    tracing::warn!(
-                        layer = %layer,
-                        level,
-                        view = %view,
-                        "this level's rebased memberships no longer partition, so it is served \
-                         artifact-major. Every answer is unchanged; the layout is not"
-                    );
-                }
+            if lost && !self.kept_without_a_column(&address, &mut rows, &added, "rebased") {
+                continue;
             }
             self.insert_newest(address, Held { key, at, rows });
         }
+    }
+
+    /// **What a level does when its memberships no longer partition** — the disposition all three
+    /// amendments share, `amendment` naming which one reached it.
+    ///
+    /// A form that holds its own bitmaps goes back to the artifact-major route, which answers
+    /// identically. **A form that holds no bitmaps takes the list form instead of falling back**:
+    /// its column is its membership, so there is nothing to fall back *to*, and the
+    /// list form is what a fold would choose for a level that has stopped partitioning
+    /// (decision 0094). Composed through the disk-backed partition route from the
+    /// column it already holds — nothing row-sized is held.
+    ///
+    /// `false` where that recomposition failed: the form is dropped here and the caller has
+    /// nothing left to file.
+    fn kept_without_a_column(
+        &self,
+        address: &LevelAddress,
+        rows: &mut Arc<ArtifactRows>,
+        added: &[(u32, u32)],
+        amendment: &str,
+    ) -> bool {
+        let (view, layer, level) = address;
+        self.fallbacks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if rows.membership().rows_held() {
+            tracing::warn!(
+                layer = %layer,
+                level,
+                view = %view,
+                "this level's {amendment} memberships no longer partition, so it is served \
+                 artifact-major. Every answer is unchanged; the layout is not"
+            );
+            return true;
+        }
+        let started = std::time::Instant::now();
+        let scratch = self.scratch().to_path_buf();
+        if !Arc::make_mut(rows).recompose_as_list(added, &scratch) {
+            self.drop_lost_column(address, view);
+            return false;
+        }
+        self.columns_composed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!(
+            layer = %layer,
+            level,
+            view = %view,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "this level's {amendment} memberships no longer partition and it is served from \
+             its column alone, so the column is recomposed in the list form. Every answer \
+             is unchanged; the layout is not"
+        );
+        true
     }
 
     /// Every form held for `view` under `prefix`, cloned out of the map so the amendment runs
@@ -733,4 +720,22 @@ impl ArtifactProjections {
              naming this level projects it whole"
         );
     }
+}
+
+/// **What one interval's deltas did to one form** — the three arms of `ingest.md` §4.1, counted for
+/// the line [`ArtifactProjections::publish`] logs.
+#[derive(Default)]
+struct Applied {
+    /// **The rows these deltas gave each artifact**, gathered as the membership takes them, so
+    /// the column is amended at exactly those and the pack is never rewritten. Empty on an
+    /// artifact-major level, which has no column to amend.
+    added: Vec<(u32, u32)>,
+    /// Sets unioned into the served operator.
+    unions: u64,
+    /// Ordinals published.
+    published: u64,
+    /// Operators re-derived whole from entity truth.
+    rederived: usize,
+    /// Whether a page moved a generating set, which is what takes the containment partition away.
+    sets_moved: bool,
 }

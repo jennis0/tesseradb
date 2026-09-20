@@ -147,5 +147,5 @@ pub use view::{ArtifactVerdict, ArtifactView, Withheld};
 
 pub(crate) use rows::view_key;
 
-use projections::{Held, IndexKey, LevelAddress, PartitionKey, ProjectionKey};
+use projections::{Coordinate, Held, LevelAddress, ProjectionKey};
 use rows::{covered_by, drawn_record, total_rows};
