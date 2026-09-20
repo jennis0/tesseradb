@@ -12,35 +12,51 @@ files. **The table is generated; do not hand-edit the marked block.**
 | [`deployment.py`](deployment.py) | boots a `tessera serve` over an existing bundle, on its own ports and scratch state, always inside a transient cgroup scope |
 | [`serve_battery.py`](serve_battery.py) | the view-latency battery — a principal ladder, density-decile locations, three conditions |
 | [`ingest_cycle/`](ingest_cycle/) | the ingest cycle — split, build the complement's **points and declarations**, ingest the hold-out, publish every layer's artifacts, flush, fold, and decision 0091's equivalence test |
+| [`workload.py`](workload.py) | one rung through all of it — build, verify, battery, cycle — and a report of what held and what it cost |
 | `scripts/campaign_report.py assemble` | collates a rung's driver outputs into `measurements.json` on the schema below |
 
 ## Running one rung
 
 ```bash
 export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+python3 -m test_corpora.common.workload --rung arxiv --work /tmp/wl [--quick]
+```
 
-# 1. the build's own record — the flag is on `tessera build`
-tessera build --stage-timings --stage-timings-json stage-timings.json
+That builds `tessera` from this checkout unless `--binary` names one, runs `tessera check` in the
+rung directory, builds the all-in bundle into `<work>/<rung>/bundle`, runs `tessera verify --deep`
+over it, drives the battery and the cycle against it under a 16 GiB cap, and prints two sections: a
+**correctness** line per check, any FAIL making the exit code non-zero, and a **cost** table beside
+the most recent earlier run of the same rung and the same `--quick`. `--quick` is three zooms, three
+deciles, ten samples a cell and a 2% hold-out — about seven minutes on arXiv; full mode is every
+driver's own default and a 10% hold-out.
 
-# 2. the battery, uncapped and capped, against a server you boot (see deployment.py)
-python3 -m test_corpora.common.serve_battery --viewer … --session … --session-cred … \
-    --bundle <bundle> --cache <scratch>/cache --ranks <rung>/branch-ranks.json \
-    --server-pid <pid> --cgroup <scope cgroup> --out serve-nocap.json
+Each run writes `$TESSERA_LADDER/<rung>/workload-results/<timestamp>-<commit>.json`, holding both
+driver results whole. **Those files are not committed**: `data/` is git-ignored, they are the figures
+of one box, and the cost table is the only thing that reads them.
 
-# 3. the ingest cycle, one cell per (fraction, concurrency)
+Ports run from `--port0`, default 8171: the battery takes three and the cycle six. **8111–8143 are
+not available**, other sessions on this checkout use them.
+
+The three drivers also run on their own, which is what a sweep of one knob wants:
+
+```bash
+# the battery against a server it boots itself
+python3 -m test_corpora.common.serve_battery --boot-rung <rung> --boot-bundle <bundle> \
+    --boot-scratch <scratch> --boot-binary <tessera> --boot-port0 8151 \
+    --cap-bytes 17179869184 --out serve-6g.json
+
+# the cycle, one cell per (fraction, concurrency)
 python3 -m test_corpora.common.ingest_cycle --rung-dir <rung> --work <scratch> \
-    --binary <tessera> --fraction 0.10 --concurrency 8 --write-cycle --out ingest-10.json
+    --binary <tessera> --fraction 0.10 --concurrency 8 --write-cycle --state-extent \
+    --all-in-bundle <bundle> --cap-bytes 17179869184 --out ingest-10.json
 
-# 4. collate and render
+# collate and render
 python3 scripts/campaign_report.py assemble --rung medcpt --rows 35920666 \
     --build stage-timings.json --bundle <bundle> \
     --serve serve-nocap.json --serve serve-6g.json --ingest ingest-10.json \
     --out test_corpora/medcpt/measurements.json
 python3 scripts/campaign_report.py
 ```
-
-Ports are the caller's to choose and **8111–8143 are not available**: other sessions on this
-checkout use them.
 
 ## `measurements.json`
 
