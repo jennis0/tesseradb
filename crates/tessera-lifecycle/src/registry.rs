@@ -148,8 +148,8 @@ pub enum RegistryError {
     ///
     /// Two spellings of one edge, disagreeing: the same refusal a build makes when two points name
     /// different parents for one cluster. There is no correct output — choosing between them would
-    /// publish a hierarchy the caller did not write. **A `dag` layer never makes it**: there a
-    /// list column declares no edges at all, so nothing reaches here from one.
+    /// publish a hierarchy the caller did not write. **A `dag` layer never makes it**: its list
+    /// column declares no edges, so no edge reaches here from one.
     ContradictedParent {
         layer: String,
         level: u32,
@@ -348,9 +348,8 @@ pub enum EdgeCheck {
     /// [`LayerRegistry::prepare_parent_fill`].
     Records,
     /// The child does not exist yet and is one of the keys this batch is about to mint, so the edge
-    /// is the minted artifact's own parent rather than a claim about a stored one. **The one route
-    /// by which the wire creates an edge**, and it creates it where the artifact is created — which
-    /// is where lineage has always been settled.
+    /// is the minted artifact's own parent rather than a claim about a stored one. It travels on the
+    /// publication that creates the child.
     Mints,
 }
 

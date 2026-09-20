@@ -1480,7 +1480,7 @@ impl Executor {
         })
     }
 
-    /// Resolve one batch's membership keys, and check the edges its adjacency declared.
+    /// Resolve one batch's membership keys, and decide the edges its adjacency declared.
     ///
     /// Returns the memberships, each carrying the ordinal it resolved to or `None` where an open
     /// layer will mint it at the close, and the edges the close has to settle: the ones whose child
