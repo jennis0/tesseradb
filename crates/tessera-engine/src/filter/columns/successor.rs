@@ -33,19 +33,10 @@ pub struct TextExtentPaths {
 /// are never reused (contracts §2.1), so a path still listed at publication is still the same bytes.
 #[derive(Debug, Clone)]
 pub struct CoalescedWindow {
-    pub column: String,
     /// The consumed extents' values paths, as `attr_extents` names them.
     pub consumed: Vec<String>,
-    /// The coalesced extent's values path.
-    pub values_rel: String,
-    pub values: Arc<ValueColumn>,
-    /// The dictionary the coalesced values are ordinals into — a keyword column's merged
-    /// dictionary, `None` for every other family. It arrives beside the values it numbers, as a
-    /// flush's [`PublishedExtent`] carries its own, and [`FilterColumns::with_coalesced`] installs
-    /// the two as one [`Layer`] or refuses: a keyword window without one has no reading, and a
-    /// dictionary on another family's window means the pass and the schema disagree about what
-    /// the values are.
-    pub dict: Option<Arc<SortedDict>>,
+    /// What replaces them: the entry the manifest takes, and the reader publication pushes.
+    pub replacement: OpenedExtent,
 }
 
 /// One text column's window of extents, and the coalesced extent that replaces them.
@@ -62,15 +53,31 @@ pub struct CoalescedTextWindow {
     pub paths: TextExtentPaths,
 }
 
-/// One flushed extent, as publication hands it over: the column it extends, the prefix-relative
-/// path of its values, the opened column, and — for a keyword — the dictionary those values are
-/// ordinals into.
+/// One extent as publication hands it over — a flush's and a coalesce's alike: the manifest entry
+/// it becomes, the opened column, and, for a keyword, the dictionary those values are ordinals
+/// into.
 ///
-/// **The dictionary travels with the values or not at all**, which is why this is one tuple rather
+/// **The dictionary travels with the values or not at all**, which is why this is one record rather
 /// than two arguments that could disagree: an extent's ordinals are positions in its own
 /// dictionary and name nothing against any other (`records-and-search.md` §4.3), so composition
-/// refuses a half. On disc the same pairing is `AttrExtent`'s single record.
-pub type PublishedExtent = (String, String, Arc<ValueColumn>, Option<Arc<SortedDict>>);
+/// refuses a half. The entry is the same pairing on disc.
+///
+/// **Opened on the pool, so publication is a pointer push** on the executor thread and cannot fail
+/// on IO after the manifest edit.
+#[derive(Debug, Clone)]
+pub struct OpenedExtent {
+    pub extent: tessera_store::manifest::AttrExtent,
+    pub values: Arc<ValueColumn>,
+    pub dict: Option<Arc<SortedDict>>,
+}
+
+impl OpenedExtent {
+    /// The key the column map holds this extent's layer under — the column's own for an
+    /// entity-scoped extent, the resolved form where the entry names a view.
+    fn column_name(&self) -> String {
+        crate::filter::extent_column_name(&self.extent.column, self.extent.view.as_deref())
+    }
+}
 
 impl FilterColumns {
     /// The next generation's columns before anything is added to them: this generation's, with
@@ -104,6 +111,21 @@ impl FilterColumns {
             });
         };
         held.push_extent(column, values_rel, extent, dict)
+    }
+
+    /// Add one opened extent to the column its manifest entry names — the one push every producer
+    /// takes: a flush's extent, a coalesce's replacement, and each entry
+    /// [`FilterColumns::open`] reads at a restart.
+    pub(in crate::filter) fn push_opened(
+        &mut self,
+        opened: &OpenedExtent,
+    ) -> Result<(), ComposeError> {
+        self.compose(
+            &opened.column_name(),
+            &opened.extent.values,
+            Arc::clone(&opened.values),
+            opened.dict.clone(),
+        )
     }
 
     /// This generation's columns with an attribute column declared at a running service added,
@@ -188,8 +210,8 @@ impl FilterColumns {
     ///
     /// Cheap by construction: the base columns are `Arc`s, so a flush that published one entity
     /// clones pointers rather than re-opening a memory-mapped column per declared attribute. Each
-    /// extent is `(column, values path, opened column)`, the path being what the manifest names it
-    /// by and what a later coalesce replaces it by.
+    /// extent carries the entry the manifest takes, whose values path is what a later coalesce
+    /// replaces the layer by.
     ///
     /// A keyword column's extent carries the dictionary the flush minted beside the values it
     /// numbers, so the pair composes as one — see [`FilterColumns::compose`], which refuses either
@@ -197,7 +219,7 @@ impl FilterColumns {
     /// [`FilterColumns::open`] taking each extent's dictionary from `AttrExtent::dict`.
     pub fn with_extents(
         &self,
-        extents: &[PublishedExtent],
+        extents: &[OpenedExtent],
         records: &[RecordExtentPaths],
         entity_terms: &[tessera_store::EntityTermsExtentPaths],
         texts: &[TextExtentPaths],
@@ -256,8 +278,8 @@ impl FilterColumns {
                 self.access,
             )?);
         }
-        for (column, values_rel, extent, dict) in extents {
-            next.compose(column, values_rel, Arc::clone(extent), dict.clone())?;
+        for extent in extents {
+            next.push_opened(extent)?;
         }
         Ok(next)
     }
@@ -349,16 +371,14 @@ impl FilterColumns {
             ..self.successor()
         };
         for window in windows {
-            let Some(held) = next.columns.get_mut(&window.column) else {
-                return Err(ComposeError::UnknownCoalescedColumn {
-                    column: window.column.clone(),
-                });
+            let replacement = &window.replacement;
+            let column = replacement.column_name();
+            let Some(held) = next.columns.get_mut(&column) else {
+                return Err(ComposeError::UnknownCoalescedColumn { column });
             };
-            check_dictionary_pairing(held.family, &window.column, window.dict.is_some())?;
+            check_dictionary_pairing(held.family, &column, replacement.dict.is_some())?;
             let Some(layers) = held.value_layers_mut() else {
-                return Err(ComposeError::UnknownCoalescedColumn {
-                    column: window.column.clone(),
-                });
+                return Err(ComposeError::UnknownCoalescedColumn { column });
             };
             let mut union = Bitmap::new();
             for rel in &window.consumed {
@@ -367,16 +387,16 @@ impl FilterColumns {
                     .find(|l| l.values_rel.as_deref() == Some(rel.as_str()))
                 else {
                     return Err(ComposeError::MissingLayer {
-                        column: window.column.clone(),
+                        column,
                         rel: rel.clone(),
                     });
                 };
                 union |= layer.values.present();
             }
-            if union != window.values.present() {
+            if union != replacement.values.present() {
                 return Err(ComposeError::CoverageMismatch {
-                    column: window.column.clone(),
-                    replacement: window.values.present().cardinality(),
+                    column,
+                    replacement: replacement.values.present().cardinality(),
                     consumed: window.consumed.len(),
                     covered: union.cardinality(),
                 });
@@ -390,9 +410,9 @@ impl FilterColumns {
             // them enter together, checked as a pair above, and the consumed layers left with
             // their own dictionaries in the `retain` above.
             layers.push(Layer {
-                values_rel: Some(window.values_rel.clone()),
-                values: Arc::clone(&window.values),
-                dict: window.dict.clone(),
+                values_rel: Some(replacement.extent.values.clone()),
+                values: Arc::clone(&replacement.values),
+                dict: replacement.dict.clone(),
             });
             // `covered` is unchanged by construction — the equality above is what says so — so it
             // is neither recomputed nor adjusted here.
@@ -543,11 +563,13 @@ mod tests {
         // The merge's output: dictionary [beta, gamma], so 10 -> gamma is ordinal 1 and
         // 11 -> beta is ordinal 0 — neither consumed layer's numbering.
         let window = |dict: Option<Arc<SortedDict>>| CoalescedWindow {
-            column: "sub".to_string(),
             consumed: consumed.clone(),
-            values_rel: "coalesced/c-1/attrs/sub/values.arrow".to_string(),
-            values: partial(&[10, 11], &[1, 0]),
-            dict,
+            replacement: opened(
+                "sub",
+                "coalesced/c-1/attrs/sub/values.arrow",
+                partial(&[10, 11], &[1, 0]),
+                dict,
+            ),
         };
         let next = columns
             .with_coalesced(&[window(Some(dict(&["beta", "gamma"])))], &[], None, None)
@@ -651,9 +673,9 @@ mod tests {
         // The flush's extent, composed onto the generation after the window was planned.
         let live = planned
             .with_extents(
-                &[(
-                    "sub".to_string(),
-                    "extents/f3.arrow".to_string(),
+                &[opened(
+                    "sub",
+                    "extents/f3.arrow",
                     partial(&[12], &[0]),
                     Some(dict(&["gamma"])),
                 )],
@@ -665,11 +687,13 @@ mod tests {
         let next = live
             .with_coalesced(
                 &[CoalescedWindow {
-                    column: "sub".to_string(),
                     consumed: vec!["extents/f1.arrow".into(), "extents/f2.arrow".into()],
-                    values_rel: "coalesced/c-1/attrs/sub/values.arrow".to_string(),
-                    values: partial(&[10, 11], &[1, 0]),
-                    dict: Some(dict(&["beta", "gamma"])),
+                    replacement: opened(
+                        "sub",
+                        "coalesced/c-1/attrs/sub/values.arrow",
+                        partial(&[10, 11], &[1, 0]),
+                        Some(dict(&["beta", "gamma"])),
+                    ),
                 }],
                 &[],
                 None,

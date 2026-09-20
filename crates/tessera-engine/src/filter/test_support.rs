@@ -31,6 +31,30 @@ pub(super) fn partial(entities: &[u32], ordinals: &[u32]) -> Arc<ValueColumn> {
     )
 }
 
+/// An extent as a publication hands one over. Only the column name, the values path and the two
+/// readers are composed from; the rest of the entry is what the manifest carries.
+pub(super) fn opened(
+    column: &str,
+    values_rel: &str,
+    values: Arc<ValueColumn>,
+    dict: Option<Arc<SortedDict>>,
+) -> super::columns::successor::OpenedExtent {
+    super::columns::successor::OpenedExtent {
+        extent: tessera_store::manifest::AttrExtent {
+            column: column.to_string(),
+            view: None,
+            incarnation: None,
+            values: values_rel.to_string(),
+            presence: format!("{values_rel}.roaring"),
+            dict: dict.is_some().then(|| format!("{values_rel}.dict")),
+            postings: None,
+            offsets: None,
+        },
+        values,
+        dict,
+    }
+}
+
 pub(super) fn set(entities: &[u32]) -> Bitmap {
     Bitmap::of(entities)
 }

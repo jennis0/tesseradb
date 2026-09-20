@@ -29,7 +29,7 @@ use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::filter::{
     candidate, ComposeError, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand,
-    Scalar, MAX_FILTER_DEPTH,
+    OpenedExtent, Scalar, MAX_FILTER_DEPTH,
 };
 use tessera_engine::ViewportRequest;
 use tessera_lifecycle::command::UnallocatedRow;
@@ -1114,6 +1114,30 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
     assert!(open(&extents).is_ok(), "restored, it composes again");
 }
 
+/// An extent as a publication hands one over. Only the column name, the values path and the two
+/// readers are composed from; the rest of the entry is what the manifest carries.
+fn opened(
+    column: &str,
+    values_rel: &str,
+    values: Arc<tessera_filter::ValueColumn>,
+    dict: Option<Arc<tessera_filter::SortedDict>>,
+) -> OpenedExtent {
+    OpenedExtent {
+        extent: tessera_store::manifest::AttrExtent {
+            column: column.to_string(),
+            view: None,
+            incarnation: None,
+            values: values_rel.to_string(),
+            presence: format!("{values_rel}.roaring"),
+            dict: dict.is_some().then(|| format!("{values_rel}.dict")),
+            postings: None,
+            offsets: None,
+        },
+        values,
+        dict,
+    }
+}
+
 /// A keyword extent built in this process: the ordinal column and the dictionary that numbers it.
 ///
 /// The two are returned together because they are one layer. An ordinal is a position in **this**
@@ -1169,9 +1193,9 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     let err = fx
         .columns
         .with_extents(
-            &[(
-                "title".to_string(),
-                "attrs/title/extents/overlapping.arrow".to_string(),
+            &[opened(
+                "title",
+                "attrs/title/extents/overlapping.arrow",
                 overlapping,
                 Some(dict),
             )],
@@ -1191,9 +1215,9 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     assert!(fx
         .columns
         .with_extents(
-            &[(
-                "no_such_column".to_string(),
-                "attrs/no_such_column/extents/stray.arrow".to_string(),
+            &[opened(
+                "no_such_column",
+                "attrs/no_such_column/extents/stray.arrow",
                 stray,
                 Some(stray_dict),
             )],
@@ -4048,18 +4072,8 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
         .columns
         .with_extents(
             &[
-                (
-                    "bonus".to_string(),
-                    first.clone(),
-                    extent(&[100, 101]),
-                    None,
-                ),
-                (
-                    "bonus".to_string(),
-                    second.clone(),
-                    extent(&[200, 201]),
-                    None,
-                ),
+                opened("bonus", &first, extent(&[100, 101]), None),
+                opened("bonus", &second, extent(&[200, 201]), None),
             ],
             &[],
             &[],
@@ -4069,11 +4083,8 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
 
     let window =
         |values: Arc<tessera_filter::ValueColumn>| tessera_engine::filter::CoalescedWindow {
-            column: "bonus".to_string(),
             consumed: vec![first.clone(), second.clone()],
-            values_rel: "coalesced/c-1/attrs/bonus/values.arrow".to_string(),
-            values,
-            dict: None,
+            replacement: opened("bonus", "coalesced/c-1/attrs/bonus/values.arrow", values, None),
         };
     let err = columns
         .with_coalesced(&[window(extent(&[100, 101, 200]))], &[], None, None)

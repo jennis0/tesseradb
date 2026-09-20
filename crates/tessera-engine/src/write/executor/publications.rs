@@ -722,16 +722,10 @@ impl Executor {
             .iter()
             .zip(&completed.plan.attrs)
             .map(|(attr, window)| crate::filter::CoalescedWindow {
-                column: crate::filter::extent_column_name(
-                    &attr.extent.column,
-                    attr.extent.view.as_deref(),
-                ),
                 consumed: window.extents.iter().map(|e| e.values.clone()).collect(),
-                values_rel: attr.extent.values.clone(),
-                values: Arc::clone(&attr.values),
-                // A keyword window's merged dictionary, beside the ordinals it numbers; the
-                // composition installs the pair as one layer or refuses.
-                dict: attr.dict.clone(),
+                // A keyword window's merged dictionary travels here beside the ordinals it
+                // numbers; the composition installs the pair as one layer or refuses.
+                replacement: attr.clone(),
             })
             .collect();
         // The text axis's windows, named by dictionary path on both sides. The paths are resolved
@@ -1886,24 +1880,6 @@ impl Executor {
         // extent covers entities that were just issued, which no earlier layer can hold. So this
         // is the same posture as every other flush failure: the files are orphans, the buffer
         // stands, the next tick re-plans.
-        let extents: Vec<crate::filter::PublishedExtent> = completed
-            .filter_extents
-            .iter()
-            .map(|e| {
-                (
-                    // The resolved name for a group-scoped family's column, the column's own for
-                    // an entity-scoped one. One function, so a flush's layer composes under the
-                    // key a leaf resolves to (`filter::extent_column_name`).
-                    crate::filter::extent_column_name(&e.column, e.view.as_deref()),
-                    e.values_rel.clone(),
-                    Arc::clone(&e.values),
-                    // A keyword extent's dictionary travels with its ordinals or the composition
-                    // refuses: the ordinals are positions in this dictionary and name nothing
-                    // against another.
-                    e.dict.clone(),
-                )
-            })
-            .collect();
         // The record extent composes onto the live stack here, not only into the manifest: a
         // published extent that no live stack holds answers no drill-down until the next fold.
         let record_dir = self.bundle_root.join(&completed.prefix);
@@ -1955,7 +1931,7 @@ impl Executor {
             }
         };
         let filter_columns = match live_columns.with_extents(
-            &extents,
+            &completed.filter_extents,
             &record_paths,
             &entity_terms_paths,
             &text_paths,
@@ -2053,26 +2029,7 @@ impl Executor {
         // but absent is a refusal to open (`FilterColumns::open`).
         manifest
             .attr_extents
-            .extend(
-                completed
-                    .filter_extents
-                    .iter()
-                    .map(|e| tessera_store::manifest::AttrExtent {
-                        column: e.column.clone(),
-                        // `None` for an entity-scoped column, which belongs to no view: the
-                        // incarnation follows the view exactly.
-                        incarnation: e.view.as_ref().map(|_| completed.incarnation),
-                        view: e.view.clone(),
-                        values: e.values_rel.clone(),
-                        presence: e.presence_rel.clone(),
-                        // One record, so the layer's files swap as one: an extent's ordinals are
-                        // positions in that extent's dictionary, and a reader that saw a new
-                        // dictionary beside old ordinals would recolour the window.
-                        dict: e.dict_rel.clone(),
-                        postings: None,
-                        offsets: None,
-                    }),
-            );
+            .extend(completed.filter_extents.iter().map(|e| e.extent.clone()));
         // The record-blob extent, under the same two-obligation rule: the three files are already
         // in `files`, and this entry is what makes them reachable. A record stack opens exactly
         // what `record_extents` names, so bytes this list omits answer no drill-down, and bytes

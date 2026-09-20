@@ -9,9 +9,8 @@ use super::{record_open_error, request_access, Column, FilterColumns, Layer, Rou
 use crate::filter::declared::{resolve_analyser, visibility_of};
 use crate::filter::error::ComposeError;
 use crate::filter::{
-    blob_resident, carries_live_view, extent_column_name, owes_postings, owes_value_column,
-    scoped_column_name, scoped_is_filterable, scoped_owes_postings, scoped_visibility_of, Family,
-    Placement,
+    blob_resident, carries_live_view, owes_postings, owes_value_column, scoped_column_name,
+    scoped_is_filterable, scoped_owes_postings, scoped_visibility_of, Family, Placement,
 };
 
 /// Open one view's column of a group-scoped attribute family (`views.md` §5) — the name it is held
@@ -509,12 +508,11 @@ impl FilterColumns {
                     SortedDict::open(&prefix_dir.join(rel), request_access(mmap)).map(Arc::new)
                 })
                 .transpose()?;
-            open.compose(
-                &extent_column_name(&extent.column, extent.view.as_deref()),
-                &extent.values,
-                Arc::new(column),
+            open.push_opened(&crate::filter::OpenedExtent {
+                extent: extent.clone(),
+                values: Arc::new(column),
                 dict,
-            )?;
+            })?;
         }
         Ok(open)
     }

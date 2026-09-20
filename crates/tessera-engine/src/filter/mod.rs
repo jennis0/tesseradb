@@ -174,7 +174,7 @@ use tessera_lifecycle::buffer::IngestBuffer;
 use tessera_lifecycle::overlay::Overlay;
 
 pub use columns::successor::{
-    CoalescedTextWindow, CoalescedWindow, PublishedExtent, TextExtentPaths,
+    CoalescedTextWindow, CoalescedWindow, OpenedExtent, TextExtentPaths,
 };
 pub use columns::{FilterColumns, ValueLayers};
 pub(crate) use columns::{open_entity_terms_stack, open_record_stack};
