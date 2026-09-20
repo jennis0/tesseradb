@@ -16,18 +16,17 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use tessera_build::{build, BuildArgs};
 use tessera_engine::select::{decode_tier, DecodeTier};
 use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{CancelToken, Engine, EngineConfig, EngineError, ViewportOut};
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
 use tessera_plugin::Passthrough;
-use tessera_spatial::{morton_of, tiles_for_bbox, Bounds};
+use tessera_spatial::{morton_of, tiles_for_bbox};
 use tessera_store::read::open_bundle;
 
 use common::*;
@@ -628,135 +627,6 @@ fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_
         got_points, expected_points,
         "points must be a flat concatenation in the reported tile order"
     );
-}
-
-/// Step 3: latency sanity at 2.4M items — a generous local gate (p99 < 50ms); the real 10ms gate
-/// is the exit measurement, at 10⁹. Builds `/tmp/tessera-2m4` from the real corpus if it is not already there
-/// (disk is tight — this bundle is meant to be reused across runs, not deleted after each one).
-///
-/// `#[ignore]`d: this is a real-corpus, multi-second build plus a real timing measurement, not a
-/// fast unit test — run explicitly with `cargo test --release -p tessera-engine --test viewport \
-/// -- --ignored latency_sanity_at_2_4m_p99_under_50ms`.
-#[test]
-#[ignore = "measurement: builds /tmp/tessera-2m4 from the real corpus and times it — release only, see the doc above"]
-fn latency_sanity_at_2_4m_p99_under_50ms() {
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
-    use std::time::Instant;
-
-    const ITEM_LIMIT: u64 = 2_422_486;
-
-    let bundle_root = PathBuf::from("/tmp/tessera-2m4");
-    if !bundle_root.join("CURRENT").exists() {
-        let args = BuildArgs {
-            views: vec![tessera_build::ViewArgs {
-                visibility: None,
-                view_id: "s0".to_string(),
-                projection: tessera_spatial::Projection::None,
-                // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes,
-                // not coordinates (`read_points`'s Morton branch requires this exact extent).
-                extent: Bounds {
-                    x_min: 0.0,
-                    x_max: 65536.0,
-                    y_min: 0.0,
-                    y_max: 65536.0,
-                },
-                points: PathBuf::from("data/scaled/geometry.parquet"),
-                point_fields: Default::default(),
-                select: None,
-                access: tessera_build::config::AccessInput::relation(PathBuf::from(
-                    "data/scaled/pairs/categories-subclass.pairs.parquet",
-                )),
-            }],
-            anchor: 0,
-            groups: Vec::new(),
-            scoped_attributes: Vec::new(),
-            attribute_sources: Vec::new(),
-            out: bundle_root.clone(),
-            limit: Some(ITEM_LIMIT),
-            identity_key: test_key(),
-            identity_key_hex: TEST_KEY_HEX.to_string(),
-            idset: 1,
-            shard_id: 0,
-            layers: Vec::new(),
-            layer_inputs: Vec::new(),
-            scoped_layers: Default::default(),
-            mint_external_ids: true,
-            emit_oracle_pairs: true,
-            batch_items: None,
-            memory_budget: None,
-            band_rows: None,
-            schema: Default::default(),
-        };
-        build(&args).expect("2.4M fixture build should succeed");
-    }
-
-    let tmp = TempDir::new().unwrap();
-    let engine = Engine::open(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        Passthrough::new(),
-        EngineConfig {
-            // **Production defaults, deliberately.** Everything else in this file saturates theta
-            // so that masking assertions do not also depend on the density rule — but this is the
-            // only latency gate in the tree, and under saturation the threshold clause never binds,
-            // `admits` is a constant `true`, and the counting/selecting branch is barely exercised.
-            // It would have measured a path the server does not take. Keep these in step with
-            // `tessera-server`'s DEFAULT_* constants.
-            max_k: 1_000,
-            k_max_marks: 500,
-            theta_target_marks: 16,
-            ..config()
-        },
-    )
-    .expect("engine should open the 2.4M bundle");
-
-    // A real descriptor from the built dictionary (the real corpus's term ids, unlike the
-    // synthetic fixtures above) — read directly from `terms-0.dict` rather than guessed.
-    let descriptor = first_dictionary_descriptor(&bundle_root);
-    let auth = format!(r#"{{"terms": ["{descriptor}"]}}"#);
-    // Warm token: authorise once, outside the timing loop — a session's fragment is built once
-    // at authorise time (I2) and reused across every viewport, exactly as a real client would.
-    let session = engine
-        .authorise(auth.as_bytes())
-        .expect("authorise should succeed");
-
-    let mut rng = StdRng::seed_from_u64(42);
-    let mut latencies = Vec::with_capacity(300);
-    for _ in 0..300 {
-        let x0: f64 = rng.gen_range(0.0..65000.0);
-        let y0: f64 = rng.gen_range(0.0..65000.0);
-        let x1 = (x0 + rng.gen_range(1.0..500.0)).min(65536.0);
-        let y1 = (y0 + rng.gen_range(1.0..500.0)).min(65536.0);
-        let zoom: u8 = rng.gen_range(4..=12);
-
-        let start = Instant::now();
-        engine
-            .viewport(
-                &session,
-                ViewportRequest::new("s0", zoom, [x0, y0, x1, y1], 30),
-            )
-            .expect("viewport should succeed");
-        latencies.push(start.elapsed());
-    }
-
-    latencies.sort();
-    let p99_idx = ((latencies.len() as f64) * 0.99) as usize;
-    let p99 = latencies[p99_idx.min(latencies.len() - 1)];
-    println!("p99 latency over 300 random viewports at 2.4M items: {p99:?}");
-    assert!(
-        p99.as_millis() < 50,
-        "p99 latency {p99:?} exceeds the 50ms generous local gate (the real 10ms gate is Task \
-         16, at 10⁹)"
-    );
-}
-
-fn first_dictionary_descriptor(bundle_root: &Path) -> String {
-    let dict_path = bundle_root.join("v00000/dictionary/terms-0.dict");
-    let data = std::fs::read(dict_path).unwrap();
-    let len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-    String::from_utf8(data[4..4 + len].to_vec()).unwrap()
 }
 
 // ---------------------------------------------------------------------------------------------

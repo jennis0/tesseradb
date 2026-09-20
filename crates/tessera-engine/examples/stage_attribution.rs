@@ -58,8 +58,8 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Same fixture and convention as `benches/viewport.rs::ensure_bundle` — `/tmp/tessera-2m4`,
-/// built by `tessera-engine/tests/viewport.rs`'s ignored `latency_sanity_at_2_4m_p99_under_50ms`
-/// test, `scripts/bench_build_fixtures.sh` (which symlinks this exact path to its own
+/// built by `tessera-bench`'s `viewport_latency` binary,
+/// `scripts/bench_build_fixtures.sh` (which symlinks this exact path to its own
 /// `$FIXTURES/2422486/categories-subclass` convention), or rebuilt here if both are missing.
 fn ensure_bundle() -> PathBuf {
     let bundle_root = PathBuf::from("/tmp/tessera-2m4");
