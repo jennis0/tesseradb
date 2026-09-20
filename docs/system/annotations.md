@@ -310,6 +310,16 @@ rather than evaluated per request.
 | Suppression of the artifact itself | The artifact stops being served immediately. Nothing about it is stored differently; it resumes only on an explicit unsuppress | The artifact disappears the moment the suppression is accepted, and stays gone until an explicit unsuppress |
 | Deletion of the artifact itself | The artifact stops being served immediately. Its record, and every edge naming it, are removed at the next fold. Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
 
+An ingested point's membership column carries the layer's edges as well as its memberships, exactly
+as a member file's does at a build: consecutive keys in one point's list name a parent and a child.
+Where the child does not exist, it is created holding that parent. Where it exists and holds no
+parent — a roster published with names before any point named the tree — the edge is recorded on it,
+durably, with the batch. Where it holds the same parent, the column restates what is already there.
+Where it holds a different one the batch is refused, because there is no correct output and choosing
+would publish a hierarchy nobody declared. A `dag` layer's list is memberships alone; its several
+parents are declared on the artifact itself. A recorded edge reaches a response when the level's
+row form is next published, which is the terms every other change to an artifact is served on.
+
 A layer's supplied content declares, once, how it behaves when a point behind it is deleted.
 Either way the content stops serving the moment the deletion is accepted, because a generating set
 that no longer matches every visible member fails containment for every viewer, whatever the
