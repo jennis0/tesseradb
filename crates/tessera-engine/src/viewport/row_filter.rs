@@ -1,6 +1,7 @@
 //! A filter evaluated in row space: the hot-column scan, the crossing, and the leaf resolvers.
 
 use super::*;
+use crate::filter::{as_f64, narrow_hi, narrow_lo, NativeBound, Narrowed};
 
 impl Engine {
     /// Cross a filter's entity-space result into one view's row space, by whichever of the two
@@ -405,26 +406,205 @@ impl LeafValues {
     }
 }
 
-/// One render column's typed slice per segment — resolved once per leaf evaluation, exactly as
-/// the gather resolves per segment rather than per row.
+/// A row-space leaf's predicate resolved against one segment's rendered column: the typed slice
+/// and the test to run over it, settled once per segment rather than once per run.
+///
+/// **Everything a comparison would otherwise redo per row is already done here.** A range's
+/// endpoints are narrowed to the column's own type, a needle the type cannot hold is gone, a
+/// category's absent sentinel is excluded, and a needle set is sorted and deduplicated so
+/// membership is a binary search. A predicate that can match no row of the column has no
+/// representation at all: [`Prepared::of`] answers `None` and the segment is not scanned.
 ///
 /// Every declarable type but `utf8`, which the schema refuses from the hot column outright. A
 /// category is one of the three unsigned widths; the rest are a number, a datetime or a bool.
-enum HotSlice<'a> {
-    Bool(&'a arrow::array::BooleanArray),
-    U8(&'a [u8]),
-    U16(&'a [u16]),
-    U32(&'a [u32]),
-    U64(&'a [u64]),
-    I8(&'a [i8]),
-    I16(&'a [i16]),
-    I32(&'a [i32]),
-    I64(&'a [i64]),
-    F32(&'a [f32]),
-    F64(&'a [f64]),
-    /// Microseconds since the epoch — an `i64`, compared as one, exactly as the entity route
-    /// compares it.
-    TimestampUs(&'a [i64]),
+/// A datetime is microseconds since the epoch — an `i64`, compared as one, exactly as the entity
+/// route compares it.
+enum Prepared<'a> {
+    /// Every row of the run, whatever it holds: for this family the column says nothing about
+    /// absence, so presence alone decides — see [`scan_run`].
+    EveryRow,
+    Bool(&'a arrow::array::BooleanArray, IntTest<u8>),
+    U8(&'a [u8], IntTest<u8>),
+    U16(&'a [u16], IntTest<u16>),
+    U32(&'a [u32], IntTest<u32>),
+    U64(&'a [u64], IntTest<u64>),
+    I8(&'a [i8], IntTest<i8>),
+    I16(&'a [i16], IntTest<i16>),
+    I32(&'a [i32], IntTest<i32>),
+    I64(&'a [i64], IntTest<i64>),
+    F32(&'a [f32], FloatTest),
+    F64(&'a [f64], FloatTest),
+}
+
+/// What one stored integer is tested by, at the column's own width.
+///
+/// `Eq` is kept apart from a one-value `In` because it is by far the common shape — `eq`, and `in`
+/// over a single surviving code — and it is one comparison against a constant.
+enum IntTest<T> {
+    Eq(T),
+    /// Sorted and deduplicated: a linear `contains` costs O(needles) per row.
+    In(Vec<T>),
+    /// Inclusive on both sides, exclusivity having been folded into the value; `None` is an open
+    /// side.
+    Range { lo: Option<T>, hi: Option<T> },
+}
+
+/// What one stored float is tested by. Floats keep the `f64` comparison: NaN must stay unordered,
+/// and narrowing through an integer would destroy that.
+enum FloatTest {
+    /// Unsorted, because NaN has no place in an order — and equals nothing, itself included, so a
+    /// NaN needle matches no row without a special case.
+    In(Vec<f64>),
+    /// Each side carries its own inclusivity, there being no next float to fold an exclusive bound
+    /// into.
+    Range {
+        lo: Option<(f64, bool)>,
+        hi: Option<(f64, bool)>,
+    },
+}
+
+impl<'a> Prepared<'a> {
+    /// The predicate against one segment's column, or `None` where no row of that segment can
+    /// match: a range narrowed to nothing, a needle set the column's type cannot hold, a category
+    /// named by its absent sentinel alone, or a family the stored width does not carry — a code
+    /// against a float, say, which answers short rather than comparing the two.
+    ///
+    /// A category's absent sentinel keeps its rule here, where it cannot cost a comparison per row:
+    /// code 0 matches **nothing** — not a value list that names it, not the presence half of a
+    /// negation.
+    fn of(slice: &ScalarSlice<'a>, predicate: &RowPredicate<'_>) -> Option<Prepared<'a>> {
+        match predicate {
+            // No value is consulted: this family's absence lives in the bitmap beside the column.
+            RowPredicate::ValuePresent => Some(Prepared::EveryRow),
+            RowPredicate::CodeIn(codes) => match slice {
+                ScalarSlice::U8(v) => Some(Prepared::U8(v, code_test(codes)?)),
+                ScalarSlice::U16(v) => Some(Prepared::U16(v, code_test(codes)?)),
+                ScalarSlice::U32(v) => Some(Prepared::U32(v, code_test(codes)?)),
+                _ => None,
+            },
+            // A category carries a value when its code is not the sentinel, and the codes are
+            // unsigned, so "present" is "at least 1".
+            RowPredicate::CodePresent => match slice {
+                ScalarSlice::U8(v) => Some(Prepared::U8(v, above_zero())),
+                ScalarSlice::U16(v) => Some(Prepared::U16(v, above_zero())),
+                ScalarSlice::U32(v) => Some(Prepared::U32(v, above_zero())),
+                _ => None,
+            },
+            RowPredicate::NumberIn(needles) => match slice {
+                ScalarSlice::Bool(a) => Some(Prepared::Bool(a, int_in(needles)?)),
+                ScalarSlice::U8(v) => Some(Prepared::U8(v, int_in(needles)?)),
+                ScalarSlice::U16(v) => Some(Prepared::U16(v, int_in(needles)?)),
+                ScalarSlice::U32(v) => Some(Prepared::U32(v, int_in(needles)?)),
+                ScalarSlice::U64(v) => Some(Prepared::U64(v, int_in(needles)?)),
+                ScalarSlice::I8(v) => Some(Prepared::I8(v, int_in(needles)?)),
+                ScalarSlice::I16(v) => Some(Prepared::I16(v, int_in(needles)?)),
+                ScalarSlice::I32(v) => Some(Prepared::I32(v, int_in(needles)?)),
+                ScalarSlice::I64(v) | ScalarSlice::TimestampUs(v) => {
+                    Some(Prepared::I64(v, int_in(needles)?))
+                }
+                ScalarSlice::F32(v) => Some(Prepared::F32(v, float_in(needles)?)),
+                ScalarSlice::F64(v) => Some(Prepared::F64(v, float_in(needles)?)),
+                ScalarSlice::Utf8(_) => None,
+            },
+            RowPredicate::Range { lo, hi } => match slice {
+                // A bool is compared as the 0/1 the entity route stores it as, so `>= 1` means true
+                // on both — the mapping is `u8::from`, in one place on each side.
+                ScalarSlice::Bool(a) => Some(Prepared::Bool(a, int_range(*lo, *hi)?)),
+                ScalarSlice::U8(v) => Some(Prepared::U8(v, int_range(*lo, *hi)?)),
+                ScalarSlice::U16(v) => Some(Prepared::U16(v, int_range(*lo, *hi)?)),
+                ScalarSlice::U32(v) => Some(Prepared::U32(v, int_range(*lo, *hi)?)),
+                ScalarSlice::U64(v) => Some(Prepared::U64(v, int_range(*lo, *hi)?)),
+                ScalarSlice::I8(v) => Some(Prepared::I8(v, int_range(*lo, *hi)?)),
+                ScalarSlice::I16(v) => Some(Prepared::I16(v, int_range(*lo, *hi)?)),
+                ScalarSlice::I32(v) => Some(Prepared::I32(v, int_range(*lo, *hi)?)),
+                ScalarSlice::I64(v) | ScalarSlice::TimestampUs(v) => {
+                    Some(Prepared::I64(v, int_range(*lo, *hi)?))
+                }
+                ScalarSlice::F32(v) => Some(Prepared::F32(v, float_range(*lo, *hi)?)),
+                ScalarSlice::F64(v) => Some(Prepared::F64(v, float_range(*lo, *hi)?)),
+                ScalarSlice::Utf8(_) => None,
+            },
+        }
+    }
+}
+
+/// The codes a category's value list names, at the column's width. A code the width cannot hold
+/// names no row of this column, and code 0 names no row at all; both go here rather than costing a
+/// comparison per row. `None` where none survives.
+fn code_test<T: Copy + Ord + TryFrom<u32>>(codes: &[u32]) -> Option<IntTest<T>> {
+    let mut w: Vec<T> = codes
+        .iter()
+        .filter(|code| **code != 0)
+        .filter_map(|code| T::try_from(*code).ok())
+        .collect();
+    w.sort_unstable();
+    w.dedup();
+    set_test(w)
+}
+
+/// A category's non-sentinel codes, as a bound rather than a set.
+fn above_zero<T: TryFrom<u32>>() -> IntTest<T> {
+    IntTest::Range {
+        lo: T::try_from(1).ok(),
+        hi: None,
+    }
+}
+
+/// The needles a numeric `in` names, at the column's width — one the type cannot hold matches
+/// nothing and is dropped here, and a fractional needle names no integer. `None` where none
+/// survives.
+fn int_in<T: Copy + Ord + TryFrom<i128>>(needles: &[Scalar]) -> Option<IntTest<T>> {
+    let mut w: Vec<T> = needles
+        .iter()
+        .filter_map(|n| match n {
+            Scalar::Int(i) => T::try_from(*i).ok(),
+            Scalar::Float(_) => None,
+        })
+        .collect();
+    w.sort_unstable();
+    w.dedup();
+    set_test(w)
+}
+
+/// A sorted set as the cheapest test that answers it.
+fn set_test<T: Copy>(w: Vec<T>) -> Option<IntTest<T>> {
+    match w.len() {
+        0 => None,
+        1 => Some(IntTest::Eq(w[0])),
+        _ => Some(IntTest::In(w)),
+    }
+}
+
+fn float_in(needles: &[Scalar]) -> Option<FloatTest> {
+    let w: Vec<f64> = needles.iter().map(|n| as_f64(*n)).collect();
+    (!w.is_empty()).then_some(FloatTest::In(w))
+}
+
+/// Both bounds as inclusive native values. `None` is the unsatisfiable range: no value of the type
+/// lies inside it, so the segment is not scanned at all.
+fn int_range<T: TryFrom<i128> + NativeBound>(
+    lo: Option<Endpoint>,
+    hi: Option<Endpoint>,
+) -> Option<IntTest<T>> {
+    let narrow = |n| match n {
+        Narrowed::Unsatisfiable => None,
+        Narrowed::Unbounded => Some(None),
+        Narrowed::At(x) => Some(Some(x)),
+    };
+    Some(IntTest::Range {
+        lo: narrow(narrow_lo::<T>(lo))?,
+        hi: narrow(narrow_hi::<T>(hi))?,
+    })
+}
+
+fn float_range(lo: Option<Endpoint>, hi: Option<Endpoint>) -> Option<FloatTest> {
+    let bound = |e: Option<Endpoint>| e.map(|e| (as_f64(e.value), e.inclusive));
+    let (lo, hi) = (bound(lo), bound(hi));
+    // A NaN bound is satisfied by nothing, which is what `narrow_*` answers for the integer widths.
+    if [lo, hi].iter().flatten().any(|(b, _)| b.is_nan()) {
+        return None;
+    }
+    Some(FloatTest::Range { lo, hi })
 }
 
 /// One contiguous run of rows inside one segment: the rows that match the predicate **and** carry
@@ -437,26 +617,26 @@ enum HotSlice<'a> {
 /// instead would put a bitmap lookup inside the loop the hoist below exists to keep flat.
 #[inline]
 fn scan_run(
-    slice: &HotSlice<'_>,
+    prepared: &Prepared<'_>,
     base: u32,
     run: Range<u32>,
-    predicate: &RowPredicate<'_>,
     present: Option<&croaring::Bitmap>,
     rows: &mut croaring::Bitmap,
     buf: &mut Vec<u32>,
 ) {
     match present {
-        None => match_run(slice, base, run, predicate, rows, buf),
+        None => match_run(prepared, base, run, rows, buf),
         Some(present) => {
             let mut matched = croaring::Bitmap::new();
-            match_run(slice, base, run, predicate, &mut matched, buf);
+            match_run(prepared, base, run, &mut matched, buf);
             matched.and_inplace(present);
             rows.or_inplace(&matched);
         }
     }
 }
 
-/// One contiguous run of rows, tested against the predicate alone — presence is [`scan_run`]'s.
+/// One contiguous run of rows, tested against the prepared matcher alone — presence is
+/// [`scan_run`]'s.
 ///
 /// **The dispatch is hoisted out of the row loop, and that is the whole point of this function.**
 /// The obvious shape — resolve the segment, match the stored width and match the predicate for
@@ -465,279 +645,114 @@ fn scan_run(
 /// (`docs/evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md` §2). The tell in
 /// that data is that the constant was **insensitive to the code width**: a loop bound by moving
 /// one or two bytes per row would not be, so the loop was bound by its own branching. Deciding the
-/// width and the predicate once per run leaves a monomorphic compare over a slice, which is the
-/// loop the probe measured — and a range's bounds are narrowed to the column's own type in the
-/// same hoist, so no comparison widens a value.
-///
-/// A category's absent sentinel keeps its rule at every instantiation: code 0 matches nothing —
-/// not a value list that names it, not the presence half of a negation. `run_matching` never sees
-/// it: each caller below excludes it before the loop, which is the same statement made where it
-/// cannot cost a comparison per row.
+/// width once per segment and the test once per run leaves a monomorphic compare over a slice,
+/// which is the loop the probe measured.
 ///
 /// `buf` is empty on entry and on return. It is a parameter so its allocation is reused across the
 /// runs of a chunk, never to carry rows between them: a run's matches must be complete before
 /// [`scan_run`] intersects them with presence.
 fn match_run(
-    slice: &HotSlice<'_>,
+    prepared: &Prepared<'_>,
     base: u32,
     run: Range<u32>,
-    predicate: &RowPredicate<'_>,
     rows: &mut croaring::Bitmap,
     buf: &mut Vec<u32>,
 ) {
     let span = (run.start - base) as usize..(run.end - base) as usize;
-    match predicate {
-        RowPredicate::CodeIn(codes) => code_run(slice, span, run.start, codes, rows, buf),
-        RowPredicate::CodePresent => code_present_run(slice, span, run.start, rows, buf),
-        RowPredicate::NumberIn(needles) => number_run(slice, span, run.start, needles, rows, buf),
-        RowPredicate::Range { lo, hi } => range_run(slice, span, run.start, *lo, *hi, rows, buf),
-        // No value is consulted: for this family the column says nothing about absence, so every
-        // row of the run is present unless the bitmap [`scan_run`] intersects says otherwise.
-        RowPredicate::ValuePresent => {
+    let first_row = run.start;
+    match prepared {
+        Prepared::EveryRow => {
             rows.add_range(run);
             return;
         }
+        // The one fixed-width type Arrow does not store as a flat slice of itself: the run's bits
+        // are taken once and read forward, which is what makes this the same loop as a slice's,
+        // and the test over them is the integer widths'.
+        Prepared::Bool(a, test) => {
+            let bits = a.values().slice(span.start, span.len());
+            int_run(bits.iter().map(u8::from), first_row, test, rows, buf)
+        }
+        Prepared::U8(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::U16(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::U32(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::U64(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::I8(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::I16(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::I32(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::I64(v, test) => int_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::F32(v, test) => float_run(values_of(v, span), first_row, test, rows, buf),
+        Prepared::F64(v, test) => float_run(values_of(v, span), first_row, test, rows, buf),
     }
     rows.add_many(buf);
     buf.clear();
 }
 
-/// A category's codes. Any slice that is not one of the three code widths matches nothing: a
-/// category is stored at one of them, so anything else is a tail that disagrees with the
-/// declaration, and comparing a float to a code would be worse than answering short.
+/// One run of a flat slice, as the values themselves.
 #[inline]
-fn code_run(
-    slice: &HotSlice<'_>,
-    span: Range<usize>,
+fn values_of<T: Copy>(values: &[T], span: Range<usize>) -> impl Iterator<Item = T> + '_ {
+    values[span].iter().copied()
+}
+
+/// One integer run: the test decided once, then a native compare per value.
+#[inline]
+fn int_run<T: Copy + Ord>(
+    values: impl Iterator<Item = T>,
     first_row: u32,
-    codes: &[u32],
+    test: &IntTest<T>,
     rows: &mut croaring::Bitmap,
     buf: &mut Vec<u32>,
 ) {
-    // The common shape by far — `eq`, and `in` over a single surviving code. One comparison per
-    // row against a constant.
-    if codes.len() == 1 {
-        let needle = codes[0];
-        if needle == 0 {
-            return; // The sentinel names no row; the whole run is a non-match.
+    match test {
+        IntTest::Eq(needle) => run_matching(values, first_row, rows, buf, |x| x == *needle),
+        IntTest::In(w) => {
+            run_matching(values, first_row, rows, buf, |x| w.binary_search(&x).is_ok())
         }
-        match slice {
-            // A needle outside the column's code space matches no row, and the width test happens
-            // once per run rather than once per comparison.
-            HotSlice::U8(v) => {
-                if let Ok(n) = u8::try_from(needle) {
-                    run_matching(&v[span], first_row, rows, buf, |c| *c == n);
-                }
-            }
-            HotSlice::U16(v) => {
-                if let Ok(n) = u16::try_from(needle) {
-                    run_matching(&v[span], first_row, rows, buf, |c| *c == n);
-                }
-            }
-            HotSlice::U32(v) => run_matching(&v[span], first_row, rows, buf, |c| *c == needle),
-            _ => {}
+        IntTest::Range { lo, hi } => {
+            let (lo, hi) = (*lo, *hi);
+            run_matching(values, first_row, rows, buf, move |x| {
+                lo.is_none_or(|b| x >= b) && hi.is_none_or(|b| x <= b)
+            })
         }
-        return;
-    }
-    match slice {
-        HotSlice::U8(v) => run_matching(&v[span], first_row, rows, buf, |c| {
-            *c != 0 && codes.contains(&u32::from(*c))
-        }),
-        HotSlice::U16(v) => run_matching(&v[span], first_row, rows, buf, |c| {
-            *c != 0 && codes.contains(&u32::from(*c))
-        }),
-        HotSlice::U32(v) => run_matching(&v[span], first_row, rows, buf, |c| {
-            *c != 0 && codes.contains(c)
-        }),
-        _ => {}
     }
 }
 
-/// A category carries a value: a non-sentinel code.
+/// One float run. The stored width widens to `f64` for the comparison, as it does on the entity
+/// route.
 #[inline]
-fn code_present_run(
-    slice: &HotSlice<'_>,
-    span: Range<usize>,
+fn float_run<T: Copy + Into<f64>>(
+    values: impl Iterator<Item = T>,
     first_row: u32,
+    test: &FloatTest,
     rows: &mut croaring::Bitmap,
     buf: &mut Vec<u32>,
 ) {
-    match slice {
-        HotSlice::U8(v) => run_matching(&v[span], first_row, rows, buf, |c| *c != 0),
-        HotSlice::U16(v) => run_matching(&v[span], first_row, rows, buf, |c| *c != 0),
-        HotSlice::U32(v) => run_matching(&v[span], first_row, rows, buf, |c| *c != 0),
-        _ => {}
-    }
-}
-
-/// A number's value lies within the bounds — the row-space transcription of
-/// `ValueColumn::scan_range`, and it must stay one.
-///
-/// **A deliberate second copy of the narrowing, across a crate boundary.** `tessera-filter`'s is
-/// private to the entity-space column, and the two routes must agree exactly over the domain or
-/// 0068's licence to choose a route on cost alone fails. The rules copied here are the ones that
-/// are wrong in silence if they drift: an exclusive integer bound is folded by one step; a
-/// fractional bound rounds *into* the constraint (`> 3.2` and `>= 3.2` both admit 4); a NaN bound
-/// satisfies nothing; a bound past the type's floor or ceiling is no constraint or no match rather
-/// than a wrapped comparison. `the_row_route_and_the_entity_route_agree_over_the_domain` is what
-/// holds the copies together, over a numeric predicate as well as a category one.
-#[inline]
-fn range_run(
-    slice: &HotSlice<'_>,
-    span: Range<usize>,
-    first_row: u32,
-    lo: Option<Endpoint>,
-    hi: Option<Endpoint>,
-    rows: &mut croaring::Bitmap,
-    buf: &mut Vec<u32>,
-) {
-    macro_rules! int_range {
-        ($v:expr, $t:ty) => {{
-            let lo_b = match narrow_lo::<$t>(lo) {
-                Narrowed::Unsatisfiable => return,
-                Narrowed::Unbounded => None,
-                Narrowed::At(x) => Some(x),
-            };
-            let hi_b = match narrow_hi::<$t>(hi) {
-                Narrowed::Unsatisfiable => return,
-                Narrowed::Unbounded => None,
-                Narrowed::At(x) => Some(x),
-            };
-            run_matching($v, first_row, rows, buf, move |x| {
-                lo_b.is_none_or(|b| *x >= b) && hi_b.is_none_or(|b| *x <= b)
-            })
-        }};
-    }
-    // Floats keep the `f64` comparison: NaN must stay unordered, and narrowing through an integer
-    // would destroy that.
-    macro_rules! float_range {
-        ($v:expr) => {{
-            let lo_f = lo.map(|e| (as_f64(e.value), e.inclusive));
-            let hi_f = hi.map(|e| (as_f64(e.value), e.inclusive));
-            run_matching($v, first_row, rows, buf, move |x| {
-                let x = *x as f64;
-                lo_f.is_none_or(|(b, inc)| if inc { x >= b } else { x > b })
-                    && hi_f.is_none_or(|(b, inc)| if inc { x <= b } else { x < b })
-            })
-        }};
-    }
-    match slice {
-        HotSlice::Bool(a) => {
-            // A bool is compared as the 0/1 the entity route stores it as, so `>= 1` means true on
-            // both — the mapping is `u8::from`, in one place on each side.
-            let lo_b = match narrow_lo::<u8>(lo) {
-                Narrowed::Unsatisfiable => return,
-                Narrowed::Unbounded => None,
-                Narrowed::At(x) => Some(x),
-            };
-            let hi_b = match narrow_hi::<u8>(hi) {
-                Narrowed::Unsatisfiable => return,
-                Narrowed::Unbounded => None,
-                Narrowed::At(x) => Some(x),
-            };
-            bool_matching(a, span, first_row, rows, buf, move |x| {
-                lo_b.is_none_or(|b| x >= b) && hi_b.is_none_or(|b| x <= b)
+    match test {
+        FloatTest::In(w) => run_matching(values, first_row, rows, buf, |x| w.contains(&x.into())),
+        FloatTest::Range { lo, hi } => {
+            let (lo, hi) = (*lo, *hi);
+            run_matching(values, first_row, rows, buf, move |x| {
+                let x: f64 = x.into();
+                lo.is_none_or(|(b, inc)| if inc { x >= b } else { x > b })
+                    && hi.is_none_or(|(b, inc)| if inc { x <= b } else { x < b })
             })
         }
-        HotSlice::U8(v) => int_range!(&v[span], u8),
-        HotSlice::U16(v) => int_range!(&v[span], u16),
-        HotSlice::U32(v) => int_range!(&v[span], u32),
-        HotSlice::U64(v) => int_range!(&v[span], u64),
-        HotSlice::I8(v) => int_range!(&v[span], i8),
-        HotSlice::I16(v) => int_range!(&v[span], i16),
-        HotSlice::I32(v) => int_range!(&v[span], i32),
-        HotSlice::I64(v) | HotSlice::TimestampUs(v) => int_range!(&v[span], i64),
-        HotSlice::F32(v) => float_range!(&v[span]),
-        HotSlice::F64(v) => float_range!(&v[span]),
     }
 }
 
-/// A number's value equals one of the needles — the row-space transcription of
-/// `ValueColumn::scan_num_in`, with the same rules: a needle the column's type cannot hold matches
-/// nothing and is dropped before the loop rather than compared away per row, and the survivors are
-/// sorted and searched because a linear `contains` costs O(needles) per row.
-#[inline]
-fn number_run(
-    slice: &HotSlice<'_>,
-    span: Range<usize>,
-    first_row: u32,
-    needles: &[Scalar],
-    rows: &mut croaring::Bitmap,
-    buf: &mut Vec<u32>,
-) {
-    macro_rules! int_in {
-        ($v:expr, $t:ty) => {{
-            let mut w: Vec<$t> = needles
-                .iter()
-                .filter_map(|n| match n {
-                    Scalar::Int(i) => <$t>::try_from(*i).ok(),
-                    Scalar::Float(_) => None,
-                })
-                .collect();
-            if w.is_empty() {
-                return;
-            }
-            w.sort_unstable();
-            w.dedup();
-            run_matching($v, first_row, rows, buf, move |x| {
-                w.binary_search(x).is_ok()
-            })
-        }};
-    }
-    macro_rules! float_in {
-        ($v:expr) => {{
-            // NaN equals nothing, itself included — so a NaN needle matches no row, which the
-            // comparison gives without a special case.
-            let w: Vec<f64> = needles.iter().map(|n| as_f64(*n)).collect();
-            run_matching($v, first_row, rows, buf, move |x| {
-                let x = *x as f64;
-                w.iter().any(|n| x == *n)
-            })
-        }};
-    }
-    match slice {
-        HotSlice::Bool(a) => {
-            let mut w: Vec<u8> = needles
-                .iter()
-                .filter_map(|n| match n {
-                    Scalar::Int(i) => u8::try_from(*i).ok(),
-                    Scalar::Float(_) => None,
-                })
-                .collect();
-            if w.is_empty() {
-                return;
-            }
-            w.sort_unstable();
-            w.dedup();
-            bool_matching(a, span, first_row, rows, buf, move |x| {
-                w.binary_search(&x).is_ok()
-            })
-        }
-        HotSlice::U8(v) => int_in!(&v[span], u8),
-        HotSlice::U16(v) => int_in!(&v[span], u16),
-        HotSlice::U32(v) => int_in!(&v[span], u32),
-        HotSlice::U64(v) => int_in!(&v[span], u64),
-        HotSlice::I8(v) => int_in!(&v[span], i8),
-        HotSlice::I16(v) => int_in!(&v[span], i16),
-        HotSlice::I32(v) => int_in!(&v[span], i32),
-        HotSlice::I64(v) | HotSlice::TimestampUs(v) => int_in!(&v[span], i64),
-        HotSlice::F32(v) => float_in!(&v[span]),
-        HotSlice::F64(v) => float_in!(&v[span]),
-    }
-}
-
-/// The monomorphic inner loop every flat-slice arm above resolves to: one slice, one test, one
-/// buffered flush. Generic over the stored type so each width compiles to its own loop.
+/// The monomorphic inner loop every arm above resolves to: one run of values, one test, one
+/// buffered flush. Generic over the stored type and over how a value is read, so each width
+/// compiles to its own loop — a slice's is over the slice itself, and a bool's is the same loop
+/// over the bits Arrow packs it into.
 #[inline]
 fn run_matching<T: Copy>(
-    values: &[T],
+    values: impl Iterator<Item = T>,
     first_row: u32,
     rows: &mut croaring::Bitmap,
     buf: &mut Vec<u32>,
-    matches: impl Fn(&T) -> bool,
+    matches: impl Fn(T) -> bool,
 ) {
-    for (offset, code) in values.iter().enumerate() {
-        if matches(code) {
+    for (offset, value) in values.enumerate() {
+        if matches(value) {
             buf.push(first_row + offset as u32);
             if buf.len() == 1024 {
                 rows.add_many(buf);
@@ -747,124 +762,14 @@ fn run_matching<T: Copy>(
     }
 }
 
-/// [`run_matching`] for the one fixed-width type Arrow does not store as a flat slice of itself.
-/// The test is hoisted exactly as the others are; what differs is only the bit extraction.
-#[inline]
-fn bool_matching(
-    values: &arrow::array::BooleanArray,
-    span: Range<usize>,
-    first_row: u32,
-    rows: &mut croaring::Bitmap,
-    buf: &mut Vec<u32>,
-    matches: impl Fn(u8) -> bool,
-) {
-    let start = span.start;
-    for idx in span {
-        if matches(u8::from(values.value(idx))) {
-            buf.push(first_row + (idx - start) as u32);
-            if buf.len() == 1024 {
-                rows.add_many(buf);
-                buf.clear();
-            }
-        }
-    }
-}
-
-/// What a range bound becomes once narrowed to the column's own type — see [`range_run`] for why
-/// this mirrors `tessera-filter`'s private original rather than calling it.
-enum Narrowed<T> {
-    /// No constraint on this side — the bound lies beyond the type's range in the permissive
-    /// direction, or was absent.
-    Unbounded,
-    /// Nothing can satisfy it: the bound lies beyond the type's range in the excluding direction.
-    Unsatisfiable,
-    /// An inclusive native bound. Exclusivity is folded in by moving the bound one step, which is
-    /// exact for integers.
-    At(T),
-}
-
-/// The integer widths' extremes as `i128`, so the narrowing can tell "below the floor" (no
-/// constraint) from "above the ceiling" (nothing matches) without a per-type arm.
-trait NativeBound {
-    fn min_i128() -> i128;
-    fn max_i128() -> i128;
-}
-macro_rules! native_bound {
-    ($($t:ty),*) => { $(impl NativeBound for $t {
-        fn min_i128() -> i128 { <$t>::MIN as i128 }
-        fn max_i128() -> i128 { <$t>::MAX as i128 }
-    })* };
-}
-native_bound!(u8, u16, u32, u64, i8, i16, i32, i64);
-
-/// The lower bound as an **inclusive** native value.
-fn narrow_lo<T>(e: Option<Endpoint>) -> Narrowed<T>
-where
-    T: TryFrom<i128> + NativeBound,
-{
-    let Some(e) = e else {
-        return Narrowed::Unbounded;
-    };
-    // `gt x` over integers is `gte x+1`; the saturating add keeps the shift exact at the ceiling,
-    // where `x+1` would not exist and the answer is "nothing above it".
-    let want = match e.value {
-        Scalar::Int(i) if e.inclusive => i,
-        Scalar::Int(i) => i.saturating_add(1),
-        // A fractional lower bound rounds *up* to the next integer the column can hold: `> 3.2`
-        // and `>= 3.2` both admit 4 and exclude 3.
-        Scalar::Float(f) => {
-            if f.is_nan() {
-                return Narrowed::Unsatisfiable;
-            }
-            f.ceil() as i128
-        }
-    };
-    match T::try_from(want) {
-        Ok(v) => Narrowed::At(v),
-        // Below the floor: every value satisfies it. Above the ceiling: none does.
-        Err(_) if want < T::min_i128() => Narrowed::Unbounded,
-        Err(_) => Narrowed::Unsatisfiable,
-    }
-}
-
-/// The upper bound as an **inclusive** native value.
-fn narrow_hi<T>(e: Option<Endpoint>) -> Narrowed<T>
-where
-    T: TryFrom<i128> + NativeBound,
-{
-    let Some(e) = e else {
-        return Narrowed::Unbounded;
-    };
-    let want = match e.value {
-        Scalar::Int(i) if e.inclusive => i,
-        Scalar::Int(i) => i.saturating_sub(1),
-        Scalar::Float(f) => {
-            if f.is_nan() {
-                return Narrowed::Unsatisfiable;
-            }
-            f.floor() as i128
-        }
-    };
-    match T::try_from(want) {
-        Ok(v) => Narrowed::At(v),
-        Err(_) if want > T::max_i128() => Narrowed::Unbounded,
-        Err(_) => Narrowed::Unsatisfiable,
-    }
-}
-
-fn as_f64(s: Scalar) -> f64 {
-    match s {
-        Scalar::Int(i) => i as f64,
-        Scalar::Float(f) => f,
-    }
-}
-
-/// One segment's share of a row-space leaf: where its rows begin, the column's values, and which
-/// of those rows carry one.
+/// One segment's share of a row-space leaf: where its rows begin, the prepared matcher over the
+/// column's values, and which of those rows carry one.
 struct ScannedSegment<'a> {
     row_base: u32,
-    /// `None` for a segment whose schema does not hold the column: none of its rows matches.
-    values: Option<HotSlice<'a>>,
+    /// `None` where no row of this segment can match, whether because its schema does not hold the
+    /// column or because the predicate is unsatisfiable at the column's type. The scan skips the
+    /// segment rather than rediscovering it once per run.
+    values: Option<Prepared<'a>>,
     /// The rows that carry a value, **in view row space** — the presence bitmap shifted by
     /// `row_base` once, here, rather than per run. `None` where every row does.
     present: Option<croaring::Bitmap>,
@@ -878,6 +783,9 @@ struct ScannedSegment<'a> {
 /// matches nothing** (`ingest.md` §6.3): it was written before the column was declared at a
 /// running service, so none of its rows carries a value, which is the answer for a range and for
 /// a negation's presence half alike. Answered from the schema, never from a blob read.
+///
+/// **The predicate meets the column here, once per segment**: what the runs below carry is the
+/// matcher [`Prepared::of`] settled from the two, at the width the segment stores.
 fn scan_rows(
     segments: &[(&SegmentData, u32)],
     domain: &[Range<u32>],
@@ -890,35 +798,24 @@ fn scan_rows(
         .iter()
         .map(|&(segment, row_base)| {
             let values = match segment.columns.scalar(column) {
-                Some(ScalarSlice::Bool(a)) => Some(HotSlice::Bool(a)),
-                Some(ScalarSlice::U8(s)) => Some(HotSlice::U8(s)),
-                Some(ScalarSlice::U16(s)) => Some(HotSlice::U16(s)),
-                Some(ScalarSlice::U32(s)) => Some(HotSlice::U32(s)),
-                Some(ScalarSlice::U64(s)) => Some(HotSlice::U64(s)),
-                Some(ScalarSlice::I8(s)) => Some(HotSlice::I8(s)),
-                Some(ScalarSlice::I16(s)) => Some(HotSlice::I16(s)),
-                Some(ScalarSlice::I32(s)) => Some(HotSlice::I32(s)),
-                Some(ScalarSlice::I64(s)) => Some(HotSlice::I64(s)),
-                Some(ScalarSlice::F32(s)) => Some(HotSlice::F32(s)),
-                Some(ScalarSlice::F64(s)) => Some(HotSlice::F64(s)),
-                Some(ScalarSlice::TimestampUs(s)) => Some(HotSlice::TimestampUs(s)),
                 // The segment predates the column's declaration: no row of it carries a value.
                 None => None,
                 // `utf8`: the schema refuses `render` on a string, so the segment and the
                 // manifest disagree about the tail.
-                Some(_) => {
+                Some(ScalarSlice::Utf8(_)) => {
                     return Err(EngineError::Malformed(format!(
                         "a segment of this view holds rendered column '{column}' at a type other \
                          than a fixed width, which the routed filter requires; the manifest and \
                          the segment disagree about the tail"
                     )))
                 }
+                Some(slice) => Prepared::of(&slice, &predicate),
             };
-            // Only for a family that stores absence beside the column. A category's absence is a
-            // code in the column itself and it has no bitmap at all, so asking for one would be
-            // the sentinel-and-bitmap muddle decision 0064 declines.
-            let present = predicate
-                .reads_presence()
+            // Only for a family that stores absence beside the column, and only where there is a
+            // scan to narrow. A category's absence is a code in the column itself and it has no
+            // bitmap at all, so asking for one would be the sentinel-and-bitmap muddle decision
+            // 0064 declines.
+            let present = (values.is_some() && predicate.reads_presence())
                 .then(|| present_rows(segment, column, row_base))
                 .flatten();
             Ok(ScannedSegment {
@@ -954,7 +851,6 @@ fn scan_rows(
                         values,
                         segment.row_base,
                         row..seg_end,
-                        &predicate,
                         segment.present.as_ref(),
                         &mut rows,
                         &mut buf,
@@ -1779,27 +1675,31 @@ mod tests {
         );
     }
 
-    /// Every row of one run, matched and narrowed to the rows that carry a value.
+    /// Every row of one run, matched and narrowed to the rows that carry a value — the leaf's
+    /// sequence over one segment: prepare the matcher, then scan.
     fn run(
-        slice: &HotSlice<'_>,
+        slice: &ScalarSlice<'_>,
         predicate: &RowPredicate<'_>,
         present: Option<&croaring::Bitmap>,
     ) -> Vec<u32> {
         let rows_in_slice = match slice {
-            HotSlice::Bool(a) => a.len(),
-            HotSlice::I32(v) => v.len(),
-            HotSlice::U8(v) => v.len(),
-            HotSlice::F64(v) => v.len(),
-            HotSlice::I64(v) | HotSlice::TimestampUs(v) => v.len(),
+            ScalarSlice::Bool(a) => a.len(),
+            ScalarSlice::I32(v) => v.len(),
+            ScalarSlice::U8(v) => v.len(),
+            ScalarSlice::F64(v) => v.len(),
+            ScalarSlice::I64(v) | ScalarSlice::TimestampUs(v) => v.len(),
             _ => unreachable!("the fixtures below use these widths"),
         } as u32;
+        // Nothing to prepare is nothing to scan, which is what the segment's own skip does.
+        let Some(prepared) = Prepared::of(slice, predicate) else {
+            return Vec::new();
+        };
         let mut rows = croaring::Bitmap::new();
         let mut buf = Vec::with_capacity(1024);
         scan_run(
-            slice,
+            &prepared,
             0,
             0..rows_in_slice,
-            predicate,
             present,
             &mut rows,
             &mut buf,
@@ -1833,7 +1733,7 @@ mod tests {
     fn an_absent_number_matches_no_range_not_even_one_containing_zero() {
         // rows:      0    1*   2    3*   4    5     (* = no value, stored as the type's zero)
         let values = [7i32, 0, -3, 0, 0, 40];
-        let slice = HotSlice::I32(&values);
+        let slice = ScalarSlice::I32(&values);
         let present = presence(&[1, 3], 6);
 
         let straddling_zero = RowPredicate::Range {
@@ -1904,7 +1804,7 @@ mod tests {
     #[test]
     fn a_category_reads_absence_from_its_sentinel_and_asks_for_no_bitmap() {
         let codes = [1u8, 0, 2, 0, 1, 3];
-        let slice = HotSlice::U8(&codes);
+        let slice = ScalarSlice::U8(&codes);
         assert!(!RowPredicate::CodeIn(&[1]).reads_presence());
         assert!(!RowPredicate::CodePresent.reads_presence());
 
@@ -1924,14 +1824,15 @@ mod tests {
         );
     }
 
-    /// The bounds are the entity route's, endpoint for endpoint: exclusivity folded by one step
-    /// over integers, a bound past the type's ceiling excluding everything and one past its floor
-    /// constraining nothing, a NaN bound satisfying nothing, and a fractional bound rounding *into*
-    /// the constraint. These are the rules that are wrong in silence if the two copies drift.
+    /// **The bounds are narrowed to the width the hot column stores.** What an endpoint means is
+    /// `tessera-filter`'s rule and is tested beside it; what this pins is that the row route hands
+    /// that rule each column's own stored type — so a bound outside the type is no constraint or no
+    /// match rather than a wrapped comparison — and that a float column is compared as floats, with
+    /// NaN unordered.
     #[test]
-    fn a_range_over_the_hot_column_reads_its_endpoints_as_the_entity_route_does() {
+    fn a_range_over_the_hot_column_is_narrowed_to_the_columns_own_width() {
         let values = [0u8, 1, 2, 254, 255];
-        let slice = HotSlice::U8(&values);
+        let slice = ScalarSlice::U8(&values);
         let at = |v: i128, inclusive: bool| {
             Some(Endpoint {
                 value: Scalar::Int(v),
@@ -1943,11 +1844,6 @@ mod tests {
         assert_eq!(
             run(&slice, &range(at(1, true), at(2, true)), None),
             vec![1, 2]
-        );
-        assert_eq!(
-            run(&slice, &range(at(0, false), at(254, false)), None),
-            vec![1, 2],
-            "an exclusive integer bound is the next value along"
         );
         // Beyond the type in either direction, which is where a wrapped comparison would show.
         assert_eq!(
@@ -1970,22 +1866,12 @@ mod tests {
             "`> 255` over a u8 is nothing, not everything wrapped"
         );
 
-        // A fractional bound rounds into the constraint, on both sides.
         let fractional = |v: f64, inclusive: bool| {
             Some(Endpoint {
                 value: Scalar::Float(v),
                 inclusive,
             })
         };
-        assert_eq!(
-            run(
-                &slice,
-                &range(fractional(0.5, true), fractional(2.5, true)),
-                None
-            ),
-            vec![1, 2]
-        );
-
         // NaN is unordered: it satisfies nothing as a bound, and matches nothing as a value.
         assert_eq!(
             run(&slice, &range(fractional(f64::NAN, true), None), None),
@@ -1993,13 +1879,13 @@ mod tests {
         );
         let floats = [1.0f64, f64::NAN, 3.0];
         assert_eq!(
-            run(&HotSlice::F64(&floats), &range(None, None), None),
+            run(&ScalarSlice::F64(&floats), &range(None, None), None),
             vec![0, 1, 2],
             "an unbounded range asks only that the row carry a value"
         );
         assert_eq!(
             run(
-                &HotSlice::F64(&floats),
+                &ScalarSlice::F64(&floats),
                 &range(at(0, true), at(4, true)),
                 None
             ),
@@ -2008,7 +1894,7 @@ mod tests {
         );
         assert_eq!(
             run(
-                &HotSlice::F64(&floats),
+                &ScalarSlice::F64(&floats),
                 &RowPredicate::NumberIn(&[Scalar::Float(f64::NAN)]),
                 None
             ),
@@ -2022,7 +1908,7 @@ mod tests {
     #[test]
     fn a_bool_and_a_datetime_compare_as_their_entity_space_storage_does() {
         let flags = arrow::array::BooleanArray::from(vec![true, false, true, false]);
-        let slice = HotSlice::Bool(&flags);
+        let slice = ScalarSlice::Bool(&flags);
         let (yes, no) = ([Scalar::Int(1)], [Scalar::Int(0)]);
         assert_eq!(run(&slice, &RowPredicate::NumberIn(&yes), None), vec![0, 2]);
         assert_eq!(run(&slice, &RowPredicate::NumberIn(&no), None), vec![1, 3]);
@@ -2040,7 +1926,7 @@ mod tests {
         let micros = [1_000i64, 2_000, 3_000];
         assert_eq!(
             run(
-                &HotSlice::TimestampUs(&micros),
+                &ScalarSlice::TimestampUs(&micros),
                 &RowPredicate::Range {
                     lo: Some(Endpoint {
                         value: Scalar::Int(2_000),

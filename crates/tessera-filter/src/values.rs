@@ -514,7 +514,10 @@ pub enum Scalar {
 }
 
 /// What a bound becomes once narrowed to a column's own type.
-enum Narrowed<T> {
+///
+/// Public because the engine's row-space scan narrows the same endpoints against the same column's
+/// rendered copy, and the two routes must answer alike.
+pub enum Narrowed<T> {
     /// No constraint on this side — the bound lies beyond the type's range in the permissive
     /// direction, or was absent.
     Unbounded,
@@ -526,9 +529,9 @@ enum Narrowed<T> {
 }
 
 /// The lower bound as an **inclusive** native value.
-fn narrow_lo<T>(e: Option<Endpoint>) -> Narrowed<T>
+pub fn narrow_lo<T>(e: Option<Endpoint>) -> Narrowed<T>
 where
-    T: TryFrom<i128> + Bounded,
+    T: TryFrom<i128> + NativeBound,
 {
     let Some(e) = e else {
         return Narrowed::Unbounded;
@@ -556,9 +559,9 @@ where
 }
 
 /// The upper bound as an **inclusive** native value.
-fn narrow_hi<T>(e: Option<Endpoint>) -> Narrowed<T>
+pub fn narrow_hi<T>(e: Option<Endpoint>) -> Narrowed<T>
 where
-    T: TryFrom<i128> + Bounded,
+    T: TryFrom<i128> + NativeBound,
 {
     let Some(e) = e else {
         return Narrowed::Unbounded;
@@ -581,20 +584,22 @@ where
 }
 
 /// The integer widths' extremes as `i128`, so `narrow_*` can tell "below the floor" (no constraint)
-/// from "above the ceiling" (nothing matches) without a per-type arm.
-trait Bounded {
+/// from "above the ceiling" (nothing matches) without a per-type arm. Implemented for the eight
+/// integer widths a column can be declared at, and for nothing else.
+pub trait NativeBound {
     fn min_i128() -> i128;
     fn max_i128() -> i128;
 }
-macro_rules! bounded {
-    ($($t:ty),*) => { $(impl Bounded for $t {
+macro_rules! native_bound {
+    ($($t:ty),*) => { $(impl NativeBound for $t {
         fn min_i128() -> i128 { <$t>::MIN as i128 }
         fn max_i128() -> i128 { <$t>::MAX as i128 }
     })* };
 }
-bounded!(u8, u16, u32, u64, i8, i16, i32, i64);
+native_bound!(u8, u16, u32, u64, i8, i16, i32, i64);
 
-fn as_f64(s: Scalar) -> f64 {
+/// A bound or comparand as the `f64` a float column is compared in.
+pub fn as_f64(s: Scalar) -> f64 {
     match s {
         Scalar::Int(i) => i as f64,
         Scalar::Float(f) => f,
