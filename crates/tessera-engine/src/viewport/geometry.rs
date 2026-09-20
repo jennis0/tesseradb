@@ -336,6 +336,8 @@ impl Engine {
                 // per-request pool).
                 probe.mark_projection_built();
                 self.counters.full_projection_builds.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "fault-injection")]
+                self.switches.hold_projection_build_if_wanted();
                 // **The route is chosen here, from this principal's own grant, before any route
                 // runs**, and every route returns the identical projection
                 // (`crate::projection::RowProjection::new`). The images are the bundle's, mapped;
