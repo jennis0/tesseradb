@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::ops::Range;
 
 use super::geometry::{bounds, dot};
 use super::reduce::interleave_cell;
@@ -75,10 +76,14 @@ struct Cell {
 /// [`Buckets::cells`] (a leaf) or its two children.
 struct Node {
     extent: Box2,
-    /// The child node indices, or `(range start, range end)` when `leaf`.
-    a: u32,
-    b: u32,
-    leaf: bool,
+    kind: Kind,
+}
+
+/// Which of the two a [`Node`] is. Both arms are two `u32`s, so naming them costs the node
+/// nothing over the flat pair and a flag.
+enum Kind {
+    Leaf { cells: Range<u32> },
+    Inner { left: u32, right: u32 },
 }
 
 impl Buckets {
@@ -227,40 +232,41 @@ impl Buckets {
                     break;
                 }
             }
-            let node = &self.tree[index as usize];
-            let (first, second, leaf) = (node.a, node.b, node.leaf);
-            if !leaf {
-                for child in [first, second] {
-                    let n = &self.tree[child as usize];
-                    if !feasible(&n.extent) {
-                        continue;
-                    }
-                    self.heap.push(Reverse((bound(&n.extent), child)));
-                }
-                continue;
-            }
-            for cell in &self.cells[first as usize..second as usize] {
-                if !feasible(&cell.extent) {
-                    continue;
-                }
-                if let Some((found, _)) = best {
-                    if bound(&cell.extent) > found {
-                        continue;
+            match &self.tree[index as usize].kind {
+                Kind::Inner { left, right } => {
+                    for child in [*left, *right] {
+                        let n = &self.tree[child as usize];
+                        if !feasible(&n.extent) {
+                            continue;
+                        }
+                        self.heap.push(Reverse((bound(&n.extent), child)));
                     }
                 }
-                for &q in &self.points[cell.start..cell.start + cell.len] {
-                    let d = cross(q);
-                    if d < 0 || dot(a, b, q) <= 0 || dot(b, a, q) <= 0 {
-                        continue;
-                    }
-                    let better = match best {
-                        None => true,
-                        // Ties are broken on the position itself, so the answer does not depend on
-                        // the order the buckets happen to be walked in.
-                        Some((bd, bq)) => d < bd || (d == bd && q < bq),
-                    };
-                    if better {
-                        best = Some((d, q));
+                Kind::Leaf { cells } => {
+                    for cell in &self.cells[cells.start as usize..cells.end as usize] {
+                        if !feasible(&cell.extent) {
+                            continue;
+                        }
+                        if let Some((found, _)) = best {
+                            if bound(&cell.extent) > found {
+                                continue;
+                            }
+                        }
+                        for &q in &self.points[cell.start..cell.start + cell.len] {
+                            let d = cross(q);
+                            if d < 0 || dot(a, b, q) <= 0 || dot(b, a, q) <= 0 {
+                                continue;
+                            }
+                            let better = match best {
+                                None => true,
+                                // Ties are broken on the position itself, so the answer does not
+                                // depend on the order the buckets happen to be walked in.
+                                Some((bd, bq)) => d < bd || (d == bd && q < bq),
+                            };
+                            if better {
+                                best = Some((d, q));
+                            }
+                        }
                     }
                 }
             }
@@ -287,9 +293,9 @@ fn build_tree(cells: &[Cell], lo: usize, hi: usize, out: &mut Vec<Node>) -> u32 
         }
         out.push(Node {
             extent,
-            a: lo as u32,
-            b: hi as u32,
-            leaf: true,
+            kind: Kind::Leaf {
+                cells: lo as u32..hi as u32,
+            },
         });
         return out.len() as u32 - 1;
     }
@@ -299,9 +305,7 @@ fn build_tree(cells: &[Cell], lo: usize, hi: usize, out: &mut Vec<Node>) -> u32 
     let extent = out[a as usize].extent.union(&out[b as usize].extent);
     out.push(Node {
         extent,
-        a,
-        b,
-        leaf: false,
+        kind: Kind::Inner { left: a, right: b },
     });
     out.len() as u32 - 1
 }
