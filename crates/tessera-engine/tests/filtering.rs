@@ -446,36 +446,47 @@ fn a_zero_coverage_principal_matches_nothing() {
     }
 }
 
-/// String predicates over a real mask: equality, prefix and substring, each against the corpus.
+/// Every keyword operand over a real mask, against the corpus: equality, a set, a prefix and a
+/// substring, on the built `title` column. The set names a key nobody carries beside two that are
+/// carried, so a miss inside an `in` is answered rather than refused.
 #[test]
 fn string_filters_agree_with_the_corpus_under_a_real_mask() {
     let fx = fixture();
     let (_engine, cand) = candidate_for(&fx, &subset_credential());
     let terms = [SUBSET_TERM];
 
-    let eq = fx
-        .columns
-        .resolve("title", &FilterOperand::TextEquals(title_of(3)), &cand)
-        .unwrap();
-    assert_eq!(as_vec(&eq), expected(&fx, &terms, |e| e == 3));
-
-    let prefix = fx
-        .columns
-        .resolve("title", &FilterOperand::TextPrefix("paper-1".into()), &cand)
-        .unwrap();
-    assert_eq!(
-        as_vec(&prefix),
-        expected(&fx, &terms, |e| title_of(e).starts_with("paper-1"))
-    );
-
-    let contains = fx
-        .columns
-        .resolve("title", &FilterOperand::TextContains("-2".into()), &cand)
-        .unwrap();
-    assert_eq!(
-        as_vec(&contains),
-        expected(&fx, &terms, |e| title_of(e).contains("-2"))
-    );
+    let cases: Vec<(&str, FilterOperand, Box<dyn Fn(u64) -> bool>)> = vec![
+        (
+            "eq",
+            FilterOperand::TextEquals(title_of(3)),
+            Box::new(|e| e == 3),
+        ),
+        (
+            "in",
+            FilterOperand::TextIn(vec![
+                title_of(3),
+                title_of(9),
+                "paper-no-such-thing".to_string(),
+            ]),
+            Box::new(|e| e == 3 || e == 9),
+        ),
+        (
+            "prefix",
+            FilterOperand::TextPrefix("paper-1".into()),
+            Box::new(|e| title_of(e).starts_with("paper-1")),
+        ),
+        (
+            "contains",
+            FilterOperand::TextContains("-2".into()),
+            Box::new(|e| title_of(e).contains("-2")),
+        ),
+    ];
+    for (label, operand, carries) in cases {
+        let got = fx.columns.resolve("title", &operand, &cand).unwrap();
+        let want = expected(&fx, &terms, &carries);
+        assert!(!want.is_empty(), "{label}: the fixture selects nothing");
+        assert_eq!(as_vec(&got), want, "{label}");
+    }
 }
 
 /// **Composition is intersection, and it commutes with the corpus.** Two operands over different
@@ -3716,6 +3727,116 @@ fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
             .expect("answers");
         assert!(title.contains(*entity as u32));
     }
+}
+
+/// Everything one generation's filter columns hold and answer, as one comparable value: per
+/// declared column the layer counts and the placement, one representative operand per family, and
+/// the record stack's depth.
+fn composition_reading(
+    engine: &tessera_engine::Engine,
+    fx: &Fixture,
+) -> BTreeMap<String, String> {
+    let (generation, cand) = live_candidate(engine);
+    let columns = &generation.filter_columns;
+    let mut out = BTreeMap::new();
+    out.insert("candidate".to_string(), cand.cardinality().to_string());
+    out.insert(
+        "record layers".to_string(),
+        columns.record_layers().to_string(),
+    );
+    for column in ["department", "archive", "title", "score", "bonus"] {
+        out.insert(
+            format!("{column}: layers"),
+            format!(
+                "{:?} value, {:?} text",
+                columns.layer_count(column),
+                columns.text_layer_count(column)
+            ),
+        );
+        let placement = columns.placement(column).expect("a filterable column");
+        out.insert(
+            format!("{column}: placement"),
+            format!(
+                "entity={} row={} family={}",
+                placement.entity,
+                placement.row,
+                placement.family.as_str()
+            ),
+        );
+    }
+    for (family, column, operand) in [
+        (
+            "category",
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        ),
+        (
+            "category",
+            "archive",
+            FilterOperand::Equals(AttrLocalId::new(fx.archive_codes["xx"])),
+        ),
+        (
+            "keyword",
+            "title",
+            FilterOperand::TextPrefix("differential-title-".into()),
+        ),
+        (
+            "keyword",
+            "title",
+            FilterOperand::TextContains("title-0".into()),
+        ),
+        (
+            "numeric",
+            "score",
+            FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(1_000),
+                    inclusive: true,
+                }),
+                hi: None,
+            },
+        ),
+    ] {
+        let answer = columns.resolve(column, &operand, &cand).expect("answers");
+        let members = as_vec(&answer);
+        assert!(
+            !members.is_empty(),
+            "{family} {column}: the fixture answers nothing, so the comparison is vacuous"
+        );
+        out.insert(
+            format!("{family} {column} {operand:?}"),
+            format!("{members:?}"),
+        );
+    }
+    out
+}
+
+/// **A build is an ingest into an empty database**, so a live generation's filter columns and a
+/// reopen of the same bundle are the same database — which nothing pinned as a whole.
+///
+/// A window's worth of flushes and the coalesce they trigger make a generation the build alone
+/// cannot: a base, a coalesced layer, and the manifest entries that say so. What is compared is
+/// what each composition *holds* — the value and text layer counts per column, each column's
+/// placement, the record stack's depth — and what it *answers*, one representative operand per
+/// family under a candidate taken the same way from each.
+///
+/// A publication that edited the manifest without replacing the live layers differs in the counts;
+/// one that replaced the live layers without committing the entries differs in them the other way;
+/// a merge that paired values with the wrong entities differs in the answers.
+#[test]
+fn a_live_generation_and_a_reopen_of_the_same_bundle_hold_and_answer_alike() {
+    let fx = fixture();
+    let live = {
+        let engine = engine_for_coalesce(&fx, "differential");
+        flush_a_window(&engine, "differential", 0);
+        assert!(
+            engine.write_executor_stats().coalesces >= 1,
+            "the reading is of a generation a coalesce has published into"
+        );
+        composition_reading(&engine, &fx)
+    };
+    let reopened = engine_for_coalesce(&fx, "differential-reopen");
+    assert_eq!(live, composition_reading(&reopened, &fx));
 }
 
 /// The keys the keyword tests below ingest, one per flush of a window. Repeated across flushes and

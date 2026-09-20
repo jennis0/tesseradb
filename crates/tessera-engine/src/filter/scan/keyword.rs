@@ -372,10 +372,8 @@ mod tests {
     //! nobody holds — are ones a fixture would have to be contrived to produce. What these cover
     //! is every step the route is made of: the per-layer resolve, the sentinel rule, the two
     //! `contains` routes against each other, and the slot arithmetic the narrow one depends on.
-    //!
-    //! ⊘ An end-to-end pass over a built bundle — a keyword column filtered through a real
-    //! principal's mask, which is what `tests/filtering.rs` does for every other family — is owed
-    //! and is not here.
+    //! The end-to-end pass over a built bundle — every keyword operand through a real principal's
+    //! mask, against the corpus — is `tests/filtering.rs`'s.
 
     use super::*;
     use crate::filter::test_support::*;
@@ -386,43 +384,64 @@ mod tests {
     // The sentinel rule
     // -------------------------------------------------------------------------------------
 
-    /// **A needle the layer does not hold resolves to the reserved ordinal, never to a shortcut.**
-    /// The assertion is on the *representation* rather than on the answer, because both are empty:
-    /// what must not drift is that a miss is carried to the scan as a value to look for.
+    /// **What each operand resolves to, over one dictionary** — and every miss is a value to look
+    /// for rather than a shortcut. The assertions are on the *representation* rather than on the
+    /// answer, because what must not drift is that a miss is carried to the scan.
+    ///
+    /// A prefix no key carries is the sentinel **range** and not an empty one, which is why
+    /// [`OrdinalPredicate::Range`] is inclusive — see its doc for the bound that would make an
+    /// empty range skip the scan. Both directions are here: `zeta` sorts above every key and `aa`
+    /// below every one of them, the second being the `0..0` case. `in` yields one ordinal per
+    /// needle the caller named, misses included, so the list's length is the operand's own. An
+    /// operand from another family cannot reach a keyword column through the parse, and arriving
+    /// from an embedder that built the expression directly it takes the same sentinel.
     #[test]
-    fn a_dictionary_miss_is_the_reserved_ordinal() {
-        let d = dict(&["alpha", "beta", "gamma"]);
-        assert_eq!(
-            keyword_ordinals(&d, &FilterOperand::TextEquals("delta".into())).unwrap(),
-            OrdinalPredicate::Eq(NO_SUCH_ORDINAL)
-        );
-        assert_eq!(
-            keyword_ordinals(&d, &FilterOperand::TextEquals("beta".into())).unwrap(),
-            OrdinalPredicate::Eq(1)
-        );
-    }
-
-    /// **A prefix no key carries is the sentinel *range*, not an empty one**, and that distinction
-    /// is the whole reason [`OrdinalPredicate::Range`] is inclusive — see its doc for the bound
-    /// that would make an empty range skip the scan. Both directions are covered: `zeta` sorts
-    /// above every key here and `aa` below every one of them, the second being the `0..0` case.
-    #[test]
-    fn a_prefix_no_key_carries_is_the_sentinel_range() {
-        let d = dict(&["alpha", "alpine", "beta"]);
-        for absent in ["zeta", "aa"] {
-            assert_eq!(
-                keyword_ordinals(&d, &FilterOperand::TextPrefix(absent.into())).unwrap(),
-                OrdinalPredicate::Range {
-                    lo: NO_SUCH_ORDINAL,
-                    hi: NO_SUCH_ORDINAL
-                },
-                "prefix {absent:?}"
-            );
+    fn an_operand_resolves_to_the_predicate_the_scan_answers() {
+        let d = dict(&["alpha", "alpine", "beta", "gamma"]);
+        let sentinel_range = OrdinalPredicate::Range {
+            lo: NO_SUCH_ORDINAL,
+            hi: NO_SUCH_ORDINAL,
+        };
+        let cases = [
+            (
+                "a needle the dictionary holds",
+                FilterOperand::TextEquals("beta".into()),
+                OrdinalPredicate::Eq(2),
+            ),
+            (
+                "a needle no dictionary holds",
+                FilterOperand::TextEquals("delta".into()),
+                OrdinalPredicate::Eq(NO_SUCH_ORDINAL),
+            ),
+            (
+                "a prefix two keys carry",
+                FilterOperand::TextPrefix("alp".into()),
+                OrdinalPredicate::Range { lo: 0, hi: 1 },
+            ),
+            (
+                "a prefix sorting above every key",
+                FilterOperand::TextPrefix("zeta".into()),
+                sentinel_range.clone(),
+            ),
+            (
+                "a prefix sorting below every key",
+                FilterOperand::TextPrefix("aa".into()),
+                sentinel_range.clone(),
+            ),
+            (
+                "a set of three needles, one of them a miss",
+                FilterOperand::TextIn(vec!["gamma".into(), "delta".into(), "alpha".into()]),
+                OrdinalPredicate::In(vec![3, NO_SUCH_ORDINAL, 0]),
+            ),
+            (
+                "an operand from another family",
+                FilterOperand::NumEquals(Scalar::Int(3)),
+                OrdinalPredicate::Eq(NO_SUCH_ORDINAL),
+            ),
+        ];
+        for (label, operand, expected) in cases {
+            assert_eq!(keyword_ordinals(&d, &operand).unwrap(), expected, "{label}");
         }
-        assert_eq!(
-            keyword_ordinals(&d, &FilterOperand::TextPrefix("alp".into())).unwrap(),
-            OrdinalPredicate::Range { lo: 0, hi: 1 }
-        );
     }
 
     /// **The pin on the whole rule: a sentinel predicate is answered by a real scan.**
@@ -451,30 +470,6 @@ mod tests {
                 "{predicate:?} must reach the slot holding the reserved ordinal"
             );
         }
-    }
-
-    /// `in` hands the scan one ordinal per needle the caller named, misses included, so the list's
-    /// length is the operand's own and never a count of how many of them this layer holds.
-    #[test]
-    fn an_in_set_carries_one_ordinal_per_needle_hit_or_miss() {
-        let d = dict(&["alpha", "beta", "gamma"]);
-        let operand = FilterOperand::TextIn(vec!["gamma".into(), "delta".into(), "alpha".into()]);
-        assert_eq!(
-            keyword_ordinals(&d, &operand).unwrap(),
-            OrdinalPredicate::In(vec![2, NO_SUCH_ORDINAL, 0])
-        );
-    }
-
-    /// An operand from another family cannot reach a keyword column through the parse; arriving
-    /// here from an embedder that built the expression directly, it matches nothing **and still
-    /// scans** — the same fail-closed answer a needle nobody holds gets.
-    #[test]
-    fn an_operand_from_another_family_takes_the_sentinel() {
-        let d = dict(&["alpha"]);
-        assert_eq!(
-            keyword_ordinals(&d, &FilterOperand::NumEquals(Scalar::Int(3))).unwrap(),
-            OrdinalPredicate::Eq(NO_SUCH_ORDINAL)
-        );
     }
 
     // -------------------------------------------------------------------------------------
@@ -912,42 +907,6 @@ mod tests {
         }
     }
 
-    /// **`contains`' ordinal test is sized by the dictionary, not by what matched.**
-    ///
-    /// The traversal counter cannot see this one: `runs` and `slots` were already equal across
-    /// needles, because both routes always scanned the whole candidate. What differed was the cost
-    /// *per slot* — a sorted list of matching ordinals is `O(log k)`, and for `contains` that *k*
-    /// is the number of dictionary keys carrying the substring: a corpus-wide count, including keys
-    /// no visible entity carries, that a caller can move by choosing a fragment. A table over the
-    /// ordinal domain is the same size and the same test whatever matched, which is what the three
-    /// needles below assert directly, since no counter can.
-    #[test]
-    fn contains_tests_ordinals_through_a_table_sized_by_the_dictionary() {
-        let keys: Vec<String> = (0..64).map(|i| format!("host-{i:03}.example")).collect();
-        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-        let d = dict(&refs);
-
-        // Nothing, one key, and every key — the span a fragment-guessing caller would sweep.
-        for (needle, expected) in [("zzz", 0usize), ("host-007", 1), ("example", 64)] {
-            let mut matched = tessera_filter::CodeSet::over_domain(d.len() - 1);
-            let matcher = tessera_filter::KeyMatcher::new(needle);
-            let mut hits = 0usize;
-            d.walk(|ordinal, key| {
-                if matcher.matches(key) {
-                    matched.insert(ordinal);
-                    hits += 1;
-                }
-            })
-            .unwrap();
-            assert_eq!(hits, expected, "needle {needle:?}");
-            assert_eq!(
-                matched.domain(),
-                d.len() - 1,
-                "needle {needle:?}: the table is sized by the dictionary, whatever matched"
-            );
-        }
-    }
-
     /// **The two routes traverse alike**, and not merely answer alike. They differ in how the
     /// matching ordinal set is found — every key in the dictionary, or only the blocks holding the
     /// candidate's own values — and not at all in the scan that turns that set into an answer. So
@@ -1038,17 +997,6 @@ mod tests {
             members(&contains_narrow(&values, &d, "phab", &candidate).unwrap()),
             vec![1]
         );
-    }
-
-    /// `contains` matching no key is the empty answer by way of the sentinel, and the whole
-    /// candidate is still scanned for it.
-    #[test]
-    fn a_contains_matching_no_key_still_scans() {
-        let d = dict(&["alpha", "beta"]);
-        let values = universal(&[0, 1]);
-        assert!(contains_broad(&values, &d, "zzz", &set(&[0, 1]))
-            .unwrap()
-            .is_empty());
     }
 
     /// The empty needle is *carries a value in this column*, which is not every entity: entity 2
