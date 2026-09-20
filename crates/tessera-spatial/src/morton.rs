@@ -1,6 +1,6 @@
-//! Quantisation and Morton interleaving (contracts §2.5).
+//! Quantisation and Morton interleaving.
 //!
-//! Grid is 2^16 x 2^16; Morton codes are 32-bit, low-aligned in a `u64` on disk.
+//! The grid is 2^16 x 2^16; Morton codes are 32-bit, low-aligned in a `u64` on disk.
 //! Cells are half-open: `v = max` lands in the top cell (65535), clamped otherwise.
 
 use tessera_types::MortonCode;
@@ -15,16 +15,17 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    /// Reject degenerate/non-finite extents. `cell`/`morton_of`/`tiles_for_bbox` are defined
-    /// only over a valid extent (all four bounds finite, both axes non-empty) — a `min == max`
-    /// or infinite bound would make `cell`'s division produce NaN/±inf silently, diverging from
-    /// the Python oracle, which raises instead.
-    pub fn validate(&self) -> Result<(), String> {
-        if !(self.x_min.is_finite()
+    pub fn is_finite(&self) -> bool {
+        self.x_min.is_finite()
             && self.x_max.is_finite()
             && self.y_min.is_finite()
-            && self.y_max.is_finite())
-        {
+            && self.y_max.is_finite()
+    }
+
+    /// Reject degenerate or non-finite extents. `cell`, `morton_of` and `tiles_for_bbox` require
+    /// a valid extent (finite bounds, non-empty axes); over a degenerate one the quantiser divides by zero.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.is_finite() {
             return Err("Bounds bounds must be finite".to_string());
         }
         if self.x_max <= self.x_min {
@@ -37,59 +38,32 @@ impl Bounds {
     }
 }
 
-/// Quantise a coordinate value into a 16-bit cell index.
+/// Positions per axis on the 32-bit grid: 2^32.
+pub(crate) const FIXED_SPAN: f64 = 4_294_967_296.0;
+
+/// Quantise a coordinate value into a 16-bit cell index: the high 16 bits of [`fixed32`].
 ///
 /// `cell(v) = clamp( floor( (v - min) / (max - min) * 65536 ), 0, 65535 )`, computed in f64.
-/// Cells are half-open; `v = max` lands in cell 65535 (contracts §2.5).
+/// Cells are half-open; `v = max` lands in cell 65535.
 ///
-/// Behaviour is defined only for finite `v` over a valid extent (`min < max`, both finite) —
-/// callers that quantise against user-controlled bounds must validate the [`Bounds`] first via
-/// [`Bounds::validate`]. This function only asserts in debug builds; it does not itself reject
-/// degenerate input, since it takes bare `min`/`max` rather than an `Bounds`.
+/// Domain conditions are [`fixed32`]'s.
 pub fn cell(v: f64, min: f64, max: f64) -> u16 {
-    debug_assert!(v.is_finite(), "cell(): v must be finite, got {v}");
-    debug_assert!(
-        min.is_finite() && max.is_finite() && max > min,
-        "cell(): invalid extent [{min}, {max})"
-    );
-    let scaled = (v - min) / (max - min) * 65536.0;
-    let floored = scaled.floor();
-    if floored <= 0.0 {
-        0
-    } else if floored >= 65535.0 {
-        65535
-    } else {
-        floored as u16
-    }
+    (fixed32(v, min, max) >> 16) as u16
 }
 
-/// Quantise a coordinate value into a 32-bit fixed-point position: [`cell`] widened by 16 bits.
+/// Quantise a coordinate value into a 32-bit fixed-point position.
 ///
-/// `fixed32(v) = clamp( floor( (v - min) / (max - min) * 2^32 ), 0, 2^32 - 1 )`, computed in f64.
+/// `fixed32(v) = clamp( floor( (v - min) / (max - min) * 2^32 ), 0, 2^32 - 1 )`, computed in f64,
+/// so `fixed32(v) >> 16 == cell(v)` exactly at both clamps.
 ///
-/// **`fixed32(v) >> 16 == cell(v)`, exactly and at both clamps**, which is the property the whole
-/// cell-plus-residual representation rests on: the cell a point lands in is the same whether it is
-/// derived from the coarse quantiser or from the fine one, so a residual is always the remainder
-/// within *that* cell rather than a separately-rounded quantity. Flooring and then shifting equals
-/// flooring at the coarser scale, and the clamp `2^32 - 1` shifts to exactly 65535. Pinned by
-/// [`tests::fixed32_high_half_is_cell`].
-///
-/// This is why the quantiser must be a *widening* of `cell` rather than any other 32-bit mapping.
-/// A scale factor of `2^32 - 1`, or round-to-nearest instead of floor, each disagree with `cell`
-/// about which cell a coordinate belongs to for a large fraction of inputs — measured at ~25% of
-/// uniformly distributed values for `round(t × (2^16 - 1))`, the mapping the corpus generator used
-/// before this function existed. Nothing detected it, because a corpus that stores Morton codes is
-/// read back through the code and never re-quantised.
-///
-/// Same domain conditions as [`cell`]: finite `v`, valid extent, debug-asserted only.
+/// Domain: finite `v` over a valid extent (`min < max`, both finite), debug-asserted only.
 pub fn fixed32(v: f64, min: f64, max: f64) -> u32 {
     debug_assert!(v.is_finite(), "fixed32(): v must be finite, got {v}");
     debug_assert!(
         min.is_finite() && max.is_finite() && max > min,
         "fixed32(): invalid extent [{min}, {max})"
     );
-    const SCALE: f64 = 4_294_967_296.0; // 2^32
-    let scaled = (v - min) / (max - min) * SCALE;
+    let scaled = (v - min) / (max - min) * FIXED_SPAN;
     let floored = scaled.floor();
     if floored <= 0.0 {
         0
@@ -102,26 +76,20 @@ pub fn fixed32(v: f64, min: f64, max: f64) -> u32 {
 
 /// Split a pair of 32-bit fixed-point axes into the stored `(cell code, sub-cell residual)`.
 ///
-/// The two words concatenate to the 64-bit interleave of the inputs — `(morton << 32) | residual`
-/// — because interleaving is bit-local: bit *i* of an axis lands at a fixed position of the code
-/// regardless of the other bits, so the high half of the 64-bit form is exactly the 32-bit
-/// interleave of the two high halves. The residual uses the same axis convention as the cell code,
-/// which is what makes that concatenation meaningful rather than merely well-typed.
+/// The two words concatenate to the 64-bit interleave of the inputs: `(morton << 32) | residual`,
+/// since bit *i* of an axis lands at a fixed position of the code regardless of the other bits.
 pub fn split32(qx: u32, qy: u32) -> (MortonCode, u32) {
     let cell = interleave((qx >> 16) as u16, (qy >> 16) as u16);
     let residual = spread(qx as u16) | (spread(qy as u16) << 1);
     (cell, residual)
 }
 
-/// Recover `(qx, qy)` from the stored `(cell code, sub-cell residual)` — the exact inverse of
+/// Recover `(qx, qy)` from the stored `(cell code, sub-cell residual)`: the exact inverse of
 /// [`split32`].
 ///
-/// **Exact, and that is what it is for.** A merge re-emits the rows of several segments as one, and
-/// a segment stores the *code*, never the axes it was built from. Recovering the axes through
-/// coordinates — dequantise to floats, re-quantise — would move points by up to a quantisation
-/// step, silently, on every merge. Going back through the interleave moves nothing: it is a bit
-/// permutation, so `unsplit32(split32(qx, qy)) == (qx, qy)` for every input, which the round-trip
-/// test asserts rather than argues.
+/// A segment stores the code, not the axes it was built from, so a merge that re-emits several
+/// segments' rows as one recovers axes by going back through the interleave, a bit permutation
+/// that moves nothing: `unsplit32(split32(qx, qy)) == (qx, qy)` for every input.
 pub fn unsplit32(cell: MortonCode, residual: u32) -> (u32, u32) {
     let code = cell.raw();
     let qx = (compact(code) << 16) | compact(residual);
@@ -129,7 +97,7 @@ pub fn unsplit32(cell: MortonCode, residual: u32) -> (u32, u32) {
     (qx, qy)
 }
 
-/// Gather the even bit positions of a 32-bit value back into the low 16 bits — the inverse of
+/// Gather the even bit positions of a 32-bit value back into the low 16 bits: the inverse of
 /// [`spread`].
 pub(crate) fn compact(v: u32) -> u32 {
     let mut x = v & 0x5555_5555;
@@ -167,11 +135,8 @@ pub fn morton_of(x: f64, y: f64, e: &Bounds) -> MortonCode {
     interleave(xc, yc)
 }
 
-/// Interleave `d`-bit tile coordinates `(tx, ty)` directly into a `2d`-bit prefix.
-///
-/// Unlike [`interleave`], which always spreads over the full 32-bit code space, this spreads
-/// only the low `d` bits of each coordinate, producing a prefix in `[0, 4^d)` — the value used
-/// directly as [`Tile::prefix`] at depth `d`.
+/// Interleave `d`-bit tile coordinates `(tx, ty)` into a `2d`-bit prefix in `[0, 4^d)`, the value
+/// used directly as [`Tile::prefix`] at depth `d`.
 pub fn interleave_bits(tx: u32, ty: u32, d: u8) -> u64 {
     debug_assert!(
         d <= 16,
@@ -181,23 +146,15 @@ pub fn interleave_bits(tx: u32, ty: u32, d: u8) -> u64 {
         tx >> d == 0 && ty >> d == 0,
         "interleave_bits(): tx/ty must fit in {d} bits, got tx={tx}, ty={ty}"
     );
-    let mut prefix: u64 = 0;
-    for i in 0..d as u64 {
-        let xb = ((tx as u64) >> i) & 1;
-        let yb = ((ty as u64) >> i) & 1;
-        prefix |= xb << (2 * i);
-        prefix |= yb << (2 * i + 1);
-    }
-    prefix
+    // Bit i of a coordinate lands at bit 2i whatever the depth, so the full-width spread of a
+    // d-bit coordinate is already the 2d-bit prefix.
+    u64::from(spread(tx as u16) | (spread(ty as u16) << 1))
 }
 
 /// A tile in the Morton quadtree: a `depth`-deep prefix over the 32-bit code space.
 ///
-/// Fields are public so `Tile { prefix, depth }` literal construction stays available (used
-/// throughout `tiles_for_bbox` and by callers), but `depth` must be `<= 16` — the grid is
-/// 2^16 x 2^16 and codes are 32-bit, so a deeper prefix has no meaning. Out-of-range depth is
-/// caught by `debug_assert!` in [`Tile::code_range`], not by construction, since there is no
-/// checked constructor to bypass.
+/// `depth` must be `<= 16`: the grid is 2^16 x 2^16 and codes are 32-bit, so a deeper prefix has
+/// no meaning. Out-of-range depth is caught by `debug_assert!` in [`Tile::code_range`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tile {
     pub prefix: u64,
@@ -208,8 +165,8 @@ impl Tile {
     /// The half-open range of `u64`-widened Morton codes covered by this tile:
     /// `[prefix << (32 - 2*depth), (prefix + 1) << (32 - 2*depth))`.
     ///
-    /// Debug-asserts `depth <= 16`: at greater depth `32 - 2*depth` underflows (debug panic) or
-    /// silently wraps (release), since the grid has only 32 bits of code space.
+    /// Debug-asserts `depth <= 16`: at greater depth `32 - 2*depth` underflows in debug builds or
+    /// wraps in release, since the grid has only 32 bits of code space.
     pub fn code_range(&self) -> (u64, u64) {
         debug_assert!(
             self.depth <= 16,
@@ -224,10 +181,9 @@ impl Tile {
 /// Enumerate the depth-`d` tiles overlapping `bbox = [x0, y0, x1, y1]` within `extent`.
 ///
 /// Corners are quantised to cells, shifted to depth-`d` tile coordinates (`cell >> (16 - d)`),
-/// and the resulting `(tx, ty)` grid — inclusive of both corners — is enumerated. The prefix for
-/// each `(tx, ty)` is the interleave of the *d-bit* tile coordinates, spread over `2d` bits
-/// ([`interleave_bits`]) — not the 16-bit [`interleave`] applied to shifted inputs, which would
-/// spread over the wrong number of bits. Depth 0 yields a single tile (prefix 0, whole grid).
+/// and the resulting `(tx, ty)` grid, inclusive of both corners, is enumerated. The prefix for
+/// each `(tx, ty)` is [`interleave_bits`] applied to the `d`-bit tile coordinates. Depth 0 yields
+/// a single tile (prefix 0, whole grid).
 pub fn tiles_for_bbox(bbox: [f64; 4], depth: u8, e: &Bounds) -> Vec<Tile> {
     debug_assert!(
         depth <= 16,
@@ -266,14 +222,11 @@ fn tile_corners(bbox: [f64; 4], depth: u8, e: &Bounds) -> (u16, u16, u16, u16) {
     (cx0.min(cx1), cx0.max(cx1), cy0.min(cy1), cy0.max(cy1))
 }
 
-/// How many tiles [`tiles_for_bbox`] *would* return, **without allocating any of them**.
+/// How many tiles [`tiles_for_bbox`] would return, without allocating any of them.
 ///
-/// Exists so a caller can refuse an over-large request before paying for it. The count is the
-/// product of two inclusive tile-coordinate spans, so at depth 16 over the full extent it is
-/// `65536² = 4.29×10⁹` — one 16-byte `Tile` each, ~69 GB, which is an out-of-memory abort rather
-/// than a slow request. Returning `u64` rather than `usize` is deliberate: the point is to compare
-/// against a budget, and a caller must be able to see the real magnitude rather than a value that
-/// has already been truncated or has already exhausted the allocator.
+/// Exists so a caller can refuse an over-large request before paying for it. Returns `u64` rather
+/// than `usize` so a caller can compare the true magnitude against a budget rather than a value
+/// already truncated to pointer width.
 pub fn tiles_for_bbox_count(bbox: [f64; 4], depth: u8, e: &Bounds) -> u64 {
     if depth == 0 {
         return 1;
@@ -293,30 +246,6 @@ mod tests {
         assert_eq!(interleave(6, 3).raw(), 30); // contracts §2.5
     }
 
-    /// The property the cell-plus-residual representation rests on: the 32-bit quantiser is a
-    /// *widening* of the 16-bit one, so both agree on which cell a coordinate belongs to. A
-    /// different scale factor or rounding mode passes every other test in this file and fails
-    /// this one — which is the whole reason it exists.
-    #[test]
-    fn fixed32_high_half_is_cell() {
-        let (min, max) = (-12.0, 25.5);
-        // Both clamps, both boundaries, and a spread of interior values including ones that
-        // land exactly on a cell edge.
-        let mut vs = vec![min, max, min - 1.0, max + 1.0, 0.0, 0.5, -11.999_999];
-        for i in 0..2000 {
-            vs.push(min + (max - min) * (i as f64) / 2000.0);
-        }
-        for v in vs {
-            assert_eq!(
-                (fixed32(v, min, max) >> 16) as u16,
-                cell(v, min, max),
-                "fixed32(v) >> 16 must equal cell(v) at v = {v}"
-            );
-        }
-    }
-
-    /// Concatenating the two stored words yields the 64-bit interleave of the two 32-bit axes.
-    /// Checked at every single-bit position, which is what a change to the bit ordering breaks.
     #[test]
     fn split32_concatenates_to_the_64_bit_interleave() {
         fn reference_interleave64(qx: u32, qy: u32) -> u64 {
@@ -344,8 +273,6 @@ mod tests {
         }
     }
 
-    /// The cell half of `split32` is the code `morton_of` would produce for the same point, so
-    /// adding a residual leaves every existing Morton code byte-identical.
     #[test]
     fn split32_cell_half_agrees_with_morton_of() {
         let e = Bounds {
@@ -404,14 +331,10 @@ mod tests {
 mod unsplit_tests {
     use super::*;
 
-    /// **`unsplit32 ∘ split32 == identity`, asserted rather than argued.** A merge re-emits several
-    /// segments' rows as one, and a segment stores the code, not the axes: this is the only route
-    /// back that moves nothing. Going via coordinates — dequantise, re-quantise — would shift
-    /// points by up to a quantisation step on every merge, silently.
+    /// `unsplit32(split32(x)) == x` for every input.
     #[test]
     fn splitting_and_unsplitting_is_the_identity() {
-        // Boundaries and a deterministic spread of interior values, rather than a random sample:
-        // the failure mode is a bit-position error, which is exactly what extremes expose.
+        // Boundaries plus a deterministic spread: the failure mode is a bit-position error.
         let mut cases: Vec<(u32, u32)> = vec![
             (0, 0),
             (u32::MAX, u32::MAX),
@@ -437,9 +360,6 @@ mod unsplit_tests {
         }
     }
 
-    /// The halves are independent: the cell is the interleave of the high halves and the residual
-    /// of the low, which is what makes `(code << 32) | residual` the 64-bit interleave (see
-    /// [`split32`]'s doc). A merge relies on that to sort by the code alone.
     #[test]
     fn the_cell_carries_the_high_halves_and_the_residual_the_low() {
         let (cell, residual) = split32(0xABCD_1234, 0x5678_9ABC);
