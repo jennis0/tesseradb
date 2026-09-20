@@ -224,6 +224,27 @@ def response_figures(content: bytes) -> dict:
     }
 
 
+def full_box(quant: dict) -> list[float]:
+    """A view's whole extent as a bbox, from its quantisation."""
+    return [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
+
+
+def drain(r: requests.Response) -> tuple[bytes, str | None]:
+    """The body as it arrived, and the error where the server cut it mid-stream."""
+    shed_error = None
+    content = bytearray()
+    try:
+        r.raise_for_status()
+        try:
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                content.extend(chunk)
+        except SHED_ERRORS as e:  # noqa: BLE001 — the cut is the measurement
+            shed_error = f"{type(e).__name__}: {e}"[:300]
+    finally:
+        r.close()
+    return bytes(content), shed_error
+
+
 def viewport(
     viewer_base: str,
     token: str,
@@ -244,10 +265,11 @@ def viewport(
     **A stream the server cut is a result, not an exception.** The whole emit phase runs under
     `serve.stream_deadline_ms` from the first flush (`streamed-serving.md` §5), and a
     budget-sized response on a large corpus can outrun it: the connection aborts mid-body and no
-    trailer is emitted. The body is therefore read chunk by chunk and what arrived is returned
-    with `shed` set — the counts frame is first on the wire, so a shed sample still carries exact
-    counts, and its delivered points are a sound prefix (§6). A response with no trailer is shed
-    whether or not the read raised, because the trailer's presence is the completeness signal.
+    trailer is emitted. The body is therefore read chunk by chunk ([`drain`]) and what arrived is
+    returned with `shed` set — the counts frame is first on the wire, so a shed sample still
+    carries exact counts, and its delivered points are a sound prefix (§6). A response with no
+    trailer is shed whether or not the read raised, because the trailer's presence is the
+    completeness signal.
     """
     body: dict = {"view": view_id, "zoom": zoom, "bbox": list(bbox), "k": k}
     if layers is not None:
@@ -262,17 +284,7 @@ def viewport(
         timeout=timeout,
         stream=True,
     )
-    shed_error = None
-    content = bytearray()
-    try:
-        r.raise_for_status()
-        try:
-            for chunk in r.iter_content(chunk_size=1 << 20):
-                content.extend(chunk)
-        except SHED_ERRORS as e:  # noqa: BLE001 — the cut is the measurement
-            shed_error = f"{type(e).__name__}: {e}"[:300]
-    finally:
-        r.close()
+    content, shed_error = drain(r)
     wall = time.perf_counter() - t0
     out = {
         # To the cut where there was one, which is what a client waited before it knew.
@@ -287,7 +299,7 @@ def viewport(
         "k": k,
         "shed_error": shed_error,
     }
-    out.update(response_figures(bytes(content)))
+    out.update(response_figures(content))
     out["shed"] = shed_error is not None or not out["complete"]
     return out
 
@@ -372,9 +384,7 @@ class Evictor:
         self.server_pid = server_pid
         self.cgroup = Path(cgroup) if cgroup else None
         self.reclaim_bytes = reclaim_bytes
-        self.files_evicted = 0
         self.evictions = 0
-        self.reclaim_errors = 0
 
     def _files(self) -> Iterable[Path]:
         for root in self.roots:
@@ -385,9 +395,8 @@ class Evictor:
                     if path.is_file():
                         yield path
 
-    def evict(self) -> int:
-        """Drop every page we can, and return how many files were advised."""
-        n = 0
+    def evict(self) -> None:
+        """Drop every page we can."""
         for path in self._files():
             try:
                 fd = os.open(path, os.O_RDONLY)
@@ -395,7 +404,6 @@ class Evictor:
                 continue
             try:
                 os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-                n += 1
             except OSError:
                 pass
             finally:
@@ -418,10 +426,8 @@ class Evictor:
                 with open(self.cgroup / "memory.reclaim", "w") as f:
                     f.write(f"{max(charged, 1 << 20)}\n")
             except OSError:
-                self.reclaim_errors += 1
-        self.files_evicted += n
+                pass
         self.evictions += 1
-        return n
 
     def majflt(self) -> int | None:
         """The server's process-wide major-fault count (`/proc/<pid>/stat` field 12)."""
@@ -659,7 +665,6 @@ def condition_figures(samples: Sequence[dict], cold: bool) -> dict:
     top level and real ones in `all`, which is the honest shape for "nothing here was proven
     cold" — never a fast cold read.
     """
-    samples = [s for s in samples]
     complete = [s for s in samples if not s.get("failed") and not s.get("shed")]
     proven = (
         [s for s in complete if s.get("majflt_delta") not in (None, 0)] if cold else complete
@@ -713,13 +718,24 @@ class Battery:
         self.oom_seen = False
         self.failures = 0
         self.died: dict | None = None
-        # The request shape, settled in `run` from `/v1/meta` before anything is sampled: the
-        # view's own frame, the deployment's `k` ceiling and its tile guard. A request is built
-        # from these three and from nothing else.
+        # The sample shape, from the flags alone.
+        self.zooms = [int(z) for z in args.zooms.split(",")]
+        self.deciles = [int(d) for d in args.deciles.split(",")]
+        self.conditions = args.conditions.split(",")
+        self.cold_samples = args.cold_samples or args.samples
+        # The request shape, settled in [`Battery.request_shape`] from `/v1/meta` before anything
+        # is sampled: the view, its own frame, the deployment's `k` ceiling and its tile guard. A
+        # request is built from these and from nothing else.
+        self.view_id = ""
         self.quant: dict = {}
-        self.selection: dict = {}
         self.max_tiles = DEFAULT_MAX_TILES
         self.k = args.k if args.k is not None else DEFAULT_K
+        #: The density deciles, ranked once under the 100% principal, by zoom.
+        self.pools: dict[int, list[list[tuple[list[float], int]]]] = {}
+
+    def _depth(self, box: Sequence[float], zoom: int) -> int:
+        """The depth a box at `zoom` is asked at, under this deployment's own tile ceiling."""
+        return budget_zoom(self.quant, box, zoom, self.args.budget_depth, self.max_tiles)
 
     def _fresh_token(self, terms: Sequence[str]) -> str | None:
         """A new session. `None` once the server has died — the caller stops rather than raising."""
@@ -746,7 +762,7 @@ class Battery:
         if events and events.get("memory.events", {}).get("oom_kill", 0):
             self.oom_seen = True
 
-    def _sample(self, token, view_id, zoom, box, cold: bool, **kw) -> dict:
+    def _sample(self, token, zoom, box, cold: bool, **kw) -> dict:
         """One request, with the cold proof around it when the condition asks for one.
 
         **A request that fails is a sample with a `failed` field, not the end of the run.** A
@@ -755,11 +771,11 @@ class Battery:
         mid-body does not reach here at all: [`viewport`] returns it marked `shed`, which is a
         sample with exact counts and no latency figure.
         """
-        depth = budget_zoom(self.quant, box, zoom, self.args.budget_depth, self.max_tiles)
+        depth = self._depth(box, zoom)
         before = self.evictor.majflt() if cold else None
         t0 = time.perf_counter()
         try:
-            s = viewport(self.args.viewer, token, view_id, depth, box, k=self.k, **kw)
+            s = viewport(self.args.viewer, token, self.view_id, depth, box, k=self.k, **kw)
         except Exception as e:  # noqa: BLE001 — the failure is the measurement
             self.failures += 1
             return {
@@ -785,7 +801,7 @@ class Battery:
             s["eviction_failed"] = delta == 0
         return s
 
-    def _cold_samples(self, terms, view_id, zoom, pool, n, fresh_session: bool) -> list[dict]:
+    def _cold_samples(self, terms, zoom, pool, n, fresh_session: bool) -> list[dict]:
         """`n` samples, a distinct location each, evicted before every one.
 
         A repeated location is warm, so the pool is walked rather than one box repeated; where the
@@ -798,9 +814,7 @@ class Battery:
                 return []
             # Build this session's fragments once — that is what "warm engine" means — on a
             # location that is not one of the samples, so no sample's own extent is faulted here.
-            self._sample(token, view_id, zoom, pool[0][0], cold=False)
-        if token is None and not fresh_session:
-            return []
+            self._sample(token, zoom, pool[0][0], cold=False)
         out = []
         for i in range(n):
             box = pool[i % len(pool)][0]
@@ -809,225 +823,226 @@ class Battery:
                 token = self._fresh_token(terms)
             if token is None:
                 break
-            s = self._sample(token, view_id, zoom, box, cold=True)
+            s = self._sample(token, zoom, box, cold=True)
             s["location"] = i % len(pool)
             out.append(s)
             self._watch_oom()
         return out
 
-    def _hot_samples(self, token, view_id, zoom, box, n) -> list[dict]:
-        out = []
-        for _ in range(n):
-            out.append(self._sample(token, view_id, zoom, box, cold=False))
-        return out
+    def _hot_samples(self, token, zoom, box, n) -> list[dict]:
+        return [self._sample(token, zoom, box, cold=False) for _ in range(n)]
+
+    def request_shape(self, token: str) -> dict:
+        """Settle the view, its frame and the deployment's ceilings from `/v1/meta`.
+
+        The two ceilings a request is built against come from the deployment that will serve it
+        rather than from a file beside it: `/v1/meta` publishes both for exactly this reason
+        (contracts §3.2), and a battery driving a server it did not boot has no other source.
+        Returns the `selection` block it read.
+        """
+        m = meta(self.args.viewer, token)
+        self.view_id = self.args.view or m["views"][0]["id"]
+        self.quant = next(v for v in m["views"] if v["id"] == self.view_id)["quantisation"]
+        selection = m.get("selection") or {}
+        self.max_tiles = int(selection.get("max_tiles_per_request") or DEFAULT_MAX_TILES)
+        if self.args.k is None:
+            self.k = int(selection.get("max_k") or DEFAULT_K)
+        return selection
+
+    def whole_extent(self, token: str) -> dict:
+        """One budget request over the whole extent, logged."""
+        box = full_box(self.quant)
+        whole = viewport(
+            self.args.viewer, token, self.view_id, self._depth(box, 0), box, k=self.k, layers=None
+        )
+        counts = whole["counts"] or {}
+        served, occupied = int(counts.get("served") or 0), int(counts.get("n_tiles") or 0)
+        self.log(
+            f"  100% principal sees {int(counts.get('visible') or 0):,} over the whole extent; "
+            f"the budget request at depth {whole['request_zoom']} with k={self.k} serves "
+            f"{served:,} points over {occupied:,} occupied tiles "
+            f"({served / max(occupied, 1):.1f} a tile) in "
+            f"{(whole['bytes'] or 0) / 1e6:.1f} MB, first flush {whole['server_ms']:.0f} ms, "
+            f"stream {(whole['stream_ms'] or 0):.0f} ms"
+            + (f" — SHED after {whole['wall_ms']:.0f} ms" if whole["shed"] else "")
+        )
+        return whole
+
+    def rank_deciles(self, token: str) -> None:
+        """Fill `pools`: the density deciles at each zoom, ranked once under the 100% principal
+        and reused by every rung."""
+        for zoom in self.zooms:
+            boxes = candidate_boxes(self.quant, zoom, self.args.candidates, self.rng)
+            ranked = rank_by_density(
+                self.args.viewer,
+                token,
+                self.view_id,
+                zoom,
+                boxes,
+                self.quant,
+                self.args.budget_depth,
+                self.max_tiles,
+                self.log,
+            )
+            self.pools[zoom] = decile_pools(ranked)
+            self.log(
+                f"  zoom {zoom}: visible over {self.args.candidates} candidates "
+                f"min={ranked[0][1]:,} median={ranked[len(ranked)//2][1]:,} max={ranked[-1][1]:,}"
+            )
+
+    def measure_cell(self, token, terms, zoom: int, decile: int, which: int) -> dict:
+        """One cell: one location of one decile, under each condition.
+
+        Two cells in one decile are two different orderings of the same pool, so their samples are
+        distinct locations of the same known density.
+        """
+        pool = self.pools[zoom][decile]
+        offset = (which * len(pool)) // max(self.args.cells_per_decile, 1)
+        rotated = pool[offset:] + pool[:offset]
+        box, density = rotated[0]
+        cell = {
+            "zoom": zoom,
+            "decile": decile,
+            "which": which,
+            "box": box,
+            "request_zoom": self._depth(box, zoom),
+            "density_visible_100pc": density,
+            "distinct_locations": min(self.cold_samples, len(rotated)),
+            "conditions": {},
+        }
+        # **Cold and hot get different sample counts, and that is deliberate.** A hot sample is a
+        # millisecond; a cold one at 3.6×10⁷ rows under the widest principal is a fresh fragment
+        # build plus a re-fault of the bundle, tens of seconds — so forty of each is not one
+        # budget but two, and the cold half decides whether a rung is measurable in an evening at
+        # all. The count that was used is recorded per run; a reduced run must never look like a
+        # full one.
+        for condition in self.conditions:
+            if condition == "hot":
+                samples = self._hot_samples(token, zoom, box, self.args.samples)
+            elif condition == "cold":
+                samples = self._cold_samples(terms, zoom, rotated, self.cold_samples, True)
+            elif condition == "cold_pages_warm_engine":
+                samples = self._cold_samples(terms, zoom, rotated, self.cold_samples, False)
+            else:
+                raise SystemExit(f"unknown condition {condition!r}")
+            cell["conditions"][condition] = condition_figures(samples, cold=condition != "hot")
+        # `all` rather than the headline block: the first condition may be a cold one that proved
+        # nothing, and the points a request served are the same whether the eviction worked.
+        served_figures = cell["conditions"][self.conditions[0]]["all"]["served"]
+        shed = sum(figures.get("shed", 0) for figures in cell["conditions"].values())
+        self.log(
+            f"    zoom {zoom} decile {decile}.{which} "
+            f"depth={cell['request_zoom']} density={density:,} "
+            f"served_p50={served_figures['p50']} "
+            + " ".join(
+                f"{c}:p50={figures['wall_ms']['p50']}"
+                for c, figures in cell["conditions"].items()
+            )
+            + (f" shed={shed}" if shed else "")
+        )
+        return cell
+
+    def run_rung(self, rung: dict, token: str, authorise_s: float, total_rows: int) -> dict:
+        """One principal's first viewport and every cell under it.
+
+        Returned even when the server died mid-rung: the cells measured before it are
+        measurements, and `died` says where it stopped.
+        """
+        # The first viewport of a fresh session is its own figure: it carries the
+        # `(view, principal)` fragment build, which is not a per-request cost and must not be
+        # averaged into one.
+        t0 = time.perf_counter()
+        first = self._sample(token, 0, full_box(self.quant), cold=False)
+        first_s = time.perf_counter() - t0
+        first_counts = first.get("counts") or {}
+        measured = int(first_counts.get("visible") or 0)
+        self.log(
+            f"    authorise {authorise_s*1000:.0f} ms, first viewport {first_s:.2f} s at "
+            f"depth {first.get('request_zoom')} with k={first.get('k')}: "
+            f"{int(first_counts.get('served') or 0):,} points over "
+            f"{int(first_counts.get('n_tiles') or 0):,} occupied tiles in "
+            f"{(first.get('bytes') or 0) / 1e6:.1f} MB, first flush "
+            f"{(first.get('server_ms') or 0):.0f} ms, stream "
+            f"{(first.get('stream_ms') or 0):.0f} ms, measured coverage "
+            f"{measured/max(total_rows,1):.4%}"
+            + (" — SHED" if first.get("shed") else "")
+        )
+
+        cells = [
+            self.measure_cell(token, rung["terms"], zoom, decile, which)
+            for zoom in self.zooms
+            for decile in self.deciles
+            if self.pools[zoom][decile]
+            for which in range(self.args.cells_per_decile)
+        ]
+        return {
+            "target": rung["target"],
+            "terms": rung["terms"],
+            "terms_n": len(rung["terms"]),
+            "rule": rung.get("rule"),
+            "measured": round(measured / max(total_rows, 1), 6),
+            "first_viewport_failed": first.get("failed"),
+            "measured_visible": measured,
+            "authorise_s": round(authorise_s, 4),
+            "first_viewport_s": round(first_s, 4),
+            "first_viewport_request_zoom": first.get("request_zoom"),
+            "first_viewport_k": first.get("k"),
+            "first_viewport_served": first_counts.get("served"),
+            "first_viewport_occupied_tiles": first_counts.get("n_tiles"),
+            "first_viewport_bytes": first.get("bytes"),
+            "first_viewport_server_ms": first.get("server_ms"),
+            "first_viewport_stream_ms": first.get("stream_ms"),
+            "first_viewport_shed": bool(first.get("shed")),
+            "cells": cells,
+            "battery": battery_figures(cells),
+        }
 
     def run(self) -> dict:
         args = self.args
         ranks = json.loads(Path(args.ranks).read_text())
-        targets = [float(t) for t in args.targets.split(",")]
-        zooms = [int(z) for z in args.zooms.split(",")]
-        deciles = [int(d) for d in args.deciles.split(",")]
 
         # The 100% principal first: it is the denominator of every coverage figure and the
         # principal the deciles are ranked under.
         all_terms = sorted(r["term"] for r in ranks)
         broad_token, broad_authorise_s = authorise(args.session, args.session_cred, all_terms)
-        m = meta(args.viewer, broad_token)
-        view_id = args.view or m["views"][0]["id"]
-        quant = next(v for v in m["views"] if v["id"] == view_id)["quantisation"]
-        # The two ceilings a request is built against, from the deployment that will serve it
-        # rather than from a file beside it: `/v1/meta` publishes both for exactly this reason
-        # (contracts §3.2), and a battery driving a server it did not boot has no other source.
-        selection = m.get("selection") or {}
-        self.quant = quant
-        self.selection = selection
-        self.max_tiles = int(selection.get("max_tiles_per_request") or DEFAULT_MAX_TILES)
-        if args.k is None:
-            self.k = int(selection.get("max_k") or DEFAULT_K)
-        full_extent = [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
-        whole_zoom = budget_zoom(quant, full_extent, 0, args.budget_depth, self.max_tiles)
-        whole = viewport(
-            args.viewer, broad_token, view_id, whole_zoom, full_extent, k=self.k, layers=None
-        )
-        whole_counts = whole["counts"] or {}
-        total_rows = int(whole_counts.get("visible") or 0)
-        whole_occupied = int(whole_counts.get("n_tiles") or 0)
-        whole_served = int(whole_counts.get("served") or 0)
-        self.log(
-            f"  100% principal sees {total_rows:,} over the whole extent; the budget request at "
-            f"depth {whole_zoom} with k={self.k} serves {whole_served:,} points over "
-            f"{whole_occupied:,} occupied tiles "
-            f"({whole_served / max(whole_occupied, 1):.1f} a tile) in "
-            f"{(whole['bytes'] or 0) / 1e6:.1f} MB, first flush {whole['server_ms']:.0f} ms, "
-            f"stream {(whole['stream_ms'] or 0):.0f} ms"
-            + (f" — SHED after {whole['wall_ms']:.0f} ms" if whole["shed"] else "")
-        )
+        selection = self.request_shape(broad_token)
+        whole = self.whole_extent(broad_token)
+        total_rows = int((whole["counts"] or {}).get("visible") or 0)
+        self.rank_deciles(broad_token)
 
-        # Density deciles, ranked once under the 100% principal and reused by every rung.
-        pools: dict[int, list[list[tuple[list[float], int]]]] = {}
-        for zoom in zooms:
-            boxes = candidate_boxes(quant, zoom, args.candidates, self.rng)
-            ranked = rank_by_density(
-                args.viewer,
-                broad_token,
-                view_id,
-                zoom,
-                boxes,
-                quant,
-                args.budget_depth,
-                self.max_tiles,
-                self.log,
-            )
-            pools[zoom] = decile_pools(ranked)
-            self.log(
-                f"  zoom {zoom}: visible over {args.candidates} candidates "
-                f"min={ranked[0][1]:,} median={ranked[len(ranked)//2][1]:,} max={ranked[-1][1]:,}"
-            )
-
-        ladder_spec = compose_ladder(ranks, total_rows, targets)
+        token = broad_token
         ladder_out = []
-        for rung in ladder_spec:
-            terms = rung["terms"]
+        for rung in compose_ladder(
+            ranks, total_rows, [float(t) for t in args.targets.split(",")]
+        ):
             # **A dead server ends the run and does not lose it.** Under a cap the process can be
             # OOM-killed part-way up the ladder — which is the result the capped run exists to
             # find — and every principal measured before that is still a measurement. The rung
             # that was in flight is recorded in `died` with the principal it was serving.
             if self.died is not None:
                 break
-            self.log(f"  principal target {rung['target']:.0%}: {len(terms)} term(s) {terms}")
-            try:
-                token, authorise_s = authorise(args.session, args.session_cred, terms)
-            except requests.exceptions.RequestException as e:
-                self._record_death("session/authorise", e, terms)
-                break
-            # The first viewport of a fresh session is its own figure: it carries the
-            # `(view, principal)` fragment build, which is not a per-request cost and must not be
-            # averaged into one.
-            t0 = time.perf_counter()
-            first = self._sample(token, view_id, 0, full_extent, cold=False)
-            first_s = time.perf_counter() - t0
-            first_counts = first.get("counts") or {}
-            measured = int(first_counts.get("visible") or 0)
             self.log(
-                f"    authorise {authorise_s*1000:.0f} ms, first viewport {first_s:.2f} s at "
-                f"depth {first.get('request_zoom')} with k={first.get('k')}: "
-                f"{int(first_counts.get('served') or 0):,} points over "
-                f"{int(first_counts.get('n_tiles') or 0):,} occupied tiles in "
-                f"{(first.get('bytes') or 0) / 1e6:.1f} MB, first flush "
-                f"{(first.get('server_ms') or 0):.0f} ms, stream "
-                f"{(first.get('stream_ms') or 0):.0f} ms, measured coverage "
-                f"{measured/max(total_rows,1):.4%}"
-                + (" — SHED" if first.get("shed") else "")
+                f"  principal target {rung['target']:.0%}: {len(rung['terms'])} term(s) "
+                f"{rung['terms']}"
             )
-
-            cells = []
-            for zoom in zooms:
-                for decile in deciles:
-                    pool = pools[zoom][decile]
-                    if not pool:
-                        continue
-                    for which in range(args.cells_per_decile):
-                        # Two cells in one decile are two different orderings of the same pool,
-                        # so their samples are distinct locations of the same known density.
-                        offset = (which * len(pool)) // max(args.cells_per_decile, 1)
-                        rotated = pool[offset:] + pool[:offset]
-                        box, density = rotated[0]
-                        cell = {
-                            "zoom": zoom,
-                            "decile": decile,
-                            "which": which,
-                            "box": box,
-                            "request_zoom": budget_zoom(
-                                quant, box, zoom, args.budget_depth, self.max_tiles
-                            ),
-                            "density_visible_100pc": density,
-                            "distinct_locations": min(
-                                args.cold_samples or args.samples, len(rotated)
-                            ),
-                            "conditions": {},
-                        }
-                        # **Cold and hot get different sample counts, and that is deliberate.** A
-                        # hot sample is a millisecond; a cold one at 3.6×10⁷ rows under the widest
-                        # principal is a fresh fragment build plus a re-fault of the bundle, tens
-                        # of seconds — so forty of each is not one budget but two, and the cold
-                        # half decides whether a rung is measurable in an evening at all. The
-                        # count that was used is recorded per run; a reduced run must never look
-                        # like a full one.
-                        cold_n = args.cold_samples or args.samples
-                        for condition in args.conditions.split(","):
-                            if condition == "hot":
-                                samples = self._hot_samples(
-                                    token, view_id, zoom, box, args.samples
-                                )
-                            elif condition == "cold":
-                                samples = self._cold_samples(
-                                    terms, view_id, zoom, rotated, cold_n, True
-                                )
-                            elif condition == "cold_pages_warm_engine":
-                                samples = self._cold_samples(
-                                    terms, view_id, zoom, rotated, cold_n, False
-                                )
-                            else:
-                                raise SystemExit(f"unknown condition {condition!r}")
-                            cell["conditions"][condition] = condition_figures(
-                                samples, cold=condition != "hot"
-                            )
-                        cells.append(cell)
-                        # `all` rather than the headline block: the first condition may be a
-                        # cold one that proved nothing, and the points a request served are the
-                        # same whether the eviction worked.
-                        served_figures = cell["conditions"][args.conditions.split(",")[0]][
-                            "all"
-                        ]["served"]
-                        shed = sum(
-                            cell["conditions"][c].get("shed", 0) for c in cell["conditions"]
-                        )
-                        self.log(
-                            f"    zoom {zoom} decile {decile}.{which} "
-                            f"depth={cell['request_zoom']} density={density:,} "
-                            f"served_p50={served_figures['p50']} "
-                            + " ".join(
-                                f"{c}:p50={cell['conditions'][c]['wall_ms']['p50']}"
-                                for c in cell["conditions"]
-                            )
-                            + (f" shed={shed}" if shed else "")
-                        )
-
-            # Appended even when the server died mid-rung: the cells measured before it are
-            # measurements, and `died` says where it stopped.
-            rung_out = {
-                "target": rung["target"],
-                "terms": terms,
-                "terms_n": len(terms),
-                "rule": rung.get("rule"),
-                "measured": round(measured / max(total_rows, 1), 6),
-                "first_viewport_failed": first.get("failed"),
-                "measured_visible": measured,
-                "authorise_s": round(authorise_s, 4),
-                "first_viewport_s": round(first_s, 4),
-                "first_viewport_request_zoom": first.get("request_zoom"),
-                "first_viewport_k": first.get("k"),
-                "first_viewport_served": first_counts.get("served"),
-                "first_viewport_occupied_tiles": first_counts.get("n_tiles"),
-                "first_viewport_bytes": first.get("bytes"),
-                "first_viewport_server_ms": first.get("server_ms"),
-                "first_viewport_stream_ms": first.get("stream_ms"),
-                "first_viewport_shed": bool(first.get("shed")),
-                "cells": cells,
-            }
-            rung_out["battery"] = battery_figures(cells)
-            ladder_out.append(rung_out)
+            try:
+                token, authorise_s = authorise(args.session, args.session_cred, rung["terms"])
+            except requests.exceptions.RequestException as e:
+                self._record_death("session/authorise", e, rung["terms"])
+                break
+            ladder_out.append(self.run_rung(rung, token, authorise_s, total_rows))
 
         text = (
             {"skipped": "the server died earlier in the run"}
             if self.died is not None
-            else self._text_and_drilldown(token, view_id, view_id, quant, pools, zooms)
+            else self._text_and_drilldown(token)
         )
+        whole_counts = whole["counts"] or {}
 
         return {
             "cap": args.cap_bytes,
             "cgroup": str(args.cgroup) if args.cgroup else None,
-            "view": view_id,
+            "view": self.view_id,
             "total_rows": total_rows,
             "request": {
                 "budget_depth": args.budget_depth,
@@ -1038,19 +1053,19 @@ class Battery:
                 "k_max_marks": selection.get("k_max_marks"),
                 "theta_target_marks": selection.get("theta_target_marks"),
                 "max_tiles_per_request": self.max_tiles,
-                "whole_extent_zoom": whole_zoom,
-                "whole_extent_served": whole_served,
-                "whole_extent_occupied_tiles": whole_occupied,
+                "whole_extent_zoom": whole["request_zoom"],
+                "whole_extent_served": int(whole_counts.get("served") or 0),
+                "whole_extent_occupied_tiles": int(whole_counts.get("n_tiles") or 0),
                 "whole_extent_bytes": whole["bytes"],
                 "whole_extent_shed": bool(whole["shed"]),
             },
             "all_terms_authorise_s": round(broad_authorise_s, 4),
             "candidates_per_zoom": args.candidates,
             "samples_per_cell": args.samples,
-            "cold_samples_per_cell": args.cold_samples or args.samples,
-            "conditions": args.conditions.split(","),
-            "zooms": zooms,
-            "deciles": deciles,
+            "cold_samples_per_cell": self.cold_samples,
+            "conditions": self.conditions,
+            "zooms": self.zooms,
+            "deciles": self.deciles,
             "cells_per_decile": args.cells_per_decile,
             "evictions": self.evictor.evictions,
             "cgroup_at_end": self.evictor.cgroup_events(),
@@ -1061,14 +1076,14 @@ class Battery:
             "text_and_drilldown": text,
         }
 
-    def _text_and_drilldown(self, token, view_id, _unused, quant, pools, zooms) -> dict:
+    def _text_and_drilldown(self, token) -> dict:
         """A `match` on the rung's text column, common and rare, and one drill-down.
 
         Under the same three conditions as the battery, at one location, so the text index's cold
         cost is on the same footing as the geometry's rather than being a warm figure beside cold
         ones.
         """
-        full = [quant["x_min"], quant["y_min"], quant["x_max"], quant["y_max"]]
+        full = full_box(self.quant)
         out: dict = {"column": self.args.text_column, "matches": {}}
         for label, word in (("common", self.args.common_token), ("rare", self.args.rare_token)):
             per_condition = {}
@@ -1080,7 +1095,6 @@ class Battery:
                     samples.append(
                         self._sample(
                             token,
-                            view_id,
                             0,
                             full,
                             cold=(condition == "cold"),
