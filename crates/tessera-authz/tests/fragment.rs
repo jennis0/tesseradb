@@ -1,9 +1,6 @@
-//! Mask fragment build and the frozen cache. `build_fragment` is the authorise path
-//! (measured as postings union) — tested here against a brute-force `HashSet<u32>` union.
-//! `FragmentCache` is a directory-backed frozen-bitmap cache, keyed on
-//! `bundle_identity ‖ auth_plugin_hash ‖ sorted term ids`, so a cache dir reused across bundle
-//! rebuilds cannot serve a fragment naming a different entity set — a disclosure bug, not a perf
-//! bug.
+//! Mask fragment build and the frozen cache, tested against a brute-force `HashSet<u32>` union.
+//! `FragmentCache` is keyed on `bundle_identity ‖ auth_plugin_hash ‖ sorted term ids`, so a cache
+//! dir reused across bundle rebuilds cannot serve a fragment naming a different entity set.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -17,9 +14,7 @@ use tessera_types::TermId;
 
 const UNIVERSE: u32 = 100_000;
 
-/// The single `.frag` file a cache has written, found by scanning rather than by reaching into
-/// `FragmentCache`'s internals. Entries live flat in the cache directory, named by their canonical
-/// key.
+/// The single `.frag` file a cache has written, found by scanning its directory.
 fn the_frag_file(cache_dir: &std::path::Path) -> std::path::PathBuf {
     std::fs::read_dir(cache_dir)
         .unwrap_or_else(|e| panic!("no cache dir at {}: {e}", cache_dir.display()))
@@ -31,7 +26,7 @@ fn the_frag_file(cache_dir: &std::path::Path) -> std::path::PathBuf {
 const SMALL_TERM_THRESHOLD: u32 = 32;
 
 /// Write postings for `term_count` random terms over `[0, UNIVERSE)`, returning the reader path
-/// and the per-term entity sets (for brute-force comparison).
+/// and the per-term entity sets.
 fn write_random_postings(
     dir: &std::path::Path,
     seed: u64,
@@ -40,7 +35,6 @@ fn write_random_postings(
     let mut rng = StdRng::seed_from_u64(seed);
     let mut per_term = Vec::new();
     for _ in 0..term_count {
-        // Mix of small (tag 0) and large (tag 1) postings so the union exercises both partitions.
         let size = rand::Rng::gen_range(&mut rng, 0usize..500);
         let mut set: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         while set.len() < size {
@@ -61,7 +55,6 @@ fn build_fragment_matches_brute_force_union() {
 
     let mut rng = StdRng::seed_from_u64(2);
     for _ in 0..20 {
-        // Random grant subset of the 50 terms.
         let grant: Vec<TermId> = (0..50u32)
             .filter(|_| rand::Rng::gen_bool(&mut rng, 0.3))
             .map(TermId::new)
@@ -118,7 +111,6 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
         let got: HashSet<u32> = frozen.view().iter().collect();
         assert_eq!(got, expected);
 
-        // Second call, same process, same key: must not rebuild.
         let frozen2 = cache
             .get_or_build(&terms, &reader, &[], 42)
             .unwrap();
@@ -130,8 +122,6 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
         assert_eq!(frozen2.watermark, 42);
     }
 
-    // Drop the cache (and its in-memory map), reopen the cache dir fresh: the on-disk frozen
-    // fragment must still be reused, not rebuilt.
     {
         let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
         assert_eq!(cache.rebuild_count(), 0);
@@ -151,8 +141,6 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
         let got: HashSet<u32> = frozen.view().iter().collect();
         assert_eq!(got, expected);
 
-        // Frozen file length must equal the exact serialised size. Find the single `.frag` file
-        // written under the cache dir rather than reaching into `FragmentCache`'s internals.
         let frag_path = the_frag_file(cache_dir.path());
         let on_disk_len = std::fs::metadata(&frag_path).unwrap().len();
         let expected_len = frozen
@@ -180,8 +168,6 @@ fn stale_bundle_identity_misses_the_cache() {
         assert_eq!(cache.rebuild_count(), 1);
     }
 
-    // Same cache dir, different bundle_identity: must rebuild, not hit — a persistent cache dir
-    // reused across bundle rebuilds must never serve a fragment naming a different entity set.
     {
         let cache = FragmentCache::new(cache_dir.path(), [10u8; 32], auth_plugin_hash);
         cache
@@ -213,9 +199,6 @@ fn stale_auth_plugin_hash_misses_the_cache() {
         assert_eq!(cache.rebuild_count(), 1);
     }
 
-    // Same cache dir, same bundle_identity, different auth_plugin_hash: must rebuild, not hit —
-    // design §2.3 requires the plugin version in the key (an auth plugin upgrade must not serve a
-    // frozen fragment computed under a different plugin's term semantics).
     {
         let cache = FragmentCache::new(cache_dir.path(), bundle_identity, [8u8; 32]);
         cache
@@ -229,11 +212,7 @@ fn stale_auth_plugin_hash_misses_the_cache() {
     }
 }
 
-/// Corruption is checked here rather than in the conformance suite, because it is cheap enough to
-/// need no bundle: a bit-flipped `.frag` file must be treated as a cache miss (rebuild), never as
-/// a successful-but-wrong open, and never a panic/crash. `FrozenFragment::open`'s sidecar digest
-/// check (fragment.rs module doc: "a parseable-but-wrong fragment would be a silent disclosure,
-/// not merely a crash") is exactly the mechanism under test.
+/// A bit-flipped `.frag` file must be treated as a cache miss and rebuilt, never a panic.
 #[test]
 fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     let corpus_dir = TempDir::new().unwrap();
@@ -250,7 +229,6 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
         expected.extend(per_term[t.raw() as usize].iter().copied());
     }
 
-    // Build and persist the frozen fragment once.
     {
         let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
         cache
@@ -259,8 +237,6 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
         assert_eq!(cache.rebuild_count(), 1);
     }
 
-    // Flip one byte in the on-disk `.frag` file — a corrupt-but-right-length buffer, exactly the
-    // failure mode a torn write after power loss would produce.
     let frag_path = the_frag_file(cache_dir.path());
     {
         let mut bytes = std::fs::read(&frag_path).unwrap();
@@ -272,8 +248,6 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
         std::fs::write(&frag_path, &bytes).unwrap();
     }
 
-    // Reopening the cache dir fresh must not crash, must not serve the corrupted bytes, and must
-    // rebuild instead — the correct fragment either way, from postings directly this time.
     {
         let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
         let frozen = cache
@@ -293,13 +267,7 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     }
 }
 
-/// D-G / lifecycle §3.3: concurrent same-key misses must build exactly once, not once per
-/// thread. Every thread races through `get_or_build` on the same canonical key from a cold
-/// cache; a losing arrival gets `FragmentCacheError::Building` (never blocks — the
-/// non-blocking-waiters rule) and retries itself until it observes the one real build's result.
-/// Deterministic despite the retry loop: no sleeps, and a bounded attempt count turns a D-G
-/// regression (e.g. a arrival stuck forever seeing `Building`) into a fast, clear failure rather
-/// than a hang.
+/// Concurrent same-key misses must build exactly once, not once per thread.
 #[test]
 fn concurrent_cold_builds_single_flight_to_one_real_build() {
     let corpus_dir = TempDir::new().unwrap();
@@ -331,9 +299,6 @@ fn concurrent_cold_builds_single_flight_to_one_real_build() {
                     match cache.get_or_build(&terms, &reader, &[], 7) {
                         Ok(frozen) => return frozen,
                         Err(FragmentCacheError::Building) => {
-                            // Yield rather than busy-spin: a losing arrival retrying this tightly
-                            // would otherwise burn a full core against the one thread actually
-                            // doing the build, on every OS thread this test spawns.
                             std::thread::yield_now();
                             continue;
                         }
@@ -359,12 +324,8 @@ fn concurrent_cold_builds_single_flight_to_one_real_build() {
     );
 }
 
-/// The `Ready` slot doubles as the in-memory cache (D-G): a warm hit must do no file IO at all.
-/// Proven by deleting the on-disk `.frag`/`.meta` pair after warm-up — if the second call touched
-/// disk at all it would find nothing there, fall through to a rebuild, and `rebuild_count` would
-/// climb to 2 (the postings reader is still perfectly valid, so a rebuild would still succeed,
-/// just wastefully); instead it must stay at 1, and the returned `Arc` must be the identical
-/// warm-up instance.
+/// A warm hit must do no file IO at all, proven by deleting the on-disk `.frag`/`.meta` pair
+/// after warm-up.
 #[test]
 fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
     let corpus_dir = TempDir::new().unwrap();
@@ -385,7 +346,6 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
         .unwrap();
     assert_eq!(cache.rebuild_count(), 1);
 
-    // Poison the backing files: remove every file the cache directory holds.
     for entry in std::fs::read_dir(cache_dir.path()).unwrap() {
         std::fs::remove_file(entry.unwrap().path()).unwrap();
     }
@@ -407,11 +367,7 @@ fn warm_hit_does_no_file_io_after_backing_files_are_removed() {
     assert_eq!(got, expected);
 }
 
-/// Fail-closed (I13a): a build failure must never cache the error and must never leave a wedged
-/// `Building` entry. Here the failure is a real IO error (the cache directory's parent is a
-/// plain file, so `create_dir_all` fails with `ENOTDIR`) rather than an injected panic, exercising
-/// the same drop-guard path through its `Err` arm. After "repairing" the filesystem (turning the
-/// blocking file into a real directory) a retry with the same `FragmentCache` instance succeeds.
+/// A build failure must never cache the error and must never leave a wedged `Building` entry.
 #[test]
 fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
     let corpus_dir = TempDir::new().unwrap();
@@ -439,7 +395,6 @@ fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
     );
     assert_eq!(cache.rebuild_count(), 0);
 
-    // Repair: replace the blocking file with a real directory so `create_dir_all` can succeed.
     std::fs::remove_file(&blocker_path).unwrap();
     std::fs::create_dir_all(&blocker_path).unwrap();
 
@@ -455,16 +410,7 @@ fn failed_build_leaves_no_wedge_and_retry_after_repair_succeeds() {
     assert_eq!(got, expected);
 }
 
-/// **A rotation starts empty and carries the byte bound** — the two halves of
-/// [`FragmentCache::rotate`], which is what a compaction's publication installs.
-///
-/// Emptiness is a correctness property and the bound is an operational one, and they pull in
-/// opposite directions, which is why both are here. Both maps are keyed under the old identity:
-/// `slots` by the canonical key, `key_memo` by a credential whose memoised value *is* a canonical
-/// key. Carrying either forward hands a post-fold caller a pre-fold fragment — the memo without
-/// even a lookup that could miss. Carrying the bound forward is the opposite obligation: it arrives
-/// once at startup through `set_memory_bound`, nothing re-applies it, and a rotation that reset it
-/// to unbounded would silently undo the startup refusal that validated it.
+/// A rotation starts empty and carries the byte bound.
 #[test]
 fn a_rotation_starts_empty_and_keeps_the_byte_bound() {
     let corpus_dir = TempDir::new().unwrap();
@@ -492,9 +438,6 @@ fn a_rotation_starts_empty_and_keeps_the_byte_bound() {
     );
     assert_ne!(rotated.canonical_key_for(&terms, 1), key_before);
 
-    // The same credential, the same dictionary length, the same watermark — the whole of the memo
-    // key, unchanged by a fold. A carried memo would answer `key_before` here, find the persisted
-    // pre-rotation `.frag` under that name, and return it having rebuilt nothing.
     rotated
         .get_or_build(&terms, &reader, &[], 1)
         .unwrap();
@@ -505,9 +448,7 @@ fn a_rotation_starts_empty_and_keeps_the_byte_bound() {
     );
 }
 
-/// The identity a fragment reports is the one whose cache produced it — what
-/// `Engine::fragment_for` compares against the live generation's, because a fold advances no
-/// watermark and the watermark test alone cannot see one.
+/// The identity a fragment reports is the one whose cache produced it.
 #[test]
 fn a_fragment_carries_the_identity_it_was_built_under() {
     let corpus_dir = TempDir::new().unwrap();
@@ -524,8 +465,6 @@ fn a_fragment_carries_the_identity_it_was_built_under() {
     assert_eq!(built.identity, [9u8; 32]);
     assert_eq!(cache.bundle_identity(), [9u8; 32]);
 
-    // And a fragment reopened from the persisted pair carries it too, so the comparison survives a
-    // restart rather than holding only for the process that built it.
     let reopened = FragmentCache::new(cache_dir.path(), [9u8; 32], [7u8; 32])
         .get_or_build(&terms, &reader, &[], 1)
         .unwrap();

@@ -1,4 +1,4 @@
-//! The fragment cache keys on the watermark it was built at (§9).
+//! The fragment cache keys on the watermark it was built at.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,13 +36,9 @@ fn cache(dir: &TempDir) -> FragmentCache {
     cache_at(dir, "cache")
 }
 
-/// **Two watermarks, two entries.** Without this the same key names two different fragments: after
-/// a flush, one session's entry was built over the tiers that existed then and another's over the
-/// tiers that exist now, and `tmp_sibling`'s "both writers wrote byte-identical content" argument
-/// — the thing that makes a concurrent write-then-rename safe — stops holding.
-///
-/// A **disclosure risk, not merely a staleness one**: the two fragments differ by the entities the
-/// newer tiers carry, and which of them a session gets would be decided by whoever wrote last.
+/// Two watermarks, two entries. Without this the same key names two different fragments: after a
+/// flush, one session's entry was built over the tiers that existed then and another's over the
+/// tiers that exist now, and the two fragments differ by the entities the newer tiers carry.
 #[test]
 fn the_watermark_is_part_of_the_disk_key() {
     let dir = TempDir::new().unwrap();
@@ -73,26 +69,15 @@ fn the_watermark_is_part_of_the_disk_key() {
     );
 }
 
-/// **A merge does not need a key of its own**, and this is why the watermark suffices. A merge
-/// coalesces tiers as a content-preserving re-encode (§5.2) — the same (term, entity) pairs — so
-/// the fragment it would produce is identical, and reusing the pre-merge entry is correct rather
-/// than merely tolerable.
+/// A merge does not need a key of its own: it coalesces tiers as a content-preserving re-encode,
+/// the same `(term, entity)` pairs, so the fragment it produces is identical to the pre-merge one.
 ///
-/// The tier under test is the **output of `coalesce_delta_tiers`**, not a hand-written stand-in,
-/// so what this pins is the composition: the coalesce's encode and `build_fragment_with_deltas`'s
-/// decode agreeing. A disagreement between them would surface only after a restart, as a session's
-/// visible set changing with no flush behind it.
+/// The tier under test is the output of `coalesce_delta_tiers`, not a hand-written stand-in, so
+/// what this pins is the coalesce's encode agreeing with `build_fragment_with_deltas`'s decode.
 ///
-/// **The two builds must be two builds.** The single-flight map is keyed by the canonical key —
-/// bundle identity, plugin hash, watermark and the sorted term ids, and nothing else — so a second
-/// `get_or_build` on the same cache with the same terms and watermark returns the first fragment
-/// from `Ready` whatever tiers it is handed, and would compare a value with itself. Two caches with
-/// separate directories are what make the second build happen; the guard below is what keeps that
-/// true if the keying changes.
-///
-/// Mutations this kills: a coalesce that drops an input, a term or an entity; a coalesce that
-/// re-encodes a posting in a form the fragment build reads differently; and the vacuity itself —
-/// collapsing the two caches back into one fails the guard rather than passing silently.
+/// Two caches with separate directories force two real builds: the single-flight map is keyed by
+/// the canonical key, so a second `get_or_build` on the same cache with the same terms and
+/// watermark would return the first fragment from `Ready` and compare a value with itself.
 #[test]
 fn coalescing_tiers_leaves_the_fragment_unchanged() {
     let dir = TempDir::new().unwrap();
@@ -142,7 +127,7 @@ fn coalescing_tiers_leaves_the_fragment_unchanged() {
     assert_eq!(separate.view().to_vec(), coalesced.view().to_vec());
 }
 
-/// A cache reopens its own entries — the property that makes a persistent cache worth having.
+/// A cache reopens its own entries.
 #[test]
 fn an_entry_survives_a_reopen_of_the_cache() {
     let dir = TempDir::new().unwrap();

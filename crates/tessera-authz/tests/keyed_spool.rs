@@ -1,8 +1,5 @@
-//! The streaming keyed-postings writer against the buffered one.
-//!
-//! Byte-identity is the assertion, for the same reason the value column's is: the fold rebuilds a
-//! category's postings whole and claims the result is what a build would have written
-//! (`filter-index.md` §6.2), so the two writers must agree on bytes rather than on readback.
+//! The streaming keyed-postings writer against the buffered one. Byte-identity is the assertion:
+//! the two writers must agree on bytes rather than on readback.
 
 use tessera_authz::{write_delta_tier_at, DeltaTier, KeyedPostingsSpool, PostingRef};
 
@@ -100,8 +97,6 @@ fn a_spooled_file_reads_back_through_the_ordinary_reader() {
 #[test]
 fn a_key_that_does_not_ascend_is_refused_across_a_band_boundary() {
     let dir = tempfile::tempdir().expect("tempdir");
-    // The band boundary is exactly where an ascending check written per band would lapse: the
-    // second band's first key looks like the first key that band has seen.
     let mut spool = KeyedPostingsSpool::create(&dir.path().join("spool"), SMALL).expect("create");
     spool.append(4, &[1]).expect("append");
     spool.append(9, &[2]).expect("append");

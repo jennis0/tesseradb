@@ -1,29 +1,18 @@
-//! The **sparse delta postings tier** a flush publishes (§3.1, §5.2): the terms its flushed items
-//! carried, and nothing else.
+//! The sparse delta postings tier a flush publishes: the terms its flushed items carried, and
+//! nothing else.
 //!
-//! ## Why this is not `postings.arrow`
-//!
-//! [`crate::postings`]'s layout is ordinal-indexed — record *i* is term *i* — which is right for a
-//! build, where every term has a posting and the ordinals are dense by construction. A flush's
-//! terms are an arbitrary handful of ordinals drawn from the whole dictionary, so the same layout
-//! would write a file dense to the **highest ordinal used**: an empty record is one tag byte plus
-//! an eight-byte offset, so a tier touching one term at ordinal 10⁶ costs ~9 MB, and the plugin
-//! ABI's declared `max_distinct_terms` is 2×10⁸. A tier per 90 s, every one of them read by every
-//! fragment build, makes that untenable rather than merely wasteful.
-//!
-//! So a tier stores its term ids alongside its postings and is looked up by binary search. The
-//! **posting encoding is `postings.arrow`'s, byte for byte** — [`crate::encode_posting`], the same
-//! tag rule, the same [`PostingRef`] — because the two files differ in how a term is *found*, not
-//! in what a posting *is*, and a second encoding would be a second thing to get wrong on the
-//! authorisation path.
-//!
-//! ## Absent is not empty
+//! `postings.arrow`'s ordinal-indexed layout, record *i* is term *i*, is right for a build,
+//! where the ordinals are dense. A flush's terms are an arbitrary handful of ordinals, so the
+//! same layout would write a file dense to the highest ordinal used. A tier instead stores its
+//! term ids alongside its postings and is looked up by binary search, with the same posting
+//! encoding as `postings.arrow`, byte for byte: [`crate::encode_posting`] and the same
+//! [`PostingRef`].
 //!
 //! [`DeltaTier::posting`] answers `None` for a term this tier does not carry, exactly as
 //! [`crate::PostingsReader::posting`] does for a term beyond its range. A fragment build unions
 //! over the session's satisfied terms and skips the misses, so a tier contributes only for the
-//! terms it actually holds — never its whole term set, which would hand a viewer entities outside
-//! `M_auth` (I2).
+//! terms it actually holds, never its whole term set, which would hand a viewer entities it was
+//! never granted.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -45,32 +34,19 @@ const TERM_COLUMN_NAME: &str = "term_id";
 const POSTING_COLUMN_NAME: &str = "posting";
 
 /// How many of a code's high bits the bucket table [`DeltaTier::open_indexed`] builds is indexed
-/// by — 20, so the table is 2²⁰ + 1 `u32` offsets, **4.2 MB**.
-///
-/// **The search, not the read, is what a keyed lookup spends** (`value-suggestion.md` §6.2,
-/// measured): two dozen comparisons over a 40 MB sorted `u32` array miss cache on the last several
-/// of them, and at 10⁷ records that is 550 ns of a 730–811 ns probe — 68–72%. Twenty bits leaves
-/// ~10 records per bucket at 10⁷, one or two cache lines, so the search inside a bucket is one or
-/// two misses rather than eight.
+/// by. The table is `2^BUCKET_BITS + 1` `u32` offsets, small enough to keep the search inside a
+/// bucket within a cache line or two for a large key array.
 const BUCKET_BITS: u32 = 20;
 
 /// `1 << BUCKET_BITS`, named because the table carries a sentinel and is one longer.
 const BUCKET_COUNT: usize = 1 << BUCKET_BITS;
 
-/// The record count below which [`DeltaTier::open_indexed`] builds no table.
-///
-/// **4.2 MB is not free, and below this it buys nothing.** A 65,536-record key array is 256 KB and
-/// stays in L2 across a walk, so its binary search is already the cheap kind; the table would be
-/// sixteen times the array it indexes. Above it the array leaves cache and the table is a fraction
-/// of it — 4.2 MB against 40 MB at 10⁷ records.
+/// The record count below which [`DeltaTier::open_indexed`] builds no table: below this the key
+/// array is small enough to stay in cache, so a plain binary search is already cheap.
 const BUCKET_TABLE_MIN_RECORDS: usize = 1 << 16;
 
-/// `t[b]` is the first index whose code has bucket prefix `b`, with `t[BUCKET_COUNT]` the sentinel.
-///
-/// Free to build, which is the property that makes this the fix rather than a code → record map:
-/// the key array is already sorted, so one pass over it fills the table and no map from a code to
-/// a record ordinal is needed anywhere (a code with no members has no record, so rank in code
-/// order is *not* the record ordinal).
+/// `t[b]` is the first index whose code has bucket prefix `b`, with `t[BUCKET_COUNT]` the
+/// sentinel. Free to build: the key array is already sorted, so one pass fills the table.
 fn build_bucket_table(codes: &[u32]) -> Box<[u32]> {
     let mut table = vec![0u32; BUCKET_COUNT + 1];
     let mut at = 0usize;
@@ -84,16 +60,12 @@ fn build_bucket_table(codes: &[u32]) -> Box<[u32]> {
     table.into_boxed_slice()
 }
 
-/// Write a sparse tier: `entries` is `(term, sorted entity list)` in **strictly ascending term
-/// order**.
+/// Write a sparse tier: `entries` is `(term, sorted entity list)` in strictly ascending term
+/// order. Ascending and distinct is checked, not trusted: the lookup is a binary search over the
+/// term column, so an unordered or duplicated file would make a posting unreachable, which on
+/// this path is items a viewer is entitled to simply not being there.
 ///
-/// Ascending and distinct is checked, not trusted. The lookup is a binary search over the term
-/// column, so an unordered file would answer `None` for terms it holds and a duplicated term would
-/// make one of the two records unreachable — either way a posting silently disappears, and on this
-/// path a disappeared posting is items a viewer is entitled to simply not being there.
-///
-/// Each entity list must itself be sorted strictly ascending; [`encode_posting`] enforces that and
-/// says why.
+/// Each entity list must itself be sorted strictly ascending; [`encode_posting`] enforces that.
 pub fn write_delta_tier(
     path: &Path,
     entries: &[(TermId, Vec<u32>)],
@@ -106,8 +78,7 @@ pub fn write_delta_tier(
     )
 }
 
-/// The same writer, addressed by bare record ordinals — the format core
-/// ([`crate::PostingsReader::posting_at`] carries the argument for why both exist).
+/// The same writer, addressed by bare record ordinals.
 pub fn write_delta_tier_at(
     path: &Path,
     entries: &[(u32, Vec<u32>)],
@@ -120,8 +91,7 @@ pub fn write_delta_tier_at(
     )
 }
 
-/// Both public writers' body, over whatever they have to iterate: neither holds a `Vec` of its own,
-/// so a `TermId`-keyed caller costs no copy of its entity lists.
+/// Both public writers' body, over whatever they have to iterate.
 fn write_tier_entries<'a>(
     path: &Path,
     entries: impl IntoIterator<Item = (u32, &'a [u32])>,
@@ -148,8 +118,7 @@ fn write_tier_entries<'a>(
 }
 
 /// [`crate::postings::write_single_batch`] with the keyed tier schema. Neither column carries a
-/// validity buffer: the builder path appends no nulls, the spool path passes `None` explicitly, and
-/// a spurious all-valid buffer would change the file's bytes.
+/// validity buffer.
 fn write_keyed_array(
     path: &Path,
     terms: UInt32Array,
@@ -164,21 +133,13 @@ fn write_keyed_array(
 
 /// A keyed postings file written key by key, across as many bands as its producer needs.
 ///
-/// **Streaming cannot be done by appending record batches.** [`DeltaTier::open`] decodes a single
-/// batch and refuses a second, because its postings borrow from the mapping rather than copying —
-/// concatenating batches is exactly the copy that construction exists to avoid. So this is the
-/// spool-then-assemble discipline [`crate::PostingsSpool`] already applies to the positional
-/// format: each encoded record is spooled as it arrives, and only the key and its Arrow offset are
-/// held — twelve bytes per key, against the whole encoded posting set the buffered writer holds.
-/// `finish` maps the spool as the posting column's values buffer and writes the one record batch
-/// from it, byte for byte the file [`write_delta_tier_at`] would write from the same entries.
+/// Streaming cannot be done by appending record batches: [`DeltaTier::open`] decodes a single
+/// batch and refuses a second. So this is the spool-then-assemble discipline
+/// [`crate::PostingsSpool`] already applies to the positional format. `finish` writes the file
+/// byte for byte what [`write_delta_tier_at`] would write from the same entries.
 ///
-/// **The ascending-key check holds across bands, not merely within one.** It compares against the
-/// last key appended, wherever that came from, which is what makes a banded producer safe: a band
-/// boundary is not a place the ordering may lapse. The check is the same fail-closed rule
-/// [`write_delta_tier_at`] states — the lookup is a binary search, so an unordered file answers
-/// `None` for keys it holds and a duplicate makes one record unreachable, and a disappeared posting
-/// is items a viewer is entitled to simply not being there.
+/// The ascending-key check holds across bands, not merely within one: it compares against the
+/// last key appended, wherever that came from.
 pub struct KeyedPostingsSpool {
     spool: RecordSpool,
     keys: Vec<u32>,
@@ -196,8 +157,7 @@ impl KeyedPostingsSpool {
     }
 
     /// Append one key's posting. `entities` must be sorted strictly ascending, which
-    /// [`encode_posting`] enforces and says why; `key` must be strictly above every key appended
-    /// before it, in this band or any earlier one.
+    /// [`encode_posting`] enforces; `key` must be strictly above every key appended before it.
     pub fn append(&mut self, key: u32, entities: &[u32]) -> io::Result<()> {
         if let Some(&last) = self.keys.last() {
             if key <= last {
@@ -232,19 +192,14 @@ impl KeyedPostingsSpool {
     }
 }
 
-/// One live delta postings tier, memory-mapped. Postings borrow from the mapping without copying,
-/// exactly as [`crate::PostingsReader`]'s do.
+/// One live delta postings tier, memory-mapped. Postings borrow from the mapping without
+/// copying, exactly as [`crate::PostingsReader`]'s do.
 #[derive(Debug)]
 pub struct DeltaTier {
     terms: UInt32Array,
     postings: LargeBinaryArray,
     /// The bucket table over the key array's top [`BUCKET_BITS`] bits, or `None` where this tier
-    /// was opened without one — every tier a flush publishes, which is small and read a handful of
-    /// times, against the keyed **base** of a category column, which a suggestion walk searches
-    /// `max_suggestion_walk` times per keystroke. See [`Self::open_indexed`].
-    ///
-    /// In memory, per open: the file's format is untouched by it, so nothing on disk knows the
-    /// table exists.
+    /// was opened without one. See [`Self::open_indexed`]. Built in memory, per open.
     buckets: Option<Box<[u32]>>,
 }
 
@@ -278,8 +233,6 @@ impl DeltaTier {
                 postings.len()
             )));
         }
-        // The ordering the binary search below depends on, established once at open rather than
-        // trusted per lookup — a file written by anything but `write_delta_tier` reaches here too.
         if !terms.values().windows(2).all(|w| w[0] < w[1]) {
             return Err(invalid_data(
                 "delta tier: term ids are not strictly ascending, so a lookup could not find them",
@@ -294,13 +247,8 @@ impl DeltaTier {
         })
     }
 
-    /// [`Self::open`], plus the bucket table its lookups then search inside
-    /// (`value-suggestion.md` §6.2 **(b′)**, decision 0124).
-    ///
-    /// **The answer is identical either way**, which is what makes this a cost decision rather than
-    /// a behavioural one: the table narrows the binary search's bounds and changes neither the
-    /// record found nor the `None` for a code this tier does not carry. A tier below
-    /// [`BUCKET_TABLE_MIN_RECORDS`] records gets no table and is not the worse for it.
+    /// [`Self::open`], plus the bucket table its lookups then search inside. The answer is
+    /// identical either way. A tier below [`BUCKET_TABLE_MIN_RECORDS`] records gets no table.
     pub fn open_indexed(path: &Path) -> io::Result<Self> {
         let mut tier = Self::open(path)?;
         if tier.terms.len() >= BUCKET_TABLE_MIN_RECORDS {
@@ -309,15 +257,12 @@ impl DeltaTier {
         Ok(tier)
     }
 
-    /// Whether this tier holds a bucket table — an operator/bench observable, never a behaviour.
+    /// Whether this tier holds a bucket table: an operator/bench observable, never a behaviour.
     pub fn is_bucketed(&self) -> bool {
         self.buckets.is_some()
     }
 
     /// The record index for `ordinal`, or `None` where this tier carries no such key.
-    ///
-    /// **One transcription of the search**, so the bucketed and unbucketed forms cannot drift into
-    /// two answers: every lookup on this type reaches the key array through here.
     fn index_of(&self, ordinal: u32) -> Option<usize> {
         let codes = self.terms.values();
         let Some(buckets) = self.buckets.as_deref() else {
@@ -329,16 +274,13 @@ impl DeltaTier {
         codes[lo..hi].binary_search(&ordinal).ok().map(|at| lo + at)
     }
 
-    /// How many terms this tier carries — its record count, never a dictionary bound.
+    /// How many terms this tier carries: its record count, never a dictionary bound.
     pub fn term_count(&self) -> u32 {
         self.terms.len() as u32
     }
 
-    /// The term ids this tier carries, ascending.
-    ///
-    /// Needed because [`Self::term_count`] is a **record count, not an id domain**: a tier holding
-    /// one posting for term 5,000 has a count of 1, so walking `0..term_count()` finds nothing at
-    /// all. Coalescing has to enumerate what is actually there.
+    /// The term ids this tier carries, ascending. Needed because [`Self::term_count`] is a
+    /// record count, not an id domain: walking `0..term_count()` would find nothing.
     pub fn terms(&self) -> impl Iterator<Item = TermId> + '_ {
         self.terms.values().iter().map(|t| TermId::new(*t))
     }
@@ -349,8 +291,7 @@ impl DeltaTier {
         self.posting_at(t.raw())
     }
 
-    /// The same lookup, addressed by a bare record ordinal — the format core
-    /// ([`crate::PostingsReader::posting_at`] carries the argument for why both exist).
+    /// The same lookup, addressed by a bare record ordinal.
     pub fn posting_at(&self, ordinal: u32) -> io::Result<Option<PostingRef<'_>>> {
         let Some(idx) = self.index_of(ordinal) else {
             return Ok(None);
@@ -358,17 +299,12 @@ impl DeltaTier {
         read_posting(&self.postings, idx).map(Some)
     }
 
-    /// The record ordinals this tier carries, ascending — [`Self::terms`] untyped.
+    /// The record ordinals this tier carries, ascending: [`Self::terms`] untyped.
     pub fn ordinals(&self) -> impl Iterator<Item = u32> + '_ {
         self.terms.values().iter().copied()
     }
 
     /// [`Self::posting_at`]'s first half alone: the binary search over the key array.
-    ///
-    /// Exists so a bench can price the search and the view construction separately without
-    /// transcribing either — `posting_at` is these two calls and nothing else, which is the
-    /// property the decomposition depends on
-    /// (`probes/2026-09-02-value-suggestion/`, the decomposition arm).
     #[cfg(feature = "bench-timing")]
     pub fn bench_record_index(&self, ordinal: u32) -> Option<usize> {
         self.index_of(ordinal)
@@ -381,27 +317,15 @@ impl DeltaTier {
     }
 }
 
-/// Coalesce several delta tiers into one, at `out`.
+/// Coalesce several delta tiers into one, at `out`. Content-preserving: the same `(term, entity)`
+/// pairs the inputs carried, unioned per term, deduplicated and re-sorted, nothing dropped.
 ///
-/// **A content-preserving re-encode, and that phrase is the specification.** The same
-/// `(term, entity)` pairs the inputs carried, concatenated, deduplicated and re-sorted — nothing
-/// dropped, nothing consulted. This is to postings exactly what the Morton merge-sort is to a
-/// segment's codes.
+/// A merge retires nothing: no tombstone is applied, since that is the compaction fold's job.
+/// The dedup is required, not defensive: two tiers may legitimately carry the same term, and
+/// concatenating their entity lists would yield a non-ascending sequence that [`encode_posting`]
+/// hard-fails on.
 ///
-/// **A merge retires nothing** (write-path §7). No tombstone is applied and no overlay entry
-/// becomes retirable: a merge that dropped a posting because an entity was
-/// deleted would be performing the compaction fold, which is invariant-bearing work this layer must
-/// not do. The dedup is set semantics over identical pairs, so it changes no viewer's answer.
-///
-/// **The dedup is required, not defensive.** A buffered row's descriptors are not deduplicated on
-/// the write path, and two tiers may legitimately carry the same `(term, entity)` — the same entity
-/// appearing under one term in two flushes cannot happen, but the same term appearing in both tiers
-/// certainly can, and concatenating their entity lists yields a non-ascending sequence.
-/// [`encode_posting`] hard-fails on exactly that, so "concatenate and sort" without the dedup
-/// specifies an artefact the encoder refuses to write.
-///
-/// Reads every input fully into memory: a tier holds one tick's arrivals, and the merge policy's
-/// size bound is what keeps the total in hand.
+/// Reads every input fully into memory: a tier holds one tick's arrivals.
 pub fn coalesce_delta_tiers(
     inputs: &[PathBuf],
     out: &Path,
@@ -444,20 +368,14 @@ mod tests {
         })
     }
 
-    /// **(b′) The bucket table changes the search's bounds and nothing else** (`value-suggestion.md`
-    /// §6.2, decision 0124). Over 2¹⁷ codes scattered across the whole `u32` width — a category's
-    /// own draw (per-point-attributes §3.4) — every code the tier holds resolves to the same record
-    /// as the plain binary search, and **every code it does not hold answers `None` on both
-    /// routes**. The second half is the one worth a test: an empty bucket, and a code landing
-    /// between two held codes, are exactly where an off-by-one would hand back a neighbour's
-    /// posting — which on this path is a viewer being shown another value's members.
+    /// The bucket table changes the search's bounds and nothing else. An off-by-one here would
+    /// hand back a neighbour's posting, which on this path is a viewer shown another value's
+    /// members.
     #[test]
     fn the_bucket_table_resolves_every_code_as_the_plain_search_does() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(0x0b7c);
         let mut codes: Vec<u32> = (0..(1u32 << 17)).map(|_| rng.gen::<u32>()).collect();
-        // Both extremes and two codes either side of a bucket boundary: the table's first slot and
-        // its sentinel are the ends a scattered draw is unlikely to reach on its own.
         codes.extend_from_slice(&[0, u32::MAX, 1 << 12, (1 << 12) - 1, 1u32 << 31]);
         codes.sort_unstable();
         codes.dedup();
@@ -492,8 +410,7 @@ mod tests {
         }
     }
 
-    /// A tier under the floor keeps the plain search — 4.2 MB for a 256 KB key array is the trade
-    /// the floor exists to decline — and answers identically.
+    /// A tier under the floor keeps the plain search and answers identically.
     #[test]
     fn a_small_tier_is_not_bucketed_and_answers_the_same() {
         let dir = tempfile::TempDir::new().unwrap();
