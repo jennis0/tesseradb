@@ -1,9 +1,7 @@
 /// Why a bundle's filter columns could not be opened, or a published layer composed onto them.
 ///
-/// **Every refusal carries the facts rather than a sentence about them**, so a caller — a test
-/// included — can tell two refusals apart without reading their wording. The alternative was one
-/// `InvalidData` per site, which made the message the only thing that distinguished a coverage
-/// mismatch from a missing layer.
+/// Every refusal carries the facts rather than a sentence about them, so a caller, a test included,
+/// can tell two refusals apart without reading their wording.
 #[derive(Debug)]
 pub enum ComposeError {
     /// An extent names a column this generation holds no layers of its kind for.
@@ -145,53 +143,48 @@ impl From<ComposeError> for std::io::Error {
 /// Why a filter could not be answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterError {
-    /// The column is not declared filterable. A caller error, distinguishable from an empty
-    /// result, which an undeclared column must never be served as.
+    /// The column is not declared filterable. A caller error, distinguishable from an empty result,
+    /// which an undeclared column must never be served as.
     UndeclaredColumn(String),
     /// The expression nests deeper than [`crate::filter::MAX_FILTER_DEPTH`].
     TooDeep { depth: usize, max: usize },
-    /// A routed column's postings could not be read. **Fail-closed**: the alternative — falling
-    /// back to the scan — would answer correctly and hide that the bundle's accelerator is
-    /// unreadable, and the alternative to *that* — an empty result — says no entity carries the
-    /// value. Neither is distinguishable from a right answer, so this refuses.
+    /// A routed column's postings could not be read. Fail-closed: falling back to the scan would
+    /// hide that the accelerator is unreadable, and an empty result would say no entity carries the
+    /// value; neither is distinguishable from a right answer.
     PostingsUnreadable { column: String, detail: String },
-    /// A keyword layer's sorted dictionary refused a read. **Fail-closed, for the reason
-    /// [`FilterError::PostingsUnreadable`] gives and one more of its own**: a dictionary that
-    /// answered wrongly would resolve a needle to the wrong ordinal and return a different value's
-    /// entities, so a read that cannot vouch for its answer must refuse rather than treat the miss
-    /// as ordinary. An ordinary miss is not this — it is [`crate::filter::scan::keyword::NO_SUCH_ORDINAL`], and it still scans.
+    /// A keyword layer's sorted dictionary refused a read. Fail-closed for one more reason of its
+    /// own: a dictionary that answered wrongly would resolve a needle to the wrong ordinal and
+    /// return a different value's entities. An ordinary miss is not this; it is
+    /// [`crate::filter::scan::keyword::NO_SUCH_ORDINAL`], and it still scans.
     DictionaryUnreadable { column: String, detail: String },
-    /// The column has no derived membership postings, so the `derived` visibility predicate
-    /// cannot be evaluated for it. Fail-closed for the reason `categories.rs` gives: an empty value
-    /// set is what a principal who may see none of them is told.
+    /// The column has no derived membership postings, so the `derived` visibility predicate cannot
+    /// be evaluated for it. Fail-closed: an empty value set is what a principal who may see none of
+    /// them is told.
     MembershipUnavailable(String),
-    /// A `none_of` names more or fewer than one column — see [`crate::filter::FilterExpr::NoneOf`].
+    /// A `none_of` names more or fewer than one column; see [`crate::filter::FilterExpr::NoneOf`].
     NegationSpansColumns { columns: Vec<String> },
-    /// A `none_of` names a column with no presence set to subtract from — a `text` column, whose
+    /// A `none_of` names a column with no presence set to subtract from, a `text` column, whose
     /// index is postings over words and whose values are blob rows.
     ///
-    /// **Fail-closed, and the alternative is what makes it worth a variant of its own.** A negation
-    /// is `present ∖ matched`; with no presence the left operand is empty and every such request
-    /// answers "no items" with a 200, which is indistinguishable from a corpus where nothing
-    /// matches. Refusing names the column and the reason, so a caller can say what they meant a
-    /// different way.
+    /// Fail-closed: a negation is `present ∖ matched`, and with no presence the left operand is
+    /// empty, so every such request would answer "no items" with a 200, indistinguishable from a
+    /// corpus where nothing matches. Refusing names the column and the reason instead.
     NegationWithoutPresence { column: String, family: String },
     /// A region leaf reached the entity-space evaluator, which cannot answer it: a region is a
-    /// statement about position, and position is row space (I4). Only
+    /// statement about position, and position is row space. Only
     /// [`crate::filter::FilterColumns::evaluate_routed`] takes a tree carrying one.
     RegionInEntitySpace,
-    /// The region resolver could not answer a leaf for this generation — a cancelled build, a
-    /// view whose segments could not be assembled. Fail-closed: an empty operand here would be
+    /// The region resolver could not answer a leaf for this generation, a cancelled build or a view
+    /// whose segments could not be assembled. Fail-closed: an empty operand here would be
     /// indistinguishable from a shape that holds nothing.
     RegionUnavailable(String),
     /// A `member_of` leaf reached the entity-space evaluator. Row space only, exactly as
     /// [`FilterError::RegionInEntitySpace`] is.
     MemberOfInEntitySpace,
-    /// A `member_of` leaf named a layer this principal's `/v1/meta` does not list. **A `422`, and
-    /// the caller's fault**: a layer name is deployment schema, resolved through the same probe
-    /// that answers alike for a gate-failed name and a never-registered one
-    /// (`LayerRegistry::resolve_for`), so refusing by name discloses nothing this principal was
-    /// not already told. The *artifact* is a value and is never refused (§3).
+    /// A `member_of` leaf named a layer this principal's `/v1/meta` does not list. The caller's
+    /// fault: a layer name is deployment schema, resolved the same way for a gate-failed name and a
+    /// never-registered one, so refusing by name discloses nothing the principal was not already
+    /// told. The artifact itself is a value and is never refused this way.
     UnknownLayer(String),
     /// The `member_of` resolver could not answer for this generation. Fail-closed, for
     /// [`FilterError::RegionUnavailable`]'s reason.
@@ -282,19 +275,17 @@ impl FilterError {
         }
     }
 
-    /// Is this the caller's fault or the deployment's?
+    /// Is this the caller's fault or the deployment's? Decides the status code.
     ///
-    /// **The distinction decides a status code, so it lives with the variants rather than at the
-    /// mapping.** A malformed expression is a `422` — the caller can fix it, and refusing tells
-    /// them nothing about the corpus, since a column's existence and its family are deployment
-    /// schema published to every principal alike (`/v1/meta`). An artefact that cannot be read is a
-    /// `500` — fail-closed, because the alternatives are answering short or answering empty and
-    /// neither is distinguishable from a right answer.
+    /// A malformed expression is a `422`: the caller can fix it, and refusing tells them nothing
+    /// about the corpus, since a column's existence and its family are deployment schema published
+    /// to every principal alike. An artefact that cannot be read is a `500`, fail-closed, because
+    /// answering short or answering empty is indistinguishable from a right answer.
     ///
-    /// Note which side [`FilterError::UndeclaredColumn`] falls on: the *name* of a filterable
-    /// column is public, so refusing by name discloses nothing. An unknown **value** is a different
-    /// matter entirely and is never an error at all — it is an empty operand, because refusing it
-    /// would make the filter an existence oracle over exactly what `visibility = "derived"` hides.
+    /// [`FilterError::UndeclaredColumn`] is the caller's fault because a filterable column's name
+    /// is public. An unknown value is different again and never an error at all: it is an empty
+    /// operand, because refusing it would make the filter an existence oracle over exactly what
+    /// `visibility = "derived"` hides.
     pub fn is_callers_fault(&self) -> bool {
         match self {
             FilterError::UndeclaredColumn(_)

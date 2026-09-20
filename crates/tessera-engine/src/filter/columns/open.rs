@@ -13,21 +13,13 @@ use crate::filter::{
     scoped_is_filterable, scoped_owes_postings, scoped_visibility_of, Family, Placement,
 };
 
-/// Open one view's column of a group-scoped attribute family (`views.md` §5) — the name it is held
-/// under, its placement, and its layers.
+/// Open one view's column of a group-scoped attribute family: the name it is held under, its
+/// placement, and its layers.
 ///
-/// **One column per view, opened under its resolved name**, so a scoped leaf evaluates through
-/// exactly the machinery an unscoped one of its family does: the same `ValueColumn`, the same
-/// scan, the same presence rules for absence. The only thing the scope decides is which file —
-/// which is what keeps the attribute inside I2's argument unchanged, every value being indexed by
-/// entity and every predicate answering a bitmap in entity space that the mask meets before any
-/// permutation.
-///
-/// **Two callers, one body.** [`FilterColumns::open`] walks every family's `views` at startup; a
-/// flush that wrote the *first* column of a family for a view created since the build composes it
-/// onto the live generation through [`FilterColumns::with_scoped_columns`]. The two must produce
-/// the same reader, or a running process and the same bundle reopened would disagree about what a
-/// pin resolves to.
+/// One column per view, opened under its resolved name, so a scoped leaf evaluates through
+/// exactly the machinery an unscoped one of its family does. Called both by
+/// [`FilterColumns::open`] at startup and, through [`FilterColumns::with_scoped_columns`], by a
+/// flush writing the first column of a family for a view created since the build.
 pub(super) fn open_scoped_column(
     partition_dir: &Path,
     family: &tessera_store::manifest::ScopedScalar,
@@ -37,16 +29,13 @@ pub(super) fn open_scoped_column(
     mmap: bool,
 ) -> Result<(String, Placement, Column), ComposeError> {
     let scoped_family = Family::of_scoped(family);
-    // **A family with neither flag is opened and is not filterable** (owner ruling 2026-09-01).
-    // Its per-view column is on disc exactly as an indexed one's is, and the drill-down reads one
-    // entity's value out of it — so the column is held here, `filterable: false`, which is the
-    // same standing an entity-scoped `derived` category with neither flag already has: `resolve`
-    // refuses it by name and `FilterColumns::stored_value` answers from it.
+    // A family with neither flag is opened and is not filterable: the drill-down still reads one
+    // entity's value out of it, so it is held here with `filterable: false`, the same standing an
+    // entity-scoped `derived` category with neither flag already has.
     let filterable = scoped_is_filterable(family);
-    // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the one place a
-    // view id becomes a path, so the opener cannot drift from the writer. Above the declared
-    // incarnation the key carries its own suffix (decision 0115): a recreated key opens its own
-    // base, and its predecessor's is left where the fold's reclaim expects to find it.
+    // `attrs/<column>/<group>/<key>/`. Above the declared incarnation the key carries its own
+    // suffix: a recreated key opens its own base, leaving its predecessor's where the fold's
+    // reclaim expects to find it.
     let mut dir = partition_dir.join("attrs").join(&family.name);
     for component in tessera_store::scoped_column_components(view_id, incarnation) {
         dir.push(component);
@@ -54,27 +43,15 @@ pub(super) fn open_scoped_column(
     let name = scoped_column_name(&family.name, view_id);
     let placement = Placement {
         entity: true,
-        // **Never the row route**, though a rendered family does occupy a row tail
-        // (`views.md` §5): a leaf resolves to one entity-space column and a pin may make that
-        // another view's, which no scan of *these* rows can answer. A rendered family is an
-        // operand through the entity column beside that tail rather than through it, so the
-        // entity route is the whole filter surface — see [`scoped_is_filterable`].
+        // Never the row route: a leaf resolves to one entity-space column and a pin may make that
+        // another view's, which no scan of these rows can answer.
         row: false,
         family: scoped_family,
     };
-    // **No position in `declared_scalars`, because it is not one of them.** The tag is the record
-    // blob's field key and a scoped column is never blob-resident — it has an entity-space home by
-    // construction, which is the condition `blob_resident` is the negation of. The sentinel is what
-    // a reader would see if that ever stopped being true, rather than another column's field.
+    // No position in `declared_scalars`, since it is not one of them and a scoped column is never
+    // blob-resident.
     let declared_index = usize::MAX;
-    // **Text opens with no value column at all**, per view exactly as bundle-wide: its artefacts
-    // are the token dictionary and the positional postings over it. The base's layer alone is
-    // opened here; each caller appends the published extents this view's column has taken since —
-    // [`FilterColumns::open`] from the manifest, and a flush from what it wrote.
     if scoped_family == Family::Text {
-        // The analyser a text family's terms were produced by: an analyser this binary does not
-        // carry is the same refusal an entity-scoped text column's is — a `match` answered from a
-        // different segmentation is a wrong answer wearing a correct one's clothes.
         let analyser = resolve_analyser(&family.name, family.analyser.as_deref())?;
         let text = vec![TextLayer::open_base(&name, &dir, request_access(mmap))?];
         return Ok((
@@ -83,9 +60,8 @@ pub(super) fn open_scoped_column(
             Column::text(declared_index, filterable, analyser, text),
         ));
     }
-    // The same artefacts and the same routing the entity-scoped family takes, in this view's own
-    // directory, and for decision 0063's reason rather than a tuning one: a `derived` vocabulary's
-    // postings answer *membership* and must not answer the filter, whose work would then be a
+    // The same artefacts and routing the entity-scoped family takes: a `derived` vocabulary's
+    // postings answer membership and must not answer the filter, whose work would then be a
     // function of the value named.
     let (base, postings, route) = open_value_base(
         &dir,
@@ -97,11 +73,6 @@ pub(super) fn open_scoped_column(
     Ok((
         name,
         placement,
-        // **The licence, not the fact that it opened.** A family carrying neither flag is opened
-        // so the drill-down can read a value out of it, and `evaluate` gates on that flag — so a
-        // leaf that somehow reached it is refused exactly as an unfilterable entity-scoped
-        // column's is. `EngineMeta::resolve_filter_column` refuses such a leaf one layer earlier,
-        // before any column is looked up; this is the second of the two.
         Column::values(
             declared_index,
             filterable,
@@ -113,16 +84,12 @@ pub(super) fn open_scoped_column(
     ))
 }
 
-/// A column's **base** value layer, the derived postings where they are owed, and the route the
-/// vocabulary's visibility fixes — what an entity-scoped column and one view's column of a
-/// group-scoped family each open from their own directory.
+/// A column's base value layer, the derived postings where they are owed, and the route the
+/// vocabulary's visibility fixes.
 ///
-/// Everything here is opened on the declaration rather than probed for, which is the rule every
-/// open keeps: a column the manifest says is indexed and whose artefacts are absent is a bundle
-/// that is not what its manifest says, and reading that as "no entity carries a value" would
-/// answer wrongly while looking right. A keyword column's dictionary sits beside its values under
-/// the canonical name, and its ordinals have no reading without it; a routed column that silently
-/// fell back to the scan would hide an unreadable accelerator.
+/// Everything here is opened on the declaration rather than probed for: a column the manifest
+/// says is indexed and whose artefacts are absent is a bundle that is not what its manifest says,
+/// and reading that as "no entity carries a value" would answer wrongly while looking right.
 fn open_value_base(
     dir: &Path,
     family: Family,
@@ -153,10 +120,8 @@ fn open_value_base(
     ))
 }
 
-/// The layers a run of published text extents opens as, in the order the manifest lists them —
-/// what a column's base is followed by at [`FilterColumns::open`], entity-scoped and group-scoped
-/// alike. `column` is the name the column is held under, which for a group-scoped family is
-/// [`scoped_column_name`]'s resolved form.
+/// The layers a run of published text extents opens as, in manifest order, following a column's
+/// base at [`FilterColumns::open`].
 fn text_extent_layers<'a>(
     prefix_dir: &Path,
     extents: impl Iterator<Item = &'a tessera_store::manifest::TextExtent>,
@@ -179,15 +144,10 @@ fn text_extent_layers<'a>(
 
 /// The record blob's stack for one partition: the base the schema owes, plus every extent named.
 ///
-/// **The base is owed exactly when the compiled schema has a blob-resident column** — one with no
-/// other home ([`blob_resident`], records §3) — and a column declared at a running service has
-/// extents alone until a fold writes the base, so `unfolded` names the columns that owe none.
-/// Derived from the schema rather than probed for on disk, so a missing base is a refusal, never
-/// "those entities have no record".
-///
-/// **Two callers, one rule.** [`FilterColumns::open`] composes the stack at a restart, and a
-/// coalesce's publication re-derives it from the rebased manifest; a rule written twice would have
-/// one of them demand a base the other does not, and the coalesce would be discarded every time.
+/// The base is owed exactly when the compiled schema has a blob-resident column with no other
+/// home ([`blob_resident`]); `unfolded` names the columns declared at a running service that have
+/// extents alone until a fold writes the base. Derived from the schema rather than probed for on
+/// disk, so a missing base is a refusal, never "those entities have no record".
 pub(crate) fn open_record_stack(
     partition_dir: &Path,
     declared: &[tessera_store::manifest::DeclaredScalar],
@@ -205,11 +165,9 @@ pub(crate) fn open_record_stack(
 
 /// The entity→term transpose's stack for one partition: the base and every extent named.
 ///
-/// **The base is unconditional**, where the blob's is schema-dependent: every entity has a label
-/// set, so a build always writes one. A bundle that lacks it refuses the open rather than reading
-/// as "no entity carries a term" — the fail-open direction on the write path, where the join
-/// rule's label arm compares against it (`views.md` §4). [`open_record_stack`]'s two callers open
-/// this one too, and for the same reason.
+/// The base is unconditional, where the blob's is schema-dependent: every entity has a label set,
+/// so a build always writes one. A bundle that lacks it refuses the open rather than reading as
+/// "no entity carries a term", the fail-open direction on the write path.
 pub(crate) fn open_entity_terms_stack(
     partition_dir: &Path,
     extents: &[tessera_store::EntityTermsExtentPaths],
@@ -221,16 +179,13 @@ pub(crate) fn open_entity_terms_stack(
 }
 
 /// The stack a column declared at a running service opens with before any fold: no base, no
-/// postings, the extents composed later (`ingest.md` §6.3). `None` for a column with no
-/// entity-space home, which holds no stack at all.
+/// postings, the extents composed later. `None` for a column with no entity-space home.
 pub(super) fn runtime_layers(
     scalar: &tessera_store::manifest::DeclaredScalar,
     declared_index: usize,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
 ) -> Result<Option<Column>, ComposeError> {
     let family = Family::of(scalar);
-    // The filter surface this declaration affords, which is where a column's own licence comes
-    // from — `None` for a column on none of it.
     let filterable = Placement::of(scalar, vocabularies).is_some_and(|placement| placement.entity);
     if family == Family::Text {
         if !scalar.index {
@@ -259,18 +214,13 @@ pub(super) fn runtime_layers(
 }
 
 /// Every extent list one partition's side-manifest names, as [`FilterColumns::open`] reads them:
-/// the base each artefact class owes plus whatever has been published since, always the full
-/// shape, so a restart composes what was published even while no flush writes one.
-///
-/// Borrowed rather than taken from the manifest inside, because a caller may hold a list the
-/// manifest does not — a test reopening one corrupted extent, and the empty default a freshly
-/// built bundle has for every class.
+/// the base each artefact class owes plus whatever has been published since.
 #[derive(Default, Clone, Copy)]
 pub struct PartitionExtents<'a> {
     pub attrs: &'a [tessera_store::manifest::AttrExtent],
     pub records: &'a [tessera_store::manifest::RecordExtent],
-    /// An artifact's content extents, listed apart from a point's because their *ownership*
-    /// differs rather than their bytes.
+    /// An artifact's content extents, listed apart from a point's because their ownership differs
+    /// rather than their bytes.
     pub artifact_records: &'a [tessera_store::manifest::RecordExtent],
     pub entity_terms: &'a [tessera_store::manifest::EntityTermsExtent],
     pub texts: &'a [tessera_store::manifest::TextExtent],
@@ -297,81 +247,60 @@ impl FilterColumns {
     /// Open every filter column the manifest declares, with every extent the partition's
     /// side-manifest names.
     ///
-    /// A declared column whose files are missing is an **error**, not an absence: the manifest
+    /// A declared column whose files are missing is an error, not an absence: the manifest
     /// digests them, so a missing one means the bundle is not what its manifest says it is. The
-    /// same rule covers an extent, and there it is the whole safety argument — an extent that
-    /// failed to open and was skipped would answer "those entities carry no value", which is
-    /// indistinguishable from a correct answer.
+    /// same rule covers an extent that failed to open: skipping it would answer "those entities
+    /// carry no value", indistinguishable from a correct answer.
     ///
-    /// **`mmap` decides whether a declared column costs resident memory before anyone filters on
-    /// it.** Every declared column is opened here, at once, and a value column is 1 GB per byte of
-    /// declared width per 10⁹ entities — so reading them into the heap would make sixteen declared
-    /// columns tens of GB of residency paid at open by a deployment that may never issue a filter.
-    /// Mapped, the pages are faulted in by the scans that touch them and reclaimable under
-    /// pressure. The engine passes `true`; tests that build a column and read it back in the same
-    /// process pass `false`, exactly as they do for `PostingsReader::open`.
+    /// `mmap` decides whether a declared column costs resident memory before anyone filters on
+    /// it: a value column is 1 GB per byte of declared width per 10⁹ entities, so reading every
+    /// declared column into the heap at open would pay for filters a deployment may never issue.
+    /// Mapped, the pages are faulted in by the scans that touch them. The engine passes `true`;
+    /// tests pass `false`.
     ///
-    /// **It stays a `bool` where the reader beneath it takes a three-way [`tessera_filter::Access`],
-    /// and that is the point.** The third case is `MappedSequential`, the fold's `MADV_SEQUENTIAL`,
-    /// and [decision 0052](../../../docs/decisions/0052-the-folds-page-cache-mitigation-is-a-hint-not-a-throttle.md)
-    /// rules that it belongs only to mappings the fold owns and must never be applied to these —
-    /// which are the request path's. A `bool` here cannot express it, so the rule is enforced by the
-    /// signature rather than by a comment asking the next caller to remember it.
+    /// It stays a `bool` where the reader beneath it takes a three-way [`tessera_filter::Access`]:
+    /// the third case, `MappedSequential`, is the fold's hint and must never be applied to the
+    /// request path's mappings, which a `bool` cannot express.
     pub fn open(
         prefix_dir: &Path,
         partition: &str,
         manifest: &tessera_store::manifest::Manifest,
         extents: PartitionExtents<'_>,
         // The entity-scoped columns declared at a running service that no fold has written a
-        // base for: the side manifest's `attributes`, by name (`ingest.md` §6.3). Each opens as
-        // an empty stack the extents compose onto; every other declared column's base is
-        // demanded.
+        // base for. Each opens as an empty stack the extents compose onto; every other declared
+        // column's base is demanded.
         unfolded: &[String],
         mmap: bool,
     ) -> Result<Self, ComposeError> {
         let declared = &manifest.declared_scalars;
         let vocabularies = &manifest.vocabularies;
-        // Every group's scoped column families, in manifest order (`views.md` §5).
         let scoped = manifest.scoped_scalars();
-        // Which incarnation each view is, from the roster (decision 0115). A family names the
-        // views that have a column; this is what places one on disc, a recreated key's base living
-        // beside its predecessor's rather than over it.
         let view_incarnation = &|view: &str| manifest.incarnation_of(view);
         let partition_dir = prefix_dir.join("partitions").join(partition);
         let mut columns = BTreeMap::new();
         let mut placements = BTreeMap::new();
         for (declared_index, scalar) in declared.iter().enumerate() {
-            // The route affordances, from the compiled declaration alone (decision 0068).
             let family = Family::of(scalar);
             let placement = Placement::of(scalar, vocabularies);
-            // The licence to answer a filter from the entity-space column, which is the entity
-            // half of the placement and nothing else.
             let entity = placement.is_some_and(|placement| placement.entity);
             if let Some(placement) = placement {
                 placements.insert(scalar.name.clone(), placement);
             }
-            // **A column declared at a running service and not yet folded has no base**
-            // (`ingest.md` §6.3): its stack starts empty and the extents the flushes since the
-            // declaration published compose onto it below. A base is demanded from the fold
-            // onward, when the side manifest no longer names the column.
+            // A column declared at a running service and not yet folded has no base: its stack
+            // starts empty and the extents compose onto it below.
             if unfolded.iter().any(|name| name == &scalar.name) {
                 if let Some(layers) = runtime_layers(scalar, declared_index, vocabularies)? {
                     columns.insert(scalar.name.clone(), layers);
                 }
                 continue;
             }
-            // **Text opens before the value-column gate, because it owes none.** Its entity-space
-            // artefacts are a token dictionary and postings over it; the prose is a blob row. Both
-            // are opened on the declaration rather than probed for, the same rule every other open
-            // here keeps: a column the manifest says is indexed and whose index is absent is a
-            // bundle that is not what its manifest says, and reading that as "no entity matches"
-            // would answer a `match` wrongly while looking right.
+            // Text opens before the value-column gate, because it owes none: its entity-space
+            // artefacts are a token dictionary and postings over it, and the prose is a blob row.
             if family == Family::Text {
                 if !scalar.index {
                     continue;
                 }
                 let dir = partition_dir.join("attrs").join(&scalar.name);
-                // The base build's layer, then one per published extent, oldest first.
                 let mut text_layers = vec![TextLayer::open_base(
                     &scalar.name,
                     &dir,
@@ -409,35 +338,21 @@ impl FilterColumns {
                 Column::values(declared_index, entity, family, Some(base), postings, route),
             );
         }
-        // ---- the group-scoped column families (`views.md` §5) ------------------------------
+        // ---- the group-scoped column families ------------------------------------------------
         //
-        // **One column per view, opened under its resolved name**, so a scoped leaf evaluates
-        // through exactly the machinery an unscoped one of its family does: the same
-        // `ValueColumn`, the same scan, the same presence rules for absence. The only thing the
-        // scope decides is which file — which is what keeps the attribute inside I2's argument
-        // unchanged, every value being indexed by entity and every predicate answering a bitmap
-        // in entity space that the mask meets before any permutation.
+        // Every family with a value column on disc is opened; only a filterable one takes a
+        // placement, which is what gives a declaration with neither `index` nor `render` its
+        // meaning: stored, served at `POST /v1/items`, on no filter surface and in no row tail.
         //
-        // **Every family with a value column on disc is opened; only a filterable one takes a
-        // placement.** The drill-down serves a scoped family's values whatever its flags (owner
-        // ruling 2026-09-01), which is what gives a declaration with neither `index` nor `render`
-        // its meaning — stored, served at `POST /v1/items`, on no filter surface and in no row
-        // tail. Holding a column without a placement is exactly the standing an entity-scoped
-        // `derived` category with neither flag already has: `placement` is `None`, `resolve`
-        // refuses the name as undeclared, and `stored_value` answers from it.
-        //
-        // `text` is the one family skipped, and skipped because there is nothing to read: it has
-        // no per-entity value slot at all, so no drill-down could serve it either. An unindexed
-        // scoped `text` column is refused at the declaration, so a text family here is always
-        // filterable and always takes the branch below.
+        // `text` is skipped when unfilterable, since it has no per-entity value slot for
+        // drill-down to serve; an unindexed scoped `text` column is refused at the declaration.
         for family in &scoped {
             if !family.has_value_column() && !scoped_is_filterable(family) {
                 continue;
             }
             for view_id in &family.views {
-                // **No incarnation, no column** (decision 0115): a family naming a view the
-                // roster cannot place is a bundle whose two halves disagree, and opening it under
-                // a guessed incarnation is how a dropped view's values reach a live one.
+                // No incarnation, no column: opening under a guessed incarnation is how a dropped
+                // view's values would reach a live one.
                 let Some(incarnation) = view_incarnation(view_id) else {
                     continue;
                 };
@@ -449,9 +364,6 @@ impl FilterColumns {
                     vocabularies,
                     mmap,
                 )?;
-                // A text family's flushed layers are added here; every other family's arrive
-                // through `compose` below. A key created again shares `(column, view)` with its
-                // predecessor, whose extents stay listed until a fold.
                 if let Some(text) = column.text_layers_mut() {
                     text.extend(text_extent_layers(
                         prefix_dir,
@@ -475,11 +387,9 @@ impl FilterColumns {
                 columns.insert(name, column);
             }
         }
-        // **Both lists, one stack.** Artifact content extents hold the same format and the same
-        // reader as a point's; they are listed separately because their *ownership* differs (see
-        // `SegmentsManifest::artifact_record_extents`), not their bytes. Opening them together is
-        // what makes `fields_of` answer for an artifact entity, and it is safe because the two
-        // never share one: artifact ids descend from the ceiling, point ids ascend from zero.
+        // Artifact content extents hold the same format and reader as a point's, listed
+        // separately because ownership differs, not bytes. Safe to open together because the two
+        // never share an id: artifact ids descend from the ceiling, point ids ascend from zero.
         let extent_paths: Vec<RecordExtentPaths> = extents
             .records
             .iter()
@@ -531,9 +441,6 @@ impl FilterColumns {
                 &prefix_dir.join(&extent.presence),
                 request_access(mmap),
             )?;
-            // An extent's dictionary is named by the manifest rather than derived from the values
-            // path: `AttrExtent::column` carries the same rule for the column name, and a path
-            // parsed back out of another path is one the manifest no longer digests.
             let dict = extent
                 .dict
                 .as_ref()

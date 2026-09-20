@@ -15,22 +15,17 @@ use crate::filter::{
 #[derive(Debug, Clone)]
 pub struct TextExtentPaths {
     pub column: String,
-    /// **The manifest path, which is the layer's identity** — what `text_extents` lists and what a
-    /// later coalesce names its inputs by. Distinct from `dict` below, which is that path resolved
-    /// against the prefix directory: a composition storing the resolved one would leave the two
-    /// producers of a layer (a flush's, and `open`'s at startup) naming the same layer differently,
-    /// and a coalesce's lookup would find the layer after a restart and miss it after a flush.
+    /// The manifest path, the layer's identity, distinct from `dict` below, that path resolved
+    /// against the prefix directory.
     pub dict_rel: String,
     pub dict: std::path::PathBuf,
     pub postings: std::path::PathBuf,
     pub presence: std::path::PathBuf,
 }
 
-/// One column's window of extents, and the coalesced extent that replaces them.
-///
-/// Named by the manifest's own paths on both sides, which is what makes the replace ABA-safe
-/// against the flushes that published while the pass ran: a `seg_id` and the paths derived from it
-/// are never reused (contracts §2.1), so a path still listed at publication is still the same bytes.
+/// One column's window of extents, and the coalesced extent that replaces them. Named by the
+/// manifest's own paths on both sides, ABA-safe against flushes that published while the pass
+/// ran: a `seg_id` and the paths derived from it are never reused.
 #[derive(Debug, Clone)]
 pub struct CoalescedWindow {
     /// The consumed extents' values paths, as `attr_extents` names them.
@@ -39,31 +34,24 @@ pub struct CoalescedWindow {
     pub replacement: OpenedExtent,
 }
 
-/// One text column's window of extents, and the coalesced extent that replaces them.
-///
-/// Named by dictionary path on both sides — a text layer's identity, and the never-reused one
-/// [`CoalescedWindow`] takes for its own reason. The replacement carries its three files rather
-/// than an opened layer because a text layer is composed from paths wherever it enters, the flush's
-/// extents included ([`FilterColumns::with_extents`]).
+/// One text column's window of extents, and the coalesced extent that replaces them, named by
+/// dictionary path on both sides. The replacement carries its three files rather than an opened
+/// layer because a text layer is composed from paths wherever it enters.
 #[derive(Debug, Clone)]
 pub struct CoalescedTextWindow {
     /// The consumed extents' dictionary paths, as `text_extents` names them.
     pub consumed: Vec<String>,
-    /// The replacement, named exactly as a flush's extent is — the column included.
+    /// The replacement, named exactly as a flush's extent is, the column included.
     pub paths: TextExtentPaths,
 }
 
-/// One extent as publication hands it over — a flush's and a coalesce's alike: the manifest entry
+/// One extent as publication hands it over, a flush's and a coalesce's alike: the manifest entry
 /// it becomes, the opened column, and, for a keyword, the dictionary those values are ordinals
-/// into.
+/// into. The dictionary travels with the values or not at all: an extent's ordinals are positions
+/// in its own dictionary and name nothing against any other, so composition refuses a half.
 ///
-/// **The dictionary travels with the values or not at all**, which is why this is one record rather
-/// than two arguments that could disagree: an extent's ordinals are positions in its own
-/// dictionary and name nothing against any other (`records-and-search.md` §4.3), so composition
-/// refuses a half. The entry is the same pairing on disc.
-///
-/// **Opened on the pool, so publication is a pointer push** on the executor thread and cannot fail
-/// on IO after the manifest edit.
+/// Opened on the pool, so publication is a pointer push on the executor thread and cannot fail on
+/// IO after the manifest edit.
 #[derive(Debug, Clone)]
 pub struct OpenedExtent {
     pub extent: tessera_store::manifest::AttrExtent,
@@ -72,7 +60,7 @@ pub struct OpenedExtent {
 }
 
 impl OpenedExtent {
-    /// The key the column map holds this extent's layer under — the column's own for an
+    /// The key the column map holds this extent's layer under: the column's own for an
     /// entity-scoped extent, the resolved form where the entry names a view.
     fn column_name(&self) -> String {
         crate::filter::extent_column_name(&self.extent.column, self.extent.view.as_deref())
@@ -80,12 +68,9 @@ impl OpenedExtent {
 }
 
 impl FilterColumns {
-    /// The next generation's columns before anything is added to them: this generation's, with
-    /// every layer shared rather than re-opened.
-    ///
-    /// Cheap by construction — the base columns and the two stacks are `Arc`s, so a flush that
-    /// published one entity clones pointers rather than a memory-mapped column per declared
-    /// attribute.
+    /// The next generation's columns before anything is added: this generation's, with every
+    /// layer shared rather than re-opened. Cheap by construction, since the base columns and the
+    /// two stacks are `Arc`s.
     fn successor(&self) -> FilterColumns {
         FilterColumns {
             columns: self.columns.clone(),
@@ -97,7 +82,7 @@ impl FilterColumns {
     }
 
     /// Add one flush's extent to the column it names, refusing a name this composition does not
-    /// hold a value column for — see [`Column::push_extent`] for what the column itself refuses.
+    /// hold a value column for, see [`Column::push_extent`] for what the column itself refuses.
     pub(in crate::filter) fn compose(
         &mut self,
         column: &str,
@@ -113,9 +98,9 @@ impl FilterColumns {
         held.push_extent(column, values_rel, extent, dict)
     }
 
-    /// Add one opened extent to the column its manifest entry names — the one push every producer
-    /// takes: a flush's extent, a coalesce's replacement, and each entry
-    /// [`FilterColumns::open`] reads at a restart.
+    /// Add one opened extent to the column its manifest entry names, the one push every producer
+    /// takes: a flush's extent, a coalesce's replacement, and each entry [`FilterColumns::open`]
+    /// reads at a restart.
     pub(in crate::filter) fn push_opened(
         &mut self,
         opened: &OpenedExtent,
@@ -128,10 +113,8 @@ impl FilterColumns {
         )
     }
 
-    /// This generation's columns with an attribute column declared at a running service added,
-    /// at its position in the served schema (`ingest.md` §1.3, §6.3): an empty stack the next
-    /// flush's extent composes onto, and the placement its flags afford. A column with no
-    /// entity-space home (rendered or blob-resident and not indexed) takes a placement or nothing.
+    /// This generation's columns with an attribute column declared at a running service added: an
+    /// empty stack the next flush's extent composes onto, and the placement its flags afford.
     pub(crate) fn with_runtime_column(
         &self,
         scalar: &tessera_store::manifest::DeclaredScalar,
@@ -148,14 +131,10 @@ impl FilterColumns {
         Ok(next)
     }
 
-    /// This generation's columns with a **newly based** group-scoped column opened onto them —
-    /// the first flush of a view a family had no column for (`views.md` §5).
-    ///
-    /// **Applied before the extents compose, and that order is the whole of it.** A flush of a
-    /// view created since the build writes the family's base and its own extent in one unit; the
-    /// extent composes onto a column, so the column has to exist first. A `(column, view)` pair
-    /// this generation already holds is a no-op rather than a refusal — a re-publication reaching
-    /// the same state — because the base is written once and named by its files, not by a counter.
+    /// This generation's columns with a newly based group-scoped column opened onto them: the
+    /// first flush of a view a family had no column for. Applied before the extents compose,
+    /// since the extent composes onto a column that must exist first. A `(column, view)` pair
+    /// already held is a no-op, a re-publication reaching the same state.
     pub fn with_scoped_columns(
         &self,
         partition_dir: &Path,
@@ -206,17 +185,12 @@ impl FilterColumns {
         next
     }
 
-    /// This generation's columns with one flush's extents added — the successor generation's.
-    ///
-    /// Cheap by construction: the base columns are `Arc`s, so a flush that published one entity
-    /// clones pointers rather than re-opening a memory-mapped column per declared attribute. Each
-    /// extent carries the entry the manifest takes, whose values path is what a later coalesce
-    /// replaces the layer by.
+    /// This generation's columns with one flush's extents added, the successor generation's,
+    /// cheap by construction since the base columns are `Arc`s.
     ///
     /// A keyword column's extent carries the dictionary the flush minted beside the values it
-    /// numbers, so the pair composes as one — see [`FilterColumns::compose`], which refuses either
-    /// half without the other. Reopening the generation from the manifest reaches the same state,
-    /// [`FilterColumns::open`] taking each extent's dictionary from `AttrExtent::dict`.
+    /// numbers, so the pair composes as one (see [`FilterColumns::compose`], which refuses either
+    /// half without the other).
     pub fn with_extents(
         &self,
         extents: &[OpenedExtent],
@@ -224,11 +198,8 @@ impl FilterColumns {
         entity_terms: &[tessera_store::EntityTermsExtentPaths],
         texts: &[TextExtentPaths],
     ) -> Result<FilterColumns, ComposeError> {
-        // The record blob's extent composes here for the same reason a filter extent does: the
-        // manifest entry makes the bytes reachable to a *reopen*, and this process serves from the
-        // stack it holds. A flush that published one and did not compose it would leave every
-        // entity it flushed with its blob-resident fields silently absent from drill-down until the
-        // next fold — an entity in no layer being the ordinary `Ok(None)`.
+        // Composes here so this process serves from the stack it holds; uncomposed, the entities
+        // flushed would have their blob-resident fields absent from drill-down until the fold.
         let records = if records.is_empty() {
             Arc::clone(&self.records)
         } else {
@@ -238,9 +209,8 @@ impl FilterColumns {
                     .map_err(record_open_error)?,
             )
         };
-        // The transpose's extent composes here for the record blob's reason, plus one of its own:
-        // a flush's labels that no live stack holds leave the join rule's label arm unable to
-        // compare against the batch that just landed, which is the arm's whole point.
+        // Composes here for the same reason, plus its own: uncomposed labels leave the join
+        // rule's label arm unable to compare against the batch that just landed.
         let entity_terms =
             if entity_terms.is_empty() {
                 Arc::clone(&self.entity_terms)
@@ -256,9 +226,8 @@ impl FilterColumns {
             entity_terms,
             ..self.successor()
         };
-        // A text extent appends a layer: its own dictionary, its own postings, and the entities it
-        // covers. Composed here for the same reason a filter extent is — a published layer the live
-        // generation does not hold answers no `match` until the next fold.
+        // A text extent appends a layer: a published layer the live generation does not hold
+        // answers no `match` until the next fold.
         for text in texts {
             let Some(layers) = next
                 .columns
@@ -284,52 +253,23 @@ impl FilterColumns {
         Ok(next)
     }
 
-    /// This generation's columns with each window of extents **replaced** by the one that carries
-    /// their values — the successor generation's, after an entity-space coalesce (§5.2).
+    /// This generation's columns with each window of extents replaced by the one that carries
+    /// their values, after an entity-space coalesce.
     ///
-    /// **Replace is not append, and its correctness condition is a different one.** Appending
-    /// checks the new layer is disjoint from what is covered; replacing N layers with one must
-    /// check that the replacement's presence **equals** the union of the ones it consumes. Without
-    /// that, `covered` drifts — the coalesced layer's entities are removed from it with the
-    /// consumed layers and added back only as far as the replacement reaches — and every later
-    /// disjointness check tests against the wrong coverage, silently. The merge's own
-    /// duplicate-entity guard (`tessera_filter_write::coalesce_attr_extents`) makes the mismatch
-    /// unreachable, which is exactly why it is cheap to verify and wrong to assume.
+    /// Replacing N layers with one must check the replacement's presence equals the union of the
+    /// ones it consumes, or `covered` drifts and later disjointness checks test against the wrong
+    /// coverage. A consumed layer this generation does not hold is a refusal: the plan was made
+    /// against a manifest, and a layer it names that this process cannot find means the two
+    /// disagree about what the bundle is.
     ///
-    /// A consumed layer this generation does not hold is a refusal rather than a no-op: the plan
-    /// was made against a manifest, so a layer it names and this process cannot find means the two
-    /// disagree about what the bundle is, and publishing on that basis would serve a column short
-    /// of a window's worth of entities.
+    /// A keyword window arrives with the dictionary its coalesce minted, installed as one layer:
+    /// the merge renumbers every ordinal, so [`check_dictionary_pairing`] refuses a keyword
+    /// window without one, and a dictionary on any other family's window. A text column takes the
+    /// same rule through its own record, dictionary, postings and presence replaced together.
     ///
-    /// **A keyword window arrives with the dictionary its coalesce minted, and the two are
-    /// installed as one layer.** A coalesce merges the window's dictionaries and renumbers every
-    /// ordinal, so the replacement's ordinals name positions in a dictionary no consumed layer
-    /// held. [`OpenedExtent::dict`] carries it beside the values, [`check_dictionary_pairing`]
-    /// refuses a keyword window without one (and a dictionary on any other family's window), and
-    /// the pair becomes a single [`Layer`] in one push — the consumed layers leave and the
-    /// replacement enters in the same generation, so no generation ever holds the new ordinals
-    /// beside an old dictionary or the old ordinals beside the new one. That is the composition's
-    /// half of records §7's rule that a keyword layer's files swap atomically; `AttrExtent` is the
-    /// manifest's half.
-    ///
-    /// **A text column takes the same rule through its own record.** A text layer's dictionary,
-    /// postings and presence are one entry, replaced together, so the coalesced layer's new
-    /// ordinals arrive with the dictionary that minted them and nothing outside the three files
-    /// ever held one. `texts` carries those windows; the coverage equality above is checked for
-    /// them too, against `TextLayer::present`, which is exactly what a flush extent stores and
-    /// what makes the check expressible for this family.
-    ///
-    /// **The transpose is replaced whole rather than patched**, and `entity_terms` is the stack
-    /// the caller re-derived from the rebased manifest — `None` where the axis did not run, in
-    /// which case the live stack rides through unchanged. Its ordinals need no attention either
-    /// way: they are dictionary positions, which `coalesce_dict_extents` preserves by construction
-    /// (it replaces a contiguous window with the same records in the same order), so unlike a
-    /// keyword column's they name the same terms after every coalesce.
-    ///
-    /// The coverage rule above holds for it too, and is checked the same way: the replacement's
-    /// entity set must **equal** the live one's. A merge that lost a layer would leave the
-    /// drill-down answering *unknown* for entities that carry labels, and the join rule's arm
-    /// comparing against nothing — which is a `409` that does not fire.
+    /// The transpose is replaced whole; `None` where the axis did not run, in which case the live
+    /// stack rides through unchanged. The coverage rule holds for it too: the replacement's
+    /// entity set must equal the live one's.
     pub fn with_coalesced(
         &self,
         windows: &[CoalescedWindow],
@@ -351,16 +291,8 @@ impl FilterColumns {
                 next
             }
         };
-        // **The record axis's stack is replaced, not carried through** — the same rule the
-        // transpose above takes, and it had the same defect the transpose was fixed for: a
-        // coalesce that folded a window of record extents into one edited the manifest and left
-        // the live stack holding the layers it had consumed, so the running process kept probing
-        // them until a restart while a reopen of the same bundle held one. Nothing served a wrong
-        // answer — the layers are disjoint in entity space (I9), so an extra layer answers for
-        // the entities it always answered for — but the cost the coalesce exists to remove stayed
-        // until a restart removed it, and the process and its own manifest disagreed about what
-        // it was serving from. `None` where the axis did not run, in which case the live stack
-        // rides through untouched, which is the ordinary case.
+        // Replaced, not carried through, for the transpose's reason. `None` where the axis did
+        // not run, the ordinary case.
         let records = match records {
             None => Arc::clone(&self.records),
             Some(next) => next,
@@ -380,9 +312,6 @@ impl FilterColumns {
             let Some(layers) = held.value_layers_mut() else {
                 return Err(ComposeError::UnknownColumn { column });
             };
-            // One push of one struct: the coalesced ordinals and the dictionary that numbers
-            // them enter together, checked as a pair above, and the consumed layers leave with
-            // their own dictionaries.
             replace_window(layers, &column, &window.consumed, || {
                 Ok(Layer {
                     values_rel: Some(replacement.extent.values.clone()),
@@ -390,8 +319,6 @@ impl FilterColumns {
                     dict: replacement.dict.clone(),
                 })
             })?;
-            // `covered` is unchanged by construction — the coverage equality is what says so — so
-            // it is neither recomputed nor adjusted here.
         }
         for window in texts {
             let column = &window.paths.column;
@@ -446,16 +373,13 @@ impl WindowLayer for TextLayer {
     }
 }
 
-/// Replace one window of a column's layers with the layer that carries their values — the one
-/// walk both axes take, over the identity and presence each spells its own way.
+/// Replace one window of a column's layers with the layer that carries their values, the one
+/// walk both axes take.
 ///
 /// A consumed layer this generation does not hold is a refusal rather than a no-op, and the
-/// replacement stands for **exactly** the entities its inputs did or it does not enter: a merge
-/// that lost a layer answers every later request short of that layer's entities, and no
-/// cardinality anywhere else would move.
-///
-/// **Nothing is removed until the replacement is in hand and checked**, so one that will not open
-/// leaves the consumed layers standing rather than a column short of a window.
+/// replacement stands for exactly the entities its inputs did or it does not enter. Nothing is
+/// removed until the replacement is in hand and checked, so one that will not open leaves the
+/// consumed layers standing rather than a column short of a window.
 fn replace_window<L: WindowLayer>(
     layers: &mut Vec<L>,
     column: &str,
@@ -501,9 +425,7 @@ mod tests {
     // The layer pairing, and what crosses the boundary
     // -------------------------------------------------------------------------------------
 
-    /// A keyword extent arriving without its dictionary is refused rather than composed: scanned
-    /// as codes it would answer every string predicate with the empty set, which under-reports
-    /// with no symptom.
+    /// A keyword extent arriving without its dictionary is refused rather than composed.
     #[test]
     fn a_keyword_extent_without_its_dictionary_is_refused() {
         let mut columns = keyword_column(
@@ -520,8 +442,7 @@ mod tests {
     }
 
 
-    /// And the other direction: a dictionary for a column the schema does not call a keyword means
-    /// the caller and the declaration disagree about what its values are.
+    /// And the other direction: a dictionary for a column the schema does not call a keyword.
     #[test]
     fn a_dictionary_on_a_non_keyword_extent_is_refused() {
         let mut columns = keyword_column(
@@ -544,15 +465,8 @@ mod tests {
     }
 
 
-    /// **A coalesced keyword window is installed with the dictionary its merge minted, as one
-    /// layer, and every entity still reads its own key.** The merged dictionary numbers `beta` and
-    /// `gamma` the other way round from either consumed layer, so a replacement resolved against
-    /// a consumed layer's dictionary — or a consumed layer left behind beside the merged one —
-    /// would answer another key's entities.
-    ///
-    /// The refusals are the same test's other half: the window without its dictionary is refused
-    /// with the generation unchanged, and a dictionary on a window of a column the schema does not
-    /// call a keyword is refused too — both through the one pairing rule a flush's extent passes.
+    /// A coalesced keyword window installs with the dictionary its merge minted, and every entity
+    /// still reads its own key.
     #[test]
     fn a_coalesced_keyword_window_installs_its_dictionary_beside_its_values() {
         let columns = keyword_column(
@@ -577,7 +491,7 @@ mod tests {
             "extents/f2.arrow".to_string(),
         ];
         // The merge's output: dictionary [beta, gamma], so 10 -> gamma is ordinal 1 and
-        // 11 -> beta is ordinal 0 — neither consumed layer's numbering.
+        // 11 -> beta is ordinal 0, neither consumed layer's numbering.
         let window = |dict: Option<Arc<SortedDict>>| CoalescedWindow {
             consumed: consumed.clone(),
             replacement: opened(
@@ -662,12 +576,8 @@ mod tests {
     }
 
 
-    /// **A flush that lands between a coalesce's plan and its replace keeps its own dictionary.**
-    /// The replace names the consumed layers by path, so an extent appended meanwhile is neither
-    /// consumed nor renumbered: it stays a layer of its own, its ordinals read against the
-    /// dictionary that minted them, beside the coalesced layer read against the merged one. The
-    /// appended extent numbers `gamma` as ordinal 0 where the merged dictionary numbers it 1, so
-    /// a replace that read either against the other would answer wrongly here.
+    /// A flush that lands between a coalesce's plan and its replace keeps its own dictionary: the
+    /// replace names the consumed layers by path.
     #[test]
     fn a_flush_landing_between_plan_and_replace_keeps_its_own_dictionary() {
         let planned = keyword_column(

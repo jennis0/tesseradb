@@ -63,7 +63,7 @@ pub(super) fn members(bitmap: &Bitmap) -> Vec<u32> {
     bitmap.iter().collect()
 }
 
-/// A keyword column of one or more layers, each with its own dictionary — the shape
+/// A keyword column of one or more layers, each with its own dictionary: the shape
 /// [`FilterColumns::open`] builds from a manifest, assembled here without one.
 pub(super) fn keyword_column(
     name: &str,

@@ -12,7 +12,7 @@ use crate::filter::expr::{
 use crate::filter::scan::text::{contains_phrase, text_match};
 use crate::filter::scan::{scan, scan_layer};
 
-/// The space a sub-tree evaluates in — [`FilterColumns::space_of`]'s answer.
+/// The space a sub-tree evaluates in: [`FilterColumns::space_of`]'s answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Space {
     Entity,
@@ -21,15 +21,9 @@ enum Space {
 }
 
 impl FilterColumns {
-    /// Entities in `candidate` whose value for `column` satisfies `operand`.
-    ///
-    /// The result is a subset of `candidate` by
-    /// construction, so it is already inside the composed verdict — **I12**'s "a filter narrows
-    /// `M_sel` and never widens it" is a property of the shape here rather than a check.
-    ///
-    /// **Every layer is scanned and the results unioned.** The layers partition entity space, so
-    /// the union is disjoint and an entity is tested against exactly one value however many flushes
-    /// have published — which is what makes composition a union rather than a precedence rule.
+    /// Entities in `candidate` whose value for `column` satisfies `operand`, a subset of
+    /// `candidate` by construction. Every layer is scanned and the results unioned; the layers
+    /// partition entity space, so an entity is tested against exactly one value.
     pub fn resolve(
         &self,
         column: &str,
@@ -43,10 +37,7 @@ impl FilterColumns {
             .filter(|column| column.filterable)
             .ok_or_else(|| FilterError::UndeclaredColumn(name.to_string()))?;
 
-        // **Text answers from postings and nothing else**, because it has nothing else: no value
-        // column and no scan. Every layer is asked and the answers are unioned — the base build's
-        // index plus one per flush — which is sound because the layers are disjoint in entity space
-        // (I9) and each holds its own entities' terms whole.
+        // Text answers from postings only: no value column and no scan.
         let (layers, postings, route) = match &column.layers {
             ColumnLayers::Text { layers, analyser } => {
                 let declared_index = column.declared_index;
@@ -61,20 +52,16 @@ impl FilterColumns {
             } => (layers, postings.as_deref(), *route),
         };
 
-        // **The routed pair, and the split between them is the whole of decision 0063.** The base
-        // build's answer comes from the postings; every extent layer is scanned, because no flush
-        // writes postings and an answer from the postings alone would omit every entity ingested
-        // since the build.
+        // The base build's answer comes from the postings; every extent layer is scanned, since
+        // no flush writes postings.
         if let (Route::Postings, Some(postings), Some(values)) =
             (route, postings, codes_of(operand))
         {
             let mut out = resolve_union(postings, values)
                 .map_err(|e| FilterError::postings_unreadable(name, e))?
                 .and(candidate);
-            // Every layer that is *not* the base, which is the one the postings cover. Selected by
-            // the absence of a manifest path rather than by position: a coalesce replaces a window
-            // of extents with one layer appended at the end, so "the base is layer 0" would hold
-            // today and stop holding the first time the list is rewritten.
+            // Selected by the absence of a manifest path, not position: a coalesce appends its
+            // replacement at the end of the list.
             for layer in layers.iter().filter(|l| l.values_rel.is_some()) {
                 out |= scan(&layer.values, operand, candidate);
             }
@@ -88,8 +75,8 @@ impl FilterColumns {
         Ok(out)
     }
 
-    /// A `match` or a `phrase` over one text column's layers — [`FilterColumns::resolve`]'s text
-    /// half, split out because the two families share nothing but the column lookup.
+    /// A `match` or a `phrase` over one text column's layers: [`FilterColumns::resolve`]'s text
+    /// half.
     fn resolve_text(
         &self,
         name: &str,
@@ -99,17 +86,12 @@ impl FilterColumns {
         operand: &FilterOperand,
         candidate: &Bitmap,
     ) -> Result<Bitmap, FilterError> {
-        // An operator outside this family is refused at the parse gate, which asks
-        // `Family::operands` — the same list `/v1/meta` publishes. Empty here is the second
-        // line of defence and the direction that narrows.
         let (query, minimum, phrase) = match operand {
             FilterOperand::Match { query, minimum } => (query, *minimum, false),
             FilterOperand::Phrase { query } => (query, None, true),
             _ => return Ok(Bitmap::new()),
         };
-        // **Order and duplicates survive the analyser, and a phrase needs both** — which is why
-        // the sort and the deduplication happen here, on the copy the postings take, rather
-        // than in `Analyser::tokens`.
+        // `ordered` keeps the original order and duplicates, which a phrase needs.
         let ordered = analyser.tokens(query);
         let mut tokens = ordered.clone();
         tokens.sort();
@@ -120,9 +102,8 @@ impl FilterColumns {
             out |= text_match(&layer.dict, &layer.postings, &tokens, minimum, candidate)
                 .map_err(|e| FilterError::postings_unreadable(name, e))?;
         }
-        // A one-word phrase *is* a `match`, and short-circuiting it is worth stating: the
-        // verify below decompresses a record block per survivor, and for the commonest phrase
-        // shape there is nothing for it to establish that the conjunction has not.
+        // A one-word phrase is a `match`, so short-circuit it before the verify decompresses a
+        // block per survivor.
         if !phrase || ordered.len() < 2 {
             return Ok(out);
         }
@@ -131,34 +112,22 @@ impl FilterColumns {
 
     /// Evaluate a filter expression against `candidate`.
     ///
-    /// **Every node is evaluated under the candidate, never over the column at large.** A
-    /// conjunction narrows the candidate as it goes, so a selective first clause makes the rest
-    /// cheaper; a disjunction evaluates each branch under the *original* candidate and unions —
-    /// which is what keeps `any_of` a subset of it, since each branch already is.
+    /// Every node is evaluated under the candidate: a conjunction narrows it as it goes, and a
+    /// disjunction evaluates each branch under the original candidate and unions.
     pub fn evaluate(&self, expr: &FilterExpr, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
         expr.check()?;
         self.eval(expr, candidate)
     }
 
-    /// Evaluate a filter expression's entity-space part and route the rest — the seam decision
-    /// 0068 admits (this module's header carries the full argument).
+    /// Evaluate a filter expression's entity-space part and route the rest.
     ///
-    /// `prefer_row` decides a both-routes column's leaf: the caller derives it from 0068's rule
-    /// (`rows_in_ranges ≤ |M_auth|`), which is a per-request quantity, so it arrives as an
-    /// argument rather than being stored at open — unlike [`Route`], which must not vary per
-    /// request because the postings' work is a function of the value named. This preference
-    /// carries no such channel: both routes' work is a function of the request's shape and the
-    /// mask, never of the value (placement memo §2).
+    /// `prefer_row` decides a both-routes column's leaf: a per-request quantity, so it arrives as
+    /// an argument rather than being stored at open, unlike [`Route`], which must not vary per
+    /// request since the postings' work is a function of the value named.
     ///
-    /// A tree with no row-space leaf returns [`RoutedFilter::Entity`], evaluated exactly as
-    /// [`FilterColumns::evaluate`] would have. Otherwise every maximal entity-space sub-tree is
-    /// evaluated **here, under `candidate`** — the composed verdict — and the returned
-    /// [`RowExpr`] awaits the one crossing and the row-space leaves, which need the request's
-    /// tile ranges and so live in `viewport.rs`.
-    ///
-    /// `resolvers` answers each region leaf (selection-operand §5) and each `member_of` leaf
-    /// (`highlight-and-hierarchy.md` §3): both are always row space and always the whole view, so
-    /// a tree carrying either never returns [`RoutedFilter::Entity`].
+    /// A tree with no row-space leaf returns [`RoutedFilter::Entity`]. Otherwise every maximal
+    /// entity-space sub-tree is evaluated here, under `candidate`, and the returned [`RowExpr`]
+    /// awaits the row-space leaves, which need the request's tile ranges.
     pub fn evaluate_routed(
         &self,
         expr: &FilterExpr,
@@ -175,11 +144,8 @@ impl FilterColumns {
         ))
     }
 
-    /// One column's routed space — **the single transcription of the leaf-routing rule**, called
-    /// for a leaf and for a `none_of`'s one column alike, so the two cannot drift.
+    /// One column's routed space, the single transcription of the leaf-routing rule.
     fn leaf_space(&self, column: &str, prefer_row: bool) -> Result<Space, FilterError> {
-        // The reserved words name no column: a region and a `member_of` are row space whatever
-        // the request's span.
         if column == REGION_COLUMN || column == MEMBER_OF_COLUMN {
             return Ok(Space::Row);
         }
@@ -187,10 +153,8 @@ impl FilterColumns {
         Ok(match (placement.entity, placement.row) {
             (true, false) => Space::Entity,
             (false, true) => Space::Row,
-            // Both routes: 0068's rule, carried in by the caller.
             (true, true) if prefer_row => Space::Row,
             (true, true) => Space::Entity,
-            // Never inserted — `open` only stores a placement with at least one space.
             (false, false) => unreachable!("a placement affords at least one space"),
         })
     }
@@ -204,13 +168,9 @@ impl FilterColumns {
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))
     }
 
-    /// Which space `expr` evaluates in, given each leaf's placement and the request's preference.
-    ///
-    /// `Entity` means the whole sub-tree can be answered by the existing entity-space evaluation;
-    /// anything else means at least one leaf must be tested against the hot column. A `none_of`
-    /// takes its single column's space whole — `check_negations` has already established there is
-    /// exactly one — because its presence half and its matched half must be computed in the same
-    /// space or the subtraction would mix domains.
+    /// Which space `expr` evaluates in. `Entity` means the whole sub-tree can be answered by the
+    /// existing entity-space evaluation. A `none_of` takes its single column's space whole, since
+    /// its presence half and its matched half must be computed in the same space.
     fn space_of(&self, expr: &FilterExpr, prefer_row: bool) -> Result<Space, FilterError> {
         match expr {
             FilterExpr::Leaf { column, .. } => self.leaf_space(column, prefer_row),
@@ -222,8 +182,6 @@ impl FilterColumns {
                         all_entity = false;
                     }
                 }
-                // An empty combinator is pure entity space: its identity value needs no hot
-                // column (`AllOf([])` is the candidate, `AnyOf([])` is empty).
                 Ok(if all_entity {
                     Space::Entity
                 } else {
@@ -286,39 +244,22 @@ impl FilterColumns {
         }
     }
 
-    /// Keep only the entities whose prose actually carries the phrase, by reading it (§4.5).
+    /// Keep only the entities whose prose actually carries the phrase, by reading it.
     ///
-    /// # Why the answer is exact, and why it costs no storage
+    /// The postings answer which items use all these words, a superset of which items say them
+    /// adjacent and in order, so the conjunction over-approximates but is never short. This pass
+    /// reads each survivor's own prose out of the record blob, runs it through the same analyser
+    /// the index was built with, and looks for the query's token sequence contiguously, with no
+    /// positional payload, no bigram terms, no second artefact (bigram terms were measured at
+    /// 61.7 B/entity over 2.4M titles, 2.7 times the unigram index).
     ///
-    /// The postings answer *which items use all these words*, which is a superset of *which items
-    /// say them in this order and adjacent*: an item cannot carry the phrase without carrying every
-    /// word in it, so the conjunction is an over-approximation that is never short. This pass then
-    /// reads each survivor's own prose out of the record blob, runs it through the **same analyser
-    /// the index was built with**, and looks for the query's token sequence contiguously in the
-    /// document's. Same pipeline both sides, so a phrase is found exactly where the words the index
-    /// holds are adjacent — no positional payload, no bigram terms, no second artefact.
+    /// One record-block decompression and one analysis per surviving entity, result-bound, not
+    /// corpus-bound: 236 to 270 µs per block on selective phrases, unbounded on an unselective
+    /// one since `of the` survives the conjunction almost everywhere.
     ///
-    /// The refuted alternative is worth naming at the site, because it is the one a reader reaches
-    /// for: **token-bigram terms cost 61.7 B/entity over 2.4M titles, 2.7× the whole unigram index
-    /// they would sit beside** (`probes/2026-08-12-string-storage/`). They are not to be
-    /// re-derived.
-    ///
-    /// # What it costs, and the class that cost belongs to
-    ///
-    /// One record-block decompression and one analysis per **surviving** entity — result-bound, not
-    /// corpus-bound. Measured at 236–270 µs per block through the built reader on selective
-    /// phrases. It is unbounded on an unselective one — `of the` survives the conjunction almost
-    /// everywhere, so almost every visible item is read — which is the same accepted class as
-    /// `filter-index.md` §2.2's unselective predicates and not a new one: the work is a function of
-    /// the candidate and the query, both of which the caller already holds.
-    ///
-    /// # The gate, discharged rather than assumed
-    ///
-    /// The verify decompresses a block on behalf of each survivor, so a survivor outside the
-    /// candidate would be a block read for an entity this principal may not see. `text_match`
-    /// intersects with the candidate as it reads each posting, so this cannot happen — and it is
-    /// checked anyway, before a single block is touched, because "cannot happen" is what an
-    /// intersection moved one line would make false with no other symptom.
+    /// A survivor outside the candidate would be a block read for an entity this principal may
+    /// not see. `text_match` intersects with the candidate as it reads each posting, so this
+    /// cannot happen, and it is checked anyway before a single block is touched.
     fn verify_phrase(
         &self,
         name: &str,
@@ -337,11 +278,9 @@ impl FilterColumns {
         let tag = u16::try_from(declared_index).unwrap_or(u16::MAX);
         let mut out = Bitmap::new();
         for entity in survivors.iter() {
-            // **A row that will not read excludes the item rather than refusing the request.** The
-            // conjunction has already established that the item's words are in the index, so a
-            // missing or malformed blob row is a bundle defect — but the fail-closed reading of it
-            // here is exclusion, which narrows, where drill-down's is a refusal because it is about
-            // to *serve* the row. Two different questions about the same bytes.
+            // A row that will not read excludes the item rather than refusing the request: the
+            // fail-closed reading narrows, where drill-down's is a refusal because it is about to
+            // serve the row.
             let Ok(Some(fields)) = self.records.fields_of(entity) else {
                 continue;
             };
@@ -357,33 +296,21 @@ impl FilterColumns {
         Ok(out)
     }
 
-    /// The entities of `candidate` that carry a value in `column` — the presence half of a
+    /// The entities of `candidate` that carry a value in `column`, the presence half of a
     /// negation, unioned across the layers exactly as a scan is.
     ///
-    /// **A scan of every layer, never the postings**, even for a column whose `eq` is routed
-    /// (decision 0063). Presence derived from postings would be a union over every code in the
-    /// vocabulary — O(values) file reads to answer a question the value column answers in one
-    /// intersection per layer — and it would answer it only for the base, since no flush writes
-    /// postings.
+    /// A scan of every layer, never the postings, even for a column whose `eq` is routed: the
+    /// value column answers this in one intersection per layer, where the postings answer only
+    /// for the base, since no flush writes postings.
     fn present_in(&self, column: &str, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
         let held = self
             .columns
             .get(column)
             .filter(|held| held.filterable)
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
-        // **A column with no value column has no presence set, and answering the empty one is a
-        // wrong answer wearing a right one's clothes.** A `text` column holds no value layers at
-        // all — its index is postings over words and its prose is a blob row — and a column
-        // declared at a running service holds none until its first flush composes one, so this
-        // loop would union nothing and every negation over it would return no entities, for every
-        // principal and every corpus, with a 200. Narrowing, so no disclosure; simply wrong, and
-        // silently.
-        //
-        // Refused rather than answered from the postings. The presence a negation needs is *carries
-        // a value*, and for prose that is not derivable from the index: text analysing to no terms
-        // at all — an empty string, a line of punctuation — carries a value and appears in no
-        // posting. A flush extent stores a presence bitmap for exactly that reason; the base build
-        // writes none, so there is nothing to answer from until it does.
+        // A column with no value column has no presence set: a `text` column has no value layers
+        // at all, and a running-service column has none until its first flush. Answering the
+        // empty set would under-report every negation silently, so it is refused instead.
         let layers = held.value_layers();
         if layers.is_empty() {
             return Err(FilterError::NegationWithoutPresence {
@@ -420,18 +347,13 @@ impl FilterColumns {
                 }
                 Ok(out)
             }
-            // `present ∖ matched`, and `present` is what makes this a positive predicate — see
-            // `FilterExpr::NoneOf` for the two arguments that rest on it.
-            //
-            // `check_negations` has already established that the sub-expressions name exactly one
-            // column, so this cannot pick the wrong one.
+            // `present ∖ matched`: `NoneOf` carries a value and none of these match, never the
+            // complement, so an unreadable value must narrow rather than widen.
             FilterExpr::NoneOf(kids) => {
                 let column = FilterExpr::negated_column(kids);
                 let mut out = self.present_in(column, candidate)?;
                 for kid in kids {
-                    // Under `out`, not `candidate`: each clause need only be evaluated over what is
-                    // still standing, so a selective first clause makes the rest cheaper — the same
-                    // narrowing `AllOf` does, for the same reason.
+                    // Under `out`, not `candidate`, the same narrowing `AllOf` does.
                     out.andnot_inplace(&self.eval(kid, &out)?);
                     if out.is_empty() {
                         break;
@@ -445,9 +367,8 @@ impl FilterColumns {
 
 /// The vocabulary codes an operand names, or `None` where the operand is not a category one.
 ///
-/// The match is on the operand's *shape*, never on the values it carries: a category column reaches
-/// the postings for `eq` and `in` alike and for nothing else, so the route cannot become a function
-/// of which value was asked for.
+/// The match is on the operand's shape, never on the values it carries, so the route cannot
+/// become a function of which value was asked for.
 fn codes_of(operand: &FilterOperand) -> Option<&[AttrLocalId]> {
     match operand {
         FilterOperand::Equals(v) => Some(std::slice::from_ref(v)),
