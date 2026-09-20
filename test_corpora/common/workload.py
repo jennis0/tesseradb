@@ -44,7 +44,7 @@ from .timing import Steps
 #: `MemoryMax` on every deployment this run serves.
 CAP_BYTES = 16 * 1024**3
 
-#: The checkout this module lives in, which is where the binary is built and the bench is run.
+#: The checkout this module lives in, which is where the binary is built.
 CHECKOUT = Path(__file__).resolve().parents[2]
 
 
@@ -158,6 +158,23 @@ def per_view(views: dict, key: str) -> tuple[bool, str]:
     return held, said or "no view"
 
 
+def levels_compared(views: dict) -> tuple[bool, str]:
+    """Whether every declared level of every layer was compared with an artifact in it, and what
+    each layer's census reached."""
+    held, said = bool(views), []
+    for name, view in views.items():
+        layers = dig(view, "census_coverage", "layers", default={})
+        held = held and bool(layers)
+        for layer, entry in sorted(layers.items()):
+            compared, declared = entry.get("levels_compared", 0), entry.get("levels_declared", 0)
+            held = held and compared == declared
+            said.append(
+                f"{f'{name}/' if len(views) > 1 else ''}{layer} {compared} of {declared} levels, "
+                f"{entry.get('parent_edges', 0):,} parent edges"
+            )
+    return held, "; ".join(said) or "no layer"
+
+
 def correctness(result: dict) -> list[tuple[str, bool, str]]:
     """One `(check, held, the number that decides it)` per line of the correctness section."""
     rows = []
@@ -192,6 +209,7 @@ def correctness(result: dict) -> list[tuple[str, bool, str]]:
     rows += [
         ("census equal per view", *per_view(views, "equal")),
         ("artifact parents equal per view", *per_view(views, "parents_equal")),
+        ("every declared layer level compared", *levels_compared(views)),
         ("write cycle counts", written == expected, f"{written} visible against {expected} expected"),
         (
             "restart equal",
@@ -390,22 +408,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         cycle_out = work / "cycle.json"
         result["ingest"] = json.loads(cycle_out.read_text()) if cycle_out.exists() else None
         failures += list(dig(result, "ingest", "failures", default=[]))
-
-        # `viewport_latency` opens the bundle with the engine directly, on its own fixture's
-        # view and frame rather than the rung's; it never gates.
-        if not args.quick:
-            with steps.step("viewport_latency"):
-                result["viewport_latency"] = run(
-                    ["cargo", "run", "--release", "-p", "tessera-bench", "--bin",
-                     "viewport_latency", "--", "--bundle", bundle],
-                    CHECKOUT,
-                    dict(os.environ, CARGO_PROFILE_RELEASE_DEBUG="0"),
-                )
-            if result["viewport_latency"]["returncode"] != 0:
-                print(
-                    "viewport_latency could not measure this bundle and is not a gate: "
-                    f"{result['viewport_latency']['stderr_tail'].strip().splitlines()[-1:]}"
-                )
 
     result["failures"] = failures
     result["total_wall_s"] = steps.total()

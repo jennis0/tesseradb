@@ -21,7 +21,14 @@ import requests
 from .. import serve_battery
 from ..deployment import Deployment, minted_credentials
 from ..serve_battery import full_box
-from .census import census, compare_census
+from .census import (
+    census,
+    census_coverage,
+    census_zooms,
+    compare_census,
+    coverage_failures,
+    incomplete_sentences,
+)
 from .control import Control, wait_for
 from .holdout import HoldOut
 from .publication import Publication
@@ -37,6 +44,9 @@ from .split import (
 # ---------------------------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------------------------
+
+#: Candidate boxes ranked per census box asked for, so the deciles have something to rank.
+CENSUS_CANDIDATES = 6
 
 
 def executor_laps(before: dict, after: dict, rows: int) -> dict:
@@ -96,6 +106,10 @@ class Cycle:
         #: Credentials minted for this run, by variable name.
         self.minted: dict[str, str] = {}
         self.ladder: list[dict] | None = None
+        #: The census's boxes per view, chosen once on the all-in deployment, and every layer
+        #: `/v1/meta` publishes, which carries each one's declared levels and their zoom ranges.
+        self.census_boxes: dict[str, list[tuple[int, list[float]]]] = {}
+        self.meta_layers: list[dict] = []
         #: The served deployment, its session credential and the 100% principal's terms.
         self.served: Deployment | None = None
         self.session_cred = ""
@@ -381,13 +395,17 @@ class Cycle:
 
     def phase(self, name: str, fn) -> None:
         """Run one named phase, recording a failure rather than ending the run: a failure here is
-        as often a result — a shed stream, a refusal — as it is a bug in the driver.
+        as often a result — a shed stream, a refusal — as it is a bug in the driver. `phase_s` is
+        the phase's own wall, whether it held or failed.
         """
+        t0 = time.perf_counter()
         try:
             self.result[name] = fn()
         except Exception as e:  # noqa: BLE001 — a driver failure is a recorded outcome
             self.result[name] = {"failed": f"{type(e).__name__}: {e}"[:2000]}
             self.log(f"  {name} FAILED: {type(e).__name__}: {e}")
+        if isinstance(self.result[name], dict):
+            self.result[name]["phase_s"] = round(time.perf_counter() - t0, 1)
 
     def _run(self) -> None:
         args = self.args
@@ -758,19 +776,65 @@ class Cycle:
             "live_rows": compaction.get("live_rows"),
         }
 
-    def boxes(self, quant: dict) -> list[tuple[int, list[float]]]:
-        """The census's boxes in one view's frame: `--equivalence-boxes` at zoom 3, 6, 9, drawn
-        from the seed."""
-        rng = random.Random(self.args.seed)
-        return [
-            (zoom, box)
-            for zoom in (3, 6, 9)
-            for box in serve_battery.candidate_boxes(quant, zoom, self.args.equivalence_boxes, rng)
-        ]
+    def declared_levels(self, view: str) -> dict[str, list[int]]:
+        """The levels each of one view's layers declares, from `/v1/meta`: what the census's zooms
+        are chosen to reach and what its coverage is measured against."""
+        return {
+            layer["name"]: [level["level"] for level in layer["levels"]]
+            for layer in self.meta_layers
+            if view in layer["views"]
+        }
+
+    def choose_boxes(self, viewer: str, token: str) -> None:
+        """Fill `census_boxes`: `--equivalence-boxes` boxes per census zoom per view, where the
+        points are. Candidates are drawn from the seed and ranked by what the 100% principal sees
+        at the census zoom itself, and the boxes are taken from the densest three deciles — a box
+        with no artifacts in it compares nothing. Chosen once, on the all-in deployment, and asked
+        of both deployments and every principal.
+        """
+        wanted = self.args.equivalence_boxes
+        for name in self.view_names:
+            quant = self.frames[name]
+            rng = random.Random(self.args.seed)
+            chosen: list[tuple[int, list[float]]] = []
+            zooms = census_zooms(
+                [
+                    level["zoom"]
+                    for layer in self.meta_layers
+                    if name in layer["views"]
+                    for level in layer["levels"]
+                    if level.get("zoom")
+                ]
+            )
+            for zoom in zooms:
+                ranked = serve_battery.rank_by_density(
+                    viewer,
+                    token,
+                    name,
+                    zoom,
+                    serve_battery.candidate_boxes(quant, zoom, CENSUS_CANDIDATES * wanted, rng),
+                    quant,
+                    0,
+                    serve_battery.DEFAULT_MAX_TILES,
+                    self.log,
+                )
+                pool = [
+                    pair
+                    for decile in reversed(serve_battery.decile_pools(ranked)[7:])
+                    for pair in reversed(decile)
+                    if pair[1] > 0
+                ]
+                step = max(len(pool) // wanted, 1)
+                boxes = [box for box, _ in pool[::step]][:wanted] or [
+                    box for box, _ in ranked[-wanted:]
+                ]
+                chosen += [(zoom, box) for box in boxes]
+            self.log(f"  {name}: census boxes at zooms {zooms}, {wanted} each")
+            self.census_boxes[name] = chosen
 
     def census_views(self, deployment, cred: str, ladder) -> dict:
         """One census per declared view, keyed by view, in the folded deployment's frames
-        whichever deployment is asked."""
+        whichever deployment is asked, over the boxes chosen for that view."""
         return {
             name: census(
                 deployment.viewer,
@@ -779,7 +843,7 @@ class Cycle:
                 name,
                 self.frames[name],
                 ladder,
-                self.boxes(self.frames[name]),
+                self.census_boxes.get(name) or [],
             )
             for name in self.view_names
         }
@@ -799,11 +863,13 @@ class Cycle:
     def do_equivalence(self, ranks) -> dict:
         """The folded deployment's census against the all-in build's, per view, same boxes.
         `equal` is every view agreeing.
+
+        The all-in deployment goes first: it publishes every layer's declaration, from which the
+        census zooms follow, and it is the deployment the boxes are ranked on.
         """
         targets = [float(t) for t in self.args.targets.split(",")]
         ladder = serve_battery.compose_ladder(ranks, self.visible() or 1, targets)
         self.ladder = ladder
-        folded = self.census_views(self.served, self.session_cred, ladder)
 
         # The all-in deployment, served on the three ports after the folded deployment's.
         allin = Deployment(
@@ -823,9 +889,12 @@ class Cycle:
             )
             all_in_meta = serve_battery.meta(allin.viewer, reference_token)
             all_in_frames = {v["id"]: v["quantisation"] for v in all_in_meta["views"]}
+            self.meta_layers = all_in_meta.get("layers") or []
+            self.choose_boxes(allin.viewer, reference_token)
             reference = self.census_views(allin, allin.credential("session"), ladder)
         finally:
             allin.stop()
+        folded = self.census_views(self.served, self.session_cred, ladder)
         out: dict = {
             "ladder": [{"target": r["target"], "terms": r["terms"]} for r in ladder],
             "views": {},
@@ -840,6 +909,10 @@ class Cycle:
             # The frames, side by side: under `extent = "auto"` they differ at the margins.
             compared["frames"] = {"folded": self.frames[name], "all_in": all_in_frames.get(name)}
             compared["frames_equal"] = self.frames[name] == all_in_frames.get(name)
+            # What the folded deployment's census reached: the zooms, and each layer's levels.
+            compared["census_coverage"] = census_coverage(
+                folded[name], self.declared_levels(name)
+            )
             out["views"][name] = compared
             for surface, count in compared["differences_by_surface"].items():
                 by_surface[surface] = by_surface.get(surface, 0) + count
@@ -851,6 +924,7 @@ class Cycle:
             out[f"{surface}_equal"] = by_surface.get(surface, 0) == 0
         out["equal"] = all(v["equal"] for v in out["views"].values())
         out["frames_equal"] = all(v["frames_equal"] for v in out["views"].values())
+        out["incomplete"] = incomplete_sentences(folded) + incomplete_sentences(reference)
         return out
 
     def do_restart(self, ranks) -> dict:
@@ -880,6 +954,7 @@ class Cycle:
             },
         }
         out["census_equal"] = all(v["equal"] for v in out["views"].values())
+        out["incomplete"] = incomplete_sentences(before) + incomplete_sentences(after)
         return out
 
     def send_changes(self, control, items: list[dict]) -> tuple[requests.Response, float]:
@@ -1022,6 +1097,14 @@ class Cycle:
                 out.append(
                     f"the census on {name} is unequal: {compared.get('differences_by_surface')}"
                 )
+            out += [
+                f"the census on {name} proved nothing about a declared level: {sentence}"
+                for sentence in coverage_failures(compared.get("census_coverage") or {})
+            ]
+        for name in ("equivalence", "restart"):
+            phase = result.get(name)
+            if isinstance(phase, dict):
+                out += list(phase.get("incomplete") or [])
         cycle = result.get("write_cycle") or {}
         if isinstance(cycle, dict) and cycle and not cycle.get("skipped") and not cycle.get("failed"):
             for op in ("delete", "suppress"):
