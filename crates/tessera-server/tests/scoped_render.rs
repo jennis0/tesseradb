@@ -53,6 +53,16 @@ const ENTITIES: u64 = 24;
 const WORLD: std::ops::Range<u64> = 0..20;
 const QUARTERS: [(&str, std::ops::Range<u64>); 2] = [("2026-Q1", 0..15), ("2026-Q2", 8..24)];
 
+/// A key the sharing group declares and the owning group does not. The owner's view of it is
+/// created while the service runs, so the two views of the key sit at different incarnations —
+/// the one shape in which a flush through the borrowing view can stamp an artifact with an
+/// incarnation the view it names does not carry. Nothing but
+/// [`a_borrowing_views_scoped_values_survive_a_restart`] reaches it.
+const BORROWED_KEY: &str = "2026-Q4";
+/// The rows the sharing group's view of [`BORROWED_KEY`] holds at the build: geometry only, the
+/// family's columns belonging to the group that owns the key.
+const BORROWED: std::ops::Range<u64> = 0..10;
+
 /// **`heat`, per view and per entity** — the rendered family. An entity's value differs between
 /// quarters, so a tail gathered from the wrong view's column is a wrong number rather than a
 /// missing one; one entity in three carries none at all, which is the presence bitmap's ordinary
@@ -182,6 +192,18 @@ fn roster(gated: bool) -> Vec<GroupViewDescriptor> {
         .collect()
 }
 
+/// The sharing group's roster: the owner's two keys and [`BORROWED_KEY`], which is its own until
+/// the owner's view of it is created.
+fn sharing_roster() -> Vec<GroupViewDescriptor> {
+    let mut views = roster(false);
+    views.push(GroupViewDescriptor {
+        key: BORROWED_KEY.to_string(),
+        visibility: None,
+        metadata: Default::default(),
+    });
+    views
+}
+
 /// The bundle: a plain view, a group of two quarters carrying the rendered family, and a second
 /// group that is a different layout over the same two keys (`views.md` §3.3).
 ///
@@ -210,6 +232,11 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
         write_points(&points, &id, range.clone(), Some(slot));
         views.push(view_args(&id, &points, &pairs, None));
     }
+    // The sharing group's own key, which the owner acquires only while the service runs.
+    let borrowed = format!("quarter_map:{BORROWED_KEY}");
+    let borrowed_points = dir.join("map-borrowed.parquet");
+    write_points(&borrowed_points, &borrowed, BORROWED, None);
+    views.push(view_args(&borrowed, &borrowed_points, &pairs, None));
     let out = dir.join("bundle");
     build(&BuildArgs {
         views,
@@ -235,7 +262,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
                 // The same keys, a second layout: a family over these views belongs to the group
                 // that owns them, and renders under both.
                 members_of: Some("quarter".to_string()),
-                views: roster(false),
+                views: sharing_roster(),
                 quantisation: group_frame(),
                 projection: tessera_spatial::Projection::None,
                 metadata: Vec::new(),
@@ -1431,6 +1458,128 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
         "and the folded column holds no value of the predecessor to answer the leaf"
     );
     adopts_nothing(&served, &token, REJOINS, FRESH, "after the fold").await;
+}
+
+/// **A flush through a view that borrows the owner's scoped columns writes artifacts the owner
+/// view's incarnation carries** (`views.md` §3.3, §5, decision 0115).
+///
+/// The sharing group declares [`BORROWED_KEY`] and the owning group acquires it while the service
+/// runs, so the two views of the key sit at different incarnations. A batch through the borrowing
+/// view writes its scoped extents under the owner's name and incarnation; stamped with the
+/// flushing view's own, a reopen compares the stamp against the owner view's and skips the extent,
+/// and a restart of the same bundle answers where the live generation answered.
+#[tokio::test]
+async fn a_borrowing_views_scoped_values_survive_a_restart() {
+    let served = serve().await;
+    const OWNED_ENTITY: u64 = 9_801;
+    const BORROWED_ENTITY: u64 = 9_802;
+    let owner = format!("quarter:{BORROWED_KEY}");
+    let borrower = format!("quarter_map:{BORROWED_KEY}");
+    let resp = served
+        .server
+        .client
+        .put(
+            served
+                .server
+                .control_url(&format!("/control/views/quarter/{BORROWED_KEY}")),
+        )
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "the owner's view of the key is created"
+    );
+    // The owner's own batch first: it is what gives the families their columns for this key, so
+    // the batch through the borrowing view below writes an extent onto a base that is there.
+    let (status, body) = try_ingest_families(
+        &served,
+        "borrowed-owner",
+        &owner,
+        &[(external_id_of(OWNED_ENTITY), 250.0, 250.0, "0")],
+        Some(&[Some(90.0)]),
+        Some(&[Some("peregrine")]),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "the owner's batch is accepted: {body}");
+    flush(&served).await;
+    let (status, body) = try_ingest_families(
+        &served,
+        "borrowed-sharing",
+        &borrower,
+        &[(external_id_of(BORROWED_ENTITY), 350.0, 350.0, "0")],
+        Some(&[Some(80.0)]),
+        Some(&[Some("linnet")]),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "the borrowing view's batch is accepted: {body}");
+    flush(&served).await;
+
+    /// What the borrowing view owes about the value its own batch carried: the leaf, the text
+    /// match and the drill-down, each over the column the owner's view names.
+    async fn answers(served: &Served, borrower: &str, entity: u64, stage: &str) {
+        let token = authorise(&served.server, &["0", "1"]).await["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let rows = (BORROWED.end - BORROWED.start) as usize + 1;
+        settled_points(served, &token, borrower, rows).await;
+        assert_eq!(
+            filtered_entities(served, &token, borrower, range("heat")).await,
+            BTreeSet::from([entity]),
+            "{stage}: the value the borrowing view's batch carried answers the leaf"
+        );
+        assert_eq!(
+            filtered_entities(
+                served,
+                &token,
+                borrower,
+                json!({ "note": {"match": "linnet"} })
+            )
+            .await,
+            BTreeSet::from([entity]),
+            "{stage}: and its text matches"
+        );
+        let id = id_of(served, &token, borrower, entity).await;
+        assert_eq!(
+            item(served, &token, id).await["scoped"]["heat"][BORROWED_KEY],
+            json!(80.0),
+            "{stage}: and the drill-down serves it under the key"
+        );
+    }
+    answers(&served, &borrower, BORROWED_ENTITY, "in process").await;
+
+    // The same answers after a restart, which composes the extents the side-manifest names rather
+    // than the columns this process holds.
+    let Served {
+        server,
+        bundle,
+        _tmp,
+        ..
+    } = served;
+    server.shutdown().await;
+    let server = spawn_server(
+        &bundle,
+        &_tmp.path().join("cache"),
+        &_tmp.path().join("wal.log"),
+    )
+    .await;
+    let token = authorise(&server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let served = Served {
+        server,
+        token,
+        bundle,
+        _tmp,
+    };
+    answers(&served, &borrower, BORROWED_ENTITY, "after a restart").await;
 }
 
 /// **A principal who reaches a sharing group's view and not the owner's is told the truth about
