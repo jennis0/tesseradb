@@ -588,6 +588,9 @@ pub(crate) struct CompletedFlush {
     pub(crate) scoped_columns: Vec<(String, String)>,
     /// The incarnation of [`FlushContext::view`] this flush wrote under.
     pub(crate) incarnation: tessera_types::view::ViewIncarnation,
+    /// The incarnation of the view [`CompletedFlush::scoped_columns`] names, which under a
+    /// sharing door is not [`CompletedFlush::incarnation`].
+    pub(crate) scoped_incarnation: tessera_types::view::ViewIncarnation,
     /// This flush's text layers, one per indexed `text` column, composed onto the live generation at publication.
     pub(crate) text_extents: Vec<tessera_store::manifest::TextExtent>,
     /// Every file this flush wrote, prefix-relative, with its digest — computed on the pool.
@@ -906,6 +909,7 @@ fn execute_flush_stages(
         text_extents,
         scoped_columns,
         incarnation: ctx.incarnation,
+        scoped_incarnation: ctx.scoped_incarnation,
         files,
         dict: promotion.dict,
         promoted_from_dict_len: promoted_from,
@@ -1144,8 +1148,9 @@ fn write_value_extent(
         extent: tessera_store::manifest::AttrExtent {
             column: name.to_string(),
             // `None` for an entity-scoped column, which belongs to no view: the incarnation
-            // follows the view exactly.
-            incarnation: view.as_ref().map(|_| ctx.incarnation),
+            // follows the view exactly, and a view here is the owner's rather than the flushing
+            // one's.
+            incarnation: view.as_ref().map(|_| ctx.scoped_incarnation),
             view,
             values: rel(&values_path)?,
             presence: rel(&presence_path)?,
@@ -1448,7 +1453,9 @@ fn write_text_extents(
 struct TextTarget<'a> {
     prefix_dir: &'a Path,
     seg_id: &'a str,
-    incarnation: tessera_types::view::ViewIncarnation,
+    /// Stamped on a layer that names a view, which is the owning group's rather than the
+    /// flushing one's; an entity-scoped layer names none and carries no incarnation.
+    scoped_incarnation: tessera_types::view::ViewIncarnation,
 }
 
 impl<'a> TextTarget<'a> {
@@ -1456,7 +1463,7 @@ impl<'a> TextTarget<'a> {
         TextTarget {
             prefix_dir: &ctx.prefix_dir,
             seg_id: &ctx.seg_id,
-            incarnation: ctx.incarnation,
+            scoped_incarnation: ctx.scoped_incarnation,
         }
     }
 }
@@ -1540,7 +1547,7 @@ fn write_text_layer(
     Ok(Some(tessera_store::manifest::TextExtent {
         column: column.to_string(),
         // `None` for the same rows `view` is: an entity-scoped column belongs to no view.
-        incarnation: view.as_ref().map(|_| target.incarnation),
+        incarnation: view.as_ref().map(|_| target.scoped_incarnation),
         view,
         dict: dict_rel,
         postings: postings_rel,
