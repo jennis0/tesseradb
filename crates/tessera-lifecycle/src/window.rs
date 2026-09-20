@@ -131,10 +131,10 @@ pub struct WindowEntry<W> {
     /// admission** and the row positions that named it (`artifacts-from-points.md` §6.2). Empty for
     /// a batch carrying no membership column, which is every batch that names no layer.
     pub memberships: Vec<ResolvedMembership>,
-    /// The parent edges this batch's list column declared **whose child is to be minted** — the
-    /// rest were checked against the layer's own lineage at admission and are gone by here
-    /// (`artifacts-from-points.md` §6.3). A minted child takes its parent from these, which is the
-    /// one route by which the wire creates an edge rather than checking one.
+    /// The parent edges this batch's list column declared **that the close has to settle**: the ones
+    /// whose child it is about to mint, and the ones whose child exists and holds no parent. An edge
+    /// the layer already holds agreed at admission and is gone by here. A minted child takes its
+    /// parent from these; an existing one is filled with it.
     pub edges: Vec<crate::command::BatchEdge>,
     pub waiters: Vec<W>,
 }
@@ -187,7 +187,7 @@ pub struct ClosedEntry<W> {
     /// **Mutable after the close, at exactly one site**: the mint pass resolves the keys that had
     /// no ordinal at admission, so that what follows it sees one shape rather than two.
     pub memberships: Vec<ResolvedMembership>,
-    /// The edges of this entry's minted children, carried through the allocation unchanged.
+    /// The edges this entry's close has to settle, carried through the allocation unchanged.
     pub edges: Vec<crate::command::BatchEdge>,
     pub waiters: Vec<W>,
 }

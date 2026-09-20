@@ -161,9 +161,9 @@ pub struct BatchMembership {
 ///
 /// Carried beside the memberships rather than folded into them because it is a different claim
 /// about the same data: an entry names a membership, and *consecutive* entries name an edge
-/// ([`tessera_types::layer::parent_edges`]). The wire route cannot create an edge — a growth adds
-/// members and never lineage — so what the executor does with one is check it against the edge the
-/// publication already stored, and refuse where the two disagree.
+/// ([`tessera_types::layer::parent_edges`]). The executor decides each one against what the layer
+/// holds: the same edge is nothing to do, no edge at all is one to record, and a different parent is
+/// a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchEdge {
     pub layer: String,
