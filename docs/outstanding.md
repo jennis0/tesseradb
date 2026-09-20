@@ -19,6 +19,8 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 - `DELETE /control/views/{group}/{key}` is in the HTTP API only: not in `docs/openapi/tessera.yaml`, the Python client, the TypeScript client or the CLI.
 - A layer's `visibility` and `artifact_visibility.default` are checked for an empty word and for `inherited` at a build (`tessera_plugin::check_label`) and not when a layer is declared at a running service.
 - The build always labels with `builtin:passthrough`; the engine takes whichever plugin it is given. Five sites compare a manifest's hash with `Passthrough::new().data_plugin_hash()` and three of them are in the engine, which holds its own plugin (`containment.rs`, `generation.rs`, `write/schema.rs`, `artifact_pass.rs`, build `config.rs`).
+- The build's report for a rendered scoped attribute in a shared group still says a batch into a sharing group's view may not carry a value (`tessera-build/src/pipeline.rs`, about line 2938). The engine accepts one and stores it in the owning view's column, and `scoped_render.rs` now tests it across a restart. Remove the sentence or make it say what happens.
+- A build accepts a sharing group that declares a key its owning group does not. Creating the owner's view of that key later leaves the two views at different incarnations. It is the only way to reach that state, and nothing says whether it is meant to be allowed.
 
 ## Structure
 
