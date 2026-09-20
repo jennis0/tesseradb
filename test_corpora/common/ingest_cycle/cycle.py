@@ -395,13 +395,17 @@ class Cycle:
 
     def phase(self, name: str, fn) -> None:
         """Run one named phase, recording a failure rather than ending the run: a failure here is
-        as often a result — a shed stream, a refusal — as it is a bug in the driver.
+        as often a result — a shed stream, a refusal — as it is a bug in the driver. `phase_s` is
+        the phase's own wall, whether it held or failed.
         """
+        t0 = time.perf_counter()
         try:
             self.result[name] = fn()
         except Exception as e:  # noqa: BLE001 — a driver failure is a recorded outcome
             self.result[name] = {"failed": f"{type(e).__name__}: {e}"[:2000]}
             self.log(f"  {name} FAILED: {type(e).__name__}: {e}")
+        if isinstance(self.result[name], dict):
+            self.result[name]["phase_s"] = round(time.perf_counter() - t0, 1)
 
     def _run(self) -> None:
         args = self.args

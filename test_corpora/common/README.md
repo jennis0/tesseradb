@@ -201,6 +201,7 @@ also carries every view's, under `ingest_by_view` (below, under "Beyond the sche
 | `fold_peak_rss` | bytes | the server's own `compaction.last_rss_bytes` |
 | `driver_peak_rss` | bytes/`null` | the driver's own `VmHWM` at the cell's end, not the server's |
 | `equivalence` | — | the masked-count equivalence test, by surface — below |
+| `<phase>.phase_s` | seconds | one phase's own wall — `flush`, `fold`, `equivalence`, `write_cycle`, `restart` — whether it held or failed |
 | `write_cycle` | — | deletes, suppressions, re-ingests, a fold and census again, each with its latency to visibility |
 
 `publish` covers one phase: the base bundle carries the built fraction's points and every layer's
