@@ -75,6 +75,17 @@ pub(super) const REDUCTION_FLOOR: usize = 75_000;
 #[doc(hidden)]
 pub const SERVED_QUANTISE_DIVISIONS: u32 = QUANTISE_DIVISIONS;
 
+/// The representatives [`dig_rings_at`](super::dig_rings_at) would compute a shape over — **the third measurement seam,
+/// and public for [`dig_rings`](super::dig_rings)'s reason**.
+///
+/// The sweep has to ask what binning did to α, which is a statistic of the representatives' own
+/// convex wrap, and a test binary that rebuilt the cell arithmetic from the constant would be
+/// measuring its own copy of it.
+#[doc(hidden)]
+pub fn quantised(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
+    quantise(points, divisions, REDUCTION_FLOOR, None).map(|(reduced, _)| reduced)
+}
+
 /// One real member per occupied cell of a square grid over the members' own bounding box, or `None`
 /// where the grid cannot reduce the input — see [`QUANTISE_DIVISIONS`] for what this is for.
 ///
@@ -93,17 +104,7 @@ pub const SERVED_QUANTISE_DIVISIONS: u32 = QUANTISE_DIVISIONS;
 /// The cell side is the same on both axes so that a long thin cloud is not stretched, and it is
 /// derived from the longer axis so that the shorter one is never binned more coarsely than
 /// [`QUANTISE_DIVISIONS`] asks for.
-/// The representatives [`dig_rings_at`](super::dig_rings_at) would compute a shape over — **the third measurement seam,
-/// and public for [`dig_rings`](super::dig_rings)'s reason**.
 ///
-/// The sweep has to ask what binning did to α, which is a statistic of the representatives' own
-/// convex wrap, and a test binary that rebuilt the cell arithmetic from the constant would be
-/// measuring its own copy of it.
-#[doc(hidden)]
-pub fn quantised(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
-    quantise(points, divisions, REDUCTION_FLOOR, None).map(|(reduced, _)| reduced)
-}
-
 /// `floor` is [`REDUCTION_FLOOR`] on every serving route. It is a parameter rather than a constant
 /// read here because the reduction's own properties — a representative is a member, every member
 /// has one within a cell, α survives, the answer does not depend on the arrival order — hold at any
@@ -377,36 +378,6 @@ pub(super) fn interleave_cell(cx: u64, cy: u64) -> u64 {
     spread(cx) | (spread(cy) << 1)
 }
 
-/// **α must not move when the input is reduced, so every member that could be a convex-hull vertex
-/// survives [`quantise`] whether or not it is its cell's representative.**
-///
-/// α is three times the median edge of the visible members' *own* convex wrap, and that statistic
-/// is a function of the sampling density rather than only of the cloud: the hull of a sparser
-/// sample of the same region has fewer vertices and longer edges. Measured over the 197-artifact
-/// layer at a resolution of 512, computing the wrap over the representatives alone moved α by up to
-/// **3.6×** on one artifact, which took its shape from 0.29 to 1.29 of the unquantised one's area —
-/// a visibly different shape rather than a blurred one. Carrying the candidates removes the drift
-/// at its source: the wrap of `representatives ∪ candidates` **is** the wrap of every member, so α
-/// is not approximated at all.
-///
-/// The filter is Akl–Toussaint's: a member strictly inside the polygon spanned by the extremes of
-/// `x`, `y`, `x + y` and `x − y` is inside the hull of those eight members and so cannot be a hull
-/// vertex. It costs one pass and discards the interior, which on this corpus is *measured* at 94% …
-/// 99.9% of a large artifact's members.
-///
-/// **`f64` here, and it is the only inexact arithmetic in this module's construction — with a
-/// margin that makes the answer exact anyway.** Grid coordinates are below 2^32 and exact in `f64`,
-/// so each cross product carries an absolute error under 2^13; a member is discarded only when
-/// every edge puts it more than [`OCTAGON_MARGIN`] inside, which is eight times that bound. A
-/// member near an edge is therefore *kept*, and a kept member costs a slot in a vector that is
-/// about to be sorted. There is no rounding under which a hull vertex is discarded, so the wrap —
-/// and α, and the shape — stay exactly what the exact monotone chain makes of the whole membership.
-///
-/// **The set it keeps is also identical on every platform**, which is what the shape being a
-/// function of the member positions alone requires (§1): every operation here is an IEEE-754
-/// multiply, add or compare on values a `f64` represents exactly, all correctly rounded and none
-/// contracted, so a member kept on one machine is kept on every machine. Soundness would hold
-/// without that; determinism would not, because a kept member is a candidate the dig can dig to.
 /// [`extreme_octagon`] over the folded cells — the same eight extremes and the same polygon, found
 /// without a pass over the members.
 ///
@@ -513,6 +484,36 @@ fn octagon_of(best: [Option<(i64, [u32; 2])>; 8]) -> Octagon {
     }
 }
 
+/// **α must not move when the input is reduced, so every member that could be a convex-hull vertex
+/// survives [`quantise`] whether or not it is its cell's representative.**
+///
+/// α is three times the median edge of the visible members' *own* convex wrap, and that statistic
+/// is a function of the sampling density rather than only of the cloud: the hull of a sparser
+/// sample of the same region has fewer vertices and longer edges. Measured over the 197-artifact
+/// layer at a resolution of 512, computing the wrap over the representatives alone moved α by up to
+/// **3.6×** on one artifact, which took its shape from 0.29 to 1.29 of the unquantised one's area —
+/// a visibly different shape rather than a blurred one. Carrying the candidates removes the drift
+/// at its source: the wrap of `representatives ∪ candidates` **is** the wrap of every member, so α
+/// is not approximated at all.
+///
+/// The filter is Akl–Toussaint's: a member strictly inside the polygon spanned by the extremes of
+/// `x`, `y`, `x + y` and `x − y` is inside the hull of those eight members and so cannot be a hull
+/// vertex. It costs one pass and discards the interior, which on this corpus is *measured* at 94% …
+/// 99.9% of a large artifact's members.
+///
+/// **`f64` here, and it is the only inexact arithmetic in this module's construction — with a
+/// margin that makes the answer exact anyway.** Grid coordinates are below 2^32 and exact in `f64`,
+/// so each cross product carries an absolute error under 2^13; a member is discarded only when
+/// every edge puts it more than [`OCTAGON_MARGIN`] inside, which is eight times that bound. A
+/// member near an edge is therefore *kept*, and a kept member costs a slot in a vector that is
+/// about to be sorted. There is no rounding under which a hull vertex is discarded, so the wrap —
+/// and α, and the shape — stay exactly what the exact monotone chain makes of the whole membership.
+///
+/// **The set it keeps is also identical on every platform**, which is what the shape being a
+/// function of the member positions alone requires (§1): every operation here is an IEEE-754
+/// multiply, add or compare on values a `f64` represents exactly, all correctly rounded and none
+/// contracted, so a member kept on one machine is kept on every machine. Soundness would hold
+/// without that; determinism would not, because a kept member is a candidate the dig can dig to.
 #[cfg(test)]
 fn extreme_octagon(points: &[[u32; 2]]) -> Octagon {
     // One pass for all eight, not one pass each: the members are read once here and once again to

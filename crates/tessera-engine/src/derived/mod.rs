@@ -117,11 +117,6 @@ impl DerivedContent {
     }
 }
 
-/// Compute the declared properties over the rows a viewer may see.
-///
-/// `visible` comes from the composed mask and nothing else — see this module's doc. `declared` is
-/// the layer's parsed vocabulary; an empty one costs one branch and no position read, which is what
-/// keeps a count-only layer at count-only cost.
 /// [`compute`]'s answer for a level served from its column alone, read out of the accumulation one
 /// pass over the mask produced for every artifact at once
 /// ([`crate::histogram::MaskedGeometry`]).
@@ -154,6 +149,11 @@ pub fn accumulated(
     out
 }
 
+/// Compute the declared properties over the rows a viewer may see.
+///
+/// `visible` comes from the composed mask and nothing else — see this module's doc. `declared` is
+/// the layer's parsed vocabulary; an empty one costs one branch and no position read, which is what
+/// keeps a count-only layer at count-only cost.
 pub fn compute(
     declared: &[ComputedProperty],
     visible: &Bitmap,
