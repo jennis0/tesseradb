@@ -148,9 +148,8 @@ pub enum RegistryError {
     ///
     /// Two spellings of one edge, disagreeing: the same refusal a build makes when two points name
     /// different parents for one cluster. There is no correct output — choosing between them would
-    /// publish a hierarchy the caller did not write. **A `dag` layer never makes it**: there a
-    /// parent the child does not hold is an edge a growth cannot add, reported as
-    /// [`EdgeCheck::Unrecorded`] (`dag-hierarchies.md` §4).
+    /// publish a hierarchy the caller did not write. **A `dag` layer never makes it**: its list
+    /// column declares no edges, so no edge reaches here from one.
     ContradictedParent {
         layer: String,
         level: u32,
@@ -344,13 +343,13 @@ fn prepare_set_page(
 pub enum EdgeCheck {
     /// The layer holds exactly this edge.
     Agrees,
-    /// The child exists and holds no parent at all, so there is no edge to disagree with — and the
-    /// growth route cannot create one. The caller reports it; see [`LayerRegistry::check_edge`].
-    Unrecorded,
+    /// The child exists and holds no parent at all, so the edge is the one the artifact is missing.
+    /// The caller carries it to the close and records it there through
+    /// [`LayerRegistry::prepare_parent_fill`].
+    Records,
     /// The child does not exist yet and is one of the keys this batch is about to mint, so the edge
-    /// is the minted artifact's own parent rather than a claim about a stored one. **The one route
-    /// by which the wire creates an edge**, and it creates it where the artifact is created — which
-    /// is where lineage has always been settled.
+    /// is the minted artifact's own parent rather than a claim about a stored one. It travels on the
+    /// publication that creates the child.
     Mints,
 }
 
@@ -2311,28 +2310,25 @@ impl LayerRegistry {
             })
     }
 
-    /// Whether the edge a caller's list column declared is the edge this layer already holds.
+    /// What one edge a caller's list column declared is against the edge this layer holds: the same
+    /// one, one to record, or a contradiction.
     ///
-    /// **A growth adds members and never lineage**, so this checks rather than writes: the edge was
-    /// settled when the artifact was published, and a point's list is a second spelling of it. The
-    /// two disagreeing is the build's `two_parents` refusal at the other entry point — there is no
-    /// correct output, and picking one would publish a hierarchy nobody wrote.
+    /// The edge is decided here, at admission, so a contradiction refuses the one batch that carries
+    /// it rather than the window it would have joined. Recording happens at the close, where the
+    /// ordinals are claimed — [`LayerRegistry::prepare_parent_fill`].
     ///
-    /// [`EdgeCheck::Unrecorded`] is the third state and is **not** an error: the artifact exists and
-    /// holds no parent, so the column states an edge this route cannot create. Reported by the
-    /// caller and accepted, because the membership half of the same entry is unambiguous and
-    /// refusing it would block a batch over a roster published without its edges — which discloses
-    /// nothing and costs a republication.
+    /// A parent other than the one the child holds is the build's `two_parents` refusal at this entry
+    /// point: there is no correct output, and picking one would publish a hierarchy nobody wrote.
     ///
     /// The two `minting` arguments answer *is this key one the batch is about to create?* — the keys
     /// [`resolve_or_mint`] returned `None` for. They decide two of the three answers:
     ///
     /// - **the child is minting** → [`EdgeCheck::Mints`]: the edge is the new artifact's own
-    ///   parent, settled where every edge is settled, at the publication that creates it.
-    /// - **the parent is minting** and the child exists → the layer holds no such parent *yet*, and
-    ///   a growth adds members and never lineage. A child holding no parent is
-    ///   [`EdgeCheck::Unrecorded`] as before; a child holding a different one is the contradiction,
-    ///   because a parent that does not exist cannot be the parent it already has.
+    ///   parent, carried on the publication that creates it.
+    /// - **the parent is minting** and the child exists → the layer holds no such parent yet, so a
+    ///   child holding no parent is [`EdgeCheck::Records`] and takes the ordinal the close assigns;
+    ///   a child holding a different one is the contradiction, because a parent that does not exist
+    ///   cannot be the parent it already has.
     ///
     /// **Every edge reaching here is a tree's.** Only a `nested` or `tiered` list column declares
     /// edges; a `dag` layer's list is memberships alone and its several parents arrive on the
@@ -2385,7 +2381,7 @@ impl LayerRegistry {
         };
         if parent_mints(parent) {
             return match held.first() {
-                None => Ok(EdgeCheck::Unrecorded),
+                None => Ok(EdgeCheck::Records),
                 Some(held) => Err(contradicted(*held)),
             };
         }
@@ -2395,9 +2391,53 @@ impl LayerRegistry {
             return Ok(EdgeCheck::Agrees);
         }
         match held.first() {
-            None => Ok(EdgeCheck::Unrecorded),
+            None => Ok(EdgeCheck::Records),
             Some(held) => Err(contradicted(*held)),
         }
+    }
+
+    /// The record that gives an existing artifact the parent a list column named, or `None` where it
+    /// already holds it.
+    ///
+    /// A parent list is a fixed part, so this is [`Self::prepare_fills`]'s rule reached from the
+    /// ingest door: absent is filled, identical is nothing, a different parent is a refusal, and the
+    /// cycle walk runs over the layer's held edges and `window_edges` — every edge this close is
+    /// recording — as one graph. `pending` answers a parent key the same close is minting.
+    ///
+    /// Called at the close and not at admission, because a parent minted here has no ordinal until
+    /// the publication that claims it.
+    pub fn prepare_parent_fill(
+        &self,
+        edge: &crate::command::BatchEdge,
+        store: &ArtifactStore,
+        pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
+        window_edges: &mut BTreeMap<crate::wal::ParentRef, Vec<crate::wal::ParentRef>>,
+    ) -> Result<Option<WalRecord>, RegistryError> {
+        let (layer, level) = (edge.layer.as_str(), edge.level);
+        let ordinal = self.resolve_growth_key(layer, level, &edge.child, store)?;
+        let parts = crate::membership::FixedParts {
+            parent_keys: vec![edge.parent.clone()],
+            ..Default::default()
+        };
+        let part = self
+            .prepare_fills(
+                layer,
+                level,
+                ordinal,
+                None,
+                &edge.child,
+                &parts,
+                store,
+                pending,
+                window_edges,
+            )?
+            .pop();
+        Ok(part.map(|part| WalRecord::ArtifactFill {
+            layer: layer.to_string(),
+            level,
+            ordinal,
+            part,
+        }))
     }
 
     /// The caller's own name for the artifact at a resolved position, for a refusal that has to

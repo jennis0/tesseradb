@@ -188,10 +188,13 @@ def viewport(
     filters: dict | None = None,
     layers: str | None = "all",
     timeout: float = 300.0,
+    keep_body: bool = False,
 ) -> dict:
     """One `/v1/viewport` at the depth and `k` the caller has already chosen. A stream the
     server cuts mid-body is a result, not an exception: read chunk by chunk ([`drain`]) and
-    returned with `shed` set; a shed sample still carries exact counts."""
+    returned with `shed` set; a shed sample still carries exact counts. `keep_body` adds the
+    frames as they arrived under `body`, for a caller reading a frame this module does not
+    summarise; a sample that is written to a result file asks for figures only."""
     body: dict = {"view": view_id, "zoom": zoom, "bbox": list(bbox), "k": k}
     if layers is not None:
         body["layers"] = layers
@@ -219,6 +222,8 @@ def viewport(
     }
     out.update(response_figures(content))
     out["shed"] = shed_error is not None or not out["complete"]
+    if keep_body:
+        out["body"] = content
     return out
 
 

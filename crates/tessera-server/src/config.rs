@@ -21,14 +21,11 @@
 //! cwd would make `cd crates && tessera serve` open a different bundle from the one `tessera
 //! build` had just written.
 //!
-//! `[disclosure]` has no defaults at all: absence of the section, or of the key inside it, is
-//! a startup error naming design §7.5/§2.3 — a deployment must state its disclosure parameters
-//! rather than inherit them. The section holds `token_max_lifetime` alone. The existence
-//! criterion it once also carried is declared **per layer** and has no deployment-wide form
-//! ([decision 0085](../../../docs/decisions/0085-the-existence-criterion-has-no-deployment-wide-form.md)):
-//! a deployment default would make an undeclared criterion mean *inherit* where
-//! [decision 0084](../../../docs/decisions/0084-an-undeclared-criterion-declares-no-test.md) rules
-//! it means *no test*.
+//! `[disclosure]` has no defaults at all: absence of the section, or of the key inside it, is a
+//! startup refusal naming what to write. The section holds `token_max_lifetime` alone, and a key
+//! it does not know is refused like any other section's. The membership requirement an artifact
+//! layer gates on is declared per layer, in the corpus declaration, and has no deployment-wide
+//! form.
 //! Every other section either has a documented default (`max_k = 1000`) or is required outright.
 //! Credentials are never inline: `[serve]`'s `*_credential_file`/`*_credential_env` pairs are the
 //! only way to supply the session/operator bearer secrets, and the secret itself is read at
@@ -431,15 +428,13 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Toml(e) => write!(f, "config parse error: {e}"),
             ConfigError::MissingDisclosureSection => write!(
                 f,
-                "tessera.toml is missing its [disclosure] section — design §7.5/§2.3: \
-                 disclosure parameters have no defaults, so startup refuses rather than silently \
-                 choosing one"
+                "tessera.toml is missing its [disclosure] section, which has no defaults to fall \
+                 back on. Add `[disclosure]` with `token_max_lifetime = 3600` under it, in seconds"
             ),
             ConfigError::MissingDisclosureKey(key) => write!(
                 f,
-                "tessera.toml's [disclosure] section is missing '{key}' — design §7.5/§2.3: \
-                 disclosure parameters have no defaults, so startup refuses rather than silently \
-                 choosing one"
+                "tessera.toml's [disclosure] section is missing '{key}', which has no default to \
+                 fall back on. Write `{key} = 3600` under `[disclosure]`, in seconds"
             ),
             ConfigError::CredentialFileUnreadable {
                 which,
@@ -728,24 +723,21 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 /// The cost is that a `tessera.toml` carrying a key from a *newer* build is refused rather than
 /// ignored. That is the right direction for a fail-closed config: a downgrade that silently drops
 /// half an operator's tuning is the worse outcome.
-///
-/// `[disclosure]` is exempt in practice — it is parsed as a `toml::Value` and validated by hand
-/// below, since its rule is "present, with both keys" rather than a shape.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     bundle: RawBundle,
     plugin: RawPlugin,
     #[serde(default)]
-    disclosure: Option<toml::Value>,
+    disclosure: Option<RawDisclosure>,
     /// `[build]` — what `tessera build` needs and `tessera serve` ignores. Absent means the whole
     /// section defaults, which is the ordinary case: the declaration is `schema.toml` beside this
     /// file.
     #[serde(default)]
     build: RawBuild,
     /// `[identity]` — the **name** of the environment variable carrying the identity key, never
-    /// the key. Parsed as a `toml::Value` and validated by hand, on `[disclosure]`'s precedent,
-    /// so `key = "…"` gets the refusal it deserves rather than serde's unknown-field text.
+    /// the key. Parsed as a `toml::Value` and validated by hand, so `key = "…"` gets the refusal
+    /// it deserves rather than serde's unknown-field text.
     #[serde(default)]
     identity: Option<toml::Value>,
     #[serde(default)]
@@ -754,6 +746,15 @@ struct RawConfig {
     /// are the write path's performance knobs; none of them is a disclosure control.
     #[serde(default)]
     ingest: RawIngest,
+}
+
+/// `[disclosure]`. The section, and the key in it, are both required; the `Option`s carry
+/// "absent" as far as the refusal that names what to write.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDisclosure {
+    #[serde(default)]
+    token_max_lifetime: Option<u64>,
 }
 
 /// SA §7's `[ingest]` section. Every field is `Option` and the struct is `Default`, so
@@ -2218,17 +2219,11 @@ fn parse(text: &str) -> Result<Config> {
         return Err(ConfigError::UnsupportedPlugin(raw.plugin.module));
     }
 
-    let disclosure_value = raw
+    let token_max_lifetime_secs = raw
         .disclosure
-        .ok_or(ConfigError::MissingDisclosureSection)?;
-    let table = disclosure_value
-        .as_table()
-        .ok_or(ConfigError::MissingDisclosureSection)?;
-    let token_max_lifetime_secs = table
-        .get("token_max_lifetime")
-        .and_then(toml::Value::as_integer)
-        .ok_or(ConfigError::MissingDisclosureKey("token_max_lifetime"))?
-        as u64;
+        .ok_or(ConfigError::MissingDisclosureSection)?
+        .token_max_lifetime
+        .ok_or(ConfigError::MissingDisclosureKey("token_max_lifetime"))?;
 
     // `[identity]` names the variable, never the key. Absent means the default, which is what
     // makes the section omissible in the ordinary deployment.
@@ -3021,6 +3016,30 @@ mod tests {
             err,
             ConfigError::MissingDisclosureKey("token_max_lifetime")
         ));
+    }
+
+    /// `[disclosure]` takes `token_max_lifetime` and nothing else. An operator who writes a key
+    /// the table does not know is told so, rather than having it ignored.
+    #[test]
+    fn an_unknown_disclosure_key_refuses_to_start() {
+        let with = |extra: &str| {
+            format!(
+                r#"
+                [bundle]
+                path = "b"
+                cache = "c"
+                wal = "w"
+                [plugin]
+                module = "builtin:passthrough"
+                [disclosure]
+                token_max_lifetime = 3600
+                {extra}
+            "#
+            )
+        };
+        parse(&with("")).expect("token_max_lifetime alone is the whole section");
+        let err = parse(&with("min_visible_members = 10")).unwrap_err();
+        assert!(matches!(err, ConfigError::Toml(_)));
     }
 
     // ---- the compaction schedule (compaction §9, decision 0056) ------------------------------

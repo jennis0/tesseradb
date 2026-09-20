@@ -1054,10 +1054,9 @@ async fn a_lineage_column_mints_the_chain_and_the_edges_it_declares() {
 
 /// **A `dag` layer's list column is memberships and declares no edges**, at ingest exactly as at a
 /// build (decision 0125): the same lists a `nested` layer reads as a lineage are, on a DAG, the
-/// artifacts each point is a member of and nothing more — every artifact minted a root, and no
-/// edge named for `check_edge` to report as unrecorded. A DAG's edges are spelled on the artifact
-/// row's `parent` list, by publication; the case above is the `nested` column still minting and
-/// linking its chain.
+/// artifacts each point is a member of and nothing more — every artifact minted a root, and no edge
+/// named for the executor to record. A DAG's edges are spelled on the artifact row's `parent` list,
+/// by publication; the case above is the `nested` column still minting and linking its chain.
 #[tokio::test]
 async fn a_dag_list_column_ingests_memberships_and_no_edges() {
     let layer = layer_toml("dag", "lineage");
@@ -1473,16 +1472,14 @@ async fn a_column_naming_a_predicate_layer_is_refused() {
     assert!(detail.contains("evaluated per request"), "{detail}");
 }
 
-/// **An edge the layer does not hold is reported and the memberships still land.**
+/// **An edge the artifact does not yet hold is recorded, as a build records it.**
 ///
-/// A growth adds members and never lineage, so a point naming an edge nobody published states
-/// something this route cannot execute. Refusing would block a batch over a roster published without
-/// its parents — which discloses nothing, costs a republication, and would make the membership half
-/// of an unambiguous entry unavailable. So the operator is told and the join happens. ⊘ It stops
-/// being reachable when an unknown key mints its artifact (§6.2), where a chain arrives parent
-/// before child in one batch.
+/// A roster published with names and no parents is the ordinary mixed state: the artifacts arrive by
+/// publication and the tree arrives with the points. A build derives the edge from the same column,
+/// so dropping it here made one input two databases — a hierarchy on one path and a flat level on
+/// the other.
 #[tokio::test]
-async fn a_lineage_naming_an_edge_the_layer_does_not_hold_still_joins() {
+async fn a_lineage_naming_an_edge_the_layer_does_not_hold_records_it() {
     let built = build_side(
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("flat", "cluster"),
@@ -1554,10 +1551,17 @@ async fn a_lineage_naming_an_edge_the_layer_does_not_hold_still_joins() {
         .iter()
         .find(|a| a.key.as_deref() == Some("leaf"))
         .expect("the published artifact serves");
-    assert!(
-        leaf.parent_keys.is_empty(),
-        "the edge was reported, not invented — a growth adds members and never lineage"
+    assert_eq!(
+        leaf.parent_keys,
+        vec!["root".to_string()],
+        "the child takes the parent its list column declared"
     );
+    let root = view
+        .artifacts
+        .iter()
+        .find(|a| a.key.as_deref() == Some("root"))
+        .expect("the parent serves");
+    assert!(root.parent_keys.is_empty(), "the parent is still a root");
 }
 
 /// **A scalar names the artifact at level 0**, which is what a member table with no `level` column

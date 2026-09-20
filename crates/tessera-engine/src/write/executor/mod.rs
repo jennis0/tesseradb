@@ -492,9 +492,11 @@ pub(super) fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) ->
 /// cursor and is durable only in the record that claims it. One artifact per key per level for the
 /// whole window, re-resolved against `ArtifactStore::ordinal_of_key` in case a publication landed
 /// since admission, in which case it grows instead of minting. A minted artifact is published
-/// carrying its members, so `growth_records` skips a membership whose ordinal is `None`. This is
-/// the one route by which the wire creates a lineage edge: a growth never creates one, so the edge
-/// arrives parent before child.
+/// carrying its members, so `growth_records` skips a membership whose ordinal is `None`.
+///
+/// The edges come with them, because the close settles both: an edge whose child this window mints
+/// travels on the publication that creates it, and an edge whose child exists without a parent is
+/// filled onto it. So a window with edges and nothing to mint still has work here.
 pub(super) fn mint_plan<W>(
     closed: &[tessera_lifecycle::ClosedEntry<W>],
 ) -> Option<(MintPlan, Vec<tessera_lifecycle::BatchEdge>)> {
@@ -515,13 +517,11 @@ pub(super) fn mint_plan<W>(
             }
         }
     }
-    if wanted.is_empty() {
+    let edges: Vec<tessera_lifecycle::BatchEdge> =
+        closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();
+    if wanted.is_empty() && edges.is_empty() {
         return None;
     }
-    let edges = closed
-        .iter()
-        .flat_map(|e| e.edges.iter().cloned())
-        .collect();
     Some((wanted, edges))
 }
 
@@ -1480,12 +1480,12 @@ impl Executor {
         })
     }
 
-    /// Resolve one batch's membership keys, and check the edges its adjacency declared.
+    /// Resolve one batch's membership keys, and decide the edges its adjacency declared.
     ///
     /// Returns the memberships, each carrying the ordinal it resolved to or `None` where an open
-    /// layer will mint it at the close, and the edges whose child is one of those mints, which are
-    /// the only edges this route creates rather than checks. `Err` is the refusal text the caller
-    /// is answered with, whole batch without effect.
+    /// layer will mint it at the close, and the edges the close has to settle: the ones whose child
+    /// it is about to mint, and the ones whose child exists and holds no parent. `Err` is the refusal
+    /// text the caller is answered with, whole batch without effect.
     ///
     /// The memberships resolve first: neither a child nor a parent can be minted without appearing
     /// in the resolved set the edge checks read.
@@ -1502,10 +1502,7 @@ impl Executor {
         if artifacts.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
-        // One line per batch, not one per edge.
-        let mut unrecorded: Vec<String> = Vec::new();
-        let mut unrecorded_total = 0usize;
-        let resolved = self.live.with_publication_state(|registry, store, _| {
+        self.live.with_publication_state(|registry, store, _| {
             let memberships: Vec<tessera_lifecycle::ResolvedMembership> = artifacts
                 .memberships
                 .iter()
@@ -1539,7 +1536,7 @@ impl Executor {
             // parents arrive on its artifact rows' `parent` list by the publish route, never here.
             parent_of_each_child(&artifacts.edges)?;
 
-            let mut mints = Vec::new();
+            let mut settling = Vec::new();
             for edge in &artifacts.edges {
                 let layer = edge.layer.as_str();
                 match registry.check_edge(
@@ -1548,36 +1545,19 @@ impl Executor {
                     minting.contains(&(layer, edge.level, edge.child.as_str())),
                     &|key| anywhere.contains(&(layer, key)),
                 ) {
+                    // The layer already holds this edge, so there is nothing for the close to do.
                     Ok(tessera_lifecycle::EdgeCheck::Agrees) => {}
-                    // The child does not exist yet, so this edge is carried to the close, where
-                    // the artifact is created and lineage is settled.
-                    Ok(tessera_lifecycle::EdgeCheck::Mints) => mints.push(edge.clone()),
-                    // Reported, not refused: the membership half of the same entry lands; only the
-                    // edge this route cannot create is lost.
-                    Ok(tessera_lifecycle::EdgeCheck::Unrecorded) => {
-                        unrecorded_total += 1;
-                        if unrecorded.len() < 5 {
-                            unrecorded.push(format!(
-                                "{} of {} under {}",
-                                edge.child, edge.layer, edge.parent
-                            ));
-                        }
-                    }
+                    // Carried to the close, where the ordinals are claimed: on the publication that
+                    // creates the child, or as a fill on the child that exists without a parent.
+                    Ok(
+                        tessera_lifecycle::EdgeCheck::Mints
+                        | tessera_lifecycle::EdgeCheck::Records,
+                    ) => settling.push(edge.clone()),
                     Err(e) => return Err(e.to_string()),
                 }
             }
-            Ok((memberships, mints))
-        });
-        if unrecorded_total > 0 {
-            tracing::warn!(
-                count = unrecorded_total,
-                examples = ?unrecorded,
-                "an ingest batch's list column names parent edges these layers do not hold; the \
-                 memberships are applied and the edges are not. A growth adds members, and \
-                 lineage is declared where the artifact is published"
-            );
-        }
-        resolved
+            Ok((memberships, settling))
+        })
     }
 
     /// The artifacts this window's values named and nothing holds: one per
@@ -1772,6 +1752,68 @@ impl Executor {
                 }
                 records.push(record);
             }
+
+            // The edges whose child was not minted above: it exists and holds no parent, so the
+            // edge is a fill on it. Behind the publications, so a parent this window minted has an
+            // ordinal by the time the fill resolves it.
+            //
+            // The cycle walk reads the layer's held edges and `window_edges` as one graph, so
+            // `window_edges` is seeded with the edges the publications above are about to create:
+            // nothing prepared here is in the store yet, and a mint under an existing artifact plus
+            // a fill on that artifact naming the mint is a cycle neither half sees alone.
+            let mut window_edges: BTreeMap<
+                &str,
+                BTreeMap<tessera_lifecycle::wal::ParentRef, Vec<tessera_lifecycle::wal::ParentRef>>,
+            > = BTreeMap::new();
+            for record in &records {
+                let WalRecord::ArtifactPublish {
+                    layer,
+                    level,
+                    artifacts,
+                    ..
+                } = record
+                else {
+                    continue;
+                };
+                let held = window_edges.entry(layer.as_str()).or_default();
+                for artifact in artifacts.iter().filter(|a| !a.parents.is_empty()) {
+                    held.insert(
+                        tessera_lifecycle::wal::ParentRef {
+                            level: *level,
+                            ordinal: artifact.ordinal,
+                        },
+                        artifact.parents.clone(),
+                    );
+                }
+            }
+            let mut fills = Vec::new();
+            for edge in edges {
+                if assigned.contains_key(&(edge.layer.as_str(), edge.level, edge.child.as_str())) {
+                    continue;
+                }
+                let pending = |key: &str| {
+                    assigned
+                        .iter()
+                        .find(|((layer, _, held), _)| *layer == edge.layer && *held == key)
+                        .map(|((_, level, _), ordinal)| tessera_lifecycle::wal::ParentRef {
+                            level: *level,
+                            ordinal: *ordinal,
+                        })
+                };
+                if let Some(record) = registry
+                    .prepare_parent_fill(
+                        edge,
+                        store,
+                        &pending,
+                        window_edges.entry(edge.layer.as_str()).or_default(),
+                    )
+                    .map_err(|e| e.to_string())?
+                {
+                    fills.push(record);
+                }
+            }
+            records.extend(fills);
+
             let minted = assigned
                 .keys()
                 .map(|(layer, level, key)| ((*layer).to_string(), *level, (*key).to_string()))

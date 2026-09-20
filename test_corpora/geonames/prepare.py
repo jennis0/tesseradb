@@ -554,8 +554,7 @@ module = "builtin:passthrough"
 env = "TESSERA_IDENTITY_KEY"
 
 [disclosure]
-min_visible_members = 10
-token_max_lifetime  = 3600
+token_max_lifetime = 3600
 
 [serve]
 viewer  = "127.0.0.1:8081"
