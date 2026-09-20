@@ -174,7 +174,7 @@ use tessera_filter::{
 pub use tessera_filter::{Endpoint, Scalar};
 /// How a bound is narrowed to the column's own type, owned by the filter crate and called by both
 /// routes: the entity-space scan there, the row-space scan in [`crate::viewport`].
-pub(crate) use tessera_filter::{as_f64, narrow_hi, narrow_lo, Narrowed};
+pub(crate) use tessera_filter::{as_f64, narrow_hi, narrow_lo, NativeBound, Narrowed};
 use tessera_store::manifest::Visibility;
 use tessera_types::{AttrLocalId, TermId};
 
