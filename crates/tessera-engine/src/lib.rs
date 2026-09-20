@@ -22,7 +22,6 @@ pub mod containment;
 mod control;
 pub mod cut;
 pub mod derived;
-pub mod derived_cache;
 mod engine;
 mod error;
 pub mod filter;
