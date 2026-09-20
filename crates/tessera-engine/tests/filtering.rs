@@ -28,7 +28,8 @@ use croaring::Bitmap;
 use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::filter::{
-    candidate, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand, Scalar,
+    candidate, ComposeError, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand,
+    Scalar, MAX_FILTER_DEPTH,
 };
 use tessera_engine::ViewportRequest;
 use tessera_lifecycle::command::UnallocatedRow;
@@ -1179,7 +1180,10 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
             &[],
         )
         .expect_err("an extent claiming entity 0 overlaps the base column");
-    assert!(format!("{err}").contains("I9"), "{err}");
+    assert!(
+        matches!(&err, ComposeError::Overlap { column } if column == "title"),
+        "{err:?}"
+    );
 
     // And an extent for a column the schema does not declare filterable is refused too: it would
     // otherwise be silently dropped, which is a value column quietly going missing.
@@ -1929,14 +1933,10 @@ fn a_negation_spanning_two_columns_is_refused_and_composes_instead() {
         .columns
         .evaluate(&spanning, &cand)
         .expect_err("a negation over two columns is refused");
-    let text = format!("{err}");
     assert!(
-        text.contains("department") && text.contains("title"),
-        "{text}"
-    );
-    assert!(
-        text.contains("all_of"),
-        "the refusal names the way to say it: {text}"
+        matches!(&err, FilterError::NegationSpansColumns { columns }
+            if columns == &["department".to_string(), "title".to_string()]),
+        "{err:?}"
     );
 
     // And the composition it points at is accepted, and is the intersection of the two negations.
@@ -2051,8 +2051,10 @@ fn an_over_deep_expression_is_refused() {
         expr = FilterExpr::AllOf(vec![expr]);
     }
     let err = fx.columns.evaluate(&expr, &cand).expect_err("too deep");
-    assert!(matches!(err, FilterError::TooDeep { .. }), "{err:?}");
-    assert!(format!("{err}").contains("rather than flattened"));
+    assert!(
+        matches!(err, FilterError::TooDeep { depth, max } if depth == 9 && max == MAX_FILTER_DEPTH),
+        "{err:?}"
+    );
 }
 
 /// A disjunction whose branches a principal cannot see is empty, not an error — and costs the same
@@ -2304,7 +2306,7 @@ fn postings_path(fx: &Fixture, column: &str) -> std::path::PathBuf {
 
 /// Reopen the fixture's columns from disk — used after a test has rewritten a postings file, since
 /// the route is decided and the file mapped at open.
-fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
+fn reopen(fx: &Fixture) -> Result<FilterColumns, tessera_engine::filter::ComposeError> {
     FilterColumns::open(
         &fx.bundle.join(&fx.prefix),
         &fx.phash,
@@ -4076,7 +4078,18 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let err = columns
         .with_coalesced(&[window(extent(&[100, 101, 200]))], &[], None, None)
         .expect_err("a coalesced layer short of its window is refused");
-    assert!(format!("{err}").contains("coverage"), "{err}");
+    assert!(
+        matches!(
+            &err,
+            ComposeError::CoverageMismatch {
+                column,
+                replacement: 3,
+                consumed: 2,
+                covered: 4,
+            } if column == "bonus"
+        ),
+        "{err:?}"
+    );
 
     // And one naming a layer this generation does not hold: the plan and the process disagree
     // about what the bundle is, which is a refusal rather than a no-op.

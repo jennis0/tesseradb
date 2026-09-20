@@ -5,10 +5,8 @@ use croaring::Bitmap;
 use tessera_filter::{RecordExtentPaths, RecordStack, SortedDict, ValueColumn};
 
 use super::open::{open_scoped_column, runtime_layers};
-use super::{
-    check_dictionary_pairing, record_open_error, unknown_filter_column, FilterColumns, Layer,
-    TextLayer,
-};
+use super::{check_dictionary_pairing, record_open_error, FilterColumns, Layer, TextLayer};
+use crate::filter::error::ComposeError;
 use crate::filter::{
     scoped_column_name, scoped_has_value_column, scoped_is_filterable, Placement, PIN,
 };
@@ -99,9 +97,11 @@ impl FilterColumns {
         values_rel: &str,
         extent: Arc<ValueColumn>,
         dict: Option<Arc<SortedDict>>,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), ComposeError> {
         let Some(held) = self.columns.get_mut(column) else {
-            return Err(unknown_filter_column(column));
+            return Err(ComposeError::UnknownColumn {
+                column: column.to_string(),
+            });
         };
         held.push_extent(column, values_rel, extent, dict)
     }
@@ -115,7 +115,7 @@ impl FilterColumns {
         scalar: &tessera_store::manifest::DeclaredScalar,
         declared_index: usize,
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
-    ) -> std::io::Result<FilterColumns> {
+    ) -> Result<FilterColumns, ComposeError> {
         let mut next = self.successor();
         if let Some(placement) = Placement::of(scalar, vocabularies) {
             next.placements.insert(scalar.name.clone(), placement);
@@ -141,17 +141,14 @@ impl FilterColumns {
         scoped: &[tessera_store::manifest::ScopedScalar],
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
         mmap: bool,
-    ) -> std::io::Result<FilterColumns> {
+    ) -> Result<FilterColumns, ComposeError> {
         let mut next = self.successor();
         for (column, view, incarnation) in columns {
             let Some(family) = scoped.iter().find(|f| f.name == *column) else {
-                return std::io::Result::Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "a flush wrote a base for the group-scoped column family '{column}' under \
-                         view '{view}', which this bundle does not declare"
-                    ),
-                ));
+                return Err(ComposeError::UndeclaredScopedFamily {
+                    column: column.clone(),
+                    view: view.clone(),
+                });
             };
             if !scoped_is_filterable(family) && !scoped_has_value_column(family) {
                 continue;
@@ -204,7 +201,7 @@ impl FilterColumns {
         records: &[RecordExtentPaths],
         entity_terms: &[tessera_store::EntityTermsExtentPaths],
         texts: &[TextExtentPaths],
-    ) -> std::io::Result<FilterColumns> {
+    ) -> Result<FilterColumns, ComposeError> {
         // The record blob's extent composes here for the same reason a filter extent does: the
         // manifest entry makes the bytes reachable to a *reopen*, and this process serves from the
         // stack it holds. A flush that published one and did not compose it would leave every
@@ -226,9 +223,11 @@ impl FilterColumns {
             if entity_terms.is_empty() {
                 Arc::clone(&self.entity_terms)
             } else {
-                Arc::new(self.entity_terms.with_extents(entity_terms).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-                })?)
+                Arc::new(
+                    self.entity_terms
+                        .with_extents(entity_terms)
+                        .map_err(|e| ComposeError::EntityTermsUnreadable(e.to_string()))?,
+                )
             };
         let mut next = FilterColumns {
             records,
@@ -244,14 +243,9 @@ impl FilterColumns {
                 .get_mut(text.column.as_str())
                 .and_then(super::Column::text_layers_mut)
             else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "a flush published a text extent for column '{}', which this generation \
-                         does not hold",
-                        text.column
-                    ),
-                ));
+                return Err(ComposeError::UnknownTextColumn {
+                    column: text.column.clone(),
+                });
             };
             layers.push(TextLayer::open(
                 &text.column,
@@ -320,24 +314,17 @@ impl FilterColumns {
         texts: &[CoalescedTextWindow],
         entity_terms: Option<Arc<tessera_store::EntityTermsStack>>,
         records: Option<Arc<RecordStack>>,
-    ) -> std::io::Result<FilterColumns> {
+    ) -> Result<FilterColumns, ComposeError> {
         let entity_terms = match entity_terms {
             None => Arc::clone(&self.entity_terms),
             Some(next) => {
                 let held = self.entity_terms.entity_set();
                 let replacement = next.entity_set();
                 if held != replacement {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "a coalesce's entity→term stack holds lists for {} entities where the one it \
-                             replaces holds {}; replacing on that would answer 'unknown' for an \
-                             entity that carries labels, which on the write path is a 409 that \
-                             does not fire",
-                            replacement.cardinality(),
-                            held.cardinality()
-                        ),
-                    ));
+                    return Err(ComposeError::EntityTermsCoverage {
+                        replacement: replacement.cardinality(),
+                        held: held.cardinality(),
+                    });
                 }
                 next
             }
@@ -363,23 +350,15 @@ impl FilterColumns {
         };
         for window in windows {
             let Some(held) = next.columns.get_mut(&window.column) else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "a coalesce names column '{}', which this generation does not hold",
-                        window.column
-                    ),
-                ));
+                return Err(ComposeError::UnknownCoalescedColumn {
+                    column: window.column.clone(),
+                });
             };
             check_dictionary_pairing(held.family, &window.column, window.dict.is_some())?;
             let Some(layers) = held.value_layers_mut() else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "a coalesce names column '{}', which this generation does not hold",
-                        window.column
-                    ),
-                ));
+                return Err(ComposeError::UnknownCoalescedColumn {
+                    column: window.column.clone(),
+                });
             };
             let mut union = Bitmap::new();
             for rel in &window.consumed {
@@ -387,31 +366,20 @@ impl FilterColumns {
                     .iter()
                     .find(|l| l.values_rel.as_deref() == Some(rel.as_str()))
                 else {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "a coalesce for column '{}' consumed extent '{rel}', which this \
-                             generation holds no layer for",
-                            window.column
-                        ),
-                    ));
+                    return Err(ComposeError::MissingLayer {
+                        column: window.column.clone(),
+                        rel: rel.clone(),
+                    });
                 };
                 union |= layer.values.present();
             }
             if union != window.values.present() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "the coalesced extent for column '{}' is present for {} entities where the \
-                         {} layers it replaces cover {}; replacing on that would leave the \
-                         column's coverage wrong and every later disjointness check testing \
-                         against it",
-                        window.column,
-                        window.values.present().cardinality(),
-                        window.consumed.len(),
-                        union.cardinality()
-                    ),
-                ));
+                return Err(ComposeError::CoverageMismatch {
+                    column: window.column.clone(),
+                    replacement: window.values.present().cardinality(),
+                    consumed: window.consumed.len(),
+                    covered: union.cardinality(),
+                });
             }
             layers.retain(|l| {
                 l.values_rel
@@ -436,10 +404,9 @@ impl FilterColumns {
                 .get_mut(column)
                 .and_then(super::Column::text_layers_mut)
             else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("a coalesce names text column '{column}', which this generation does not hold"),
-                ));
+                return Err(ComposeError::UnknownCoalescedTextColumn {
+                    column: column.clone(),
+                });
             };
             let mut union = Bitmap::new();
             for rel in &window.consumed {
@@ -447,13 +414,10 @@ impl FilterColumns {
                     .iter()
                     .find(|l| l.dict_rel.as_deref() == Some(rel.as_str()))
                 else {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "a coalesce for text column '{column}' consumed extent '{rel}', which \
-                             this generation holds no layer for"
-                        ),
-                    ));
+                    return Err(ComposeError::MissingTextLayer {
+                        column: column.clone(),
+                        rel: rel.clone(),
+                    });
                 };
                 union |= &layer.present;
             }
@@ -472,16 +436,12 @@ impl FilterColumns {
             // inputs did. A merge that dropped a layer answers every later `match` short of that
             // layer's documents, silently, and no cardinality anywhere else would move.
             if union != replacement.present {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "the coalesced text extent for column '{column}' is present for {} \
-                         entities where the {} layers it replaces cover {}",
-                        replacement.present.cardinality(),
-                        window.consumed.len(),
-                        union.cardinality()
-                    ),
-                ));
+                return Err(ComposeError::TextCoverageMismatch {
+                    column: column.clone(),
+                    replacement: replacement.present.cardinality(),
+                    consumed: window.consumed.len(),
+                    covered: union.cardinality(),
+                });
             }
             layers.retain(|l| {
                 l.dict_rel
@@ -518,8 +478,8 @@ mod tests {
             .compose("sub", "extents/f1.arrow", partial(&[10], &[0]), None)
             .unwrap_err();
         assert!(
-            err.to_string().contains("carries no sorted dictionary"),
-            "{err}"
+            matches!(&err, ComposeError::KeywordWithoutDictionary { column } if column == "sub"),
+            "{err:?}"
         );
     }
 
@@ -542,9 +502,8 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            err.to_string()
-                .contains("does not declare the column a keyword"),
-            "{err}"
+            matches!(&err, ComposeError::DictionaryOnOtherFamily { column } if column == "sub"),
+            "{err:?}"
         );
     }
 
@@ -627,8 +586,8 @@ mod tests {
             .with_coalesced(&[window(None)], &[], None, None)
             .expect_err("a keyword window without its dictionary is refused");
         assert!(
-            err.to_string().contains("carries no sorted dictionary"),
-            "{err}"
+            matches!(&err, ComposeError::KeywordWithoutDictionary { column } if column == "sub"),
+            "{err:?}"
         );
         assert_eq!(
             columns.layer_count("sub"),
@@ -659,9 +618,8 @@ mod tests {
             .with_coalesced(&[window(Some(dict(&["beta", "gamma"])))], &[], None, None)
             .expect_err("a dictionary on a non-keyword window is refused");
         assert!(
-            err.to_string()
-                .contains("does not declare the column a keyword"),
-            "{err}"
+            matches!(&err, ComposeError::DictionaryOnOtherFamily { column } if column == "sub"),
+            "{err:?}"
         );
     }
 

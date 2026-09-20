@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use tessera_store::manifest::Visibility;
 
+use super::error::ComposeError;
+
 /// A filterable column's family, which decides **which operators apply to it**.
 ///
 /// Published per column by `/v1/meta` so a client need not infer it, and checked at the parse: an
@@ -424,27 +426,15 @@ pub(crate) fn owes_postings(
 pub(in crate::filter) fn resolve_analyser(
     column: &str,
     identity: Option<&str>,
-) -> std::io::Result<Arc<tessera_analyse::Analyser>> {
-    let identity = identity.ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "column '{column}' is text but the manifest records no analyser identity — the \
-                 build is what resolves one, so this bundle is not what its manifest says"
-            ),
-        )
+) -> Result<Arc<tessera_analyse::Analyser>, ComposeError> {
+    let identity = identity.ok_or_else(|| ComposeError::NoAnalyserRecorded {
+        column: column.to_string(),
     })?;
     tessera_analyse::analyser_with_identity(identity)
         .map(Arc::new)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "column '{column}' was indexed by analyser '{identity}', which this binary \
-                     does not carry. Its terms cannot be reproduced, so every `match` over it \
-                     would answer from a different segmentation"
-                ),
-            )
+        .ok_or_else(|| ComposeError::UnknownAnalyser {
+            column: column.to_string(),
+            identity: identity.to_string(),
         })
 }
 

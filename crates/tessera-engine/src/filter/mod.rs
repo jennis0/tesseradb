@@ -185,7 +185,7 @@ pub use declared::{
     extent_column_name, is_filterable, scoped_column_name, scoped_has_value_column,
     scoped_is_filterable, Family, Placement, PIN,
 };
-pub use error::FilterError;
+pub use error::{ComposeError, FilterError};
 pub use expr::{
     FilterExpr, FilterOperand, MemberOfLeaf, MemberResolver, RegionLeaf, RegionResolver,
     RoutedFilter, RowExpr, RowLeafResolvers, MAX_FILTER_DEPTH, MEMBER_OF_COLUMN, REGION_COLUMN,

@@ -302,6 +302,7 @@ fn open_filter_columns(
         // lifetime, so the alternative is paying tens of GB of residency before any filter arrives.
         true,
     )
+    .map_err(std::io::Error::from)
 }
 
 /// What the side manifests declare, merged into the manifest and then kept: [`ManifestSeed`]

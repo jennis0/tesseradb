@@ -10,6 +10,7 @@ use croaring::Bitmap;
 use tessera_filter::{Codes, ColumnPostings, RecordStack, RecordValue, SortedDict, ValueColumn};
 
 use super::declared::{Family, Placement};
+use super::error::ComposeError;
 
 /// One bundle's filter columns, keyed by declared column name — plus the record-blob stack,
 /// which shares this type's lifecycle rather than its name.
@@ -308,24 +309,21 @@ impl Column {
         values_rel: &str,
         extent: Arc<ValueColumn>,
         dict: Option<Arc<SortedDict>>,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), ComposeError> {
         check_dictionary_pairing(self.family, column, dict.is_some())?;
         let ColumnLayers::Values {
             layers, covered, ..
         } = &mut self.layers
         else {
-            return Err(unknown_filter_column(column));
+            return Err(ComposeError::UnknownColumn {
+                column: column.to_string(),
+            });
         };
         let present = extent.present();
         if covered.and_cardinality(&present) != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "a filter extent for column '{column}' claims entities an earlier layer \
-                     already holds values for; entity ids are permanent (I9) and an extent may \
-                     only add ids no layer holds"
-                ),
-            ));
+            return Err(ComposeError::Overlap {
+                column: column.to_string(),
+            });
         }
         *covered |= present;
         layers.push(Layer {
@@ -335,14 +333,6 @@ impl Column {
         });
         Ok(())
     }
-}
-
-/// An extent naming a column this composition has no value layers for.
-fn unknown_filter_column(column: &str) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("a filter extent names column '{column}', which the schema does not declare filterable"),
-    )
 }
 
 /// One `text` layer: its own dictionary, its own postings over that dictionary, and the entities
@@ -389,7 +379,11 @@ impl TextLayer {
     ///
     /// The base writes no presence file of its own — the build writes none and the fold therefore
     /// writes none — so nothing here can say which entities carry a value. See [`TextLayer::present`].
-    fn open_base(column: &str, dir: &Path, access: tessera_filter::Access) -> std::io::Result<TextLayer> {
+    fn open_base(
+        column: &str,
+        dir: &Path,
+        access: tessera_filter::Access,
+    ) -> Result<TextLayer, ComposeError> {
         text_layer(
             SortedDict::open_dir(dir, access)?,
             ColumnPostings::open(&dir.join("postings.arrow"), access != tessera_filter::Access::Read)?,
@@ -410,7 +404,7 @@ impl TextLayer {
         postings: &Path,
         presence: &Path,
         access: tessera_filter::Access,
-    ) -> std::io::Result<TextLayer> {
+    ) -> Result<TextLayer, ComposeError> {
         text_layer(
             SortedDict::open(dict, access)?,
             ColumnPostings::open(postings, access != tessera_filter::Access::Read)?,
@@ -429,16 +423,14 @@ fn text_layer(
     which: &str,
     present: Bitmap,
     dict_rel: Option<String>,
-) -> std::io::Result<TextLayer> {
+) -> Result<TextLayer, ComposeError> {
     if dict.len() != postings.record_count() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "column '{column}': the {which} text layer holds {} terms but {} postings records.                  An ordinal names a position in its own layer's dictionary, so serving these                  together would answer `match` from the wrong words",
-                dict.len(),
-                postings.record_count()
-            ),
-        ));
+        return Err(ComposeError::TermsAndPostingsDisagree {
+            column: column.to_string(),
+            layer: which.to_string(),
+            terms: dict.len(),
+            postings: postings.record_count(),
+        });
     }
     Ok(TextLayer {
         dict: Arc::new(dict),
@@ -483,13 +475,13 @@ fn request_access(mmap: bool) -> tessera_filter::Access {
     }
 }
 
-/// A record-blob open failure, in the `io::Result` this opener speaks. Fail-closed either way:
+/// A record-blob open failure, in the refusal this opener speaks. Fail-closed either way:
 /// a missing, short or malformed layer refuses the whole open (records §3), never "those
 /// entities have no record".
-fn record_open_error(e: tessera_filter::RecordError) -> std::io::Error {
+fn record_open_error(e: tessera_filter::RecordError) -> ComposeError {
     match e {
-        tessera_filter::RecordError::Io(io) => io,
-        malformed => std::io::Error::new(std::io::ErrorKind::InvalidData, malformed.to_string()),
+        tessera_filter::RecordError::Io(io) => ComposeError::Io(io),
+        malformed => ComposeError::RecordUnreadable(malformed.to_string()),
     }
 }
 
@@ -505,23 +497,18 @@ fn record_open_error(e: tessera_filter::RecordError) -> std::io::Error {
 /// refused rather than scanned as codes, which would answer every string predicate with the empty
 /// set; a dictionary on another family's layer is refused because the caller and the schema
 /// disagree about what the values are.
-fn check_dictionary_pairing(family: Family, column: &str, has_dict: bool) -> std::io::Result<()> {
+fn check_dictionary_pairing(
+    family: Family,
+    column: &str,
+    has_dict: bool,
+) -> Result<(), ComposeError> {
     match (family == Family::Keyword, has_dict) {
-        (true, false) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "a layer for keyword column '{column}' carries no sorted dictionary; its values \
-                 are ordinals into the dictionary minted beside them (records §4.3, §7), and a \
-                 layer without one has no reading"
-            ),
-        )),
-        (false, true) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "a layer for column '{column}' carries a sorted dictionary, but the schema does \
-                 not declare the column a keyword; the two disagree about what its values are"
-            ),
-        )),
+        (true, false) => Err(ComposeError::KeywordWithoutDictionary {
+            column: column.to_string(),
+        }),
+        (false, true) => Err(ComposeError::DictionaryOnOtherFamily {
+            column: column.to_string(),
+        }),
         _ => Ok(()),
     }
 }

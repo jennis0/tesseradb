@@ -7,6 +7,7 @@ use tessera_store::manifest::Visibility;
 
 use super::{record_open_error, request_access, Column, FilterColumns, Layer, Route, TextLayer};
 use crate::filter::declared::{resolve_analyser, visibility_of};
+use crate::filter::error::ComposeError;
 use crate::filter::{
     blob_resident, carries_live_view, extent_column_name, owes_postings, owes_value_column,
     scoped_column_name, scoped_is_filterable, scoped_owes_postings, scoped_visibility_of, Family,
@@ -35,7 +36,7 @@ pub(super) fn open_scoped_column(
     incarnation: tessera_types::view::ViewIncarnation,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
     mmap: bool,
-) -> std::io::Result<(String, Placement, Column)> {
+) -> Result<(String, Placement, Column), ComposeError> {
     let scoped_family = Family::of_scoped(family);
     // **A family with neither flag is opened and is not filterable** (owner ruling 2026-09-01).
     // Its per-view column is on disc exactly as an indexed one's is, and the drill-down reads one
@@ -129,7 +130,7 @@ fn open_value_base(
     owes_postings: bool,
     visibility: Option<Visibility>,
     mmap: bool,
-) -> std::io::Result<(Layer, Option<Arc<ColumnPostings>>, Route)> {
+) -> Result<(Layer, Option<Arc<ColumnPostings>>, Route), ComposeError> {
     let values = Arc::new(ValueColumn::open_dir(dir, request_access(mmap))?);
     let dict = (family == Family::Keyword)
         .then(|| SortedDict::open_dir(dir, request_access(mmap)).map(Arc::new))
@@ -162,7 +163,7 @@ fn text_extent_layers<'a>(
     extents: impl Iterator<Item = &'a tessera_store::manifest::TextExtent>,
     column: &str,
     mmap: bool,
-) -> std::io::Result<Vec<TextLayer>> {
+) -> Result<Vec<TextLayer>, ComposeError> {
     extents
         .map(|extent| {
             TextLayer::open(
@@ -184,7 +185,7 @@ pub(super) fn runtime_layers(
     scalar: &tessera_store::manifest::DeclaredScalar,
     declared_index: usize,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
-) -> std::io::Result<Option<Column>> {
+) -> Result<Option<Column>, ComposeError> {
     let family = Family::of(scalar);
     // The filter surface this declaration affords, which is where a column's own licence comes
     // from — `None` for a column on none of it.
@@ -263,7 +264,7 @@ impl FilterColumns {
         // demanded.
         unfolded: &[String],
         mmap: bool,
-    ) -> std::io::Result<Self> {
+    ) -> Result<Self, ComposeError> {
         let partition_dir = prefix_dir.join("partitions").join(partition);
         let mut columns = BTreeMap::new();
         let mut placements = BTreeMap::new();
@@ -447,7 +448,7 @@ impl FilterColumns {
                 })
                 .collect::<Vec<_>>(),
         )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        .map_err(|e| ComposeError::EntityTermsUnreadable(e.to_string()))?;
         let mut open = FilterColumns {
             columns,
             placements,

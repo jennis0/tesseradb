@@ -1,3 +1,199 @@
+/// Why a bundle's filter columns could not be opened, or a published layer composed onto them.
+///
+/// **Every refusal carries the facts rather than a sentence about them**, so a caller — a test
+/// included — can tell two refusals apart without reading their wording. The alternative was one
+/// `InvalidData` per site, which made the message the only thing that distinguished a coverage
+/// mismatch from a missing layer.
+#[derive(Debug)]
+pub enum ComposeError {
+    /// An extent names a column the schema holds no value column for.
+    UnknownColumn { column: String },
+    /// An extent claims entities an earlier layer already holds values for.
+    Overlap { column: String },
+    /// A flush wrote a base for a group-scoped family this bundle does not declare.
+    UndeclaredScopedFamily { column: String, view: String },
+    /// A flush published a text extent for a column this generation holds no text index for.
+    UnknownTextColumn { column: String },
+    /// A coalesce names a column this generation does not hold.
+    UnknownCoalescedColumn { column: String },
+    /// A coalesce names a text column this generation does not hold.
+    UnknownCoalescedTextColumn { column: String },
+    /// A coalesce consumed an extent this generation holds no layer for.
+    MissingLayer { column: String, rel: String },
+    /// A coalesce consumed a text extent this generation holds no layer for.
+    MissingTextLayer { column: String, rel: String },
+    /// A coalesced extent stands for a different entity set from the layers it replaces.
+    CoverageMismatch {
+        column: String,
+        replacement: u64,
+        consumed: usize,
+        covered: u64,
+    },
+    /// A coalesced text extent stands for a different entity set from the layers it replaces.
+    TextCoverageMismatch {
+        column: String,
+        replacement: u64,
+        consumed: usize,
+        covered: u64,
+    },
+    /// A coalesced entity→term stack holds lists for a different entity set from the live one.
+    EntityTermsCoverage { replacement: u64, held: u64 },
+    /// A keyword layer arrived without the dictionary its ordinals number.
+    KeywordWithoutDictionary { column: String },
+    /// A dictionary arrived on a layer of a column the schema does not call a keyword.
+    DictionaryOnOtherFamily { column: String },
+    /// A text layer's dictionary and its postings are different lengths.
+    TermsAndPostingsDisagree {
+        column: String,
+        layer: String,
+        terms: u32,
+        postings: u32,
+    },
+    /// A text column whose manifest records no analyser identity.
+    NoAnalyserRecorded { column: String },
+    /// A text column indexed by an analyser this binary does not carry.
+    UnknownAnalyser { column: String, identity: String },
+    /// The record blob's stack refused to open, malformed rather than absent.
+    RecordUnreadable(String),
+    /// The entity→term stack refused to open.
+    EntityTermsUnreadable(String),
+    /// An artefact would not read. Carried whole, so the kind survives.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ComposeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ComposeError::UnknownColumn { column } => write!(
+                f,
+                "a filter extent names column '{column}', which the schema does not declare \
+                 filterable"
+            ),
+            ComposeError::Overlap { column } => write!(
+                f,
+                "a filter extent for column '{column}' claims entities an earlier layer already \
+                 holds values for; entity ids are permanent (I9) and an extent may only add ids \
+                 no layer holds"
+            ),
+            ComposeError::UndeclaredScopedFamily { column, view } => write!(
+                f,
+                "a flush wrote a base for the group-scoped column family '{column}' under view \
+                 '{view}', which this bundle does not declare"
+            ),
+            ComposeError::UnknownTextColumn { column } => write!(
+                f,
+                "a flush published a text extent for column '{column}', which this generation \
+                 does not hold"
+            ),
+            ComposeError::UnknownCoalescedColumn { column } => write!(
+                f,
+                "a coalesce names column '{column}', which this generation does not hold"
+            ),
+            ComposeError::UnknownCoalescedTextColumn { column } => write!(
+                f,
+                "a coalesce names text column '{column}', which this generation does not hold"
+            ),
+            ComposeError::MissingLayer { column, rel } => write!(
+                f,
+                "a coalesce for column '{column}' consumed extent '{rel}', which this generation \
+                 holds no layer for"
+            ),
+            ComposeError::MissingTextLayer { column, rel } => write!(
+                f,
+                "a coalesce for text column '{column}' consumed extent '{rel}', which this \
+                 generation holds no layer for"
+            ),
+            ComposeError::CoverageMismatch {
+                column,
+                replacement,
+                consumed,
+                covered,
+            } => write!(
+                f,
+                "the coalesced extent for column '{column}' is present for {replacement} entities \
+                 where the {consumed} layers it replaces cover {covered}; replacing on that would \
+                 leave the column's coverage wrong and every later disjointness check testing \
+                 against it"
+            ),
+            ComposeError::TextCoverageMismatch {
+                column,
+                replacement,
+                consumed,
+                covered,
+            } => write!(
+                f,
+                "the coalesced text extent for column '{column}' is present for {replacement} \
+                 entities where the {consumed} layers it replaces cover {covered}"
+            ),
+            ComposeError::EntityTermsCoverage { replacement, held } => write!(
+                f,
+                "a coalesce's entity→term stack holds lists for {replacement} entities where the \
+                 one it replaces holds {held}; replacing on that would answer 'unknown' for an \
+                 entity that carries labels, which on the write path is a 409 that does not fire"
+            ),
+            ComposeError::KeywordWithoutDictionary { column } => write!(
+                f,
+                "a layer for keyword column '{column}' carries no sorted dictionary; its values \
+                 are ordinals into the dictionary minted beside them (records §4.3, §7), and a \
+                 layer without one has no reading"
+            ),
+            ComposeError::DictionaryOnOtherFamily { column } => write!(
+                f,
+                "a layer for column '{column}' carries a sorted dictionary, but the schema does \
+                 not declare the column a keyword; the two disagree about what its values are"
+            ),
+            ComposeError::TermsAndPostingsDisagree {
+                column,
+                layer,
+                terms,
+                postings,
+            } => write!(
+                f,
+                "column '{column}': the {layer} text layer holds {terms} terms but {postings} \
+                 postings records. An ordinal names a position in its own layer's dictionary, so \
+                 serving these together would answer `match` from the wrong words"
+            ),
+            ComposeError::NoAnalyserRecorded { column } => write!(
+                f,
+                "column '{column}' is text but the manifest records no analyser identity — the \
+                 build is what resolves one, so this bundle is not what its manifest says"
+            ),
+            ComposeError::UnknownAnalyser { column, identity } => write!(
+                f,
+                "column '{column}' was indexed by analyser '{identity}', which this binary does \
+                 not carry. Its terms cannot be reproduced, so every `match` over it would answer \
+                 from a different segmentation"
+            ),
+            ComposeError::RecordUnreadable(detail) => write!(f, "{detail}"),
+            ComposeError::EntityTermsUnreadable(detail) => write!(f, "{detail}"),
+            ComposeError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ComposeError {}
+
+impl From<std::io::Error> for ComposeError {
+    fn from(e: std::io::Error) -> ComposeError {
+        ComposeError::Io(e)
+    }
+}
+
+impl From<tessera_filter::DictError> for ComposeError {
+    fn from(e: tessera_filter::DictError) -> ComposeError {
+        ComposeError::Io(e.into())
+    }
+}
+
+impl From<ComposeError> for std::io::Error {
+    fn from(e: ComposeError) -> std::io::Error {
+        match e {
+            ComposeError::Io(e) => e,
+            other => std::io::Error::new(std::io::ErrorKind::InvalidData, other.to_string()),
+        }
+    }
+}
+
 /// Why a filter could not be answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterError {
