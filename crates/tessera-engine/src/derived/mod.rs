@@ -50,10 +50,12 @@
 //! oversubscribe the pool the others are queued behind, which trades a served viewer's latency for
 //! a hovering one's. The two ways this module was made cheap instead are the ones a second thread
 //! would have hidden: the input is reduced before the shape is computed
-//! ([`QUANTISE_DIVISIONS`](reduce::QUANTISE_DIVISIONS)), and the answer is not computed twice ([`crate::derived_cache`]).
+//! ([`QUANTISE_DIVISIONS`](reduce::QUANTISE_DIVISIONS)), and the answer is not computed twice
+//! ([`cache`]).
 
 
 mod buckets;
+pub mod cache;
 mod dig;
 mod geometry;
 mod groups;

@@ -522,7 +522,7 @@ impl Engine {
         let derived = if declared_derived.is_empty() {
             crate::derived::DerivedContent::default()
         } else {
-            let key = crate::derived_cache::DerivedKey {
+            let key = crate::derived::cache::DerivedKey {
                 token_id: mask_identity.token_id,
                 view: view.to_string(),
                 layer: name.clone(),
@@ -536,7 +536,7 @@ impl Engine {
                 overlay_version: mask_identity.overlay_version,
                 fragment_identity: mask_identity.fragment_identity,
                 fragment_watermark: mask_identity.fragment_watermark,
-                properties: crate::derived_cache::properties_bits(&declared_derived),
+                properties: crate::derived::cache::properties_bits(&declared_derived),
             };
             match counts.as_ref().and_then(|c| c.geometry()) {
                 // The accumulation the level's own counts carry.
@@ -1299,7 +1299,7 @@ impl Engine {
             {
                 crate::derived::DerivedContent::default()
             } else {
-                let key = crate::derived_cache::DerivedKey {
+                let key = crate::derived::cache::DerivedKey {
                     token_id: served.mask_identity.token_id,
                     view: served.name.to_string(),
                     layer: name.clone(),
@@ -1310,7 +1310,7 @@ impl Engine {
                     overlay_version: served.mask_identity.overlay_version,
                     fragment_identity: served.mask_identity.fragment_identity,
                     fragment_watermark: served.mask_identity.fragment_watermark,
-                    properties: crate::derived_cache::properties_bits(&layer.declared_derived),
+                    properties: crate::derived::cache::properties_bits(&layer.declared_derived),
                 };
                 // The accumulation where the level has one; nothing here walks the mask again.
                 match level.counts.as_ref().and_then(|c| c.geometry()) {

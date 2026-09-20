@@ -166,11 +166,11 @@ impl Engine {
     /// The derived-geometry cache's gauges. Operator plane only, naming no artifact and no
     /// principal. `hit_rate` is the figure it is judged on: the same principal panning across one
     /// layer re-serves mostly the same artifacts.
-    pub fn derived_cache_stats(&self) -> crate::derived_cache::DerivedCacheStats {
+    pub fn derived_cache_stats(&self) -> crate::derived::cache::DerivedCacheStats {
         self.derived_geometry.stats()
     }
 
-    /// Bound the derived-geometry cache. Unset, an embedder gets `crate::derived_cache`'s default;
+    /// Bound the derived-geometry cache. Unset, an embedder gets `crate::derived::cache`'s default;
     /// there is no configuration key, since an entry's size is bounded by the vertex budget rather
     /// than the corpus.
     pub fn set_derived_cache_bytes(&self, bytes: u64) {
