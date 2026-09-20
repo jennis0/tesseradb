@@ -1,6 +1,5 @@
-//! The materialisers against the lookups: every way in must state the same corpus (spec §12.1's
-//! "one source"), so each written form is read back and compared against [`Corpus::item`] and
-//! [`Corpus::terms`] — the functions total verification will later hold served rows against.
+//! The materialisers against the lookups: each written form is read back and compared against
+//! [`Corpus::item`] and [`Corpus::terms`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -46,7 +45,7 @@ fn column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> &'a T {
 }
 
 /// Every row of the points file is its item: geometry and all six declared fields, absence as
-/// null, exactly as the generator states them.
+/// null.
 #[test]
 fn points_parquet_rows_are_the_items() {
     let c = corpus(300);
@@ -96,8 +95,7 @@ fn opt_str(array: &StringArray, i: usize) -> Option<String> {
     (!array.is_null(i)).then(|| array.value(i).to_string())
 }
 
-/// A smaller build input is a **prefix** of a larger one, row for row — the file-level face of
-/// spec §8's first property, and what makes a big run's failure reducible by `--limit` alone.
+/// A smaller build input is a prefix of a larger one, row for row.
 #[test]
 fn a_smaller_points_file_is_a_prefix_of_a_larger_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -146,7 +144,7 @@ fn pairs_parquet_rows_are_the_terms() {
     assert_eq!(
         by_item.len() as u64,
         c.n(),
-        "every item carries at least one pair"
+        "every item has at least one pair"
     );
     for e in 0..c.n() {
         let expected: Vec<u32> = c.terms(e).iter().map(|t| t.raw()).collect();
@@ -154,11 +152,8 @@ fn pairs_parquet_rows_are_the_terms() {
     }
 }
 
-/// The ingest batch is the wire shape — `(external_id, x, y, access, the declared scalars)` —
-/// with the workspace's 8-byte little-endian external-id convention, the access labels as a list
-/// (one term per element, decision 0129), and the same values as every other materialiser. A
-/// range past `n` draws from the same functions, which is what lets a driver ingest beyond the
-/// built prefix.
+/// The ingest batch is the wire shape, `(external_id, x, y, access, the declared scalars)`. A
+/// range past `n` draws from the same functions, letting a driver ingest beyond the built prefix.
 #[test]
 fn ingest_batch_is_the_wire_shape_of_the_same_items() {
     let c = corpus(10);
@@ -197,8 +192,6 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
         let item = c.item(e);
         assert_eq!(external_id.value(i), e.to_le_bytes());
         assert_eq!(x.value(i), item.x);
-        // Every row of this batch is past `n = 10`, which is the point: the partition value is a
-        // function of `(seed, layer, e)` and is answerable beyond the built prefix.
         assert_eq!(
             u64::from(partition.value(i)),
             c.partition_artifact_of(PARTITION_LAYER, e)
@@ -220,8 +213,6 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
         assert_eq!(opt_str(bay, i).as_deref(), item.bay);
     }
 
-    // The reserved wire columns are non-nullable; every declared scalar but the join key admits
-    // absence. A nullability defect here surfaces server-side as a refused batch, so pin it.
     for field in batch.schema().fields() {
         let admits_absence = matches!(
             field.name().as_str(),
@@ -236,9 +227,8 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
     }
 }
 
-/// The artifact fixture's files agree with the closed forms they were written from — the same
-/// property [`points_parquet_rows_are_the_items`] pins for the item arm, extended to all four
-/// closed-form artifact arms (flat, partition, boundary, treed). Small `n`, so a brute-force
+/// The artifact fixture's files agree with the closed forms they were written from, across all
+/// four kinds of artifact (flat, partition, boundary, treed). Small `n`, so a brute-force
 /// comparison is affordable in the test itself.
 #[test]
 fn the_artifact_fixture_agrees_with_the_closed_forms() {
@@ -250,7 +240,6 @@ fn the_artifact_fixture_agrees_with_the_closed_forms() {
     let dir = tempfile::tempdir().unwrap();
     let counts = c.write_artifact_fixtures(dir.path()).unwrap();
 
-    // The partition column on points.parquet agrees with `partition_artifact_of` for every entity.
     let points_path = dir.path().join("points.parquet");
     c.write_points_parquet(&points_path).unwrap();
     let mut partition_by_entity: HashMap<u64, u32> = HashMap::new();
@@ -269,9 +258,6 @@ fn the_artifact_fixture_agrees_with_the_closed_forms() {
         );
     }
 
-    // The flat roster and membership: `flat_artifacts.len()` artifacts, each artifact's members
-    // exactly `artifact_members` — both directions, since the roster names the count and the
-    // membership file is checked entity by entity below.
     let roster: Vec<String> = read_parquet(&dir.path().join("flat_artifacts.parquet"))
         .iter()
         .flat_map(|b| {
@@ -313,8 +299,6 @@ fn the_artifact_fixture_agrees_with_the_closed_forms() {
         );
     }
 
-    // The partition roster and its enumerated twin: single-valued, so every entity names exactly
-    // one key, and that key is `partition_artifact_of`.
     let mut partition_members: HashMap<u64, u64> = HashMap::new();
     let mut partition_rows = 0u64;
     for batch in read_parquet(&dir.path().join("partition_members.parquet")) {
@@ -336,8 +320,6 @@ fn the_artifact_fixture_agrees_with_the_closed_forms() {
         );
     }
 
-    // The boundary roster: every key is an authored prefix, and the set is exactly
-    // `boundary_artifacts`'s.
     let boundary_roster: BTreeSet<u64> =
         read_parquet(&dir.path().join("boundary_artifacts.parquet"))
             .iter()
@@ -355,9 +337,6 @@ fn the_artifact_fixture_agrees_with_the_closed_forms() {
     assert_eq!(boundary_roster, expected_boundary);
     assert_eq!(boundary_roster.len() as u64, counts.boundary_artifacts);
 
-    // The treed roster and lineage: `key` ascending `0..treed_artifacts`, `parent` null only at
-    // the root and otherwise `artifact_parent`'s answer, and the membership file agreeing with
-    // `treed_members` node by node.
     let mut treed_parent: BTreeMap<u64, Option<u64>> = BTreeMap::new();
     for batch in read_parquet(&dir.path().join("treed_artifacts.parquet")) {
         let key = column::<StringArray>(&batch, "key");
