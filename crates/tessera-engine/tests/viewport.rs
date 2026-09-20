@@ -26,7 +26,7 @@ use tessera_build::{build, BuildArgs};
 use tessera_engine::select::{decode_tier, DecodeTier};
 use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{
-    CancelToken, Engine, EngineConfig, EngineError, Session,
+    CancelToken, Engine, EngineConfig, EngineError,
 };
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
 use tessera_plugin::{Passthrough, Plugin};
@@ -2128,125 +2128,70 @@ fn concurrent_same_key_viewports_are_all_served_off_one_build() {
     );
 }
 
-/// D-G / F4: distinct sessions' first viewports must build their row projections
-/// **concurrently**, not serialise behind one global lock — the exact regression F4 measured
-/// (Arm A at c=1000: throughput halves while server CPU *drops* from 712% to 426%, the signature
-/// of threads blocked on a lock rather than doing work).
-///
-/// Measured directly: `serial` times N fresh sessions' cold first viewports run one after
-/// another; `concurrent` times N *different* fresh sessions' cold first viewports released
-/// together on N threads. Both exclude `Engine::authorise` (sessions are minted before either
-/// timer starts) so only the row-projection build itself is measured. If builds still serialised
-/// behind one lock, `concurrent` would be roughly `serial` (same total work, funnelled through
-/// one mutex, plus contention overhead); genuine overlap should land `concurrent` well under
-/// `serial` given more than one core.
+/// One session's row-projection build does not block another session's first viewport. The first
+/// session's build is held open inside the build, and the second session's first viewport must
+/// finish while it is held. A lock held across the build, in the cache or in the request path
+/// around it, leaves the second viewport waiting. `tessera-bench`'s load arm measures the
+/// throughput this protects.
 #[test]
-fn distinct_key_first_viewports_overlap_instead_of_serialising() {
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    // N=4 concurrent builds need at least N cores to genuinely overlap; on a 2- or 3-core
-    // runner the 70%-of-serial assertion below has too little headroom (some builds queue for a
-    // core regardless of the lock-free design) and flakes for reasons unrelated to F4. Skip
-    // rather than loosen the ratio, so a real regression on well-provisioned runners still fails
-    // loudly.
-    if cores < 4 {
-        eprintln!("skipping distinct_key_first_viewports_overlap_instead_of_serialising: only {cores} cores available, need >= 4 for headroom");
-        return;
-    }
-
-    const N: usize = 4;
-    const ITEMS: u64 = 150_000;
-    // **Best of three, and the retry is not slack in the assertion.** The ratio is asymmetrically
-    // sensitive to whatever else is competing for cores: `serial` needs one core and `concurrent`
-    // needs N, so external load — a full-workspace run putting other test binaries on the same
-    // box — degrades exactly the quantity being measured while leaving its baseline alone. A
-    // genuinely serialised implementation cannot produce a fast `concurrent` on any attempt, so
-    // taking the best observation keeps the regression this test exists to catch while removing
-    // the load sensitivity. Captured failing once during a full-workspace run and not reproduced
-    // in twelve isolated ones, which is the signature of contention rather than of a real change.
-    //
-    // Timing the intervals rather than the totals would not help: under one global lock the
-    // waiting threads block *inside* `viewport`, so their measured intervals overlap just as much
-    // as genuinely concurrent builds do. The totals are what distinguish the two.
-    const ATTEMPTS: usize = 3;
-
+fn a_first_viewport_finishes_while_another_sessions_build_is_held() {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture_n(
         &bundle_root,
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
-        ITEMS,
+        5_000,
     );
     let engine = Arc::new(open_engine(
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
     ));
-
-    // Every attempt mints fresh sessions, so every build is genuinely cold: the row-projection
-    // cache keys on `token_id`, so a new token is a new key and nothing is reused across attempts.
-    let measure = || {
-        let serial_sessions: Vec<_> = (0..N)
-            .map(|_| engine.authorise(&full_coverage_credential()).unwrap())
-            .collect();
-        let serial_start = std::time::Instant::now();
-        for session in &serial_sessions {
-            engine
-                .viewport(
-                    session,
-                    ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
-                )
-                .unwrap();
-        }
-        let serial = serial_start.elapsed();
-
-        let concurrent_sessions: Vec<Arc<Session>> = (0..N)
-            .map(|_| Arc::new(engine.authorise(&full_coverage_credential()).unwrap()))
-            .collect();
-        let barrier = Arc::new(std::sync::Barrier::new(N));
-        let concurrent_start = std::time::Instant::now();
-        let handles: Vec<_> = concurrent_sessions
-            .into_iter()
-            .map(|session| {
-                let engine = Arc::clone(&engine);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    engine
-                        .viewport(
-                            &session,
-                            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
-                        )
-                        .unwrap();
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
-        }
-        (serial, concurrent_start.elapsed())
+    let first_viewport = |engine: &Engine| {
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+            )
+            .unwrap();
     };
 
-    let mut observed = Vec::with_capacity(ATTEMPTS);
-    for attempt in 1..=ATTEMPTS {
-        let (serial, concurrent) = measure();
-        println!(
-            "distinct-key overlap ({cores} cores, N={N}, attempt {attempt}): \
-             serial={serial:?} concurrent={concurrent:?}"
+    engine.hold_next_projection_build_for_test();
+    let held = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || first_viewport(&engine))
+    };
+    let deadline = std::time::Instant::now() + WAIT;
+    while engine.full_projection_builds() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held build never started"
         );
-        if concurrent < serial * 7 / 10 {
-            return;
-        }
-        observed.push((serial, concurrent));
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
-    panic!(
-        "concurrent never landed under 70% of serial in {ATTEMPTS} attempts on a {cores}-core \
-         machine ({observed:?}) — distinct sessions' first-viewport builds are serialising behind \
-         one lock rather than overlapping (F4)"
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let other = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            first_viewport(&engine);
+            let _ = finished_tx.send(());
+        })
+    };
+    let finished = finished_rx.recv_timeout(WAIT);
+    let builds_while_held = engine.full_projection_builds();
+
+    engine.release_projection_build_for_test();
+    held.join().unwrap();
+    other.join().unwrap();
+    assert!(
+        finished.is_ok(),
+        "a second session's first viewport waited for the first session's build"
     );
+    assert_eq!(builds_while_held, 2, "each session builds its own projection");
 }
 
 /// Byte-format/wire behaviour is unchanged by the D-G refactor: a warm cache must serve output
