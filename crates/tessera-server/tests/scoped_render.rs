@@ -1885,6 +1885,68 @@ async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
     );
 }
 
+/// **A cell of a family declaring neither flag holds its value too** (`views.md` §5, decision
+/// 0116).
+///
+/// `tag` is neither indexed nor rendered, so no filter and no tile reads it — but the build writes
+/// its value column and the drill-down serves it, so the cell holds a value and the write path has
+/// one to compare against. A second write naming a different value is refused as the rendered
+/// family's is ([`a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_different_one`]);
+/// one naming the value held is deduped.
+///
+/// The door is the values route rather than a joining row, because a built cell cannot be reached
+/// by one: every view of its key already holds the entity's row, and a second row in a view is
+/// refused before any cell is read.
+#[tokio::test]
+async fn a_written_cell_of_an_unflagged_family_dedupes_or_is_refused() {
+    let served = serve().await;
+    // An entity the build placed in `2026-Q1`, whose `tag` the build wrote: slot 0, so `e * 2`.
+    const CELL: u64 = 4;
+    const HELD: f32 = (CELL * 2) as f32;
+
+    let (status, body) = fill(&served, "tag-agrees", "quarter:2026-Q1", CELL, HELD).await;
+    assert_eq!(status, 200, "the value the cell holds is deduped: {body}");
+    assert_eq!(body["filled"], json!(0), "and nothing is written: {body}");
+
+    let (status, body) = fill(&served, "tag-differs", "quarter:2026-Q1", CELL, HELD + 1.0).await;
+    assert_eq!(status, 409, "one cell holds one value: {body}");
+
+    // The cell still holds what the build wrote.
+    flush(&served).await;
+    let id = id_of(&served, &served.token, "quarter:2026-Q1", CELL).await;
+    let body = item(&served, &served.token, id).await;
+    assert_eq!(
+        body["scoped"]["tag"]["2026-Q1"],
+        json!(f64::from(HELD)),
+        "the cell keeps the value the build wrote: {body}"
+    );
+}
+
+/// One `tag` value for one entity through `POST /control/values`, with its status and body.
+async fn fill(
+    served: &Served,
+    batch_id: &str,
+    view: &str,
+    entity: u64,
+    tag: f32,
+) -> (u16, Value) {
+    use base64::Engine as _;
+    let id = base64::engine::general_purpose::STANDARD.encode(external_id_of(entity));
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/values"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .json(&json!([{ "external_id": id, "tag": tag }]))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap())
+}
+
 /// **A `text` cell that has flushed takes no second value through either door** (`views.md` §5,
 /// decision 0116; review finding F1).
 ///
