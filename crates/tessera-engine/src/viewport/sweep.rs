@@ -243,6 +243,222 @@ const _: () = {
 /// now, not because it won everywhere it was tried. Full table: calibration report §14.5.
 pub(super) const TILE_PAR_MIN_LEN: usize = 8;
 
+/// The tiles one request answers over, and the §3.3 underlay demanded beneath them.
+pub(super) struct TileSet {
+    /// In response order: the request's own list where it carried one, `tiles_for_bbox`'s raster
+    /// order otherwise.
+    pub(super) tiles: Vec<Tile>,
+    /// `None` where no underlay was requested, and then no sub-cell frame is served.
+    pub(super) underlay_offset: Option<u8>,
+    /// How many sub-cells the underlay demands, 0 where none was requested — a term of the
+    /// serial-fallback predictor, which is otherwise blind to the underlay's cost.
+    pub(super) underlay_cells_demanded: u64,
+}
+
+/// A [`TileSet`] with every tile's row range resolved: what the sweep, the filter's crossing and
+/// the artifact pass all read the request's extent from. It cannot be built before the tile set is,
+/// which is the order the response needs.
+pub(super) struct Tiling {
+    pub(super) tiles: Vec<Tile>,
+    pub(super) underlay_offset: Option<u8>,
+    pub(super) underlay_cells_demanded: u64,
+    /// Positionally aligned with `tiles`, each entry the tile's `(segment, range)` parts.
+    pub(super) ranges: Vec<Vec<(usize, Range<u32>)>>,
+    /// `Σ range.len()` — the rows every resolved tile spans, pre-mask and pre-select.
+    pub(super) rows_in_ranges: u64,
+}
+
+impl Engine {
+    /// The request's tiles, counted and refused before they are allocated, and the underlay's three
+    /// bounds.
+    pub(super) fn resolve_tiles(
+        &self,
+        served: &ServedView<'_>,
+        req: &ViewportRequest<'_>,
+        probe: &mut Probe,
+    ) -> Result<TileSet> {
+        // **This view's frame, not the bundle's** (decision 0040): every tile address below is a
+        // fraction of the extent the requested view's positions were quantised against, so
+        // reading another view's would address different ground under the same prefix. An unknown
+        // name refuses rather than defaulting — there is no frame a view that does not exist
+        // could be drawn in.
+        let q = served
+            .generation
+            .bundle
+            .manifest
+            .quantisation_of(served.name)
+            .ok_or_else(|| EngineError::UnknownView(served.name.to_string()))?;
+        let extent = Bounds {
+            x_min: q.x_min,
+            x_max: q.x_max,
+            y_min: q.y_min,
+            y_max: q.y_max,
+        };
+
+        // Refuse an over-large tile set **before allocating it**. `zoom` and `bbox` are both
+        // attacker-chosen, and the tile set is their product: at zoom 16 over the full extent that
+        // is 65536² = 4.29e9 tiles at 16 B each — ~69 GB in one `Vec`, i.e. an out-of-memory abort
+        // from a single authenticated request, reached before any masking work happens. Counting
+        // first (`tiles_for_bbox_count` allocates nothing) is what makes this a 422 instead.
+        //
+        // Both independent reviews of this file flagged that an earlier revision bounded only the
+        // *derived* underlay fan-out below while commenting that "`tiles_for_bbox` is itself
+        // uncapped" — guarding the second-order factor and leaving the first-order one open. This
+        // is the first-order bound; the underlay's is now genuinely second-order.
+        // The same bound applies to an explicit list — the count is attacker-chosen either way, and
+        // a list makes it *more* directly so than a bbox does.
+        let tile_count = match req.tiles {
+            Some(list) => list.len() as u64,
+            None => tiles_for_bbox_count(req.bbox, req.zoom, &extent),
+        };
+        if tile_count > self.config.max_tiles_per_request as u64 {
+            return Err(EngineError::TooManyTiles {
+                demanded: tile_count,
+                limit: self.config.max_tiles_per_request,
+            });
+        }
+        let tiles = match req.tiles {
+            // **An explicit list replaces the derivation, and that is where the saving is.** Every
+            // tile a client can prove it already holds is absent, and absence costs nothing at all:
+            // no row range, no `count_range`, no selection scan, no gather. Ordering is the
+            // caller's — deduplicated at the request boundary, first occurrence kept, NOT sorted
+            // (contracts §3.2 r26) — and it is the order the tile stream reports and the points
+            // stream concatenates in.
+            Some(list) => list
+                .iter()
+                .map(|&prefix| Tile {
+                    prefix,
+                    depth: req.zoom,
+                })
+                .collect(),
+            None => tiles_for_bbox(req.bbox, req.zoom, &extent),
+        };
+        probe.lap(|t| &mut t.tiles_for_bbox_ns);
+        probe.count(|t| &mut t.tiles_resolved, tiles.len() as u64);
+
+        // §3.3 underlay bounds, all three checked up front and all three *rejecting* rather than
+        // clamping (see `EngineError::UnderlayRefused`). The cell budget is checked before any
+        // counting work because the underlay multiplies the (already-bounded) tile set by 4^offset.
+        //
+        // `underlay_cells_demanded` (0 when no underlay was requested) is captured
+        // here, outside the match, so the serial-fallback predictor below can see it — review
+        // caught that the predictor was blind to underlay cost entirely (`total_rows_in_ranges`
+        // alone), which is a real gap since a saturated underlay (`max_underlay_cells`, default
+        // 8192) is comparable work to thousands of spanned rows and was previously invisible to
+        // the serial/parallel decision no matter how large it was.
+        let mut underlay_cells_demanded: u64 = 0;
+        let underlay_offset = match req.underlay_offset {
+            None | Some(0) => None,
+            Some(offset) => {
+                if offset > self.config.max_underlay_offset {
+                    return Err(EngineError::UnderlayRefused(format!(
+                        "underlay_offset {offset} exceeds the configured maximum {}",
+                        self.config.max_underlay_offset
+                    )));
+                }
+                let sub_depth = req.zoom as u32 + offset as u32;
+                if sub_depth > 16 {
+                    return Err(EngineError::UnderlayRefused(format!(
+                        "underlay_offset {offset} at zoom {} needs depth {sub_depth}, but the \
+                         grid is fixed at 2^16 x 2^16 so depth may not exceed 16 (§5.2)",
+                        req.zoom
+                    )));
+                }
+                let per_tile = 1usize << (2 * offset as u32);
+                let demanded = tiles.len().saturating_mul(per_tile);
+                if demanded > self.config.max_underlay_cells {
+                    return Err(EngineError::UnderlayRefused(format!(
+                        "underlay_offset {offset} over {} tiles demands {demanded} sub-cells, \
+                         above the configured budget of {}",
+                        tiles.len(),
+                        self.config.max_underlay_cells
+                    )));
+                }
+                underlay_cells_demanded = demanded as u64;
+                Some(offset)
+            }
+        };
+
+        Ok(TileSet {
+            tiles,
+            underlay_offset,
+            underlay_cells_demanded,
+        })
+    }
+}
+
+/// Resolve every tile's row range in ONE monotone sweep rather than two full-column binary
+/// searches per tile. A few hundred independent `log2(rows)` searches is where a sparse
+/// request's time actually goes — measured at 26-64% of one
+/// (docs/evidence/memos/2026-07-30-f1-selection-overdraw.md), and flat in density, because
+/// the cost is the searching rather than the rows found.
+///
+/// `tile_ranges_all` returns ranges positionally aligned with `tiles`, so the zip below
+/// walks `tiles_for_bbox`'s raster order unchanged. That order is load-bearing (it is the
+/// response's tile order, and the wire payload's points are a flat concatenation in it) —
+/// the sweep's own Morton order stays inside `tile_ranges_all` and never reaches here.
+///
+/// One sweep **per segment**, each in that segment's own Morton column. Transposed below
+/// into per-tile part lists, because a tile is the union of its parts across segments
+/// (`select::SelectionParts`) while the sweep's monotone advantage is per column.
+///
+/// A view with zero segments (an empty build) has nothing visible in any tile: every
+/// tile's part list is empty, and the response is empty — as before.
+///
+/// **§14.2 fix: `rows_in_ranges` is summed here**, rather than accumulated per-tile inside
+/// [`tile_sweep`]. It used to be counted into each tile's `TileStats` before that tile's own
+/// `visible == 0` check, but a tile that fails that check returns `Ok(None)`, and the fold over the
+/// sweep discards `Ok(None)` entirely — so a grant that left a tile empty silently dropped that
+/// tile's rows from the total, making a field documented as mask-independent
+/// (`rows_in_ranges - sigma_visible` is C4's leak-register numerator, and that subtraction is
+/// meaningless if the minuend already has the mask baked in) actually depend on the session's mask.
+/// The ranges are materialised here, before the tile sweep starts and before any mask is consulted,
+/// so summing them once is mask-free by construction and cannot regress the same way — see
+/// `TileStats`'s doc, which no longer carries this field at all, for the other half of this fix.
+pub(super) fn tile_ranges(
+    set: TileSet,
+    segments: &[(&SegmentData, u32)],
+    probe: &mut Probe,
+) -> Tiling {
+    let TileSet {
+        tiles,
+        underlay_offset,
+        underlay_cells_demanded,
+    } = set;
+    let per_segment: Vec<Vec<Range<u32>>> = segments
+        .iter()
+        .map(|&(segment, _)| tile_ranges_all(segment, &tiles))
+        .collect();
+    let ranges: Vec<Vec<(usize, Range<u32>)>> = (0..tiles.len())
+        .map(|t| {
+            per_segment
+                .iter()
+                .enumerate()
+                .filter_map(|(s, sweep)| {
+                    let range = sweep[t].clone();
+                    (range.start < range.end).then_some((s, range))
+                })
+                .collect()
+        })
+        .collect();
+    probe.lap(|t| &mut t.tile_ranges_ns);
+
+    let rows_in_ranges: u64 = ranges
+        .iter()
+        .flat_map(|parts| parts.iter())
+        .map(|(_, r)| r.len() as u64)
+        .sum();
+    probe.count(|t| &mut t.rows_in_ranges, rows_in_ranges);
+
+    Tiling {
+        tiles,
+        underlay_offset,
+        underlay_cells_demanded,
+        ranges,
+        rows_in_ranges,
+    }
+}
+
 /// One tile's sweep contribution (D-F): count, select and underlay — **no gather**, which the
 /// emit pass does later from the `rows`/`parts` returned here (`streamed-serving.md` §4). The
 /// pure per-tile body pulled out of what was, before streaming, a fused count-select-gather
@@ -428,6 +644,156 @@ pub(super) struct TileSweepOut<'a> {
     pub(super) parts: Vec<SelectionPart<'a>>,
     pub(super) sub_cells: Vec<SubCellCount>,
     pub(super) stats: TileStats,
+}
+
+/// What the sweep produced for the frames below it: every non-empty tile's count row, the
+/// underlay's sub-cells, and the swept tiles themselves, which the emit pass gathers from.
+pub(super) struct Swept<'a> {
+    pub(super) tile_counts: Vec<TileCount>,
+    pub(super) sub_cells: Vec<SubCellCount>,
+    pub(super) swept: Vec<TileSweepOut<'a>>,
+}
+
+impl Engine {
+    /// Sweep every tile — serially or on the pool — and fold the outcomes in tile order.
+    pub(super) fn sweep_tiles<'a>(
+        &self,
+        served: &ServedView<'a>,
+        mask: &EffectiveMask,
+        tiling: &Tiling,
+        params: &SelectParams,
+        req: &ViewportRequest<'_>,
+        probe: &mut Probe,
+    ) -> Result<Swept<'a>> {
+        // Calibration task: the predictor decides serial-fold vs `pool.install` fan-out, and it
+        // must be available BEFORE either path runs — `Σ range.len()`, the total rows every
+        // resolved tile spans (pre-mask, pre-select), is exactly that: already materialised by
+        // the `tile_ranges_all` sweep above, costs one pass over `ranges` to sum, and needs no
+        // work from either candidate path to compute. See [`SERIAL_FALLBACK_MAX_ROWS`]'s doc for
+        // why this predictor (and not tile count) is the one the sweep data supports.
+        //
+        // `underlay_cells_demanded` is added in, not left out. The underlay's own
+        // per-cell cost is "one small binary search plus one bitmap range-count" (the underlay
+        // block's own comment, in `tile_sweep`) — the same shape of operation `count_range`
+        // performs per row-range, so summing the two into one row-equivalent total before
+        // comparing against the threshold is the natural extension of the same predictor, not a
+        // second one bolted on. Before this fix a saturated underlay (`max_underlay_cells`,
+        // default 8192) was invisible to this decision entirely, regardless of how large the
+        // resulting per-tile sub-cell fan-out actually was.
+        let total_rows_in_ranges = tiling.rows_in_ranges + tiling.underlay_cells_demanded;
+
+        // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_sweep` in place —
+        // same function, same input order, no `pool.install` — since below that line the fan-out's
+        // own entry/scheduling cost exceeds the per-tile work it would parallelise (measured; see
+        // the constant's doc). At or above it, the existing `pool.install` fan-out runs, on the
+        // ONE shared pool this engine built at `Engine::open` — no second, per-request pool, no
+        // nested throttling (D-D). Every input to `tile_sweep` is borrowed or `Copy`:
+        // `mask`/`segment`/`params` are the generation- and request-derived values already
+        // resolved above (lifecycle §1.1 — nothing is re-loaded per tile), and `cancel` is the D-C
+        // token, checked inside `tile_sweep` at the very top (moved there rather than here).
+        //
+        // Both branches produce `Vec<Result<Option<TileResult>>>` (this crate's `Result<T>` alias
+        // for `std::result::Result<T, EngineError>`), in `tiles`' order, so the fold below is
+        // identical either way — this is what makes the two paths byte-identical (see this
+        // module's doc; `with_min_len(TILE_PAR_MIN_LEN)` and the parallel branch's own collect
+        // shape are load-bearing for THAT claim within the parallel branch itself).
+        //
+        // D-C cancellation bound, both branches: a `Cancelled` observed inside `tile_sweep`
+        // propagates to the fold below regardless of path, which discards every result after the
+        // first `Err` it walks (see the fold's own comment). What differs is how much wasted work
+        // can be IN FLIGHT past the checkpoint at the instant of cancellation. Serial fold: at
+        // most ONE tile — the one `tile_sweep` call currently running, since nothing else is
+        // concurrently past the checkpoint by construction. Parallel fan-out: at most
+        // `compute_threads` tiles (one per worker) — every tile that had already passed the
+        // checkpoint keeps running to completion; every tile whose worker had not yet reached it
+        // observes the flip there instead and returns immediately. The serial path's bound is
+        // therefore strictly tighter, not merely no-worse.
+        // One closure, not two independently-maintained copies of the same 8-argument
+        // call — the duplication was a divergence risk (a future change to `tile_sweep`'s
+        // argument list would need to be made twice, silently, with no compiler help if one copy
+        // were missed). `run` captures only shared references and `Copy` values, so it is
+        // `Sync` for free and usable from both the serial `Iterator::map` below and rayon's
+        // parallel `map` inside `pool.install` — no new bound this file did not already require of
+        // these captures for the parallel branch to compile before this change.
+        let run = |tile: &Tile, tile_parts: &[(usize, Range<u32>)]| {
+            tile_sweep(
+                tile,
+                tile_parts,
+                mask,
+                &served.segments,
+                params,
+                req.zoom,
+                tiling.underlay_offset,
+                &req.cancel,
+            )
+        };
+
+        // The threshold is read from `self`, not the constant directly, so
+        // `set_serial_fallback_max_rows_for_test` (session.rs, test-only) can override it per-
+        // `Engine` — see that method's doc. **The `serial_fallback_max_rows` field and this load
+        // are unconditional — present and paid in EVERY build, not just `bench-timing` ones.**
+        // Only the setter method is `bench-timing`-gated; nothing outside it ever writes the
+        // field, so in a build without that feature (every shipped binary) this load always
+        // yields `SERIAL_FALLBACK_MAX_ROWS` — behaviourally identical to reading the constant
+        // directly, at the cost of one `Relaxed` atomic load, negligible against the request's
+        // own atomic operations elsewhere. Deliberately not `#[cfg]`-gated to a second code path
+        // here too: that would cost more to audit than the load itself costs to run.
+        let serial_fallback_max_rows =
+            self.switches.serial_fallback_max_rows.load(Ordering::Relaxed);
+        let tile_outcomes: Vec<Result<Option<TileSweepOut>>> = if should_fold_serially(
+            total_rows_in_ranges,
+            serial_fallback_max_rows,
+            tiling.tiles.len(),
+        ) {
+            tiling
+                .tiles
+                .iter()
+                .zip(&tiling.ranges)
+                .map(|(tile, tile_parts)| run(tile, tile_parts))
+                .collect::<Vec<Result<Option<TileSweepOut>>>>()
+        } else {
+            self.pool.install(|| {
+                tiling
+                    .tiles
+                    .par_iter()
+                    .zip(tiling.ranges.par_iter())
+                    .with_min_len(TILE_PAR_MIN_LEN)
+                    .map(|(tile, tile_parts)| run(tile, tile_parts))
+                    .collect::<Vec<Result<Option<TileSweepOut>>>>()
+            })
+        };
+        // D-E: neither branch's own wall time is a named stage — it is already fully accounted
+        // for, per tile, inside each `TileResult::stats` (folded below) — so this resets the clock
+        // without charging the stretch to whatever lap runs next, rather than leaving it to be
+        // silently misattributed. True of the serial branch too: its per-tile costs are equally
+        // captured in `TileStats`, so `skip()` here keeps both branches' accounting symmetric.
+        probe.skip();
+
+        // D-F: the serial, IN-ORDER fold. `tile_outcomes`' order equals `tiles`' order by
+        // construction (the indexed collect path above — this module's doc), so the response
+        // order is the request order. Short-circuits on the
+        // first `Err` (D-C's `Cancelled`, or any other per-tile error): every tile's own work is
+        // already done by this point (the parallel sweep does not itself short-circuit — that is
+        // the point of collecting `Vec<Result<..>>` rather than `Result<Vec<..>>`), so bailing out
+        // here costs only the remaining `Result`s' worth of `?`, never any recomputation.
+        let mut tile_counts = Vec::new();
+        let mut sub_cells = Vec::new();
+        let mut swept: Vec<TileSweepOut> = Vec::new();
+        for outcome in tile_outcomes {
+            let Some(mut ts) = outcome? else {
+                continue;
+            };
+            ts.stats.fold_into(&mut probe.t);
+            tile_counts.push(ts.count.clone());
+            sub_cells.append(&mut ts.sub_cells);
+            swept.push(ts);
+        }
+        Ok(Swept {
+            tile_counts,
+            sub_cells,
+            swept,
+        })
+    }
 }
 
 /// One entity's row in one view, resolved to the **segment that owns it and that segment's local
