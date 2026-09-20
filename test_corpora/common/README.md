@@ -229,16 +229,35 @@ declaration; each layer's artifacts, memberships and supplied content are publis
 
 `equivalence` compares masked counts, per view, on four surfaces that are not equally comparable:
 `zoom0_equal`, the whole extent under each principal, frame-independent; `boxes_equal`, a box at
-zooms 3, 6 and 9, frame-dependent (`extent = "auto"` fits a base built from the complement onto a
+each census zoom, frame-dependent (`extent = "auto"` fits a base built from the complement onto a
 slightly different grid, so a box's margins can disagree by a handful of rows — `frames` carries
 both quantisations, `frames_equal` whether they match); `layers_equal`, the served-artifact frame
-per layer, artifact count and summed masked count, since either alone passes a different defect;
-`parents_equal`, a layer's parent edges per artifact, compared as sets so reordering is not a
-difference.
+per layer — artifact count, summed masked count, and the same two by the level each artifact was
+served at — since any one alone passes a different defect; `parents_equal`, a layer's parent edges
+per artifact, compared as sets so reordering is not a difference.
+
+Every census request carries `layers: "all"`, so each box compares the layers and the parents at
+the levels its own zoom serves: a tiered layer answers only the levels whose declared zoom range
+covers the request's zoom, and a served artifact names a parent only where the same response
+carries that parent. The census zooms are 3, 6 and 9, and the lower bound of every declared level
+range that none of those falls in, which reaches each level of a tiered layer and lands where
+neighbouring levels overlap, the only place a parent edge between them can be compared. The boxes
+are `--equivalence-boxes` per zoom, drawn from the seed, ranked by what the 100% principal sees at
+that zoom on the all-in deployment and taken from the densest three deciles, then asked of both
+deployments and every principal: a box with no artifacts in it compares nothing. A layers or
+parents difference found inside a box names the box and counts under `layers` or `parents` all the
+same.
 
 `equivalence.views` holds each view's own comparison, keyed by name, with the four flags above,
-`frames`, `frames_equal`, `differences` and `differences_by_surface`. The top-level `equal` is
-every view's `equal`; the other top-level fields are the views' own summed or concatenated.
+`frames`, `frames_equal`, `census_coverage`, `differences` and `differences_by_surface`.
+`census_coverage` is what the folded deployment's census reached, read from the principal that
+sees the most: `zooms`, the artifacts and parent edges compared at each census zoom, and `layers`,
+each layer's `declared_levels` against the levels an artifact was served at, with
+`levels_compared`, `levels_declared`, `levels_missing` and the layer's own parent edges. A level in
+`levels_missing` is a failure sentence, since a census that compares no artifact at a level proves
+nothing there. The top-level `equal` is every view's `equal`, `incomplete` is a sentence per census
+request that did not arrive whole, and the other top-level fields are the views' own summed or
+concatenated.
 
 ## Beyond the schema
 
@@ -253,6 +272,6 @@ every view's `equal`; the other top-level fields are the views' own summed or co
 | `publish_rosters` | a column-route layer's roster (key, content, parents, no members), published before the ingest since a hold-out row's column names a key that must exist. Keyed by layer; a missing roster or failed publish carries `{failed: true, reason}` |
 | `minted_credentials` | credential environment variables minted for this run, sorted |
 | `restart` | the deployment stopped and reopened, compared against itself rather than the all-in build (a write cycle suppresses rows the all-in build still serves): `open_s`, `visible`, `visible_before`, per-view comparisons, `census_equal` |
-| `failures` | plain sentences for what did not hold — a blocked build or serve, a batch not fully accepted, a publication failure, an unequal census surface, a fold failure, a restart answering a different count. Empty means the cycle held |
+| `failures` | plain sentences for what did not hold — a blocked build or serve, a batch not fully accepted, a publication failure, an unequal census surface, a declared level the census compared no artifact at, a census request that did not arrive whole, a fold failure, a restart answering a different count. Empty means the cycle held |
 
 The exit code is 1 if `failures` is non-empty; the result file is written first regardless.
