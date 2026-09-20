@@ -2036,3 +2036,300 @@ fn a_list_column_naming_two_parents_refuses_at_every_kind() {
     }
     assert_eq!(engine.published_artifacts(), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// An edge the artifact does not yet hold (`artifacts-from-points.md` §6.2)
+// ---------------------------------------------------------------------------------------------
+
+/// One ingest batch of one point naming `keys` at their own levels, with the edges its list column
+/// declared, each edge at the child's level — the levelled form of [`ingest_edges`], for the tiered
+/// case where a parent sits a level above its child.
+fn ingest_levelled(
+    engine: &Engine,
+    batch: &str,
+    layer: &str,
+    keys: &[(u32, &str)],
+    edges: &[(u32, &str, &str)],
+) -> Result<u64, String> {
+    let descriptors = vec![b"0".to_vec()];
+    let mut hash = [0u8; 32];
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
+        *slot = *byte;
+    }
+    let row = tessera_lifecycle::command::UnallocatedRow {
+        external_id: Some(batch.as_bytes().to_vec()),
+        view: "s0".to_string(),
+        join: None,
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
+    };
+    engine
+        .accept_ingest_joining(
+            vec![row],
+            batch.to_string(),
+            hash,
+            tessera_lifecycle::BatchArtifacts {
+                memberships: keys
+                    .iter()
+                    .map(|(level, key)| tessera_lifecycle::BatchMembership {
+                        layer: layer.to_string(),
+                        level: *level,
+                        key: key.to_string(),
+                        rows: vec![0],
+                    })
+                    .collect(),
+                edges: edges
+                    .iter()
+                    .map(|(level, child, parent)| tessera_lifecycle::BatchEdge {
+                        layer: layer.to_string(),
+                        level: *level,
+                        child: child.to_string(),
+                        parent: parent.to_string(),
+                    })
+                    .collect(),
+            },
+        )
+        .map(|(_, minted)| minted)
+        .map_err(|e| e.to_string())
+}
+
+/// The identifier the viewport serves each artifact under, by key.
+fn ids_by_key(engine: &Engine) -> std::collections::BTreeMap<String, tessera_types::TesseraId> {
+    artifacts_of(engine, &full_coverage_credential(), None)
+        .into_iter()
+        .filter_map(|a| a.key.map(|key| (key, a.tessera_id)))
+        .collect()
+}
+
+/// The parents the viewport names for `key`.
+fn served_parents(engine: &Engine, key: &str) -> Vec<tessera_types::TesseraId> {
+    artifacts_of(engine, &full_coverage_credential(), None)
+        .into_iter()
+        .find(|a| a.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("{key} is served"))
+        .parent_ids
+}
+
+/// **A roster published with no edges takes them from an ingest batch's list column.**
+///
+/// A layer whose artifacts arrive by publication and whose members arrive by ingest is the ordinary
+/// mixed state: the roster names the artifacts and the points name the tree. A build derives the
+/// same edges from the same column, so a growth that dropped them made one input two databases.
+#[test]
+fn an_ingest_batch_records_an_edge_a_parentless_artifact_does_not_hold() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(tree_open("clusters/t")).unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/t".into(),
+            0,
+            vec![
+                node_under(&fx, "p", &[], 0..200),
+                node_under(&fx, "c", &[], 0..100),
+            ],
+        )
+        .expect("two artifacts, neither carrying a parent");
+    assert!(
+        served_parents(&engine, "c").is_empty(),
+        "the roster declared no edge, so there is one to record"
+    );
+
+    assert_eq!(
+        ingest_edges(&engine, "b1", "clusters/t", &["c", "p"], &[("c", "p")])
+            .expect("both keys exist, so nothing mints"),
+        0
+    );
+
+    // A held row form changes at a tick and at no other moment, so the recorded edge reaches a
+    // response on the same terms every other artifact change does.
+    flush(&engine);
+    fold(&engine);
+    let ids = ids_by_key(&engine);
+    assert_eq!(
+        served_parents(&engine, "c"),
+        vec![ids["p"]],
+        "the child names the parent its list column declared"
+    );
+    assert!(served_parents(&engine, "p").is_empty(), "the parent is a root");
+}
+
+/// **The recorded edge is durable**: it comes back from the log at a restart, and from the bundle
+/// alone once the fold has written the level.
+#[test]
+fn a_recorded_edge_survives_a_restart_and_a_fold() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        engine.register_layer(tree_open("clusters/t")).unwrap();
+        engine
+            .publish_artifacts(
+                "clusters/t".into(),
+                0,
+                vec![
+                    node_under(&fx, "p", &[], 0..200),
+                    node_under(&fx, "c", &[], 0..100),
+                ],
+            )
+            .unwrap();
+        ingest_edges(&engine, "b1", "clusters/t", &["c", "p"], &[("c", "p")]).unwrap();
+        assert_eq!(served_parents(&engine, "c").len(), 1);
+    }
+
+    // The log alone: every record replayed, nothing folded.
+    {
+        let engine = fx.open();
+        let ids = ids_by_key(&engine);
+        assert_eq!(
+            served_parents(&engine, "c"),
+            vec![ids["p"]],
+            "replay brings the edge back"
+        );
+        flush(&engine);
+        fold(&engine);
+        assert_eq!(
+            parents_in_bundle(&fx, &engine, "c"),
+            vec![tessera_lifecycle::wal::ParentRef {
+                level: 0,
+                ordinal: 0
+            }],
+            "the fold writes the edge into the record pack"
+        );
+    }
+
+    // The bundle alone.
+    remove_the_whole_log(&fx.wal);
+    let engine = fx.open();
+    let ids = ids_by_key(&engine);
+    assert_eq!(
+        served_parents(&engine, "c"),
+        vec![ids["p"]],
+        "the folded bundle holds the edge with no log behind it"
+    );
+}
+
+/// **An edge the artifact already holds is one edge.** The same column arrives with every point of
+/// the cluster, so the second statement onward has to be a comparison and not a second parent.
+#[test]
+fn an_agreeing_edge_records_no_second_parent() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(tree_open("clusters/t")).unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/t".into(),
+            0,
+            vec![
+                node_under(&fx, "p", &[], 0..200),
+                node_under(&fx, "c", &["p"], 0..100),
+            ],
+        )
+        .unwrap();
+    let ids = ids_by_key(&engine);
+    for batch in ["b1", "b2"] {
+        ingest_edges(&engine, batch, "clusters/t", &["c", "p"], &[("c", "p")])
+            .expect("the edge the artifact holds is the edge the column names");
+    }
+    assert_eq!(served_parents(&engine, "c"), vec![ids["p"]]);
+    flush(&engine);
+    fold(&engine);
+    assert_eq!(
+        parents_in_bundle(&fx, &engine, "c").len(),
+        1,
+        "one edge, however many rows stated it"
+    );
+}
+
+/// **A parent other than the one the artifact holds refuses the batch whole**, as a build refuses
+/// the corpus: there is no correct output, and choosing would publish a hierarchy nobody wrote. So
+/// does one batch whose own rows disagree about a parentless child.
+#[test]
+fn a_parent_other_than_the_held_one_refuses_the_batch() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(tree_open("clusters/t")).unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/t".into(),
+            0,
+            vec![
+                node_under(&fx, "p0", &[], 0..200),
+                node_under(&fx, "p1", &[], 0..200),
+                node_under(&fx, "c", &["p0"], 0..100),
+                node_under(&fx, "free", &[], 0..50),
+            ],
+        )
+        .unwrap();
+    let before = count_of(&engine, "c");
+
+    let refused = ingest_edges(&engine, "b1", "clusters/t", &["c"], &[("c", "p1")])
+        .expect_err("the artifact holds p0");
+    assert!(refused.contains("c") && refused.contains("p1"), "{refused}");
+
+    let refused = ingest_edges(
+        &engine,
+        "b2",
+        "clusters/t",
+        &["free"],
+        &[("free", "p0"), ("free", "p1")],
+    )
+    .expect_err("one batch, two parents for one parentless child");
+    assert!(refused.contains("free"), "{refused}");
+
+    assert_eq!(
+        count_of(&engine, "c"),
+        before,
+        "neither refused batch joined anything"
+    );
+    assert_eq!(
+        served_parents(&engine, "c").len(),
+        1,
+        "the child keeps the parent it was published under"
+    );
+    assert!(
+        served_parents(&engine, "free").is_empty(),
+        "a refused batch records no edge"
+    );
+}
+
+/// **The same on a tiered layer, where the parent sits a level above the child** — and where the
+/// parent is minted by the very batch that records the edge.
+#[test]
+fn a_tiered_edge_is_recorded_against_a_parent_minted_by_the_same_batch() {
+    let fx = fixture();
+    let engine = fx.open();
+    let mut layer = tiered_zoomed("admin/b", &[(0, 7), (0, 7)]);
+    layer.value_set = tessera_types::layer::ValueSet::Open;
+    engine.register_layer(layer).unwrap();
+    // The fine level's artifact exists and hangs from nothing; the coarse level is empty.
+    engine
+        .publish_artifacts("admin/b".into(), 1, vec![node_under(&fx, "state", &[], 0..150)])
+        .unwrap();
+    assert!(served_parents(&engine, "state").is_empty());
+
+    assert_eq!(
+        ingest_levelled(
+            &engine,
+            "b1",
+            "admin/b",
+            &[(0, "country"), (1, "state")],
+            &[(1, "state", "country")],
+        )
+        .expect("the coarse level mints and the fine one takes its parent"),
+        1,
+        "only the country is created"
+    );
+
+    flush(&engine);
+    fold(&engine);
+    let ids = ids_by_key(&engine);
+    assert_eq!(
+        served_parents(&engine, "state"),
+        vec![ids["country"]],
+        "the child takes the parent this batch minted a level above it"
+    );
+}

@@ -829,7 +829,7 @@ impl Executor {
         };
         let mut mints: Vec<WalRecord> = Vec::new();
         let mut minted_count = 0u64;
-        if !wanted.is_empty() {
+        if !wanted.is_empty() || !mint_edges.is_empty() {
             match self.prepare_mints(&wanted, &mint_edges) {
                 Ok((records, resolved, minted)) => {
                     settle_resolved_ordinals(&mut memberships, &resolved);

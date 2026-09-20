@@ -1279,3 +1279,154 @@ fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
         built.iter().map(|e| e.raw()).collect::<Vec<_>>()
     );
 }
+
+// -------------------------------------------------------------------------------------------
+// 9. Two batches in one window naming an edge the artifact does not hold
+// -------------------------------------------------------------------------------------------
+
+/// A `nested` layer whose keys mint, for the edge cases below. The flat declaration above declares
+/// no lineage at all, so an edge on it is refused before it is decided.
+fn nested_open(name: &str) -> LayerDeclaration {
+    let mut d = declaration(name, ValueSet::Open);
+    d.hierarchy.kind = HierarchyKind::Nested;
+    d
+}
+
+/// One batch of one point, naming `keys` and declaring `edges`.
+fn ingest_with_edges(
+    engine: &Engine,
+    batch: &str,
+    layer: &str,
+    keys: &[&str],
+    edges: &[(&str, &str)],
+    x: f64,
+) -> Result<u64, String> {
+    engine
+        .accept_ingest_joining(
+            vec![row(engine, batch, x, x)],
+            batch.to_string(),
+            body_hash(batch),
+            BatchArtifacts {
+                memberships: keys
+                    .iter()
+                    .map(|key| BatchMembership {
+                        layer: layer.to_string(),
+                        level: 0,
+                        key: key.to_string(),
+                        rows: vec![0],
+                    })
+                    .collect(),
+                edges: edges
+                    .iter()
+                    .map(|(child, parent)| tessera_lifecycle::BatchEdge {
+                        layer: layer.to_string(),
+                        level: 0,
+                        child: child.to_string(),
+                        parent: parent.to_string(),
+                    })
+                    .collect(),
+            },
+        )
+        .map(|(_, minted)| minted)
+        .map_err(|e| e.to_string())
+}
+
+/// The parents the viewport names for `key`.
+fn parents_of(engine: &Engine, key: &str) -> Vec<tessera_types::TesseraId> {
+    artifacts_of(engine, &full_coverage_credential())
+        .into_iter()
+        .find(|a| a.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("{key} is served"))
+        .parent_ids
+}
+
+/// **Two batches of one window naming the same new edge record one edge.** The edge is decided at
+/// each admission and applied once at the close, so the second statement of it is a comparison and
+/// not a second parent.
+#[test]
+fn two_batches_in_one_window_naming_one_new_edge_record_it_once() {
+    let fx = fixture();
+    let (engine, faults) = fx.open_with_faults();
+    engine.register_layer(nested_open(LAYER)).unwrap();
+    engine
+        .publish_artifacts(
+            LAYER.into(),
+            0,
+            vec![
+                IncomingArtifact::from_entities(Some("p".into()), fx.members(0..200)),
+                IncomingArtifact::from_entities(Some("c".into()), fx.members(0..100)),
+            ],
+        )
+        .expect("two artifacts, neither carrying a parent");
+
+    let (fsyncs_before, first, second) = std::thread::scope(|s| {
+        let parked = park(s, &engine, &faults);
+        let fsyncs_before = engine.write_executor_stats().wal_fsyncs;
+        let b1 = s.spawn(|| ingest_with_edges(&engine, "b1", LAYER, &["c", "p"], &[("c", "p")], 5.0));
+        wait_for_queue(&engine, parked.base + 1);
+        let b2 = s.spawn(|| ingest_with_edges(&engine, "b2", LAYER, &["c", "p"], &[("c", "p")], 6.0));
+        wait_for_queue(&engine, parked.base + 2);
+
+        faults.release();
+        parked.gate.join().unwrap();
+        (fsyncs_before, b1.join().unwrap(), b2.join().unwrap())
+    });
+    assert_eq!(
+        engine.write_executor_stats().wal_fsyncs - fsyncs_before,
+        1,
+        "the two batches closed one window"
+    );
+    first.expect("the first batch is accepted");
+    second.expect("the second batch is accepted");
+    assert_eq!(
+        parents_of(&engine, "c").len(),
+        1,
+        "one edge, whichever batch of the window stated it"
+    );
+}
+
+/// **Two batches of one window naming different parents for one parentless child refuse the
+/// window.** The conflict is the same one a build refuses over a corpus, and it is found where the
+/// window's edges are gathered — before anything is appended, so neither batch lands and a replay
+/// has nothing to disagree with.
+#[test]
+fn two_batches_in_one_window_disagreeing_about_a_parent_refuse_the_window() {
+    let fx = fixture();
+    let (engine, faults) = fx.open_with_faults();
+    engine.register_layer(nested_open(LAYER)).unwrap();
+    engine
+        .publish_artifacts(
+            LAYER.into(),
+            0,
+            vec![
+                IncomingArtifact::from_entities(Some("p0".into()), fx.members(0..200)),
+                IncomingArtifact::from_entities(Some("p1".into()), fx.members(0..200)),
+                IncomingArtifact::from_entities(Some("c".into()), fx.members(0..100)),
+            ],
+        )
+        .unwrap();
+
+    let (first, second) = std::thread::scope(|s| {
+        let parked = park(s, &engine, &faults);
+        let b1 =
+            s.spawn(|| ingest_with_edges(&engine, "b1", LAYER, &["c"], &[("c", "p0")], 5.0));
+        wait_for_queue(&engine, parked.base + 1);
+        let b2 =
+            s.spawn(|| ingest_with_edges(&engine, "b2", LAYER, &["c"], &[("c", "p1")], 6.0));
+        wait_for_queue(&engine, parked.base + 2);
+
+        faults.release();
+        parked.gate.join().unwrap();
+        (b1.join().unwrap(), b2.join().unwrap())
+    });
+    for outcome in [&first, &second] {
+        let refused = outcome
+            .as_ref()
+            .expect_err("the window carries two parents for one child");
+        assert!(refused.contains("c"), "{refused}");
+    }
+    assert!(
+        parents_of(&engine, "c").is_empty(),
+        "a refused window records no edge"
+    );
+}
