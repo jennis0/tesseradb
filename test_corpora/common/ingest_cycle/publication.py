@@ -19,33 +19,17 @@ import pyarrow.parquet as pq
 _B64 = np.frombuffer(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", np.uint8)
 
 #: A member table's row, as the partitioning pass writes it: the artifact's ordinal in publication
-#: order, the row's rank (−1 is the membership, `k` is `contents[k]`'s generating set) and the
-#: entity. 14 bytes; 1.66×10⁹ rows of rung 3's DAG membership are 23 GB of transient files.
+#: order, the row's rank (-1 is the membership, `k` is `contents[k]`'s generating set) and the
+#: entity.
 MEMBER_RECORD = np.dtype([("idx", "<i4"), ("rank", "<i2"), ("entity", "<u8")])
 
 EMPTY_ENTITIES = np.zeros(0, np.uint64)
 
 
 def external_ids_b64(entities: np.ndarray) -> np.ndarray:
-    """`(n, 12)` uint8: each entity id as eight little-endian bytes, base64.
-
-    **The external id is the source entity id, little-endian, because that is the one address both
-    halves of the split share.** A publication names its members by external id, and its members
-    are base rows and ingested rows alike: the ingested half carries whatever `external_id` the
-    batch supplied, and the built half carries whatever the build minted, which is
-    `source_id.to_le_bytes()` under `--mint-external-ids` (`tessera-build`'s `ExternalIdRow`) and
-    nothing at all without it. So the driver builds the base with that flag and sends the same
-    eight bytes on ingest, and one member list then addresses both.
-
-    Computed from the ids in NumPy rather than looked up in a table indexed by entity id: rung 5's
-    table was 16 bytes for each of 2.3×10⁸ entities, 3.7 GB, filled by a Python loop over every
-    id. Eight bytes are two full base64 groups and one group of two bytes, so the twelfth
-    character is always `=`.
-
-    ⊘ **This is why the PMID is no longer the external id.** An earlier driver sent the PMID, which
-    is the natural caller identifier for that corpus and is still the `pmid` attribute, but the
-    build cannot mint an external id from a column, so a published membership over base rows was
-    unaddressable and the whole batch was refused, naming member 0 of artifact 0.
+    """`(n, 12)` uint8: each entity id as eight little-endian bytes, base64, the external id a
+    publication names base rows and ingested rows alike by. Eight bytes are two full base64
+    groups and one of two bytes, so the twelfth character is always `=`.
     """
     raw = np.ascontiguousarray(entities, dtype="<u8").view(np.uint8).reshape(-1, 8)
     out = np.empty((len(raw), 12), np.uint8)
@@ -69,11 +53,8 @@ def json_list_bytes(count: int) -> int:
 
 
 def json_list(entities: np.ndarray) -> bytes:
-    """A JSON array of base64 external ids, as bytes, assembled in NumPy.
-
-    One `(n, 15)` byte array — quote, twelve characters, quote, comma — then one copy. No Python
-    string is made per member: `json.dumps` over 7.6×10⁵ of them was the largest single cost in
-    a publication, and a list of 4×10⁶ Python `bytes` is a gigabyte of interpreter objects.
+    """A JSON array of base64 external ids, as bytes: one `(n, 15)` byte array — quote, twelve
+    characters, quote, comma — then one copy, rather than a Python string built per member.
     """
     if not len(entities):
         return b"[]"
@@ -86,12 +67,9 @@ def json_list(entities: np.ndarray) -> bytes:
 
 
 def roster_table(path: Path) -> pa.Table:
-    """A roster, with `parent` as a **list of keys** whichever way the file spells it.
-
-    A rung writes one parent per artifact as a string column and several as a list, and an artifact
-    with none is null in both. Read as it is written, a string is a sequence of characters: every
-    edge is then counted once per character, declared against keys no layer holds, and none is
-    published. Normalised here, where the file is read, so every reader below sees one shape.
+    """A roster, with `parent` as a list of keys whichever way the file spells it: a single
+    parent may be written as a plain string, which would otherwise be counted as one edge per
+    character. Normalised here so every reader below sees one shape.
     """
     table = pq.read_table(path)
     if "parent" not in table.schema.names:
@@ -108,16 +86,8 @@ def roster_table(path: Path) -> pa.Table:
 
 
 def in_parent_order(table: pa.Table) -> pa.Table:
-    """A roster's rows reordered so that no artifact precedes a parent of its own.
-
-    A publication resolves a parent key against the level as it stands **plus the artifacts earlier
-    in the same batch** (`LayerRegistry::prepare_publish`), so a child published before its parent
-    names nothing and refuses the batch. A roster is written in key order, which for a DAG of MeSH
-    descriptors is alphabetical and unrelated to depth.
-
-    By longest path to a root, which is the layer's own depth and is what a level-by-level
-    publication would have used. A parent the roster does not hold is ignored here, as it is where
-    the row is written: it is not an artifact of this layer.
+    """A roster's rows reordered by longest path to a root, so no artifact precedes a parent of
+    its own. A parent the roster does not hold is ignored.
     """
     if "parent" not in table.schema.names:
         return table
@@ -127,10 +97,8 @@ def in_parent_order(table: pa.Table) -> pa.Table:
     depth = [-1] * len(keys)
 
     for start in range(len(keys)):
-        # Iterative rather than recursive: 3.0×10⁴ descriptors is shallow, but a rung's DAG is the
-        # caller's data and a recursion limit is not the refusal anyone wants to read. `on_stack`
-        # is the cycle guard — the service refuses a cycle at publication, and a driver that spun
-        # for ever instead of saying so would look like a hung run.
+        # Iterative rather than recursive: a DAG is the caller's data, and a recursion limit is
+        # not the refusal anyone wants to read. `on_stack` is the cycle guard.
         stack = [start]
         on_stack = set()
         while stack:
@@ -157,10 +125,8 @@ def in_parent_order(table: pa.Table) -> pa.Table:
 
 def key_order_is_parent_order(keys: Sequence[str], parents: Sequence[list | None]) -> bool:
     """Whether publishing the roster in key order would put every parent before its children.
-
-    True for a layer with no edges. Where it holds, a member file sorted by key can be streamed
-    and published in file order; where it does not, the file is partitioned into publication
-    order first.
+    Where it holds, a member file sorted by key can be streamed and published in file order;
+    where it does not, the file is partitioned into publication order first.
     """
     held = set(keys)
     return all(
@@ -185,22 +151,16 @@ def key_ranges(path: Path) -> list[tuple[str, str]] | None:
 
 
 def grouped_by_key(ranges: Sequence[tuple[str, str]]) -> bool:
-    """Whether consecutive row groups' key ranges never overlap, so every key's rows are contiguous.
-
-    Two adjacent row groups may share one key at their boundary; a row group whose maximum exceeds
-    the next one's minimum means a key's rows can be anywhere in the file. Parquet orders string
-    statistics bytewise, as Python compares `str`.
+    """Whether consecutive row groups' key ranges never overlap, so every key's rows are
+    contiguous, allowing one shared key at a boundary.
     """
     return all(a_max <= b_min for (_, a_max), (b_min, _) in zip(ranges, ranges[1:]))
 
 
 def member_columns(table: pa.Table, value_set: pa.Array, path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """`(ordinal int32, rank int16, entity uint64)` for one read of a member table.
-
-    The ordinal is the key's position in `value_set`, the roster in publication order. A `key`
-    read as a dictionary is mapped through its dictionary, so a 10⁶-row row group costs one
-    `index_in` over its distinct keys and one NumPy take; a row whose key the roster does not hold
-    is a refusal naming it. `rank` null becomes −1.
+    """`(ordinal int32, rank int16, entity uint64)` for one read of a member table. The ordinal
+    is the key's position in `value_set`, the roster in publication order; a row whose key the
+    roster does not hold is a refusal naming it. `rank` null becomes -1.
     """
     keys = table.column("key")
     if keys.null_count:
@@ -233,9 +193,8 @@ def member_columns(table: pa.Table, value_set: pa.Array, path: Path) -> tuple[np
 
 
 def rank_groups(idx: np.ndarray, rank: np.ndarray, entity: np.ndarray):
-    """Yield `(ordinal, {rank: entities})` for every ordinal present, in ordinal order.
-
-    One `lexsort` over the rows, then the group boundaries are one `diff`.
+    """Yield `(ordinal, {rank: entities})` for every ordinal present, in ordinal order: one
+    `lexsort` over the rows, then the group boundaries are one `diff`.
     """
     if not len(idx):
         return
@@ -255,50 +214,19 @@ def rank_groups(idx: np.ndarray, rank: np.ndarray, entity: np.ndarray):
 
 
 class Publication:
-    """One declared layer's roster, published in batches under a byte cap, as they are assembled.
+    """One declared layer's roster, published in batches under a byte cap. Every artifact
+    carries its whole member set, addressed by external id; one whose body would exceed
+    `--publish-max-bytes` is published with as many members as fit, then grown through
+    `PATCH /control/layers/{name}/artifacts`. Only an artifact whose key, content and parents
+    alone do not fit is declined.
 
-    **Every artifact carries its whole member set**, base rows and ingested rows alike, addressed
-    by external id, which is the address both halves share. The batch is the commit unit at the
-    route, so the cap splits *between* artifacts. An artifact whose whole body would exceed
-    `--publish-max-bytes` is published with its key, content, parents and as many members as fit
-    under the cap, then **grown** through `PATCH /control/layers/{name}/artifacts` in slices of at
-    most the cap, in the same parent-before-child order and after the batch that published it
-    (decision 0127; contracts §3.4). `grown_artifacts`, `grow_requests` and `grown_members` record
-    that path. Only an artifact whose key, content and parents alone do not fit is declined, and
-    recorded with its key, member count and body bytes before its member list is ever built.
+    The member table is read in artifact order once, never held whole: streamed where
+    consecutive row groups' key ranges do not overlap and key order is parent-before-child, or
+    partitioned via buckets under `--publish-bucket-rows` read back one at a time otherwise.
 
-    **The member table is read in artifact order once, and never held whole.** A layer's member
-    table can be 1.66×10⁹ rows (rung 3's DAG membership), and a driver that inverted it in memory
-    to address it per artifact held ~25 GB of bodies for it and declined the layer instead. Two
-    readers, chosen from the file's own row-group statistics:
-
-    * **Streamed**, where consecutive row groups' key ranges do not overlap (a k-means member file,
-      written one cluster after another) and key order is a parent-before-child order for this
-      layer. Row groups are read one at a time; a key closes when the next row group's minimum is
-      past it, so what is live is the row groups spanning one key boundary. A key that reappears
-      after closing is a refusal, so the statistics are checked rather than trusted.
-    * **Partitioned**, otherwise. One pass over `key` and `rank` counts each artifact's rows, and
-      buckets are planned as ranges of the publication order under `--publish-bucket-rows` (an
-      artifact over the budget has a bucket to itself). One pass writes every row as a 14-byte
-      record into its bucket under `--work`; then one bucket at a time is read back, sorted, and
-      published. Peak memory is one bucket plus one artifact's body, whatever the table's size.
-      Buckets are ranges of the publication order, so a parent is never in a later bucket than
-      its child. An artifact whose membership alone already exceeds the route's cap is declined
-      at planning and its rows are not written.
-
-    **The roster's `parent` list travels as the artifact's `parent`**, which is where a `dag`
-    layer's edges are spelled and the only place they are (decision 0125); `edges_published`
-    counts what landed, against `edges_declared`. Parents are published before their children
-    ([`in_parent_order`]): a parent must already exist or sit earlier in the same batch, an
-    ordering an edge has always carried (`annotation-representation.md` §5.0.4).
-
-    **A declined artifact is not held, and a child's edge to it is dropped before sending.** The
-    route refuses an artifact whose parent the layer does not hold, so an edge to a declined parent
-    would refuse every descendant's batch and the census would list the whole tree as missing
-    rather than the artifacts that were declined. The child is kept, its edge to the declined
-    parent is dropped, and `edges_dropped_to_declined` counts them beside `edges_published`. A
-    parent whose batch the route **refused** is a different case: its children's batches are
-    refused too, each refusal is counted and logged, and the census then lists the subtree.
+    The roster's `parent` list travels as the artifact's `parent`, published before their
+    children ([`in_parent_order`]); a declined artifact's edge is dropped from its children so a
+    census difference lands on it rather than on every descendant.
     """
 
     def __init__(
@@ -316,11 +244,7 @@ class Publication:
         self.held = set(self.keys)
         self.members_path = members
         self.work = work
-        # **Every cap is the served deployment's**, read from `/control/status`'s `limits` block
-        # ([`Cycle.served_limits`]): `--publish-max-bytes` is clamped to the publication route's
-        # byte cap, a batch closes at its artifact count, and a growth slice stays under both the
-        # growth route's byte cap and its member count. A value carried by the driver would be a
-        # second number that can disagree with the one the route refuses over.
+        # Every cap is the served deployment's, read from `/control/status`'s `limits` block.
         self.max_bytes = min(max_bytes, int(limits["publish"]["max_body_bytes"]))
         self.max_artifacts = int(limits["publish"]["max_artifacts_per_request"])
         self.grow_max_bytes = min(max_bytes, int(limits["grow"]["max_body_bytes"]))
@@ -425,7 +349,7 @@ class Publication:
         self.stats["count_s"] = round(time.perf_counter() - t0, 2)
 
         # Buckets: ranges of the publication order under the row budget. An artifact over the
-        # budget has a bucket to itself; its membership is published in slices, never declined.
+        # budget has a bucket to itself.
         bucket_of = np.full(count, -1, np.int32)
         bucket_range: list[tuple[int, int]] = []
         start, filled = 0, 0
@@ -479,15 +403,10 @@ class Publication:
         return b'{"key":' + json.dumps(self.rows[i]["key"]).encode() + b',"members":'
 
     def bodies(self):
-        """Yield the requests in order: `("put", level, body, artifacts, members, edges)` as each
-        batch fills, and `("grow", level, key, body, members)` for each slice that grows an artifact
-        the batch before it published.
-
-        A batch closes when the next artifact would take it over `--publish-max-bytes` or the
-        route's artifact count, or sits on another level; the wrapper is one level per request. An
-        artifact whose whole membership does not fit closes the batch it is in, so its slices
-        follow the request that created it.
-        """
+        """Yield the requests in order: `("put", level, body, artifacts, members, edges)` per
+        batch, and `("grow", level, key, body, members)` per slice that grows an artifact the
+        batch before it published. A batch closes at `--publish-max-bytes`, the artifact count,
+        or a level change."""
         if self.members_path is not None:
             self.work.mkdir(parents=True, exist_ok=True)
         batch: list[bytes] = []
@@ -569,8 +488,7 @@ class Publication:
                 }
             ).encode()
         tail += b"}"
-        # Sized before anything large is built: a declined artifact's list is never assembled, and
-        # a grown one's is built only as far as the cap allows.
+        # Sized before anything large is built, so a declined artifact's list is never assembled.
         fixed = len(head) + len(tail) + len(self._body(0, [b""]))
         if content_heads:
             fixed += len(b',"content":[') + 1 + sum(

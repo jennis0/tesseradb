@@ -21,10 +21,8 @@ import pyarrow.parquet as pq
 
 
 def split_entities(points: Path, fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """`(base entity ids, hold-out entity ids)` — a seeded uniform hold-out of `fraction`.
-
-    Uniform over **entities**, not over rows of the file, which for a one-row-per-entity points
-    file is the same thing and is stated because it stops being so the moment a rung has views.
+    """`(base entity ids, hold-out entity ids)` — a seeded uniform hold-out of `fraction`, over
+    entities rather than rows, which differ once a rung has several views.
     """
     ids = pq.read_table(points, columns=["entity_id"]).column("entity_id").to_numpy()
     rng = np.random.default_rng(seed)
@@ -36,15 +34,12 @@ def split_entities(points: Path, fraction: float, seed: int) -> tuple[np.ndarray
 
 
 def in_sorted(values: np.ndarray, sorted_ids: np.ndarray) -> np.ndarray:
-    """Membership of `values` in `sorted_ids`, by binary search.
-
-    `np.isin` builds an intermediate the size of both inputs; at rung 3 one of them is 1.66×10⁹
-    rows and the other 3.6×10⁷, so the pass is done a row group at a time against a sorted array
-    instead.
+    """Membership of `values` in `sorted_ids`, by binary search against a sorted array rather
+    than `np.isin`, which builds an intermediate the size of both inputs.
     """
     if len(sorted_ids) == 0:
-        # The f = 1.0 cell: nothing is kept for the base at all. An empty `keep` is a real case
-        # and the whole point of that cell — a build over a zero-row points file.
+        # At f = 1.0 nothing is kept for the base: an empty `keep` is a real case, a build over
+        # a zero-row points file.
         return np.zeros(len(values), dtype=bool)
     idx = np.searchsorted(sorted_ids, values)
     idx[idx >= len(sorted_ids)] = 0
@@ -54,21 +49,9 @@ def in_sorted(values: np.ndarray, sorted_ids: np.ndarray) -> np.ndarray:
 def filter_parquet(
     source: Path, out: Path, column: str, keep: np.ndarray, drop: Sequence[str] = ()
 ) -> int:
-    """Copy `source` to `out`, keeping rows whose `column` is in `keep`. **A row group at a time.**
-
-    Streaming rather than `read_table().filter()` because rung 3's points file is 4 GB of parquet:
-    read whole it is tens of gigabytes of Arrow, and the machine this runs on has 47. Through
-    `read_row_group` rather than `iter_batches`, for the reason `HoldOut.batches` gives: the batch
-    reader retains part of every row group it has yielded, and over rung 4's file that is tens of
-    gigabytes by the time the split ends.
-
-    **Written under the source's own compression**, not `ParquetWriter`'s default. Rung 4's points
-    file is 52 GB of ZSTD carrying abstracts; rewritten as Snappy the 90% base copy passes 130 GB
-    and fills the disk before the build starts. The codec is read off the first row group, so a
-    rung that changes its own is followed rather than assumed.
-
-    `drop` names columns to leave behind — see [`write_base_inputs`], which drops the membership
-    columns a rung's points file may carry.
+    """Copy `source` to `out`, keeping rows whose `column` is in `keep`, a row group at a time
+    through `read_row_group`, for the reason `HoldOut.batches` gives, and under the source's own
+    compression rather than `ParquetWriter`'s default. `drop` names columns to leave behind.
     """
     reader = pq.ParquetFile(source)
     codec = reader.metadata.row_group(0).column(0).compression.lower()
@@ -97,12 +80,8 @@ def filter_parquet(
 
 
 def ranks_file(rung: Path) -> Path:
-    """The rung's principal ladder — `[{"term": …, "pairs": …}, …]`, richest term first.
-
-    **Named after the rung's own axis, not after MedCPT's.** Rung 3 and MedCPT rank by branch and
-    write `branch-ranks.json`; rung 4 ranks by licence and writes `licence-ranks.json`. A driver
-    that opened the first by name refused to run against the second at all, after building its
-    base.
+    """The rung's principal ladder — `[{"term": ..., "pairs": ...}, ...]`, richest term first,
+    read from whichever `<axis>-ranks.json` is present.
     """
     named = rung / "branch-ranks.json"
     if named.exists():
@@ -114,11 +93,8 @@ def ranks_file(rung: Path) -> Path:
 
 
 def bundle_manifest(bundle: Path) -> tuple[str, dict] | None:
-    """`(version prefix, manifest)` of the bundle's **current** version, or None for no bundle.
-
-    The version is the one `CURRENT` names. Read by name, the lexicographically last `v*` is a
-    version the bundle has written and may have abandoned, and its frame is then stated against a
-    manifest nothing serves.
+    """`(version prefix, manifest)` of the bundle's current version, or None for no bundle: the
+    version `CURRENT` names, not the lexicographically last `v*`, which can be abandoned.
     """
     current = bundle / "CURRENT"
     if not current.is_file():
@@ -129,25 +105,9 @@ def bundle_manifest(bundle: Path) -> tuple[str, dict] | None:
 
 
 def state_extent(corpus_toml: Path, bundle: Path) -> dict | None:
-    """Rewrite each `[[view]]`'s `extent = "auto"` as **that view's own** frame in the all-in bundle.
-
-    Two things follow from `auto`, and both are properties of the *frame* rather than of ingest:
-
-    * **A zero-row build is refused.** `auto` fits a box around the data, and there is no box
-      around no rows — the refusal says so and names this remedy. So the *f* = 100% cell cannot
-      run at all under `auto`, and a deployment starting empty must state its frame.
-    * **A complement build quantises onto a different grid.** The frame is fitted to the rows the
-      build saw, so a base built from 90% of the corpus has a slightly smaller box, and the two
-      deployments' cells do not line up. Every box-level count then differs at the margins for a
-      reason that has nothing to do with the write path.
-
-    Stating the all-in frame removes both. Each view's frame is fitted to its own layout, so a
-    declaration carrying several views takes several frames: one frame written over both puts one
-    route's points in a corner of the other's grid, which quantisation clamps rather than refuses.
-
-    It is a change to the *declaration the measurement builds from*, never to the rung's committed
-    one, and the run records what was stated.
-    """
+    """Rewrite each `[[view]]`'s `extent = "auto"` as that view's own frame in the all-in bundle:
+    `auto` refuses a zero-row build and quantises a complement build onto a slightly different
+    grid. Changes the declaration the measurement builds from, never the rung's committed one."""
     read = bundle_manifest(bundle)
     if read is None:
         return None
@@ -191,34 +151,10 @@ def state_extent(corpus_toml: Path, bundle: Path) -> dict | None:
 def base_declaration(
     text: str, keep_members: Sequence[str] = (), keep_sources: Sequence[str] = ()
 ) -> tuple[str, list[dict]]:
-    """The rung's `corpus.toml` as the base's: every layer stated, and only a column-route layer's
-    member table kept.
-
-    A `[[layer]]` block says two kinds of thing. Its declaration — kind, levels, views, the three
-    disclosure controls, the content kinds — is what a running deployment holds and what
-    `PUT /control/layers` takes. Its `source` and `[layer.members]` are *acquisition*: where the
-    rows come from, which is build-only and is the half decision 0091 excludes from the rule that
-    the two entry points say the same things (`configuration.md` §2). Removing that half leaves a
-    layer that exists, is empty, and can be published into.
-
-    `keep_members` names the layers whose `[layer.members]` stays: the ones whose member table is
-    per-point, which the build reads over the base's rows and whose hold-out rows carry the same
-    list on the wire (the module doc). `keep_sources` names the layers whose roster stays, which
-    are those of them that declare supplied content: an artifact of such a layer cannot be minted
-    from a key alone, at either entry point, so the base build takes the roster the all-in build
-    took. Every other layer's `source` is removed, a roster being the publication route's input.
-
-    **A layer declared with no source is legal and needed no change** (`Config::layer_sources`
-    carries `None` for it): the build reads no artifact table, plans no artifacts, and writes an
-    empty level. What the build *does* refuse for an empty layer is nothing at all — the refusals
-    an earlier driver met at *f* = 100% were about an empty **corpus**, not an empty layer, and
-    they are gone with the roster.
-
-    Only `source` at a `[[layer]]`'s own depth is removed. `[defaults]` and `[[view]]` carry a
-    `source` too and are untouched: the points still come from a file.
-
-    Returns the rewritten text and one record per layer, saying what was removed from it.
-    """
+    """The rung's `corpus.toml` as the base's: every layer stated, and only a column-route
+    layer's member table kept. A `[[layer]]`'s `source` and `[layer.members]` are build-only
+    acquisition, removed except where `keep_members` or `keep_sources` names the layer. Returns
+    the rewritten text and one record per layer, saying what was removed."""
     out: list[str] = []
     removed: list[dict] = []
     section: str | None = None
@@ -266,21 +202,9 @@ def source_path(rung: Path, named: dict, key: str | None) -> Path | None:
 
 
 def declared_layers(rung: Path) -> list[dict]:
-    """Every `[[layer]]` of the rung's declaration, with the files its acquisition names.
-
-    One record per layer, in declaration order: `name`; `roster`, the path the layer's own `source`
-    names, or None where the layer declares none (an open value set mints its artifacts from the
-    member rows); `members`, the path `[layer.members] source` names, or None; `attribute`, the
-    column an attribute-membership layer is drawn from, or None; `supplied`, whether the layer
-    declares supplied content; and `route`, how its membership reaches the folded deployment
-    (the module doc): `attribute` for a predicate layer, `column` for a layer whose member table is
-    **per point** — the build reads it over the base's rows and the hold-out's rows carry the same
-    lists on the wire — and `publication` for one whose member table is per (artifact, entity),
-    which is read artifact by artifact and sent with the artifact.
-
-    Read off the declaration rather than listed in this file: a table of two layer names ran every
-    rung's cell with at most those two, so rung 4's `topics/openalex` was never published and no
-    record said so.
+    """Every `[[layer]]` of the rung's declaration, with the files its acquisition names and its
+    `route`: `attribute` for a predicate layer, `column` for a per-point member table,
+    `publication` for a per (artifact, entity) one.
     """
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
@@ -313,13 +237,9 @@ def declared_layers(rung: Path) -> list[dict]:
 
 
 def per_point_member_table(path: Path) -> bool:
-    """Whether a member table names **a point's artifacts in a list column** — one row per point,
-    one entry per declared level — rather than one row per (artifact, entity).
-
-    The two shapes are two routes. A list column is what the build reads beside the points file and
-    what an ingest batch carries as the column named for the layer, so such a membership travels
-    with the rows that hold it. A `key` and `rank` per row addresses artifacts, and its rows are
-    read artifact by artifact and sent with the artifact they belong to.
+    """Whether a member table names a point's artifacts in a list column — one row per point, one
+    entry per declared level — rather than one row per (artifact, entity), which is read artifact
+    by artifact and sent with the artifact it belongs to.
     """
     key = pq.ParquetFile(path).schema_arrow.field("key")
     return pa.types.is_list(key.type) or pa.types.is_large_list(key.type)
@@ -346,12 +266,9 @@ def build_bundle(
     extra: Sequence[str] = (),
     env: dict[str, str] | None = None,
 ) -> dict:
-    """`tessera build` into `out`, and what it cost.
-
-    `peak_rss_kib` is the largest stage's own high-water, which the build reports per stage. The
-    driver's `getrusage(RUSAGE_CHILDREN)` is a high-water over every child it has reaped — a
-    `cargo build` among them — and cannot be attributed to this build.
-    """
+    """`tessera build` into `out`, and what it cost. `peak_rss_kib` is the largest stage's own
+    high-water, as the build reports it, rather than the driver's `getrusage`, a high-water over
+    every child it has reaped."""
     t0 = time.perf_counter()
     proc = subprocess.run(
         [
@@ -385,32 +302,10 @@ def build_bundle(
 
 
 def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
-    """The complement's inputs: **the points, the declaration, and a column-route layer's member
-    table over the base's rows.** Nothing else.
-
-    No artifact roster is copied, and no member table of a layer on the publication route (the
-    module doc). Every such artifact, its membership and its supplied content is published on the
-    wire after the points it depends on have been ingested, so a roster beside the build would be
-    the same layer supplied twice — once as a build input and once as a publication — and the
-    level's keys would collide on the second.
-
-    **A publication-route layer's membership column is dropped from the points file with it.** A
-    rung may name a point's artifacts in a column of its own rows (decision 0125; `mesh.py` writes
-    one), which is the other way a membership arrives at a build — and it would arrive *before* the
-    artifacts exist, on a layer declaring supplied content, which `LayerRegistry::resolve_or_mint`
-    refuses outright: an artifact minted from a key alone could not be served, so the key is
-    unmintable and the build stops. Membership travels with the artifact that holds it there.
-
-    **A column-route layer's member table is filtered to the base's rows** and written beside the
-    points under the name the declaration gives it, so the base build reads exactly the membership
-    the base's rows name; the hold-out's rows name theirs on the wire. Such a layer's roster, where
-    it has one, is copied whole: an artifact of a layer declaring supplied content is never minted
-    from a key, so the keys must come from the roster, and a key no base row names is an artifact
-    with no members at the base and its membership arrives with the hold-out.
-
-    `corpus.toml` is rewritten by [`base_declaration`], which removes the publication route's
-    rosters and keeps a column-route layer's `[layer.members]` and roster.
-    """
+    """The complement's inputs: the points, the declaration, and a column-route layer's member
+    table over the base's rows. Nothing else: a publication-route layer's artifacts are
+    published on the wire after the points they depend on have been ingested. `corpus.toml` is
+    rewritten by [`base_declaration`]."""
     out.mkdir(parents=True, exist_ok=True)
     layers = declared_layers(rung)
     published = [layer["name"] for layer in layers if layer["route"] == "publication"]
@@ -444,11 +339,8 @@ def write_base_members(
     out: Path, on_column: Sequence[dict], base_ids: np.ndarray
 ) -> tuple[dict, list[str]]:
     """Each column-route layer's member table, filtered to the base's rows and written under the
-    name the declaration gives it, and the rosters copied beside them.
-
-    **A roster beside a per-point member table stays**, whole: the layer declares supplied content,
-    so its artifacts cannot be minted from the member column at either entry point, and the base
-    build takes the roster the all-in build took.
+    name the declaration gives it, and its roster, where the layer declares supplied content,
+    copied beside it whole.
     """
     tables: dict = {}
     rosters: list[str] = []
@@ -468,14 +360,9 @@ def write_base_members(
 def copy_declared_inputs(
     rung: Path, out: Path, base_ids: np.ndarray, published: Sequence[str]
 ) -> dict:
-    """**Every other file the declaration still names**, read off the declaration rather than
-    listed here.
-
-    A vocabulary is copied whole — it is a value set, not rows, and a base built from half the
-    corpus declares the same closed set. Any *other* view's points file is filtered by entity id
-    exactly as the anchor's is: a rung may carry several row spaces over one entity space (rung 5's
-    `bioclip` and `geo`), and a declaration naming a file the base directory does not hold refuses
-    the build with `No such file or directory`.
+    """Every other file the declaration still names, read off the declaration rather than listed
+    here: a vocabulary is copied whole, and any other view's points file is filtered by entity id
+    exactly as the anchor's is.
     """
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})

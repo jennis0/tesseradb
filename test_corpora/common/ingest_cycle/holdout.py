@@ -21,26 +21,9 @@ from .split import declared_layers, in_sorted, member_table_columns
 
 
 def wire_columns(rung: Path, points: Path | None = None) -> tuple[str | None, list[str]]:
-    """`(access column, attribute columns)` for the hold-out's batches, **read off the rung's own
-    declaration** rather than listed here.
-
-    The batch a rung's hold-out is sent as is not a property of this driver: hard-coding MedCPT's
-    four made the driver refuse rung 4 after building its 92M-row base, on a `KeyError` for a
-    column that rung does not have.
-
-    The access column is the first `point_visibility.field` any view declares — a rung compartments
-    on one column, and the wire takes one list of labels a row; the rung's column may be a list per
-    row (rung 3 and MedCPT) or one string (rung 4's licence, rung 5's publisher), and
-    [`encode_batch`] sends both as the list (decision 0129). The attribute
-    columns are every `[[attribute]]` the declaration names that `points` actually holds, which is
-    what makes the ingested rows carry the same columns the built ones do; a rung whose points file
-    does not hold one of them is a rung whose build would have refused too.
-
-    **A view's own file decides what its pass carries.** An attribute is entity-space and rides the
-    anchor's file alone (arXiv's second view carries identity, position and the access column and
-    nothing else), so a second view's pass sends a position and a label for an entity that already
-    exists and restates nothing declared once for the whole item.
-    """
+    """`(access column, attribute columns)` for the hold-out's batches, read off the rung's own
+    declaration: the first `point_visibility.field` any view declares, and every `[[attribute]]`
+    the declaration names that `points` holds."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     access = None
     for view in declared.get("view", []):
@@ -56,29 +39,10 @@ def wire_columns(rung: Path, points: Path | None = None) -> tuple[str | None, li
 def encode_batch(
     table: pa.Table, access: str | None, attributes: list[str], columns: Sequence[str] = ()
 ) -> bytes:
-    """One Arrow IPC stream for a slice of the hold-out.
-
-    `access` is the wire's **list of labels**, one element per label, each taken verbatim
-    (contracts §3.4, decision 0129): a rung's list column travels as itself, a scalar compartment
-    column as one-element lists, and a null — a null scalar or a null list — as the empty list,
-    which the server would otherwise refuse for the whole batch. **The empty list is a row with no
-    label, and the view's declaration decides it at both entry points** (decision 0133): where the
-    view declares a `point_visibility.default` the server gives the row that label, as the build
-    gives it to a null or empty value; where it declares none the server refuses the batch naming
-    the count, as the build refuses the corpus. This driver applies no default of its own, so an
-    ingest cycle takes the same declaration the build took. Nothing here joins or splits a label, so a compartment
-    key containing a comma is one term on both sides of the split. `external_id` is the **source entity id, eight bytes little-endian**, the same form the
-    build mints under `--mint-external-ids` (see [`external_ids`]). That is what makes an ingested
-    row addressable on `/control/changes` afterwards, and what an artifact's `members` names it by
-    on the same footing as a base row. Every declared attribute travels beside it, by the name the
-    declaration gives it — see [`wire_columns`].
-
-    `columns` names the column-route layers (the module doc): each is a column of `table` already
-    named for the layer, carrying the row's member list as the member table spells it — one entry
-    per declared level, null where the row is in no artifact at that level — and it travels as
-    itself. A publication-route layer has no column here, because the column would name artifacts
-    that do not exist yet and a layer declaring supplied content refuses to mint them.
-    """
+    """One Arrow IPC stream for a slice of the hold-out. `access` is the wire's list of labels,
+    a null becoming the empty list for the view's declaration to interpret. `external_id` is
+    the source entity id, eight bytes little-endian, the build's own form. `columns` names the
+    column-route layers, already named for the layer they belong to."""
     entities = table.column("entity_id").to_pylist()
     arrays = [
         table.column("x").cast(pa.float64()).combine_chunks(),
@@ -103,10 +67,9 @@ def encode_batch(
         names.append("access")
     arrays.append(pa.array([int(e).to_bytes(8, "little") for e in entities], pa.binary()))
     names.append("external_id")
-    # **Every declared attribute, the access column included.** The scalar tail is read back by
-    # position, so an omission misaligns it exactly as a spurious column does — and a rung whose
-    # compartment is also a rendered attribute (rung 5's `publisher`) sends it twice on purpose:
-    # once as `access`, the plugin's own descriptor list, and once as the column itself.
+    # Every declared attribute, the access column included: the scalar tail is read back by
+    # position, so an omission misaligns it exactly as a spurious column does. A column that is
+    # also the compartment attribute is sent twice on purpose — once as `access`, once as itself.
     for name in attributes:
         arrays.append(table.column(name).combine_chunks())
         names.append(name)
@@ -123,15 +86,9 @@ def encode_batch(
 
 
 class MemberStream:
-    """A column-route layer's member table, read in lockstep with the points file.
-
-    Both files ascend by entity — the rung's preparation writes them so, and this checks it a row
-    group at a time rather than trusting it — so the member rows a points batch needs are the ones
-    up to its last entity. One row group is decoded at a time, filtered to the hold-out, and what is
-    live is the rows past the last batch's entities; at rung 5's 2.3×10⁸ member rows nothing is held
-    whole. A hold-out entity the table does not name is in no artifact and gets a null cell, which
-    is what the build reads for a point the member table leaves out; the count is recorded.
-    """
+    """A column-route layer's member table, read in lockstep with the points file, one row
+    group at a time and filtered to the hold-out. An entity the table does not name gets a null
+    cell; the count is recorded."""
 
     def __init__(self, name: str, path: Path, held: np.ndarray):
         self.name = name
@@ -188,29 +145,13 @@ class MemberStream:
 
 
 class HoldOut:
-    """The held-back rows, streamed out of the rung's own parquet as ingest batches.
+    """The held-back rows, streamed out of the rung's own parquet as ingest batches, never
+    materialised whole. Only `head_rows` rows are kept, for the write cycle, which needs the
+    same bytes twice.
 
-    **Streamed, never materialised.** At *f* = 100% of rung 3 the hold-out is the whole corpus —
-    4 GB of parquet, tens of gigabytes of Arrow — and holding it beside a running server on a
-    47 GB box is the run failing for a reason that has nothing to do with what it measures. Only
-    `head_rows` rows are kept, for the write cycle, which needs the same bytes twice.
-
-    A column-route layer's member list rides each batch as the column named for the layer, joined
-    from a [`MemberStream`] read in lockstep with the points; `member_stats` records, per layer, how
-    many hold-out rows the table named and how many it did not.
-
-    **A body is bounded by both of the route's caps, and both are read from the served
-    deployment's `limits` block** ([`Cycle.served_limits`]). The row cap (`batch_rows`, the
-    deployment's `ingest_max_batch_rows`) sizes a slice; the driver sends exactly it, so a run also
-    exercises the cap's own boundary. The byte cap (`max_body_bytes`, the deployment's
-    `ingest_max_batch_bytes`) is enforced on the route before decoding, and
-    a 10,000-row slice of a rung with a text attribute can exceed it: rung 4's abstracts put a
-    10,000-row body near the 16 MiB cap, and 19 of the 92M cell's slices went over it. [`bodies`] encodes the slice and, where the body is over the cap, halves the slice and
-    encodes each half again until every piece fits, in row order; each piece keeps its own
-    first-row index, so the batch id the caller derives from it stays unique. `body_stats` counts
-    the bodies sent, the bodies that were over the cap and split (a half that is still over counts
-    again), the bodies sent over the cap because they were one row, and the largest body sent.
-    """
+    A body is bounded by both of the route's caps, read from the served deployment's `limits`
+    block: the row cap sizes a slice exactly, and a slice over the byte cap is halved by
+    [`bodies`] until every piece fits."""
 
     def __init__(
         self,
@@ -249,16 +190,9 @@ class HoldOut:
         return {"bodies": 0, "slices": 0, "bodies_split": 0, "largest_body_bytes": 0, "over_cap": 0}
 
     def bodies(self, table: pa.Table, start: int, stats: dict | None = None):
-        """Yield `(first row index, body bytes, row count)` for one slice, every body under the cap.
-
-        The slice is encoded whole. A body over `max_body_bytes` is not sent: the slice is halved
-        and each half is encoded again, so the pieces come out in row order and each carries the
-        index of its first row. Exact rather than estimated: the body that is sent is the body
-        that was measured, so a piece under the cap here is under it on the route. A single row
-        whose body is over the cap cannot be split; it is sent as it is, so the route's 422 is
-        recorded in `statuses` and `first_refusal` and `over_cap` counts it. The first split is
-        logged.
-        """
+        """Yield `(first row index, body bytes, row count)` for one slice, every body under the
+        cap: a body over it is halved and each half encoded again. A single row over the cap
+        cannot be split, so `over_cap` counts it."""
         stats = self.body_stats if stats is None else stats
         stats["slices"] += 1
         pending = [(start, table)]
@@ -284,17 +218,9 @@ class HoldOut:
             yield first, body, piece.num_rows
 
     def batches(self, rows: int | None = None):
-        """Yield `(first row index, body bytes, row count)` for the whole hold-out, in file order,
-        in slices of `rows` (the served row cap unless given).
-
-        **One row group at a time through `read_row_group`, not `iter_batches`.** Measured on
-        rung 4's 52 GB points file (`probes/2026-09-05-holdout-memory/`): pyarrow 25's
-        `iter_batches` reader keeps about 150 MB of every row group it has yielded alive in
-        Arrow's pool for the life of the iterator, whatever the caller drops and whichever
-        allocator backs the pool (`mimalloc` and `system` measured), so the driver reached 38 GB by
-        900 batches and the cell stalled. `read_row_group` holds one decoded row group at a time
-        and the same file streams whole with the driver under 3 GB.
-        """
+        """Yield `(first row index, body bytes, row count)` for the whole hold-out, in slices of
+        `rows`, a row group at a time through `read_row_group` rather than `iter_batches`, which
+        keeps every yielded group alive for the iterator's life."""
         rows = self.batch_rows if rows is None else rows
         self.body_stats = self.new_body_stats()
         reader = pq.ParquetFile(self.points)
