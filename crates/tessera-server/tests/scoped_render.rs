@@ -1911,8 +1911,7 @@ async fn a_written_cell_of_an_unflagged_family_dedupes_or_is_refused() {
     let (status, body) = fill(&served, "tag-differs", "quarter:2026-Q1", CELL, HELD + 1.0).await;
     assert_eq!(status, 409, "one cell holds one value: {body}");
 
-    // The cell still holds what the build wrote.
-    flush(&served).await;
+    // The cell still holds what the build wrote, neither write having reached it.
     let id = id_of(&served, &served.token, "quarter:2026-Q1", CELL).await;
     let body = item(&served, &served.token, id).await;
     assert_eq!(
@@ -2408,7 +2407,19 @@ async fn a_gate_failed_view_is_absent_from_the_drill_down_and_its_key_is_not() {
 async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
     use base64::Engine as _;
     let served = serve().await;
-    let id = base64::engine::general_purpose::STANDARD.encode(external_id_of(3));
+    // An entity ingested and published, so the cell this fills is empty and nothing else is
+    // buffered. A built cell holds the build's own value, which the fill would be refused for.
+    const FRESH: u64 = 9_801;
+    ingest_with_heat(
+        &served,
+        "fill-then-drop-row",
+        "quarter:2026-Q1",
+        &[(external_id_of(FRESH), 270.0, 270.0, "0")],
+        &[None],
+    )
+    .await;
+    flush(&served).await;
+    let id = base64::engine::general_purpose::STANDARD.encode(external_id_of(FRESH));
     let resp = served
         .server
         .client
