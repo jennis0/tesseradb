@@ -1754,16 +1754,41 @@ impl Executor {
             }
 
             // The edges whose child was not minted above: it exists and holds no parent, so the
-            // edge is a fill on it. Behind the publications, so a parent this window minted is in
-            // the store by the time the fill resolves it; `window_edges` carries the edges being
-            // recorded here so the cycle walk sees them and the level's held ones as one graph.
-            let mut window_edges = BTreeMap::new();
+            // edge is a fill on it. Behind the publications, so a parent this window minted has an
+            // ordinal by the time the fill resolves it.
+            //
+            // The cycle walk reads the layer's held edges and `window_edges` as one graph, so
+            // `window_edges` is seeded with the edges the publications above are about to create:
+            // nothing prepared here is in the store yet, and a mint under an existing artifact plus
+            // a fill on that artifact naming the mint is a cycle neither half sees alone.
+            let mut window_edges: BTreeMap<
+                &str,
+                BTreeMap<tessera_lifecycle::wal::ParentRef, Vec<tessera_lifecycle::wal::ParentRef>>,
+            > = BTreeMap::new();
+            for record in &records {
+                let WalRecord::ArtifactPublish {
+                    layer,
+                    level,
+                    artifacts,
+                    ..
+                } = record
+                else {
+                    continue;
+                };
+                let held = window_edges.entry(layer.as_str()).or_default();
+                for artifact in artifacts.iter().filter(|a| !a.parents.is_empty()) {
+                    held.insert(
+                        tessera_lifecycle::wal::ParentRef {
+                            level: *level,
+                            ordinal: artifact.ordinal,
+                        },
+                        artifact.parents.clone(),
+                    );
+                }
+            }
+            let mut fills = Vec::new();
             for edge in edges {
-                if assigned.contains_key(&(
-                    edge.layer.as_str(),
-                    edge.level,
-                    edge.child.as_str(),
-                )) {
+                if assigned.contains_key(&(edge.layer.as_str(), edge.level, edge.child.as_str())) {
                     continue;
                 }
                 let pending = |key: &str| {
@@ -1776,12 +1801,18 @@ impl Executor {
                         })
                 };
                 if let Some(record) = registry
-                    .prepare_parent_fill(edge, store, &pending, &mut window_edges)
+                    .prepare_parent_fill(
+                        edge,
+                        store,
+                        &pending,
+                        window_edges.entry(edge.layer.as_str()).or_default(),
+                    )
                     .map_err(|e| e.to_string())?
                 {
-                    records.push(record);
+                    fills.push(record);
                 }
             }
+            records.extend(fills);
 
             let minted = assigned
                 .keys()

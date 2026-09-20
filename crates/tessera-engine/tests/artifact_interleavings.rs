@@ -1430,3 +1430,44 @@ fn two_batches_in_one_window_disagreeing_about_a_parent_refuse_the_window() {
         "a refused window records no edge"
     );
 }
+
+/// **A mint under an existing artifact, and a fill on that artifact naming the mint, is a cycle.**
+///
+/// Neither half can see it alone: the publication's parent is not in the store when the fill
+/// resolves, and the fill's is not in the store when the publication is prepared. So the close walks
+/// the layer's held edges and every edge it is about to create as one graph, and refuses the window.
+#[test]
+fn a_mint_and_a_fill_that_close_a_cycle_refuse_the_window() {
+    let fx = fixture();
+    let (engine, faults) = fx.open_with_faults();
+    engine.register_layer(nested_open(LAYER)).unwrap();
+    engine
+        .publish_artifacts(
+            LAYER.into(),
+            0,
+            vec![IncomingArtifact::from_entities(
+                Some("c".into()),
+                fx.members(0..100),
+            )],
+        )
+        .expect("one artifact, carrying no parent");
+
+    let (first, second) = std::thread::scope(|s| {
+        let parked = park(s, &engine, &faults);
+        // `m` is created under `c` …
+        let b1 = s.spawn(|| ingest_with_edges(&engine, "b1", LAYER, &["c", "m"], &[("m", "c")], 5.0));
+        wait_for_queue(&engine, parked.base + 1);
+        // … and `c`, which holds no parent, is given `m`.
+        let b2 = s.spawn(|| ingest_with_edges(&engine, "b2", LAYER, &["m", "c"], &[("c", "m")], 6.0));
+        wait_for_queue(&engine, parked.base + 2);
+
+        faults.release();
+        parked.gate.join().unwrap();
+        (b1.join().unwrap(), b2.join().unwrap())
+    });
+    for outcome in [&first, &second] {
+        let refused = outcome.as_ref().expect_err("the two edges close a cycle");
+        assert!(refused.contains("cycle"), "{refused}");
+    }
+    assert!(parents_of(&engine, "c").is_empty(), "nothing was recorded");
+}
