@@ -1,9 +1,10 @@
-//! The golden vectors: known answers per script family, recorded in `vectors/golden.json`.
+//! The golden vectors: the expected tokens for sample text in each script family, stored in
+//! `vectors/golden.json`.
 //!
-//! The conformance oracle tokenises through `tessera tokenise`, so these vectors are the check on
-//! the analyser that does not pass through the analyser. Every text index is a function of the
-//! token stream. A changed expectation therefore moves the analyser's version (`UNICODE_VERSION`
-//! in `src/lib.rs`), and every text index built under the old version is rebuilt.
+//! The conformance oracle tokenises by running `tessera tokenise`, so it cannot detect a wrong
+//! analyser. These vectors can. Every text index is built from the analyser's tokens, so if an
+//! expected answer changes, change the analyser's version (`UNICODE_VERSION` in `src/lib.rs`) and
+//! rebuild every text index built under the old version.
 
 use sha2::{Digest, Sha256};
 use tessera_analyse::{
@@ -35,7 +36,7 @@ fn tokens(vector: &serde_json::Value) -> Vec<&str> {
 }
 
 #[test]
-fn a_name_this_binary_does_not_carry_is_refused() {
+fn an_unknown_analyser_name_is_refused() {
     for name in ["", "Unicode", "icu", "unicode/icu4x-2.2/p1", "standard"] {
         assert!(analyser(name).is_none(), "{name:?} resolved to an analyser");
     }
@@ -48,7 +49,7 @@ fn a_name_this_binary_does_not_carry_is_refused() {
 }
 
 #[test]
-fn an_identity_resolves_only_at_the_version_this_binary_carries() {
+fn an_identity_resolves_only_at_this_binarys_version() {
     let identity = Analyser::new().identity();
     assert!(analyser_with_identity(&identity).is_some());
     for stale in [
@@ -64,9 +65,9 @@ fn an_identity_resolves_only_at_the_version_this_binary_carries() {
     }
 }
 
-/// Every analyser has a vector set and a digest, and every vector set names an analyser.
+/// Every analyser has a vector set and a digest, and every vector set belongs to an analyser.
 #[test]
-fn analysers_vector_sets_and_digests_name_each_other() {
+fn analysers_vector_sets_and_digests_correspond() {
     let sets = vector_sets();
     let mut named: Vec<&str> = sets.iter().map(|set| text(set, "name")).collect();
     let mut digested: Vec<&str> = ANALYSER_VECTOR_DIGESTS.iter().map(|(n, _)| *n).collect();
@@ -85,12 +86,12 @@ fn analysers_vector_sets_and_digests_name_each_other() {
 fn the_golden_vectors_hold() {
     for set in vector_sets() {
         let name = text(&set, "name");
-        let analyser = analyser(name).unwrap_or_else(|| panic!("{name} is not carried"));
+        let analyser = analyser(name).unwrap_or_else(|| panic!("this binary has no analyser named {name}"));
         assert_eq!(
             text(&set, "identity"),
             analyser.identity(),
-            "{name}: the vectors were recorded under another identity. Re-record them under the \
-             version this binary carries"
+            "{name}: the vector file records a different analyser version. Update its `identity` \
+             after checking every expected answer against this version"
         );
 
         let vectors = set["vectors"].as_array().expect("a vector array");
@@ -99,14 +100,15 @@ fn the_golden_vectors_hold() {
             assert_eq!(
                 analyser.tokens(input),
                 tokens(vector),
-                "{name}/{family}: {input:?} no longer analyses to its recorded tokens. If the \
-                 change is intended, move the analyser's version in src/lib.rs and rebuild every \
-                 text index"
+                "{name}/{family}: the tokens of {input:?} differ from the expected answer. If the \
+                 change is intended, change the analyser's version in src/lib.rs and rebuild \
+                 every text index"
             );
         }
 
-        // Every analyser covers the six dictionary-segmented scripts and the single-word runs the
-        // segmenter's word-like flag drops, so an edit cannot remove the hard cases.
+        // Each analyser's vectors must include the six scripts that need dictionary segmentation
+        // and the single-word runs for which the segmenter's word-like flag is false. Removing one
+        // of these cases from the file fails here.
         let families: Vec<&str> = vectors.iter().map(|v| text(v, "family")).collect();
         for required in [
             "latin",
@@ -128,9 +130,9 @@ fn the_golden_vectors_hold() {
     }
 }
 
-/// The form the digest is taken over: name and recorded identity, then each vector's family,
-/// input and tokens, unit-separated within a record and record-separated between. The `why` notes
-/// are outside it, because a note changes no index.
+/// The bytes that are hashed: the analyser's name and identity, then each vector's family, input
+/// and tokens. Fields are separated by U+001F and records end with U+001E. The `why` notes are
+/// left out, because editing a note does not change any index.
 fn recorded_answers(set: &serde_json::Value) -> String {
     let mut buf = format!("{}\u{1f}{}\u{1e}", text(set, "name"), text(set, "identity"));
     for vector in set["vectors"].as_array().expect("a vector array") {
@@ -146,8 +148,8 @@ fn recorded_answers(set: &serde_json::Value) -> String {
     buf
 }
 
-/// Vectors regenerated from changed behaviour pass `the_golden_vectors_hold` with the version
-/// unmoved. They do not pass this: the digest sits beside the version in `src/lib.rs`.
+/// If the vectors are regenerated from changed behaviour, `the_golden_vectors_hold` still passes.
+/// This test fails until the digest in `src/lib.rs`, next to the version, is updated.
 #[test]
 fn the_recorded_answers_match_the_digest_beside_the_version() {
     for set in vector_sets() {
@@ -159,8 +161,8 @@ fn the_recorded_answers_match_the_digest_beside_the_version() {
         let digest = format!("{:x}", Sha256::digest(recorded_answers(&set).as_bytes()));
         assert_eq!(
             &digest, expected,
-            "{name}: the recorded answers changed. Move the analyser's version in src/lib.rs with \
-             this digest, and rebuild every text index built under the old version"
+            "{name}: the expected answers changed. Change the analyser's version in src/lib.rs, \
+             update this digest, and rebuild every text index built under the old version"
         );
     }
 }

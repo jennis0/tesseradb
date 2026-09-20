@@ -1,17 +1,15 @@
-//! The descent's tie handling, on fixtures built to tie (`polygon-membership.md` §12, "stage 1
-//! owes one more test file").
+//! The descent's tie handling, on fixtures built to tie.
 //!
 //! The property tests in `shape.rs` draw star polygons at random `f64` positions and essentially
-//! never put a vertex on a tile boundary — and a tile boundary is where a wrong carried parity
-//! flips an *interior tile* rather than one cell. These fixtures are deterministic and lie exactly
-//! on the grid: vertices on tile corners and tile edges at depths 4, 10 and 16, axis-aligned
-//! edges along tile boundaries on both sides (the `x0` of one tile and the `x1` of its
-//! neighbour), a horizontal edge along a cell's bottom, collinear runs the canonical form must
+//! never put a vertex on a tile boundary, where a wrong carried parity flips an interior tile
+//! rather than one cell. These fixtures are deterministic and lie exactly on the grid: vertices
+//! on tile corners and edges at depths 4, 10 and 16, axis-aligned edges along tile boundaries on
+//! both sides, a horizontal edge along a cell's bottom, collinear runs the canonical form must
 //! remove, a hole touching its outer at one vertex, two parts sharing an edge, and a ring through
 //! `(0, 0)`, the root ray's origin. Every fixture is held to three things: the decomposition
-//! answers as the direct test does at probes placed on those grid lines and one unit either side;
-//! every boundary cell's carried parity is the full ray cast from its corner; and every interior
-//! tile's four corners are inside by the direct test.
+//! agrees with the direct test at probes on those grid lines and one unit either side; every
+//! boundary cell's carried parity is the full ray cast from its corner; and every interior tile's
+//! four corners are inside by the direct test.
 
 use std::collections::BTreeSet;
 
@@ -50,7 +48,7 @@ fn polygon(parts: &[&[&[(u32, u32)]]]) -> Shape {
     })
 }
 
-/// A decomposition indexed for the lookup a probe makes — `shape.rs`'s `Lookup`.
+/// A decomposition indexed for the lookup a probe makes: `shape.rs`'s `Lookup`.
 struct Lookup<'a> {
     d: &'a Decomposition<PolyCtx>,
     ranges: Vec<(u64, u64)>,
@@ -94,8 +92,8 @@ impl<'a> Lookup<'a> {
 }
 
 /// The coordinates a fixture ties on, each with one unit either side: every vertex coordinate,
-/// every tile boundary at depths 4 and 10 across the shape's bounds, and the depth-16 cell
-/// boundaries within two cells of every vertex. The probes are the cross product.
+/// every tile boundary at depths 4 and 10, and the depth-16 boundaries near every vertex. The
+/// probes are the cross product.
 fn probes(shape: &Shape) -> Vec<(u32, u32)> {
     let b = shape.bounds().unwrap();
     let mut xs = BTreeSet::new();
@@ -206,9 +204,8 @@ fn hold(name: &str, shape: &Shape) {
     }
 }
 
-/// Squares whose four corners are tile corners at depth `d`, from tile `(a, a)` to `(b, b)`: the
-/// left and bottom edges lie on the `x0`/`y0` of a tile and the right and top on the `x0` of the
-/// next, which is `x1 + 1` of the tile before it.
+/// Squares whose four corners are tile corners at depth `d`: the left and bottom edges lie on a
+/// tile's `x0`/`y0`, the right and top on the next tile's, `x1 + 1` of the one before it.
 #[test]
 fn a_square_on_tile_corners_at_three_depths() {
     for d in [4u32, 10, 16] {
@@ -221,8 +218,7 @@ fn a_square_on_tile_corners_at_three_depths() {
     }
 }
 
-/// Squares whose edges lie on the `x1`/`y1` of a tile — one unit short of the boundary at every
-/// depth.
+/// Squares whose edges lie on the `x1`/`y1` of a tile, one unit short of the boundary.
 #[test]
 fn a_square_on_the_far_edges_of_tiles() {
     for d in [4u32, 10, 16] {
@@ -235,8 +231,7 @@ fn a_square_on_the_far_edges_of_tiles() {
     }
 }
 
-/// A triangle whose base is a horizontal edge along a depth-16 cell's bottom, with a vertex on
-/// a cell corner and one strictly inside a cell.
+/// A triangle whose base runs along a depth-16 cell's bottom, a vertex on a cell corner.
 #[test]
 fn a_horizontal_edge_along_a_cells_bottom() {
     let s = side(16);
@@ -267,8 +262,7 @@ fn a_horizontal_edge_along_a_cells_bottom() {
     );
 }
 
-/// A diamond whose four vertices sit on depth-4 tile corners: a vertex on the ray at every tile
-/// row it touches, and every edge crossing tile corners diagonally.
+/// A diamond on depth-4 tile corners, its edges crossing corners diagonally.
 #[test]
 fn a_diamond_on_tile_corners() {
     let s = side(4);
@@ -293,9 +287,8 @@ fn a_diamond_on_tile_corners() {
     );
 }
 
-/// A square given with collinear runs on every edge and a doubled vertex, through the canonical
-/// form, which must reduce it to four vertices on depth-4 corners — and then behave as the plain
-/// square does.
+/// A square given with collinear runs and a doubled vertex, which canonicalisation must reduce
+/// to four vertices on depth-4 corners, then behaving as the plain square does.
 #[test]
 fn collinear_runs_are_removed_and_the_square_ties_as_before() {
     let s = f64::from(side(4));
@@ -345,8 +338,7 @@ fn collinear_runs_are_removed_and_the_square_ties_as_before() {
     hold("canonicalised square", &shape);
 }
 
-/// A hole that touches its outer at one vertex, the outer's lower-left corner — a vertex two
-/// rings share, on a depth-4 tile corner.
+/// A hole that touches its outer at one vertex, the outer's lower-left corner, on a tile corner.
 #[test]
 fn a_hole_touching_its_outer_at_one_vertex() {
     let s = side(4);
@@ -374,8 +366,7 @@ fn a_hole_touching_its_outer_at_one_vertex() {
     );
 }
 
-/// Two parts sharing an edge along a tile boundary: the shared edge is in both rings, so a ray
-/// crosses it twice and the tie rule must count both or neither.
+/// Two parts sharing an edge: a ray crosses it twice and the tie rule must count both or neither.
 #[test]
 fn two_parts_sharing_an_edge() {
     for d in [4u32, 16] {
@@ -388,7 +379,7 @@ fn two_parts_sharing_an_edge() {
                 &[&[(b, a), (c, a), (c, b), (b, b)]],
             ]),
         );
-        // Sharing a horizontal edge — the ray's own direction.
+        // Sharing a horizontal edge, the ray's own direction.
         hold(
             &format!("shared horizontal edge at depth {d}"),
             &polygon(&[
@@ -399,9 +390,8 @@ fn two_parts_sharing_an_edge() {
     }
 }
 
-/// Rings through `(0, 0)`, the origin of the root's ray: a triangle with a vertex there, a square
-/// in the grid's corner, and a triangle whose edge passes through the origin without a vertex on
-/// it.
+/// Rings through `(0, 0)`, the root ray's origin: a vertex there, a square in the grid's corner,
+/// and an edge passing through the origin without a vertex on it.
 #[test]
 fn a_ring_through_the_origin() {
     let s = side(4);
@@ -422,19 +412,15 @@ fn a_ring_through_the_origin() {
             (u32::MAX - s + 1, u32::MAX),
         ]]]),
     );
-    // An edge through the origin: from (0, 2s) to (2s, 0) passes (s, s), not (0, 0); so put a
-    // vertex left of and below nothing — the grid has no negative side — and instead run an edge
-    // along each axis from the origin.
+    // The grid has no negative side, so an edge through the origin instead runs along each axis.
     hold(
         "edges along both axes",
         &polygon(&[&[&[(0, 0), (4 * s, 0), (4 * s, 3 * s), (2 * s, s), (0, 4 * s)]]]),
     );
 }
 
-/// Vertices on tile corners at every depth at once: a coordinate that is a multiple of the
-/// depth-4 side is a corner at every depth below it, so a ring on depth-4 corners already ties
-/// at 10 and 16; this ring mixes them, one vertex on a depth-4 corner, one on a depth-10 corner
-/// that is not a depth-4 one, one on a depth-16 corner that is neither.
+/// A ring mixing corners of different depths: one vertex on a depth-4 corner, one on a depth-10
+/// corner that is not a depth-4 one, one on a depth-16 corner that is neither.
 #[test]
 fn vertices_on_corners_of_mixed_depths() {
     let (s4, s10, s16) = (side(4), side(10), side(16));

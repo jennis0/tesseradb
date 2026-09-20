@@ -1,4 +1,4 @@
-//! The canonical bytes of a shape (`polygon-membership.md` §6.6) — what the record blob holds.
+//! The canonical bytes of a shape: what the record blob holds.
 //!
 //! ```text
 //! shape := u8 1 | 4 × u32 LE                          -- bbox: min_x, min_y, max_x, max_y

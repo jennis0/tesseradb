@@ -1,5 +1,5 @@
 {
-  "note": "Known answers per script family. A change to any of them changes every text index built with the analyser, so a diff here moves the analyser's version in src/lib.rs and is a rebuild. The answers were produced by the shipped analyser and read by a person against the token rule; they are not copied from a second library. Each analyser has its own set.",
+  "note": "The expected tokens for sample text in each script family. Every text index is built from these tokens, so if you change an expected answer, also change the analyser's version in src/lib.rs and rebuild every text index. The answers were produced by this analyser and then checked by a person against the token rule. They were not copied from another library. Each analyser has its own set.",
   "analysers": [
     {
       "name": "unicode",

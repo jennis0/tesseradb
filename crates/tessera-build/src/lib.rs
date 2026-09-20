@@ -2018,7 +2018,6 @@ fn write_manifests(
         declared_bounds: serde_json::json!({
             "max_distinct_terms": bounds.max_distinct_terms,
             "max_terms_per_item": bounds.max_terms_per_item,
-            "max_terms_per_token": bounds.max_terms_per_token,
         }),
         // The schema, compiled. `MANIFEST.declared_scalars` is the *only* thing downstream reads:
         // `columns.arrow`'s tail is written in this order, `/control/ingest` builds each row's

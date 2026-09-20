@@ -1,6 +1,5 @@
-//! Quantisation, Morton codes, tile addressing (contracts §2.5) — shapes over the grid
-//! (`polygon-membership.md`), and the projections that put a place on the Earth into the grid in
-//! the first place (`projections.md`).
+//! Quantisation, Morton codes, tile addressing, shapes over the grid, and the projections that
+//! put a place on the Earth into the grid in the first place.
 
 pub mod frame;
 pub mod morton;

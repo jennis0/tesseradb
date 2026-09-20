@@ -1830,7 +1830,7 @@ impl tessera_plugin::Plugin for ParkingPlugin {
     fn terms_of_auth(
         &self,
         auth_data: &[u8],
-    ) -> Result<tessera_plugin::AuthTerms, tessera_plugin::PluginError> {
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
         self.inner.terms_of_auth(auth_data)
     }
 
