@@ -1,113 +1,47 @@
 use super::geometry::convex_hull_of_sorted;
 
 /// How many cells the quantising grid spans along the artifact's longer axis, before the shape is
-/// computed. **1,024, and the number is chosen against what is drawn.**
+/// computed. 1,024, chosen against what is drawn: members are binned to a square grid over their
+/// own bounding box and the shape computed over one real member per occupied cell ([`quantise`]),
+/// a quantisation and not a sample, so every vertex is still a visible member's own position.
 ///
-/// **What it does.** Every construction here consumed one position per visible member to produce
-/// something whose resolution is bounded by the drawing: the largest shape on the measurement layer
-/// is 757 vertices over 2.42M members, drawn about a thousand pixels wide. So the members are
-/// binned to a square grid over their own bounding box and the shape is computed over **one real
-/// member per occupied cell** ([`quantise`]). It is a *quantisation and not a sample*: every member
-/// falls in some cell, every occupied cell contributes, and every vertex is still a visible
-/// member's own position, so §1's vertex property is untouched.
+/// The resolution is relative to the artifact and not the request's zoom, so a cell is at most a
+/// viewport pixel or two of displacement and the identifier route, which carries no zoom, still
+/// has an answer.
 ///
-/// **Why the resolution is relative to the artifact and not to the request's zoom.** A shape drawn
-/// at all is drawn at most a viewport wide, so a cell of 1/1,024 of the artifact's own longer axis
-/// is at most a viewport pixel or two of displacement in the case that matters, and less than that
-/// in every other. Making it depend on the request's zoom instead would key the cache on zoom, give
-/// a viewer a shape that flickers as they zoom, and hand the identifier route — which carries no
-/// zoom — no answer at all. The stability is worth more than the extra fidelity at a deep zoom,
-/// where the client's own drawn curve is already the coarser of the two: the served ring is
-/// smoothed by a periodic cubic B-spline that leaves it by up to a third of the longest adjacent
-/// edge (`artifact-shapes.md` §9), and those edges are α-scale — thousands of times a cell.
-///
-/// **What it costs and what it buys, measured** over the 197-artifact `clusters/hdbscan` layer of
-/// `notebook-2m4` at full membership, release build, one thread. 22 of the 197 artifacts are dense
-/// enough to reduce at all, and between them 9,287,043 members become 1,717,984 representatives.
-/// Over those 22:
-///
-/// | | median | p90 | worst |
-/// |---|---|---|---|
-/// | boundary's departure from the unreduced shape, as a fraction of the artifact's own extent | 0.005 | 0.025 | 0.044 |
-/// | area, against the unreduced shape | 1.000 | — | 0.988 … 1.007 |
-///
-/// α is **exactly** unchanged on every artifact of the layer ([`extreme_octagon`] is what makes
-/// that true rather than nearly true). The whole layer's digging goes **1,759 ms → 862 ms**, one
-/// artifact's shape from p50 1.7 ms / p90 20.9 ms / worst 265 ms to **p50 1.6 ms / p90 14.4 ms /
-/// worst 84 ms**, and the corpus root — 2,422,486 members, which reduce to 139,732 — from 167 ms to
-/// 43 ms with an area ratio of 1.0000 and no measurable departure at all.
-///
-/// **Where it is not invisible, stated rather than averaged away.** At the median the departure is
-/// half a percent of the artifact's extent, which is a pixel or two. On one artifact of the 197 it
-/// is 4.4%: a single concavity that the unreduced dig opens and the reduced one does not, because
-/// the members that would have been dug to are no longer candidates. The area is within 1.2% there,
-/// so it is one notch rather than a shape that has moved. Below 1,024 divisions that case gets
-/// common enough to matter — at 512 the worst departure is 17% of an artifact's extent — which is
-/// what fixes the resolution here rather than lower, where the time would be better.
-///
-/// **The residual, stated rather than smoothed over.** A member may now fall outside its own
-/// artifact's shape, by at most one cell — the owner's ruling of 2026-08-28
-/// (`artifact-shapes.md` §4's head) is what permits it, containment having been a bar the shape no
-/// longer has to clear. Measured over the layer: 1,965 member positions of 12,808,679, and at most
-/// 0.09% of any one artifact's members.
+/// Measured over a 197-artifact layer at full membership: median boundary departure from the
+/// unreduced shape 0.5% of the artifact's own extent, worst 4.4% (17% at 512 divisions). α is
+/// exactly unchanged on every artifact ([`extreme_octagon`] makes that exact). Digging over the
+/// layer goes 1,759 ms to 862 ms; a member may fall outside its own shape by at most one cell,
+/// 1,965 of 12,808,679 measured.
 pub(super) const QUANTISE_DIVISIONS: u32 = 1_024;
 
 /// How many visible members an artifact needs before its shape is computed over representatives
 /// rather than over every one of them.
 ///
-/// **100,000, and the floor is about what is drawn rather than about what the reduction costs.**
-/// The reduction moves a shape's boundary by up to a cell and puts a small fraction of the members
-/// outside their own outline (§7.1), which is invisible on an artifact drawn a viewport wide and is
-/// not what a viewer who has zoomed into a small cluster is looking at. Below the floor the exact
-/// shape is affordable — a *measured* 0.5 ms at under 10,000 members and 5 ms at 50,000 — so there
-/// is nothing to buy with the fidelity.
-///
-/// **Without a floor the reduction reaches artifacts it has nothing to offer.** Measured over the
-/// four layers of `notebook-2m4`: `clusters/kmeans` (13,658 … 73,360 members) put 6.7% of one
-/// artifact's members outside its shape and lost 45 of its 190 rings, `clusters/toponymy` level 3
-/// (1,211 … 11,682) 6.5% of one, and `topics/hdbscan` — 200 members an artifact — 5.0% of one, for
-/// 49 ms, 2 ms and nothing across the three layers. The floor is where that stops.
+/// 75,000, chosen against what is drawn rather than what the reduction costs. Below the floor the
+/// exact shape is affordable, 0.5 ms under 10,000 members and 5 ms at 50,000, and small artifacts
+/// are the ones a viewer zooms into. Without a floor the reduction reaches artifacts it has
+/// nothing to offer: small layers lost up to 6.7% of an artifact's members outside its shape.
 pub(super) const REDUCTION_FLOOR: usize = 75_000;
 
 /// The representatives the served dig computes its shape over, or `None` where it digs over every
-/// member — the second seam this module keeps open, for `tessera-bench`'s `hull_cost`.
-///
-/// That binary holds the reduction to a second implementation written from the definition, and a
-/// differential that rebuilt the cell arithmetic on both sides would be comparing one transcription
-/// against another rather than against what is served.
+/// member, for `tessera-bench`'s `hull_cost` to hold the reduction to a second implementation
+/// written from the definition.
 #[doc(hidden)]
 pub fn quantised(points: &[[u32; 2]]) -> Option<Vec<[u32; 2]>> {
     quantise(points, QUANTISE_DIVISIONS, REDUCTION_FLOOR, None)
 }
 
 /// One real member per occupied cell of a square grid over the members' own bounding box, or `None`
-/// where the grid cannot reduce the input — see [`QUANTISE_DIVISIONS`] for what this is for.
+/// where the grid cannot reduce the input ([`QUANTISE_DIVISIONS`]).
 ///
-/// **The representative is the member nearest its cell's centre**, ties broken on the position
-/// itself, which keeps the choice a function of the member positions alone rather than of the order
-/// they were gathered in. The cheaper rule — the lexicographically smallest member of the cell —
-/// was declined because its error is *directional*: the left edge of a cloud would be exact and the
-/// right edge would pull inward by a cell, so the shape would shrink rather than blur.
-///
-/// **`None` where the grid holds at least as many cells as there are members**, which is both the
-/// case where there is nothing to gain and the case where the grid would cost more memory than the
-/// input it is reducing. Small artifacts therefore take the unquantised path, which is the right
-/// answer twice over: they are the cheap ones (a *measured* 0.5 ms at under 10,000 members), and
-/// they are the ones a viewer zooms into.
-///
-/// The cell side is the same on both axes so that a long thin cloud is not stretched, and it is
-/// derived from the longer axis so that the shorter one is never binned more coarsely than
-/// [`QUANTISE_DIVISIONS`] asks for.
-///
-/// `floor` is [`REDUCTION_FLOOR`] on every serving route. It is a parameter rather than a constant
-/// read here because the reduction's own properties — a representative is a member, every member
-/// has one within a cell, α survives, the answer does not depend on the arrival order — hold at any
-/// size and are tested on clouds small enough to check exhaustively, where the served floor would
-/// switch the reduction off and leave nothing to assert about.
-///
-/// `bounds` is `points`'s own bounding box where a caller has already traversed them
-/// ([`concave_rings`](super::dig::concave_rings)), and `None` where it has not; it changes no answer, only the number of
-/// passes.
+/// The representative is the member nearest its cell's centre, ties broken on the position, so the
+/// choice is a function of the member positions alone. `None` where the grid holds at least as many
+/// cells as there are members; the cell side is the same on both axes, derived from the longer one.
+/// `floor` is [`REDUCTION_FLOOR`] on every serving route, a parameter here because the reduction's
+/// properties are tested at sizes small enough to check exhaustively. `bounds` is `points`'s own
+/// bounding box where a caller has already traversed them, `None` otherwise; it changes no answer.
 pub(super) fn quantise(
     points: &[[u32; 2]],
     divisions: u32,
@@ -116,10 +50,7 @@ pub(super) fn quantise(
 ) -> Option<Vec<[u32; 2]>> {
     let runs = Runs::fold(points, grid_shift(points, divisions, floor, bounds)?);
 
-    // A run count is the occupied-cell count exactly where the runs ascend, and an upper bound on
-    // it otherwise, since merging equal keys only ever removes cells. So the ordered case — every
-    // serving route, a view's rows being Morton rank — answers the test here and leaves the
-    // artifact without paying for a representative it is about to throw away.
+    // A run count is the occupied-cell count where the runs ascend, an upper bound otherwise.
     if runs.descents == 0 && occupancy_loses(runs.len(), points.len()) {
         return None;
     }
@@ -132,33 +63,26 @@ pub(super) fn quantise(
     let cell_count = merged.as_ref().map_or(runs.len(), |m| m.len());
 
     let octagon = runs.extreme_octagon_over(&reps);
-    // The representatives are the bulk of what this returns, so they are the vector the candidates
-    // are appended to rather than a second one copied into it.
+    // The representatives are the bulk of what this returns, so candidates append to them.
     let mut out = merged.unwrap_or(reps);
     out.reserve(cell_count / 8);
     runs.push_hull_candidates(&octagon, &mut out);
 
-    // Order and duplicates are left for the caller's sort and dedup, which every route into this
-    // already pays: a member may be both its cell's representative and a hull candidate. What this
-    // returns as a *set* is a function of the member positions alone — the fold's representative
-    // rule is order-independent and the merge above restores it where the runs were not ordered —
-    // and the set is what the shape is computed from.
+    // Order and duplicates are left for the caller's sort and dedup, which every route already
+    // pays: a member may be both its cell's representative and a hull candidate.
     Some(out)
 }
 
 /// The binning grid's cell side as a shift, or `None` where the reduction is refused before a cell
-/// is ever computed — see [`quantise`] for what each refusal is.
+/// is ever computed.
 fn grid_shift(
     points: &[[u32; 2]],
     divisions: u32,
     floor: usize,
     bounds: Option<[u32; 4]>,
 ) -> Option<u32> {
-    // The squared distance below is `u64`, and the bound that keeps it from overflowing is that a
-    // cell side is at most `2^32 / divisions` rounded up to a power of two: at 16 divisions a
-    // half-side is under 2^29 and its square under 2^58. Every caller is the constant or the sweep,
-    // both far above that.
-    // `0` is the seam's "no quantisation at all", and every other caller is far above 16.
+    // The squared distance below is `u64`; a cell side of at most `2^32 / divisions` rounded up to
+    // a power of two keeps it from overflowing. `0` is the seam's "no quantisation at all".
     if divisions == 0 || points.len() < floor.max(4) {
         return None;
     }
@@ -180,36 +104,24 @@ fn grid_shift(
         "a supplied box must be the members' own, tightly: the grid is scaled from it"
     );
     let (wx, wy) = ((x1 - x0) as u64 + 1, (y1 - y0) as u64 + 1);
-    // **A power of two, so a cell index is a shift rather than a division.** Two integer divisions
-    // per member is a real cost at these sizes — this pass is the one thing every member is still
-    // read for — and rounding the side up only ever makes the grid coarser than `divisions` asked,
-    // never finer, so the resolution argument is unaffected.
+    // A power of two, so a cell index is a shift rather than a division; rounding the side up
+    // only ever makes the grid coarser than `divisions` asked, never finer.
     let shift = wx
         .max(wy)
         .div_ceil(divisions as u64)
         .next_power_of_two()
         .trailing_zeros();
     if 1u64 << shift <= 1 {
-        // The grid is already the position lattice, so binning is the identity on a deduplicated
-        // input and buys nothing.
+        // The grid is already the position lattice, so binning buys nothing.
         return None;
     }
     Some(shift)
 }
 
-/// **Nothing gained is reported as nothing done.** Where the members are spread thinner than the
-/// grid, the occupied cells are nearly as numerous as the members and the representatives are
-/// very nearly the input again — the same shape computed over a vector rebuilt for no reason.
-/// Three quarters is where the reduction starts to return more than the sort it saves; below it
-/// the artifact takes the exact path, which is the right answer twice over, since those are the
-/// cheap ones (a *measured* 0.5 ms at under 10,000 members) and the ones a viewer zooms into.
-///
-/// **The fold is what makes this an exact test rather than a guess about the grid.** What it
-/// replaces asked whether the grid held more than four cells per member and skipped the
-/// reduction when it did — a proxy for occupancy that put **170 of the 197** artifacts of the
-/// measurement layer on the unreduced path at 1,024 divisions, which are the artifacts the shape
-/// spends its time on (`artifact-shapes.md` §7.1). Counting the occupied cells costs one pass
-/// and answers the question the proxy was standing in for.
+/// Where the members are spread thinner than the grid, the occupied cells are nearly as numerous
+/// as the members, and reducing returns nearly the input again. Three quarters is where the
+/// reduction starts to return more than the sort it saves. Counting the occupied cells costs one
+/// pass and answers the question exactly, rather than a fixed cells-per-member proxy.
 fn occupancy_loses(cells: usize, members: usize) -> bool {
     cells * 4 > members * 3
 }
@@ -222,53 +134,29 @@ struct Runs<'a> {
     starts: Vec<u32>,
     shift: u32,
     side: u64,
-    /// How many runs opened a cell whose key is below its predecessor's — the count that decides
-    /// whether a cell can have been met twice.
+    /// How many runs opened a cell whose key is below its predecessor's, deciding whether a cell
+    /// can have been met twice.
     descents: usize,
 }
 
 impl<'a> Runs<'a> {
-    /// **A cell is a contiguous row range, so the occupied cells are found by folding runs rather
-    /// than by binning into a grid** — the reduction's whole cost, on the input every route into it
-    /// actually supplies.
+    /// A cell is a contiguous row range, so the occupied cells are found by folding runs rather
+    /// than binning into a grid. The grid is anchored at the corpus's own origin, so each cell is
+    /// a Morton block and, rows being Morton rank, a cell's members arrive consecutively: one
+    /// comparison per member finds every boundary and nothing is allocated for an unoccupied cell.
     ///
-    /// The grid is anchored at the corpus's own origin rather than at the artifact's bounding box,
-    /// which makes each cell a Morton block of the corpus grid whenever its side is at least one
-    /// Morton cell. Rows are Morton rank (`architecture.md` §5.2, and `tile_index.rs`'s opening for
-    /// what else rests on it) and members reach here in row order, so the members of such a cell
-    /// are **consecutive**: one comparison per member finds every cell boundary, and nothing is
-    /// allocated for a cell that is not occupied. The anchor is the only thing that had to change
-    /// to make that true — an artifact-anchored cell straddles Morton blocks, and its members do
-    /// not arrive together.
+    /// Folding runs needs no grid; a dense grid or a hash map per cell measured 215 to 289 ms over
+    /// the same layer this replaces, against one comparison a member here. A jump to the next cell
+    /// by bitmap arithmetic loses too: it costs on the order of ten probes against one comparison,
+    /// and only wins where a cell holds tens of members, a corpus two orders of magnitude denser
+    /// than this one.
     ///
-    /// **What this replaces, and why three obvious routes lost.** The dense `nx × ny` grid it
-    /// replaces is *measured* at 215 ms of binning over the measurement layer, nearly all of it
-    /// faulting in a grid whose occupied fraction is small; a hash map keyed on the cell index is
-    /// 289 ms, a hash a member; indexing the dense grid in Morton order so its writes are local is
-    /// 260 ms, the locality bought back by a grid four times the size. Folding runs is one
-    /// comparison a member and no grid at all.
-    ///
-    /// **A *jump* per cell — the route the row-range property most obviously suggests — was refused
-    /// on measurement, and this is where the crossover is.** Skipping to the next cell by bitmap
-    /// arithmetic, a gallop over the segment's Morton column and a `reset_at_or_after` on the mask,
-    /// costs on the order of ten probes and a container walk against one sequential comparison per
-    /// member here. It can only win where a cell holds more members than that, and on
-    /// `notebook-2m4` it is not close: 12,808,679 members occupy 12,560,851 distinct Morton cells —
-    /// a **ratio of 1.02**, the corpus grid being 2^16 × 2^16 against 2.4M items — and at the
-    /// served resolution the densest artifact of the measurement layer holds 17.4 members to a cell
-    /// against a layer mean of 2.5. The jump
-    /// becomes the cheaper route somewhere around a few tens of members a cell, which is a corpus
-    /// two orders of magnitude denser than this one.
-    ///
-    /// **The fold reads a cell index and nothing else.** A cell at this resolution is the top bits
-    /// of a member's position on both axes — the top bits of its Morton code, the grid being
-    /// anchored at the corpus origin — so finding where one cell ends and the next begins is two
-    /// shifts and a comparison a member.
+    /// The fold reads a cell index and nothing else: the top bits of a member's position on both
+    /// axes, so finding where one cell ends and the next begins is two shifts and a comparison.
     fn fold(points: &'a [[u32; 2]], shift: u32) -> Runs<'a> {
         let mut starts: Vec<u32> = Vec::with_capacity(points.len() / 4 + 1);
-        // A run out of Morton order is a cell that may already have been seen — row order restarts
-        // at each segment of the view, and a caller outside the serving path need not be ordered at
-        // all. Counted rather than assumed, and what it costs is one sort below.
+        // A run out of Morton order is a cell that may already have been seen: row order restarts
+        // at each segment of the view. Counted rather than assumed; the cost is one sort below.
         let mut descents = 0usize;
         let mut last = (u64::MAX, u64::MAX);
         let mut last_key = 0u64;
@@ -317,18 +205,12 @@ impl<'a> Runs<'a> {
         )
     }
 
-    /// **One member per run, the one nearest its cell's centre, ties broken on the position** — the
-    /// rule stated at [`quantised`], answered per run rather than per member. All of a run's
-    /// members share a cell, so the centre is computed once for the run and not once for each of
-    /// them, and a run of one has no comparison to make at all.
-    ///
-    /// The distance arithmetic runs only for the members of a cell that holds more than one: over
-    /// the measurement layer that is 9.5M of 12.8M members, and on an artifact the reduction then
-    /// declines it is none of them, because the occupancy test is answered before a single distance
-    /// is computed.
-    ///
-    /// The squared distances are returned beside the representatives only where a cell can be met
-    /// twice, which is the one case that has to compare two runs' answers.
+    /// One member per run, the one nearest its cell's centre, ties broken on the position, answered
+    /// per run rather than per member: a run of one has no comparison to make at all. The distance
+    /// arithmetic runs only for a cell holding more than one member, and not at all where the
+    /// occupancy test declines the reduction first. The squared distances are returned beside the
+    /// representatives only where a cell can be met twice, the one case that compares two runs'
+    /// answers.
     fn representatives(&self) -> (Vec<[u32; 2]>, Vec<u64>) {
         let half = self.side / 2;
         let n = self.len();
@@ -356,16 +238,11 @@ impl<'a> Runs<'a> {
         (reps, dists)
     }
 
-    /// **One representative per occupied cell, and the same one whatever order the members arrived
-    /// in.** Where the runs were in Morton order each cell is exactly one run and there is nothing
-    /// to merge, and this is not called at all. Where they were not, merging equal keys under the
-    /// rule the fold applies — nearest the cell's centre, ties on the position — gives exactly what
-    /// binning every member into a grid would have given, because that rule is associative: a
-    /// cell's representative is the representative of its runs' representatives.
-    ///
-    /// `None` where the merged cells are too nearly as numerous as the members to be worth
-    /// returning ([`occupancy_loses`]), which is the test the ordered case answers off the run
-    /// count alone.
+    /// One representative per occupied cell, the same one whatever order the members arrived in.
+    /// Where the runs were already in Morton order each cell is one run and this is not called.
+    /// Merging equal keys under the fold's rule is associative, so it gives what binning every
+    /// member into a grid would. `None` where the merged cells are too nearly as numerous as the
+    /// members to be worth returning ([`occupancy_loses`]).
     fn merge(&self, reps: &[[u32; 2]], dists: &[u64]) -> Option<Vec<[u32; 2]>> {
         let mut merged: Vec<(u64, u64, [u32; 2])> = (0..self.len())
             .map(|i| {
@@ -382,15 +259,9 @@ impl<'a> Runs<'a> {
         Some(merged.into_iter().map(|(_, _, q)| q).collect())
     }
 
-    /// **The hull candidates are found per *cell*, so no member is tested on its own.** α is three
-    /// times the median edge of the whole membership's convex wrap, so every member that could be a
-    /// wrap vertex has to survive the reduction ([`extreme_octagon`]) — and testing 12.8M members
-    /// against eight edges is *measured* at 68 ms over the layer, on top of the 49 ms the eight
-    /// extremes cost in a pass of their own.
-    ///
-    /// **The filter is exact.** `strictly_inside` is a conjunction of half-planes, so it is convex:
-    /// a cell whose four corners are all strictly inside holds nothing that is not, and can be
-    /// skipped whole. The cells that remain are the octagon's own boundary band.
+    /// The hull candidates are found per cell, so no member is tested on its own. The filter is
+    /// exact: `strictly_inside` is a conjunction of half-planes, so a cell whose four corners are
+    /// all strictly inside holds nothing that is not, and is skipped whole.
     fn push_hull_candidates(&self, octagon: &Octagon, out: &mut Vec<[u32; 2]>) {
         for i in 0..self.len() {
             let (cx0, cy0) = self.cell_corner(i);
@@ -406,13 +277,11 @@ impl<'a> Runs<'a> {
     }
 }
 
-/// The two cell coordinates interleaved — the key [`quantise`] folds runs on.
-///
-/// The standard bit-spreading, five shift-or-and steps an axis rather than a loop. Ordering by this
-/// key is Morton order over the binning grid, which is what makes "this run is out of order" a
-/// single comparison. [`tessera_spatial::morton::interleave`] is the same operation over the
-/// *corpus* grid at 16 bits an axis; this one is over an artifact's binning grid, whose coordinates
-/// run to 32 bits where the cell side is small, so it is a `u64` and not that function.
+/// The two cell coordinates interleaved, the key [`quantise`] folds runs on: standard
+/// bit-spreading, five shift-or-and steps an axis. Ordering by this key is Morton order over the
+/// binning grid, so "this run is out of order" is a single comparison. A `u64` and not
+/// [`tessera_spatial::morton::interleave`], because the binning grid's coordinates run to 32 bits
+/// where the cell side is small, against the corpus grid's 16.
 pub(super) fn interleave_cell(cx: u64, cy: u64) -> u64 {
     fn spread(mut v: u64) -> u64 {
         v &= 0x0000_0000_ffff_ffff;
@@ -426,33 +295,21 @@ pub(super) fn interleave_cell(cx: u64, cy: u64) -> u64 {
     spread(cx) | (spread(cy) << 1)
 }
 
-/// [`extreme_octagon`] over the folded cells — the same eight extremes and the same polygon, found
-/// without a pass over the members.
-///
-/// **The cells bound the members, so the search is a band and not a sweep.** For each supporting
-/// direction the best representative is a lower bound on the extreme's score, and a cell whose
-/// furthest corner scores below that bound cannot hold a member that beats it. What is left is the
-/// cells within one cell of the supporting line, and only their members are read — so the answer is
-/// the exact extreme of the whole membership, arrived at by reading a band rather than everything.
-///
-/// Ties are broken on the position exactly as [`extreme_octagon`] breaks them, so the two functions
-/// return the same polygon for the same members; `tests::the_octagon_over_cells_is_the_octagon`
-/// pins that on inputs the band and the sweep disagree about if the bound is wrong.
+/// [`extreme_octagon`] over the folded cells, without a pass over the members: the cells bound
+/// the members, so the search is a band, a cell whose furthest corner scores below the best
+/// representative's bound holding nothing that beats it. Ties break as [`extreme_octagon`] breaks
+/// them, so the two return the same polygon for the same members.
 impl Runs<'_> {
     fn extreme_octagon_over(&self, reps: &[[u32; 2]]) -> Octagon {
-        // Every representative is a member, so the best of them is a lower bound on each extreme —
-        // established over every cell before any cell is opened, so the band below is as thin as
-        // the representatives can make it.
+        // Every representative is a member, so the best of them is a lower bound on each extreme,
+        // established before any cell is opened.
         let mut best: [Option<(i64, [u32; 2])>; 8] = [None; 8];
         for rep in reps {
             offer(&mut best, *rep);
         }
         let s1 = self.side as i64 - 1;
         for i in 0..self.len() {
-            // The cell's furthest corner in each direction is its low corner plus `side - 1` on
-            // whichever axes that direction is positive on. A cell whose furthest corner scores
-            // below the bound holds nothing that can beat it, in that direction or — over all
-            // eight — at all.
+            // A cell's furthest corner is its low corner plus `side - 1` on positive axes.
             let (cx0, cy0) = self.cell_corner(i);
             let (lo_x, lo_y) = (cx0 as i64, cy0 as i64);
             let interesting = best
@@ -474,10 +331,8 @@ impl Runs<'_> {
     }
 }
 
-/// `q` against each of the eight running extremes, kept where it scores higher.
-///
-/// Ties are broken on the position, so the octagon is a function of the member positions rather
-/// than of the order they were gathered in.
+/// `q` against each of the eight running extremes, kept where it scores higher. Ties break on the
+/// position, so the octagon is a function of the member positions alone.
 fn offer(best: &mut [Option<(i64, [u32; 2])>; 8], q: [u32; 2]) {
     let (x, y) = (q[0] as i64, q[1] as i64);
     for (slot, (wx, wy)) in best.iter_mut().zip(OCTAGON_DIRECTIONS) {
@@ -500,15 +355,13 @@ const OCTAGON_DIRECTIONS: [(i64, i64); 8] = [
     (-1, -1),
 ];
 
-/// The polygon eight extremes span, as one linear form per edge — shared by
-/// [`extreme_octagon`] and [`extreme_octagon_over`] so the two cannot drift apart.
+/// The polygon eight extremes span, one linear form per edge, shared so [`extreme_octagon`] and
+/// [`extreme_octagon_over`] cannot drift apart.
 fn octagon_of(best: [Option<(i64, [u32; 2])>; 8]) -> Octagon {
     let mut extremes: Vec<[u32; 2]> = best.into_iter().flatten().map(|(_, q)| q).collect();
     extremes.sort_unstable();
     extremes.dedup();
-    // `A·x + B·y + C` per edge, which is the same cross product with the vertex subtracted out
-    // once rather than per member — two multiplications instead of four, on the one test every
-    // member takes.
+    // `A·x + B·y + C` per edge: the cross product with the vertex subtracted out once.
     let ring = convex_hull_of_sorted(&extremes);
     let edges = (0..ring.len())
         .map(|i| {
@@ -524,41 +377,14 @@ fn octagon_of(best: [Option<(i64, [u32; 2])>; 8]) -> Octagon {
     }
 }
 
-/// **α must not move when the input is reduced, so every member that could be a convex-hull vertex
-/// survives [`quantise`] whether or not it is its cell's representative.**
-///
-/// α is three times the median edge of the visible members' *own* convex wrap, and that statistic
-/// is a function of the sampling density rather than only of the cloud: the hull of a sparser
-/// sample of the same region has fewer vertices and longer edges. Measured over the 197-artifact
-/// layer at a resolution of 512, computing the wrap over the representatives alone moved α by up to
-/// **3.6×** on one artifact, which took its shape from 0.29 to 1.29 of the unquantised one's area —
-/// a visibly different shape rather than a blurred one. Carrying the candidates removes the drift
-/// at its source: the wrap of `representatives ∪ candidates` **is** the wrap of every member, so α
-/// is not approximated at all.
-///
-/// The filter is Akl–Toussaint's: a member strictly inside the polygon spanned by the extremes of
-/// `x`, `y`, `x + y` and `x − y` is inside the hull of those eight members and so cannot be a hull
-/// vertex. It costs one pass and discards the interior, which on this corpus is *measured* at 94% …
-/// 99.9% of a large artifact's members.
-///
-/// **`f64` here, and it is the only inexact arithmetic in this module's construction — with a
-/// margin that makes the answer exact anyway.** Grid coordinates are below 2^32 and exact in `f64`,
-/// so each cross product carries an absolute error under 2^13; a member is discarded only when
-/// every edge puts it more than [`OCTAGON_MARGIN`] inside, which is eight times that bound. A
-/// member near an edge is therefore *kept*, and a kept member costs a slot in a vector that is
-/// about to be sorted. There is no rounding under which a hull vertex is discarded, so the wrap —
-/// and α, and the shape — stay exactly what the exact monotone chain makes of the whole membership.
-///
-/// **The set it keeps is also identical on every platform**, which is what the shape being a
-/// function of the member positions alone requires (§1): every operation here is an IEEE-754
-/// multiply, add or compare on values a `f64` represents exactly, all correctly rounded and none
-/// contracted, so a member kept on one machine is kept on every machine. Soundness would hold
-/// without that; determinism would not, because a kept member is a candidate the dig can dig to.
+/// α must not move when the input is reduced, so every member that could be a convex-hull vertex
+/// survives [`quantise`]. α follows the sampling density: the wrap over the representatives alone
+/// measured moving it by up to 3.6x on one artifact. The filter is Akl-Toussaint's, discarding a
+/// member strictly inside the polygon spanned by the extremes of `x`, `y`, `x + y` and `x - y`,
+/// 94% to 99.9% of a large artifact's members in one pass. `f64` appears here, made exact by
+/// [`OCTAGON_MARGIN`], so the set kept is identical on every platform.
 #[cfg(test)]
 fn extreme_octagon(points: &[[u32; 2]]) -> Octagon {
-    // One pass for all eight, not one pass each: the members are read once here and once again to
-    // bin them, and a third to eighth pass over a 2.4M-member cloud is the cost this whole
-    // construction is about.
     let mut best: [Option<(i64, [u32; 2])>; 8] = [None; 8];
     for q in points {
         offer(&mut best, *q);
@@ -566,8 +392,7 @@ fn extreme_octagon(points: &[[u32; 2]]) -> Octagon {
     octagon_of(best)
 }
 
-/// The polygon spanned by the eight extremes, as one linear form per edge — see
-/// [`extreme_octagon`].
+/// The polygon spanned by the eight extremes, one linear form per edge ([`extreme_octagon`]).
 struct Octagon {
     edges: Vec<[f64; 3]>,
     /// A polygon of fewer than three vertices encloses nothing, so every member is a candidate.
@@ -587,15 +412,8 @@ impl Octagon {
     }
 
     /// Whether every position of the cell `[lo_x, lo_x + side) × [lo_y, lo_y + side)` is
-    /// [`strictly_inside`](Self::strictly_inside) — the same answer as asking it of all four
-    /// corners, at one corner's cost.
-    ///
-    /// **An edge's form is linear and separable, so its minimum over a box is at the corner the
-    /// signs of `a` and `b` pick out**, and asking the other three adds nothing: floating-point
-    /// addition and multiplication are monotone, so the corner that minimises the exact value
-    /// minimises the rounded one too. The answer is therefore *identical* to the four-corner test
-    /// rather than an approximation of it, which matters because this decides which cells' members
-    /// are read for hull candidates.
+    /// [`strictly_inside`](Self::strictly_inside), at one corner's cost: an edge's minimum over a
+    /// box is at the corner the signs of `a` and `b` pick out.
     fn cell_strictly_inside(&self, lo_x: u64, lo_y: u64, side: u64) -> bool {
         if self.degenerate {
             return false;
@@ -611,8 +429,8 @@ impl Octagon {
 }
 
 /// How far inside every edge a member must be before [`extreme_octagon`]'s filter discards it, in
-/// cross-product units. 2^16, against a *worst-case* `f64` error under 2^13 on a grid of 2^32 —
-/// see [`extreme_octagon`] for why a margin makes an inexact test an exact answer.
+/// cross-product units. 2^16, against a worst-case `f64` error under 2^13: a member near an edge
+/// is kept, so no hull vertex is ever discarded and α is exactly what the full membership gives.
 const OCTAGON_MARGIN: f64 = 65_536.0;
 
 #[cfg(test)]
@@ -622,19 +440,10 @@ mod tests {
     use crate::derived::geometry::convex_hull;
     use crate::derived::test_support::*;
 
-    /// **The set the fold returns is the set a dense binning would have returned**, cell for cell
-    /// and candidate for candidate — the assertion that makes the route to the occupied cells a
-    /// speed change rather than a shape change.
-    ///
-    /// The oracle here is written from `artifact-shapes.md` §7.1 and shares nothing with
-    /// [`quantise`] but the cell arithmetic the resolution defines: it puts every member into a map
-    /// keyed on its cell rather than folding runs, and tests every member against the octagon on
-    /// its own rather than opening a band of cells. Three clouds, because the routes differ in what
-    /// they do with *order*: one in Morton order, one rotated so the fold meets a cell twice, and
-    /// one whose members are spread thinly enough that the reduction declines.
-    ///
-    /// `tessera-bench`'s `hull_cost` makes the same assertion over a bundle's real memberships,
-    /// and requires the *rings* to match as well.
+    /// The set the fold returns is the set a dense binning would have returned, cell for cell and
+    /// candidate for candidate, so the route to the occupied cells is a speed change and not a
+    /// shape change. Would catch a divergence between the fold and a from-the-definition oracle
+    /// that shares nothing with [`quantise`] but the cell arithmetic itself.
     #[test]
     fn the_fold_returns_what_a_dense_binning_would_have() {
         /// One member per occupied cell and every hull candidate, the obvious way.
@@ -722,14 +531,10 @@ mod tests {
         );
     }
 
-    /// **The reduction is a quantisation and not a sample**, which is the property the vertex
-    /// guarantee rests on: every representative is a member's own position, and every member has a
-    /// representative within a cell of it.
-    ///
-    /// Run at a coarse resolution rather than the served one, because the properties do not depend
-    /// on the resolution and a cloud dense enough to reduce at 1,024 divisions is millions of
-    /// members. The second half is what makes the escape bound in
-    /// `the_budget_is_shared_across_the_rings` a bound rather than an observation.
+    /// The reduction is a quantisation and not a sample: every representative is a member's own
+    /// position, and every member has a representative within a cell of it. Run at a coarse
+    /// resolution, because the properties do not depend on it and a cloud dense enough to reduce
+    /// at the served resolution is millions of members.
     #[test]
     fn every_representative_is_a_member_and_every_member_has_one() {
         let members = sample(5_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
@@ -755,12 +560,8 @@ mod tests {
         );
     }
 
-    /// **α does not move when the input is reduced**, because every member that could be a convex
-    /// hull vertex survives the reduction whatever cell it falls in ([`extreme_octagon`]).
-    ///
-    /// α is three times the median edge of the members' own wrap, and that statistic follows the
-    /// sampling density — measured on the corpus, taking it over the representatives alone moved it
-    /// by up to 3.6× and changed the shape rather than blurring it.
+    /// α does not move when the input is reduced, because every member that could be a convex hull
+    /// vertex survives the reduction whatever cell it falls in ([`extreme_octagon`]).
     #[test]
     fn the_reduction_leaves_the_convex_wrap_and_so_alpha_exact() {
         for cloud in [
@@ -784,9 +585,8 @@ mod tests {
         }
     }
 
-    /// A membership small enough that the grid cannot reduce it is dug over every member, so the
-    /// shape is exactly what it was before the reduction existed — which is what keeps the
-    /// artifacts a viewer zooms into at full fidelity.
+    /// A membership too small for the grid to reduce is dug over every member, so a viewer's
+    /// zoomed-in artifact keeps full fidelity.
     #[test]
     fn a_small_membership_is_not_reduced_at_all() {
         let members = moon();
@@ -797,8 +597,8 @@ mod tests {
         );
     }
 
-    /// The reduction is a function of the member positions, not of the order they arrive in — the
-    /// cell's representative is the member nearest its centre, ties broken on the position itself.
+    /// The reduction is a function of the member positions, not of arrival order: the cell's
+    /// representative is the member nearest its centre, ties broken on the position itself.
     #[test]
     fn the_reduction_does_not_depend_on_the_order_the_members_arrive_in() {
         let members = sample(20_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
@@ -811,16 +611,9 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// **The band the octagon is found over is the whole membership's octagon, not an
-    /// approximation of it.** [`extreme_octagon_over`] reads a cell's members only where that
-    /// cell's furthest corner could still beat the best representative, and the property that
-    /// justifies the skip is the one this pins: on every cloud below, the polygon it returns is the
-    /// polygon a pass over every member returns.
-    ///
-    /// The clouds are chosen where a wrong bound would show. A ring puts every extreme in a cell
-    /// whose representative is far from it; a diagonal band is extreme in four directions the axes
-    /// do not see; a cloud with one far outlier makes seven of the eight bounds loose at once; and a
-    /// cloud in convex position has no interior for a slack bound to hide in.
+    /// The band [`extreme_octagon_over`] searches is the whole membership's octagon, not an
+    /// approximation of it, on clouds chosen where a wrong bound would show: a ring, a diagonal
+    /// band, an outlier, and a cloud in convex position.
     #[test]
     fn the_octagon_over_cells_is_the_octagon_over_the_members() {
         let clouds: Vec<(&str, Vec<[u32; 2]>)> = vec![
@@ -868,13 +661,8 @@ mod tests {
         }
     }
 
-    /// **A cell folded out of one run is the cell folded out of many**, which is what lets the
-    /// reduction skip the merge when the members arrive in row order and still answer the same way
-    /// when they do not.
-    ///
-    /// The members here are ordered so that every cell is met twice, once early and once late — the
-    /// shape a view's row order takes when its segments are walked one after another — and the
-    /// answer has to be the answer over the same members in one pass.
+    /// A cell folded out of one run is the cell folded out of many: the merge, taken only when the
+    /// members do not arrive in row order, must answer as one pass over an ordered input would.
     #[test]
     fn a_cell_met_twice_folds_to_one_representative() {
         let mut sorted = sample(20_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);

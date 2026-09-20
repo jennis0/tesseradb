@@ -1,5 +1,5 @@
-/// The members' own bounding box, `[x_min, y_min, x_max, y_max]` — the fold every grid in this
-/// module is anchored and scaled by. Empty input gives an inverted box, which no caller has.
+/// The members' own bounding box, `[x_min, y_min, x_max, y_max]`. Empty input gives an inverted
+/// box, which no caller has.
 pub(super) fn bounds(points: &[[u32; 2]]) -> [u32; 4] {
     let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
     for q in points {
@@ -36,7 +36,7 @@ pub(super) fn on_segment(p: [u32; 2], q: [u32; 2], r: [u32; 2]) -> bool {
         && r[1] <= p[1].max(q[1])
 }
 
-/// Whether two closed segments share any point at all — touching counts, because a boundary that
+/// Whether two closed segments share any point at all; touching counts, since a boundary that
 /// touches itself is not a shape a client can fill.
 pub(super) fn segments_meet(p1: [u32; 2], p2: [u32; 2], p3: [u32; 2], p4: [u32; 2]) -> bool {
     let (d1, d2) = (orient(p3, p4, p1), orient(p3, p4, p2));
@@ -54,20 +54,9 @@ pub(super) fn segments_meet(p1: [u32; 2], p2: [u32; 2], p3: [u32; 2], p4: [u32; 
         || (d4 == 0 && on_segment(p1, p2, p4))
 }
 
-/// Andrew's monotone chain, counter-clockwise, on the integer grid, over members already sorted and
-/// deduplicated — [`concave_rings`](super::dig::concave_rings) does that once and then buckets the same vector, rather than
-/// sorting it twice. It is the shape digging starts from, and the shape a point set in convex
-/// position keeps.
-///
-/// **Integer arithmetic throughout, in `i128`.** Each component of a grid vector is bounded by
-/// 2^32, so their product needs 64 bits and their *difference* needs 65: an `i64` cross product
-/// overflows on a hull spanning most of the map, which is the ordinary case for a broad principal's
-/// cluster rather than an edge one. In `i128` the orientation test is exact and there is no epsilon
-/// to choose. A hull computed in floats would be non-deterministic across platforms for collinear
-/// members, and the wire carries the vertex list itself.
-///
-/// Collinear points are dropped (`<= 0` rather than `< 0`), so a hull carries vertices and not the
-/// members lying along its edges.
+/// Andrew's monotone chain, counter-clockwise, over members already sorted and deduplicated, in
+/// `i128` since a grid vector's component is bounded by 2^32 and a cross product's difference needs
+/// 65 bits. Collinear points are dropped (`<= 0` rather than `< 0`).
 pub(super) fn convex_hull_of_sorted(p: &[[u32; 2]]) -> Vec<[u32; 2]> {
     if p.len() <= 2 {
         return p.to_vec();
@@ -92,9 +81,8 @@ pub(super) fn convex_hull_of_sorted(p: &[[u32; 2]]) -> Vec<[u32; 2]> {
     hull
 }
 
-/// The convex hull of an arbitrary member list — the reference shape the tests below compare the
-/// concave one against. The serving path reaches [`convex_hull_of_sorted`] through
-/// [`concave_rings`](super::dig::concave_rings), which has already sorted.
+/// The convex hull of an arbitrary member list, the reference the tests below compare the concave
+/// shape against.
 #[cfg(test)]
 pub(super) fn convex_hull(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     let mut p: Vec<[u32; 2]> = points.to_vec();
@@ -126,8 +114,7 @@ mod tests {
         );
     }
 
-    /// A degenerate hull is the members themselves. Rounding one up to an area would draw a region
-    /// no member occupies — a shape asserting more than the data does.
+    /// A degenerate hull is the members themselves, not a region rounded up to an area.
     #[test]
     fn a_degenerate_hull_is_the_members_themselves() {
         assert_eq!(convex_hull(&[[3, 4]]), vec![[3, 4]]);
@@ -141,9 +128,8 @@ mod tests {
         );
     }
 
-    /// The hull's winding is fixed, because the oracle compares vertex lists and a hull that
-    /// started at a different vertex or wound the other way would differ byte-for-byte while being
-    /// the same shape.
+    /// The winding is fixed: the oracle compares vertex lists, so a hull starting elsewhere or
+    /// wound the other way would differ byte for byte while being the same shape.
     #[test]
     fn the_hull_starts_at_the_lowest_vertex_and_winds_counter_clockwise() {
         let hull = convex_hull(&[[10, 0], [0, 10], [0, 0], [10, 10]]);

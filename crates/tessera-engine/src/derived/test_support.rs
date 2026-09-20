@@ -1,11 +1,7 @@
 use super::geometry::on_segment;
 
-/// A deterministic sample of `count` positions from `region`, drawn over the box
-/// `[-span, span]²` and offset into the unsigned grid.
-///
-/// **Not a lattice.** Real positions are a quantisation of a continuous embedding, so a third
-/// member exactly on the line through two others is a fluke; a lattice makes it the common case
-/// and turns every test into a test of the collinear path. That path has its own test below.
+/// A deterministic sample of `count` positions from `region`, over the box `[-span, span]²`,
+/// offset into the unsigned grid. Not a lattice, so a collinear third member stays a fluke.
 pub(super) fn sample(count: usize, span: i64, region: impl Fn(i64, i64) -> bool) -> Vec<[u32; 2]> {
     let mut state = 0x2545_f491_4f6c_dd1du64;
     let mut next = || {
@@ -27,17 +23,15 @@ pub(super) fn sample(count: usize, span: i64, region: impl Fn(i64, i64) -> bool)
     points
 }
 
-/// A moon: the disk of radius 1000 about the origin with the disk of radius 900 about
-/// `(1200, 0)` bitten out of it. The bite is the concavity a convex wrap swallows, and
-/// `(600, 0)` sits in the middle of it.
+/// A moon: radius 1000 minus radius 900 about `(1200, 0)`, the concavity a convex wrap swallows.
 pub(super) fn moon() -> Vec<[u32; 2]> {
     sample(4000, 1000, |x, y| {
         x * x + y * y <= 1000 * 1000 && (x - 1200) * (x - 1200) + y * y > 900 * 900
     })
 }
 
-/// Seven lobes on a common centre, so the wrap bridges seven separate voids and the budget has
-/// somewhere to be spent. Sampled finely enough that no single dig finishes a valley.
+/// Seven lobes on a common centre: seven voids for the budget to spend on, sampled finely enough
+/// that no single dig finishes a valley.
 pub(super) fn flower() -> Vec<[u32; 2]> {
     sample(20_000, 1000, |x, y| {
         let (fx, fy) = (x as f64, y as f64);
@@ -46,8 +40,8 @@ pub(super) fn flower() -> Vec<[u32; 2]> {
     })
 }
 
-/// `p` is inside the ring or on its boundary. Crossing number, exact in `i128`, with the
-/// boundary tested first so a member sitting on an edge counts as contained.
+/// `p` is inside the ring or on its boundary; crossing number, exact in `i128`, boundary tested
+/// first so an edge member counts as contained.
 pub(super) fn contains(poly: &[[u32; 2]], p: [u32; 2]) -> bool {
     let n = poly.len();
     if n == 1 {
@@ -76,8 +70,7 @@ pub(super) fn contains(poly: &[[u32; 2]], p: [u32; 2]) -> bool {
     inside
 }
 
-/// Two disks of radius 400 whose centres are 3,000 apart — a membership that is honestly two
-/// clouds, with a gap far wider than any α its own wrap can produce.
+/// Two radius-400 disks 3,000 apart: a gap far wider than any α their wrap can produce.
 pub(super) fn two_clouds() -> Vec<[u32; 2]> {
     sample(3000, 2000, |x, y| {
         (x + 1500) * (x + 1500) + y * y <= 400 * 400
@@ -85,8 +78,7 @@ pub(super) fn two_clouds() -> Vec<[u32; 2]> {
     })
 }
 
-/// Twice the area of the triangle `a b p`, over `|ab|` — the distance from `p` to the line
-/// through `a` and `b`, clamped to the segment.
+/// The distance from `p` to the line through `a` and `b`, clamped to the segment.
 pub(super) fn point_to_segment(a: [u32; 2], b: [u32; 2], p: [u32; 2]) -> f64 {
     let (ax, ay) = (a[0] as f64, a[1] as f64);
     let (bx, by) = (b[0] as f64, b[1] as f64);
@@ -101,11 +93,8 @@ pub(super) fn point_to_segment(a: [u32; 2], b: [u32; 2], p: [u32; 2]) -> f64 {
     ((px - (ax + t * vx)).powi(2) + (py - (ay + t * vy)).powi(2)).sqrt()
 }
 
-/// The furthest a member can be from its own shape: the diagonal of one quantising cell.
-///
-/// A cell side is `extent / QUANTISE_DIVISIONS` rounded up to a power of two, so at most twice
-/// that, and its diagonal at most √2 again. Every member shares its cell with a representative,
-/// which the dig does hold — so this is a bound and not a tolerance.
+/// The furthest a member can be from its own shape: the diagonal of one quantising cell, a bound
+/// and not a tolerance since every member shares its cell with a representative the dig holds.
 pub(super) fn cell_bound(members: &[[u32; 2]], divisions: u32) -> f64 {
     let (mut lo, mut hi) = ([u32::MAX; 2], [0u32; 2]);
     for m in members {

@@ -1,40 +1,21 @@
-/// How many cells of the grouping grid span α.
-///
-/// **Two, and the trade it sets is measured.** The grouping joins members whose cells are within
-/// this many cells of each other along both axes, so a cell side of α/`GROUP_CELLS_PER_ALPHA` makes
-/// the join *complete* — every pair within α is joined — while joining members as far apart as
-/// √2·(1 + 1/`GROUP_CELLS_PER_ALPHA`)·α, which at 2 is 2.12α. Over the 197-artifact measurement
-/// layer the result agrees with exact single-linkage at α on 192 artifacts and coarsens the rest;
-/// at one cell per α it agrees on 190, and at four on 192 (`artifact-shapes.md` §5). The exact
-/// alternative needs a Delaunay triangulation, which is the route ruling C measured and declined.
+/// How many cells of the grouping grid span α. At 2 every pair within α is joined and pairs up to
+/// about 2.12α may be; the groups match exact single linkage on 192 of 197 measured artifacts
+/// (190 at one cell per α, 192 at four).
 const GROUP_CELLS_PER_ALPHA: u64 = 2;
 
 /// The α-groups of the visible members: one label per member, and how many groups there are.
 ///
-/// **Grid connectivity at α, conservative in the direction that cannot lie.** The members are
-/// bucketed into a square grid anchored at their own bounding box, with a cell side of
-/// α/[`GROUP_CELLS_PER_ALPHA`], and two members are joined when their cells are within
-/// [`GROUP_CELLS_PER_ALPHA`] cells of each other along both axes. A displacement of at most α moves
-/// a cell index by at most that many cells per axis, so **every pair within α lands in one group**:
-/// the grouping never separates members that single-linkage at α would join. It does join members
-/// further apart than α, and that is the safe direction — an over-joined group draws the single
-/// ring the wire drew before, while an over-split one would claim a gap the members do not have.
-///
-/// **The grid never holds more cells than there are members.** Where the members are so scattered
-/// that a cell side of α/[`GROUP_CELLS_PER_ALPHA`] would need more, the side doubles until they
-/// fit, which only ever joins more. That keeps the pass `O(members)` with no data-dependent worst
-/// case — the exact route, cutting the Delaunay edges longer than α, has none either but costs a
-/// triangulation, measured at 1.4 s on the largest artifact of the measurement layer against 0.16 s
-/// for the whole dig (`artifact-shapes.md` §4.1).
+/// The members sit in a square grid, cell side α/[`GROUP_CELLS_PER_ALPHA`], joined when their
+/// cells are within [`GROUP_CELLS_PER_ALPHA`] cells of each other on both axes: a displacement of
+/// at most α moves a cell index by at most that many cells, so every pair within α lands in one
+/// group; a wider join only draws a wider ring, never a gap the members do not have. The grid never
+/// holds more cells than there are members, doubling the cell side until they fit. `O(members)`
+/// against a Delaunay route that measured 1.4 s to this pass's 0.16 s on the largest artifact.
 pub(super) fn alpha_groups(p: &[[u32; 2]], alpha_sq: i128) -> (Vec<u32>, usize) {
     let [x0, y0, x1, y1] = super::geometry::bounds(p);
     let (wx, wy) = ((x1 - x0) as u64 + 1, (y1 - y0) as u64 + 1);
-    // α as a length. The square root is the only float in this module, and it is safe here for two
-    // reasons rather than one: it is IEEE-754 correctly rounded, so it is identical on every
-    // platform; and it is rounded *up* to a whole grid unit, so `2 · side ≥ α` holds with an
-    // integer's margin that a last-bit error cannot cross — which is the inequality the
-    // completeness argument above rests on. Every join is then an integer comparison of cell
-    // indices.
+    // α as a length. The root is a float, rounded up to a whole grid unit so `2 · side ≥ α` holds
+    // with an integer's margin a last-bit error cannot cross.
     let alpha = (alpha_sq as f64).sqrt();
     let mut side = (alpha / GROUP_CELLS_PER_ALPHA as f64).ceil().max(1.0) as u64;
     let (mut nx, mut ny) = (wx.div_ceil(side), wy.div_ceil(side));
@@ -55,9 +36,8 @@ pub(super) fn alpha_groups(p: &[[u32; 2]], alpha_sq: i128) -> (Vec<u32>, usize) 
         occupied[cell(q)] = true;
     }
 
-    // Union-find over the *cells*, not the members: the grid has at most one cell per member and
-    // usually far fewer, so the join costs a bounded sweep over cells rather than a neighbourhood
-    // query per member.
+    // Union-find over the cells, not the members: the grid has at most one cell per member, so the
+    // join costs a bounded sweep over cells rather than a neighbourhood query per member.
     let mut parent: Vec<u32> = (0..total as u32).collect();
     let r = GROUP_CELLS_PER_ALPHA as i64;
     for cy in 0..ny as i64 {
@@ -66,7 +46,6 @@ pub(super) fn alpha_groups(p: &[[u32; 2]], alpha_sq: i128) -> (Vec<u32>, usize) 
             if !occupied[k] {
                 continue;
             }
-            // Half the neighbourhood; the other half is reached from the cell on its own side.
             for dx in 0..=r {
                 for dy in -r..=r {
                     if dx == 0 && dy <= 0 {
@@ -85,8 +64,7 @@ pub(super) fn alpha_groups(p: &[[u32; 2]], alpha_sq: i128) -> (Vec<u32>, usize) 
         }
     }
 
-    // Labels are minted in cell order, so they are a function of the positions rather than of the
-    // order the members were gathered in.
+    // Labels are minted in cell order, a function of the positions rather than of arrival order.
     let mut label = vec![u32::MAX; total];
     let mut groups = 0u32;
     for k in 0..total {
@@ -125,10 +103,8 @@ mod tests {
     use crate::derived::geometry::{convex_hull_of_sorted, sq_len};
     use crate::derived::test_support::two_clouds;
 
-    /// **The grouping never separates members single-linkage at α would join**, which is the whole
-    /// of its soundness: it may join members further apart, and that only ever draws the wider
-    /// shape the wire drew before. Checked exhaustively against the definition on a cloud small
-    /// enough to compare every pair.
+    /// The grouping never separates members single-linkage at α would join, checked exhaustively
+    /// on a cloud small enough to compare every pair.
     #[test]
     fn a_pair_within_alpha_is_never_split_across_groups() {
         let members = two_clouds();
