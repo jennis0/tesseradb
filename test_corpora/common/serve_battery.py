@@ -1,74 +1,26 @@
 """The serve battery — view latency across a principal ladder, hot and cold, on one schema.
 
-Every rung of the ladder records the same three things (owner rulings, 2026-09-03): what the
-build cost per stage, what a view costs a principal, and what online ingest sustains. This module
-is the middle one. It drives a **running** `tessera serve` — it does not boot one — and writes the
-`serve` block of the rung's `measurements.json` (`README.md` carries the schema).
+It drives a running `tessera serve` and writes the `serve` block of the rung's
+`measurements.json`.
 
-What makes it a battery rather than a pan sequence
---------------------------------------------------
+Each cell is measured under three conditions, stamped in every row:
 
-`probes/2026-09-02-serve-under-memory-cap/drive.py` panned five fixed fractions of the extent per
-zoom. That answers "does it survive"; it cannot answer "what does a viewport cost", because the
-five boxes' densities are whatever the corpus put there and a p99 over them is a p99 over an
-unknown mixture. `crates/tessera-bench/src/arms/viewport.rs`' module doc makes the same argument
-for the bench arms: the cost of a viewport is a function of how many points are in it, so the
-locations are drawn by **density decile** and every cell carries the density it was drawn at.
+* `cold` — bundle and cache pages evicted and a fresh session before every sample.
+* `cold_pages_warm_engine` — the session's fragments built once, then pages evicted before
+  every sample, isolating the storage cost from the per-session build.
+* `hot` — one location repeated, nothing evicted.
 
-Three conditions, split mechanically
-------------------------------------
+The two cold conditions draw 40 distinct locations from the cell's own decile, since repeating a
+location warms it. Locations are drawn by density decile, and each cell carries the density it
+was drawn at, since the cost of a viewport is a function of how many points are in it.
 
-A single "latency" figure over a mixture of cold and warm requests is the number that hides both.
-So each cell is measured three ways, and the condition is stamped in every row:
+A request is made at the budget's depth rather than the sample's own zoom, since a client spreads
+its point budget over the tiles a viewport covers, and `k` is the deployment's own `max_k`.
 
-* ``cold`` — the bundle's and cache's pages evicted **and** a fresh session (a new
-  ``session/authorise``) before every sample, so neither the page cache nor the session's own
-  fragments carry anything over. This is a first request by a new viewer.
-* ``cold_pages_warm_engine`` — the session's fragments built once, then pages evicted before every
-  sample. This isolates the storage cost from the per-session build.
-* ``hot`` — one location repeated, nothing evicted.
-
-The two cold conditions draw **40 distinct locations from the cell's own decile**: repeating one
-location warms it, and a "cold" sample of an already-faulted extent measures nothing. ``hot``
-repeats one location, which is what makes it hot.
-
-The request shape is the client's budget
-----------------------------------------
-
-A client draws one to two million marks a view and the request-time budget spreads them over the
-tiles the viewport covers: `architecture.md` §7.2's arithmetic puts the tile count a request
-carries at `B / m_target`, independent of zoom, and `caching.md` §3 prices a view at 60 k to 125 k
-tiles. So a request is made at the **budget's depth** rather than at the sample's own zoom, and
-`k` is the deployment's own ``max_k``, which the engine clamps per tile to ``k_max_marks``. Beside
-the latency every sample records what its request served and moved: the depth, `k`, the points the
-sweep selected, the bytes, the time to the first flush and the time to the trailer. At two million
-points the body is tens of megabytes, and the split between the sweep and the emit is what a
-viewer waits through.
-
-The ranking pass asks at the same depth its samples will, so a cell's recorded density is the
-visible count over the tiles the samples request rather than over a coarser cover of the same box.
-It costs ``--candidates`` requests a zoom at that depth before the ladder starts, which is the
-knob to lower on a large corpus.
-
-Proof of cold, and why a failed eviction is not a result
---------------------------------------------------------
-
-Eviction without root is ``posix_fadvise(…, POSIX_FADV_DONTNEED)`` over every file under the bundle
-and the cache, plus ``memory.reclaim`` on the server's cgroup when one is given. Neither is
-guaranteed: a page another process holds mapped is not dropped, and a cgroup may reclaim less than
-asked. So every cold sample reads the server's ``majflt`` from ``/proc/<pid>/stat`` either side of
-its request, and **a cold sample whose major-fault delta is zero is excluded from the cell's
-headline percentiles** rather than reported as a fast cold read. Every cell carries `proven_cold`,
-`eviction_failed` and an `all` block over every sample regardless, so a cell that proved nothing is
-visible as such and its numbers are still there to read — see `condition_figures` for why a zero
-delta means different things under the two cold conditions.
-
-⊘ ``majflt`` is process-wide, so a fault another thread caused inside the sampling window counts
-here too. It is a **lower bound on cold-ness being real**, not an attribution: what it rules out
-is the case this check exists for, an "eviction" that dropped nothing at all.
-
-Usage
------
+Eviction is `posix_fadvise(DONTNEED)` over the bundle and cache files plus `memory.reclaim` on the
+server's cgroup, and neither is guaranteed. Each cold sample reads the server's `majflt` either
+side of its request; a sample with no major-fault delta is excluded from the headline percentiles
+and counted in `eviction_failed` instead.
 
     python -m test_corpora.common.serve_battery \\
         --viewer http://127.0.0.1:8151 --session http://127.0.0.1:8152 \\
@@ -96,18 +48,14 @@ import requests
 import urllib3
 from pyarrow import ipc
 
-#: The percentiles every cell reports. p25 and p75 are here because the interesting shape at a
-#: cold cell is the *spread*, and a p50/p99 pair cannot show it.
+#: The percentiles every cell reports, p25 and p75 included to show a cold cell's spread.
 PERCENTILES = (25, 50, 75, 95, 99)
 
-#: How much deeper than its own zoom a request is made. The whole extent at depth 9 covers
-#: 4⁹ = 262,144 tiles, which is `serve.max_tiles_per_request`'s default and the depth at which
-#: sixteen marks per occupied tile is nearest two million on the whole GBIF corpus; a box that is
-#: one depth-`z` tile asked at `z + 9` covers the same 262,144.
+#: How much deeper than its own zoom a request is made: depth 9 covers 4**9 = 262,144 tiles,
+#: `serve.max_tiles_per_request`'s default.
 BUDGET_DEPTH = 9
 
-#: The Morton grid has sixteen levels (`tessera-spatial`'s `Tile::code_range`), so no request can
-#: be made below depth 16.
+#: The Morton grid has sixteen levels, so no request can be made below depth 16.
 GRID_DEPTH = 16
 
 #: `k` where `/v1/meta` publishes no `selection.max_k`. Every rung's deployment declares 5000.
@@ -116,20 +64,15 @@ DEFAULT_K = 5000
 #: `max_tiles_per_request` where `/v1/meta` publishes none: the server's own default.
 DEFAULT_MAX_TILES = 262_144
 
-#: `k` on a ranking request. `k = 0` is the counts-only request (contracts §3.2 r38): the tiles
-#: frame is served exact as at any `k` and no points frame is emitted at all, so the engine's
-#: `cap == 0` arm returns the counts without a selection or a gather. A decile is a ranking over
-#: `visible`, which no `k` changes, and at the budget's depth a ranked candidate asked for points
-#: would move tens of megabytes per candidate before the ladder had started.
+#: `k` on a ranking request. `k = 0` is the counts-only request: a decile ranks `visible`, which
+#: no `k` changes.
 RANK_K = 0
 
-#: The frame kinds this module reads (contracts §3.2 r26; `clients/ts/core/src/frame.ts` carries
-#: the whole grammar).
+#: The frame kinds this module reads.
 FRAME_TILES = 1
 FRAME_TRAILER = 4
 
-#: What a connection aborted part-way through a body raises. Caught around the read alone, never
-#: around the request, so a server that is not there is still a failure rather than a shed stream.
+#: What a connection aborted part-way through a body raises, caught around the read alone.
 SHED_ERRORS = (
     requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ConnectionError,
@@ -168,12 +111,8 @@ def meta(viewer_base: str, token: str, timeout: float = 30.0) -> dict:
 
 
 def frames(content: bytes) -> list[tuple[int, bytes]]:
-    """The response's frames as `(kind, payload)` in wire order.
-
-    `u8 kind, u32 little-endian length, payload`, repeated (contracts §3.2 r26). A body that ends
-    part-way through a frame yields the frames that were whole: what a cut stream delivered is a
-    measurement here, and the absent kind-4 trailer is how the cut is seen
-    (`streamed-serving.md` §6).
+    """The response's frames as `(kind, payload)` in wire order: `u8 kind, u32 little-endian
+    length, payload`, repeated. A body cut mid-frame yields only the frames that were whole.
     """
     out: list[tuple[int, bytes]] = []
     at = 0
@@ -188,14 +127,8 @@ def frames(content: bytes) -> list[tuple[int, bytes]]:
 
 
 def response_figures(content: bytes) -> dict:
-    """What the response counted, what it served and whether it arrived whole.
-
-    The tiles frame's `visible` and `matched` are the masked counts and its `served` is what the
-    sweep selected; the trailer's `points` is what the emit delivered. **These sums, not a byte
-    digest, are the correctness check**: `k` point sampling is not claimed deterministic across
-    processes and is not observed to be, while the masked counts are exact. The two point figures
-    differ exactly where the stream was cut, which the missing trailer says a second way.
-    """
+    """What the response counted, served and whether it arrived whole: the tiles frame's
+    `visible`/`matched` are the masked counts, `served` is what the sweep selected."""
     counts = None
     trailer: dict | None = None
     received = frames(content)
@@ -256,21 +189,9 @@ def viewport(
     layers: str | None = "all",
     timeout: float = 300.0,
 ) -> dict:
-    """One `/v1/viewport` at the depth and `k` the caller has already chosen.
-
-    Neither has a default here. The depth is [`budget_zoom`]'s and `k` is the deployment's
-    ceiling, and a default on either would be a second answer to a question this module answers
-    once.
-
-    **A stream the server cut is a result, not an exception.** The whole emit phase runs under
-    `serve.stream_deadline_ms` from the first flush (`streamed-serving.md` §5), and a
-    budget-sized response on a large corpus can outrun it: the connection aborts mid-body and no
-    trailer is emitted. The body is therefore read chunk by chunk ([`drain`]) and what arrived is
-    returned with `shed` set — the counts frame is first on the wire, so a shed sample still
-    carries exact counts, and its delivered points are a sound prefix (§6). A response with no
-    trailer is shed whether or not the read raised, because the trailer's presence is the
-    completeness signal.
-    """
+    """One `/v1/viewport` at the depth and `k` the caller has already chosen. A stream the
+    server cuts mid-body is a result, not an exception: read chunk by chunk ([`drain`]) and
+    returned with `shed` set; a shed sample still carries exact counts."""
     body: dict = {"view": view_id, "zoom": zoom, "bbox": list(bbox), "k": k}
     if layers is not None:
         body["layers"] = layers
@@ -287,12 +208,9 @@ def viewport(
     content, shed_error = drain(r)
     wall = time.perf_counter() - t0
     out = {
-        # To the cut where there was one, which is what a client waited before it knew.
+        # Time to the cut, if there was one.
         "wall_ms": wall * 1000.0,
-        # Post-admission to the sweep's end, which under streaming is the time to the first flush
-        # and the earliest byte a client can draw (`streamed-serving.md` §5). The whole stream is
-        # the trailer's `stream_us`, and the two are named apart so neither stands in for the
-        # other.
+        # Time from admission to the sweep's end: the trailer's `stream_us` covers the rest.
         "server_ms": int(r.headers.get("x-tessera-server-us", "0")) / 1000.0,
         "bytes": len(content),
         "request_zoom": zoom,
@@ -313,11 +231,8 @@ def _cell_index(v: float, lo: float, hi: float) -> int:
 
 
 def covered_tiles(quantisation: dict, bbox: Sequence[float], depth: int) -> int:
-    """How many depth-`depth` tiles `bbox` covers, as `tessera-spatial` counts them.
-
-    The engine counts this same product and refuses a request above `max_tiles_per_request`
-    before it does any masking work, so the battery counts it too and asks a depth shallower
-    rather than sending a request it knows will be refused.
+    """How many depth-`depth` tiles `bbox` covers, as `tessera-spatial` counts them: the engine
+    refuses a request above `max_tiles_per_request`, so the battery asks a shallower depth first.
     """
     if depth <= 0:
         return 1
@@ -345,15 +260,8 @@ def budget_zoom(
     budget_depth: int = BUDGET_DEPTH,
     max_tiles: int = DEFAULT_MAX_TILES,
 ) -> int:
-    """The depth a client spending its point budget on `bbox` asks at.
-
-    `zoom + budget_depth`, held to the grid's sixteen levels and then reduced while the box covers
-    more tiles than the deployment allows one request. The reduction is not a corner case. A box
-    drawn here is one depth-`zoom` tile's worth of area placed at random rather than a tile, so it
-    straddles an extra row and column of tiles, and (2⁹ + 1)² is 1,025 above the default ceiling.
-    The drawn span also stops shrinking at zoom 6, so above that zoom the sum on its own asks for
-    four or sixteen times the budget.
-    """
+    """The depth a client spending its point budget on `bbox` asks at: `zoom + budget_depth`,
+    held to sixteen levels and reduced while the box covers more tiles than one request allows."""
     depth = min(GRID_DEPTH, zoom + budget_depth)
     while depth > 0 and covered_tiles(quantisation, bbox, depth) > max_tiles:
         depth -= 1
@@ -366,11 +274,8 @@ def budget_zoom(
 
 
 class Evictor:
-    """Drops the bundle's and cache's pages, and reads the server's major-fault counter.
-
-    **Without root**, which is the whole constraint: `/proc/sys/vm/drop_caches` needs it and
-    `probes/2026-09-02-serve-under-memory-cap` had no genuinely cold run for exactly that reason.
-    `posix_fadvise(POSIX_FADV_DONTNEED)` needs only read access to the file.
+    """Drops the bundle's and cache's pages, and reads the server's major-fault counter, without
+    root: `posix_fadvise(POSIX_FADV_DONTNEED)` needs only read access to the file.
     """
 
     def __init__(
@@ -409,15 +314,8 @@ class Evictor:
             finally:
                 os.close(fd)
         if self.cgroup is not None:
-            # `memory.reclaim` takes a byte count; asking for more than is charged is not an
-            # error, it reclaims what it can. Absent on a kernel without it, which is not a
-            # failure of the run — the fadvise pass above is the primary mechanism.
-            # **Sized to what the cgroup is actually holding**, read fresh each time, rather than
-            # a fixed large number: `memory.reclaim` iterates until it has reclaimed what it was
-            # asked for or run out of candidates, so an ask far above the charge spends real time
-            # scanning for pages that are not there — at 4,000 evictions in a battery that is the
-            # run's duration. This is the only mechanism here that reaches pages the server holds
-            # mapped, and it runs before **every** cold sample.
+            # Sized to the charge read fresh each call, the only mechanism here that reaches
+            # pages the server holds mapped.
             try:
                 charged = int((self.cgroup / "memory.current").read_text().strip())
             except OSError:
@@ -437,8 +335,7 @@ class Evictor:
             raw = Path(f"/proc/{self.server_pid}/stat").read_text()
         except OSError:
             return None
-        # The comm field may contain spaces and parentheses; everything after the last ')' is
-        # positionally safe. `majflt` is field 12 overall, so index 9 of the tail.
+        # Everything after the last ')' is positionally safe; `majflt` is index 9 of that tail.
         tail = raw[raw.rindex(")") + 2 :].split()
         return int(tail[9])
 
@@ -471,24 +368,9 @@ class Evictor:
 
 
 def compose_ladder(ranks: list[dict], total_rows: int, targets: Sequence[float]) -> list[dict]:
-    """Greedy term sets for each target fraction of the corpus.
-
-    `ranks` is the rung's `branch-ranks.json`: `[{"term": ..., "pairs": ...}, …]`, one entry per
-    value of the point-visibility vocabulary, `pairs` being how many (item, term) pairs carry it.
-
-    **Pairs are an upper bound on entities, never the entity count**: an article carries a mean of
-    10.6 MeSH descriptors and so several branch letters, and the pair sums overlap. That is why
-    the composition is a *target* and the number that gets reported beside it is **measured** —
-    a zoom-0 whole-extent viewport under the composed principal, over the same under the 100%
-    principal.
-
-    The greedy is: fill descending by size while the running sum stays under the target's pair
-    budget; then consider the one smallest unused term that would overshoot, and take whichever of
-    the two sums is closer to the budget **in ratio** rather than in absolute difference. Ratio,
-    because a ladder rung's job is to sit at an order of magnitude: for a 1% target on this rung
-    the two candidates are 0.014% and 2.9%, and absolute difference picks 0.014%, which is not a
-    1% rung by any reading.
-    """
+    """Greedy term sets for each target fraction, from `branch-ranks.json`'s pairs (an upper
+    bound on entities): fills descending by size under the budget, then compares the smallest
+    overshoot against the total by ratio, so a rung lands within an order of magnitude."""
     ladder = []
     for target in targets:
         if target >= 1.0:
@@ -524,11 +406,8 @@ def compose_ladder(ranks: list[dict], total_rows: int, targets: Sequence[float])
 
 
 def candidate_boxes(quantisation: dict, zoom: int, n: int, rng: random.Random) -> list[list[float]]:
-    """`n` boxes at one zoom, uniformly placed over the extent.
-
-    The span shrinks with zoom and stops shrinking at zoom 6, matching the pan sequence the
-    memory-cap probe used, so the request sizes here and there are comparable. What differs is
-    that these are *drawn* rather than fixed, which is what gives the deciles something to rank.
+    """`n` boxes at one zoom, uniformly placed over the extent, span shrinking with zoom to a
+    floor at zoom 6, drawn per call rather than fixed so the deciles have something to rank.
     """
     x0, y0 = quantisation["x_min"], quantisation["y_min"]
     x1, y1 = quantisation["x_max"], quantisation["y_max"]
@@ -554,22 +433,8 @@ def rank_by_density(
     max_tiles: int,
     log: Callable[[str], None],
 ) -> list[tuple[list[float], int]]:
-    """`(box, visible)` sorted ascending by `visible`, under the **100% principal**.
-
-    Under the widest principal on purpose: a decile is a property of the corpus's geometry, so
-    that every principal's cells at decile *d* are the same places, and "the narrow principal is
-    faster at decile 9" is a statement about masking rather than about two different maps.
-
-    At the depth the cell's samples will ask at, because `visible` is summed over the tiles a
-    request covers and a coarser cover of the same box reaches past it: a decile ranked at the
-    zoom's own depth would rank boxes on ground the samples do not read.
-
-    **At `RANK_K` and with the artifact channel off**, which is the counts frame and nothing else.
-    A ranking pass is ``--candidates`` requests a zoom before any cell is measured; asked for
-    points at the budget's depth each one is a whole view's body, and on a corpus large enough for
-    that body to outrun `serve.stream_deadline_ms` the pass cannot complete at all. No count here
-    depends on either.
-    """
+    """`(box, visible)` sorted ascending by `visible`, under the 100% principal, at the depth
+    the cell's samples will ask at, at `RANK_K` and nothing else."""
     ranked = []
     for i, box in enumerate(boxes):
         depth = budget_zoom(quantisation, box, zoom, budget_depth, max_tiles)
@@ -593,11 +458,8 @@ def decile_pools(ranked: Sequence[tuple[list[float], int]]) -> list[list[tuple[l
 
 
 def percentiles(values: Sequence[float]) -> dict:
-    """p25/p50/p75/p95/p99 and max, by nearest rank on the sorted samples.
-
-    Nearest rank rather than an interpolating estimator: these are latencies with a long tail and
-    a small n, and an interpolated p99 over 40 samples reports a number no request took.
-    """
+    """p25/p50/p75/p95/p99 and max, by nearest rank rather than interpolation, which over a
+    small n would report a number no request took."""
     if not values:
         return {f"p{p}": None for p in PERCENTILES} | {"max": None, "mean": None, "n": 0}
     s = sorted(values)
@@ -611,24 +473,14 @@ def percentiles(values: Sequence[float]) -> dict:
     return out
 
 
-#: The per-sample figures a cell reports percentiles over. `server_ms` is the header's time to the
-#: first flush and `stream_ms` the trailer's time to the last, so at a budget-sized response the
-#: distance between them is the emit; `served` and `response_bytes` are what that emit moved.
+#: The per-sample figures a cell reports percentiles over: `server_ms` is time to first flush,
+#: `stream_ms` to the last, and `served`/`response_bytes` are what the emit moved.
 SAMPLE_FIGURES = ("server_ms", "stream_ms", "wall_ms", "served", "response_bytes")
 
 
 def cell_figures(samples: Sequence[dict]) -> dict:
-    """Server-side, whole-stream and end-to-end percentiles, **separately**.
-
-    The three answer different questions. A cold first request on this corpus is 22.7 s end to end
-    against 0.12 ms server-side (`probes/2026-09-02-serve-under-memory-cap`), so one pooled figure
-    is two measurements averaged into neither; and under streaming the server-side figure stops at
-    the sweep, so what a viewer waits through is the stream figure beside it.
-
-    **Over the complete samples.** A shed stream's wall time is the time to the cut, which is a
-    property of `serve.stream_deadline_ms` rather than of the request, so averaging it in would
-    report the deadline as a latency. The shed are counted instead.
-    """
+    """Server-side, whole-stream and end-to-end percentiles, separately, over the complete
+    samples only: a shed stream's wall time is the time to the cut, counted instead of pooled."""
     ok = [s for s in samples if not s.get("failed") and not s.get("shed")]
     out = {
         "server_ms": percentiles([s["server_ms"] for s in ok if s.get("server_ms") is not None]),
@@ -649,22 +501,9 @@ def cell_figures(samples: Sequence[dict]) -> dict:
 
 
 def condition_figures(samples: Sequence[dict], cold: bool) -> dict:
-    """One condition's figures, with the proven-cold samples separated from the rest.
-
-    **A zero major-fault delta is not always a failed eviction, and the two cannot be told apart
-    from `majflt` alone.** Under `cold_pages_warm_engine` on this corpus most samples show one:
-    the eviction drops the bundle's pages, and then the request reads nothing off disk at all,
-    because a session's fragments and its row projection are heap structures and a masked count
-    over them is bitmap arithmetic (`filter-index.md` §8). So a zero delta there is a *result* —
-    the request needed no file page — and a zero delta under `cold`, where the session itself is
-    new, is much more likely to be an eviction that dropped nothing.
-
-    Both readings are served by carrying both sets: the top-level figures are over the
-    **proven-cold** samples for a cold condition (and over everything for `hot`), and `all` is
-    over every sample regardless. A cell whose `proven_cold` is 0 has `None` percentiles at the
-    top level and real ones in `all`, which is the honest shape for "nothing here was proven
-    cold" — never a fast cold read.
-    """
+    """One condition's figures, with the proven-cold samples separated from the rest: a zero
+    delta under `cold_pages_warm_engine` can be genuine, while under `cold` it is more likely a
+    failed eviction. `all` is kept over every sample regardless."""
     complete = [s for s in samples if not s.get("failed") and not s.get("shed")]
     proven = (
         [s for s in complete if s.get("majflt_delta") not in (None, 0)] if cold else complete
@@ -676,14 +515,9 @@ def condition_figures(samples: Sequence[dict], cold: bool) -> dict:
     out["eviction_failed"] = (
         sum(1 for s in samples if s.get("eviction_failed")) if cold else 0
     )
-    # A response whose trailer never arrived is a stream the server cut mid-body
-    # (`streamed-serving.md` §6). It is counted rather than dropped: on a corpus whose budget
-    # response outruns `serve.stream_deadline_ms` that is the result, and the delivered prefix is
-    # still a sound partial band. A cell every sample of which was shed has no percentiles and
-    # this count, which is the honest shape for it.
+    # A response with no trailer is a stream the server cut mid-body, counted rather than dropped.
     out["shed"] = sum(1 for s in samples if s.get("shed") and not s.get("failed"))
-    # The counts frame is first on the wire, so a shed sample carries them exactly and is as good
-    # a source for them as a complete one.
+    # The counts frame is first on the wire, so a shed sample carries them exactly.
     first = next((s for s in samples if s.get("counts")), None)
     out["visible"] = first["counts"]["visible"] if first else None
     out["matched"] = first["counts"]["matched"] if first else None
@@ -699,9 +533,8 @@ def condition_figures(samples: Sequence[dict], cold: bool) -> dict:
 
 
 def _log(message: str) -> None:
-    """Line-buffered by hand: a long run is watched through its redirected log, and Python
-    block-buffers stdout when it is not a terminal — a battery that had run for forty minutes
-    looked, from the file, like one that had not started."""
+    """Line-buffered by hand: Python block-buffers stdout when it is not a terminal, and a long
+    run is watched through its redirected log."""
     print(message, flush=True)
 
 
@@ -723,9 +556,7 @@ class Battery:
         self.deciles = [int(d) for d in args.deciles.split(",")]
         self.conditions = args.conditions.split(",")
         self.cold_samples = args.cold_samples or args.samples
-        # The request shape, settled in [`Battery.request_shape`] from `/v1/meta` before anything
-        # is sampled: the view, its own frame, the deployment's `k` ceiling and its tile guard. A
-        # request is built from these and from nothing else.
+        # The request shape, settled in [`Battery.request_shape`] from `/v1/meta`.
         self.view_id = ""
         self.quant: dict = {}
         self.max_tiles = DEFAULT_MAX_TILES
@@ -763,14 +594,8 @@ class Battery:
             self.oom_seen = True
 
     def _sample(self, token, zoom, box, cold: bool, **kw) -> dict:
-        """One request, with the cold proof around it when the condition asks for one.
-
-        **A request that fails is a sample with a `failed` field, not the end of the run.** A
-        battery that died on one would throw away every cell it had already measured. The failure
-        is recorded with its wall time and excluded from the percentiles. A stream the server cut
-        mid-body does not reach here at all: [`viewport`] returns it marked `shed`, which is a
-        sample with exact counts and no latency figure.
-        """
+        """One request, with the cold proof around it when asked for. A failure is a sample
+        with a `failed` field, not the end of the run; a shed stream is marked `shed` instead."""
         depth = self._depth(box, zoom)
         before = self.evictor.majflt() if cold else None
         t0 = time.perf_counter()
@@ -802,18 +627,15 @@ class Battery:
         return s
 
     def _cold_samples(self, terms, zoom, pool, n, fresh_session: bool) -> list[dict]:
-        """`n` samples, a distinct location each, evicted before every one.
-
-        A repeated location is warm, so the pool is walked rather than one box repeated; where the
-        pool holds fewer than `n` it is walked round, and the run says so in `distinct_locations`.
+        """`n` samples, a distinct location each, evicted before every one; the pool wraps round
+        where it holds fewer than `n`, recorded in `distinct_locations`.
         """
         token = None
         if not fresh_session:
             token = self._fresh_token(terms)
             if token is None:
                 return []
-            # Build this session's fragments once — that is what "warm engine" means — on a
-            # location that is not one of the samples, so no sample's own extent is faulted here.
+            # Build this session's fragments once, on a location that is not one of the samples.
             self._sample(token, zoom, pool[0][0], cold=False)
         out = []
         for i in range(n):
@@ -833,13 +655,8 @@ class Battery:
         return [self._sample(token, zoom, box, cold=False) for _ in range(n)]
 
     def request_shape(self, token: str) -> dict:
-        """Settle the view, its frame and the deployment's ceilings from `/v1/meta`.
-
-        The two ceilings a request is built against come from the deployment that will serve it
-        rather than from a file beside it: `/v1/meta` publishes both for exactly this reason
-        (contracts §3.2), and a battery driving a server it did not boot has no other source.
-        Returns the `selection` block it read.
-        """
+        """Settle the view, its frame and the deployment's ceilings from `/v1/meta`. Returns
+        the `selection` block it read."""
         m = meta(self.args.viewer, token)
         self.view_id = self.args.view or m["views"][0]["id"]
         self.quant = next(v for v in m["views"] if v["id"] == self.view_id)["quantisation"]
@@ -891,11 +708,8 @@ class Battery:
             )
 
     def measure_cell(self, token, terms, zoom: int, decile: int, which: int) -> dict:
-        """One cell: one location of one decile, under each condition.
-
-        Two cells in one decile are two different orderings of the same pool, so their samples are
-        distinct locations of the same known density.
-        """
+        """One cell: one location of one decile, under each condition. Two cells in one decile
+        are two orderings of the same pool, so their samples are distinct known densities."""
         pool = self.pools[zoom][decile]
         offset = (which * len(pool)) // max(self.args.cells_per_decile, 1)
         rotated = pool[offset:] + pool[:offset]
@@ -910,12 +724,7 @@ class Battery:
             "distinct_locations": min(self.cold_samples, len(rotated)),
             "conditions": {},
         }
-        # **Cold and hot get different sample counts, and that is deliberate.** A hot sample is a
-        # millisecond; a cold one at 3.6×10⁷ rows under the widest principal is a fresh fragment
-        # build plus a re-fault of the bundle, tens of seconds — so forty of each is not one
-        # budget but two, and the cold half decides whether a rung is measurable in an evening at
-        # all. The count that was used is recorded per run; a reduced run must never look like a
-        # full one.
+        # Cold and hot use different sample counts, recorded per run.
         for condition in self.conditions:
             if condition == "hot":
                 samples = self._hot_samples(token, zoom, box, self.args.samples)
@@ -926,8 +735,7 @@ class Battery:
             else:
                 raise SystemExit(f"unknown condition {condition!r}")
             cell["conditions"][condition] = condition_figures(samples, cold=condition != "hot")
-        # `all` rather than the headline block: the first condition may be a cold one that proved
-        # nothing, and the points a request served are the same whether the eviction worked.
+        # `all` rather than the headline block, since the first condition may have proved nothing.
         served_figures = cell["conditions"][self.conditions[0]]["all"]["served"]
         shed = sum(figures.get("shed", 0) for figures in cell["conditions"].values())
         self.log(
@@ -943,14 +751,9 @@ class Battery:
         return cell
 
     def run_rung(self, rung: dict, token: str, authorise_s: float, total_rows: int) -> dict:
-        """One principal's first viewport and every cell under it.
-
-        Returned even when the server died mid-rung: the cells measured before it are
-        measurements, and `died` says where it stopped.
-        """
-        # The first viewport of a fresh session is its own figure: it carries the
-        # `(view, principal)` fragment build, which is not a per-request cost and must not be
-        # averaged into one.
+        """One principal's first viewport and every cell under it, returned even when the
+        server died mid-rung: `died` says where it stopped."""
+        # The first viewport carries the fragment build and must not be averaged in.
         t0 = time.perf_counter()
         first = self._sample(token, 0, full_box(self.quant), cold=False)
         first_s = time.perf_counter() - t0
@@ -1001,8 +804,7 @@ class Battery:
         args = self.args
         ranks = json.loads(Path(args.ranks).read_text())
 
-        # The 100% principal first: it is the denominator of every coverage figure and the
-        # principal the deciles are ranked under.
+        # The 100% principal first: the denominator of every coverage figure.
         all_terms = sorted(r["term"] for r in ranks)
         broad_token, broad_authorise_s = authorise(args.session, args.session_cred, all_terms)
         selection = self.request_shape(broad_token)
@@ -1015,10 +817,8 @@ class Battery:
         for rung in compose_ladder(
             ranks, total_rows, [float(t) for t in args.targets.split(",")]
         ):
-            # **A dead server ends the run and does not lose it.** Under a cap the process can be
-            # OOM-killed part-way up the ladder — which is the result the capped run exists to
-            # find — and every principal measured before that is still a measurement. The rung
-            # that was in flight is recorded in `died` with the principal it was serving.
+            # A dead server ends the run without losing it: the rung in flight is recorded in
+            # `died`.
             if self.died is not None:
                 break
             self.log(
@@ -1077,11 +877,8 @@ class Battery:
         }
 
     def _text_and_drilldown(self, token) -> dict:
-        """A `match` on the rung's text column, common and rare, and one drill-down.
-
-        Under the same three conditions as the battery, at one location, so the text index's cold
-        cost is on the same footing as the geometry's rather than being a warm figure beside cold
-        ones.
+        """A `match` on the rung's text column, common and rare, and one drill-down, under the
+        same three conditions as the battery, at one location.
         """
         full = full_box(self.quant)
         out: dict = {"column": self.args.text_column, "matches": {}}
@@ -1106,8 +903,7 @@ class Battery:
                 )
             out["matches"][label] = {"token": word, "conditions": per_condition}
 
-        # One drill-down. Handles are `tessera_id`s and most low ones are not live, so a 404 is a
-        # result rather than a failure; what is measured is the route, not the row.
+        # One drill-down; a 404 is a result, not a failure, since most low handles are not live.
         drill = []
         for handle in range(1, self.args.drilldowns + 1):
             t0 = time.perf_counter()
@@ -1134,12 +930,9 @@ class Battery:
 
 
 def battery_figures(cells: Sequence[dict]) -> dict:
-    """Battery-level figures **over cells, not over pooled samples**.
-
-    Pooling every sample would weight the battery by how many samples each cell happened to
-    contribute and let one cell's tail become the battery's p99. What a battery-level p99 should
-    mean is "the worst cell", so each cell contributes its own p50 and its own p99, and these are
-    percentiles over those.
+    """Battery-level figures over cells, not over pooled samples: pooling every sample would
+    weight the battery by how many samples each cell happened to contribute. Each cell instead
+    contributes its own p50 and its own p99, and these figures are percentiles over those.
     """
     out: dict = {}
     conditions = sorted({c for cell in cells for c in cell["conditions"]})
@@ -1216,9 +1009,7 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--text-samples", type=int, default=10)
     ap.add_argument("--drilldowns", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
-    # Booting one here rather than being handed one: a battery has to know the server's pid and
-    # its cgroup, and both are properties of how it was started. Given `--boot-rung`, everything
-    # above is filled in from the deployment this creates.
+    # Booted here rather than handed one, since a battery needs the server's pid and cgroup.
     ap.add_argument("--boot-rung", help="a rung directory to serve, instead of an already-running server")
     ap.add_argument("--boot-bundle", help="the bundle to serve; defaults to <rung>/bundle")
     ap.add_argument("--boot-scratch", help="where the scratch deployment, cache and WAL go")
@@ -1271,9 +1062,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if served is not None:
             served.stop()
     if served is not None:
-        # The **open**, which is `tessera serve` from launch to `/readyz` — on this rung it is the
-        # artifact projections being built at open rather than on the first request. Measured
-        # around `start()` alone; taking it around the whole run would report the battery.
+        # The open: tessera serve from launch to /readyz, measured around start() alone.
         result["open_s"] = open_s
     result["ran_s"] = round(time.time() - started, 1)
     Path(args.out).write_text(json.dumps(result, indent=2))
