@@ -244,11 +244,11 @@ impl<'a> Runs<'a> {
     /// The grid is anchored at the corpus's own origin rather than at the artifact's bounding box,
     /// which makes each cell a Morton block of the corpus grid whenever its side is at least one
     /// Morton cell. Rows are Morton rank (`architecture.md` §5.2, and `tile_index.rs`'s opening for
-    /// what else rests on it) and members reach here in row order, so the members of such a cell are
-    /// **consecutive**: one comparison per member finds every cell boundary, and nothing is
-    /// allocated for a cell that is not occupied. The anchor is the only thing that had to change to
-    /// make that true — an artifact-anchored cell straddles Morton blocks, and its members do not
-    /// arrive together.
+    /// what else rests on it) and members reach here in row order, so the members of such a cell
+    /// are **consecutive**: one comparison per member finds every cell boundary, and nothing is
+    /// allocated for a cell that is not occupied. The anchor is the only thing that had to change
+    /// to make that true — an artifact-anchored cell straddles Morton blocks, and its members do
+    /// not arrive together.
     ///
     /// **What this replaces, and why three obvious routes lost.** The dense `nx × ny` grid it
     /// replaces is *measured* at 215 ms of binning over the measurement layer, nearly all of it
@@ -263,11 +263,11 @@ impl<'a> Runs<'a> {
     /// costs on the order of ten probes and a container walk against one sequential comparison per
     /// member here. It can only win where a cell holds more members than that, and on
     /// `notebook-2m4` it is not close: 12,808,679 members occupy 12,560,851 distinct Morton cells —
-    /// a **ratio of 1.02**, the corpus grid being 2^16 × 2^16 against 2.4M items — and at the served
-    /// resolution the densest artifact of the measurement layer holds 17.4 members to a cell against
-    /// a layer mean of 2.5 (`tests/hull_geometry.rs`, `the_cell_occupancy`). The jump becomes the
-    /// cheaper route somewhere around a few tens of members a cell, which is a corpus two orders of
-    /// magnitude denser than this one.
+    /// a **ratio of 1.02**, the corpus grid being 2^16 × 2^16 against 2.4M items — and at the
+    /// served resolution the densest artifact of the measurement layer holds 17.4 members to a cell
+    /// against a layer mean of 2.5 (`tests/hull_geometry.rs`, `the_cell_occupancy`). The jump
+    /// becomes the cheaper route somewhere around a few tens of members a cell, which is a corpus
+    /// two orders of magnitude denser than this one.
     ///
     /// **The fold reads a cell index and nothing else.** A cell at this resolution is the top bits
     /// of a member's position on both axes — the top bits of its Morton code, the grid being
@@ -327,9 +327,9 @@ impl<'a> Runs<'a> {
     }
 
     /// **One member per run, the one nearest its cell's centre, ties broken on the position** — the
-    /// rule stated at [`quantised`], answered per run rather than per member. All of a run's members
-    /// share a cell, so the centre is computed once for the run and not once for each of them, and a
-    /// run of one has no comparison to make at all.
+    /// rule stated at [`quantised`], answered per run rather than per member. All of a run's
+    /// members share a cell, so the centre is computed once for the run and not once for each of
+    /// them, and a run of one has no comparison to make at all.
     ///
     /// The distance arithmetic runs only for the members of a cell that holds more than one: over
     /// the measurement layer that is 9.5M of 12.8M members, and on an artifact the reduction then
