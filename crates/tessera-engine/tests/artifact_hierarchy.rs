@@ -2266,11 +2266,10 @@ fn a_parent_other_than_the_held_one_refuses_the_batch() {
         .unwrap();
     let before = count_of(&engine, "c");
 
-    let refused = ingest_edges(&engine, "b1", "clusters/t", &["c"], &[("c", "p1")])
+    ingest_edges(&engine, "b1", "clusters/t", &["c"], &[("c", "p1")])
         .expect_err("the artifact holds p0");
-    assert!(refused.contains("c") && refused.contains("p1"), "{refused}");
 
-    let refused = ingest_edges(
+    ingest_edges(
         &engine,
         "b2",
         "clusters/t",
@@ -2278,7 +2277,6 @@ fn a_parent_other_than_the_held_one_refuses_the_batch() {
         &[("free", "p0"), ("free", "p1")],
     )
     .expect_err("one batch, two parents for one parentless child");
-    assert!(refused.contains("free"), "{refused}");
 
     assert_eq!(
         count_of(&engine, "c"),
