@@ -809,7 +809,7 @@ pub(crate) struct OccupancyKey {
 /// 32 MiB admits 65,536 entries, which is 480 publications' worth of ladders for eight sessions
 /// over one view before the LRU begins removing the coldest — and the coldest are exactly the
 /// superseded ones, because a live rung is re-read on every request that composes θ. A bound below
-/// the live set would cost walks, not correctness ([`crate::single_flight`]'s rule 3).
+/// the live set would cost walks, not correctness (`tessera-cache`'s rule 3).
 ///
 /// **What a deployment should set it to** (`serve.occupancy_cache_bytes`): the live set is
 /// [`OCCUPANCY_LIVE_BYTES_PER_SESSION`] per concurrently-querying session per view, and the
@@ -831,13 +831,13 @@ pub const DEFAULT_OCCUPANCY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 /// `tessera_server::validate_cache_bounds` weighs the configured bound against it and the
 /// arithmetic must have one home.
 pub const OCCUPANCY_LIVE_BYTES_PER_SESSION: u64 =
-    17 * crate::single_flight::PER_ENTRY_FLOOR_BYTES;
+    17 * tessera_cache::PER_ENTRY_FLOOR_BYTES;
 
 /// One memoised `N_occ(d)`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OccupiedTiles(pub u64);
 
-impl crate::single_flight::CacheWeight for OccupiedTiles {
+impl tessera_cache::CacheWeight for OccupiedTiles {
     fn cache_weight_bytes(&self) -> u64 {
         // The value is a `u64`; the per-entry floor the cache applies is what actually bounds the
         // entry count, and it is the honest charge for a key holding a view name.
@@ -871,7 +871,7 @@ mod tests {
     /// publication must not accumulate, which is what the bound is for.
     #[test]
     fn the_memo_holds_the_live_set_and_bounds_the_superseded_one() {
-        let cache = crate::single_flight::SingleFlightCache::new(DEFAULT_OCCUPANCY_CACHE_BYTES);
+        let cache = tessera_cache::SingleFlightCache::new(DEFAULT_OCCUPANCY_CACHE_BYTES);
         for token_id in 0..8u64 {
             for depth in 0..=16u8 {
                 let _ = cache.get_or_derive(rung(token_id, depth, 0), None, |_| OccupiedTiles(1));
@@ -885,7 +885,7 @@ mod tests {
         // one at a time to watch the 65,537th evict is a minute of a debug build for a property
         // the per-entry charge already fixes. `an_undersized_bound_evicts` below is where the
         // eviction itself is exercised.
-        let admitted = DEFAULT_OCCUPANCY_CACHE_BYTES / crate::single_flight::PER_ENTRY_FLOOR_BYTES;
+        let admitted = DEFAULT_OCCUPANCY_CACHE_BYTES / tessera_cache::PER_ENTRY_FLOOR_BYTES;
         assert_eq!(admitted, 65_536);
         assert!(
             admitted > 400 * (8 * 17),
@@ -901,8 +901,8 @@ mod tests {
     /// [`DEFAULT_OCCUPANCY_CACHE_BYTES`], whose size is argued there.
     #[test]
     fn an_undersized_bound_evicts() {
-        let bound = 8 * crate::single_flight::PER_ENTRY_FLOOR_BYTES;
-        let cache = crate::single_flight::SingleFlightCache::new(bound);
+        let bound = 8 * tessera_cache::PER_ENTRY_FLOOR_BYTES;
+        let cache = tessera_cache::SingleFlightCache::new(bound);
         for publication in 0..32u64 {
             let _ = cache.get_or_derive(rung(0, 0, publication), None, |_| OccupiedTiles(1));
         }

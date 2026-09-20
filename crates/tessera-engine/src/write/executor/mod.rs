@@ -598,7 +598,7 @@ pub(super) struct Executor {
     pub(super) row_projection_cache: Arc<RowProjectionCache>,
     /// See [`MaintenanceDeps::region_cache`].
     pub(super) region_cache: Arc<
-        crate::single_flight::SingleFlightCache<
+        tessera_cache::SingleFlightCache<
             crate::region::RegionKey,
             crate::region::RegionDecomposition,
         >,

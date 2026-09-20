@@ -356,7 +356,6 @@ impl Engine {
                     projection: Arc::new(projection),
                     satisfied_sorted: Arc::clone(session.satisfied_sorted()),
                     auth_data_hash: session.auth_data_hash(),
-                    satisfied_at: session.segments_version_at_authorise(),
                 }
             })
             .map_err(|ended| match ended {
@@ -416,7 +415,7 @@ impl Engine {
         };
         if matches!(
             self.occupancy.peek(&deepest),
-            crate::single_flight::Peek::Ready(_)
+            tessera_cache::Peek::Ready(_)
         ) {
             return;
         }
@@ -463,7 +462,7 @@ impl Engine {
             fragment_identity: identity.fragment_identity,
             fragment_watermark: identity.fragment_watermark,
         };
-        if let crate::single_flight::Peek::Ready(hit) = self.occupancy.peek(&key) {
+        if let tessera_cache::Peek::Ready(hit) = self.occupancy.peek(&key) {
             return hit.0;
         }
         // The whole ladder from one walk, and every rung below this one memoised on the way.
@@ -494,7 +493,7 @@ impl Engine {
             .get_or_derive(key, None, |_| crate::occupancy::OccupiedTiles(ladder.at(depth)))
         {
             Ok(entry) => entry.0,
-            Err(crate::single_flight::Building) => ladder.at(depth),
+            Err(tessera_cache::Building) => ladder.at(depth),
         }
     }
 

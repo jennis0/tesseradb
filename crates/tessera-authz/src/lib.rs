@@ -1,7 +1,6 @@
 pub mod dict;
 pub mod fragment;
 pub mod postings;
-mod single_flight;
 pub mod term_sweep;
 pub mod tier;
 

@@ -1,8 +1,4 @@
-//! Coalescing delta tiers is a content-preserving re-encode (write-path §7).
-//!
-//! A fragment build unions the base with **every live delta tier**, so a flush per tick is a
-//! serving cliff on the authorisation path just as it is on the tile path. Coalescing is what
-//! bounds the union's width, and it must do so without changing a single viewer's answer.
+//! Coalescing delta tiers is a content-preserving re-encode.
 
 use std::path::PathBuf;
 
@@ -32,9 +28,8 @@ fn posting(path: &std::path::Path, term: u32) -> Option<Vec<u32>> {
     })
 }
 
-/// **The same pairs, concatenated, deduplicated, re-sorted.** The dedup is required rather than
-/// defensive: `encode_posting` hard-fails on a non-strictly-ascending entity list, so
-/// concatenate-and-sort alone specifies an artefact the encoder refuses to write.
+/// The same pairs, concatenated, deduplicated, re-sorted. The dedup is required: `encode_posting`
+/// hard-fails on a non-strictly-ascending entity list.
 #[test]
 fn coalescing_deduplicates_and_drops_nothing() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -46,13 +41,10 @@ fn coalescing_deduplicates_and_drops_nothing() {
     assert_eq!(posting(&out, 3), Some(vec![1, 2, 5]));
 }
 
-/// Terms present in only one input survive, and the result is ordered by term — `write_delta_tier`
-/// requires strictly ascending term ids, and a coalesce that emitted them in input order would
-/// produce a file it refuses.
+/// Terms present in only one input survive, and the result is ordered by term.
 #[test]
 fn every_term_from_every_input_survives_in_term_order() {
     let dir = tempfile::TempDir::new().unwrap();
-    // Each input is itself term-ascending — `write_delta_tier`'s own precondition.
     let a = tier_at(dir.path(), "a.arrow", &[(2, &[20]), (7, &[10])]);
     let b = tier_at(dir.path(), "b.arrow", &[(4, &[30])]);
     let out = dir.path().join("merged.arrow");
@@ -63,9 +55,8 @@ fn every_term_from_every_input_survives_in_term_order() {
     assert_eq!(posting(&out, 7), Some(vec![10]));
 }
 
-/// **A merge retires nothing.** Coalescing consults no overlay, so an entity that has been deleted
-/// or suppressed keeps its posting — dropping it would be the compaction fold, performed by a layer
-/// that must not perform it.
+/// A merge retires nothing. Coalescing consults no overlay, so an entity that has been deleted or
+/// suppressed keeps its posting.
 #[test]
 fn coalescing_retires_nothing() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -81,8 +72,7 @@ fn coalescing_retires_nothing() {
     );
 }
 
-/// A term wide enough to cross the threshold coalesces through the Roaring arm, and the answer is
-/// the same set — the encoding is chosen by width, and the width is a property of the merged list.
+/// A term wide enough to cross the threshold coalesces through the Roaring arm.
 #[test]
 fn a_wide_term_coalesces_through_the_roaring_arm() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -96,8 +86,7 @@ fn a_wide_term_coalesces_through_the_roaring_arm() {
     assert_eq!(posting(&out, 5), Some((0..70).collect::<Vec<u32>>()));
 }
 
-/// One input is a no-op re-encode, which is what makes coalescing safe to run on any selection the
-/// policy happens to make.
+/// One input is a no-op re-encode.
 #[test]
 fn coalescing_one_tier_preserves_it() {
     let dir = tempfile::TempDir::new().unwrap();

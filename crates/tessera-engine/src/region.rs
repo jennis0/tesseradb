@@ -39,7 +39,7 @@ use tessera_store::read::{tile_ranges_all, SegmentData};
 use tessera_types::MortonCode;
 
 use crate::compose::EffectiveMask;
-use crate::single_flight::CacheWeight;
+use tessera_cache::CacheWeight;
 
 /// The default `max_region_cells` — the most boundary cells a region's descent may hold at one
 /// depth before it stops and answers a cover (selection-operand §2). A box around the whole world

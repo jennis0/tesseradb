@@ -13,6 +13,9 @@ bench-timing = []
 [dependencies]
 croaring = { workspace = true }
 tessera-types = { path = "../tessera-types" }
+# The single-flight cache the fragment tier is built on, shared with tessera-engine so the state
+# machine and its rules exist once.
+tessera-cache = { path = "../tessera-cache" }
 rustc-hash = "1"
 arrow = { workspace = true }
 memmap2 = { workspace = true }

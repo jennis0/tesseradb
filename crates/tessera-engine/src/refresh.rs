@@ -141,11 +141,6 @@ pub(crate) fn refresh_resident(
         // value would cache it (I13a).
         let fragment = match generation.fragments.get_or_build(
             &previous.satisfied_sorted,
-            previous.auth_data_hash,
-            // The generation that term set was resolved against, never this one — see
-            // `SessionGeometry::satisfied_at`, and `Engine::fragment_for` for the same rule at the
-            // request-path call site.
-            previous.satisfied_at,
             &generation.postings,
             &generation.delta_postings,
             generation.watermark,
@@ -222,7 +217,6 @@ pub(crate) fn refresh_resident(
                 projection: Arc::new(projection),
                 satisfied_sorted: Arc::clone(&previous.satisfied_sorted),
                 auth_data_hash: previous.auth_data_hash,
-                satisfied_at: previous.satisfied_at,
             }
         });
         if built.is_ok() {
@@ -266,7 +260,7 @@ pub(crate) struct RefreshDeps {
     ///
     /// A fold inverts the rule by two orders (a ~180 s pass against a 1.3 s build), so arming this would refuse
     /// every session for minutes to avoid a burst that clears in seconds — and the burst is already
-    /// bounded by `ComputeGate`, by `single_flight`, and by `RowProjection::new` fanning out across
+    /// bounded by `ComputeGate`, by the single-flight cache, and by `RowProjection::new` fanning out across
     /// the whole pool so concurrent rebuilds contend rather than multiply. After a fold, a missing
     /// projection is an ordinary cache miss.
     ///
