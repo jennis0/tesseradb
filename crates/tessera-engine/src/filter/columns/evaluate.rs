@@ -331,7 +331,7 @@ impl FilterColumns {
         if survivors.andnot(candidate).cardinality() != 0 {
             return Err(FilterError::postings_unreadable(
                 name,
-                "the phrase conjunction named an entity outside the candidate, so the                          verify would decompress a record block on behalf of an item this                          principal may not see",
+                "the phrase conjunction named an entity outside the candidate",
             ));
         }
         let tag = u16::try_from(declared_index).unwrap_or(u16::MAX);

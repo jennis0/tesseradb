@@ -72,8 +72,7 @@ impl std::fmt::Display for ComposeError {
             ComposeError::Overlap { column } => write!(
                 f,
                 "a filter extent for column '{column}' claims entities an earlier layer already \
-                 holds values for; entity ids are permanent (I9) and an extent may only add ids \
-                 no layer holds"
+                 holds values for"
             ),
             ComposeError::UndeclaredScopedFamily { column, view } => write!(
                 f,
@@ -111,9 +110,7 @@ impl std::fmt::Display for ComposeError {
             } => write!(
                 f,
                 "the coalesced extent for column '{column}' is present for {replacement} entities \
-                 where the {consumed} layers it replaces cover {covered}; replacing on that would \
-                 leave the column's coverage wrong and every later disjointness check testing \
-                 against it"
+                 where the {consumed} layers it replaces cover {covered}"
             ),
             ComposeError::TextCoverageMismatch {
                 column,
@@ -128,19 +125,17 @@ impl std::fmt::Display for ComposeError {
             ComposeError::EntityTermsCoverage { replacement, held } => write!(
                 f,
                 "a coalesce's entity→term stack holds lists for {replacement} entities where the \
-                 one it replaces holds {held}; replacing on that would answer 'unknown' for an \
-                 entity that carries labels, which on the write path is a 409 that does not fire"
+                 one it replaces holds {held}"
             ),
             ComposeError::KeywordWithoutDictionary { column } => write!(
                 f,
-                "a layer for keyword column '{column}' carries no sorted dictionary; its values \
-                 are ordinals into the dictionary minted beside them (records §4.3, §7), and a \
-                 layer without one has no reading"
+                "a layer for keyword column '{column}' carries no sorted dictionary to read its \
+                 ordinals against"
             ),
             ComposeError::DictionaryOnOtherFamily { column } => write!(
                 f,
-                "a layer for column '{column}' carries a sorted dictionary, but the schema does \
-                 not declare the column a keyword; the two disagree about what its values are"
+                "a layer for column '{column}' carries a sorted dictionary and the schema does \
+                 not declare the column a keyword"
             ),
             ComposeError::TermsAndPostingsDisagree {
                 column,
@@ -149,20 +144,17 @@ impl std::fmt::Display for ComposeError {
                 postings,
             } => write!(
                 f,
-                "column '{column}': the {layer} text layer holds {terms} terms but {postings} \
-                 postings records. An ordinal names a position in its own layer's dictionary, so \
-                 serving these together would answer `match` from the wrong words"
+                "the {layer} text layer of column '{column}' holds {terms} terms and {postings} \
+                 postings records"
             ),
             ComposeError::NoAnalyserRecorded { column } => write!(
                 f,
-                "column '{column}' is text but the manifest records no analyser identity — the \
-                 build is what resolves one, so this bundle is not what its manifest says"
+                "column '{column}' is text and the manifest records no analyser identity for it"
             ),
             ComposeError::UnknownAnalyser { column, identity } => write!(
                 f,
                 "column '{column}' was indexed by analyser '{identity}', which this binary does \
-                 not carry. Its terms cannot be reproduced, so every `match` over it would answer \
-                 from a different segmentation"
+                 not carry"
             ),
             ComposeError::RecordUnreadable(detail) => write!(f, "{detail}"),
             ComposeError::EntityTermsUnreadable(detail) => write!(f, "{detail}"),
@@ -253,24 +245,23 @@ pub enum FilterError {
 impl std::fmt::Display for FilterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FilterError::UndeclaredColumn(name) => {
-                write!(f, "column '{name}' is not declared filterable")
-            }
+            FilterError::UndeclaredColumn(name) => write!(
+                f,
+                "column '{name}' is not declared filterable; /v1/meta lists the columns a filter \
+                 may name"
+            ),
             FilterError::TooDeep { depth, max } => write!(
                 f,
-                "the filter expression nests {depth} deep; the limit is {max}. Refused rather than \
-                 flattened, which would answer a different question"
+                "the filter nests {depth} deep and the limit is {max}; flatten it"
             ),
             FilterError::PostingsUnreadable { column, detail } => write!(
                 f,
                 "column '{column}' is routed through its derived postings and they could not be \
-                 read ({detail}); refused rather than answered short"
+                 read ({detail})"
             ),
             FilterError::DictionaryUnreadable { column, detail } => write!(
                 f,
-                "column '{column}' is a keyword column and one of its layers' sorted dictionaries \
-                 could not be read ({detail}); refused rather than answered, because a dictionary \
-                 that cannot be trusted resolves a needle to another value's ordinal"
+                "a sorted dictionary of keyword column '{column}' could not be read ({detail})"
             ),
             FilterError::MembershipUnavailable(column) => write!(
                 f,
@@ -280,54 +271,44 @@ impl std::fmt::Display for FilterError {
             FilterError::NegationSpansColumns { columns } => match columns.len() {
                 0 => write!(
                     f,
-                    "a 'none_of' names no column, so there is no value for an item to be required \
-                     to carry. 'none_of' means *carries a value in this column, and none of these \
-                     matches it*, which needs a column to be about"
+                    "a 'none_of' names no column, so there is nothing for an item to be required \
+                     to carry a value in; name one column inside it"
                 ),
                 _ => write!(
                     f,
-                    "a 'none_of' names {} columns ({}), and it may name only one: it requires the \
-                     item to carry a value in the column it negates, and two columns give two \
-                     answers to which. Write all_of: [{{none_of: [...]}}, {{none_of: [...]}}], \
-                     which is the same set and says which presence each clause requires",
+                    "a 'none_of' names {} columns ({}) and may name only one; write all_of: \
+                     [{{none_of: [...]}}, {{none_of: [...]}}], one 'none_of' per column",
                     columns.len(),
                     columns.join(", ")
                 ),
             },
             FilterError::NegationWithoutPresence { column, family } => write!(
                 f,
-                "a 'none_of' names column '{column}', which is a {family} column and stores no \
-                 per-item value to be present or absent — its index is the words its documents \
-                 use. 'none_of' means *carries a value in this column, and none of these matches \
-                 it*, and there is nothing here to answer the first half. Say what is wanted with \
-                 a positive expression instead"
+                "a 'none_of' names column '{column}', which is a {family} column and holds no \
+                 per-item value to be present or absent; say what is wanted with a positive \
+                 expression instead"
             ),
             FilterError::RegionInEntitySpace => write!(
                 f,
-                "a 'region' leaf is answered in row space over the whole view and cannot be \
-                 evaluated by the entity-space evaluator"
+                "a 'region' leaf is answered in row space and cannot be evaluated in entity space"
             ),
             FilterError::RegionUnavailable(detail) => write!(
                 f,
-                "the 'region' leaf could not be resolved against this generation ({detail}); \
-                 refused rather than answered empty"
+                "the 'region' leaf could not be resolved against this generation ({detail})"
             ),
             FilterError::MemberOfInEntitySpace => write!(
                 f,
-                "a 'member_of' leaf is answered in row space over the whole view and cannot be \
-                 evaluated by the entity-space evaluator"
+                "a 'member_of' leaf is answered in row space and cannot be evaluated in entity \
+                 space"
             ),
             FilterError::UnknownLayer(layer) => write!(
                 f,
-                "'member_of' names layer '{layer}', which this deployment does not publish to you \
-                 — /v1/meta lists the layers a 'member_of' leaf may name. The *artifact* it names \
-                 is never refused: an identifier that resolves to nothing you may see is an empty \
-                 operand"
+                "'member_of' names layer '{layer}', which this deployment does not publish to \
+                 you; /v1/meta lists the layers a 'member_of' leaf may name"
             ),
             FilterError::MemberOfUnavailable(detail) => write!(
                 f,
-                "the 'member_of' leaf could not be resolved against this generation ({detail}); \
-                 refused rather than answered empty"
+                "the 'member_of' leaf could not be resolved against this generation ({detail})"
             ),
         }
     }
