@@ -949,7 +949,12 @@ class Cycle:
         out: dict = {
             "ladder": [{"target": r["target"], "terms": r["terms"]} for r in ladder],
             "views": {},
+            # The censuses themselves, per view, under the two names a collator strips.
+            "folded": folded,
+            "all_in": reference,
         }
+        by_surface: dict[str, int] = {}
+        differences: list[dict] = []
         for name in self.view_names:
             compared = compare_census(folded[name], reference[name])
             # **The frames, side by side.** Under `extent = "auto"` they differ, and that difference
@@ -957,9 +962,15 @@ class Cycle:
             # the next reader attributing it to the write path.
             compared["frames"] = {"folded": self.frames[name], "all_in": all_in_frames.get(name)}
             compared["frames_equal"] = self.frames[name] == all_in_frames.get(name)
-            compared["folded"] = folded[name]
-            compared["all_in"] = reference[name]
             out["views"][name] = compared
+            for surface, count in compared["differences_by_surface"].items():
+                by_surface[surface] = by_surface.get(surface, 0) + count
+            differences += [{"view": name, **d} for d in compared["differences"]]
+        # The views together, so a reader asking whether the two deployments agree has one answer.
+        out["differences_by_surface"] = by_surface
+        out["differences"] = differences
+        for surface in ("zoom0", "boxes", "layers", "parents"):
+            out[f"{surface}_equal"] = by_surface.get(surface, 0) == 0
         out["equal"] = all(v["equal"] for v in out["views"].values())
         out["frames_equal"] = all(v["frames_equal"] for v in out["views"].values())
         return out
