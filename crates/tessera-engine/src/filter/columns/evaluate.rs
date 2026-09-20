@@ -49,7 +49,9 @@ impl FilterColumns {
         // (I9) and each holds its own entities' terms whole.
         let (layers, postings, route) = match &column.layers {
             ColumnLayers::Text { layers, analyser } => {
-                return self.resolve_text(name, column.declared_index, layers, analyser, operand, candidate);
+                let declared_index = column.declared_index;
+                return self
+                    .resolve_text(name, declared_index, layers, analyser, operand, candidate);
             }
             ColumnLayers::Values {
                 layers,
@@ -63,7 +65,8 @@ impl FilterColumns {
         // build's answer comes from the postings; every extent layer is scanned, because no flush
         // writes postings and an answer from the postings alone would omit every entity ingested
         // since the build.
-        if let (Route::Postings, Some(postings), Some(values)) = (route, postings, codes_of(operand))
+        if let (Route::Postings, Some(postings), Some(values)) =
+            (route, postings, codes_of(operand))
         {
             let mut out = resolve_union(postings, values)
                 .map_err(|e| FilterError::postings_unreadable(name, e))?

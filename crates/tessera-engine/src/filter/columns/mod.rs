@@ -378,7 +378,8 @@ impl TextLayer {
     /// in this dictionary, where a category's code is a scattered vocabulary entry (§2.5).
     ///
     /// The base writes no presence file of its own — the build writes none and the fold therefore
-    /// writes none — so nothing here can say which entities carry a value. See [`TextLayer::present`].
+    /// writes none — so nothing here can say which entities carry a value. See
+    /// [`TextLayer::present`].
     fn open_base(
         column: &str,
         dir: &Path,
@@ -386,7 +387,10 @@ impl TextLayer {
     ) -> Result<TextLayer, ComposeError> {
         text_layer(
             SortedDict::open_dir(dir, access)?,
-            ColumnPostings::open(&dir.join("postings.arrow"), access != tessera_filter::Access::Read)?,
+            ColumnPostings::open(
+                &dir.join("postings.arrow"),
+                access != tessera_filter::Access::Read,
+            )?,
             column,
             "base",
             Bitmap::new(),
