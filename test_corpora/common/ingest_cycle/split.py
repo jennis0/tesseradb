@@ -259,6 +259,12 @@ def base_declaration(
     return "".join(out), removed
 
 
+def source_path(rung: Path, named: dict, key: str | None) -> Path | None:
+    """The file a `source` names: a key into `[sources]` or a file name, as `Config::layer_sources`
+    reads it. None for no source at all."""
+    return None if key is None else rung / named.get(key, key)
+
+
 def declared_layers(rung: Path) -> list[dict]:
     """Every `[[layer]]` of the rung's declaration, with the files its acquisition names.
 
@@ -270,8 +276,7 @@ def declared_layers(rung: Path) -> list[dict]:
     (the module doc): `attribute` for a predicate layer, `column` for a layer whose member table is
     **per point** — the build reads it over the base's rows and the hold-out's rows carry the same
     lists on the wire — and `publication` for one whose member table is per (artifact, entity),
-    which is read artifact by artifact and sent with the artifact. A `source` is a key into
-    `[sources]` or a file name, as `Config::layer_sources` reads it.
+    which is read artifact by artifact and sent with the artifact.
 
     Read off the declaration rather than listed in this file: a table of two layer names ran every
     rung's cell with at most those two, so rung 4's `topics/openalex` was never published and no
@@ -279,16 +284,12 @@ def declared_layers(rung: Path) -> list[dict]:
     """
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
-
-    def path_of(key: str | None) -> Path | None:
-        return None if key is None else rung / named.get(key, key)
-
     out = []
     for layer in declared.get("layer", []):
         membership = layer.get("membership")
         attribute = membership.get("attribute") if isinstance(membership, dict) else None
-        roster = path_of(layer.get("source"))
-        members = path_of((layer.get("members") or {}).get("source"))
+        roster = source_path(rung, named, layer.get("source"))
+        members = source_path(rung, named, (layer.get("members") or {}).get("source"))
         supplied = bool((layer.get("content") or {}).get("supplied"))
         if attribute is not None:
             route = "attribute"
@@ -414,7 +415,7 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
     layers = declared_layers(rung)
     published = [layer["name"] for layer in layers if layer["route"] == "publication"]
     on_column = [layer for layer in layers if layer["route"] == "column"]
-    kept = {
+    kept: dict = {
         "points": filter_parquet(
             rung / "points.parquet", out / "points.parquet", "entity_id", base_ids, drop=published
         ),
@@ -423,57 +424,11 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
             for name in pq.ParquetFile(rung / "points.parquet").schema_arrow.names
             if name in set(published)
         ],
-        "member_tables": {},
     }
-    for layer in on_column:
-        members = layer["members"]
-        entity, _ = member_table_columns(pq.ParquetFile(members).schema_arrow)
-        kept["member_tables"][layer["name"]] = {
-            "file": members.name,
-            "rows": filter_parquet(members, out / members.name, entity, base_ids),
-        }
-        # **A roster beside a per-point member table stays**, whole: the layer declares supplied
-        # content, so its artifacts cannot be minted from the member column at either entry point,
-        # and the base build takes the roster the all-in build took.
-        if layer["roster"] is not None and layer["roster"].exists():
-            shutil.copy2(layer["roster"], out / layer["roster"].name)
-            kept.setdefault("rosters", []).append(layer["roster"].name)
-    # **Every file the declaration still names**, read off the declaration rather than listed here.
-    # A vocabulary is copied whole — it is a value set, not rows, and a base built from half the
-    # corpus declares the same closed set. Any *other* view's points file is filtered by entity id
-    # exactly as the anchor's is: a rung may carry several row spaces over one entity space
-    # (rung 5's `bioclip` and `geo`), and a declaration naming a file the base directory does not
-    # hold refuses the build with `No such file or directory`.
-    declared = tomllib.loads((rung / "corpus.toml").read_text())
-    named = declared.get("sources", {})
-    anchor = declared.get("defaults", {}).get("source", "points")
-
-    def path_of(key: str) -> Path:
-        return rung / named.get(key, key)
-
-    for vocabulary in declared.get("vocabulary", []):
-        source = vocabulary.get("source")
-        if source is None:
-            continue
-        got = path_of(source)
-        if got.exists():
-            shutil.copy2(got, out / got.name)
-            kept.setdefault("vocabularies", []).append(got.name)
-
-    for view in declared.get("view", []):
-        source = view.get("source", anchor)
-        if source == anchor:
-            continue
-        got = path_of(source)
-        if got.exists():
-            kept.setdefault("views", {})[got.name] = filter_parquet(
-                got, out / got.name, "entity_id", base_ids, drop=published
-            )
-
-    for name in ("branch.parquet", ".env"):
-        source = rung / name
-        if source.exists() and not (out / name).exists():
-            shutil.copy2(source, out / name)
+    kept["member_tables"], rosters = write_base_members(out, on_column, base_ids)
+    if rosters:
+        kept["rosters"] = rosters
+    kept.update(copy_declared_inputs(rung, out, base_ids, published))
     declaration, removed = base_declaration(
         (rung / "corpus.toml").read_text(),
         keep_members=[layer["name"] for layer in on_column],
@@ -482,4 +437,66 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
     (out / "corpus.toml").write_text(declaration)
     kept["declaration_only"] = removed
     (out / "tessera.toml").write_text((rung / "tessera.toml").read_text())
+    return kept
+
+
+def write_base_members(
+    out: Path, on_column: Sequence[dict], base_ids: np.ndarray
+) -> tuple[dict, list[str]]:
+    """Each column-route layer's member table, filtered to the base's rows and written under the
+    name the declaration gives it, and the rosters copied beside them.
+
+    **A roster beside a per-point member table stays**, whole: the layer declares supplied content,
+    so its artifacts cannot be minted from the member column at either entry point, and the base
+    build takes the roster the all-in build took.
+    """
+    tables: dict = {}
+    rosters: list[str] = []
+    for layer in on_column:
+        members = layer["members"]
+        entity, _ = member_table_columns(pq.ParquetFile(members).schema_arrow)
+        tables[layer["name"]] = {
+            "file": members.name,
+            "rows": filter_parquet(members, out / members.name, entity, base_ids),
+        }
+        if layer["roster"] is not None and layer["roster"].exists():
+            shutil.copy2(layer["roster"], out / layer["roster"].name)
+            rosters.append(layer["roster"].name)
+    return tables, rosters
+
+
+def copy_declared_inputs(
+    rung: Path, out: Path, base_ids: np.ndarray, published: Sequence[str]
+) -> dict:
+    """**Every other file the declaration still names**, read off the declaration rather than
+    listed here.
+
+    A vocabulary is copied whole — it is a value set, not rows, and a base built from half the
+    corpus declares the same closed set. Any *other* view's points file is filtered by entity id
+    exactly as the anchor's is: a rung may carry several row spaces over one entity space (rung 5's
+    `bioclip` and `geo`), and a declaration naming a file the base directory does not hold refuses
+    the build with `No such file or directory`.
+    """
+    declared = tomllib.loads((rung / "corpus.toml").read_text())
+    named = declared.get("sources", {})
+    anchor = declared.get("defaults", {}).get("source", "points")
+    kept: dict = {}
+    for vocabulary in declared.get("vocabulary", []):
+        got = source_path(rung, named, vocabulary.get("source"))
+        if got is not None and got.exists():
+            shutil.copy2(got, out / got.name)
+            kept.setdefault("vocabularies", []).append(got.name)
+    for view in declared.get("view", []):
+        source = view.get("source", anchor)
+        if source == anchor:
+            continue
+        got = source_path(rung, named, source)
+        if got.exists():
+            kept.setdefault("views", {})[got.name] = filter_parquet(
+                got, out / got.name, "entity_id", base_ids, drop=published
+            )
+    for name in ("branch.parquet", ".env"):
+        source = rung / name
+        if source.exists() and not (out / name).exists():
+            shutil.copy2(source, out / name)
     return kept

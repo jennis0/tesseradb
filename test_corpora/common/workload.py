@@ -221,11 +221,10 @@ def cost(result: dict) -> dict[str, float | None]:
     """The run's cost figures, flat and named, in the order the section prints them."""
     serve, cycle = result.get("serve") or {}, result.get("ingest") or {}
     principal = next((r for r in serve.get("ladder") or [] if r.get("target", 0) >= 1.0), {})
+    build_peak_kib = dig(result, "build", "peak_rss_kib")
     figures: dict[str, float | None] = {
         "build wall (s)": dig(result, "build", "wall_s"),
-        "build peak RSS (MiB)": (
-            dig(result, "build", "peak_rss_kib") / 1024 if dig(result, "build", "peak_rss_kib") else None
-        ),
+        "build peak RSS (MiB)": build_peak_kib / 1024 if build_peak_kib else None,
         "bundle bytes": dig(result, "build", "bundle_bytes"),
         "verify wall (s)": dig(result, "verify", "wall_s"),
         "server open (s)": serve.get("open_s"),
@@ -242,16 +241,13 @@ def cost(result: dict) -> dict[str, float | None]:
     figures["first viewport (s)"] = principal.get("first_viewport_s")
     for view, block in (cycle.get("ingest_by_view") or {}).items():
         figures[f"ingest {view} (items/s)"] = block.get("items_per_s")
+    fold_peak = dig(cycle, "fold", "fold_peak_rss_bytes")
     figures.update(
         {
             "publication (members/s)": dig(cycle, "publish", "totals", "members_per_s"),
             "flush to visible (s)": dig(cycle, "flush", "visibility_s"),
             "fold wall (s)": dig(cycle, "fold", "fold_s"),
-            "fold peak RSS (MiB)": (
-                dig(cycle, "fold", "fold_peak_rss_bytes") / 1024**2
-                if dig(cycle, "fold", "fold_peak_rss_bytes")
-                else None
-            ),
+            "fold peak RSS (MiB)": fold_peak / 1024**2 if fold_peak else None,
             "restart open (s)": dig(cycle, "restart", "open_s"),
             "total wall (s)": result.get("total_wall_s"),
         }

@@ -223,7 +223,6 @@ class HoldOut:
         points: Path | None = None,
         members: bool = True,
     ):
-        self.rung = rung
         #: The view's own points file: its positions, its access column, and whichever declared
         #: attributes it holds.
         self.points = points or rung / "points.parquet"
@@ -337,8 +336,6 @@ class HoldOut:
         if pending_rows:
             whole = pa.concat_tables(pending)
             yield from self.bodies(whole, emitted)
-            emitted += pending_rows
-        self.total = emitted
         if head:
             self.head = pa.concat_tables(head)
 
