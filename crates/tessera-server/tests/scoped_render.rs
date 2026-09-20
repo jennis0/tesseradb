@@ -2664,6 +2664,23 @@ fn population(view: &str) -> BTreeSet<u64> {
         .collect()
 }
 
+/// The value the family's column for `key` holds for `entity`, or `None` where it holds none —
+/// what a leaf pinned to that key is answered from, whichever view the request names. The two
+/// doors onto a key write the same cell, so a row written through either is here.
+fn scoped_heat(key: &str, entity: u64) -> Option<f32> {
+    if let Some(written) = WRITTEN
+        .iter()
+        .find(|w| key_of(w.view) == key && w.entity == entity)
+    {
+        return Some(written.heat);
+    }
+    let slot = QUARTERS.iter().position(|(k, _)| *k == key)?;
+    members(slot)
+        .contains(&entity)
+        .then(|| heat(slot, entity))
+        .flatten()
+}
+
 /// What `heat` renders as for `entity` under `view`.
 fn rendered_heat(view: &str, entity: u64) -> f32 {
     match WRITTEN
@@ -2717,6 +2734,21 @@ async fn serves_everything(served: &Served, token: &str, stage: &str) {
             filtered_entities(served, token, view, range("heat")).await,
             expected,
             "{stage}, {view}: the range answers this view's column"
+        );
+
+        // The same leaf pinned to the owning group's first key: the operand is the family's
+        // column for that key wherever the request is made, so a view holding rows with no cell
+        // of it answers with none of them.
+        let pinned_key = QUARTERS[0].0;
+        let expected: BTreeSet<u64> = rows
+            .iter()
+            .copied()
+            .filter(|&e| scoped_heat(pinned_key, e).is_some_and(|v| f64::from(v) >= THRESHOLD))
+            .collect();
+        assert_eq!(
+            filtered_entities(served, token, view, range(&format!("heat@{pinned_key}"))).await,
+            expected,
+            "{stage}, {view}: the pinned leaf answers the named key's column"
         );
 
         for written in WRITTEN.iter() {

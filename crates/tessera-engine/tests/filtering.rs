@@ -108,6 +108,12 @@ index    = true
 name     = "bonus"
 type     = "i32"
 index    = true
+
+[[attribute]]
+name     = "prose"
+type     = "text"
+index    = true
+analyser = "unicode"
 "#;
 
 /// Source id → department key. Every fifth item carries none, so the absent path is exercised
@@ -167,6 +173,12 @@ fn title_of(e: u64) -> String {
     format!("paper-{e:02}")
 }
 
+/// The analysed column: one word every item carries and one only this item does, so a `match`
+/// answer is a set no other item's prose can fake.
+fn prose_of(e: u64) -> String {
+    format!("shared p{e:02}")
+}
+
 fn write_points(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -177,6 +189,7 @@ fn write_points(path: &Path) {
         Field::new("title", DataType::Utf8, true),
         Field::new("score", DataType::Int32, false),
         Field::new("bonus", DataType::Int32, true),
+        Field::new("prose", DataType::Utf8, true),
     ]));
     let ids: Vec<u64> = (0..N).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
@@ -192,6 +205,7 @@ fn write_points(path: &Path) {
     let titles: Vec<Option<String>> = ids.iter().map(|&e| Some(title_of(e))).collect();
     let scores: Vec<i32> = ids.iter().map(|&e| score_of(e)).collect();
     let bonuses: Vec<Option<i32>> = ids.iter().map(|&e| bonus_of(e)).collect();
+    let prose: Vec<Option<String>> = ids.iter().map(|&e| Some(prose_of(e))).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -203,6 +217,7 @@ fn write_points(path: &Path) {
             Arc::new(StringArray::from(titles)),
             Arc::new(arrow::array::Int32Array::from(scores)),
             Arc::new(arrow::array::Int32Array::from(bonuses)),
+            Arc::new(StringArray::from(prose)),
         ],
     )
     .unwrap();
@@ -625,6 +640,9 @@ fn ingest_and_flush_with(
             // `bonus` is the nullable numeric: the default above passes `WalScalar::Null`, which is
             // how an ingested item says it carries no value for a column (decision 0064).
             bonus,
+            // The analysed column, keyed off the external id so each flushed item carries a word
+            // no other item holds.
+            WalScalar::Utf8(format!("shared {external}")),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
         scoped: Vec::new(),
@@ -1247,13 +1265,14 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
-        // The schema declares five columns.
+        // The schema declares six columns.
         scalars: vec![
             WalScalar::Utf8("eng".to_string()),
             WalScalar::Utf8("xx".to_string()),
             WalScalar::Utf8("paper-97".to_string()),
             WalScalar::I32(43),
             WalScalar::Null,
+            WalScalar::Utf8("shared p97".to_string()),
             WalScalar::I32(1),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
@@ -1266,8 +1285,8 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         matches!(
             err,
             tessera_engine::AcceptError::ScalarArity {
-                expected: 5,
-                got: 6,
+                expected: 6,
+                got: 7,
                 ..
             }
         ),
@@ -3763,6 +3782,12 @@ fn composition_reading(
             ),
         );
     }
+    // The analysed column, which has no value column and so no placement: what it holds is its
+    // text layers, and what it answers is a `match`.
+    out.insert(
+        "prose: layers".to_string(),
+        format!("{:?} text", columns.text_layer_count("prose")),
+    );
     for (family, column, operand) in [
         (
             "category",
@@ -3793,6 +3818,24 @@ fn composition_reading(
                     inclusive: true,
                 }),
                 hi: None,
+            },
+        ),
+        // A word of the build's own prose, and one only the flushed items carry: a layer lost at
+        // the reopen shows in one of the two and not the other.
+        (
+            "text",
+            "prose",
+            FilterOperand::Match {
+                query: "p05".to_string(),
+                minimum: None,
+            },
+        ),
+        (
+            "text",
+            "prose",
+            FilterOperand::Match {
+                query: "differential".to_string(),
+                minimum: None,
             },
         ),
     ] {
