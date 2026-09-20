@@ -1032,7 +1032,9 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, Maintenanc
         .map_err(|e| MaintenanceFailed(format!("dict extent dir: {e}")))?;
     let mut writer = DictStreamWriter::new(&seg_dir);
     for descriptor in &interned {
-        writer.append(descriptor);
+        writer
+            .append(descriptor)
+            .map_err(|e| MaintenanceFailed(format!("dict extent: {e}")))?;
     }
     writer
         .finish()

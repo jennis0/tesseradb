@@ -33,7 +33,7 @@ fn dict_stream_writer_matches_dict_writer_bytes() {
     let streamed_dir = TempDir::new().unwrap();
     let mut streamed = DictStreamWriter::new(streamed_dir.path());
     for (i, d) in descriptors.iter().enumerate() {
-        assert_eq!(streamed.append(d).raw(), i as u32);
+        assert_eq!(streamed.append(d).unwrap().raw(), i as u32);
     }
     assert_eq!(streamed.len(), descriptors.len() as u32);
     let streamed_paths = streamed.finish().unwrap();
