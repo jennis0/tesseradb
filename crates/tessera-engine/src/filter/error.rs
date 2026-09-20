@@ -138,6 +138,17 @@ impl std::fmt::Display for FilterError {
 }
 
 impl FilterError {
+    /// A postings read that could not vouch for its answer, named by the column it was made for.
+    pub(in crate::filter) fn postings_unreadable(
+        column: &str,
+        detail: impl std::fmt::Display,
+    ) -> FilterError {
+        FilterError::PostingsUnreadable {
+            column: column.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+
     /// Is this the caller's fault or the deployment's?
     ///
     /// **The distinction decides a status code, so it lives with the variants rather than at the

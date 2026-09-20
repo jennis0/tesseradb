@@ -6,8 +6,8 @@ use super::{ColumnLayers, FilterColumns, Route, TextLayer};
 use crate::filter::declared::Placement;
 use crate::filter::error::FilterError;
 use crate::filter::expr::{
-    FilterExpr, FilterOperand, RoutedFilter, RowExpr, RowLeafResolvers, MAX_FILTER_DEPTH,
-    MEMBER_OF_COLUMN, REGION_COLUMN,
+    FilterExpr, FilterOperand, RoutedFilter, RowExpr, RowLeafResolvers, MEMBER_OF_COLUMN,
+    REGION_COLUMN,
 };
 use crate::filter::scan::text::{contains_phrase, text_match};
 use crate::filter::scan::{scan, scan_layer};
@@ -66,10 +66,7 @@ impl FilterColumns {
         if let (Route::Postings, Some(postings), Some(values)) = (route, postings, codes_of(operand))
         {
             let mut out = resolve_union(postings, values)
-                .map_err(|e| FilterError::PostingsUnreadable {
-                    column: name.to_string(),
-                    detail: e.to_string(),
-                })?
+                .map_err(|e| FilterError::postings_unreadable(name, e))?
                 .and(candidate);
             // Every layer that is *not* the base, which is the one the postings cover. Selected by
             // the absence of a manifest path rather than by position: a coalesce replaces a window
@@ -117,12 +114,8 @@ impl FilterColumns {
         let minimum = minimum.unwrap_or(tokens.len() as u32);
         let mut out = Bitmap::new();
         for layer in text {
-            out |= text_match(&layer.dict, &layer.postings, &tokens, minimum, candidate).map_err(
-                |e| FilterError::PostingsUnreadable {
-                    column: name.to_string(),
-                    detail: e.to_string(),
-                },
-            )?;
+            out |= text_match(&layer.dict, &layer.postings, &tokens, minimum, candidate)
+                .map_err(|e| FilterError::postings_unreadable(name, e))?;
         }
         // A one-word phrase *is* a `match`, and short-circuiting it is worth stating: the
         // verify below decompresses a record block per survivor, and for the commonest phrase
@@ -160,14 +153,7 @@ impl FilterColumns {
     /// cheaper; a disjunction evaluates each branch under the *original* candidate and unions —
     /// which is what keeps `any_of` a subset of it, since each branch already is.
     pub fn evaluate(&self, expr: &FilterExpr, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
-        let depth = expr.depth();
-        if depth > MAX_FILTER_DEPTH {
-            return Err(FilterError::TooDeep {
-                depth,
-                max: MAX_FILTER_DEPTH,
-            });
-        }
-        expr.check_negations()?;
+        expr.check()?;
         self.eval(expr, candidate)
     }
 
@@ -197,14 +183,7 @@ impl FilterColumns {
         prefer_row: bool,
         resolvers: &RowLeafResolvers<'_>,
     ) -> Result<RoutedFilter, FilterError> {
-        let depth = expr.depth();
-        if depth > MAX_FILTER_DEPTH {
-            return Err(FilterError::TooDeep {
-                depth,
-                max: MAX_FILTER_DEPTH,
-            });
-        }
-        expr.check_negations()?;
+        expr.check()?;
         if self.space_of(expr, prefer_row)? == Space::Entity {
             return Ok(RoutedFilter::Entity(self.eval(expr, candidate)?));
         }
@@ -269,11 +248,7 @@ impl FilterColumns {
                 })
             }
             FilterExpr::NoneOf(kids) => {
-                let column = kids
-                    .iter()
-                    .flat_map(|kid| kid.columns())
-                    .next()
-                    .expect("check_negations admits exactly one column");
+                let column = FilterExpr::negated_column(kids);
                 self.leaf_space(column, prefer_row)
             }
         }
@@ -310,12 +285,7 @@ impl FilterColumns {
                     .collect::<Result<Vec<_>, _>>()?,
             )),
             FilterExpr::NoneOf(kids) => {
-                let column = kids
-                    .iter()
-                    .flat_map(|kid| kid.columns())
-                    .next()
-                    .expect("check_negations admits exactly one column")
-                    .to_string();
+                let column = FilterExpr::negated_column(kids).to_string();
                 let routed = kids
                     .iter()
                     .map(|kid| self.route(kid, candidate, prefer_row, resolvers))
@@ -376,11 +346,10 @@ impl FilterColumns {
         candidate: &Bitmap,
     ) -> Result<Bitmap, FilterError> {
         if survivors.andnot(candidate).cardinality() != 0 {
-            return Err(FilterError::PostingsUnreadable {
-                column: name.to_string(),
-                detail: "the phrase conjunction named an entity outside the candidate, so the                          verify would decompress a record block on behalf of an item this                          principal may not see"
-                    .to_string(),
-            });
+            return Err(FilterError::postings_unreadable(
+                name,
+                "the phrase conjunction named an entity outside the candidate, so the                          verify would decompress a record block on behalf of an item this                          principal may not see",
+            ));
         }
         let tag = u16::try_from(declared_index).unwrap_or(u16::MAX);
         let mut out = Bitmap::new();
@@ -474,11 +443,7 @@ impl FilterColumns {
             // `check_negations` has already established that the sub-expressions name exactly one
             // column, so this cannot pick the wrong one.
             FilterExpr::NoneOf(kids) => {
-                let column = kids
-                    .iter()
-                    .flat_map(|kid| kid.columns())
-                    .next()
-                    .expect("check_negations admits exactly one column");
+                let column = FilterExpr::negated_column(kids);
                 let mut out = self.present_in(column, candidate)?;
                 for kid in kids {
                     // Under `out`, not `candidate`: each clause need only be evaluated over what is

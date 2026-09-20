@@ -235,6 +235,28 @@ impl FilterExpr {
         }
     }
 
+    /// What every evaluation of an expression establishes before it begins: that it nests no
+    /// deeper than [`MAX_FILTER_DEPTH`] and that each of its negations names exactly one column.
+    pub(in crate::filter) fn check(&self) -> Result<(), FilterError> {
+        let depth = self.depth();
+        if depth > MAX_FILTER_DEPTH {
+            return Err(FilterError::TooDeep {
+                depth,
+                max: MAX_FILTER_DEPTH,
+            });
+        }
+        self.check_negations()
+    }
+
+    /// The one column a [`FilterExpr::NoneOf`]'s sub-expressions name — [`FilterExpr::check`] has
+    /// already established that there is exactly one, so this cannot pick the wrong one.
+    pub(in crate::filter) fn negated_column(kids: &[FilterExpr]) -> &str {
+        kids.iter()
+            .flat_map(|kid| kid.columns())
+            .next()
+            .expect("check_negations admits exactly one column")
+    }
+
     /// Refuse a [`FilterExpr::NoneOf`] whose sub-expressions do not name exactly one column.
     ///
     /// **A whole-tree check run once, before evaluation** — not per node during it. A negation that
@@ -339,12 +361,10 @@ impl RowExpr {
         match self {
             RowExpr::Entity(bitmap) => out.push(bitmap),
             RowExpr::Leaf { .. } | RowExpr::Region(_) | RowExpr::MemberOf(_) => {}
-            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRows(kids) => {
-                for kid in kids {
-                    kid.collect_verdicts(out);
-                }
-            }
-            RowExpr::NoneOf { kids, .. } => {
+            RowExpr::AllOf(kids)
+            | RowExpr::AnyOf(kids)
+            | RowExpr::NotInRows(kids)
+            | RowExpr::NoneOf { kids, .. } => {
                 for kid in kids {
                     kid.collect_verdicts(out);
                 }
@@ -386,11 +406,10 @@ impl RowExpr {
         match self {
             RowExpr::Region(rows) => Some(rows.verdict),
             RowExpr::Entity(_) | RowExpr::Leaf { .. } | RowExpr::MemberOf(_) => None,
-            RowExpr::AllOf(kids) | RowExpr::AnyOf(kids) | RowExpr::NotInRows(kids) => kids
-                .iter()
-                .filter_map(RowExpr::region_verdict)
-                .reduce(|a, b| a.coarser(b)),
-            RowExpr::NoneOf { kids, .. } => kids
+            RowExpr::AllOf(kids)
+            | RowExpr::AnyOf(kids)
+            | RowExpr::NotInRows(kids)
+            | RowExpr::NoneOf { kids, .. } => kids
                 .iter()
                 .filter_map(RowExpr::region_verdict)
                 .reduce(|a, b| a.coarser(b)),

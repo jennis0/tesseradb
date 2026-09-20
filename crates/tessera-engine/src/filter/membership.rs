@@ -122,10 +122,7 @@ impl CategoryMembership<'_> {
         };
         postings
             .intersects(AttrLocalId::new(code), self.candidate)
-            .map_err(|e| FilterError::PostingsUnreadable {
-                column: self.column.clone(),
-                detail: e.to_string(),
-            })
+            .map_err(|e| FilterError::postings_unreadable(&self.column, e))
     }
 
     /// **How many items carrying `code` this principal may see** — C8's `and_cardinality` against
@@ -151,10 +148,7 @@ impl CategoryMembership<'_> {
             None => 0,
             Some(postings) => postings
                 .intersection_cardinality(AttrLocalId::new(code), self.candidate)
-                .map_err(|e| FilterError::PostingsUnreadable {
-                    column: self.column.clone(),
-                    detail: e.to_string(),
-                })?,
+                .map_err(|e| FilterError::postings_unreadable(&self.column, e))?,
         };
         Ok(extents + base)
     }
