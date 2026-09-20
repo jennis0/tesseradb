@@ -27,13 +27,7 @@ const GROUP_CELLS_PER_ALPHA: u64 = 2;
 /// triangulation, measured at 1.4 s on the largest artifact of the measurement layer against 0.16 s
 /// for the whole dig (`artifact-shapes.md` §4.1).
 pub(super) fn alpha_groups(p: &[[u32; 2]], alpha_sq: i128) -> (Vec<u32>, usize) {
-    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
-    for q in p {
-        x0 = x0.min(q[0]);
-        y0 = y0.min(q[1]);
-        x1 = x1.max(q[0]);
-        y1 = y1.max(q[1]);
-    }
+    let [x0, y0, x1, y1] = super::geometry::bounds(p);
     let (wx, wy) = ((x1 - x0) as u64 + 1, (y1 - y0) as u64 + 1);
     // α as a length. The square root is the only float in this module, and it is safe here for two
     // reasons rather than one: it is IEEE-754 correctly rounded, so it is identical on every

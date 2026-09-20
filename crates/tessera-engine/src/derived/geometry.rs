@@ -1,3 +1,16 @@
+/// The members' own bounding box, `[x_min, y_min, x_max, y_max]` — the fold every grid in this
+/// module is anchored and scaled by. Empty input gives an inverted box, which no caller has.
+pub(super) fn bounds(points: &[[u32; 2]]) -> [u32; 4] {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for q in points {
+        x0 = x0.min(q[0]);
+        y0 = y0.min(q[1]);
+        x1 = x1.max(q[0]);
+        y1 = y1.max(q[1]);
+    }
+    [x0, y0, x1, y1]
+}
+
 pub(super) fn sq_len(a: [u32; 2], b: [u32; 2]) -> i128 {
     let (dx, dy) = (b[0] as i128 - a[0] as i128, b[1] as i128 - a[1] as i128);
     dx * dx + dy * dy

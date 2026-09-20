@@ -178,16 +178,7 @@ fn grid_shift(
     if divisions < 16 {
         return None;
     }
-    let [x0, y0, x1, y1] = bounds.unwrap_or_else(|| {
-        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
-        for q in points {
-            x0 = x0.min(q[0]);
-            y0 = y0.min(q[1]);
-            x1 = x1.max(q[0]);
-            y1 = y1.max(q[1]);
-        }
-        [x0, y0, x1, y1]
-    });
+    let [x0, y0, x1, y1] = bounds.unwrap_or_else(|| super::geometry::bounds(points));
     debug_assert!(
         [
             points.iter().map(|q| q[0]).min(),

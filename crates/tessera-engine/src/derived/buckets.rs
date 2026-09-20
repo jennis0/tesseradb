@@ -1,8 +1,39 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use super::geometry::dot;
+use super::geometry::{bounds, dot};
 use super::reduce::interleave_cell;
+
+/// A bounding box on the integer grid, over a bucket's members or over a subtree's buckets.
+#[derive(Clone, Copy)]
+struct Box2 {
+    min: [u32; 2],
+    max: [u32; 2],
+}
+
+impl Box2 {
+    fn of(q: [u32; 2]) -> Box2 {
+        Box2 { min: q, max: q }
+    }
+
+    fn include(&mut self, q: [u32; 2]) {
+        self.min = [self.min[0].min(q[0]), self.min[1].min(q[1])];
+        self.max = [self.max[0].max(q[0]), self.max[1].max(q[1])];
+    }
+
+    fn union(&self, other: &Box2) -> Box2 {
+        Box2 {
+            min: [
+                self.min[0].min(other.min[0]),
+                self.min[1].min(other.min[1]),
+            ],
+            max: [
+                self.max[0].max(other.max[0]),
+                self.max[1].max(other.max[1]),
+            ],
+        }
+    }
+}
 
 /// The members bucketed into a square grid, each bucket carrying the bounding box of what it holds,
 /// **with a tree of boxes over the buckets themselves** so that a candidate search descends to the
@@ -35,8 +66,7 @@ pub(super) struct Buckets {
 }
 
 struct Cell {
-    min: [u32; 2],
-    max: [u32; 2],
+    extent: Box2,
     start: usize,
     len: usize,
 }
@@ -44,8 +74,7 @@ struct Cell {
 /// A node of the bucket tree: the box over the buckets it covers, and either their range in
 /// [`Buckets::cells`] (a leaf) or its two children.
 struct Node {
-    min: [u32; 2],
-    max: [u32; 2],
+    extent: Box2,
     /// The child node indices, or `(range start, range end)` when `leaf`.
     a: u32,
     b: u32,
@@ -55,13 +84,7 @@ struct Node {
 impl Buckets {
     pub(super) fn build(p: &[[u32; 2]]) -> Buckets {
         let axis = bucket_axis(p.len()) as u64;
-        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
-        for q in p {
-            x0 = x0.min(q[0]);
-            y0 = y0.min(q[1]);
-            x1 = x1.max(q[0]);
-            y1 = y1.max(q[1]);
-        }
+        let [x0, y0, x1, y1] = bounds(p);
         // Widths as `u64` and inclusive, so the extreme member lands in the last bucket rather than
         // one past it, and so a cloud spanning the whole 2^32 grid does not wrap.
         let (wx, wy) = ((x1 - x0) as u64 + 1, (y1 - y0) as u64 + 1);
@@ -96,17 +119,15 @@ impl Buckets {
             if start == end {
                 continue;
             }
-            let (mut min, mut max) = (points[start], points[start]);
+            let mut extent = Box2::of(points[start]);
             for q in &points[start..end] {
-                min = [min[0].min(q[0]), min[1].min(q[1])];
-                max = [max[0].max(q[0]), max[1].max(q[1])];
+                extent.include(*q);
             }
             let (cx, cy) = (k as u64 % axis, k as u64 / axis);
             cells.push((
                 interleave_cell(cx, cy),
                 Cell {
-                    min,
-                    max,
+                    extent,
                     start,
                     len: end - start,
                 },
@@ -161,10 +182,10 @@ impl Buckets {
         // The cross product is affine in the position, so its minimum over a box sits at whichever
         // corner the two coefficients — `dx` on y, `−dy` on x — select. That is the same bound the
         // flat list took per bucket; what the tree adds is that one box retires a whole subtree.
-        let bound = |min: [u32; 2], max: [u32; 2]| {
+        let bound = |e: &Box2| {
             cross([
-                if dy <= 0 { min[0] } else { max[0] },
-                if dx >= 0 { min[1] } else { max[1] },
+                if dy <= 0 { e.min[0] } else { e.max[0] },
+                if dx >= 0 { e.min[1] } else { e.max[1] },
             ])
         };
         // **A candidate has to be inside the slab as well as near the line, and the slab is what
@@ -176,11 +197,11 @@ impl Buckets {
         // near zero and is opened on every dig; with it the descent reaches the buckets over the
         // void the edge bridges and stops. **Measured at 428 ms of the layer's dig against 71 ms**
         // (`artifact-shapes.md` §7.4).
-        let feasible = |min: [u32; 2], max: [u32; 2]| {
+        let feasible = |e: &Box2| {
             let corner = |ux: i128, uy: i128| {
                 [
-                    if ux >= 0 { max[0] } else { min[0] },
-                    if uy >= 0 { max[1] } else { min[1] },
+                    if ux >= 0 { e.max[0] } else { e.min[0] },
+                    if uy >= 0 { e.max[1] } else { e.min[1] },
                 ]
             };
             cross(corner(-dy, dx)) >= 0
@@ -196,9 +217,9 @@ impl Buckets {
         let mut best: Option<(i128, [u32; 2])> = None;
         let root = self.tree.len() as u32 - 1;
         self.heap.clear();
-        let (min, max) = (self.tree[root as usize].min, self.tree[root as usize].max);
-        if feasible(min, max) {
-            self.heap.push(Reverse((bound(min, max), root)));
+        let extent = self.tree[root as usize].extent;
+        if feasible(&extent) {
+            self.heap.push(Reverse((bound(&extent), root)));
         }
         while let Some(Reverse((node_bound, index))) = self.heap.pop() {
             if let Some((found, _)) = best {
@@ -211,19 +232,19 @@ impl Buckets {
             if !leaf {
                 for child in [first, second] {
                     let n = &self.tree[child as usize];
-                    if !feasible(n.min, n.max) {
+                    if !feasible(&n.extent) {
                         continue;
                     }
-                    self.heap.push(Reverse((bound(n.min, n.max), child)));
+                    self.heap.push(Reverse((bound(&n.extent), child)));
                 }
                 continue;
             }
             for cell in &self.cells[first as usize..second as usize] {
-                if !feasible(cell.min, cell.max) {
+                if !feasible(&cell.extent) {
                     continue;
                 }
                 if let Some((found, _)) = best {
-                    if bound(cell.min, cell.max) > found {
+                    if bound(&cell.extent) > found {
                         continue;
                     }
                 }
@@ -260,14 +281,12 @@ const BUCKET_TREE_LEAF: usize = 4;
 /// would cost a pass per level to buy a box that is no tighter.
 fn build_tree(cells: &[Cell], lo: usize, hi: usize, out: &mut Vec<Node>) -> u32 {
     if hi - lo <= BUCKET_TREE_LEAF {
-        let (mut min, mut max) = (cells[lo].min, cells[lo].max);
+        let mut extent = cells[lo].extent;
         for cell in &cells[lo..hi] {
-            min = [min[0].min(cell.min[0]), min[1].min(cell.min[1])];
-            max = [max[0].max(cell.max[0]), max[1].max(cell.max[1])];
+            extent = extent.union(&cell.extent);
         }
         out.push(Node {
-            min,
-            max,
+            extent,
             a: lo as u32,
             b: hi as u32,
             leaf: true,
@@ -277,12 +296,9 @@ fn build_tree(cells: &[Cell], lo: usize, hi: usize, out: &mut Vec<Node>) -> u32 
     let mid = lo + (hi - lo) / 2;
     let a = build_tree(cells, lo, mid, out);
     let b = build_tree(cells, mid, hi, out);
-    let (na, nb) = (&out[a as usize], &out[b as usize]);
-    let min = [na.min[0].min(nb.min[0]), na.min[1].min(nb.min[1])];
-    let max = [na.max[0].max(nb.max[0]), na.max[1].max(nb.max[1])];
+    let extent = out[a as usize].extent.union(&out[b as usize].extent);
     out.push(Node {
-        min,
-        max,
+        extent,
         a,
         b,
         leaf: false,
