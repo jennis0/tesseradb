@@ -476,3 +476,40 @@ fn a_fragment_carries_the_identity_it_was_built_under() {
         .unwrap();
     assert_eq!(rebuilt.identity, [10u8; 32]);
 }
+
+/// Every waiting caller is served the one build; none is refused and none retries.
+#[test]
+fn concurrent_waiting_callers_are_all_served_the_one_build() {
+    let corpus_dir = TempDir::new().unwrap();
+    let (path, _per_term) = write_random_postings(corpus_dir.path(), 43, 20);
+    let reader = Arc::new(tessera_authz::PostingsReader::open(&path, false).unwrap());
+
+    let cache_dir = TempDir::new().unwrap();
+    let cache = Arc::new(FragmentCache::new(cache_dir.path(), [1u8; 32], [2u8; 32]));
+    let terms: Vec<TermId> = (0..20u32).map(TermId::new).collect();
+
+    const THREADS: usize = 8;
+    let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let (cache, reader, terms, barrier) = (
+                Arc::clone(&cache),
+                Arc::clone(&reader),
+                terms.clone(),
+                Arc::clone(&barrier),
+            );
+            std::thread::spawn(move || {
+                barrier.wait();
+                cache
+                    .get_or_build_waiting(&terms, &reader, &[], 7, &tessera_cache::NeverCancelled)
+                    .expect("a waiting caller is served, not refused")
+            })
+        })
+        .collect();
+
+    let results: Vec<Arc<tessera_authz::FrozenFragment>> =
+        handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(results.iter().all(|r| Arc::ptr_eq(&results[0], r)));
+    assert_eq!(cache.rebuild_count(), 1);
+    assert_eq!(cache.stats().building_refusals, 0);
+}

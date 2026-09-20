@@ -51,7 +51,8 @@ pub trait Cancel {
     fn is_cancelled(&self) -> bool;
 }
 
-struct NeverCancelled;
+/// A [`Cancel`] source for a caller with no request to lose.
+pub struct NeverCancelled;
 
 impl Cancel for NeverCancelled {
     fn is_cancelled(&self) -> bool {
@@ -106,6 +107,15 @@ pub enum SingleFlightError<E> {
     Building,
     /// The build this call ran failed. The entry is already absent, so the next arrival sees a
     /// plain miss rather than a cached failure.
+    Build(E),
+}
+
+/// A fallible, waiting build's outcome.
+#[derive(Debug)]
+pub enum WaitingBuildError<E> {
+    /// The wait for another caller's build ended with no value.
+    Wait(WaitEnded),
+    /// The build this call ran failed. The entry is absent.
     Build(E),
 }
 
@@ -321,6 +331,11 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         self.bound_bytes.store(bound_bytes, Ordering::Relaxed);
     }
 
+    /// The wait budget in milliseconds.
+    pub fn wait_budget_ms(&self) -> u64 {
+        self.wait_budget_ms.load(Ordering::Relaxed)
+    }
+
     /// Set the wait budget. Read once per waiting call, at entry, so a change takes effect for
     /// calls that arrive after it and never shortens a wait already in progress.
     pub fn set_wait_budget_ms(&self, wait_budget_ms: u64) {
@@ -385,6 +400,23 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
             Err(NoValue::Building | NoValue::Cancelled) => Err(Building),
             Err(NoValue::Build(never)) => match never {},
         }
+    }
+
+    /// [`Self::get_or_try_build`], waiting up to the wait budget for a build already in flight.
+    /// A waiter whose builder fails runs `build` itself, as a fresh arrival would.
+    pub fn get_or_try_build_waiting<E, C: Cancel + ?Sized>(
+        &self,
+        key: K,
+        cancel: &C,
+        build: impl FnOnce() -> Result<V, E>,
+    ) -> Result<Arc<V>, WaitingBuildError<E>> {
+        let deadline = Instant::now() + Duration::from_millis(self.wait_budget_ms());
+        self.claim_and_build(key, None, Some(Wait { cancel, deadline }), |_| build())
+            .map_err(|ended| match ended {
+                NoValue::Building => WaitingBuildError::Wait(WaitEnded::Budget),
+                NoValue::Cancelled => WaitingBuildError::Wait(WaitEnded::Cancelled),
+                NoValue::Build(e) => WaitingBuildError::Build(e),
+            })
     }
 
     /// Look up `key`, waiting up to the wait budget for a build already in flight rather than
@@ -1074,6 +1106,43 @@ mod tests {
             "the waiter must build its own value after the winner's build died"
         );
         assert_eq!(cache.stats().waits_satisfied, 0, "no wait was satisfied");
+    }
+
+    #[test]
+    fn a_waiter_on_a_fallible_build_takes_its_value_or_builds_after_its_failure() {
+        for builder_fails in [false, true] {
+            let cache = Arc::new(unbounded());
+            let (started_tx, started_rx) = mpsc::channel::<()>();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+
+            let builder_cache = Arc::clone(&cache);
+            let builder = thread::spawn(move || {
+                builder_cache.get_or_try_build(1, move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+                    if builder_fails {
+                        Err("boom")
+                    } else {
+                        Ok(Weighed(7, BIG))
+                    }
+                })
+            });
+            started_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
+
+            let waiter_cache = Arc::clone(&cache);
+            let waiter = thread::spawn(move || {
+                waiter_cache.get_or_try_build_waiting(1, &TestCancel::new(), || {
+                    Ok::<_, &str>(Weighed(42, BIG))
+                })
+            });
+            await_parked(&cache);
+            release_tx.send(()).unwrap();
+
+            assert_eq!(builder.join().unwrap().is_err(), builder_fails);
+            let served = waiter.join().unwrap().expect("the waiter is served").0;
+            assert_eq!(served, if builder_fails { 42 } else { 7 });
+            assert_eq!(cache.stats().waits_satisfied, u64::from(!builder_fails));
+        }
     }
 
     #[test]
