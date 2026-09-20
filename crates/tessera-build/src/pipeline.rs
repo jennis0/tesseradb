@@ -6325,7 +6325,9 @@ fn build_dictionary(
     // descriptor — the streaming half of what `build_in_memory` does by interning it first. A
     // source term spelling `public` therefore maps to 0 rather than appending a second record,
     // which would put one descriptor in the dictionary twice.
-    let public = dict.append(tessera_authz::PUBLIC_LABEL);
+    let public = dict
+        .append(tessera_authz::PUBLIC_LABEL)
+        .map_err(|e| BuildError::io(dict_dir, e))?;
     debug_assert_eq!(public, tessera_authz::PUBLIC_TERM);
     let mut pairs_of_term: Vec<(u64, u32)> = Vec::with_capacity(order.len());
     let mut row_counts: Vec<u64> = vec![0; 1];
@@ -6337,7 +6339,9 @@ fn build_dictionary(
             row_counts[public.raw() as usize] = rows;
             continue;
         }
-        let term = dict.append(descriptor.as_bytes());
+        let term = dict
+            .append(descriptor.as_bytes())
+            .map_err(|e| BuildError::io(dict_dir, e))?;
         pairs_of_term.push((source_term, term.raw()));
         row_counts.push(rows);
     }
