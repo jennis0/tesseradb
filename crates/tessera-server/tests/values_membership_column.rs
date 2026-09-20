@@ -803,7 +803,7 @@ async fn a_layer_with_supplied_content_refuses_the_column() {
 }
 
 /// **A tiered layer's list column mints the chain**, coarse level before fine, in one batch — the
-/// half of the column that a growth could never do, since a growth adds members and never lineage.
+/// half of the column a membership join alone could never do, none of the artifacts existing yet.
 #[tokio::test]
 async fn a_tiered_list_column_mints_the_chain_it_declares() {
     let mut layer = layer_toml("tiered");
@@ -838,8 +838,7 @@ async fn a_tiered_list_column_mints_the_chain_it_declares() {
     );
 
     // **The chain, walked down from the root.** A leaf reached this way is a leaf whose edges were
-    // created — the half of a list column a growth could never do, since a growth adds members and
-    // never lineage.
+    // created by the batch that created the leaf.
     let groups = browse_rows(
         &server,
         &["0", "1"],
@@ -952,5 +951,77 @@ async fn the_same_membership_by_build_ingest_and_values_is_the_same_database() {
     assert_eq!(
         browse_counts(&by_build, &["0", "1"], LAYER, None).await,
         expected_members()
+    );
+}
+
+
+/// **A values page records the edge its list column names on an artifact that holds none** — the
+/// same rule the ingest door follows, at the door that carries no geometry. A roster published with
+/// names and no parents is the state the rule exists for.
+#[tokio::test]
+async fn a_values_page_records_an_edge_the_artifact_does_not_hold() {
+    // No row carries the column, so the layer is registered and empty.
+    let built = build_side(&(0..N).collect::<Vec<_>>(), &|_| false, &layer_toml("nested"));
+    let server = serve(&built).await;
+
+    let members: Vec<String> = (0..N).map(base64_external_id).collect();
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers/clusters%2Fa/artifacts"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "addressing": "external",
+            "artifacts": [
+                { "key": "root", "members": members.clone() },
+                { "key": "k0", "members": members },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "two artifacts, neither carrying a parent"
+    );
+
+    let rows: Vec<u64> = (0..N).collect();
+    let item = Arc::new(Field::new("item", DataType::Utf8, true));
+    let mut offsets: Vec<i32> = vec![0];
+    let mut entries: Vec<Option<String>> = Vec::new();
+    for _ in &rows {
+        entries.push(Some("root".to_string()));
+        entries.push(Some("k0".to_string()));
+        offsets.push(entries.len() as i32);
+    }
+    let keys: ArrayRef = Arc::new(ListArray::new(
+        item,
+        OffsetBuffer::new(offsets.into()),
+        Arc::new(StringArray::from(entries)) as ArrayRef,
+        None,
+    ));
+    let (status, body) = post_values_arrow(&server, "edge", values_arrow(&rows, LAYER, keys)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["minted"].as_u64(), Some(0), "both keys exist: {body}");
+
+    tick(&server).await;
+    let roots = browse_rows(&server, &["0", "1"], LAYER, None, None).await;
+    assert_eq!(
+        roots.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+        vec!["root"],
+        "the child hangs from the root now, so it is no longer one itself"
+    );
+    let children = browse_rows(
+        &server,
+        &["0", "1"],
+        LAYER,
+        None,
+        Some(&roots[0].tessera_id),
+    )
+    .await;
+    assert_eq!(
+        children.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+        vec!["k0"],
+        "the edge the column named is the edge the layer holds"
     );
 }
