@@ -20,7 +20,7 @@ from .split import declared_layers, in_sorted, member_table_columns
 # ---------------------------------------------------------------------------------------------
 
 
-def wire_columns(rung: Path) -> tuple[str | None, list[str]]:
+def wire_columns(rung: Path, points: Path | None = None) -> tuple[str | None, list[str]]:
     """`(access column, attribute columns)` for the hold-out's batches, **read off the rung's own
     declaration** rather than listed here.
 
@@ -32,14 +32,14 @@ def wire_columns(rung: Path) -> tuple[str | None, list[str]]:
     on one column, and the wire takes one list of labels a row; the rung's column may be a list per
     row (rung 3 and MedCPT) or one string (rung 4's licence, rung 5's publisher), and
     [`encode_batch`] sends both as the list (decision 0129). The attribute
-    columns are every `[[attribute]]` the declaration names that this rung's points file actually
-    holds, which is what makes the ingested rows carry the same columns the built ones do; a rung
-    whose points file does not hold one of them is a rung whose build would have refused too.
+    columns are every `[[attribute]]` the declaration names that `points` actually holds, which is
+    what makes the ingested rows carry the same columns the built ones do; a rung whose points file
+    does not hold one of them is a rung whose build would have refused too.
 
-    ⊘ **Points of the anchor view alone.** A rung with several row spaces over one entity space
-    (rung 5's `bioclip` and `geo`) ingests its hold-out into the anchor view; the other views'
-    rows for those entities do not travel, so an equivalence census over a second view is not
-    comparable and the run says so.
+    **A view's own file decides what its pass carries.** An attribute is entity-space and rides the
+    anchor's file alone (arXiv's second view carries identity, position and the access column and
+    nothing else), so a second view's pass sends a position and a label for an entity that already
+    exists and restates nothing declared once for the whole item.
     """
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     access = None
@@ -48,7 +48,7 @@ def wire_columns(rung: Path) -> tuple[str | None, list[str]]:
         if field:
             access = field
             break
-    held = set(pq.ParquetFile(rung / "points.parquet").schema_arrow.names)
+    held = set(pq.ParquetFile(points or rung / "points.parquet").schema_arrow.names)
     attributes = [a["name"] for a in declared.get("attribute", []) if a["name"] in held]
     return access, attributes
 
@@ -220,20 +220,26 @@ class HoldOut:
         batch_rows: int,
         head_rows: int = 0,
         log=print,
+        points: Path | None = None,
+        members: bool = True,
     ):
         self.rung = rung
+        #: The view's own points file: its positions, its access column, and whichever declared
+        #: attributes it holds.
+        self.points = points or rung / "points.parquet"
         self.batch_rows = batch_rows
-        self.access, self.attributes = wire_columns(rung)
+        self.access, self.attributes = wire_columns(rung, self.points)
         self.held = np.sort(held)
         self.head_rows = head_rows
         self.max_body_bytes = int(max_body_bytes)
         self.log = log
         self.body_stats = self.new_body_stats()
         self.head: pa.Table | None = None
+        # Membership is entity-space and travels once, with the pass that allocates the entities.
         self.members = [
             MemberStream(layer["name"], layer["members"], self.held)
             for layer in declared_layers(rung)
-            if layer["route"] == "column"
+            if layer["route"] == "column" and members
         ]
         self.columns = [stream.name for stream in self.members]
         self.member_stats = {stream.name: stream.stats for stream in self.members}
@@ -292,7 +298,7 @@ class HoldOut:
         """
         rows = self.batch_rows if rows is None else rows
         self.body_stats = self.new_body_stats()
-        reader = pq.ParquetFile(self.rung / "points.parquet")
+        reader = pq.ParquetFile(self.points)
         pending: list[pa.Table] = []
         pending_rows = 0
         emitted = 0
@@ -308,7 +314,7 @@ class HoldOut:
                 entities = table.column("entity_id").to_numpy()
                 if int(entities[0]) <= self.last_entity or np.any(np.diff(entities.astype(np.int64)) <= 0):
                     raise ValueError(
-                        f"points.parquet: `entity_id` is not strictly ascending across row group "
+                        f"{self.points.name}: `entity_id` is not strictly ascending across row group "
                         f"{index}; a member table is read in lockstep with it and needs both in "
                         f"entity order"
                     )
