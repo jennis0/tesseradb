@@ -19,16 +19,17 @@ use super::reduce::{quantise, QUANTISE_DIVISIONS, REDUCTION_FLOOR};
 /// 108 of 197 artifacts on `clusters/hdbscan` ran out of budget with a bridging edge still live,
 /// 34 of 64 on `clusters/kmeans` and 100 of 574 on `clusters/toponymy` level 3, so what the served
 /// shape followed was the cap rather than the members. Swept over those three layers at the
-/// grouping as it is now built (`tests/hull_geometry.rs`, `the_budget_sweep`), the dig **runs out
-/// of work on its own** at 732, 833 and 197 digs respectively: past those every column — vertices,
-/// bytes, area, time — is identical to the unbounded dig, and no artifact on any of the three is
-/// capped at 1,024 or beyond. 2,048 sits 2.5× clear of the largest of them, so a corpus rougher
-/// than these three still gets the shape its members ask for rather than the shape the cap allows.
+/// grouping as it is now built, the dig **runs out of work on its own** at 732, 833 and 197 digs
+/// respectively: past those every column — vertices, bytes, area, time — is identical to the
+/// unbounded dig, and no artifact on any of the three is capped at 1,024 or beyond. 2,048 sits
+/// 2.5× clear of the largest of them, so a corpus rougher than these three still gets the shape
+/// its members ask for rather than the shape the cap allows.
 ///
 /// **What it costs**, over `clusters/hdbscan` at full membership: 12,497 → 28,459 hull vertices,
 /// 100,836 → 228,532 bytes of `shape_x`/`shape_y` for the whole layer, and 0.89 → 1.89 s of
 /// derivation for all 197 artifacts. The shapes come in from 0.870 to 0.803 of the area of the
-/// rings the grouping alone would have drawn, and the tightest from 0.290 to 0.255.
+/// rings the grouping alone would have drawn, and the tightest from 0.290 to 0.255. Rerun with
+/// `cargo run --release -p tessera-bench --bin hull_cost -- <bundle>`.
 ///
 /// The fidelity cost of running out — for the pathological membership this still bounds — is that
 /// a shape stops refining its *shortest* remaining bridges, because digging spends the budget
@@ -120,98 +121,42 @@ const BRIDGE_FACTOR: i128 = 3;
 /// is a *cache and not a parameter*: passing a box that is not `points`'s own would move the grid
 /// and so the shape, which is why nothing outside this module can supply it.
 pub(super) fn concave_rings(points: &[[u32; 2]], bounds: Option<[u32; 4]>) -> Vec<Vec<[u32; 2]>> {
-    dig_rings_within(points, DIG_BUDGET, QUANTISE_DIVISIONS, bounds, DigFloor::default()).0
+    dig_rings_within(points, DIG_BUDGET, QUANTISE_DIVISIONS, bounds).0
 }
 
-/// **Where the dig may be told to stop short of what it would dig on its own** — the two forms of
-/// *do not dig finer than the input's own resolution*, and both are `0` on every serving route.
-///
-/// The members are reduced to one representative per occupied cell of a grid across the artifact's
-/// own extent ([`QUANTISE_DIVISIONS`]) before the shape is computed, so a representative's position
-/// is known to the construction only to within a cell. The hypothesis this exists to test is that a
-/// dig finer than a cell is a dig into noise. It is measured in `tests/hull_geometry.rs`'s
-/// `the_resolution_floor` and neither form is served (`artifact-shapes.md` §7.5):
-///
-/// - `bridge_cells` — refuse to dig a bridge shorter than this many cells. **Inert, measured, and
-///   the reason is that the dig already stops at α**: an edge is dug only where it is longer than
-///   α, and α is between **34 and 270 binning cells** on every artifact of the measurement layer
-///   that is reduced at all. Nothing below 64 cells moves a vertex, a byte or an area; at 64 the
-///   first shapes change and a boundary departs by 12% of an artifact's own extent.
-/// - `depth_cells` — refuse a dig whose triangle is shallower than this many cells, the depth being
-///   the candidate's own distance to the edge it would replace. This one bites, because the
-///   candidate is the *nearest* member to the line and so the carve is shallow by construction:
-///   at one cell the layer's shapes go 26,740 → 18,414 vertices for an unchanged area, and members
-///   outside their own shape go 1,809 → 2. What it costs is one artifact's deep narrow crevice —
-///   a boundary departure of 26% of that artifact's extent for no area at all — and **whether that
-///   trade is worth taking is a ruling on what the shape claims, which is the owner's** (§8 B).
-///
-/// **The alternative both forms are measured instead of is a *drawn* pixel**, and it is refused for
-/// the reason the binning resolution is refused it (§7.1): stopping at what the request's zoom
-/// resolves would give two viewers of one artifact two different shapes, put the zoom in the derived
-/// cache's key (§7.2), and hand `/v1/artifacts/{id}` — which carries no zoom — nothing to answer
-/// with. A cell is a property of the artifact; a pixel is a property of the request.
-#[doc(hidden)]
-#[derive(Clone, Copy, Default)]
-pub struct DigFloor {
-    pub bridge_cells: u64,
-    pub depth_cells: u64,
-}
-
+/// [`concave_rings`] at a budget the caller names, with whether the budget bound the dig — a seam
+/// for `tessera-bench`'s `hull_cost` and for the budget's own test.
 #[doc(hidden)]
 pub fn dig_rings(points: &[[u32; 2]], budget: usize) -> (Vec<Vec<[u32; 2]>>, bool) {
-    dig_rings_at(points, budget, QUANTISE_DIVISIONS)
+    dig_rings_within(points, budget, QUANTISE_DIVISIONS, None)
 }
 
-/// [`dig_rings`] at a quantising resolution the caller names, `0` meaning none — the second
-/// measurement seam, and public for [`dig_rings`]'s reason.
+/// [`dig_rings`] over a set that is **already reduced**: the same dig with no quantising step at
+/// all.
 ///
-/// The sweep that fixes [`QUANTISE_DIVISIONS`] has to run the same construction at several
-/// resolutions, and against the unquantised shape, in one process.
+/// `hull_cost` holds the reduction to a binning written from the definition, and the claim it makes
+/// is that the two sets dig to byte-identical rings. That needs a dig over a set the caller
+/// supplies, because [`dig_rings`] reduces what it is given — it does, on two of one layer's 192
+/// artifacts — and would then be comparing two different clouds.
 #[doc(hidden)]
-pub fn dig_rings_at(
-    points: &[[u32; 2]],
-    budget: usize,
-    divisions: u32,
-) -> (Vec<Vec<[u32; 2]>>, bool) {
-    dig_rings_at_floor(points, budget, divisions, DigFloor::default())
+pub fn dig_rings_of(representatives: &[[u32; 2]], budget: usize) -> Vec<Vec<[u32; 2]>> {
+    dig_rings_within(representatives, budget, 0, None).0
 }
 
-/// [`dig_rings_at`] with the stopping rule the caller names ([`DigFloor`]) — the **fourth**
-/// measurement seam, public for [`dig_rings`]'s reason. `DigFloor::default()` is what every serving
-/// route takes and is the dig stopping where it always did.
-#[doc(hidden)]
-pub fn dig_rings_at_floor(
-    points: &[[u32; 2]],
-    budget: usize,
-    divisions: u32,
-    floor: DigFloor,
-) -> (Vec<Vec<[u32; 2]>>, bool) {
-    dig_rings_within(points, budget, divisions, None, floor)
-}
-
-/// [`dig_rings_at_floor`] with `points`'s own bounding box already in hand — see [`concave_rings`].
+/// [`dig_rings`] at a quantising resolution the caller names, `0` meaning none, and with
+/// `points`'s own bounding box already in hand — see [`concave_rings`].
 fn dig_rings_within(
     points: &[[u32; 2]],
     budget: usize,
     divisions: u32,
     bounds: Option<[u32; 4]>,
-    floor: DigFloor,
 ) -> (Vec<Vec<[u32; 2]>>, bool) {
     // **Reduce the input before computing the shape** ([`QUANTISE_DIVISIONS`]). It happens ahead of
     // the sort, which is where most of a large artifact's cost was: the corpus root's 2.42M
     // positions cost 121 ms to wrap and 167 ms to dig, and both figures are dominated by ordering
     // members whose individual positions the drawing cannot resolve.
     let reduced = quantise(points, divisions, REDUCTION_FLOOR, bounds);
-    // The two floors as squared lengths ([`DigFloor`]). An unreduced membership carries its
-    // members' exact positions and so has no cell and no floor, whatever the caller asked for.
-    let squared = |cells: u64| -> i128 {
-        reduced.as_ref().map_or(0, |&(_, side)| {
-            let span = (side * cells) as i128;
-            span * span
-        })
-    };
-    let (bridge_sq, depth_sq) = (squared(floor.bridge_cells), squared(floor.depth_cells));
-    let points: &[[u32; 2]] = reduced.as_ref().map_or(points, |(r, _)| r.as_slice());
+    let points: &[[u32; 2]] = reduced.as_ref().map_or(points, |r| r.as_slice());
 
     let mut p: Vec<[u32; 2]> = points.to_vec();
     p.sort_unstable();
@@ -224,12 +169,6 @@ fn dig_rings_within(
     }
 
     let alpha_sq = bridge_threshold(&convex);
-    // **α groups the members and a floor never does**, because the two answer different questions:
-    // whether these members are one cloud, which is a fact about the members, and whether this
-    // bridge is worth another vertex, which is a fact about what the input can resolve. Raising the
-    // grouping threshold would merge clouds the members do not have between them, which is what §3
-    // exists to refuse.
-    let dig_sq = alpha_sq.max(bridge_sq);
     let (labels, groups) = alpha_groups(&p, alpha_sq);
     let mut rings: Vec<Ring> = if groups == 1 {
         // The whole membership is one group, which is the ordinary case; the wrap is already
@@ -251,24 +190,14 @@ fn dig_rings_within(
     // wire carried when there was one ring, and not a budget that multiplies with the group count.
     let mut inserted = 0usize;
     while inserted < budget {
-        let Some((r, i)) = longest_bridge(&rings, dig_sq) else {
+        let Some((r, i)) = longest_bridge(&rings, alpha_sq) else {
             break;
         };
         let ring = &mut rings[r];
         let n = ring.poly.len();
         let (a, b) = (ring.poly[i].pos, ring.poly[(i + 1) % n].pos);
-        // The dig's depth is the candidate's own distance to the edge it replaces, compared
-        // squared so no root is taken: `cross(c)² > depth² · |ab|²`.
-        let deep_enough = |c: [u32; 2]| -> bool {
-            if depth_sq == 0 {
-                return true;
-            }
-            let (dx, dy) = (b[0] as i128 - a[0] as i128, b[1] as i128 - a[1] as i128);
-            let cross = dx * (c[1] as i128 - a[1] as i128) - dy * (c[0] as i128 - a[0] as i128);
-            cross * cross > depth_sq * (dx * dx + dy * dy)
-        };
         match ring.grid.nearest_inside(a, b) {
-            Some(c) if deep_enough(c) && dig_is_admissible(&ring.poly, i, c) => {
+            Some(c) if dig_is_admissible(&ring.poly, i, c) => {
                 // The replaced edge's flag goes with it; `poly[i]` now carries `(a, c)` and the
                 // inserted vertex carries `(c, b)`, both fresh.
                 ring.poly.insert(
@@ -287,7 +216,7 @@ fn dig_rings_within(
     // Exhaustion is *the budget ran out while a bridge was still live*, which is what a cap acting
     // as a fidelity control looks like — distinct from a dig that stopped because every remaining
     // edge is shorter than α or has no candidate.
-    let exhausted = inserted == budget && longest_bridge(&rings, dig_sq).is_some();
+    let exhausted = inserted == budget && longest_bridge(&rings, alpha_sq).is_some();
 
     let mut out: Vec<Vec<[u32; 2]>> = rings
         .into_iter()
@@ -564,59 +493,6 @@ mod tests {
                 }
             }
             assert!(asked > 100, "the sweep asked {asked} questions");
-        }
-    }
-
-    /// **Neither floor is served, and the seam that measures them is inert at its default.** The
-    /// served route must be the dig stopping where α says it stops; a floor is something
-    /// `tests/hull_geometry.rs`'s `the_resolution_floor` asks for and nothing else does.
-    #[test]
-    fn the_served_dig_carries_no_floor() {
-        for cloud in [moon(), flower(), two_clouds()] {
-            assert_eq!(
-                dig_rings_at(&cloud, DIG_BUDGET, QUANTISE_DIVISIONS).0,
-                dig_rings_at_floor(&cloud, DIG_BUDGET, QUANTISE_DIVISIONS, DigFloor::default()).0,
-            );
-        }
-    }
-
-    /// **A floor only ever stops the dig earlier**, on a membership large enough for the reduction
-    /// to engage and so for a cell to exist at all: fewer vertices, the same rings — the grouping is
-    /// α's and no floor touches it — and every vertex still a member's own position.
-    ///
-    /// The two forms are measured against each other in `the_resolution_floor`; what is pinned here
-    /// is that neither can invent a vertex or split a group, whatever the layer.
-    #[test]
-    fn a_floor_stops_the_dig_earlier_and_does_nothing_else() {
-        let cloud = sample(76_000, 300, |x, y| x * x + y * y < 300 * 300);
-        let members: std::collections::HashSet<[u32; 2]> = cloud.iter().copied().collect();
-        let base = dig_rings_at_floor(&cloud, usize::MAX, 32, DigFloor::default()).0;
-        assert!(
-            base.iter().map(|r| r.len()).sum::<usize>() > 8,
-            "the baseline shape has something to lose"
-        );
-        for floor in [
-            DigFloor {
-                bridge_cells: 2,
-                depth_cells: 0,
-            },
-            DigFloor {
-                bridge_cells: 0,
-                depth_cells: 2,
-            },
-        ] {
-            let rings = dig_rings_at_floor(&cloud, usize::MAX, 32, floor).0;
-            assert_eq!(rings.len(), base.len(), "a floor is not a grouping");
-            assert!(
-                rings.iter().map(|r| r.len()).sum::<usize>()
-                    <= base.iter().map(|r| r.len()).sum::<usize>(),
-                "a floor can only refuse a dig"
-            );
-            for ring in &rings {
-                for v in ring {
-                    assert!(members.contains(v), "{v:?} is not a member");
-                }
-            }
         }
     }
 

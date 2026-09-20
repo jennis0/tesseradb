@@ -21,10 +21,10 @@ use super::geometry::convex_hull_of_sorted;
 /// smoothed by a periodic cubic B-spline that leaves it by up to a third of the longest adjacent
 /// edge (`artifact-shapes.md` §9), and those edges are α-scale — thousands of times a cell.
 ///
-/// **What it costs and what it buys, measured** (`tests/hull_geometry.rs`,
-/// `the_quantisation_sweep`, over the 197-artifact `clusters/hdbscan` layer of `notebook-2m4` at
-/// full membership, release build, one thread). 22 of the 197 artifacts are dense enough to reduce
-/// at all, and between them 9,287,043 members become 1,717,984 representatives. Over those 22:
+/// **What it costs and what it buys, measured** over the 197-artifact `clusters/hdbscan` layer of
+/// `notebook-2m4` at full membership, release build, one thread. 22 of the 197 artifacts are dense
+/// enough to reduce at all, and between them 9,287,043 members become 1,717,984 representatives.
+/// Over those 22:
 ///
 /// | | median | p90 | worst |
 /// |---|---|---|---|
@@ -69,21 +69,15 @@ pub(super) const QUANTISE_DIVISIONS: u32 = 1_024;
 /// 49 ms, 2 ms and nothing across the three layers. The floor is where that stops.
 pub(super) const REDUCTION_FLOOR: usize = 75_000;
 
-/// [`QUANTISE_DIVISIONS`], for the measurement seams — the family comparison in
-/// `tests/hull_triangulation.rs` has to give the triangulated route the same reduced input the dig
-/// receives, or it is comparing two constructions over two different clouds.
-#[doc(hidden)]
-pub const SERVED_QUANTISE_DIVISIONS: u32 = QUANTISE_DIVISIONS;
-
-/// The representatives [`dig_rings_at`](super::dig_rings_at) would compute a shape over — **the third measurement seam,
-/// and public for [`dig_rings`](super::dig_rings)'s reason**.
+/// The representatives the served dig computes its shape over, or `None` where it digs over every
+/// member — the second seam this module keeps open, for `tessera-bench`'s `hull_cost`.
 ///
-/// The sweep has to ask what binning did to α, which is a statistic of the representatives' own
-/// convex wrap, and a test binary that rebuilt the cell arithmetic from the constant would be
-/// measuring its own copy of it.
+/// That binary holds the reduction to a second implementation written from the definition, and a
+/// differential that rebuilt the cell arithmetic on both sides would be comparing one transcription
+/// against another rather than against what is served.
 #[doc(hidden)]
-pub fn quantised(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
-    quantise(points, divisions, REDUCTION_FLOOR, None).map(|(reduced, _)| reduced)
+pub fn quantised(points: &[[u32; 2]]) -> Option<Vec<[u32; 2]>> {
+    quantise(points, QUANTISE_DIVISIONS, REDUCTION_FLOOR, None)
 }
 
 /// One real member per occupied cell of a square grid over the members' own bounding box, or `None`
@@ -114,15 +108,12 @@ pub fn quantised(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
 /// `bounds` is `points`'s own bounding box where a caller has already traversed them
 /// ([`concave_rings`](super::dig::concave_rings)), and `None` where it has not; it changes no answer, only the number of
 /// passes.
-///
-/// The cell side is returned beside the representatives because it is the input's own resolution,
-/// which is what a [`DigFloor`](super::DigFloor) is measured in.
 pub(super) fn quantise(
     points: &[[u32; 2]],
     divisions: u32,
     floor: usize,
     bounds: Option<[u32; 4]>,
-) -> Option<(Vec<[u32; 2]>, u64)> {
+) -> Option<Vec<[u32; 2]>> {
     let runs = Runs::fold(points, grid_shift(points, divisions, floor, bounds)?);
 
     // A run count is the occupied-cell count exactly where the runs ascend, and an upper bound on
@@ -152,7 +143,7 @@ pub(super) fn quantise(
     // returns as a *set* is a function of the member positions alone — the fold's representative
     // rule is order-independent and the merge above restores it where the runs were not ordered —
     // and the set is what the shape is computed from.
-    Some((out, runs.side))
+    Some(out)
 }
 
 /// The binning grid's cell side as a shift, or `None` where the reduction is refused before a cell
@@ -265,7 +256,7 @@ impl<'a> Runs<'a> {
     /// `notebook-2m4` it is not close: 12,808,679 members occupy 12,560,851 distinct Morton cells —
     /// a **ratio of 1.02**, the corpus grid being 2^16 × 2^16 against 2.4M items — and at the
     /// served resolution the densest artifact of the measurement layer holds 17.4 members to a cell
-    /// against a layer mean of 2.5 (`tests/hull_geometry.rs`, `the_cell_occupancy`). The jump
+    /// against a layer mean of 2.5. The jump
     /// becomes the cheaper route somewhere around a few tens of members a cell, which is a corpus
     /// two orders of magnitude denser than this one.
     ///
@@ -627,7 +618,7 @@ const OCTAGON_MARGIN: f64 = 65_536.0;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::derived::dig::{bridge_threshold, concave_rings, dig_rings_at, DIG_BUDGET};
+    use crate::derived::dig::{bridge_threshold, concave_rings, dig_rings_of, DIG_BUDGET};
     use crate::derived::geometry::convex_hull;
     use crate::derived::test_support::*;
 
@@ -642,8 +633,8 @@ mod tests {
     /// they do with *order*: one in Morton order, one rotated so the fold meets a cell twice, and
     /// one whose members are spread thinly enough that the reduction declines.
     ///
-    /// `tests/hull_geometry.rs`'s `the_reduction_is_the_definition` is the same assertion over the
-    /// 197 real memberships of the measurement layer, and it requires the *rings* to match as well.
+    /// `tessera-bench`'s `hull_cost` makes the same assertion over a bundle's real memberships,
+    /// and requires the *rings* to match as well.
     #[test]
     fn the_fold_returns_what_a_dense_binning_would_have() {
         /// One member per occupied cell and every hull candidate, the obvious way.
@@ -716,7 +707,7 @@ mod tests {
             ("too thin to reduce", &thin, 1_024),
         ] {
             assert_eq!(
-                normalise(quantise(cloud, divisions, 0, None).map(|(r, _)| r)),
+                normalise(quantise(cloud, divisions, 0, None)),
                 normalise(dense(cloud, divisions)),
                 "{name}: the fold and a dense binning disagree"
             );
@@ -742,7 +733,7 @@ mod tests {
     #[test]
     fn every_representative_is_a_member_and_every_member_has_one() {
         let members = sample(5_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
-        let reduced = quantise(&members, 32, 0, None).expect("a cloud this dense reduces").0;
+        let reduced = quantise(&members, 32, 0, None).expect("a cloud this dense reduces");
         assert!(
             reduced.len() * 3 < members.len(),
             "no reduction: {} of {}",
@@ -779,7 +770,7 @@ mod tests {
                 x * x + y * y <= 5_000 * 5_000 && (x < 0 || y.abs() > 2_000)
             }),
         ] {
-            let reduced = quantise(&cloud, 32, 0, None).expect("a cloud this dense reduces").0;
+            let reduced = quantise(&cloud, 32, 0, None).expect("a cloud this dense reduces");
             assert_eq!(
                 convex_hull(&reduced),
                 convex_hull(&cloud),
@@ -802,7 +793,7 @@ mod tests {
         assert!(quantise(&members, QUANTISE_DIVISIONS, REDUCTION_FLOOR, None).is_none());
         assert_eq!(
             concave_rings(&members, None),
-            dig_rings_at(&members, DIG_BUDGET, 0).0
+            dig_rings_of(&members, DIG_BUDGET)
         );
     }
 
@@ -813,8 +804,8 @@ mod tests {
         let members = sample(20_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
         let mut shuffled = members.clone();
         shuffled.reverse();
-        let mut a = quantise(&members, 32, 0, None).expect("reduces").0;
-        let mut b = quantise(&shuffled, 32, 0, None).expect("reduces").0;
+        let mut a = quantise(&members, 32, 0, None).expect("reduces");
+        let mut b = quantise(&shuffled, 32, 0, None).expect("reduces");
         a.sort_unstable();
         b.sort_unstable();
         assert_eq!(a, b);
@@ -854,7 +845,7 @@ mod tests {
             for divisions in [16u32, 64, 256, 1_024] {
                 cloud.push([9_000, 9_000]);
                 let (Some(mine), reference) = (
-                    quantise(&cloud, divisions, 0, None).map(|(r, _)| r),
+                    quantise(&cloud, divisions, 0, None),
                     extreme_octagon(&cloud),
                 ) else {
                     continue;
@@ -897,8 +888,8 @@ mod tests {
             .copied()
             .collect();
 
-        let mut once = quantise(&sorted, 64, 0, None).expect("reduces").0;
-        let mut twice = quantise(&twice_over, 64, 0, None).expect("reduces").0;
+        let mut once = quantise(&sorted, 64, 0, None).expect("reduces");
+        let mut twice = quantise(&twice_over, 64, 0, None).expect("reduces");
         once.sort_unstable();
         once.dedup();
         twice.sort_unstable();

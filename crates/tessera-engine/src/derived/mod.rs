@@ -68,9 +68,9 @@ use croaring::Bitmap;
 pub use tessera_types::layer::ComputedProperty;
 
 use dig::concave_rings;
-pub use dig::{dig_rings, dig_rings_at, dig_rings_at_floor, DigFloor};
+pub use dig::{dig_rings, dig_rings_of};
 pub use locator::RowLocator;
-pub use reduce::{quantised, SERVED_QUANTISE_DIVISIONS};
+pub use reduce::quantised;
 
 /// What a viewer is told about an artifact's shape, beside its masked count.
 ///
