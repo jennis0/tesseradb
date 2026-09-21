@@ -628,7 +628,7 @@ impl Executor {
         // appended. A window carrying no join row reads no artifact: the store is only consulted
         // for what a restating row might already be a member of.
         let restating = joining_entities(closing.entries());
-        let growth = if restating.is_empty() {
+        let prepared = if restating.is_empty() {
             growth_records(closing.entries(), None)
         } else {
             self.live.with_artifacts(|store| {
@@ -640,6 +640,15 @@ impl Executor {
                     }),
                 )
             })
+        };
+        let growth = match prepared {
+            Ok(growth) => growth,
+            Err(detail) => {
+                closing.fail_all(&self.health, || ExecError::LayerRefused {
+                    detail: detail.clone(),
+                });
+                return;
+            }
         };
 
         // One sequence, one fsync: the vocabulary mints first, so a mint is durable in the same

@@ -308,96 +308,47 @@ pub(super) fn plan_fills(
 
 /// The growth records one values batch's layer columns produce.
 ///
-/// A key with no ordinal was minted at this batch's own commit and the publication carried these
-/// rows as its first members, so it is skipped here as [`growth_records`] skips one. Every other
-/// reason a key could have no ordinal was refused before this, at
-/// [`Executor::resolve_memberships`].
+/// What this door adds to the shared grouping: the entities are the ones the caller's rows named,
+/// and a membership naming a row the batch does not carry is a refusal rather than an assignment
+/// this door could look up. It is one batch, so there is no entry to blame and the index the
+/// grouping carries is dropped.
 pub(super) fn values_growth_records(
     memberships: &[tessera_lifecycle::ResolvedMembership],
     rows: &[tessera_lifecycle::IncomingValues],
     store: &tessera_lifecycle::ArtifactStore,
 ) -> Result<Vec<WalRecord>, String> {
-    use std::collections::BTreeMap;
-    // Ordered, so the records a batch appends do not depend on hash iteration order: two nodes
-    // replaying one log must read the same sequence.
-    let mut by_level: BTreeMap<(&str, u32), BTreeMap<u32, croaring::Bitmap>> = BTreeMap::new();
-    for join in memberships {
-        let Some(ordinal) = join.ordinal else {
-            continue;
-        };
-        let joining = by_level
-            .entry((join.layer.as_str(), join.level))
-            .or_default()
-            .entry(ordinal)
-            .or_default();
-        for row in &join.rows {
-            let Some(entity) = rows.get(*row as usize) else {
-                return Err(format!(
-                    "column '{}' names row {row}, which this batch does not carry",
-                    join.layer
-                ));
-            };
-            // Entity space is `u32`, so the narrowing is total.
-            joining.add(entity.entity.raw() as u32);
-        }
-    }
-    // What the artifact already holds is not a join: a page restating a membership the store
-    // carries would otherwise append a record that changes nothing and pins the log at it, since
-    // `growth_record` drops an empty set.
-    //
-    // Read against the store before the batch is applied, the only moment the difference exists:
-    // [`Executor::commit_values`] holds the executor's one lock across the preparation.
-    for ((layer, level), ordinals) in &mut by_level {
-        for (ordinal, joining) in ordinals.iter_mut() {
-            if let Some(record) = store.get(layer, *level, *ordinal) {
-                joining.andnot_inplace(&record.members);
-            }
-        }
-    }
-    Ok(by_level
-        .into_iter()
-        .filter_map(|((layer, level), ordinals)| {
-            tessera_lifecycle::membership::growth_record(
-                layer,
-                level,
-                ordinals
-                    .iter()
-                    .map(|(ordinal, joining)| (*ordinal, joining)),
-            )
-        })
-        .collect())
+    // Every values row names an entity that exists, so any of them could be restating a membership
+    // the artifact holds. Read before the batch is applied: [`Executor::commit_values`] holds the
+    // executor's one lock across the preparation.
+    let held = HeldMembers {
+        store,
+        restating: None,
+    };
+    Ok(
+        grouped_growth(std::iter::once(memberships), &row_entity_of(rows), Some(held))?
+            .into_iter()
+            .map(|(record, _)| record)
+            .collect(),
+    )
 }
 
 /// The artifacts one values batch's layer columns named and no artifact holds: [`mint_plan`]'s
-/// twin for the values door.
+/// twin for the values door, on [`values_growth_records`]'s reading of the rows.
 ///
 /// An unknown key creates the artifact on an `open` layer, carrying the batch's own rows as its
-/// first members. One artifact per key per level for the whole batch: two rows naming one unknown
-/// key mint once and both join it.
+/// first members.
 pub(super) fn values_mint_plan(
     memberships: &[tessera_lifecycle::ResolvedMembership],
     rows: &[tessera_lifecycle::IncomingValues],
 ) -> Result<MintPlan, String> {
-    let mut wanted: MintPlan = std::collections::BTreeMap::new();
-    for join in memberships {
-        if join.ordinal.is_some() {
-            continue;
-        }
-        let (_, members) = wanted
-            .entry((join.layer.clone(), join.level, join.key.clone()))
-            .or_insert_with(|| (0, croaring::Bitmap::new()));
-        for row in &join.rows {
-            let Some(entity) = rows.get(*row as usize) else {
-                return Err(format!(
-                    "column '{}' names row {row}, which this batch does not carry",
-                    join.layer
-                ));
-            };
-            // Entity space is `u32`, so the narrowing is total.
-            members.add(entity.entity.raw() as u32);
-        }
-    }
-    Ok(wanted)
+    grouped_mints(std::iter::once(memberships), &row_entity_of(rows))
+}
+
+/// This door's entity lookup: a batch is one source, and a row index is a position in it.
+fn row_entity_of(
+    rows: &[tessera_lifecycle::IncomingValues],
+) -> impl Fn(usize, u32) -> Option<EntityId> + '_ {
+    |_, row| rows.get(row as usize).map(|row| row.entity)
 }
 
 /// How many of one growth record's joining members the artifacts do not already hold, read before

@@ -31,28 +31,39 @@ pub(super) fn joining_entities<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) 
     restating
 }
 
-/// The growth records one closed window owes, with the index of the entry to blame if an append
-/// fails, in the order they are to be appended.
+/// The entity one membership's row index names: `(source, row)`, and `None` for a row index the
+/// source does not carry.
 ///
-/// One record per `(layer, level)` for the whole window, not one per entry: several batches naming
-/// one cluster merge into a union. A join still carries its own `(layer, level, ordinal)`.
+/// The doors index different things: an ingest window's sources are its closed entries and the
+/// entities are the ids the close has just assigned, a values batch's one source is the request and
+/// the entities are the ones the caller named.
+pub(super) type EntityOfRow<'a> = &'a dyn Fn(usize, u32) -> Option<EntityId>;
+
+fn row_not_carried(layer: &str, row: u32) -> String {
+    format!("column '{layer}' names row {row}, which this batch does not carry")
+}
+
+/// The growth grouping both write doors share: the joins their resolved memberships declared, as
+/// one bitmap per `(layer, level, ordinal)` less what the artifact already holds, with the index of
+/// the source that first named each level.
 ///
-/// The entities are `entity_ids[row]`, the assignment this window just made, in the caller's own
-/// row order.
-pub(super) fn growth_records<W>(
-    closed: &[tessera_lifecycle::ClosedEntry<W>],
+/// One record per `(layer, level)`, not one per source: several sources naming one cluster merge
+/// into a union. A key with no ordinal is skipped: it was minted at this commit, and a minted
+/// artifact is published carrying these rows, so there is one record instead of a publication and a
+/// growth against it.
+pub(super) fn grouped_growth<'a>(
+    sources: impl Iterator<Item = &'a [tessera_lifecycle::ResolvedMembership]>,
+    entity_of: EntityOfRow<'_>,
     held: Option<HeldMembers<'_>>,
-) -> Vec<(WalRecord, usize)> {
+) -> Result<Vec<(WalRecord, usize)>, String> {
     use std::collections::BTreeMap;
-    /// One `(layer, level)`'s joins: the entry to blame for the append, and a bitmap per ordinal.
+    /// One `(layer, level)`'s joins: the source to blame for the append, and a bitmap per ordinal.
     type Level = (usize, BTreeMap<u32, croaring::Bitmap>);
     // Ordered, so replay order does not depend on hash iteration: two nodes replaying one log must
     // read the same sequence.
     let mut by_level: BTreeMap<(&str, u32), Level> = BTreeMap::new();
-    for (index, entry) in closed.iter().enumerate() {
-        for join in &entry.memberships {
-            // A key with no ordinal was minted at the close, and a minted artifact was published
-            // carrying these rows: one record instead of a publication and a growth against it.
+    for (index, memberships) in sources.enumerate() {
+        for join in memberships {
             let Some(ordinal) = join.ordinal else {
                 continue;
             };
@@ -61,7 +72,8 @@ pub(super) fn growth_records<W>(
                 .or_insert_with(|| (index, BTreeMap::new()));
             let joining = ordinals.entry(ordinal).or_default();
             for row in &join.rows {
-                let entity = entry.entity_ids[*row as usize];
+                let entity =
+                    entity_of(index, *row).ok_or_else(|| row_not_carried(&join.layer, *row))?;
                 // Entity space is `u32`-wide, so the narrowing is total.
                 joining.add(entity.raw() as u32);
             }
@@ -71,8 +83,8 @@ pub(super) fn growth_records<W>(
     // carries would otherwise append a record that changes nothing and pins the log at it, since
     // `growth_record` drops an empty set.
     //
-    // Read against the store before this window's artifact records are applied, the only moment
-    // the difference exists.
+    // Read against the store before the commit's artifact records are applied, the only moment the
+    // difference exists.
     if let Some(held) = held {
         for ((layer, level), (_, ordinals)) in &mut by_level {
             for (ordinal, joining) in ordinals.iter_mut() {
@@ -85,7 +97,7 @@ pub(super) fn growth_records<W>(
             }
         }
     }
-    by_level
+    Ok(by_level
         .into_iter()
         .filter_map(|((layer, level), (index, ordinals))| {
             let joins = ordinals
@@ -94,51 +106,85 @@ pub(super) fn growth_records<W>(
             tessera_lifecycle::membership::growth_record(layer, level, joins)
                 .map(|record| (record, index))
         })
-        .collect()
+        .collect())
 }
 
-/// The artifacts a closed window's rows named and no artifact holds: the records that create them,
-/// in the order they must be appended, and how many each entry is to be told it created.
+/// The mint grouping both write doors share: the artifacts their resolved memberships named and no
+/// artifact holds, one per `(layer, level, key)`, each carrying the entities that named it and the
+/// index of the source that named it first.
 ///
-/// Minting happens here, at the close, not at admission: an ordinal is claimed from the level's own
-/// cursor and is durable only in the record that claims it. One artifact per key per level for the
-/// whole window, re-resolved against `ArtifactStore::ordinal_of_key` in case a publication landed
-/// since admission, in which case it grows instead of minting. A minted artifact is published
-/// carrying its members, so `growth_records` skips a membership whose ordinal is `None`.
-///
-/// The edges come with them, because the close settles both: an edge whose child this window mints
-/// travels on the publication that creates it, and an edge whose child exists without a parent is
-/// filled onto it. So a window with edges and nothing to mint still has work here.
-pub(super) fn mint_plan<W>(
-    closed: &[tessera_lifecycle::ClosedEntry<W>],
-) -> Option<(MintPlan, Vec<tessera_lifecycle::BatchEdge>)> {
-    use std::collections::BTreeMap;
-    let mut wanted: MintPlan = BTreeMap::new();
-    for (index, entry) in closed.iter().enumerate() {
-        for join in &entry.memberships {
+/// Two sources naming one unknown key mint once and both join it.
+pub(super) fn grouped_mints<'a>(
+    sources: impl Iterator<Item = &'a [tessera_lifecycle::ResolvedMembership]>,
+    entity_of: EntityOfRow<'_>,
+) -> Result<MintPlan, String> {
+    let mut wanted: MintPlan = std::collections::BTreeMap::new();
+    for (index, memberships) in sources.enumerate() {
+        for join in memberships {
             if join.ordinal.is_some() {
                 continue;
             }
             let (_, members) = wanted
                 .entry((join.layer.clone(), join.level, join.key.clone()))
-                // The first entry that named the key owns the mint.
+                // The first source that named the key owns the mint.
                 .or_insert_with(|| (index, croaring::Bitmap::new()));
             for row in &join.rows {
+                let entity =
+                    entity_of(index, *row).ok_or_else(|| row_not_carried(&join.layer, *row))?;
                 // Entity space is `u32`-wide, so the narrowing is total.
-                members.add(entry.entity_ids[*row as usize].raw() as u32);
+                members.add(entity.raw() as u32);
             }
         }
     }
+    Ok(wanted)
+}
+
+/// The growth records one closed window owes, in the order they are to be appended.
+///
+/// What this door adds to [`grouped_growth`]: the entities are `entity_ids[row]`, the assignment
+/// this window has just made, and the index each record carries is the entry to blame if its append
+/// fails.
+pub(super) fn growth_records<W>(
+    closed: &[tessera_lifecycle::ClosedEntry<W>],
+    held: Option<HeldMembers<'_>>,
+) -> Result<Vec<(WalRecord, usize)>, String> {
+    grouped_growth(
+        closed.iter().map(|entry| entry.memberships.as_slice()),
+        &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
+        held,
+    )
+}
+
+/// What a closed window is about to mint, and the edges its close has to settle. `None` where it
+/// has neither, which is every window naming no layer.
+///
+/// Minting happens here, at the close, not at admission: an ordinal is claimed from the level's own
+/// cursor and is durable only in the record that claims it. The plan is re-resolved against
+/// `ArtifactStore::ordinal_of_key` in [`Executor::prepare_mints`] in case a publication landed
+/// since admission, in which case it grows instead of minting.
+///
+/// What this door adds to [`grouped_mints`]: the entities are `entity_ids[row]`, the index is the
+/// entry that first named the key, and the edges travel with the plan, because the close settles
+/// both. An edge whose child this window mints travels on the publication that creates it, and an
+/// edge whose child exists without a parent is filled onto it, so a window with edges and nothing
+/// to mint still has work here.
+pub(super) fn mint_plan<W>(
+    closed: &[tessera_lifecycle::ClosedEntry<W>],
+) -> Result<Option<(MintPlan, Vec<tessera_lifecycle::BatchEdge>)>, String> {
+    let wanted = grouped_mints(
+        closed.iter().map(|entry| entry.memberships.as_slice()),
+        &|entry, row| closed[entry].entity_ids.get(row as usize).copied(),
+    )?;
     let edges: Vec<tessera_lifecycle::BatchEdge> =
         closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();
     if wanted.is_empty() && edges.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some((wanted, edges))
+    Ok(Some((wanted, edges)))
 }
 
-/// What one window is about to mint: `(layer, level, key)` → the entry that first named it, and the
-/// entities joining it.
+/// What one commit is about to mint: `(layer, level, key)` → the source that first named it, and
+/// the entities joining it.
 pub(super) type MintPlan = std::collections::BTreeMap<(String, u32, String), (usize, croaring::Bitmap)>;
 
 /// A key that acquired an artifact between its resolution and its preparation grows into it rather
@@ -375,7 +421,7 @@ impl Executor {
         closed: &mut [tessera_lifecycle::ClosedEntry<Reply<Ingested>>],
     ) -> Result<(Vec<WalRecord>, Vec<u64>), String> {
         let mut minted_per_entry = vec![0u64; closed.len()];
-        let Some((wanted, edges)) = mint_plan(closed) else {
+        let Some((wanted, edges)) = mint_plan(closed)? else {
             return Ok((Vec::new(), minted_per_entry));
         };
         let PreparedMints {
