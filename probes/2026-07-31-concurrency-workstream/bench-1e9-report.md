@@ -9,7 +9,7 @@ together — deliberately, since that is what would actually ship.**
 
 `categories-subclass` label set (47,968-term vocabulary), `entity_id < 1e9`,
 `w=10 k=30 zoom=8`, 10 s cells, defaults otherwise (shipped 4× compute-admission).
-Bundle: `/home/joe/code/tessera/data/bench-fixtures/1e9/`. Raw run output under
+Bundle: `/home/user/code/tessera/data/bench-fixtures/1e9/`. Raw run output under
 `bench-runs/1e9/{matrix-b,matrix-a,cpu,coldbuild}/`.
 
 **Caveats up front**: shared box (another worktree's cargo test process was consuming

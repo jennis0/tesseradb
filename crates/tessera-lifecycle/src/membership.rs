@@ -1303,6 +1303,15 @@ impl ArtifactStore {
         .min_by_key(|(_, pos)| *pos)
     }
 
+    /// Whether this store holds memberships or supplied content that no manifest names — the two
+    /// pins a side-manifest releases, and not the two only a whole rewrite does.
+    ///
+    /// What a freshly replayed store answers here is whether the log is carrying artifact state on
+    /// its own, which is the state the next publication has to end.
+    pub fn has_unpublished(&self) -> bool {
+        self.oldest_wal_pos.is_some() || self.content_wal_pos.is_some()
+    }
+
     /// Applies a durable publication, a durable growth or a durable fill — the **three** paths by
     /// which artifact state enters, taken by both the live write path and replay.
     ///

@@ -714,7 +714,7 @@ impl Executor {
             .iter()
             .chain(growth.iter().map(|(record, _)| record))
             .collect();
-        self.apply_artifact_records(&artifact_records, &positions[artifacts_at..]);
+        self.apply_artifact_records(&artifact_records, &positions[artifacts_at..], Publish::AtTick);
 
         self.record_accepted_batches(closing.entries(), &positions[entries_at..artifacts_at]);
         log_minted_artifacts(&minted_per_entry, &mint_records);

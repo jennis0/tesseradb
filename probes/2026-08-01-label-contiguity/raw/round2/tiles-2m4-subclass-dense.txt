@@ -1,4 +1,4 @@
-bundle: /home/joe/code/tessera/data/bench-fixtures/2m4
+bundle: /home/user/code/tessera/data/bench-fixtures/2m4
 grant mode: random (bench GrantShape::Random, default) (w=10), dictionary=176, reps=25, max_tiles=131072
 
 grant contiguity (universe 2422486 rows): entity-space card=386128 cov=15.9393% containers=35 run_ratio=106.665 | row-space card=386128 cov=15.9393% containers=37 run_ratio=1.750

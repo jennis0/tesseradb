@@ -52,7 +52,6 @@ from test_shape_membership import (
     build_bundle,
     config_toml,
     fixture_points,
-    q,
     visible,
 )
 

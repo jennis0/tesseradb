@@ -1,5 +1,6 @@
 {
   "name": "tessera-clients",
+  "license": "Apache-2.0",
   "private": true,
   "workspaces": [
     "spike",

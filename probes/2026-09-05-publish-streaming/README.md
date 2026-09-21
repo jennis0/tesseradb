@@ -154,7 +154,7 @@ body is assembled.
 ## Method
 
 ```bash
-export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+export TESSERA_LADDER=/home/user/code/tessera/data/ladder
 python3 -m test_corpora.common.ingest_cycle --rung-dir data/ladder/medcpt-1m --work <scratch> \
     --binary target/release/tessera --out runs/medcpt-1m-f010.json \
     --fraction 0.10 --concurrency 8 --port0 8191 --write-cycle --state-extent

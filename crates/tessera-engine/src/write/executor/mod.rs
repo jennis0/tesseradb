@@ -121,7 +121,12 @@ impl Executor {
                 | self.publish_completed_suggests();
             self.tick_if_due();
             while self.run_deny_pass() {}
-            self.publish_overlay_state();
+            // The prompt half only: a batch's memberships wait for the tick, and this runs after
+            // every drain. A publication taken here carries them too, since it writes everything
+            // live state holds and no manifest does.
+            if self.side_manifests.behind_live {
+                self.publish_overlay_state();
+            }
             if self.run_work_pass() || published {
                 continue;
             }
@@ -150,6 +155,9 @@ impl Executor {
         self.reclaim_superseded_prefixes();
         self.dispatch_suggest_rebuild();
         self.publish_row_forms();
+        // The tick is where a data door's memberships and content reach a manifest. Above the
+        // in-flight gate below, so a tick that publishes no geometry still publishes them.
+        self.publish_overlay_state();
 
         let generation = self.generation.load_full();
 

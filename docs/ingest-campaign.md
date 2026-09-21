@@ -40,7 +40,7 @@ either must rebuild it. ⊘ **Deleting it also breaks the doc-link gate**: three
 path that does not exist. Those two files and `scales.json` were kept back and restored — 7 KB, and
 the citations are about the schema's shape rather than the 31 GB beside it.
 
-**All eight datasets are staged** at `/mnt/nas/joe/tessera/datasets/<name>/<vintage>/`, 2.5 TB, each
+**All eight datasets are staged** at `/mnt/nas/tessera/datasets/<name>/<vintage>/`, 2.5 TB, each
 with a README stating what was verified at acquisition and what is the publisher's claim. **A ninth
 was added 2026-09-01** — `mesh/2025/`, rung 3's label side, on the same convention (§4.1).
 
@@ -50,7 +50,7 @@ no space pressure at rung 1 (117 GB free, GeoNames needs ~5 GB end to end).
 
 **The second volume (plan §4) is not built,** and rung 6 no longer obviously needs one. Archiving the three rungs'
 `staging/` intermediates and the whole of `paperseek/` to the share — verified file for file and byte for byte, at
-`/mnt/nas/joe/tessera/derived-archive/` — took this volume from 202 GB free to **366 GB**, against rung 6's modelled
+`/mnt/nas/tessera/derived-archive/` — took this volume from 202 GB free to **366 GB**, against rung 6's modelled
 ~304 GB. `target/debug` is a further 109 GB if the transient needs it. Restoring rung 4 is now a copy off the share
 at a measured 39.7 MB/s, not an instant rebuild.
 
@@ -452,7 +452,7 @@ named, and that is a scope choice rather than a gate.
 **What was actually missing is the MeSH tree, and it is 2.7 MB.** The chunks name descriptors; they
 do not say where a descriptor sits. `mtrees2025.bin` is the NLM's flat `Descriptor Name;TreeNumber`
 file and it is the whole of the structure. Acquired 2026-09-01 to
-`/mnt/nas/joe/tessera/datasets/mesh/2025/`, with its own README carrying the counts below and the
+`/mnt/nas/tessera/datasets/mesh/2025/`, with its own README carrying the counts below and the
 join's cost. The 2026 vintage is not published at that path; 2025 already post-dates the corpus.
 
 **Abstracts are staged and free to read.** The plan defers them to rung 4 as the forcing case for

@@ -12,13 +12,13 @@ projected whole on the request path), the second is the rebuilt form serving.
 import base64, json, os, sys, time, uuid
 from pathlib import Path
 
-sys.path.insert(0, "/home/joe/code/tessera/test_corpora")
+sys.path.insert(0, "/home/user/code/tessera/test_corpora")
 import pyarrow as pa, pyarrow.ipc as ipc, pyarrow.parquet as pq, requests
 from common import serve_battery
 from common.deployment import Deployment
 from common.ingest_cycle import Control, encode_batch, wire_columns, wait_for
 
-R = Path("/home/joe/code/tessera")
+R = Path("/home/user/code/tessera")
 rung = R / "data/ladder/medcpt"
 scratch = Path(sys.argv[1])
 FLUSHES = int(os.environ.get("FLUSHES", "4"))

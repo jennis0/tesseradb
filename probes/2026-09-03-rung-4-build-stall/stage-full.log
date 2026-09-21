@@ -1,5 +1,5 @@
-share   /mnt/nas/joe/tessera/datasets/paperseek-openalex/2026-08-27
-staging /home/joe/code/tessera/data/ladder/paperseek/staging
+share   /mnt/nas/tessera/datasets/paperseek-openalex/2026-08-27
+staging /home/user/code/tessera/data/ladder/paperseek/staging
 102,117,343 rows x 1024
 chunk  0  already staged
 chunk  1  2,000,000 rows  title 99.7%  abstract 99.9%  zero-norm    0  255s  (peak 7.0 GB)

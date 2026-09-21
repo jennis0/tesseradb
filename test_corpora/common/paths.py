@@ -13,10 +13,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-#: The publisher's own bytes, `<dataset>/<vintage>/`, read-only.
-STAGED_ROOT = Path(os.environ.get("TESSERA_STAGED", "/mnt/nas/joe/tessera/datasets"))
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The publisher's own bytes, `<dataset>/<vintage>/`, read-only. `TESSERA_STAGED` names the share.
+STAGED_ROOT = Path(os.environ.get("TESSERA_STAGED", _REPO_ROOT / "data" / "staged"))
 
 #: Everything a `prepare.py` writes, and every bundle built from it.
 LADDER_ROOT = Path(os.environ.get("TESSERA_LADDER", _REPO_ROOT / "data" / "ladder"))

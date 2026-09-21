@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import glob
 import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -51,14 +50,9 @@ try:  # the writer moves to `common/` when the other track lands; both spellings
 except ImportError:  # pragma: no cover - whichever of the two is present
     from test_corpora.arxiv.writer import ArtifactSet
 
-from .extract import VINTAGE, keys
-
-EXTRACT = Path(os.environ.get("TESSERA_LADDER", "data/ladder")) / "paperseek" / "staging" / (
-    "openalex-extract.parquet"
-)
-
-#: The dimension tables — a few MB in total, read whole.
-DIMENSIONS = Path(os.environ.get("TESSERA_STAGED", "/mnt/nas/joe/tessera/datasets")) / "openalex"
+from ..common.paths import staged
+from . import sources
+from .extract import OPENALEX, VINTAGE, keys
 
 def short(openalex_id: str) -> str:
     """`https://openalex.org/subfields/3312` → `3312`; `…/T11045` → `T11045`.
@@ -103,9 +97,10 @@ BATCH = 1_000_000
 class OpenAlex:
     """The topic tree, and the two operations a staged slice needs against it."""
 
-    def __init__(self, extract_path: Path = EXTRACT, dimensions: Path = DIMENSIONS):
-        self.topics = self._tree(dimensions / VINTAGE / "parquet")
-        self._load(Path(extract_path))
+    def __init__(self, extract_path: Path | None = None, dimensions: Path | None = None):
+        # The dimension tables are a few MB in total, read whole.
+        self.topics = self._tree(dimensions or staged(OPENALEX, VINTAGE) / "parquet")
+        self._load(Path(extract_path or sources.staging() / "openalex-extract.parquet"))
         self.stats = {
             "rows": 0,
             "matched": 0,

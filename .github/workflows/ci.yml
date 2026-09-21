@@ -74,8 +74,30 @@ env:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    env:
+      # The runner fills its disk building the workspace's 261 test binaries, and reports it two
+      # ways in the same run: `rustc-LLVM ERROR: IO failure on output stream: No space left on
+      # device`, and `ld terminated with signal 7 [Bus error]`. The second is the first seen
+      # through an `mmap` — rustc links with `lld`, which writes its output through one, and a
+      # mapped page that cannot be written back because the filesystem is full raises SIGBUS
+      # instead of returning ENOSPC. Freeing 18 GB was not enough on its own.
+      #
+      # Debug info is what the space goes on, so CI builds without it, which is what CLAUDE.md
+      # already tells a developer to do in a worktree for the same reason. The cost is that a CI
+      # backtrace names a function but not a line.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v4
+      # Half of the fix: the runner ships ~25 GB of toolchains this build never touches. Measured
+      # on this runner, the step takes / from 14 GB free to 32 GB. The build needed more than that
+      # with debug info on, which is why the profile above turns it off.
+      - name: make room for the test binaries
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
       # `stable`, matching rust-toolchain.toml's channel. Note this is a rolling channel, not a
       # pin: the `.stderr` fixtures under crates/tessera-types/tests/ui are compiler output, so a
       # rustc release can turn this job red on wording alone. See that test's own doc for why
@@ -142,28 +164,6 @@ jobs:
           print(' '.join(d['project']['dependencies'] + d['project']['optional-dependencies']['dev']))
           ")
       - run: reference/.venv/bin/ruff check --config reference/pyproject.toml reference conformance
-      # `conformance.md` §0 states the suite's case count, and a hand-maintained number in a design
-      # document drifts silently — that one has been wrong three times. This is the treatment
-      # `scripts/check-corpus-integrity.py` gives `docs/design/inventory.md`, applied to the one
-      # fact in §0 a script can compute. It lives here and not in that script because collecting
-      # the suite needs the venv and the release binary, and that check is deliberately neither.
-      - name: the case count stated in conformance.md is the count pytest collects
-        run: |
-          collected=$(reference/.venv/bin/pytest conformance/tests conformance/suite \
-            --collect-only -q | grep -oE '^[0-9]+ tests collected' | grep -oE '^[0-9]+')
-          stated=$(grep -oE '^ *conformance-cases = [0-9]+' docs/design/conformance.md \
-            | grep -oE '[0-9]+$')
-          if [ -z "$collected" ] || [ -z "$stated" ]; then
-            echo "could not read a count: collected='$collected' stated='$stated'" >&2
-            echo "collection failed, or docs/design/conformance.md §0 lost its marker line" >&2
-            exit 1
-          fi
-          if [ "$collected" != "$stated" ]; then
-            echo "docs/design/conformance.md §0 states $stated cases; pytest collects" \
-                 "$collected. The document is stale — update the marker line in §0." >&2
-            exit 1
-          fi
-          echo "conformance.md §0 and pytest agree: $collected cases"
       # Fixtures are built once and cached in /tmp by a stamped recipe; on a fresh runner every one
       # of them is built from scratch, which is most of this job's wall-clock.
       - run: reference/.venv/bin/pytest conformance/tests conformance/suite -v

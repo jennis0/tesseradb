@@ -400,6 +400,10 @@ impl WritePath {
             .values()
             .flat_map(|p| p.manifest.artifact_record_extents.iter().cloned())
             .collect();
+        // What replay left in the log and no manifest carries: the same publication is owed for
+        // it, and without this a node that restarted between a batch and its tick would wait for
+        // the next batch to write one.
+        let growth_unpublished = live.with_artifacts(|store| store.has_unpublished());
         #[cfg(feature = "fault-injection")]
         let thread_faults = faults.clone();
         let handler = Arc::downgrade(&alive);
@@ -432,6 +436,7 @@ impl WritePath {
                         seeded_membership_extents,
                         seeded_derived_extents,
                         seeded_content_extents,
+                        growth_unpublished,
                     ),
                     coalesce: executor::Background::new(worker_bell.clone()),
                     merge: executor::Background::sharing(

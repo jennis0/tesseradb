@@ -48,12 +48,12 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from . import sources
+
 try:  # the writer moves to `common/` when the other track lands; both spellings are one class
     from test_corpora.common.writer import ArtifactSet
 except ImportError:  # pragma: no cover - whichever of the two is present
     from test_corpora.arxiv.writer import ArtifactSet
-
-TREE = Path("/mnt/nas/joe/tessera/datasets/mesh/2025/mtrees2025.bin")
 
 LAYER = "mesh/descriptors"
 
@@ -82,7 +82,8 @@ def _unique(key: np.ndarray) -> np.ndarray:
 class Mesh:
     """The descriptor DAG, and the two operations a staged chunk needs against it."""
 
-    def __init__(self, tree_path: Path = TREE):
+    def __init__(self, tree_path: Path | None = None):
+        tree_path = tree_path or sources.mesh_tree()
         display: dict[str, str] = {}
         name_of_tn: dict[str, str] = {}
         tns_of: dict[str, list[str]] = collections.defaultdict(list)

@@ -1,5 +1,6 @@
 {
   "name": "@tesseradb/react",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "description": "React hooks over the headless store, and typed wrappers for the tessera-* elements behind a separate entry.",

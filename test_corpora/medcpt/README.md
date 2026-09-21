@@ -12,7 +12,7 @@ fidelity is not judged. Every figure below *is* a claim about what this pipeline
 build` cost, and each names its medium.
 
 ```bash
-export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+export TESSERA_LADDER="$PWD/data/ladder"
 
 # once: 163 GB off the share, resumable per chunk — the only pass over the publisher's bytes
 ~/venvs/projection/bin/python -m test_corpora.medcpt.stage

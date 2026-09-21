@@ -12,8 +12,8 @@ Each rung's directory produces one of the corpora the ingest campaign measures a
 | `$TESSERA_LADDER/<rung>/` | derived: `points.parquet`, vocabularies, member files, `bundle/` |
 
 Both roots are environment variables read by [`common/paths.py`](common/paths.py):
-`TESSERA_STAGED` for the share, `TESSERA_LADDER` for the derived directory, default
-`data/ladder`.
+`TESSERA_STAGED` for the share, `TESSERA_LADDER` for the derived directory. Both default to a
+directory in the checkout, `data/staged` and `data/ladder`; a share is named by the variable.
 
 ## Projection
 
