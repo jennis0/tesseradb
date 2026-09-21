@@ -1,83 +1,123 @@
-# Tessera
+# TesseraDB
+** Access-controlled visual analytics for very large datasets **
 
-**A permission-masked point service.** An interactive, pannable and zoomable map over a large
-document corpus, where what a viewer may see determines not just which items they retrieve, but
-every count, density, cluster and summary they are shown.
+> ** Currently in pre-alpha **
 
-Most systems with per-document security draw their line at *retrieval*: a viewer cannot open a
-record they lack access to, but they can still learn it exists from a count, a cluster boundary or
-a density gradient. Tessera moves the line. A viewer's visible set is materialised once per session
-as a Roaring bitmap, and every count, sample, label decision and density estimate is computed from
-that set alone.
+TesseraDB is an open-source analytical engine for interactively exploring large collections of records as maps, embedding spaces, clusters, densities, and other visual representations.
 
-The differentiator is the access control, not the scatterplot.
+A central feature is per-viewer access control. TesseraDB computes the data and derived visual information in a view from the records the requesting user is permitted to see. This applies not only to individual points, but also to counts, densities, samples, clusters and labels.
 
-## How it works, in one paragraph
+Filters can combine numeric, date, categorical, spatial and full-text search.
 
-Permissions live in **entity space**; geometry lives in **row space**; an explicit permutation is
-the only path between them. Geometry is stored in Morton (Z-order) sequence, so a quadtree tile is
-a *contiguous range of row IDs* — which turns an exact masked count into bitmap arithmetic rather
-than a scan. A viewport costs work proportional to the rows the viewer can see in it, not to the
-size of the corpus.
+## Why TesseraDB?
 
-## Status
+Traditional access control is usually applied when a user retrieves a record:
 
-**Not ready to deploy.** The engine builds and serves; the guarantees are specified and only
-partly enforced.
+```text
+Can this user read record X?
+        ↓
+      yes/no
+```
 
-- The build pipeline, the write-ahead log, entity-ID allocation, the segment loader, mask
-  composition and the viewport query all work, measured against a synthetic 10⁹-point corpus.
-- **Three of the thirteen invariants are covered by the conformance suite as designed.** The suite
-  is the deliverable, and it is incomplete.
-- Two of the three deny-retirement rules are specified but unbuilt. They are safe today only
-  because nothing retires at all.
-- Compaction, merge, partitions, labels and the multi-process split are specified and unbuilt.
+That isn't always enough for interactive visual analytics.
 
-Everything specified but not yet built is marked ⊘ at the point it is claimed, and counted in
-[`docs/design/inventory.md`](docs/design/inventory.md). Work in progress is tracked as capability
-epics in this repository's issues.
+Suppose a dataset contains sensitive records and a precomputed map contains clusters, counts, density, labels, or other summaries. Even if the underlying records are protected, the shared analytical representation can reveal information about records that a user is not permitted to see.
 
-## Security posture
+TesseraDB takes a different approach the permission-filtered set is the input to the analytical operations themselves.
 
-Read this before evaluating the system.
+This means that the same dataset can produce different maps and analytical results for different users.
 
-**What is enforced structurally.** Aggregates are computable only from inside the authorised mask —
-the mask is the sole entry point to the geometry arrays, so there is no path along which an
-aggregate over unauthorised rows can be constructed. Entity IDs never reach a client: no
-request-path artifact stores one, so the gather cannot produce one. Sampling happens after masking,
-never before, and the floor clause that keeps a sparse viewer's map from going blank cannot be
-switched off — a zero floor is refused at startup rather than clamped.
+## Built for large, interactive corpora
 
-**What is accepted rather than eliminated.** Nineteen residual disclosures are enumerated in the
-leak register (`docs/design/architecture.md` Appendix C), with severity, mitigation and status for
-each. The register is exhaustive by construction: a disclosure not in that table is a bug, not an
-omission. That exhaustiveness depends on the query surface staying about five shapes wide, which is
-a deliberate constraint rather than an early-stage limitation.
+TesseraDB is designed for datasets that are too large to treat as a browser-side collection of points.
 
-**What is claimed less than you might assume.** The client-facing identifier is a *blinding
-permutation*, not encryption — an 8-round Feistel over a non-cryptographic mixer. It prevents a
-viewer-plane client from correlating or enumerating entity IDs. It is **not** a cryptographic
-guarantee and **not** a defence against anyone holding the bundle, who obtains the key by
-construction.
+It can work with points in geographic coordinates or other two-dimensional spaces such as embedding projections, while attaching arbitrary structured and textual data to each point.
 
-**What is not yet enforced.** See Status above, and the ⊘ markers. In particular, a partition not
-consulted failing closed (I13b) has no implementation and no test.
+Filtering can combine:
 
-## Scale and cost
+* numeric fields
+* dates
+* keywords and categorical fields
+* full-text queries
+* BM25-style text relevance thresholds
+* spatial regions
+* coordinate-space conditions
+* access-control predicates
 
-Measured on a synthetic 10⁹-point corpus on a single 47 GiB box:
+These filters can be combined arbitrarily to define the set of records participating in a view.
 
-| | |
-|---|---|
-| Corpus | 10⁹ points, ~130 terms per item |
-| Bundle | ~47 GB on disk |
-| Viewport latency | 135–164 ms p50 at 10⁹; selection is 83–89% of it |
-| Cost driver | Rows visible in the viewport. Uncorrelated with the number of points returned |
-| Build | Streaming with external spill; memory-bounded by a pre-flight plan |
+Note that TesseraDB is deliberately **filter-oriented rather than a ranked search engine**. A text relevance score can be used as a predicate — for example, `BM25 > 8` — but TesseraDB does not currently attempt to turn a query into a ranked list of results. Its purpose is to define the subset of a corpus that should participate in an analytical view.
 
-These are synthetic-corpus figures. Three of the headline results depend on how a deployment's
-access labels are actually distributed, and should be re-measured against real labels before being
-relied on. Raw records are in [`probes/`](probes/).
+## The scale
+
+TesseraDB is designed to run on a single machine. It has been tested with:
+
+- 3.5 billion points, with approximately 2 million spatial artifacts, using around 40 GB RAM, built in under 3 hours
+- 2.4 million arXiv abstracts with embeddings, including a per-point full-text index, built in 52 seconds
+
+These numbers are intended to demonstrate the scale of the analytical index, not the number of points rendered by a browser. TesseraDB serves viewport-sized and otherwise derived results to a client; the client does not receive billions of points at once.
+
+## Access control extends to derived visual information
+
+TesseraDB treats analytical artifacts as part of the access-controlled view.
+
+For example, a cluster can have rules specifying:
+
+* who may access the cluster;
+* a minimum number of visible points;
+* a minimum percentage of the cluster's points that the viewer must be able to see;
+* whether all contributing points must be visible.
+
+The representation of an artifact can also be derived from the points visible to the current viewer. For example, a cluster boundary or centroid can change when some of its contributing points are hidden.
+
+Different access policies can also expose different labels for the same spatial artifact.
+
+This is not the same as running a completely new clustering algorithm for every user. TesseraDB currently derives viewer-specific representations from declared analytical artifacts; it does not discover entirely new clusters separately for every viewer.
+
+## A changing dataset
+
+TesseraDB is not limited to static datasets.
+
+New records can be continuously ingested into a running service, and records can be deleted or suppressed. Once a deletion or suppression has been accepted, subsequent requests do not expose the affected records.
+
+This makes TesseraDB suitable for analytical views over corpora that continue to change rather than only for static benchmark datasets.
+
+## What can TesseraDB represent?
+
+A TesseraDB corpus can contain, for each point:
+
+* one or more coordinate systems
+* numeric values
+* dates
+* categorical or keyword fields
+* arbitrary text
+* full-text indexes
+* access-control labels
+* metadata used by analytical layers
+
+Coordinates do not have to represent geography. A corpus can, for example, be projected into an embedding space and explored spatially.
+
+This makes the same underlying engine applicable to things such as:
+
+* geographic datasets
+* document and research corpora
+* embedding spaces
+* entity collections
+* large collections of records with heterogeneous access policies
+
+## TesseraDB is a serving engine, not the visualisation
+
+TesseraDB provides the analytical data and derived representations.
+
+The visual interface is a separate client. TesseraDB currently provides integrations including a web component, deck.gl integration, React bindings, a Python notebook widget, and an HTTP API.
+
+This separation means TesseraDB can sit underneath an application with its own user interface rather than requiring a particular visualisation framework.
+
+---
+
+### In one sentence
+
+**TesseraDB is an analytical engine for exploring billion-scale spatial or embedding datasets interactively, where both the underlying records and the derived visual analytics obey each viewer's access permissions.**
 
 ## Repository
 
