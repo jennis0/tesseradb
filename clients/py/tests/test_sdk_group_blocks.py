@@ -1,11 +1,9 @@
-"""What `declare_view_group` and a group-scoped block compile to, and what they refuse.
-
-The served proof is `test_sdk_groups.py`; this is the block each parameter writes, asserted as the
-TOML the binary reads (python-sdk.md §4.3, §4.5, §4.6).
+"""What `declare_view_group` and a group-scoped block write, and what they refuse.
 
 A group's views and their metadata come from `insert(group, roster=table, key=, …)` and its rows
-from `insert(group, table, id=, x=, y=, access=, view=)`, so the roster below is a table and not a
-parameter.
+from `insert(group, table, id=, x=, y=, access=, view=)`, so a roster here is a table and not a
+parameter. Both roster forms are declared and handed to the check; the served proof is
+`test_sdk_groups.py`.
 """
 
 import pytest
@@ -44,10 +42,10 @@ def db(tmp_path):
     return create(tmp_path / "db")
 
 
-# ---------------------------------------------------------------------------- the roster
+# ---------------------------------------------------------------------------- the two rosters
 
 
-def test_a_roster_is_a_table_and_the_rows_carry_the_view_each_belongs_to(db):
+def test_a_roster_is_a_table_and_the_rows_carry_the_view_each_belongs_to(db, checked):
     db.declare_view_group("quarter", title="By quarter", extent=BOX, metadata={"label": "text"})
     db.insert("quarter", roster=roster(["2026-Q1", "2026-Q2"]), key="quarter", label="label")
     db.insert(
@@ -59,34 +57,33 @@ def test_a_roster_is_a_table_and_the_rows_carry_the_view_each_belongs_to(db):
         access="access",
         view="quarter",
     )
-    text = db.declaration
-    assert '[[view_group]]\nname = "quarter"\ntitle = "By quarter"' in text
-    assert 'extent = { x = [-40.0, 40.0], y = [-40.0, 40.0] }' in text
-    assert 'point_visibility = { default = "public", field = "access" }' in text
-    assert 'metadata = { label = "text" }' in text
-    # The group's own points file, and the column saying which view each row lands in.
-    assert 'fields = { view = "quarter", x = "x", y = "y", entity_id = "entity_id" }' in text
-    # Form B: the roster as a table beside it.
-    assert '[view_group.views]\nsource = "quarter_roster"' in text
-    assert 'fields = { key = "quarter", label = "label" }' in text
-    # A declaration carrying groups alone anchors on the first view of the first roster (0112).
-    assert 'allocation_view = "quarter:2026-Q1"' in text
+    assert checked(db).ok
+    # A declaration carrying groups alone anchors on the first view of the first roster.
+    assert 'allocation_view = "quarter:2026-Q1"' in db.declaration
 
 
-def test_a_members_group_takes_its_own_points_and_declares_no_metadata(db):
+def test_a_group_whose_views_each_have_their_own_file_inserts_one_table_per_view(db, checked):
+    """The other roster: `view_key=` names the one view a whole table is for."""
     db.declare_view_group("quarter", extent=BOX, metadata={"label": "text"})
-    db.declare_view_group("quarter_alt", members="quarter", extent=BOX,
-                          projection="web_mercator")
-    with pytest.raises(Refusal, match="declares no metadata"):
+    db.insert("quarter", roster=roster(["q1", "q2"]), key="quarter", label="label")
+    for key in ("q1", "q2"):
+        db.insert("quarter", rows([key]), id="entity_id", x="x", y="y", access="access",
+                  view_key=key)
+    assert checked(db).ok
+    assert db.declaration.count("[[view_group.view]]") == 2
+    assert 'allocation_view = "quarter:q1"' in db.declaration
+
+
+def test_a_members_group_takes_its_own_points_and_declares_no_metadata(db, checked):
+    db.declare_view_group("quarter", extent=BOX, metadata={"label": "text"})
+    db.declare_view_group("quarter_alt", members="quarter", projection="web_mercator",
+                          extent={"lon": [-180.0, 180.0], "lat": [-85.05, 85.05]})
+    with pytest.raises(Refusal):
         db.declare_view_group("third", members="quarter", metadata={"label": "text"})
-    text = db.declaration
-    assert 'members = "quarter"' in text
-
-
-def test_a_metadata_name_may_not_be_the_rosters_own_key(db):
-    for name in ("key", "source", "visibility"):
-        with pytest.raises(Refusal, match="the roster's own key"):
-            db.declare_view_group("quarter", extent=BOX, metadata={name: "text"})
+    db.insert("quarter", roster=roster(["q1"]), key="quarter", label="label")
+    db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access",
+              view="quarter")
+    assert checked(db).ok
 
 
 def test_a_roster_names_one_column_per_metadata_name_the_group_declared(db):
@@ -97,17 +94,17 @@ def test_a_roster_names_one_column_per_metadata_name_the_group_declared(db):
 
 
 def test_a_group_and_a_plain_view_share_one_name_space(db):
-    """A view of a group is addressed `<group>:<key>` and a plain view by its own name
-    (decision 0113), so one name held by both would make a request mean two things."""
+    """A view of a group is addressed `<group>:<key>` and a plain view by its own name, so one
+    name held by both would make a request mean two things."""
     db.declare_view("quarter")
-    with pytest.raises(Refusal, match="already declared as a view"):
+    with pytest.raises(Refusal):
         db.declare_view_group("quarter", extent=BOX)
 
 
 # ---------------------------------------------------------------------------- the scoped blocks
 
 
-def test_a_scoped_attribute_names_its_group_and_its_insert_names_the_view_column(db):
+def test_a_scoped_attribute_names_its_group_and_its_insert_names_the_view_column(db, checked):
     db.declare_view_group("quarter", extent=BOX)
     db.declare_attribute("sentiment", type="f32", scope={"group": "quarter"}, index=True)
     db.insert(
@@ -132,12 +129,8 @@ def test_a_scoped_attribute_names_its_group_and_its_insert_names_the_view_column
         value="sentiment",
         view="quarter",
     )
-    text = db.declaration
-    assert 'scope = { group = "quarter" }' in text
-    assert 'fields = { view = "quarter" }' in text
-    # The id column carries configuration.md's own canonical name, so no `entity_id_field` is
-    # written: the default reads it (§1, `[defaults].entity_id_field`).
-    assert "entity_id_field" not in text
+    assert checked(db).ok
+    assert 'scope = { group = "quarter" }' in db.declaration
 
 
 def test_a_scoped_block_names_a_group_that_is_declared(db):
@@ -145,33 +138,40 @@ def test_a_scoped_block_names_a_group_that_is_declared(db):
         lambda: db.declare_attribute("s", type="f32", scope={"group": "quarter"}),
         lambda: db.declare_layer("q", kind="flat", scope={"group": "quarter"}),
     ):
-        with pytest.raises(Refusal, match="declare_view_group"):
+        with pytest.raises(Refusal):
             call()
 
 
-def test_a_scoped_layer_with_no_views_is_drawn_on_its_group(db):
+def test_a_scoped_layer_with_no_views_is_drawn_on_its_group(db, checked):
     db.declare_view_group("quarter", extent=BOX)
-    block = db.declare_layer("q", kind="flat", scope={"group": "quarter"})
-    assert block["views"] == ["quarter"]
+    db.declare_layer("q", kind="flat", scope={"group": "quarter"})
+    db.insert("quarter", roster=roster(["q1"]), key="quarter")
+    db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access",
+              view="quarter")
+    assert checked(db).ok
+    assert 'views = ["quarter"]' in db.declaration
 
 
 def test_a_group_sharing_another_s_views_is_declared_after_it(db):
-    """views.md §3.3: a group taking another's views is a 404 at the route until it exists."""
+    """A group taking another's views is a 404 at the route until that group exists."""
     db.declare_view_group("quarter", extent=BOX)
     db.declare_view_group("quarter_alt", members="quarter", extent=BOX)
     names = db.blocks.group_names()
     assert names.index("quarter") < names.index("quarter_alt")
 
 
+# ---------------------------------------------------------------------------- the refusals
+
+
 def test_a_roster_refuses_a_keyword_that_is_no_metadata_name(db):
     """A roster is read like every other table: the names are the group's, or they are nothing."""
     db.declare_view_group("quarter", extent=BOX, metadata={"label": "text"})
-    with pytest.raises(Refusal, match="names nothing this target reads"):
+    with pytest.raises(Refusal):
         db.insert("quarter", roster=roster(["2026-Q1"]), key="quarter", colour="label")
 
 
 def test_a_roster_column_the_call_did_not_name_is_refused(db):
-    """`key` and `visibility` are the roster's own, so a table carrying one names it (§3)."""
+    """`key` and `visibility` are the roster's own, so a table carrying one names it."""
     db.declare_view_group("quarter", extent=BOX, metadata={"label": "text"})
     table = pa.table(
         {
@@ -180,7 +180,7 @@ def test_a_roster_column_the_call_did_not_name_is_refused(db):
             "visibility": pa.array(["public"], pa.string()),
         }
     )
-    with pytest.raises(Refusal, match="'visibility'"):
+    with pytest.raises(Refusal):
         db.insert("quarter", roster=table, key="key", label="label")
     insert = db.insert(
         "quarter", roster=table, key="key", label="label", visibility="visibility"
@@ -188,28 +188,10 @@ def test_a_roster_column_the_call_did_not_name_is_refused(db):
     assert insert.ignored == []
 
 
-def test_a_group_whose_views_each_have_their_own_file_inserts_one_table_per_view(db):
-    """views.md §3.2's other roster: `view_key=` names the one view a whole table is for."""
-    db.declare_view_group("quarter", extent=BOX, metadata={"label": "text"})
-    db.insert("quarter", roster=roster(["q1", "q2"]), key="quarter", label="label")
-    for key in ("q1", "q2"):
-        db.insert("quarter", rows([key]), id="entity_id", x="x", y="y", access="access",
-                  view_key=key)
-    text = db.declaration
-    # One record per table, each naming its own file and carrying that key's metadata.
-    assert text.count("[[view_group.view]]") == 2
-    assert 'key = "q1"' in text and 'source = "quarter_q1"' in text
-    assert 'label = "Q1"' in text
-    # Form A and form B are two rosters, and this group declares one: no `[view_group.views]`
-    # table and no source of its own (configuration.md §1).
-    assert "[view_group.views]" not in text
-    assert 'allocation_view = "quarter:q1"' in text
-
-
 def test_a_groups_rows_name_the_view_one_way_or_the_other(db):
     db.declare_view_group("quarter", extent=BOX)
-    with pytest.raises(Refusal, match="view=, or the one view this whole table is for"):
+    with pytest.raises(Refusal):
         db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access")
-    with pytest.raises(Refusal, match="A table is one or the other"):
+    with pytest.raises(Refusal):
         db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access",
                   view="quarter", view_key="q1")

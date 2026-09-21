@@ -1,19 +1,19 @@
-"""The control plane as the SDK calls it (contracts §3.4, ingest.md §1).
+"""The control plane as the SDK calls it.
 
 `Control` is the routes and nothing else: the SDK keeps no record of what it sent, so what a
-database holds is asked of the database (§6.4).
+database holds is asked of the database.
 
 **A batch id is a fresh id per request, and a retry resends both the id and the bytes.** The id is
 the client's choice and says which request this is; the server holds it against the SHA-256 of the
-body, so a retry that re-serialised its table would be refused as a different body under a held id
-(contracts §3.4). The bodies are therefore built once, by the plan, and this module sends the bytes
-it was given. Two requests carrying the same rows are two requests: nothing derives an id from what
+body, so a retry that re-serialised its table would be refused as a different body under a held
+id. The bodies are therefore built once, by the plan, and this module sends the bytes it was
+given. Two requests carrying the same rows are two requests: nothing derives an id from what
 a page contains, so a frame inserted and committed twice lands twice.
 
 **A `429` is backpressure.** The buffer-occupancy refusal carries `Retry-After`, and the caller
 waits that long and sends the same bytes again. Every other status is an answer: a `409` on a
-differing part is reported and not retried, since an edit is a delete and a re-ingest
-(decision 0047) and the SDK does not do that on the user's behalf.
+differing part is reported and not retried, since an edit is a delete and a re-ingest, and the
+SDK does not do that on the user's behalf.
 
 The transport is `urllib`, so the SDK's only dependency outside the standard library stays
 pyarrow.
@@ -48,7 +48,7 @@ UNANSWERED = 0
 
 
 def external_id(value: Any) -> bytes:
-    """The external id of a row: the bytes its id column holds (§3, configuration.md §8).
+    """The external id of a row: the bytes its id column holds.
 
     A string's UTF-8, an integer's eight little-endian bytes, binary as it stands. The build reads
     the same column and takes the same bytes, so one row is one address at both doors.
@@ -71,10 +71,10 @@ def addressed(value: Any) -> str:
 
 
 def batch_id(source: str, index: int) -> str:
-    """A page's batch id: a fresh random id, made once when the request is built (§6.4).
+    """A page's batch id: a fresh random id, made once when the request is built.
 
     **A request's identity is the client's to choose, and it is never inferred from what the
-    request contains** (owner ruling, 2026-09-18). The id an attempt carries is reused for the
+    request contains.** The id an attempt carries is reused for the
     retries of that same attempt — after a `429`, a timeout or a lost answer, inside one
     `commit()` — and for nothing else. Nothing is kept across commits or sessions, so the same
     frame inserted and committed five times is five loads, which is what a user testing a loader
@@ -151,7 +151,7 @@ class Control:
                 # exception out of `commit()`: the pages already acknowledged stay acknowledged,
                 # and the report names the one that was not. **A commit after it is a new
                 # request**, under a new id: whether the unanswered page landed is the database's
-                # to say, and a client that needs to ask carries an id column (§6.4).
+                # to say, and a client that needs to ask carries an id column.
                 return Answer(
                     UNANSWERED,
                     {},
@@ -170,26 +170,25 @@ class Control:
         return self._send("GET", "/control/status")
 
     def limits(self) -> dict:
-        """The pagination units every route publishes, read once and sized from (ingest §2.1)."""
+        """The pagination units every route publishes, read once and sized from."""
         if self._limits is None:
             self._limits = self.status().get("limits", {})
         return self._limits
 
-    def ingest(
-        self, body: bytes, batch: str, view: str | None = None
-    ) -> Answer:
-        headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
-        if view is not None:
-            headers["x-tessera-view"] = view
-        return self._send("POST", "/control/ingest", body, headers)
+    def ingest(self, body: bytes, batch: str, view: str | None = None) -> Answer:
+        """`POST /control/ingest`: one page of points, as an Arrow stream."""
+        return self._rows("/control/ingest", body, batch, view)
 
-    def values(
-        self, body: bytes, batch: str, view: str | None = None
-    ) -> Answer:
+    def values(self, body: bytes, batch: str, view: str | None = None) -> Answer:
+        """`POST /control/values`: one page of cells on rows the database holds."""
+        return self._rows("/control/values", body, batch, view)
+
+    def _rows(self, path: str, body: bytes, batch: str, view: str | None) -> Answer:
+        """The two row routes: the same headers, the view named where the page is of one."""
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
         if view is not None:
             headers["x-tessera-view"] = view
-        return self._send("POST", "/control/values", body, headers)
+        return self._send("POST", path, body, headers)
 
     def declare_layer(self, payload: dict) -> Answer:
         return self._send(
@@ -197,7 +196,7 @@ class Control:
         )
 
     def declare_view_group(self, name: str, body: dict) -> Answer:
-        """`PUT /control/view_groups/{name}`: the group, with an empty roster (contracts §3.4)."""
+        """`PUT /control/view_groups/{name}`: the group, with an empty roster."""
         return self._send("PUT", f"/control/view_groups/{_segment(name)}", _json(body),
                           {"content-type": JSON})
 
@@ -283,13 +282,13 @@ class Control:
         """Arm a publication cycle, and with `wait` hold until it has completed.
 
         The flush's own `?wait=visible` waits on the number the cycle it arms will carry, so it
-        covers every page sent before it: this is the commit's one wait (decision 0144).
+        covers every page sent before it: this is the commit's one wait.
         """
         return self._send("POST", "/control/flush" + _wait(wait), b"")
 
 
 def _wait(wait: bool) -> str:
-    """`?wait=visible` (contracts §3.4, decision 0144), where the caller asked for it.
+    """`?wait=visible`, where the caller asked for it.
 
     The route holds its answer until the publication its acknowledgement names has happened, and
     pulls the tick forward to get there. One request of a commit carries it, the closing flush: a
@@ -326,7 +325,7 @@ def _decoded(text: str) -> dict:
 
 
 def _retry_after(headers, body: dict) -> float:
-    """How long a `429` asks the caller to wait. The header and the body agree (contracts §3.4)."""
+    """How long a `429` asks the caller to wait. The header and the body agree."""
     named = headers.get("retry-after") if headers is not None else None
     if named is None:
         named = body.get("retry_after_s")
@@ -338,7 +337,7 @@ def _retry_after(headers, body: dict) -> float:
 
 
 def arrow_body(table: Any) -> bytes:
-    """One Arrow IPC stream carrying a table, which is what a row route takes (ingest §1.2)."""
+    """One Arrow IPC stream carrying a table, which is what a row route takes."""
     import pyarrow as pa
     import pyarrow.ipc as ipc
 

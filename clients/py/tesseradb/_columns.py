@@ -1,13 +1,13 @@
-"""`declare_columns`: every column of a frame declared from its dtype, and nothing inferred (§4.5).
+"""`declare_columns`: every column of a frame declared from its dtype, and nothing inferred.
 
 Nothing is inferred by default. The helper that reads a frame is explicit: it declares every
-column not in `skip` and not already declared, typed from its dtype by §4.5's table, as details
+column not in `skip` and not already declared, typed from its dtype, as details
 only: stored in the record blob, shown at drill-down, neither rendered nor indexed. `render` and
 `index` apply their flags to the columns named; `keyword` and `category` choose those families for
 string columns, which are `text` otherwise.
 
 Only the frame's schema is read, and a column's values decide nothing. `render` is fixed at the
-first commit (decision 0136's amendment), which is why this helper never chooses it.
+first commit, which is why this helper never chooses it.
 """
 
 from __future__ import annotations
@@ -16,9 +16,7 @@ from dataclasses import dataclass
 
 import pyarrow as pa
 
-#: A category minted from the data is an open, public vocabulary at the stated default width
-#: (§4.4, §4.5). Issue #83 is open on serving `derived`, under which `derived` becomes this
-#: default.
+#: A category minted from the data is an open, public vocabulary at this width.
 VOCABULARY_WIDTH = "u16"
 
 

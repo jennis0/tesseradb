@@ -1,9 +1,10 @@
-"""The proof python-sdk.md asks for: a corpus declaration regenerated from calls.
+"""A corpus declaration regenerated from calls, and what it discloses.
 
-`tessera check` prints its disclosure table on stdout and the schemas it read, with their paths, on
-stderr. The declarations name the same files by different paths: one reads `data/notebook/`
-directly, the other reads it through a relative path from a temporary directory. **Stdout is
-compared whole, and stderr by its file names.** That is the whole normalisation: the disclosure table carries no
+`tessera check` prints its disclosure table on stdout and the schemas it read, with their paths,
+on stderr, and it is run here over both declarations: the committed one and the one the verbs
+wrote. The two name the same files by different paths, one reading `data/notebook/` directly and
+one reading it through a relative path from a temporary directory. **Stdout is compared whole,
+and stderr by its file names.** That is the whole normalisation: the disclosure table carries no
 path, which is what makes it the thing to compare.
 
 Beside it, the first commit through `tessera build`.
@@ -199,10 +200,13 @@ def test_the_notebook_declaration_regenerated_discloses_what_the_committed_one_d
     committed, committed_stderr = check_committed(
         tessera, corpus / "schema.toml", tmp_path / "committed"
     )
-    generated = report.output[: report.output.index("  read schema")]
+    # The binary over each declaration, so the two disclosure tables are printed by one printer.
+    generated, generated_stderr = check_committed(
+        tessera, db.path / "schema.toml", tmp_path / "generated"
+    )
     assert generated.strip() == committed.strip()
     # And the same files read by the same objects: the paths differ, the file names do not.
-    read = read_schema_lines(report.output)
+    read = read_schema_lines(generated_stderr)
     assert len(read) == 12
     assert read == read_schema_lines(committed_stderr)
 

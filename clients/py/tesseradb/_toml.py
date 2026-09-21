@@ -1,9 +1,9 @@
 """Writing a declaration as TOML.
 
 The SDK writes `schema.toml` and `tessera.toml` and the binary reads them, so the mapping from
-verb to block is checked by the binary rather than mirrored here (python-sdk.md §4). The output is
+verb to block is checked by the binary rather than mirrored here. The output is
 the document the caller would have written by hand: block order preserved, one table per block,
-and every value spelled the way `configuration.md` §1 spells it.
+and every value spelled the way the declaration spells it.
 
 A plain `dict` becomes a sub-table (`[layer.members]`), a list of dicts an array of tables
 (`[[layer.levels]]`), and an `Inline` a one-line table (`hierarchy = { kind = "flat" }`). The two
