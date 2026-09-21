@@ -14,7 +14,7 @@ install needs neither anywidget nor pyarrow to ``import tesseradb``.
 
 from __future__ import annotations
 
-from ._auth import Token, authorise
+from ._auth import Token, authorise, revoke
 from ._refusal import Refusal
 from ._viewer import Viewer, connect
 
@@ -27,6 +27,7 @@ __all__ = [
     "connect",
     "create",
     "open",
+    "revoke",
     "__version__",
 ]
 __version__ = "0.1.0"

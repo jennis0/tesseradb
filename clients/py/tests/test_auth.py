@@ -32,7 +32,7 @@ def test_authorise_posts_bare_claims_and_returns_a_renewable_token(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     token = authorise("http://session.test/", "cred", ["x", "y"])
-    assert token == Token("tok-1", 1800000000.0)
+    assert token == Token("tok-1", 1800000000.0, token_id=1)
     req = seen[0]
     assert req.full_url == "http://session.test/session/authorise"
     assert req.get_header("Authorization") == "Bearer cred"
