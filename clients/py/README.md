@@ -257,30 +257,78 @@ every count, density, cluster and label in it is computed inside that principal'
 than filtered out of the operator's. A term the database has inserted no label for is refused and
 named: a typo would otherwise draw an empty map with no error anywhere.
 
-The three query verbs are `Viewer`'s and are reached on a database through its all-terms viewer.
-Each goes through the viewer plane with the token, never by reading the bundle:
+The query verbs are `Viewer`'s, one per operation the HTTP API publishes on the viewer plane,
+and are reached on a database through its all-terms viewer. Each goes through the viewer plane
+with the token, never by reading the bundle:
 
 ```python
 db.meta()                                      # the views, layers and schema this principal reads
-db.viewport(bbox=None, view=None, filters=None, k=None, zoom=0)   # the points served, as a table
+db.viewport(bbox=None, view=None, filters=None, k=None, zoom=0)   # what is served, as a table
 db.item(tessera_id)                            # one record: fields, labels, views
+
+v = db.viewer(["cs.LG"])
+v.categories("venue", limit=100)               # what a category column's codes stand for
+v.suggest_category_values("venue", "neur")     # the typeahead over its vocabulary
+v.browse_artifacts("s0", "clusters/kmeans")    # a layer's hierarchy, by lineage
+v.artifact(tessera_id, "s0")                   # one annotation: its count and its geometry
 ```
 
 `viewport()` returns a pyarrow table of `tessera_id`, `code` and the columns the schema declares
 as rendered. Those are points; a record is what `item()` returns. A served set is bounded by `k`,
 so the table's schema metadata carries what the response said about the set it came from:
 `tessera.counts` (`visible` is inside the mask and the tiles the box touches at the request's
-zoom, `matched` is that and the filter, `served` is that and `k`), `tessera.trailer` and
-`tessera.request`. `bbox` defaults to the view's whole extent and `view` to the first this
-principal is served.
+zoom, `matched` is that and the filter, `highlighted` that and the highlight, `served` is that
+and `k`), `tessera.trailer` and `tessera.request`. `bbox` defaults to the view's whole extent and
+`view` to the first this principal is served.
+
+Beside those five it takes the rest of the request body, each sent only where it was given:
+`tiles` in place of `bbox`, `highlight` (a second expression in `filters`' grammar, which lights
+the served set without moving it), `layers`, `levels`, `computed`, `artifact_budget`,
+`artifact_rows`, `point_rows`, `underlay_offset` and `pin`.
+
+```python
+served = db.viewport(view="map", layers="all", highlight={"venue": {"eq": "neurips"}})
+served.num_rows                                # the points, as before
+served.artifacts.to_pylist()                   # the annotation artifacts the response served
+served.sub_cells                               # the exact counts an underlay_offset asked for
+```
+
+The result reads as the points table wherever one is expected — `num_rows`, `column()`,
+`schema.metadata`, `to_pandas()` — and `points` names it outright. `artifacts` and `sub_cells`
+are `None` where the response carried no frame of that kind, which the wire makes an absence
+rather than an empty table.
+
+`categories()` and `browse_artifacts()` hand back the page the route served, `next` included, so
+paging is the caller's: hand `next` back as `after` and as `cursor`. Every count on those pages
+is this principal's — `masked_count` is how many of an artifact's members they can see, never how
+many it has.
 
 `item()` returns `fields` by declared column name, `labels` (the item's labels this principal
 also holds), `views`, and `external_id` where the database has one: on a `Database` it comes back
 as the type its id column carried, and on a `connect()` viewer as the bytes the wire carries.
+`artifact()` is the same drill-down for an annotation and takes a `view`, a masked count being an
+intersection in row space and row space being per view.
 
 `db.close()` stops the server. It invalidates nothing: a token this database minted stays good
-until its lifetime runs out (`[disclosure] token_max_lifetime`, an hour), and no route withdraws
-one.
+until its lifetime runs out (`[disclosure] token_max_lifetime`, an hour). `db.revoke(token)` is
+what ends one, by the `token_id` the `Token` carries — the capability never transits a second
+time, and a handle naming no live session is accepted in silence.
+
+## The operator's verbs
+
+```python
+db.status()                                    # the watermarks, queues and pagination units
+db.compact()                                   # ask for the fold that removes a deletion's rows
+db.drop_layer("clusters/kmeans")               # the inverse of declare_layer
+db.drop_view("slices", "a", delete_dangling=False)   # the inverse of create_view
+```
+
+`remove()` puts a deletion in the overlay, and the compaction that removes its rows is what ends
+it; `compact()` is how one is asked for, and it is accepted rather than finished when the call
+returns. `drop_layer()` tombstones the name rather than freeing it, so a later declaration under
+it is refused and no stale reference reaches a different layer. `drop_view()` deletes no entity;
+`delete_dangling=True` submits the entities holding a row in no other view as ordinary
+deletions, and the answer's `deleted` says how many.
 
 ## A deployment somebody else runs
 
@@ -291,8 +339,8 @@ v.viewport(k=64)
 ```
 
 `token` is a string, a `Token` or a callable returning either, as `Map` takes one. A `Viewer` from
-`connect` has `map()` and the three read verbs and nothing else: no `viewer(terms)`, minting
-another principal needing the session credential, and no write verb, the control plane having one
+`connect` has `map()` and the read verbs and nothing else: no `viewer(terms)`, minting another
+principal needing the session credential, and no write verb, the control plane having one
 operator credential and no per-principal authority.
 
 ## The widget, and the entry point being a token

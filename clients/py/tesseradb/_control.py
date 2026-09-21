@@ -163,8 +163,11 @@ class Control:
     # ------------------------------------------------------------------ the routes
 
     def status(self) -> dict:
-        answer = self._send("GET", "/control/status")
-        return answer.body
+        return self.status_answer().body
+
+    def status_answer(self) -> Answer:
+        """`GET /control/status`, with the status beside the body a refusal would leave empty."""
+        return self._send("GET", "/control/status")
 
     def limits(self) -> dict:
         """The pagination units every route publishes, read once and sized from (ingest §2.1)."""
@@ -240,6 +243,41 @@ class Control:
         return self._send(
             "POST", "/control/changes", json.dumps(items).encode(), {"content-type": JSON}
         )
+
+    def drop_layer(self, name: str, wait: bool = False) -> Answer:
+        """`DELETE /control/layers/{name}`: the inverse of `declare_layer`.
+
+        The name is tombstoned rather than freed, so a later declaration under it is refused and
+        no stale reference reaches a different layer.
+        """
+        return self._send("DELETE", f"/control/layers/{_segment(name)}" + _wait(wait))
+
+    def drop_view(
+        self, group: str, key: str, delete_dangling: bool = False, wait: bool = False
+    ) -> Answer:
+        """`DELETE /control/views/{group}/{key}`: the inverse of `create_view`.
+
+        Dropping a view deletes no entity. `delete_dangling` submits the entities holding a row in
+        no other view as ordinary deletions, which enter the overlay and retire at the fold; the
+        answer says how many in `deleted`.
+        """
+        query = {}
+        if delete_dangling:
+            query["delete_dangling"] = "true"
+        if wait:
+            query["wait"] = "visible"
+        path = f"/control/views/{_segment(group)}/{_segment(key)}"
+        if query:
+            path += "?" + urllib.parse.urlencode(query)
+        return self._send("DELETE", path)
+
+    def compact(self) -> Answer:
+        """`POST /control/compact`: ask for a fold, which is what removes a deletion's rows.
+
+        Accepted rather than performed: the fold runs behind the answer, and it is the same
+        dispatch the schedule uses, so asking neither disturbs nor is disturbed by the window.
+        """
+        return self._send("POST", "/control/compact", b"")
 
     def flush(self, wait: bool = False) -> Answer:
         """Arm a publication cycle, and with `wait` hold until it has completed.

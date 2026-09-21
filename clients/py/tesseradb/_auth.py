@@ -34,6 +34,8 @@ class Token:
 
     token: str
     expires_at: Optional[float] = None
+    #: The non-capability handle ``revoke`` takes, and ``None`` for a token handed in as a string.
+    token_id: Optional[int] = None
     renew: Optional[Callable[[], "Token"]] = field(default=None, repr=False, compare=False)
     terms: Optional[Sequence[str]] = field(default=None, repr=False, compare=False)
 
@@ -122,6 +124,50 @@ def authorise(
     return Token(
         token=answer["token"],
         expires_at=float(answer["expires_at"]),
+        token_id=int(answer["token_id"]),
         renew=lambda: authorise(session_url, credential, terms, timeout=timeout),
         terms=list(terms),
     )
+
+
+def revoke(
+    session_url: str,
+    credential: str,
+    token_id: Union[int, Token],
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """**Operator-only.** End a session by the ``token_id`` its minting returned.
+
+    It takes the ``token_id`` and never the token, so the capability itself never transits a
+    second time; a ``Token`` this process minted may be passed instead, and its handle is read off
+    it. A handle naming no live session is accepted in silence, there being nothing to say about
+    it that would not enumerate the sessions that are live.
+
+    This is the session plane and takes the session credential, as ``authorise`` does. A viewer
+    holding only a token cannot revoke itself.
+    """
+    if not credential:
+        raise ValueError("revoke needs the session credential (operator-only; see the docstring)")
+    if not session_url:
+        raise ValueError("revoke needs the session plane's URL")
+    handle = token_id.token_id if isinstance(token_id, Token) else token_id
+    if handle is None:
+        raise ValueError(
+            "revoke needs a token_id: this Token was handed in as a string and carries none. "
+            "Pass the token_id /session/authorise returned"
+        )
+    request = urllib.request.Request(
+        session_url.rstrip("/") + "/session/revoke",
+        data=json.dumps({"token_id": int(handle)}).encode(),
+        method="POST",
+        headers={
+            "authorization": f"Bearer {credential}",
+            "content-type": "application/json",
+        },
+    )
+    try:
+        urllib.request.urlopen(request, timeout=timeout).close()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        raise PermissionError(f"/session/revoke refused ({e.code}): {detail}") from None

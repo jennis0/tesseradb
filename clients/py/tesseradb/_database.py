@@ -39,7 +39,7 @@ from . import _columns
 from . import _commit as C
 from . import _declaration as D
 from . import _inserts, _instance
-from ._auth import authorise
+from ._auth import authorise, revoke
 from ._control import Control, addressed
 from ._inserts import Insert, is_integer_type
 from ._refusal import Refusal
@@ -66,6 +66,13 @@ PLAIN_ROLE = {
     "labels": "text",
     "vocabulary": "values",
 }
+
+
+def _accepted(answer, what: str) -> dict:
+    """The body of a control-plane answer, or a refusal naming the status and what it said."""
+    if not answer.ok:
+        raise Refusal(f"{what}: refused ({answer.status}): {answer.detail[:1000]}")
+    return answer.body
 
 
 class Database:
@@ -1035,10 +1042,17 @@ class Database:
         filters: dict | None = None,
         k: int | None = None,
         zoom: int = 0,
+        **rest,
     ):
-        """The points served for a box, as a pyarrow table (§8). `Viewer.viewport` is the verb."""
+        """What is served for a box, as this database's own principal (§8).
+
+        `Viewer.viewport` is the verb and this is it under the union of every term the SDK
+        inserted; `rest` is the rest of its keywords — `tiles`, `highlight`, `layers`, `levels`,
+        `computed`, `artifact_budget`, `artifact_rows`, `point_rows`, `underlay_offset` and
+        `pin` — passed through untouched.
+        """
         self._refuse_before_the_first_commit("viewport")
-        return self._all_terms().viewport(bbox, view, filters, k, zoom)
+        return self._all_terms().viewport(bbox, view, filters, k, zoom, **rest)
 
     def _id_arguments(self) -> list[str]:
         """`--mint-external-ids`, where the identity column is an integer (configuration.md §8).
@@ -1111,7 +1125,7 @@ class Database:
 
         A deletion leaves the overlay at the compaction that removes its rows and at no other point
         (write-path §5.4). A removed id inserted again goes as a point row, which decision 0047
-        allows: an edit is a delete and a re-ingest.
+        allows: an edit is a delete and a re-ingest. `compact()` asks for that compaction.
         """
         return self._changes(ids, "delete")
 
@@ -1166,6 +1180,57 @@ class Database:
         if not answer.ok:
             report.refusals.append({"status": answer.status, "detail": answer.detail[:1000]})
         return report
+
+    def status(self) -> dict:
+        """`GET /control/status`: what the operator plane says about this served database.
+
+        The counterpart of `meta()`, which is what a principal is served. This is the operator's:
+        the watermarks, the queue depths and the pagination units every write route publishes.
+        """
+        self._refuse_before_the_first_commit("status")
+        return _accepted(self.control.status_answer(), "status")
+
+    def compact(self) -> dict:
+        """`POST /control/compact`: ask for the fold that removes deleted rows (§6.5).
+
+        A deletion leaves the overlay here and nowhere else, so this is what ends one. The fold
+        runs behind the answer: it is accepted, not finished, when this returns.
+        """
+        self._refuse_before_the_first_commit("compact")
+        return _accepted(self.control.compact(), "compact")
+
+    def drop_layer(self, name: str, wait: bool = False) -> dict:
+        """`DELETE /control/layers/{name}`: the inverse of `declare_layer` (§6.5).
+
+        The name is tombstoned, not freed: a later declaration under it is refused, so no stale
+        reference to the layer that was reaches the layer that is. `wait` holds until the
+        publication the answer names has happened.
+        """
+        self._refuse_before_the_first_commit("drop_layer")
+        return _accepted(self.control.drop_layer(name, wait), f"drop_layer {name}")
+
+    def drop_view(
+        self, group: str, key: str, delete_dangling: bool = False, wait: bool = False
+    ) -> dict:
+        """`DELETE /control/views/{group}/{key}`: the inverse of `create_view` (§6.5).
+
+        Dropping a view deletes no entity. `delete_dangling` submits the entities that hold a row
+        in no other view as ordinary deletions, which retire at the next fold; the answer's
+        `deleted` says how many, and a deletion is not undone.
+        """
+        self._refuse_before_the_first_commit("drop_view")
+        return _accepted(
+            self.control.drop_view(group, key, delete_dangling, wait), f"drop_view {group}/{key}"
+        )
+
+    def revoke(self, token) -> None:
+        """End a session this database minted, by the `token_id` its `Token` carries (§8).
+
+        The capability never transits a second time: what is sent is the handle. A `token_id` as
+        an integer is taken too, and one naming no live session is accepted in silence.
+        """
+        self.serve()
+        revoke(self.session_url, self.session_credential, token)
 
     def _refuse_before_the_first_commit(self, verb: str) -> None:
         if not self.built:
