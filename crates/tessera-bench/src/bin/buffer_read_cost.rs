@@ -23,6 +23,8 @@
 //!   can reach.
 //! - **E1** — viewport latency, a session's composed mask and one filtered viewport, over a real
 //!   bundle with rows buffered and unflushed.
+//! - **E2** — deriving the per-view buffered-row lists, which is what a geometry publication pays
+//!   for the lists E1's requests then read.
 //!
 //! ```text
 //! cargo run --release -p tessera-bench --bin buffer_read_cost -- [--only r] \
@@ -811,6 +813,41 @@ fn experiment_e1(
     Ok(())
 }
 
+/// **E2** — the fresh derivation every geometry publication pays: one `buffered_rows_of` per view
+/// of the fixture's bundle, over a buffer of `depth` rows none of which has a row yet, which is the
+/// state a flush publishes out of.
+fn experiment_e2(root: &Path, depths: &[usize], runs: usize) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n== E2: deriving the buffered-row lists, as a publication does ==");
+    println!("(min of {runs}; entity ids past the bundle's high water, so every lookup misses)");
+    println!("{:>10} {:>14} {:>16}", "buffered", "per view ms", "all views ms");
+    let bundle = open_bundle(root)?;
+    let spaces: Vec<&tessera_store::RowSpace> = bundle
+        .partitions
+        .values()
+        .flat_map(|partition| partition.views.values().map(|view| &view.row_space))
+        .collect();
+    for depth in depths {
+        let mut buffer = IngestBuffer::new();
+        for i in 0..*depth as u64 {
+            let entity = EntityId::new(bundle.manifest.entity_id_high_water + i);
+            buffer.insert_row_with_terms(&wal_row(entity, VIEW, false), terms());
+        }
+        let all = best(runs, || {
+            spaces
+                .iter()
+                .map(|space| tessera_engine::buffered_rows_of(&buffer, space))
+                .collect::<Vec<_>>()
+        });
+        println!(
+            "{:>10} {:>14.4} {:>16.4}",
+            depth,
+            ms(all) / spaces.len() as f64,
+            ms(all)
+        );
+    }
+    Ok(())
+}
+
 // =================================================================================================
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -888,7 +925,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into_iter()
             .filter(|d| *d <= max_depth)
             .collect();
-        let outcome = experiment_e1(&fx, &scratch, &e1_depths, samples, rounds);
+        let outcome = experiment_e1(&fx, &scratch, &e1_depths, samples, rounds)
+            .and_then(|()| experiment_e2(&root, &[200_000, 1_000_000], runs));
         let _ = std::fs::remove_dir_all(&scratch);
         outcome?;
     }
