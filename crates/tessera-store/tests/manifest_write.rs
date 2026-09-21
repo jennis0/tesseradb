@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{fixed32, Bounds};
 use tessera_store::manifest::{
-    IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
+    DenySet, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
     SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::manifest_write::{write_current, write_manifest_json};
@@ -129,8 +129,8 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         dict_extents: vec![],
         external_id_runs: vec![],
         locator_extents: vec![],
-        tombstones: vec![],
-        deny: vec![],
+        tombstones: DenySet::default(),
+        deny: DenySet::default(),
         vocabulary_extensions: vec![],
         files: segments_files,
         ..SegmentsManifest::empty()

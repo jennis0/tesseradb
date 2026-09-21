@@ -56,9 +56,17 @@ fn newest_manifest(root: &Path) -> (u64, SegmentsManifest) {
 }
 
 fn suppressed_in(manifest: &SegmentsManifest) -> Vec<u64> {
-    let mut ids: Vec<u64> = manifest.deny.iter().map(|e| e.entity_id).collect();
-    ids.sort_unstable();
-    ids
+    ids_of(&manifest.deny)
+}
+
+/// The ids one of a manifest's deny fields carries, ascending.
+fn ids_of(field: &tessera_store::manifest::DenySet) -> Vec<u64> {
+    field
+        .entities()
+        .expect("the field a writer produced decodes")
+        .iter()
+        .map(u64::from)
+        .collect()
 }
 
 fn entity_of_source(root: &Path, source_id: u64) -> EntityId {
@@ -162,11 +170,7 @@ fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
 
     let (_, manifest) = newest_manifest(&root);
     assert_eq!(suppressed_in(&manifest), vec![suppressed.raw()]);
-    assert_eq!(manifest.tombstones, vec![deleted.raw()]);
-    assert!(
-        manifest.deny.iter().all(|e| e.cause == "suppress"),
-        "contracts §2.3: `deny` carries the suppression set, and its cause says so"
-    );
+    assert_eq!(ids_of(&manifest.tombstones), vec![deleted.raw()]);
 }
 
 /// **The restore path this exists for**: a node opened from the bundle alone — no WAL — honours

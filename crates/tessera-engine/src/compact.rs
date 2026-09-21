@@ -597,10 +597,7 @@ pub(crate) fn plan_fold(
         }
     }
 
-    let mut tombstones = Bitmap::new();
-    for entity in generation.overlay.deleted_entities() {
-        tombstones.add(entity as u32);
-    }
+    let tombstones = generation.overlay.deleted_set().clone();
 
     Ok(FoldPlan {
         partition: partition.clone(),

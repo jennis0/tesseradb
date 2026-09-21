@@ -92,23 +92,33 @@ impl Overlay {
         self.deleted.or(&self.suppressed)
     }
 
-    /// The suppression set, ascending — `SEGMENTS-<n>.json`'s `deny` field.
+    /// The suppression set — `SEGMENTS-<n>.json`'s `deny` field, which a publication serialises
+    /// as it stands rather than enumerating.
     ///
-    /// Separate from [`Self::deleted_entities`] because the two manifest fields mean different
+    /// Separate from [`Self::deleted_set`] because the two manifest fields mean different
     /// things and leave under different rules (`write-path.md` §5.4): a suppression only by its
     /// unsuppress (Rule S), a tombstone only at the fold that executes it (Rule F).
     /// [`Self::denied`] deliberately
     /// hands out only the union, which is right for the row mask and wrong here — a writer that
     /// published the union under one field would make every deletion look retirable by an
     /// unsuppress.
-    pub fn suppressed_entities(&self) -> Vec<u64> {
-        self.suppressed.iter().map(u64::from).collect()
+    pub fn suppressed_set(&self) -> &Bitmap {
+        &self.suppressed
     }
 
-    /// The deleted set, ascending — `SEGMENTS-<n>.json`'s `tombstones` field. See
-    /// [`Self::suppressed_entities`].
-    pub fn deleted_entities(&self) -> Vec<u64> {
-        self.deleted.iter().map(u64::from).collect()
+    /// The deleted set — `SEGMENTS-<n>.json`'s `tombstones` field. See [`Self::suppressed_set`].
+    pub fn deleted_set(&self) -> &Bitmap {
+        &self.deleted
+    }
+
+    /// An overlay holding exactly these two sets, the form a manifest's deny fields seed at open.
+    /// The two are given separately because the manifest keeps them apart, and a seed that unioned
+    /// them would make every deletion retirable by an unsuppress.
+    pub fn seeded(deleted: &Bitmap, suppressed: &Bitmap) -> Self {
+        Overlay {
+            deleted: deleted.clone(),
+            suppressed: suppressed.clone(),
+        }
     }
 
     /// Every entity either store has an opinion on, ascending, without duplicates.

@@ -50,21 +50,14 @@ impl std::fmt::Display for ManifestCommitRefused {
     }
 }
 
-/// Replace a manifest's deny fields with the overlay's live state. Serialised fresh at every
-/// write, never carried forward: copying an earlier manifest's fields forward would leave an
-/// unsuppress never reaching disc. The two fields are taken from the two bitmaps separately, never
-/// from `Overlay::denied`'s union, since publishing the union would make every deletion look
-/// retirable by an unsuppress.
+/// Replace a manifest's deny fields with the overlay's live state, each as the serialised bitmap
+/// the overlay already holds. Serialised fresh at every write, never carried forward: copying an
+/// earlier manifest's fields forward would leave an unsuppress never reaching disc. The two fields
+/// are taken from the two bitmaps separately, never from `Overlay::denied`'s union, since
+/// publishing the union would make every deletion look retirable by an unsuppress.
 pub(super) fn write_deny_state(manifest: &mut SegmentsManifest, overlay: &Overlay) {
-    manifest.deny = overlay
-        .suppressed_entities()
-        .into_iter()
-        .map(|entity_id| ManifestDenyEntry {
-            entity_id,
-            cause: "suppress".to_string(),
-        })
-        .collect();
-    manifest.tombstones = overlay.deleted_entities();
+    manifest.deny = DenySet::of(overlay.suppressed_set());
+    manifest.tombstones = DenySet::of(overlay.deleted_set());
 }
 
 /// Carry the live vocabulary bindings into a manifest's `vocabulary_extensions`,

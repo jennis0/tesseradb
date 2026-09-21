@@ -228,6 +228,13 @@ acknowledges the caller. The manifest takes its deletion and suppression records
 overlay directly, never from an earlier manifest, because copying one forward could republish an
 unsuppress the live overlay has already reversed.
 
+Each record reaches the manifest as the bitmap itself, serialised and text-encoded into one field,
+so the cost of publishing is the size of the set rather than a line per denied item. The two stay
+in two fields, one for deletions and one for suppressions, for the reason they are two stores. A
+field whose bytes do not decode is refused: the node will not serve that manifest, because a
+damaged record says nothing about how many items it named, and reading it as an empty set would
+put every one of them back on the map.
+
 ### If the write-ahead log fails
 
 If the fsync for a deny window fails, the executor first tries to repair it. It rewinds to the

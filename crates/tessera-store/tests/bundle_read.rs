@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{fixed32, split32, tiles_for_bbox, Bounds, Tile};
 use tessera_store::manifest::{
-    CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
+    CurrentPointer, DenySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
     SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
@@ -132,8 +132,8 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         dict_extents: vec![],
         external_id_runs: vec![],
         locator_extents: vec![],
-        tombstones: vec![],
-        deny: vec![],
+        tombstones: DenySet::default(),
+        deny: DenySet::default(),
         files: segments_files,
         ..SegmentsManifest::empty()
     };
@@ -410,6 +410,10 @@ fn add_segments_manifest(root: &Path, n: u64, edit: impl FnOnce(&mut serde_json:
 /// Name a file in this manifest's `files` map that does not exist on disk, so verification fails
 /// for this candidate and no other. Any digest will do: the file cannot be opened, so it never
 /// reaches the comparison.
+fn deny_set(ids: &[u32]) -> DenySet {
+    DenySet::of(&ids.iter().copied().collect::<croaring::Bitmap>())
+}
+
 fn name_a_missing_file(value: &mut serde_json::Value) {
     value["files"]["partitions/default/views/main/segments/seg-unsynced/columns.arrow"] =
         serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
@@ -421,12 +425,12 @@ fn a_manifest_carrying_tombstones_opens_and_carries_them_forward() {
     build_bundle(dir.path(), 50);
 
     edit_segments_manifest(dir.path(), |value| {
-        value["tombstones"] = serde_json::json!([17]);
+        value["tombstones"] = serde_json::to_value(deny_set(&[17])).unwrap();
     });
 
     let bundle = open_bundle(dir.path()).expect("tombstones are honoured, so this opens");
     assert_eq!(
-        bundle.partitions["default"].manifest.tombstones,
+        bundle.partitions["default"].manifest.tombstones.entities().unwrap().to_vec(),
         vec![17],
         "the loader must carry the deletion to whoever seeds the overlay from it — an opened \
          manifest whose tombstones went nowhere serves entity 17"
@@ -439,13 +443,12 @@ fn a_manifest_carrying_a_deny_entry_opens_and_carries_it_forward() {
     build_bundle(dir.path(), 50);
 
     edit_segments_manifest(dir.path(), |value| {
-        value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+        value["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
     });
 
     let bundle = open_bundle(dir.path()).expect("deny is honoured, so this opens");
     let deny = &bundle.partitions["default"].manifest.deny;
-    assert_eq!(deny.len(), 1);
-    assert_eq!(deny[0].entity_id, 17);
+    assert_eq!(deny.entities().unwrap().to_vec(), vec![17]);
 }
 
 /// **The fail-open this task exists to close, and the one the honouring change re-opened if the
@@ -464,7 +467,7 @@ fn a_deny_carrying_candidate_that_fails_verification_is_unready_never_stepped_pa
     build_bundle(dir.path(), 50);
 
     add_segments_manifest(dir.path(), 1, |value| {
-        value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+        value["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
         name_a_missing_file(value);
     });
 
@@ -486,6 +489,37 @@ fn a_deny_carrying_candidate_that_fails_verification_is_unready_never_stepped_pa
     }
 }
 
+/// **Bytes that do not decode are not an empty set.** A `deny` field is one base64 string holding
+/// a portable Roaring bitmap; a damaged one says nothing about how many entities it named, so the
+/// partition is unready. Reading it as empty would serve every entity it carried, and stepping
+/// past it would serve an older manifest that predates the deny.
+#[test]
+fn a_deny_field_that_does_not_decode_makes_the_partition_unready() {
+    for (field, damaged) in [
+        ("deny", serde_json::json!("not base64 at all")),
+        ("tombstones", serde_json::json!("")),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        build_bundle(dir.path(), 50);
+
+        // On the newest manifest, whose files all verify: nothing but the undecodable field is
+        // wrong with it.
+        add_segments_manifest(dir.path(), 1, |value| {
+            value[field] = damaged.clone();
+        });
+
+        match open_bundle(dir.path())
+            .expect_err("a deny field that does not decode must refuse, never read as empty")
+        {
+            StoreError::UnhonourableManifest { n, fields, .. } => {
+                assert_eq!(n, 1);
+                assert!(fields.contains(&field), "got: {fields:?}");
+            }
+            other => panic!("expected UnhonourableManifest, got: {other}"),
+        }
+    }
+}
+
 /// The same for a tombstone, which is the other deny-disposition field: a deletion re-exposed is
 /// no better than a suppression re-exposed.
 #[test]
@@ -494,7 +528,7 @@ fn a_tombstone_carrying_candidate_that_fails_verification_is_unready_too() {
     build_bundle(dir.path(), 50);
 
     add_segments_manifest(dir.path(), 1, |value| {
-        value["tombstones"] = serde_json::json!([17]);
+        value["tombstones"] = serde_json::to_value(deny_set(&[17])).unwrap();
         name_a_missing_file(value);
     });
 
@@ -522,7 +556,7 @@ fn a_deny_alongside_deltas_is_not_stepped_past_either() {
     build_bundle(dir.path(), 50);
 
     add_segments_manifest(dir.path(), 1, |value| {
-        value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+        value["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
         value["deltas"] =
             serde_json::json!(["partitions/p/views/s0/segments/flush-1-1/delta.arrow"]);
         name_a_missing_file(value);
@@ -561,7 +595,7 @@ fn the_walk_refuses_a_deny_it_reaches_only_after_stepping_down() {
     let dir = tempfile::tempdir().expect("tempdir");
     build_bundle(dir.path(), 50);
     add_segments_manifest(dir.path(), 1, |value| {
-        value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+        value["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
         name_a_missing_file(value);
     });
     add_segments_manifest(dir.path(), 2, name_a_missing_file);
@@ -1212,7 +1246,7 @@ fn a_padded_manifest_carrying_a_deny_is_refused_never_stepped_past() {
     build_bundle(dir.path(), 50);
 
     add_segments_manifest_named(dir.path(), "SEGMENTS-01.json", 1, |value| {
-        value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+        value["deny"] = serde_json::to_value(deny_set(&[17])).unwrap();
     });
 
     match open_bundle(dir.path()).expect_err(
