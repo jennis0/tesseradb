@@ -275,16 +275,19 @@ impl Executor {
             let Ok(work) = self.queues.work.try_recv() else {
                 break;
             };
+            // Only a lifecycle command rides the window. Everything else reads or replaces state
+            // an open window is holding back — a publication swaps the whole generation, and a
+            // suggestion-index pass reads the live minter a minting ingest has not published — so
+            // the open window closes first.
+            if !matches!(work, ExecutorWork::Lifecycle(_)) && !window.is_empty() {
+                window = self.close_and_reopen(window);
+            }
             let command = match work {
                 ExecutorWork::Lifecycle(command) => command,
                 ExecutorWork::PublishGeometry {
                     publication,
                     respond,
                 } => {
-                    // A publication swaps the whole generation, so the open window closes first.
-                    if !window.is_empty() {
-                        window = self.close_and_reopen(window);
-                    }
                     let _ = respond.send(self.publish_geometry(publication));
                     self.health.note_work_refused();
                     did_work = true;
@@ -295,9 +298,6 @@ impl Executor {
                     vocabulary,
                     respond,
                 } => {
-                    if !window.is_empty() {
-                        window = self.close_and_reopen(window);
-                    }
                     self.forget_suggestion_index(&vocabulary);
                     let _ = respond.send(());
                     did_work = true;
@@ -308,11 +308,6 @@ impl Executor {
                     vocabulary,
                     respond,
                 } => {
-                    // The rebuild reads the live minter, which a window holding a minting ingest
-                    // has not published yet.
-                    if !window.is_empty() {
-                        window = self.close_and_reopen(window);
-                    }
                     self.rebuild_suggestion_index_now(&vocabulary);
                     let _ = respond.send(());
                     did_work = true;

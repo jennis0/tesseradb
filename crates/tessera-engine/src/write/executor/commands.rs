@@ -831,10 +831,13 @@ impl Executor {
         let mut minted_count = 0u64;
         if !wanted.is_empty() || !mint_edges.is_empty() {
             match self.prepare_mints(&wanted, &mint_edges) {
-                Ok((records, resolved, minted)) => {
-                    settle_resolved_ordinals(&mut memberships, &resolved);
-                    minted_count = wanted.keys().filter(|at| minted.contains(*at)).count() as u64;
-                    mints = records;
+                Ok(prepared) => {
+                    settle_resolved_ordinals(&mut memberships, &prepared.resolved);
+                    minted_count = wanted
+                        .keys()
+                        .filter(|at| prepared.minted.contains(*at))
+                        .count() as u64;
+                    mints = prepared.records;
                 }
                 Err(detail) => {
                     reply.fail(ExecError::LayerRefused { detail });
