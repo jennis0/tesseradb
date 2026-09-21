@@ -1,11 +1,12 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "tesseradb"
 version = "0.1.0"
 description = "Tessera's Python package: the notebook widget as the [widget] extra, the SDK as the [local] one; the in-process instance joins them later (decision 0095)."
+license = "Apache-2.0"
 requires-python = ">=3.10"
 # The base install has no JavaScript in it and no dependency beyond the standard library:
 # `authorise` is one HTTPS call, made with `urllib`. A consumer, never a component (CLAUDE.md).

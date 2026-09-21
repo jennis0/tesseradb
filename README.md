@@ -142,4 +142,4 @@ This separation means TesseraDB can sit underneath an application with its own u
 
 ## Licence
 
-Not yet determined.
+[Apache-2.0](LICENSE). Copyright 2026 Joe Ennis.
