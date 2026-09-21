@@ -26,20 +26,10 @@ use values::*;
 // The executor
 // =================================================================================================
 
-/// How often the executor re-checks for a completed flush while one is in flight or completed but
-/// not yet drained. A poll, not a push: the pool cannot hold the doorbell sender, since that would
-/// block `WritePath::drop`'s join. Armed only while something is outstanding.
-pub(super) const FLUSH_COMPLETION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
-
 /// How long after a cycle failed to publish the next retry may come. Without this floor a failed
-/// cycle would retry at [`FLUSH_COMPLETION_POLL`]'s rate. A period tick and a row trip are not held
-/// back by it.
+/// cycle would retry as fast as the loop can wake. A period tick and a row trip are not held back
+/// by it.
 pub(super) const FAILED_CYCLE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// How often the executor looks for a completed fold while one is running. Coarser than
-/// [`FLUSH_COMPLETION_POLL`] since a fold runs minutes to hours, not seconds. Once the fold has
-/// sent, `fold_completed_pending` puts the wait back on the fast poll.
-pub(super) const FOLD_COMPLETION_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The single writer. One per partition, on its own thread, owning the WAL by value.
 pub(super) struct Executor {
@@ -211,8 +201,7 @@ impl Executor {
         if !due && !requested && !fold_requested {
             return;
         }
-        // Floored ([`FAILED_CYCLE_RETRY`]) so a retry does not re-plan the buffer at the
-        // completion-poll rate.
+        // Floored ([`FAILED_CYCLE_RETRY`]) so a retry does not re-plan the buffer at every wake.
         if !due && self.health.failed_cycle_backoff().is_some() {
             return;
         }
@@ -334,10 +323,15 @@ impl Executor {
     /// Block until something may be waiting, and report whether the executor should keep running.
     ///
     /// While the WAL is degraded this also wakes on a timer, since `/readyz` steers traffic away
-    /// from a degraded node and recovery would otherwise be reachable only by traffic. Shutdown
-    /// leaves only from here, after both queues have been observed empty: a timeout resumes the
-    /// loop, and only a disconnect ends it.
+    /// from a degraded node and recovery would otherwise be reachable only by traffic. Every other
+    /// reason to resume is a ring: a submission, a flush request, or a background unit finishing.
+    ///
+    /// Shutdown leaves only from here, and only once the handler side is gone — which closes both
+    /// queues — with both of them already drained by the passes above.
     pub(super) fn wait_for_work(&self) -> bool {
+        if self.queues.handler.strong_count() == 0 {
+            return false;
+        }
         // Bounded by the next tick, always, so a quiescent node still runs reclaim.
         let until_tick = std::time::Duration::from_secs(self.flush_max_age_secs)
             .saturating_sub(self.last_tick.elapsed());
@@ -345,24 +339,11 @@ impl Executor {
             until_tick.min(WAL_RECOVERY_POLL_INTERVAL)
         } else if let Some(backoff) = self.health.failed_cycle_backoff() {
             until_tick.min(backoff)
-        } else if self.health.flush_requested.load(Ordering::SeqCst)
-            || self.flush.outstanding()
-            || self.coalesce_outstanding()
-            || self.merge_outstanding()
-            || self.fold.completed_pending()
-        {
-            // The pool cannot ring the doorbell (see `flush_submit`).
-            until_tick.min(FLUSH_COMPLETION_POLL)
-        } else if self.fold.in_flight() {
-            // Coarser, since a fold runs minutes to hours, not seconds.
-            until_tick.min(FOLD_COMPLETION_POLL)
         } else {
             until_tick
         };
-        !matches!(
-            self.queues.bell.recv_timeout(wait),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
-        )
+        let _ = self.queues.bell.recv_timeout(wait);
+        true
     }
 
     /// The prefix directory to write into, derived from the generation the caller is publishing

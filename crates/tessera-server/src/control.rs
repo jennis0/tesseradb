@@ -3378,9 +3378,9 @@ async fn changes(
 
 /// How often a `wait=visible` wait re-reads the publication counter.
 ///
-/// A tick's own completion poll is 20 ms, so anything finer only spends wakeups; anything much
-/// coarser puts a whole poll between the publication and the answer. The wait holds no lock and
-/// no executor thread, so its only cost is this timer.
+/// The executor publishes on a wake rather than on a cadence, so this timer is the whole delay
+/// between a publication and the answer: anything much coarser adds to it, anything finer only
+/// spends wakeups. The wait holds no lock and no executor thread, so its only cost is this timer.
 const VISIBLE_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// The `wait` query parameter every write route takes (contracts §3.4).

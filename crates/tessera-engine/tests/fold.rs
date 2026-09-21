@@ -2735,3 +2735,43 @@ fn a_second_fold_publishes_a_third_prefix_and_reclaims_the_second() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(visible(&engine, &session), N_ITEMS);
 }
+
+/// **Dropping the engine returns while a background unit is still in flight.**
+///
+/// Every worker holds a doorbell sender for as long as its unit runs, so the doorbell's
+/// disconnection cannot be the shutdown signal: the signal is the two queues closing, which the
+/// executor observes at its next block. A fold held after its passes is a unit in flight that
+/// nothing will finish, and the join below must not wait for it.
+///
+/// The drop runs on its own thread, so a regression fails here rather than hanging the binary.
+/// The tick period is 90 s (`common::config`), so returning inside ten proves the drop woke the
+/// executor rather than the tick.
+///
+/// The held fold thread is never released: the only engine that could release it is the one being
+/// dropped, so it sleeps out the rest of this binary.
+#[test]
+fn dropping_the_engine_returns_while_a_fold_is_held_in_flight() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    wait_for("the fold to reach its hold", || {
+        engine.fold_is_holding_for_test()
+    });
+
+    let (done, back) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        drop(engine);
+        let _ = done.send(started.elapsed());
+    });
+    let took = back
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the engine must drop while a fold is held in flight");
+    assert!(
+        took < std::time::Duration::from_secs(10),
+        "the drop took {took:?}, so it waited on something rather than on the queues closing"
+    );
+}

@@ -351,8 +351,12 @@ impl WritePath {
         let (deny_tx, deny_rx) = std::sync::mpsc::channel();
         // Capacity one, and `try_send` that discards `Full`: a token means something may be
         // waiting, and a second token while one is pending adds nothing. The executor only blocks
-        // on this after observing both queues empty: see [`Executor::run`].
+        // on this after observing both queues empty: see [`Executor::run`]. Rung by the handler
+        // side and by every background worker that finishes a unit.
         let (bell_tx, bell_rx) = std::sync::mpsc::sync_channel(1);
+        // Alive exactly as long as the `LifecycleHandle` below, which is the only holder of the
+        // two queue senders: see [`LifecycleQueues::handler`].
+        let alive = Arc::new(());
 
         // A clone, not a move: `ExecutorHealth` keeps the other end, which is what gives the
         // counters a reader outside the executor thread (`ExecutorStats::wal_fsyncs`).
@@ -398,6 +402,9 @@ impl WritePath {
             .collect();
         #[cfg(feature = "fault-injection")]
         let thread_faults = faults.clone();
+        let handler = Arc::downgrade(&alive);
+        // The end every background worker rings when its unit finishes.
+        let worker_bell = bell_tx.clone();
         // The tick clock a snapshot reads, seeded so `next_tick_in_nanos` is one period until
         // the executor's first tick rather than zero.
         health.set_flush_period_secs(flush.max_age_secs);
@@ -420,6 +427,7 @@ impl WritePath {
                         work: work_rx,
                         deny: deny_rx,
                         bell: bell_rx,
+                        handler,
                     },
                     health: Arc::clone(&health),
                     window_seq: 0,
@@ -433,21 +441,24 @@ impl WritePath {
                     pool: flush.pool,
                     max_distinct_terms: flush.max_distinct_terms,
                     coalesce_policy: flush.coalesce,
-                    coalesce: executor::Background::new(),
+                    coalesce: executor::Background::new(worker_bell.clone()),
                     refresh: flush.refresh,
                     merge_policy: flush.merge,
                     switches: flush.switches,
                     merge: executor::Background::sharing(
+                        worker_bell.clone(),
                         Default::default(),
                         Arc::clone(&health.merge_completed_pending),
                     ),
                     fold: executor::Background::sharing(
+                        worker_bell.clone(),
                         Default::default(),
                         Arc::clone(&health.fold_completed_pending),
                     ),
                     suggest_dir: flush.suggest_dir,
-                    suggest: executor::Background::new(),
+                    suggest: executor::Background::new(worker_bell.clone()),
                     flush: executor::Background::sharing(
+                        worker_bell,
                         Arc::clone(&health.flush_in_flight),
                         Default::default(),
                     ),
@@ -499,6 +510,7 @@ impl WritePath {
             work: work_tx,
             deny: deny_tx,
             bell: bell_tx,
+            alive,
             health: Arc::clone(&self.health),
         });
         self.join = Some(join);
@@ -821,8 +833,10 @@ impl Drop for WritePath {
     /// caller's next statement is typically `TempDir::drop`, producing intermittent `ENOENT` from
     /// the sidecar rename in tests spread across many files.
     ///
-    /// The join is unconditional and cannot hang: [`LifecycleHandle`] is not `Clone` and this type
-    /// is its only owner, so dropping it below disconnects every sender.
+    /// The join is unconditional and does not wait on background work: [`LifecycleHandle`] is not
+    /// `Clone` and this type is its only owner, so dropping it below closes both queues, and the
+    /// ring that follows wakes a blocked loop to observe that. A fold still running keeps its own
+    /// thread, not this one.
     fn drop(&mut self) {
         // A test may have parked the executor at an armed pause point; release it first, or
         // teardown deadlocks on a fault the test forgot to clear.
@@ -830,7 +844,9 @@ impl Drop for WritePath {
         if let Some(faults) = &self.faults {
             faults.release();
         }
-        drop(self.handle.take());
+        if let Some(bell) = self.handle.take().map(LifecycleHandle::into_bell) {
+            let _ = bell.try_send(());
+        }
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -957,7 +973,13 @@ pub(crate) struct LifecycleHandle {
     /// alternatives were both worse: `crossbeam-channel` is a workspace dependency for one
     /// `select!`, and `recv_timeout` polling would put a latency floor on the one wait the
     /// never-shed lane exists to bound.
+    ///
+    /// Every background worker holds a clone of this sender too, so the doorbell stays connected
+    /// while one runs and its disconnection says nothing about shutdown: [`Self::alive`] does.
     bell: SyncSender<()>,
+    /// Held for exactly as long as this handle, and so for exactly as long as the two queue
+    /// senders above. The executor holds a `Weak` of it: see [`LifecycleQueues::handler`].
+    alive: Arc<()>,
     health: Arc<ExecutorHealth>,
 }
 
@@ -1027,6 +1049,17 @@ impl LifecycleHandle {
         }
         let _ = self.bell.try_send(());
         rx.recv().is_ok()
+    }
+
+    /// Drop the queue senders and the liveness token, keeping the doorbell.
+    ///
+    /// The caller rings it afterwards, so the executor woken by that token already observes the
+    /// queues closed. Ringing first would let the loop wake, find the handle still alive, and
+    /// block again until the tick deadline, which is `flush_max_age_secs` long.
+    fn into_bell(self) -> SyncSender<()> {
+        let Self { bell, alive, .. } = self;
+        drop(alive);
+        bell
     }
 
     /// Ring the executor's doorbell without submitting anything.
@@ -1118,6 +1151,11 @@ pub(crate) struct LifecycleQueues {
     deny: Receiver<Command>,
     /// The wake signal. Capacity one: see [`LifecycleHandle::bell`] and [`Executor::run`].
     bell: Receiver<()>,
+    /// The handler side's liveness. No strong count left means [`LifecycleHandle`] is gone, and
+    /// since it is the sole owner of both senders above, that both queues are disconnected:
+    /// [`Executor::wait_for_work`] reads it as the shutdown signal, with both queues by then
+    /// drained.
+    handler: std::sync::Weak<()>,
 }
 
 /// What the executor needs to run a flush, gathered rather than passed one by one.

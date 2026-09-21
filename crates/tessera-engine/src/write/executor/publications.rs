@@ -148,9 +148,8 @@ impl Executor {
     /// undrained is about to change the manifest, so a pass dispatched beside it is discarded at
     /// its rebase check.
     ///
-    /// A suspension does not stall: [`Executor::run`] drains every completed job before any
-    /// dispatcher runs, and [`Executor::wait_for_work`] treats a pending flag as a reason for the
-    /// fast completion poll.
+    /// A suspension does not stall: a finished job rings the doorbell, and [`Executor::run`]
+    /// drains every completed job before any dispatcher runs.
     pub(super) fn fold_outstanding(&self) -> bool {
         self.fold.outstanding()
     }
@@ -1244,10 +1243,10 @@ impl Executor {
             .flush_lap(crate::flush::FlushStage::Dispatch, mark);
 
         if deferred > 0 {
-            // Re-armed, so `wait_for_work` polls at `FLUSH_COMPLETION_POLL` and the tick that
-            // takes the next view comes at the completion of this flush rather than at the next
-            // period. Set before the flag below, since a reader that saw the dispatch first and
-            // this second could close the cycle in between.
+            // Re-armed, so the tick that takes the next view comes at this flush's completion,
+            // which rings the doorbell, rather than at the next period. Set before the flag below,
+            // since a reader that saw the dispatch first and this second could close the cycle in
+            // between.
             self.health.deferred_plans.store(true, Ordering::SeqCst);
             self.health.flush_requested.store(true, Ordering::SeqCst);
             tracing::warn!(
