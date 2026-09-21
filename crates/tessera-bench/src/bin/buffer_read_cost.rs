@@ -232,7 +232,7 @@ fn walks(depths: &[usize], runs: usize) {
     for depth in depths {
         for layout in [Ids::Dense, Ids::Scattered] {
             let buffer = filled(*depth, layout);
-            let entities = buffer.owning_entities().max(1);
+            let entities = buffer.iter().count().max(1);
             let iter = best(runs, || {
                 let mut n = 0usize;
                 for (_, item) in buffer.iter() {
