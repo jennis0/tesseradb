@@ -3,8 +3,8 @@
 A `declare_*` verb takes no data, so a layer's tables are its inserts' and the verb writes a
 declaration. What is asserted here is that declaration through the check every build runs: a
 shape, an inline roster, levels and a value set reach it as the verbs wrote them. The rules the
-check itself owns are its own to state, and the two refusals below stand for the SDK's blocks
-reaching it at all.
+check itself owns are its own to state, and the refusals below stand for the SDK's blocks
+reaching it at all — an inline artifact row among them, which the check reads inside.
 
 The refusals that are the SDK's own are here too: how a shape, a membership and a scope are
 spelled on a Python call, which no file expresses.
@@ -203,15 +203,27 @@ def test_the_check_refuses_a_declaration_the_verbs_wrote_and_names_the_layer(db,
     assert "clusters" in report.output
 
 
-def test_a_shape_on_an_artifact_row_of_a_layer_that_evaluates_none_is_refused(db):
-    with pytest.raises(Refusal):
-        db.declare_layer("cases", kind="flat", artifacts=[{"key": "a", "wkt": "POLYGON EMPTY"}])
+def test_a_shape_on_an_artifact_row_of_a_layer_that_evaluates_none_is_refused(db, checked):
+    db.declare_layer("cases", kind="flat", artifacts=[{"key": "ring", "wkt": "POLYGON EMPTY"}])
+    report = checked(db)
+    assert not report.ok
+    assert "cases" in report.output and "ring" in report.output
 
 
-def test_one_row_carries_one_shape(db):
-    with pytest.raises(Refusal):
-        db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox",
-                         artifacts=[{"key": "a", "bbox": [0, 0, 1, 1], "circle": [0, 0, 1]}])
+def test_one_row_carries_one_shape(db, checked):
+    db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox",
+                     artifacts=[{"key": "both", "bbox": [0, 0, 1, 1], "circle": [0, 0, 1]}])
+    report = checked(db)
+    assert not report.ok
+    assert "regions" in report.output and "both" in report.output
+
+
+def test_a_rows_shape_is_its_layers_kind_and_no_other(db, checked):
+    db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox",
+                     artifacts=[{"key": "round", "circle": [0, 0, 1]}])
+    report = checked(db)
+    assert not report.ok
+    assert "regions" in report.output and "round" in report.output
 
 
 def test_an_inline_roster_with_no_row_is_refused(db):
