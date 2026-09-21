@@ -75,20 +75,23 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     env:
-      # `ld terminated with signal 7 [Bus error]` while linking two `tessera-engine` test binaries,
-      # with 32 GB of disk free, so the constraint is memory and not space. rustc links with `lld`,
-      # which writes its output through an `mmap`; a page the kernel cannot back raises SIGBUS
-      # rather than reporting a failed allocation. Cargo defaults to one job per core, so four of
-      # the workspace's largest binaries link at once on a 16 GB runner, each pulling in arrow,
-      # parquet, croaring and zstd statically. Two at a time halves the peak. The debug level stays
-      # `line-tables-only` (Cargo.toml) so a CI backtrace still names a line; drop that next if
-      # this is not enough.
-      CARGO_BUILD_JOBS: 2
+      # The runner fills its disk building the workspace's 261 test binaries, and reports it two
+      # ways in the same run: `rustc-LLVM ERROR: IO failure on output stream: No space left on
+      # device`, and `ld terminated with signal 7 [Bus error]`. The second is the first seen
+      # through an `mmap` — rustc links with `lld`, which writes its output through one, and a
+      # mapped page that cannot be written back because the filesystem is full raises SIGBUS
+      # instead of returning ENOSPC. Freeing 18 GB was not enough on its own.
+      #
+      # Debug info is what the space goes on, so CI builds without it, which is what CLAUDE.md
+      # already tells a developer to do in a worktree for the same reason. The cost is that a CI
+      # backtrace names a function but not a line.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v4
-      # Headroom, not the fix: the runner ships ~25 GB of toolchains this build never touches, and
-      # 161 test binaries plus their incrementals fill what is left. Measured on this runner, the
-      # step takes / from 14 GB free to 32 GB.
+      # Half of the fix: the runner ships ~25 GB of toolchains this build never touches. Measured
+      # on this runner, the step takes / from 14 GB free to 32 GB. The build needed more than that
+      # with debug info on, which is why the profile above turns it off.
       - name: make room for the test binaries
         run: |
           df -h /
