@@ -24,96 +24,73 @@ pub(in crate::write) use publications::*;
 use wal::*;
 use values::*;
 
-// =================================================================================================
-// The executor
-// =================================================================================================
 
-/// How long after a cycle failed to publish the next retry may come. Without this floor a failed
-/// cycle would retry as fast as the loop can wake. A period tick and a row trip are not held back
-/// by it.
+/// How long after a failed cycle the next retry may come, so it does not retry on every wake.
 pub(super) const FAILED_CYCLE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The single writer. One per partition, on its own thread, owning the WAL by value.
 pub(super) struct Executor {
     pub(super) log: ExecutorLog,
     pub(super) live: Arc<LiveState>,
-    /// The only publishing capability in the write path. Not in [`LiveState`], which the handler
-    /// side shares.
+    /// The only publishing capability in the write path; not in [`LiveState`], which is shared.
     pub(super) generation: Arc<GenerationHandle>,
-    /// The row-projection cache, pruned of generations older than the retention depth at the swap.
+    /// Pruned of generations older than the retention depth, at the swap.
     pub(super) row_projection_cache: Arc<RowProjectionCache>,
-    /// Everything the executor was handed at its start and never changes: policies, paths, the
-    /// shared pool and the shared caches.
+    /// Policies, paths, and the shared pool and caches, fixed at construction.
     pub(super) deps: MaintenanceDeps,
     pub(super) queues: LifecycleQueues,
     pub(super) health: Arc<ExecutorHealth>,
-    /// The last window's sequence number; all it has to be is distinct per window.
+    /// All it has to be is distinct per window.
     pub(super) window_seq: u64,
     /// What this node has published into side-manifests, and what live state holds beyond them.
     pub(super) side_manifests: SideManifests,
-    /// The entity-space coalesce, with its in-flight flag, attempt counter and completion channel:
-    /// separate from a flush so the cheap one does not wait on the expensive one.
+    /// Separate from a flush so the cheap one does not wait on it.
     pub(super) coalesce: Background<crate::coalesce::CompletedCoalesce>,
-    /// The row-space merge, held separately from the flush and the coalesce since a merge
-    /// publishes its own swap.
+    /// Held separately since it publishes its own swap.
     pub(super) merge: Background<crate::merge::CompletedMerge>,
-    /// The compaction fold. It runs on its own thread, not the shared pool: it takes minutes to
-    /// hours and the pool serves viewports.
+    /// Runs on its own thread: it takes minutes to hours and the pool serves viewports.
     pub(super) fold: Background<crate::compact::CompletedFold>,
-    /// The suggestion-index rebuild. No plan, no gate, nothing to refuse: it reads a vocabulary
-    /// out of the generation and writes files the manifest does not name.
+    /// Reads a vocabulary out of the generation and writes files the manifest does not name.
     pub(super) suggest: Background<crate::suggest::CompletedSuggest>,
-    /// The flush. Its in-flight flag is [`ExecutorHealth::flush_in_flight`], which status reads.
+    /// Its in-flight flag is [`ExecutorHealth::flush_in_flight`], which status reads.
     pub(super) flush: Background<crate::flush::CompletedFlush>,
-    /// When the last fold attempt started, as a unix second. Stamped by every dispatch whatever the
-    /// attempt then does, so the interval limits attempts.
+    /// When the last fold attempt started, as a unix second, so the interval can limit attempts.
     pub(super) last_fold_start_unix: Option<u64>,
-    /// Every external-id sidecar replaced over the live prefix, weakly held: a `Weak` answers
-    /// whether one is still alive without keeping its mappings alive itself. Moved into
-    /// [`PendingReclaim`] at a fold.
+    /// Held weakly, so a `Weak` answers if one is alive; moved to [`PendingReclaim`] at a fold.
     pub(super) superseded_sidecars: Vec<std::sync::Weak<crate::engine::ExternalIdIndex>>,
-    /// Superseded prefixes awaiting reclamation, each held by the generation that named it. A
-    /// prefix is deleted only once nothing else holds that generation or its external-id sidecar. A
-    /// process that exits first leaves the tree for the startup sweep.
+    /// Deleted once nothing holds its generation or sidecar; a dead node leaves it to the sweep.
     pub(super) pending_reclaim: Vec<PendingReclaim>,
-    /// When the last tick fired. Started at construction, so the first tick is one period after
-    /// the executor starts rather than immediately at startup.
+    /// So the first tick lands one period after construction, not immediately.
     pub(super) last_tick: std::time::Instant,
-    /// What every accepted write since the last tick did to each level's row forms, applied at the
-    /// next tick. One level's deltas carry consecutive level versions.
+    /// What every accepted write since the last tick did to each level's row forms.
     pub(super) pending_forms: std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
     #[cfg(feature = "fault-injection")]
     pub(super) faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
 
-/// Why a tick is firing. `due` is the cadence itself, the period or the buffered-row count;
-/// `period_due` is the period alone. A tick that only a request brought on is not `due`.
+/// Why a tick fired: `due` is the period or the buffered-row count, `period_due` the period alone.
 struct TickDue {
     due: bool,
     period_due: bool,
 }
 
 impl Executor {
-    /// Drop the region decompositions of generations older than the retention depth: the same
-    /// pass, at the same swap, as `RowProjectionCache::prune_generations_below`.
+    /// Drop the region decompositions of generations older than the retention depth.
     pub(super) fn prune_region_cache(&self, segments_version: u64) {
         let floor = segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS);
         self.deps.region_cache
             .retain_keys(|key| key.segments_version >= floor);
     }
 
-    /// Drain deny to empty, then execute at most one work item, then repeat, blocking only once
-    /// both queues have been observed empty.
-    ///
-    /// [`Executor::run_work_pass`] returns as soon as it closes a window, so a deny's wait is
-    /// bounded by the window in front of it, not by queue depth. A deny may overtake a queued
-    /// ingest safely: an item is established only at apply, so append order still equals apply
-    /// order. Shutdown drains and executes rather than discarding.
+    /// Runs the tick, then drains deny to empty, then at most one work item, repeating, blocking
+    /// only once both queues are empty. Completed background units publish before the tick plans,
+    /// so it never re-plans rows already written; the deny lane drains fully before any work item;
+    /// [`Executor::run_work_pass`] returns after closing one window, so a deny waits for at most
+    /// one window; shutdown drains and executes rather than discarding.
     pub(super) fn run(&mut self) {
         self.sample_wal_gauge();
         loop {
             self.recover_wal();
-            // Applied before the tick plans another, or it would re-plan rows already written.
             let published = self.publish_completed_flushes()
                 | self.publish_completed_coalesces()
                 | self.publish_completed_merges()
@@ -121,9 +98,7 @@ impl Executor {
                 | self.publish_completed_suggests();
             self.tick_if_due();
             while self.run_deny_pass() {}
-            // The prompt half only: a batch's memberships wait for the tick, and this runs after
-            // every drain. A publication taken here carries them too, since it writes everything
-            // live state holds and no manifest does.
+            // The prompt half only; a batch's memberships wait for the tick.
             if self.side_manifests.behind_live {
                 self.publish_overlay_state();
             }
@@ -136,12 +111,7 @@ impl Executor {
         }
     }
 
-    /// The flush tick: the one cadence on which geometry is published.
-    ///
-    /// Runs at the top of the loop, before the deny drain, so a tick is never delayed by work that
-    /// arrived after it came due, and after the drain, so a tick that publishes does not preempt a
-    /// deny already queued. Three triggers reach this cadence and none publishes off it: the
-    /// period, the buffered-row count, and `POST /control/flush`. It also drives `reclaim`.
+    /// The flush tick: the cadence on which geometry publishes; also drives `reclaim`.
     pub(super) fn tick_if_due(&mut self) {
         let Some(TickDue { due, period_due }) = self.tick_due() else {
             return;
@@ -155,14 +125,12 @@ impl Executor {
         self.reclaim_superseded_prefixes();
         self.dispatch_suggest_rebuild();
         self.publish_row_forms();
-        // The tick is where a data door's memberships and content reach a manifest. Above the
-        // in-flight gate below, so a tick that publishes no geometry still publishes them.
+        // Above the in-flight gate, so a tick that publishes no geometry still publishes this.
         self.publish_overlay_state();
 
         let generation = self.generation.load_full();
 
-        // A period tick arriving while a flush runs is skipped, not queued. A requested flush is
-        // not consumed by a skip: the flag stays armed for the first iteration after it lands.
+        // A period tick during a flush is skipped, not queued; a requested flush stays armed.
         if flush_in_flight {
             if due {
                 self.tick_behind_flush(&generation, period_due);
@@ -176,8 +144,7 @@ impl Executor {
         let (plans, gated) = self.plan_view_flushes(&generation);
         self.dispatch_planned_tick(&generation, plans, gated);
         drop(generation);
-        // Last, so a reader that sees the count move sees everything this tick did on this
-        // thread: the plans dispatched, the log rotated.
+        // Last, so a reader that sees the count move sees everything else this tick did.
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -200,15 +167,12 @@ impl Executor {
         Some(TickDue { due, period_due })
     }
 
-    /// The tick that lands while a flush is still running: it stamps the tick and counts what is
-    /// waiting, and publishes nothing.
+    /// Lands while a flush still runs: stamps the tick, counts what is waiting, publishes nothing.
     fn tick_behind_flush(&mut self, generation: &Generation, period_due: bool) {
         self.last_tick = std::time::Instant::now();
         self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
-        // Rows, as the planning tick counts them, and no deletion filter: the buffer never holds
-        // anything of a deleted entity. A live deletion drops its rows in the same swap that marks
-        // it deleted, and replay drops them before the buffer is published.
+        // No deletion filter needed: the buffer never holds rows of a deleted entity.
         let flushable = generation.buffer.len();
         self.health
             .flushable_items
@@ -224,8 +188,7 @@ impl Executor {
         }
     }
 
-    /// Plan every view's flush, publish the row count they cover, and report whether any view was
-    /// refused rather than merely having nothing to flush.
+    /// Plan every view's flush and report whether any view was refused, not merely empty.
     fn plan_view_flushes(
         &self,
         generation: &Arc<Generation>,
@@ -248,7 +211,6 @@ impl Executor {
                 Err(crate::flush::NoFlush::NothingToFlush) => {}
                 Err(refusal) => {
                     gated = true;
-                    // Once per period: the refusal stands until an operator acts.
                     if self.health.refusal_log_due() {
                         tracing::warn!(
                             view = %view,
@@ -266,8 +228,7 @@ impl Executor {
         (plans, gated)
     }
 
-    /// Dispatch what the tick planned: the flushes, and the three background units the tick also
-    /// drives.
+    /// Dispatch what the tick planned: the flushes, and the three background units it also drives.
     fn dispatch_planned_tick(
         &mut self,
         generation: &Arc<Generation>,
@@ -292,24 +253,16 @@ impl Executor {
         self.dispatch_merge(generation);
     }
 
-    /// Whether this executor may still write durable state: the two latching postures, asked in
-    /// one place so a new publication kind cannot miss one.
-    ///
-    /// Does not include the WAL's poison flag: that one is recoverable and is asked separately by
-    /// the callers that care. These two are terminal until a restart.
+    /// Whether this executor may still write durable state, asked in one place. Excludes the
+    /// WAL's poison flag, which is recoverable; these two are terminal until a restart.
     pub(super) fn may_publish(&self) -> bool {
         !self.health.overlay_diverged.load(Ordering::SeqCst)
             && !self.health.prefix_diverged.load(Ordering::SeqCst)
     }
 
     /// Block until something may be waiting, and report whether the executor should keep running.
-    ///
     /// While the WAL is degraded this also wakes on a timer, since `/readyz` steers traffic away
-    /// from a degraded node and recovery would otherwise be reachable only by traffic. Every other
-    /// reason to resume is a ring: a submission, a flush request, or a background unit finishing.
-    ///
-    /// Shutdown leaves only from here, and only once the handler side is gone — which closes both
-    /// queues — with both of them already drained by the passes above.
+    /// from a degraded node and recovery would otherwise only be reachable through traffic.
     pub(super) fn wait_for_work(&self) -> bool {
         if self.queues.handler.strong_count() == 0 {
             return false;
@@ -328,24 +281,13 @@ impl Executor {
         true
     }
 
-    /// The prefix directory to write into, derived from the generation the caller is publishing
-    /// against rather than remembered.
-    ///
-    /// A fold flips `CURRENT`, changing which prefix is live. A stored `PathBuf` rotated at the
-    /// flip would have to be got right at every site that uses it; a derived value cannot be missed.
+    /// Derived at each use, since a fold moves the live prefix.
     pub(super) fn prefix_dir(&self, generation: &Generation) -> PathBuf {
         self.deps.bundle_root.join(&generation.prefix)
     }
 
-    /// Publish new geometry: check, swap, prune. The executor's own arm of the swap-only
-    /// publication step. On this thread there is nothing to race, so there is no
-    /// compare-and-swap retry loop: one load, one check, one store.
-    ///
-    /// The one swap carries prefix, `segments_version`, watermark, bundle, dictionary and tier list
-    /// always, and, when the publication carries a `PrefixRotation`, also the base postings, the
-    /// fragment cache and identity it keys, the external-id sidecar, and the retirement of the
-    /// executed deletions, all through the single `store` below: not a sequence a request could
-    /// land between.
+    /// Publish new geometry: check, swap, prune. The sole writer, so no compare-and-swap retry
+    /// loop: one load, one check, one store.
     pub(super) fn publish_geometry(
         &mut self,
         publication: GeometryPublication,
@@ -363,10 +305,9 @@ impl Executor {
         let previous = self.generation.load_full();
         check_publishable(&previous, &prefix, segments_version, watermark)?;
 
-        // Rule F, in the fold's own swap and nowhere else: the overlay is cloned, retired against,
-        // and published, never mutated in place on a shared `Arc` the read path is holding.
-        // `overlay_version` moves only when something actually retired, since a geometry-only swap
-        // that bumped it would falsely signal a change on the security-state axis cache keys read.
+        // Cloned and retired against here, never mutated on the shared `Arc` the read path holds.
+        // Cache keys read `overlay_version` as the security state, so a geometry-only swap must
+        // not move it.
         let (overlay, overlay_version) = match rotation.as_ref().map(|r| &r.retired) {
             Some(retired) if !retired.is_empty() => {
                 // The live external-id map loses the retired bindings first.
@@ -391,9 +332,7 @@ impl Executor {
             g.watermark = watermark;
             g.bundle = bundle;
             g.dict = dict;
-            // A rotation carries the new prefix's own columns; the previous generation's, which
-            // `with` starts from, would serve the superseded prefix's mappings out of files
-            // reclamation is unlinking.
+            // A rotation carries the new prefix's own columns, or `with` would serve stale entries.
             if let Some(r) = &rotation {
                 g.filter_columns = Arc::clone(&r.filter_columns);
                 g.postings = Arc::clone(&r.postings);
@@ -403,10 +342,8 @@ impl Executor {
             g.delta_postings = delta_postings;
             g.overlay_version = overlay_version;
             g.overlay = overlay;
-            // The suggestion index carries across a rotation: a fold retires entities, never values.
         });
-        // Listed before the swap, deleted after it: a listing taken before the swap can never name
-        // an entry a request wrote after it, and nothing is deleted if the swap does not happen.
+        // Listed before the swap and deleted after it, so nothing is lost if the swap never lands.
         let superseded = rotation
             .as_ref()
             .map(|_| previous.fragments.superseded_entries())
@@ -415,8 +352,7 @@ impl Executor {
         let next = Arc::new(next);
         self.publish_arc(Arc::clone(&next), started);
 
-        // A rotation refreshes after the swap and does not arm the shed: after a fold a missing
-        // projection is an ordinary cache miss.
+        // After the swap, so a missing projection after a fold is an ordinary cache miss.
         if rotation.is_some() {
             self.deps.refresh.spawn(next);
         }
@@ -431,25 +367,20 @@ impl Executor {
             );
         }
 
-        // The retention pass, at the swap rather than at a reclaim.
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
         self.prune_region_cache(segments_version);
         Ok(())
     }
 
-    /// The generation swap. The only `store` in the write path.
-    ///
-    /// `load_full` + `store` is safe here because this is the sole thread that can publish: a
-    /// flush must not `store` directly; it submits a command and is applied here.
-    /// `scripts/check-layers.sh` refuses any non-atomic `.store(` in this crate's sources outside
-    /// this file.
+    /// The only place a generation is stored; the executor thread is the only publisher, so a
+    /// flush submits a command rather than storing directly. `scripts/check-layers.sh` refuses
+    /// any non-atomic `.store(` elsewhere in this crate.
     pub(super) fn publish(&self, next: Generation, started: std::time::Instant) {
         self.publish_arc(Arc::new(next), started)
     }
 
-    /// [`Self::publish`] over a generation the caller already holds by `Arc`: a geometry
-    /// publication needs the same value afterwards, to hand the background refresh.
+    /// Like [`Self::publish`] but takes an `Arc` directly, for the caller to reuse afterwards.
     pub(super) fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) {
         self.generation.store(next);
         self.health
@@ -460,10 +391,7 @@ impl Executor {
         }
     }
 
-    /// Reach an armed pause site, if any. Fault-injection builds only; a no-op otherwise.
-    ///
-    /// Every call site holds no lock: a pause inside one would wedge this thread against its own
-    /// waiters.
+    /// Reach an armed pause site, if any; a no-op outside fault-injection builds.
     #[cfg(feature = "fault-injection")]
     pub(super) fn pause_point(&self, site: PauseSiteArg) {
         use tessera_lifecycle::faults::PauseAction;
@@ -480,11 +408,8 @@ impl Executor {
     pub(super) fn pause_point(&self, _site: PauseSiteArg) {}
 }
 
-/// The pause-site argument, so the executor's call sites read the same in both builds.
-///
-/// In a fault-injection build this is [`tessera_lifecycle::faults::PauseSite`]. In a shipped
-/// build the module does not exist, so it is a local zero-variant-cost stand-in and
-/// `pause_point` is a no-op.
+/// So call sites read the same in both builds: [`tessera_lifecycle::faults::PauseSite`] here, a
+/// stand-in in a shipped build.
 #[cfg(feature = "fault-injection")]
 pub(super) type PauseSiteArg = tessera_lifecycle::faults::PauseSite;
 

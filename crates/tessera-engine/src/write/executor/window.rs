@@ -9,26 +9,20 @@ pub(super) enum BatchState {
         body_hash: [u8; 32],
         entity_ids: Vec<EntityId>,
     },
-    /// Held in the open commit window, not yet acknowledged. Allocation happens at the close, so a
-    /// byte-identical retry joins the queue of waiters the entry will ack.
-    ///
-    /// `window_seq` is the window the entry was found in; there is exactly one open window.
+    /// Held in the open commit window, not yet acknowledged; a byte-identical retry joins the
+    /// queue of waiters the entry will ack. There is exactly one open window.
     Held {
         window_seq: u64,
         body_hash: [u8; 32],
     },
-    /// Never seen. A new entry.
-    ///
-    /// Also what an accepted batch regresses to once WAL rotation reclaims its member: a retry with
-    /// an `external_id` then 409s on the duplicate check, but one with none is re-ingested as a new
-    /// entity. The horizon is about one flush; a client needing longer carries its own id column.
+    /// Never seen, or what an accepted batch regresses to once WAL rotation reclaims its member: a
+    /// retry with an `external_id` then 409s, but one with none is re-ingested as new.
     Unknown,
 }
 
 impl BatchState {
     /// Look `batch_id` up: the durable index, then the open window, then unknown. The two sets are
-    /// disjoint: a batch id enters `accepted_batches` only at `close_window`. Durable is checked
-    /// first because it is the half that survives a restart.
+    /// disjoint: a batch id enters `accepted_batches` only at `close_window`.
     pub(super) fn of<W>(live: &LiveState, window: &CommitWindow<W>, batch_id: &str) -> BatchState {
         if let Some((body_hash, entity_ids)) = live.accepted_batch(batch_id) {
             return BatchState::Accepted {
@@ -46,11 +40,8 @@ impl BatchState {
     }
 }
 
-/// A commit window that has closed, and every waiter it owes an answer to.
-///
-/// It is consumed by the answer: [`ClosingWindow::fail_all`], [`ClosingWindow::fail_wal`] and
-/// [`ClosingWindow::ack`] are the three exits a closed window has, and each one answers every
-/// waiter and times the window exactly once. A path that returns without one does not compile.
+/// A closed commit window and every waiter it owes: [`ClosingWindow::fail_all`],
+/// [`ClosingWindow::fail_wal`] and [`ClosingWindow::ack`] are its three exits.
 pub(super) struct ClosingWindow {
     closed: Vec<ClosedEntry<Reply<Ingested>>>,
     /// Entries, not rows: what the service estimate is per.
@@ -76,27 +67,23 @@ impl ClosingWindow {
         &self.closed
     }
 
-    /// The entries to rewrite in place before the append: padding, the vocabulary mint, the
-    /// ordinals a key acquired since admission.
     pub(super) fn entries_mut(&mut self) -> &mut [ClosedEntry<Reply<Ingested>>] {
         &mut self.closed
     }
 
-    /// Refused after allocation and before the append, for a reason that is the whole window's:
-    /// every waiter gets it, and nothing was appended or applied.
+    /// Before the append: nothing was appended or applied, and every waiter gets the same reason.
     pub(super) fn fail_all(self, health: &ExecutorHealth, error: impl Fn() -> ExecError) {
         let waiters = self.closed.into_iter().map(|e| e.waiters).collect();
         refuse_waiters(health, waiters, self.entries, self.started, error);
     }
 
-    /// The append or fsync failed: apply nothing, and answer every waiter, the entry `blamed`
-    /// with the real error and the rest on [`Blame`]'s rule.
+    /// The append or fsync failed: apply nothing, and blame [`Blame`]'s rule for every waiter but
+    /// the one carrying the real error.
     pub(super) fn fail_wal(self, health: &ExecutorHealth, blamed: usize, error: WalError) {
         let mut blame = Blame::new(blamed, error);
         for (i, entry) in self.closed.into_iter().enumerate() {
             for (k, waiter) in entry.waiters.into_iter().enumerate() {
-                // One waiter of the blamed entry carries the real error; its joined retries were
-                // never appended separately and have nothing else to be told.
+                // A joined retry was never appended separately, so it has nothing else to be told.
                 let e = if k == 0 { blame.at(i) } else { WalError::Poisoned };
                 waiter.fail(ExecError::Wal(e));
             }
@@ -104,11 +91,8 @@ impl ClosingWindow {
         health.record_window_service(self.entries, self.started.elapsed().as_nanos() as u64);
     }
 
-    /// Committed: every waiter of an entry gets that entry's ids and the artifacts it created.
-    ///
-    /// A death partway through leaves some waiters unacked; each gets
-    /// `SubmitError::ReceiptLost` → 500, never `ExecutorDead` → 503, since its ingest is durably
-    /// in force.
+    /// Committed: every waiter of an entry gets that entry's ids and the artifacts it created. A
+    /// death partway leaves some waiters unacked; each gets a 500, not a 503, since durable.
     pub(super) fn ack(self, health: &ExecutorHealth, minted_per_entry: Vec<u64>) {
         for (entry, minted) in self.closed.into_iter().zip(minted_per_entry) {
             let ClosedEntry {
@@ -133,15 +117,12 @@ impl ClosingWindow {
 pub(super) struct MintedCodes {
     /// The bindings the window publishes if it survives, the live ones plus whatever it drew.
     pub(super) vocabularies: Vocabularies,
-    /// `(vocabulary, key, code)` per key this window bound, in the order the records that make
-    /// them durable are appended.
+    /// `(vocabulary, key, code)` per key bound, in the order the durable records are appended.
     pub(super) fresh: Vec<(String, String, u32)>,
 }
 
-/// Tell the operator what a window's keys created.
-///
-/// Under `value_set = "open"` a typo creates a permanent object rather than being refused, so the
-/// caller is told the count in its own 200 and the operator gets this line.
+/// Under `value_set = "open"` a typo creates a permanent object rather than a refusal, so the
+/// operator gets this line.
 fn log_minted_artifacts(minted_per_entry: &[u64], mint_records: &[WalRecord]) {
     let created: u64 = minted_per_entry.iter().sum();
     if created == 0 {
@@ -167,11 +148,7 @@ fn log_minted_artifacts(minted_per_entry: &[u64], mint_records: &[WalRecord]) {
 }
 
 /// Draw a code for every novel vocabulary key one positional cell list carries, and rewrite each
-/// such cell to its code at the column's declared width.
-///
-/// `columns` is the list the cells are positional against: the declared scalars for a row's own
-/// values, the owning group's families for its scoped tail. A key that is already bound costs a
-/// lookup and no copy; only a key this call draws is kept, for the record that binds it.
+/// cell to its code at the column's declared width.
 fn mint_cells<'a>(
     cells: &mut [WalScalar],
     columns: impl Iterator<Item = (&'a str, Option<&'a str>, ScalarType)>,
@@ -216,10 +193,7 @@ fn mint_cells<'a>(
 }
 
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
-/// mark did not move. `AllocError` is `Copy`, so every waiter gets the real one.
-///
-/// The one exit outside [`ClosingWindow`], because it is the one that has waiters and no closed
-/// entries to hold them: allocation is what produces an entry, and it is what failed.
+/// mark did not move. The one exit outside [`ClosingWindow`], since allocation is what failed.
 fn fail_allocation(
     health: &ExecutorHealth,
     error: AllocError,
@@ -253,19 +227,13 @@ pub(super) enum Admission {
     Admitted,
     /// It was answered outright (a replay, a join or a 409) and nothing was added to the window.
     Answered,
-    /// A conflicting external id forced the open window to close. The pass must yield to
-    /// `Executor::run`'s deny drain.
+    /// A conflicting external id forced the open window to close; the pass must yield to a deny.
     YieldedAfterClose,
 }
 
 impl Executor {
-    /// Drains the work queue into one commit window and closes it. Returns whether anything was
-    /// done, so [`Executor::run`] re-drains the deny lane instead of blocking.
-    ///
-    /// A window closes when it reaches `commit_window_max_rows`, when the queue is empty, or when an
-    /// entry names an external id the window already holds. The row bound is checked inside the
-    /// drain, because under load the queue never empties. Every close returns to the run loop, which
-    /// is what bounds a deny's wait to the window in front of it: do not keep draining after a close.
+    /// Drains the work queue into one commit window and closes it, returning whether anything was
+    /// done. Closes at `commit_window_max_rows`, an empty queue, or a conflicting external id.
     pub(super) fn run_work_pass(&mut self) -> bool {
         let max_rows = self.health.commit_window_max_rows();
         let mut window: CommitWindow<Reply<Ingested>> = CommitWindow::new(self.next_window_seq());
@@ -279,10 +247,7 @@ impl Executor {
             let Ok(work) = self.queues.work.try_recv() else {
                 break;
             };
-            // Only a lifecycle command rides the window. Everything else reads or replaces state
-            // an open window is holding back — a publication swaps the whole generation, and a
-            // suggestion-index pass reads the live minter a minting ingest has not published — so
-            // the open window closes first.
+            // Anything but a lifecycle command reads or replaces state the window is holding back.
             if !matches!(work, ExecutorWork::Lifecycle(_)) && !window.is_empty() {
                 window = self.close_and_reopen(window);
             }
@@ -326,9 +291,7 @@ impl Executor {
                 reply,
             } = command
             else {
-                // Applies immediately while a window holding earlier ingest is still open, so WAL
-                // append order stops equalling submission order: tolerable here since none of
-                // these touch the buffer or swap the generation.
+                // Tolerable while a window is open: none of these touch the buffer or the swap.
                 self.execute(command);
                 self.health.note_work_finished();
                 did_work = true;
@@ -353,11 +316,8 @@ impl Executor {
         did_work
     }
 
-    /// Close `window` and return its replacement.
-    ///
-    /// `CommitWindow::new` must stamp the replacement's `opened_at` after `close_window` runs, not
-    /// before: stamped first, a replacement would charge its predecessor's whole service to itself,
-    /// doubling `record_window_service` and the `retry_after_s` a shed client is told.
+    /// Close `window` and return its replacement, stamped after the close: stamped first, the
+    /// replacement would charge its predecessor's whole service to itself.
     pub(super) fn close_and_reopen(&mut self, window: CommitWindow<Reply<Ingested>>) -> CommitWindow<Reply<Ingested>> {
         self.close_window(window);
         CommitWindow::new(self.next_window_seq())
@@ -368,14 +328,9 @@ impl Executor {
         self.window_seq
     }
 
-    /// The batch-id state machine, evaluated on the executor.
-    ///
-    /// Takes the open window by value and hands it back, possibly replaced, so the conflict path
-    /// cannot construct the replacement before the close it replaces.
-    ///
-    /// Lookup order is durable index, then open window, then unknown, evaluated here rather than in
-    /// the handler: between a handler check and the enqueue the window can close, so a retry that
-    /// saw unknown and then enqueued into a fresh window would have double-allocated.
+    /// The batch-id state machine, evaluated on the executor rather than the handler: between a
+    /// handler check and the enqueue the window can close, so a retry that saw unknown could
+    /// double-allocate into a fresh window.
     pub(super) fn admit_ingest(
         &mut self,
         mut window: CommitWindow<Reply<Ingested>>,
@@ -441,13 +396,9 @@ impl Executor {
         }
     }
 
-    /// The external-id admission check, on the one thread that also performs the inserts. `None`
-    /// means the caller has already been answered. This check reads state written at apply, which
-    /// is why an entry naming an external id the open window holds must close it first.
-    ///
-    /// The membership column's keys resolve here too, and a bad one refuses the whole batch: one
-    /// caller's typo must not refuse another caller's rows in the same window. On an open layer the
-    /// same key mints, but its ordinal is not claimed here; see `Executor::mint_records`.
+    /// The external-id admission check. `None` means the caller has already been answered. This
+    /// reads state written at apply, which is why an entry naming an id the open window holds must
+    /// close it first.
     pub(super) fn admit(
         &mut self,
         rows: Vec<UnallocatedRow>,
@@ -456,9 +407,7 @@ impl Executor {
         artifacts: tessera_lifecycle::BatchArtifacts,
         reply: Reply<Ingested>,
     ) -> Option<WindowEntry<Reply<Ingested>>> {
-        // The fail-closed backstop for the widened check-to-apply race, read from the same
-        // generation the apply below clones from, so the deleted-holder exemption cannot race
-        // its own delete.
+        // From the same generation the apply below clones, so the exemption cannot race a delete.
         let generation = self.generation.load();
         let mut rows = rows;
         let collisions = self.live.established_collisions(
@@ -508,16 +457,8 @@ impl Executor {
         })
     }
 
-    /// Pad every row to the declared schema and draw a code for every discovered-vocabulary key
-    /// the window carries, in place and before anything is appended.
-    ///
-    /// The bindings are a mutable copy of the published ones, which becomes the next generation's
-    /// if the window survives. One copy for the whole window, not one per row: a second row naming
-    /// an already-minted-this-window key sees the first row's binding. Answers the copy and the
-    /// keys it drew, which the records at the head of the append make durable.
-    ///
-    /// The copy is a table of pointers: only a vocabulary this window mints into is copied, and
-    /// only where a published generation still holds it.
+    /// Pad every row to schema and draw a code for every discovered-vocabulary key, into one
+    /// mutable copy of the bindings shared by the whole window.
     pub(super) fn mint_window_codes(
         &self,
         closing: &mut ClosingWindow,
@@ -531,9 +472,7 @@ impl Executor {
         let mut fresh: Vec<(String, String, u32)> = Vec::new();
         for entry in closing.entries_mut() {
             for row in entry.rows_mut() {
-                // A row admitted under an earlier generation is padded here: a column declared
-                // since admission appended at the tail of `declared_scalars`. Before the mint
-                // below indexes by declared position, and before the append.
+                // A column declared since admission is appended at the tail of `declared_scalars`.
                 crate::attributes::pad_to_schema(&mut row.scalars, declared_scalars);
                 mint_cells(
                     &mut row.scalars,
@@ -543,7 +482,6 @@ impl Executor {
                     &mut vocabularies,
                     &mut fresh,
                 )?;
-                // The same mint, over the row's scoped tail.
                 let Some(families) = scoped_by_view.get(row.view.as_str()) else {
                     continue;
                 };
@@ -563,16 +501,10 @@ impl Executor {
         })
     }
 
-    /// Close a commit window: one signature-sorted allocation run, one WAL record per entry, one
-    /// fsync, one generation swap, then every waiter is acked. Allocation is unchanged from a
-    /// single batch's, except that the sort scope is the window.
-    ///
-    /// A failed window burns entity ids, exactly as a failed batch did: assignment precedes the
-    /// append, so ids given to a window whose append then fails are never issued again.
-    ///
-    /// An append or fsync failure applies nothing, in deliberate contrast to the deny path: the
-    /// apply-anyway rule is written for `Delete`/`Suppress` only. A restart does not undo the
-    /// refusal: replay discards every record past the last fsync.
+    /// Close a commit window: allocate, then one fsync over the vocabulary mints, the entries, the
+    /// artifact publications and the growths against them, in that order, since a mint must be
+    /// durable before the rows it colours and a publication must exist before anything addresses
+    /// it. A failure applies nothing, so ids given to a failed window are never reissued.
     pub(super) fn close_window(&mut self, window: CommitWindow<Reply<Ingested>>) {
         let entries = window.len() as u64;
         let started = window.opened_at();
@@ -580,8 +512,7 @@ impl Executor {
 
         let closed = match self.live.with_allocator(|a| window.allocate(a)) {
             Ok((closed, tally)) => {
-                // Recorded at the allocation rather than after the append: a window that allocates
-                // and then fails its append has still fragmented the entity axis this much.
+                // Recorded at allocation: a failed append still fragmented the entity axis.
                 self.health.record_fragmentation(tally);
                 closed
             }
@@ -600,7 +531,6 @@ impl Executor {
         } = match self.mint_window_codes(&mut closing) {
             Ok(minted) => minted,
             Err(e) => {
-                // Nothing has been appended yet, so the window has no effect.
                 let detail = e.to_string();
                 closing.fail_all(&self.health, || ExecError::VocabularyRefused {
                     detail: detail.clone(),
@@ -609,7 +539,6 @@ impl Executor {
             }
         };
 
-        // Prepared before anything is appended, so a refusal spends nothing.
         let (mut mint_records, minted_per_entry) = match self.mint_records(closing.entries_mut()) {
             Ok(minted) => minted,
             Err(detail) => {
@@ -619,8 +548,7 @@ impl Executor {
                 return;
             }
         };
-        // Runs after the vocabulary mint above, since a novel category key is a code only once
-        // that pass has drawn it, and the key an artifact is named by is the value's key.
+        // After the vocabulary mint above, since an artifact's key is a code only once drawn.
         match self.derive_records(closing.entries(), &vocabularies) {
             Ok(records) => mint_records.extend(records),
             Err(detail) => {
@@ -631,9 +559,7 @@ impl Executor {
             }
         }
 
-        // The joins this window's rows declared, prepared with everything else before anything is
-        // appended. A window carrying no join row reads no artifact: the store is only consulted
-        // for what a restating row might already be a member of.
+        // A window carrying no join row reads no artifact.
         let restating = joining_entities(closing.entries());
         let prepared = if restating.is_empty() {
             growth_records(closing.entries(), None)
@@ -658,10 +584,6 @@ impl Executor {
             }
         };
 
-        // One sequence, one fsync: the vocabulary mints first, so a mint is durable in the same
-        // commit as the rows it colours; then one record per entry in entries order, which is also
-        // apply order; then the artifact publications, since an artifact must exist before
-        // anything addresses it; then the growths against them.
         let vocabulary_records: Vec<WalRecord> = fresh_bindings
             .iter()
             .map(|(vocabulary, key, code)| WalRecord::VocabularyMint {
@@ -683,9 +605,7 @@ impl Executor {
         let positions = match self.append_and_sync(&durable, Some(mark)) {
             Ok(positions) => positions,
             Err(failure) => {
-                // Which entry the failure is blamed for: a vocabulary mint or a publication
-                // belongs to the window rather than to one entry, and a sync belongs to none of
-                // them, so all three blame the first.
+                // A mint, a publication, or a sync all belong to the window, not to one entry.
                 let blamed = match failure {
                     Undurable::Append { at, .. } if (entries_at..artifacts_at).contains(&at) => {
                         at - entries_at
@@ -721,8 +641,7 @@ impl Executor {
         closing.ack(&self.health, minted_per_entry);
     }
 
-    /// Index every entry of a committed window by its batch id, at the position of the record
-    /// that carries it. After the swap, so a replay can never see it swapped but not yet indexed.
+    /// Index every entry of a committed window by its batch id, after the swap.
     pub(super) fn record_accepted_batches(
         &mut self,
         closed: &[ClosedEntry<Reply<Ingested>>],
@@ -752,12 +671,8 @@ impl Executor {
     }
 
     /// Clone the buffer once, insert every entry in the window, publish once. The clone is
-    /// O(total buffered items), so a window of k entries pays it once instead of k times.
-    ///
-    /// `terms` is taken out of each entry rather than borrowed, since the ack needs `entity_ids`,
-    /// not terms. `vocabularies` is `close_window`'s locally mutated copy, published verbatim
-    /// rather than `Arc::clone(&generation.vocabularies)`: cloning the old `Arc` here would
-    /// silently discard every code this window just drew.
+    /// O(total buffered items), so a window of k entries pays it once. `vocabularies` is
+    /// `close_window`'s own mutated copy, published verbatim, not cloned from the published `Arc`.
     pub(super) fn apply_window(
         &self,
         closed: &mut [ClosedEntry<Reply<Ingested>>],
@@ -768,8 +683,7 @@ impl Executor {
         let started = std::time::Instant::now();
         let mut mark = StageMark::now();
         let generation = self.generation.load_full();
-        // The suggestion index's side map, grown by exactly the keys this window minted. Nothing
-        // is rebuilt: every other vocabulary's index is carried behind its `Arc`.
+        // Grown by exactly the keys this window minted; every other index carries forward.
         let suggest = generation.suggest.with_mints(
             &tessera_analyse::SuggestionFold::new(),
             &vocabularies,
@@ -779,8 +693,7 @@ impl Executor {
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
 
         let mut established = lock_recover(&self.live.established);
-        // Updated together in one critical section, so a `/control/changes` lookup and a
-        // `/v1/items` drill-down can never disagree about the same item.
+        // Updated together in one critical section, so the two can never disagree about an item.
         let mut established_inverse = lock_recover(&self.live.established_inverse);
         for (entry, wal_pos) in closed.iter_mut().zip(positions) {
             let terms = std::mem::take(&mut entry.terms);
@@ -803,8 +716,7 @@ impl Executor {
         drop(established_inverse);
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
-        // Published here, and at every other place buffer occupancy changes, so
-        // `/control/ingest`'s occupancy bound reads a figure the executor maintains.
+        // Published here, and everywhere else buffer occupancy changes.
         self.health
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
@@ -813,8 +725,6 @@ impl Executor {
             g.overlay_version = generation.overlay_version + 1;
             g.buffer = Arc::new(buffer);
             g.vocabularies = Arc::new(vocabularies);
-            // The one publication that changes the suggestion index, by the same mints that
-            // changed the bindings above. Every other publication carries the index forward.
             g.suggest = suggest;
         });
         self.publish(next, started);

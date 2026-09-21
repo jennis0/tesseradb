@@ -1,10 +1,7 @@
 use super::*;
 
-/// How often a degraded node retries WAL recovery. A second is short against the interval an
-/// operator would take to notice, and long enough that a genuinely dead device is retried sixty
-/// times a minute rather than continuously.
-///
-/// Not a latency bound on anything a caller sees: a degraded node still answers denies immediately.
+/// How often a degraded node retries WAL recovery. No caller waits on it: a degraded node still
+/// answers denies at once.
 pub(super) const WAL_RECOVERY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Why one [`Executor::append_and_sync`] run did not reach durability. The two are told apart
@@ -24,26 +21,19 @@ impl Undurable {
     }
 }
 
-/// The executor's WAL and what the executor remembers about it: where the log stood when this
-/// node last rotated it, and when the gauge was last walked.
-///
-/// Both are read off the WAL held here rather than passed in, so neither can be stamped from a
-/// position the log does not have.
+/// The executor's WAL, where the log stood at last rotation, and when the gauge was last walked.
 pub(in crate::write) struct ExecutorLog {
     pub(super) wal: ExecutorWal,
-    /// The sequence position after the last rotation, so a tick can tell whether the log has grown
-    /// since: the deny-only regime's rotation trigger.
+    /// So a tick can tell whether the log has grown since: the deny-only regime's rotation trigger.
     position_at_last_rotation: u64,
     /// When [`ExecutorLog::sample_due`] last let a walk begin, or `None` before the first one.
     last_sample: Option<std::time::Instant>,
-    /// Walks taken, published as [`WalGauge::samples`] so a reader can tell a refreshed reading
-    /// from one the rate limit held back.
+    /// Published as [`WalGauge::samples`], so a reader can tell a fresh reading from a stale one.
     samples: u64,
 }
 
 impl ExecutorLog {
-    /// Open over a WAL at `position`, which a freshly started node treats as its last rotation so
-    /// it rotates nothing until something is appended in this run.
+    /// Freshly started, so it rotates nothing until something is appended in this run.
     pub(in crate::write) fn new(wal: ExecutorWal, position: u64) -> Self {
         ExecutorLog {
             wal,
@@ -58,14 +48,13 @@ impl ExecutorLog {
         self.wal.position() != self.position_at_last_rotation
     }
 
-    /// Record that the log has just been rotated. Takes the position after the rotation, so the
-    /// next growth check counts only appends made after the snapshot it wrote.
+    /// Takes the position after the rotation, so the next growth check counts only later appends.
     fn mark_rotated(&mut self) {
         self.position_at_last_rotation = self.wal.position();
     }
 
-    /// Whether a gauge walk may begin, and the walk's number if it may. Stamped before the walk,
-    /// so a slow walk shortens the next interval rather than pushing it out.
+    /// The walk's number if one may begin now, stamped before the walk so a slow one shortens the
+    /// next interval rather than pushing it out.
     fn sample_due(&mut self, period: std::time::Duration) -> Option<u64> {
         if let Some(last) = self.last_sample {
             if last.elapsed() < period {
@@ -78,12 +67,8 @@ impl ExecutorLog {
     }
 }
 
-/// Which of a failed run's answers carries the real error.
-///
-/// The one the failure belongs to gets it; every other gets [`WalError::Poisoned`], which is
-/// precisely what its own append would have returned had it been attempted after the failure, and
-/// what the WAL will in fact return for every subsequent call. Consumed as the answers are made,
-/// so the real error is handed out exactly once.
+/// Which of a failed run's answers carries the real error; every other gets
+/// [`WalError::Poisoned`], what the WAL will in fact return for every call after the failure.
 pub(super) struct Blame {
     real: Option<WalError>,
     blamed: usize,
@@ -108,12 +93,9 @@ impl Blame {
 }
 
 impl Executor {
-    /// If the WAL is degraded and the degradation is one a discard can end, end it.
-    ///
-    /// By the time this runs every caller has been told its write is not durable, so making those
-    /// bytes durable afterwards would be fail-open: an exhausted deny window's `unsuppress` would
-    /// undo a suppression the operator was told still stood. The region is discarded instead. A
-    /// torn append does not recover: such a node stays `WalPoisoned` until restarted.
+    /// If the WAL is degraded and the degradation is one a discard can end, end it: every caller
+    /// has already been told its write is not durable, so making it durable now would be
+    /// fail-open. A torn append does not recover; such a node stays `WalPoisoned` until restarted.
     pub(super) fn recover_wal(&mut self) {
         if !self.log.wal.is_poisoned() {
             return;
@@ -121,11 +103,9 @@ impl Executor {
         if !self.log.wal.is_recoverable() {
             return;
         }
-        // Deliberately silent about failing: a log line per attempt would turn one storage fault
-        // into an unbounded stream of them.
         if self.log.wal.discard_undurable().is_ok() {
-            // The discard did not un-apply anything: every deletion and suppression applied under
-            // the apply-anyway rule is in force in memory with no record behind it.
+            // What the apply-anyway rule applied is now in force with no record behind it: the
+            // overlay is diverged, so no flush publishes and no WAL rotates until a restart.
             if !self.health.overlay_diverged.swap(true, Ordering::SeqCst) {
                 tracing::error!(
                     "ALARM: this node recovered its WAL in process, so its overlay now holds \
@@ -138,17 +118,9 @@ impl Executor {
         self.observe_wal();
     }
 
-    /// Append `records` in order and fsync once: the one path to durability, whichever lane asks
-    /// for it.
-    ///
-    /// Each record's position is read before its own append, because that is the only moment it
-    /// can be read, and the positions come back in input order; a rotation reclaims by them, so a
-    /// record that failed to append contributes none. On failure nothing the caller prepared is in
-    /// force; ids it reserved stay spent, so a torn append that replays cannot land them on
-    /// entities a later command also holds.
-    ///
-    /// `laps` times the appends against [`WriteStage::WalAppend`] and the sync against
-    /// [`WriteStage::WalFsync`] for the callers that measure them, and is `None` for the rest.
+    /// Append `records` in order and fsync once: the one path to durability. Each position is read
+    /// before its own append, since that is the bound rotation must not reclaim past. On failure
+    /// nothing the caller prepared is in force, and its reserved ids stay spent.
     pub(super) fn append_and_sync(
         &mut self,
         records: &[&WalRecord],
@@ -194,14 +166,9 @@ impl Executor {
         })
     }
 
-    /// Reclaim what the publication just made redundant: after the generation swap and never
-    /// before it, since rotation writes its snapshot before any deletion. The reclaim bound is the
-    /// buffer's oldest surviving row (`IngestBuffer::oldest_wal_pos`), refusing (`None`) rather
-    /// than guessing if any buffered row does not know its own position.
-    ///
-    /// Two gates: a poisoned WAL cannot be appended to at all, and a node whose overlay has
-    /// diverged from its durable WAL must rotate nothing, since writing a snapshot from that
-    /// overlay would make a 500'd, never-acked deny permanent. Nothing here is fatal.
+    /// Reclaim what the publication just made redundant, after the generation swap and never
+    /// before it. A poisoned WAL, or an overlay diverged from its durable WAL, rotates nothing:
+    /// writing a snapshot from a diverged overlay would make a never-acked deny permanent.
     pub(super) fn rotate_wal(&mut self) {
         if self.log.wal.is_poisoned() {
             return;
@@ -215,8 +182,7 @@ impl Executor {
         }
 
         let generation = self.generation.load();
-        // A stepped-down node reclaims nothing: its WAL members are the only recovery material
-        // for whatever the step-down shadowed.
+        // A stepped-down node reclaims nothing: its WAL members are its only recovery material.
         if generation
             .bundle
             .partitions
@@ -230,17 +196,14 @@ impl Executor {
             return;
         }
         let reclaim_below = match generation.buffer.oldest_wal_pos() {
-            // Nothing buffered: every ingest row has geometry, so the whole durable prefix is
-            // reclaimable.
+            // Nothing buffered: the whole durable prefix is reclaimable.
             None => self.log.wal.position(),
             Some(Some(oldest)) => oldest,
-            // A buffered row of unknown position pins the log: fail-safe by construction, since the
-            // sequence grows visibly rather than a record vanishing.
+            // A buffered row of unknown position pins the log: fail-safe rather than guessing.
             Some(None) => 0,
         };
-        // The oldest artifact publication pins the log too: a membership has no home outside the
-        // WAL, so reclaiming a member holding one destroys the only copy. Fail-closed: a log that
-        // grows is noticed where a membership that vanishes is not.
+        // The oldest unpublished artifact record pins the log too: a membership has no home
+        // outside the WAL.
         let reclaim_below = match self.live.artifacts_oldest_wal_pos() {
             Some(oldest) => reclaim_below.min(oldest),
             None => reclaim_below,
@@ -249,13 +212,10 @@ impl Executor {
         let snapshot = generation.overlay.snapshot();
         match self.log.wal.rotate(&snapshot, reclaim_below) {
             Ok(deleted) => {
-                // Post-rotation position, so the next growth check counts only appends made
-                // after the snapshot this rotation just wrote.
                 self.log.mark_rotated();
                 if !deleted.is_empty() {
-                    // The idempotency index follows the log it caches, so entries whose records
-                    // lay in the members just deleted go now: otherwise this process would answer
-                    // a batch id as a replay that the same node would call unknown after a restart.
+                    // The idempotency index follows the log it caches, or a replay could be
+                    // answered as unknown after a restart.
                     let forgotten = self.live.forget_batches_below(self.log.wal.retained_from());
                     tracing::info!(
                         members = ?self.log.wal.members(),
@@ -271,13 +231,8 @@ impl Executor {
         }
     }
 
-    /// Rotate at the tick when the log has grown and no flush publication is coming to do it: the
-    /// deny-only regime's rotation. Without this, a node that took denies without ever flushing
-    /// would seal nothing, snapshot nothing and reclaim nothing: an unbounded log replayed in full
-    /// at every restart.
-    ///
-    /// Gated on growth, so an idle node rotates nothing: a rotation writes an O(overlay) snapshot
-    /// and a new member, which would be churn for no reclaim on a quiet deployment.
+    /// The deny-only regime's rotation, without which a node that takes denies but never flushes
+    /// would replay an unbounded log at restart. Gated on growth, so an idle node rotates nothing.
     pub(super) fn rotate_if_grown(&mut self) {
         if !self.log.has_grown() {
             return;
@@ -287,10 +242,6 @@ impl Executor {
 
     /// Read the WAL's size and its rotation bound into [`ExecutorHealth::wal_gauge`], at most once
     /// per tick period. Rotates nothing, compares nothing against a limit, returns no decision.
-    ///
-    /// The cost is O(members): under a `growth` or `fill` pin a member accumulates per rotation for
-    /// as long as the fold that would release it is refused, so the walk gets dearer as the problem
-    /// gets worse. The rate limit below bounds it to once per `flush_max_age_secs`.
     pub(super) fn sample_wal_gauge(&mut self) {
         let period = std::time::Duration::from_secs(self.deps.flush_max_age_secs);
         let Some(samples) = self.log.sample_due(period) else {
@@ -308,10 +259,8 @@ impl Executor {
         });
     }
 
-    /// Mirror the WAL's own poison flag into the posture, in both directions.
-    ///
-    /// Asked of the WAL rather than remembered from the last error this loop happened to see, so
-    /// the posture cannot drift from the thing it describes.
+    /// Mirror the WAL's own poison flag into the posture, asked fresh rather than remembered, so
+    /// it cannot drift from the thing it describes.
     pub(super) fn observe_wal(&self) {
         self.health.mirror_wal(self.log.wal.is_poisoned());
     }

@@ -4,10 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::Arc;
 
-/// One kind of background work (a flush, a merge, a coalesce, a fold, a suggestion rebuild). At
-/// most one unit of a kind is in flight. A finished unit waits in the channel until the executor
-/// thread takes it, because only that thread publishes, and rings the doorbell so that thread
-/// wakes and takes it.
+/// One kind of background work. At most one unit of a kind is in flight. A finished unit waits in
+/// the channel until the executor thread takes it, since only that thread publishes.
 pub(in crate::write) struct Background<C> {
     in_flight: Arc<AtomicBool>,
     completed_pending: Arc<AtomicBool>,
@@ -81,17 +79,14 @@ impl<C> Background<C> {
         self.done.try_recv().ok()
     }
 
-    /// Clears the pending flag after a drain that took something. Not after an empty one: a
-    /// worker sets the flag before it sends, so clearing on an empty channel could erase the
-    /// flag of a unit about to arrive and let the executor sleep a full tick past it.
+    /// Clears the pending flag; called only after a drain that took something.
     pub(super) fn drained(&self) {
         self.completed_pending.store(false, Ordering::SeqCst);
     }
 }
 
 /// A unit in flight. Dropping it clears the in-flight flag, so a worker that fails, panics or
-/// never runs does not leave its kind blocked, and rings the doorbell, so the executor wakes to a
-/// dispatch the cleared flag now allows.
+/// never runs does not leave its kind blocked, and rings the doorbell.
 pub(super) struct InFlight<C> {
     in_flight: Arc<AtomicBool>,
     completed_pending: Arc<AtomicBool>,
@@ -100,11 +95,7 @@ pub(super) struct InFlight<C> {
 }
 
 impl<C> InFlight<C> {
-    /// Hands the finished unit to the executor and wakes it. The pending flag is set before the
-    /// send, so the executor never sees neither "in flight" nor "pending" while a unit is in the
-    /// channel, and the ring comes after it, so the wake it causes finds the flag already set.
-    ///
-    /// A full doorbell means a wake is already pending and a second token would add nothing.
+    /// Hands the finished unit to the executor and wakes it. The pending flag is set before this.
     pub(super) fn complete(&self, unit: C) {
         self.completed_pending.store(true, Ordering::SeqCst);
         let _ = self.submit.send(unit);
