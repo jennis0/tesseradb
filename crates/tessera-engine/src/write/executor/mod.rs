@@ -198,11 +198,10 @@ impl Executor {
         self.last_tick = std::time::Instant::now();
         self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
-        let flushable = generation
-            .buffer
-            .iter()
-            .filter(|(entity, _)| !generation.overlay.is_deleted(**entity))
-            .count();
+        // No deletion filter: the buffer never holds a deleted entity's own row. A live deletion
+        // drops its rows in the same swap that marks it deleted, and replay drops them before the
+        // buffer is published.
+        let flushable = generation.buffer.owning_entities();
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);

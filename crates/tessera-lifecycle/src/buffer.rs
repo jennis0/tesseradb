@@ -247,6 +247,11 @@ pub struct IngestBuffer {
     items: FxHashMap<EntityId, Arc<Vec<Arc<BufferedItem>>>>,
     /// Rows, not entities: what the occupancy bound counts and what a flush consumes.
     rows: usize,
+    /// Entities holding an own (non-join) row — exactly what [`Self::iter`] yields, maintained by
+    /// the three mutators that can change it rather than walked. A tick landing behind a flush
+    /// asks for this figure, and a walk of a million-row buffer on the executor thread is tens of
+    /// milliseconds in the one state where the buffer is that large.
+    owning: usize,
     /// The **entity-scoped** cells an accepted `POST /control/values` batch filled and no flush
     /// has written yet (`ingest.md` §1.4), keyed by the entity they fill.
     ///
@@ -309,6 +314,7 @@ impl IngestBuffer {
         IngestBuffer {
             items: FxHashMap::default(),
             rows: 0,
+            owning: 0,
             fills: FxHashMap::default(),
             scoped_fills: FxHashMap::default(),
         }
@@ -343,22 +349,41 @@ impl IngestBuffer {
         // `make_mut` on a fresh entry is in place (refcount one); on an entity a published
         // generation still holds, it copies that entity's list alone.
         let rows = Arc::make_mut(self.items.entry(row.entity_id).or_default());
+        let owned_before = owns_a_row(rows);
         // **One row per (entity, view), and a repeat replaces rather than accumulates.** The
         // ingest join refuses a second row in a view the entity is already in — that is the arm
         // the permutation *and* this buffer are both consulted for — so a replacement here is
         // replay meeting a row it has already seen, never two acked rows for one position.
-        if let Some(existing) = rows.iter_mut().find(|held| held.view == row.view) {
-            *existing = item;
-            return;
+        let added = match rows.iter_mut().find(|held| held.view == row.view) {
+            Some(existing) => {
+                *existing = item;
+                false
+            }
+            // The entity's own row goes first, a join after it, so `get` answers with the row that
+            // carries the entity's terms whatever order the two arrived in.
+            None => {
+                if row.join {
+                    rows.push(item);
+                } else {
+                    rows.insert(0, item);
+                }
+                true
+            }
+        };
+        let owned_after = owns_a_row(rows);
+        if added {
+            self.rows += 1;
         }
-        // The entity's own row goes first, a join after it, so `get` answers with the row that
-        // carries the entity's terms whatever order the two arrived in.
-        if row.join {
-            rows.push(item);
-        } else {
-            rows.insert(0, item);
+        self.note_own_row(owned_before, owned_after);
+    }
+
+    /// Carry [`Self::owning`] across one entity's list gaining or losing its own row.
+    fn note_own_row(&mut self, before: bool, after: bool) {
+        match (before, after) {
+            (false, true) => self.owning += 1,
+            (true, false) => self.owning -= 1,
+            _ => {}
         }
-        self.rows += 1;
     }
 
     /// Record which WAL position `entity`'s row arrived at. No-op if the entity is not buffered,
@@ -524,6 +549,7 @@ impl IngestBuffer {
     pub fn remove(&mut self, entity: EntityId) {
         if let Some(rows) = self.items.remove(&entity) {
             self.rows -= rows.len();
+            self.note_own_row(owns_a_row(&rows), false);
         }
         self.fills.remove(&entity);
         self.scoped_fills.retain(|(held, _), _| *held != entity);
@@ -541,9 +567,14 @@ impl IngestBuffer {
         };
         let before = rows.len();
         let rows = Arc::make_mut(rows);
+        let owned_before = owns_a_row(rows);
         rows.retain(|item| item.view != view);
-        self.rows -= before - rows.len();
-        if rows.is_empty() {
+        let owned_after = owns_a_row(rows);
+        let removed = before - rows.len();
+        let empty = rows.is_empty();
+        self.rows -= removed;
+        self.note_own_row(owned_before, owned_after);
+        if empty {
             self.items.remove(&entity);
         }
     }
@@ -618,9 +649,21 @@ impl IngestBuffer {
         self.rows
     }
 
+    /// How many entities [`Self::iter`] yields: those holding an own (non-join) row. Maintained,
+    /// so this is a read rather than a walk.
+    pub fn owning_entities(&self) -> usize {
+        self.owning
+    }
+
     pub fn is_empty(&self) -> bool {
         self.items.is_empty() && self.fills.is_empty() && self.scoped_fills.is_empty()
     }
+}
+
+/// Whether one entity's list carries the entity's own row, the one [`IngestBuffer::iter`] answers
+/// with.
+fn owns_a_row(rows: &[Arc<BufferedItem>]) -> bool {
+    rows.iter().any(|item| !item.join)
 }
 
 /// The older of two WAL positions, and `None` where either is unknown — `None` meaning "not
@@ -680,6 +723,60 @@ mod tests {
         assert_eq!(resolver.resolve(b"novel"), TermId::new(u32::MAX));
         // A second distinct novel descriptor gets the next (one lower) id.
         assert_eq!(resolver.resolve(b"novel-2"), TermId::new(u32::MAX - 1));
+    }
+
+    fn row(entity: u64, view: &str, join: bool) -> WalRow {
+        WalRow {
+            external_id: Some(format!("ext-{entity}-{view}").into_bytes()),
+            entity_id: EntityId::new(entity),
+            view: view.to_string(),
+            join,
+            descriptors: Vec::new(),
+            x: 0.0,
+            y: 0.0,
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+        }
+    }
+
+    /// The maintained count is what the walk answers, after every mutator that can move it.
+    #[test]
+    fn the_owning_count_is_the_walk() {
+        let mut buffer = IngestBuffer::new();
+        let check = |buffer: &IngestBuffer, at: &str| {
+            assert_eq!(
+                buffer.owning_entities(),
+                buffer.iter().count(),
+                "after {at}"
+            );
+        };
+
+        check(&buffer, "an empty buffer");
+        buffer.insert_row_with_terms(&row(1, "a", false), vec![TermId::new(1)]);
+        buffer.insert_row_with_terms(&row(1, "b", true), Vec::new());
+        check(&buffer, "an own row and a join of one entity");
+
+        // A join alone: the entity's own row lives in a segment, so the walk has no opinion on it.
+        buffer.insert_row_with_terms(&row(2, "b", true), Vec::new());
+        check(&buffer, "a join-only entity");
+
+        buffer.insert_row_with_terms(&row(3, "a", false), vec![TermId::new(2)]);
+        // A replay of a row already held replaces rather than accumulates.
+        buffer.insert_row_with_terms(&row(3, "a", false), vec![TermId::new(2)]);
+        check(&buffer, "a restated row");
+
+        buffer.remove_in_view(EntityId::new(1), "a");
+        check(&buffer, "the own row of an entity that keeps a join");
+        buffer.remove_in_view(EntityId::new(1), "b");
+        check(&buffer, "that entity's last row");
+
+        buffer.remove(EntityId::new(3));
+        check(&buffer, "a whole entity");
+        buffer.remove(EntityId::new(2));
+        check(&buffer, "a join-only entity removed whole");
+
+        assert_eq!(buffer.len(), 0);
+        assert_eq!(buffer.owning_entities(), 0);
     }
 
     /// Extension ids must never be able to collide with a dictionary ordinal,

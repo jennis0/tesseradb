@@ -794,7 +794,10 @@ fn predicate_layer(name: &str, view: &str, field: &str) -> tessera_types::layer:
 
 fn experiment_d(depths: &[usize], rounds: usize) {
     println!("\n== D: `tick_behind_flush`'s walk of the whole buffer ==");
-    println!("{:>10} {:>13} {:>13}", "buffered", "count ms", "ns/row");
+    println!(
+        "{:>10} {:>13} {:>13} {:>13}",
+        "buffered", "walk ms", "ns/row", "maintained ns"
+    );
     let overlay = Overlay::new();
     for depth in depths {
         let mut buffer = IngestBuffer::new();
@@ -822,16 +825,26 @@ fn experiment_d(depths: &[usize], rounds: usize) {
             best = best.min(at.elapsed().as_nanos() as u64);
             std::hint::black_box(flushable);
         }
+        // What the tick asks for now: a maintained count, read rather than walked.
+        let mut maintained = u64::MAX;
+        for _ in 0..rounds.max(5) {
+            let at = Instant::now();
+            let flushable = buffer.owning_entities();
+            maintained = maintained.min(at.elapsed().as_nanos() as u64);
+            std::hint::black_box(flushable);
+        }
         println!(
-            "{:>10} {:>13.4} {:>13.2}",
+            "{:>10} {:>13.4} {:>13.2} {:>13}",
             depth,
             ms(best),
-            best as f64 / (*depth).max(1) as f64
+            best as f64 / (*depth).max(1) as f64,
+            maintained,
         );
     }
     println!(
-        "One tick, not one window: it is paid only when a tick lands while a flush is in flight, \
-         and the overlay lookup is a Roaring `contains` per buffered entity."
+        "One tick, not one window: it is paid only when a tick lands while a flush is in flight. \
+         `walk` is the filtered walk with its Roaring `contains` per buffered entity; \
+         `maintained` is the counter the buffer keeps, which is what the tick reads."
     );
 }
 
