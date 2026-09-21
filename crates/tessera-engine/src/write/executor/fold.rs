@@ -1323,12 +1323,13 @@ impl Executor {
         stairs.record("17 reclaim");
         let cost = stairs.into_cost();
 
-        self.health.folds.fetch_add(1, Ordering::Relaxed);
         let (passes, fold_secs, staircase_rss) = self.health.record_fold_cost(
             cost,
             completed.attr_bytes_read,
             completed.attr_bytes_written,
         );
+        // After the cost, so a reader that sees the count move reads this fold's passes.
+        self.health.folds.fetch_add(1, Ordering::Relaxed);
         // One line per view: a group's keys are separate views over one dictionary, each paying
         // its own table and payload.
         for images in &completed.term_images {

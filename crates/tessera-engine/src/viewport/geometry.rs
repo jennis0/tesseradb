@@ -123,6 +123,7 @@ impl Engine {
             base,
             &view_data.row_space,
             denied,
+            generation.buffered_rows(view),
         );
         probe.lap(|t| &mut t.compose_ns);
 
@@ -414,6 +415,7 @@ impl Engine {
             Arc::clone(&geometry.projection),
             &view_data.row_space,
             denied,
+            generation.buffered_rows(view),
         );
         let segments = segments_with_row_bases(view, view_data)?;
         let mask_identity = self.mask_identity(session, &generation, &geometry);
@@ -456,6 +458,7 @@ impl Engine {
                 Arc::clone(&geometry.projection),
                 &view_data.row_space,
                 denied,
+                generation.buffered_rows(view),
             )
         };
         Ok((generation, mask))

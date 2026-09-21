@@ -141,7 +141,8 @@ fn mask_over_with(
     let base = Arc::new(RowProjection::walk(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let denied = tessera_engine::denied_rows_of(overlay, &perm);
-    let mask = compose(&satisfied, overlay, buffer, base, &perm, &denied);
+    let buffered = tessera_engine::buffered_rows_of(buffer, &perm);
+    let mask = compose(&satisfied, overlay, buffer, base, &perm, &denied, Some(&buffered));
     (temp, mask)
 }
 

@@ -261,7 +261,16 @@ impl Fixture {
         let base = Arc::new(RowProjection::walk(&fragment, &self.row_space));
         let buffer = IngestBuffer::new();
         let denied = denied_rows_of(overlay, &self.row_space);
-        let mask = compose(&satisfied, overlay, &buffer, base, &self.row_space, &denied);
+        let buffered = tessera_engine::buffered_rows_of(&buffer, &self.row_space);
+        let mask = compose(
+            &satisfied,
+            overlay,
+            &buffer,
+            base,
+            &self.row_space,
+            &denied,
+            Some(&buffered),
+        );
         (mask, satisfied, denied)
     }
 

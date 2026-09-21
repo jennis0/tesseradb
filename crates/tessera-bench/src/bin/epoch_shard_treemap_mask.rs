@@ -357,6 +357,7 @@ fn view_space_mask(map: &Treemap, scratch: &Path) -> EffectiveMask {
         Arc::new(RowProjection::from_rows(concat)),
         &space,
         &Bitmap::new(),
+        Some(&[]),
     )
 }
 

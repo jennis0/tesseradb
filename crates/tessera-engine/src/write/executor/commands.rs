@@ -923,9 +923,9 @@ impl Executor {
         self.health
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
-        let next = generation.with(|g| {
-            g.buffer = Arc::new(buffer);
-        });
+        // A values batch fills cells on rows the buffer already holds and buffers none of its own,
+        // so nothing joins the buffered-row lists here.
+        let next = generation.with_buffer(Arc::new(buffer), &[], |_| {});
         self.publish(next, started);
         // A values batch allocates no entity, so the index records none: the batch id and the
         // body hash are the whole of what a retry is answered off. Indexed at the values record's

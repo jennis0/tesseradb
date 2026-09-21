@@ -317,6 +317,33 @@ fn a_deep_deny_set_changes_no_answer() {
     );
 }
 
+/// An engine over `root` that flushes only when asked, with the switchboard its executor reads.
+/// Reopening over the same `tmp` reopens the same WAL, which is what a restart is here.
+fn engine_flushing_only_on_request(
+    tmp: &Path,
+    root: &Path,
+) -> (Engine, std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>) {
+    let mut engine = Engine::open(
+        root,
+        &tmp.join("cache"),
+        &tmp.join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            flush_max_items: usize::MAX,
+            max_merged_segment_bytes: None,
+            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config_uncapped()
+        },
+    )
+    .expect("engine opens");
+    let faults = std::sync::Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new());
+    engine
+        .start_write_executor_with_faults(64, std::sync::Arc::clone(&faults))
+        .expect("the executor starts once");
+    (engine, faults)
+}
+
 /// **A join row can publish before the entity's own row**, and the entity's mark in the joined
 /// view is drawn only by the buffer's `plus`.
 ///
@@ -330,29 +357,12 @@ fn a_deep_deny_set_changes_no_answer() {
 /// than waited for.
 #[test]
 fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
-    use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+    use tessera_lifecycle::faults::{PauseAction, PauseSite};
 
     const JOINED_VIEW: &str = "s1";
     let tmp = tempfile::TempDir::new().unwrap();
     let root = fixture(tmp.path());
-    let mut engine = Engine::open(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
-        EngineConfig {
-            flush_max_age_secs: 3600,
-            flush_max_items: usize::MAX,
-            max_merged_segment_bytes: None,
-            compaction: tessera_engine::CompactionSchedule::off(),
-            ..config_uncapped()
-        },
-    )
-    .expect("engine opens");
-    let faults = std::sync::Arc::new(FaultSwitchboard::new());
-    engine
-        .start_write_executor_with_faults(64, std::sync::Arc::clone(&faults))
-        .expect("the executor starts once");
+    let (engine, faults) = engine_flushing_only_on_request(tmp.path(), &root);
 
     engine
         .create_plain_view(tessera_engine::PlainViewDeclaration {
@@ -454,4 +464,243 @@ fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
     assert_eq!(counted, 1, "and counts only the anchor");
 
     faults.release();
+}
+
+/// **The whole life of one entry whose join publishes before its own row**, asserted by what two
+/// viewers are served at every step.
+///
+/// The state the `compose` walk exists for is assembled once, at the top, and then carried through
+/// an unrelated ingest, a suppression, its lift, the entity's own flush and two restarts. Every
+/// step asserts the served answer for a session holding the entity's term and for one holding none:
+/// a walk that lost the entry would blank it for the entitled viewer, and one that stopped
+/// consulting the overlay would serve it to the unentitled one.
+///
+/// The executor is killed at `s0`'s manifest seam rather than parked, because a parked executor
+/// takes no writes: nothing durable names that publication's files, so the restart below replays
+/// into exactly the state a park would have held.
+#[test]
+fn an_entrys_whole_life_serves_the_same_answer_at_every_step() {
+    use tessera_lifecycle::faults::{PauseAction, PauseSite};
+
+    const JOINED_VIEW: &str = "s1";
+    const WHOLE: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
+
+    /// What one credential is served in `view`: the summed visible count, and the marks drawn.
+    /// A fresh session per call, as a viewer arriving now would have.
+    fn served(
+        engine: &Engine,
+        credential: &[u8],
+        view: &str,
+    ) -> (u64, std::collections::HashSet<u64>) {
+        let session = engine.authorise(credential).expect("the credential authorises");
+        let response = engine
+            .viewport(
+                &session,
+                ViewportRequest::new(view, 4, WHOLE, N_ITEMS as usize),
+            )
+            .expect("a viewport");
+        (
+            response.tiles.iter().map(|t| t.visible).sum(),
+            response.points.iter().map(|(id, _)| id.raw()).collect(),
+        )
+    }
+
+    fn row_in_view(engine: &Engine, view: &str, entity: EntityId) -> Option<u32> {
+        engine
+            .generation()
+            .bundle
+            .partitions
+            .values()
+            .find_map(|p| p.views.get(view))
+            .expect("the view is in the generation")
+            .row_space
+            .row_of(entity)
+            .map(|row| row.raw())
+    }
+
+    /// **The premise the `minus` side leans on**: no fragment covers an entity whose own row is
+    /// unflushed, so the row a join published for it is outside the base projection and only the
+    /// walk's `plus` can draw it. Asserted of the composed mask's own parts, at each step where the
+    /// entity's own row is still buffered.
+    fn assert_drawn_only_by_the_diff(
+        engine: &Engine,
+        credential: &[u8],
+        view: &str,
+        entity: EntityId,
+    ) {
+        let session = engine.authorise(credential).expect("the credential authorises");
+        let (_, mask) = engine.composed_mask(&session, view).expect("a composed mask");
+        let row = row_in_view(engine, view, entity).expect("the join row published");
+        let (base, _, plus, _) = mask.parts();
+        assert!(
+            !base.contains(row),
+            "a buffered entity is in no fragment, so its row cannot be in the base projection"
+        );
+        assert!(plus.contains(row), "the walk's `plus` is what draws it");
+    }
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture(tmp.path());
+    let entitled = full_coverage_credential();
+    let unentitled = subset_credential();
+
+    // One row into each view, in one window, so both views have a plan at the same tick. The
+    // anchor holds the older entity id — ids are assigned by signature then external id, and
+    // "anchor" sorts below "joiner" — so `s1`'s plan is the one the dispatch sends first.
+    let joiner = {
+        let (engine, faults) = engine_flushing_only_on_request(tmp.path(), &root);
+        engine
+            .create_plain_view(tessera_engine::PlainViewDeclaration {
+                name: JOINED_VIEW.to_string(),
+                title: None,
+                projection: "none".to_string(),
+                frame: tessera_engine::DeclaredFrame {
+                    x_min: 0.0,
+                    x_max: 1000.0,
+                    y_min: 0.0,
+                    y_max: 1000.0,
+                },
+                visibility: None,
+                point_default: None,
+            })
+            .expect("the view is created");
+        tick(&engine);
+
+        let ingest_into = |batch: &str, view: &str, external_id: &str, descriptors: Vec<Vec<u8>>| {
+            let row = UnallocatedRow {
+                external_id: Some(external_id.as_bytes().to_vec()),
+                view: view.to_string(),
+                join: None,
+                x: 5.0,
+                y: 5.0,
+                scalars: Vec::new(),
+                terms: engine.resolve_terms(&descriptors),
+                descriptors,
+                scoped: Vec::new(),
+            };
+            engine
+                .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
+                .expect("ingest is accepted")[0]
+        };
+        ingest_into(
+            "b-anchor",
+            JOINED_VIEW,
+            "anchor",
+            vec![b"0".to_vec(), b"1".to_vec()],
+        );
+        let joiner = ingest_into("b-own", "s0", "joiner", vec![b"0".to_vec()]);
+        ingest_into("b-join", JOINED_VIEW, "joiner", vec![b"0".to_vec()]);
+
+        // `s1` publishes; `s0`'s publication dies at the seam with its files on disc and nothing
+        // durable naming them.
+        faults.arm_pause_after(PauseSite::BeforeManifestPublish, PauseAction::Panic, 1);
+        engine.request_flush();
+        faults.await_arrivals(PauseSite::BeforeManifestPublish, 2, Duration::from_secs(30));
+        wait_until("the executor's death is reported", || {
+            engine.write_executor_posture() == tessera_engine::ExecutorPosture::Dead
+        });
+
+        assert!(
+            row_in_view(&engine, JOINED_VIEW, joiner).is_some(),
+            "the join row published, so the entity has a row in the joined view"
+        );
+        assert!(
+            row_in_view(&engine, "s0", joiner).is_none(),
+            "its own row is still buffered: `s0` is the publication that died"
+        );
+        faults.release();
+        joiner
+    };
+
+    let mark = {
+        let (engine, _faults) = engine_flushing_only_on_request(tmp.path(), &root);
+        let mark = engine.tessera_id_of(joiner).expect("identity is computable").raw();
+
+        // Restart one, before the entity's own flush: replay buffers its own row again, and the
+        // join row it dropped is the one `s1` already holds.
+        assert!(
+            row_in_view(&engine, JOINED_VIEW, joiner).is_some()
+                && row_in_view(&engine, "s0", joiner).is_none(),
+            "the restart replayed into the state the death left"
+        );
+        let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+        assert!(drawn.contains(&mark), "drawn from the buffer after a restart");
+        assert_eq!(counted, 2, "and counted beside the anchor");
+        let (counted, drawn) = served(&engine, &unentitled, JOINED_VIEW);
+        assert!(!drawn.contains(&mark), "and served to nobody who holds none of its terms");
+        assert_eq!(counted, 1);
+        assert_drawn_only_by_the_diff(&engine, &entitled, JOINED_VIEW, joiner);
+
+        // Unrelated rows, which buffer beside it and move nothing it is served.
+        let mut unrelated = Vec::new();
+        for n in 0..3u32 {
+            let row = UnallocatedRow {
+                external_id: Some(format!("unrelated-{n}").into_bytes()),
+                view: JOINED_VIEW.to_string(),
+                join: None,
+                x: 5.0,
+                y: 5.0,
+                scalars: Vec::new(),
+                terms: engine.resolve_terms(&[b"0".to_vec()]),
+                descriptors: vec![b"0".to_vec()],
+                scoped: Vec::new(),
+            };
+            unrelated.extend(
+                engine
+                    .accept_ingest(vec![row], format!("b-unrelated-{n}"), [0u8; 32])
+                    .expect("ingest is accepted"),
+            );
+        }
+        let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+        assert!(drawn.contains(&mark), "still drawn with three more rows buffered");
+        assert_eq!(counted, 2, "and the unflushed rows are drawn for nobody");
+        assert_drawn_only_by_the_diff(&engine, &entitled, JOINED_VIEW, joiner);
+
+        // Suppressed: gone for everyone, from the moment it is accepted.
+        change(&engine, joiner, ChangeOp::Suppress);
+        let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+        assert!(!drawn.contains(&mark), "a suppression takes the mark off the map");
+        assert_eq!(counted, 1);
+        assert_eq!(served(&engine, &unentitled, JOINED_VIEW).0, 1);
+
+        // Lifted: its own terms decide again.
+        change(&engine, joiner, ChangeOp::Unsuppress);
+        let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+        assert!(drawn.contains(&mark), "the lift restores the buffered verdict");
+        assert_eq!(counted, 2);
+        assert!(!served(&engine, &unentitled, JOINED_VIEW).1.contains(&mark));
+        assert_drawn_only_by_the_diff(&engine, &entitled, JOINED_VIEW, joiner);
+
+        // Its own row flushes: the same answer, now from the fragment rather than the diff. One
+        // view publishes per tick, so the buffer is emptied a view at a time.
+        let published = |engine: &Engine| {
+            row_in_view(engine, "s0", joiner).is_some()
+                && unrelated
+                    .iter()
+                    .all(|e| row_in_view(engine, JOINED_VIEW, *e).is_some())
+        };
+        for _ in 0..4 {
+            if published(&engine) {
+                break;
+            }
+            flush(&engine);
+        }
+        assert!(published(&engine), "every buffered row reached a segment");
+        let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+        assert!(drawn.contains(&mark), "drawn from the fragment after its own flush");
+        assert_eq!(counted, 5, "with the three unrelated rows now published too");
+        let (counted, drawn) = served(&engine, &unentitled, JOINED_VIEW);
+        assert!(!drawn.contains(&mark), "and still served to nobody who holds none of its terms");
+        assert_eq!(counted, 1);
+        mark
+    };
+
+    // Restart two, after the flush: the same answers again, now out of the fragment.
+    let (engine, _faults) = engine_flushing_only_on_request(tmp.path(), &root);
+    let (counted, drawn) = served(&engine, &entitled, JOINED_VIEW);
+    assert!(drawn.contains(&mark), "the restart serves what the flush left");
+    assert_eq!(counted, 5);
+    let (counted, drawn) = served(&engine, &unentitled, JOINED_VIEW);
+    assert!(!drawn.contains(&mark));
+    assert_eq!(counted, 1);
 }
