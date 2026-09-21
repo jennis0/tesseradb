@@ -54,13 +54,12 @@ from ._reports import (
 from ._toml import Inline, dumps
 from ._viewer import Viewer
 
-try:
-    import _tessera
-except ImportError:
-    #: The declaration check reads the declaration in this process where the extension module is
-    #: installed, and through `tessera check` where it is not. The two read one declaration with
-    #: one parser; what the extension adds is a refusal that names the block it is about.
-    _tessera = None
+#: The declaration check reads the declaration in this process where the extension module is
+#: installed, and through `tessera check` where it is not. The two read one declaration with one
+#: parser; what the extension adds is a refusal that names the block it is about. The wheel
+#: carries the object inside `tesseradb_native`, so a bare `import _tessera` finds it only once
+#: that package has been imported: `find_extension` is what knows the three places it can be.
+_tessera = _instance.find_extension()
 
 #: A temporary database goes here when the platform has a RAM-backed filesystem.
 RAM_BACKED = Path("/dev/shm")
