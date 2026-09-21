@@ -46,6 +46,120 @@ impl BatchState {
     }
 }
 
+/// A commit window that has closed, and every waiter it owes an answer to.
+///
+/// It is consumed by the answer: [`ClosingWindow::fail_all`], [`ClosingWindow::fail_wal`] and
+/// [`ClosingWindow::ack`] are the three exits a closed window has, and each one answers every
+/// waiter and times the window exactly once. A path that returns without one does not compile.
+pub(super) struct ClosingWindow {
+    closed: Vec<ClosedEntry<Reply<Ingested>>>,
+    /// Entries, not rows: what the service estimate is per.
+    entries: u64,
+    /// When the window opened, so the service covers the wait as well as the close.
+    started: std::time::Instant,
+}
+
+impl ClosingWindow {
+    pub(super) fn new(
+        closed: Vec<ClosedEntry<Reply<Ingested>>>,
+        entries: u64,
+        started: std::time::Instant,
+    ) -> Self {
+        ClosingWindow {
+            closed,
+            entries,
+            started,
+        }
+    }
+
+    pub(super) fn entries(&self) -> &[ClosedEntry<Reply<Ingested>>] {
+        &self.closed
+    }
+
+    /// The entries to rewrite in place before the append: padding, the vocabulary mint, the
+    /// ordinals a key acquired since admission.
+    pub(super) fn entries_mut(&mut self) -> &mut [ClosedEntry<Reply<Ingested>>] {
+        &mut self.closed
+    }
+
+    /// Refused after allocation and before the append, for a reason that is the whole window's:
+    /// every waiter gets it, and nothing was appended or applied.
+    pub(super) fn fail_all(self, health: &ExecutorHealth, error: impl Fn() -> ExecError) {
+        let waiters = self.closed.into_iter().map(|e| e.waiters).collect();
+        refuse_waiters(health, waiters, self.entries, self.started, error);
+    }
+
+    /// The append or fsync failed: apply nothing, and answer every waiter, the entry `blamed`
+    /// with the real error and the rest on [`Blame`]'s rule.
+    pub(super) fn fail_wal(self, health: &ExecutorHealth, blamed: usize, error: WalError) {
+        let mut blame = Blame::new(blamed, error);
+        for (i, entry) in self.closed.into_iter().enumerate() {
+            for (k, waiter) in entry.waiters.into_iter().enumerate() {
+                // One waiter of the blamed entry carries the real error; its joined retries were
+                // never appended separately and have nothing else to be told.
+                let e = if k == 0 { blame.at(i) } else { WalError::Poisoned };
+                waiter.fail(ExecError::Wal(e));
+            }
+        }
+        health.record_window_service(self.entries, self.started.elapsed().as_nanos() as u64);
+    }
+
+    /// Committed: every waiter of an entry gets that entry's ids and the artifacts it created.
+    ///
+    /// A death partway through leaves some waiters unacked; each gets
+    /// `SubmitError::ReceiptLost` → 500, never `ExecutorDead` → 503, since its ingest is durably
+    /// in force.
+    pub(super) fn ack(self, health: &ExecutorHealth, minted_per_entry: Vec<u64>) {
+        for (entry, minted) in self.closed.into_iter().zip(minted_per_entry) {
+            let ClosedEntry {
+                entity_ids,
+                mut waiters,
+                ..
+            } = entry;
+            let last = waiters
+                .pop()
+                .expect("an entry always has at least one waiter");
+            for waiter in waiters {
+                let entity_ids = entity_ids.clone();
+                waiter.ack(Ingested { entity_ids, minted });
+            }
+            last.ack(Ingested { entity_ids, minted });
+        }
+        health.record_window_service(self.entries, self.started.elapsed().as_nanos() as u64);
+    }
+}
+
+/// The window could not be allocated: nothing was appended, nothing applied, and the high-water
+/// mark did not move. `AllocError` is `Copy`, so every waiter gets the real one.
+///
+/// The one exit outside [`ClosingWindow`], because it is the one that has waiters and no closed
+/// entries to hold them: allocation is what produces an entry, and it is what failed.
+fn fail_allocation(
+    health: &ExecutorHealth,
+    error: AllocError,
+    waiters: Vec<Vec<Reply<Ingested>>>,
+    entries: u64,
+    started: std::time::Instant,
+) {
+    refuse_waiters(health, waiters, entries, started, || ExecError::Alloc(error));
+}
+
+/// Answer every waiter of a window that will not commit, and time the window.
+fn refuse_waiters(
+    health: &ExecutorHealth,
+    waiters: Vec<Vec<Reply<Ingested>>>,
+    entries: u64,
+    started: std::time::Instant,
+    error: impl Fn() -> ExecError,
+) {
+    for entry in waiters {
+        for waiter in entry {
+            waiter.fail(error());
+        }
+    }
+    health.record_window_service(entries, started.elapsed().as_nanos() as u64);
+}
+
 /// What [`Executor::admit_ingest`] did with a submission, as far as the drain loop needs to know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Admission {
@@ -335,11 +449,12 @@ impl Executor {
                 self.health.record_fragmentation(tally);
                 closed
             }
-            Err((e, waiters)) => {
-                self.fail_window_alloc(e, waiters, entries, started);
+            Err((error, waiters)) => {
+                fail_allocation(&self.health, error, waiters, entries, started);
                 return;
             }
         };
+        let mut closing = ClosingWindow::new(closed, entries, started);
 
         mark = self.health.lap(WriteStage::Allocate, mark);
 
@@ -353,8 +468,7 @@ impl Executor {
         // A row admitted under an earlier generation is padded here: a column declared since
         // admission appended at the tail of `declared_scalars`. Padded before the mint pass below
         // indexes by declared position, and before the append.
-        let mut closed = closed;
-        for entry in closed.iter_mut() {
+        for entry in closing.entries_mut() {
             for row in entry.rows_mut() {
                 crate::attributes::pad_to_schema(&mut row.scalars, &declared_scalars);
             }
@@ -364,7 +478,7 @@ impl Executor {
             scoped_families_by_view(&generation.bundle.manifest);
         let mut fresh_bindings: Vec<(String, String, u32)> = Vec::new();
         let mut mint_failed: Option<MintError> = None;
-        'minting: for entry in closed.iter_mut() {
+        'minting: for entry in closing.entries_mut() {
             for row in entry.rows_mut() {
                 for (index, declared) in declared_scalars.iter().enumerate() {
                     let Some(vocabulary) = declared.vocabulary.as_deref() else {
@@ -433,52 +547,37 @@ impl Executor {
         if let Some(e) = mint_failed {
             // Nothing has been appended yet, so the window has no effect.
             let detail = e.to_string();
-            self.fail_window(
-                closed,
-                || ExecError::VocabularyRefused {
-                    detail: detail.clone(),
-                },
-                entries,
-                started,
-            );
+            closing.fail_all(&self.health, || ExecError::VocabularyRefused {
+                detail: detail.clone(),
+            });
             return;
         }
 
         // Prepared before anything is appended, so a refusal spends nothing.
-        let (mut mint_records, minted_per_entry) = match self.mint_records(&mut closed) {
+        let (mut mint_records, minted_per_entry) = match self.mint_records(closing.entries_mut()) {
             Ok(minted) => minted,
             Err(detail) => {
-                self.fail_window(
-                    closed,
-                    || ExecError::LayerRefused {
-                        detail: detail.clone(),
-                    },
-                    entries,
-                    started,
-                );
+                closing.fail_all(&self.health, || ExecError::LayerRefused {
+                    detail: detail.clone(),
+                });
                 return;
             }
         };
         // Runs after the vocabulary mint above, since a novel category key is a code only once
         // that pass has drawn it, and the key an artifact is named by is the value's key.
-        match self.derive_records(&closed, &vocabularies) {
+        match self.derive_records(closing.entries(), &vocabularies) {
             Ok(records) => mint_records.extend(records),
             Err(detail) => {
-                self.fail_window(
-                    closed,
-                    || ExecError::LayerRefused {
-                        detail: detail.clone(),
-                    },
-                    entries,
-                    started,
-                );
+                closing.fail_all(&self.health, || ExecError::LayerRefused {
+                    detail: detail.clone(),
+                });
                 return;
             }
         }
 
         // The joins this window's rows declared, prepared with everything else before anything is
         // appended.
-        let growth = growth_records(&closed);
+        let growth = growth_records(closing.entries());
 
         // One sequence, one fsync: the vocabulary mints first, so a mint is durable in the same
         // commit as the rows it colours; then one record per entry in entries order, which is also
@@ -493,11 +592,11 @@ impl Executor {
             })
             .collect();
         let entries_at = vocabulary_records.len();
-        let artifacts_at = entries_at + closed.len();
+        let artifacts_at = entries_at + closing.entries().len();
         let growth_at = artifacts_at + mint_records.len();
         let durable: Vec<&WalRecord> = vocabulary_records
             .iter()
-            .chain(closed.iter().map(|entry| &entry.record))
+            .chain(closing.entries().iter().map(|entry| &entry.record))
             .chain(mint_records.iter())
             .chain(growth.iter().map(|(record, _)| record))
             .collect();
@@ -516,7 +615,7 @@ impl Executor {
                     _ => 0,
                 };
                 drop(durable);
-                self.fail_window_wal(closed, blamed, failure.into_error(), entries, started);
+                closing.fail_wal(&self.health, blamed, failure.into_error());
                 return;
             }
         };
@@ -525,7 +624,7 @@ impl Executor {
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
         self.apply_window(
-            &mut closed,
+            closing.entries_mut(),
             &positions[entries_at..artifacts_at],
             vocabularies,
             &fresh_bindings,
@@ -540,7 +639,11 @@ impl Executor {
 
         // Recorded after the swap, so a replay can never see it swapped but not yet indexed.
         let m = StageMark::now();
-        for (entry, wal_pos) in closed.iter().zip(&positions[entries_at..artifacts_at]) {
+        for (entry, wal_pos) in closing
+            .entries()
+            .iter()
+            .zip(&positions[entries_at..artifacts_at])
+        {
             let (batch_id, body_hash) = entry.batch_key();
             debug_assert_eq!(
                 tessera_lifecycle::batch_identity(&entry.record),
@@ -584,90 +687,7 @@ impl Executor {
             );
         }
 
-        // A death partway through this loop leaves some waiters unacked; each gets
-        // `SubmitError::ReceiptLost` → 500, never `ExecutorDead` → 503, since its ingest is
-        // durably in force.
-        for (entry, minted) in closed.into_iter().zip(minted_per_entry) {
-            let ClosedEntry {
-                entity_ids,
-                mut waiters,
-                ..
-            } = entry;
-            let last = waiters
-                .pop()
-                .expect("an entry always has at least one waiter");
-            for waiter in waiters {
-                let entity_ids = entity_ids.clone();
-                waiter.ack(Ingested { entity_ids, minted });
-            }
-            last.ack(Ingested { entity_ids, minted });
-        }
-
-        self.health
-            .record_window_service(entries, started.elapsed().as_nanos() as u64);
-    }
-
-    /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
-    /// mark did not move. `AllocError` is `Copy`, so every waiter gets the real one.
-    pub(super) fn fail_window_alloc(
-        &self,
-        error: AllocError,
-        waiters: Vec<Vec<Reply<Ingested>>>,
-        entries: u64,
-        started: std::time::Instant,
-    ) {
-        for entry in waiters {
-            for waiter in entry {
-                waiter.fail(ExecError::Alloc(error));
-            }
-        }
-        self.health
-            .record_window_service(entries, started.elapsed().as_nanos() as u64);
-    }
-
-    /// The window's append or fsync failed: apply nothing, and answer every waiter.
-    pub(super) fn fail_window_wal(
-        &self,
-        closed: Vec<ClosedEntry<Reply<Ingested>>>,
-        index: usize,
-        error: WalError,
-        entries: u64,
-        started: std::time::Instant,
-    ) {
-        let mut real = Some(error);
-        for (i, entry) in closed.into_iter().enumerate() {
-            for (k, waiter) in entry.waiters.into_iter().enumerate() {
-                // The real error goes to the entry the failure belongs to; every other waiter gets
-                // `Poisoned`, which is precisely what its own append would have returned had it
-                // been attempted after the failure, and what the WAL will in fact return for
-                // every subsequent call.
-                let e = if i == index && k == 0 {
-                    real.take().unwrap_or(WalError::Poisoned)
-                } else {
-                    WalError::Poisoned
-                };
-                waiter.fail(ExecError::Wal(e));
-            }
-        }
-        self.health
-            .record_window_service(entries, started.elapsed().as_nanos() as u64);
-    }
-
-    /// Answers every waiter of a window that was refused after allocation with the same error.
-    pub(super) fn fail_window(
-        &self,
-        closed: Vec<ClosedEntry<Reply<Ingested>>>,
-        error: impl Fn() -> ExecError,
-        entries: u64,
-        started: std::time::Instant,
-    ) {
-        for entry in closed {
-            for waiter in entry.waiters {
-                waiter.fail(error());
-            }
-        }
-        self.health
-            .record_window_service(entries, started.elapsed().as_nanos() as u64);
+        closing.ack(&self.health, minted_per_entry);
     }
 
     /// Clone the buffer once, insert every entry in the window, publish once. The clone is
