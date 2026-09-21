@@ -1893,9 +1893,13 @@ impl Executor {
         // anything is appended, against a mutable copy of the published bindings that becomes the
         // next generation's if the window survives. One copy for the whole window, not one per
         // row: a second row naming an already-minted-this-window key sees the first row's binding.
+        // The passes between the allocation and the append, lapped apart on their own mark: the
+        // outer `WalAppend` lap covers all of them and says nothing about which is which.
+        let mut m = StageMark::now();
         let generation = self.generation.load_full();
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
         let declared_scalars = generation.bundle.manifest.declared_scalars.clone();
+        m = self.health.lap(WriteStage::VocabularyClone, m);
         // A row admitted under an earlier generation is padded here: a column declared since
         // admission appended at the tail of `declared_scalars`. Padded before the mint pass below
         // indexes by declared position, and before the append.
@@ -1905,6 +1909,7 @@ impl Executor {
                 crate::attributes::pad_to_schema(&mut row.scalars, &declared_scalars);
             }
         }
+        m = self.health.lap(WriteStage::PadSchema, m);
         // The group-scoped families, by the view a row names, derived once for the window.
         let scoped_by_view: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
             scoped_families_by_view(&generation.bundle.manifest);
@@ -1976,6 +1981,7 @@ impl Executor {
                 }
             }
         }
+        m = self.health.lap(WriteStage::VocabularyMint, m);
         if let Some(e) = mint_failed {
             // Nothing has been appended yet, so the window has no effect.
             let detail = e.to_string();
@@ -2022,6 +2028,8 @@ impl Executor {
             }
         }
 
+        m = self.health.lap(WriteStage::DeriveRecords, m);
+
         // One record per entry, appended in entries order, which is also apply order.
         let mut failed_at: Option<(usize, WalError)> = None;
 
@@ -2038,6 +2046,8 @@ impl Executor {
             }
         }
 
+        m = self.health.lap(WriteStage::WalMints, m);
+
         // The position before each append is the only moment it can be read: afterwards the log
         // has moved on. A rotation reclaims by it below, so a failed append contributes none.
         let mut positions: Vec<u64> = Vec::with_capacity(closed.len());
@@ -2051,6 +2061,8 @@ impl Executor {
                 positions.push(at);
             }
         }
+
+        m = self.health.lap(WriteStage::WalBatches, m);
 
         // The joins this window's rows declared, appended behind the batch records. The
         // publications that minted come first, since an artifact must exist before anything
@@ -2077,6 +2089,7 @@ impl Executor {
                 growth.push((record, at));
             }
         }
+        self.health.lap(WriteStage::WalGrowth, m);
         mark = self.health.lap(WriteStage::WalAppend, mark);
         // One fsync for the whole window: the amortisation half of group commit.
         if failed_at.is_none() {

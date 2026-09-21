@@ -353,6 +353,8 @@ impl ArtifactProjections {
             };
             let started = std::time::Instant::now();
             let amended = Arc::make_mut(&mut rows);
+            let make_mut_ms = started.elapsed().as_millis() as u64;
+            let swept = std::time::Instant::now();
             let (added, rows_taken) = match source {
                 SegmentRows::Projected => {
                     amended.extend_by(store.level_in_view(layer, *level, view_key(view)), next)
@@ -376,7 +378,10 @@ impl ArtifactProjections {
                     )
                 }
             };
+            let sweep_ms = swept.elapsed().as_millis() as u64;
+            let derived = std::time::Instant::now();
             let lost = amended.amend_derived(&added, total_rows(next));
+            let amend_ms = derived.elapsed().as_millis() as u64;
             amended.covering(next);
             tracing::info!(
                 layer = %layer,
@@ -384,6 +389,9 @@ impl ArtifactProjections {
                 view = %view,
                 rows_taken,
                 labels_added = added.len(),
+                make_mut_ms,
+                sweep_ms,
+                amend_ms,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "a level's held row form took a flush's segment"
             );

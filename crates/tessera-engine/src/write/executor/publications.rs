@@ -1947,7 +1947,13 @@ impl Executor {
             .health
             .flush_lap(crate::flush::FlushStage::Compose, *mark);
 
+        // The four parts of this stage, lapped apart on their own mark; the outer `Manifest` lap
+        // still covers the whole of it.
+        let mut n = StageMark::now();
         let mut manifest = partition_data.manifest.clone();
+        n = self
+            .health
+            .flush_lap(crate::flush::FlushStage::ManifestClone, n);
         let manifest_n = match self.allocate_manifest_n() {
             Ok(n) => n,
             Err(e) => {
@@ -1988,6 +1994,9 @@ impl Executor {
         // on the WAL surviving: rotation reclaims their records, and without this the mark and
         // everything it covers go with them.
         self.write_live_state(&mut manifest, &live.vocabularies);
+        n = self
+            .health
+            .flush_lap(crate::flush::FlushStage::ManifestLiveState, n);
         // And the group-scoped columns this flush gave a view its first of. Carried forward and
         // appended to, never restated: the list is what a restart recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
@@ -2049,11 +2058,16 @@ impl Executor {
             .text_extents
             .extend(completed.text_extents.iter().cloned());
         write_deny_state(&mut manifest, &live.overlay);
+        n = self
+            .health
+            .flush_lap(crate::flush::FlushStage::ManifestDenyState, n);
         write_vocabulary_extensions(
             &mut manifest,
             &live.vocabularies,
             &live.bundle.manifest.vocabularies,
         );
+        self.health
+            .flush_lap(crate::flush::FlushStage::ManifestVocabExtensions, n);
         *mark = self
             .health
             .flush_lap(crate::flush::FlushStage::Manifest, *mark);

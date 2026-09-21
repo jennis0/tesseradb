@@ -57,9 +57,9 @@ impl ArtifactRows {
             None => TileIndex::build(&membership, total_rows(space)),
         };
         ArtifactRows {
-            records,
+            records: Arc::new(records),
             membership,
-            index,
+            index: Arc::new(index),
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
@@ -120,9 +120,9 @@ impl ArtifactRows {
             ));
             membership.hold_no_rows();
             return Some(ArtifactRows {
-                records,
+                records: Arc::new(records),
                 membership,
-                index,
+                index: Arc::new(index),
                 partition: None,
                 layout: ServingLayout::ArtifactMajor,
                 column: None,
@@ -157,9 +157,9 @@ impl ArtifactRows {
             None => TileIndex::build(&membership, total_rows(space)),
         };
         Some(ArtifactRows {
-            records,
+            records: Arc::new(records),
             membership,
-            index,
+            index: Arc::new(index),
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
@@ -190,9 +190,9 @@ impl ArtifactRows {
         }
         let index = TileIndex::build(&membership, row_count);
         ArtifactRows {
-            records,
+            records: Arc::new(records),
             membership,
-            index,
+            index: Arc::new(index),
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
@@ -234,13 +234,13 @@ impl ArtifactRows {
         };
         let index = TileIndex::build(&membership, 0);
         ArtifactRows {
-            records: ArtifactRecords {
+            records: Arc::new(ArtifactRecords {
                 attachments: vec![None; sets.len()],
                 parents: vec![Vec::new(); sets.len()],
                 declared: vec![Vec::new(); sets.len()],
-            },
+            }),
             membership,
-            index,
+            index: Arc::new(index),
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
@@ -314,7 +314,7 @@ impl ArtifactRows {
         if taken > 0 {
             self.layout = ServingLayout::ArtifactMajor;
             self.column = None;
-            self.index = TileIndex::build(&self.membership, total_rows(space));
+            self.index = Arc::new(TileIndex::build(&self.membership, total_rows(space)));
         }
         self.inherited = borrowed;
         taken

@@ -205,6 +205,17 @@ pub struct VocabularyMinter {
     /// alike. [`ABSENT_CODE`] is excluded by the draw itself rather than held here, so that a
     /// vocabulary's assigned count is the number of codes it has actually spent.
     assigned: BTreeSet<u32>,
+    /// Bindings and titles laid down since [`Self::seed_manifest`] returned — what a publication
+    /// could owe `vocabulary_extensions` beyond the bundle's own manifest.
+    ///
+    /// **A count, not the keys.** [`Vocabularies::extensions_beyond`] walks every binding to find
+    /// what a manifest does not already carry, and it is called at every publication; on a corpus
+    /// with half a million bound keys that was 188 ms a publication, on the write thread, to
+    /// discover nothing. Zero here says there is nothing to discover and the walk is skipped. The
+    /// keys themselves would answer the same question without the fallback walk, and a build mints
+    /// every value it discovers through `bind`, so holding them would put an interned key and an
+    /// ordered insert per value on the build's streaming path to buy a publication's time.
+    beyond_manifest: u64,
 }
 
 impl VocabularyMinter {
@@ -228,6 +239,7 @@ impl VocabularyMinter {
             by_code: HashMap::new(),
             titles: BTreeMap::new(),
             assigned: BTreeSet::new(),
+            beyond_manifest: 0,
         }
     }
 
@@ -272,6 +284,7 @@ impl VocabularyMinter {
         let key: Arc<str> = Arc::from(key);
         self.codes.insert(Arc::clone(&key), code);
         self.by_code.insert(code, key);
+        self.beyond_manifest += 1;
     }
 
     /// Seed a retired code (§3.4's `reserved`). Spent, so never drawn, but bound to no key.
@@ -297,6 +310,9 @@ impl VocabularyMinter {
         for &code in &vocabulary.reserved {
             self.seed_reserved(code);
         }
+        // Everything above came out of the manifest, so none of it is owed to an extension. This
+        // runs once, before any extension is seeded and before the first mint.
+        self.beyond_manifest = 0;
         Ok(())
     }
 
@@ -362,6 +378,11 @@ impl VocabularyMinter {
         self.codes.iter().map(|(k, &c)| (&**k, c))
     }
 
+    /// Whether anything is bound or titled beyond what [`Self::seed_manifest`] established.
+    pub fn has_bindings_beyond_manifest(&self) -> bool {
+        self.beyond_manifest > 0
+    }
+
     /// This value's presentation title, where an author wrote one. `None` is ordinary — the key is
     /// the display fallback, and a discovered value never has one.
     pub fn title_of(&self, key: &str) -> Option<&str> {
@@ -380,6 +401,8 @@ impl VocabularyMinter {
         // Keyed by the `Arc` the binding interned, so a title costs no second copy of its key.
         if let Some((interned, _)) = self.codes.get_key_value(key) {
             self.titles.insert(Arc::clone(interned), title);
+            // A title a manifest does not carry is owed to an extension exactly as a binding is.
+            self.beyond_manifest += 1;
         }
     }
 
@@ -524,7 +547,14 @@ impl From<BindingConflict> for SeedError {
 /// first draw; see this module's header.
 #[derive(Debug, Clone, Default)]
 pub struct Vocabularies {
-    by_name: BTreeMap<String, VocabularyMinter>,
+    /// **`Arc<VocabularyMinter>`, because this map is cloned once per commit window and a mint is
+    /// rare.** Each minter carries a key-to-code map, its reverse, the titles and the assigned
+    /// set, so a deep copy walks every binding the corpus has: 98 ms a window on a corpus with
+    /// half a million admin keys, paid by every window whether or not it mints anything. Behind an
+    /// `Arc` the clone copies a pointer per vocabulary, and [`Self::get_mut`] copies the one
+    /// vocabulary a mint touches. The snapshot property is unchanged: a minter a published
+    /// generation holds is never mutated in place, because `Arc::make_mut` copies it first.
+    by_name: BTreeMap<String, Arc<VocabularyMinter>>,
 }
 
 impl Vocabularies {
@@ -566,15 +596,16 @@ impl Vocabularies {
                 vocabulary.width,
             );
             minter.seed_manifest(vocabulary)?;
-            by_name.insert(vocabulary.name.clone(), minter);
+            by_name.insert(vocabulary.name.clone(), Arc::new(minter));
         }
 
         for extension in extensions {
-            let minter = by_name.get_mut(&extension.name).ok_or_else(|| {
-                SeedError::ExtensionWithoutVocabulary {
+            let minter = by_name
+                .get_mut(&extension.name)
+                .map(Arc::make_mut)
+                .ok_or_else(|| SeedError::ExtensionWithoutVocabulary {
                     vocabulary: extension.name.clone(),
-                }
-            })?;
+                })?;
             for value in &extension.values {
                 minter.seed_value(&value.key, value.code)?;
                 // **The extension's title wins over the manifest's**, the manifest having been
@@ -590,7 +621,7 @@ impl Vocabularies {
     }
 
     pub fn get(&self, name: &str) -> Option<&VocabularyMinter> {
-        self.by_name.get(name)
+        self.by_name.get(name).map(|minter| &**minter)
     }
 
     /// Add a vocabulary declared while the service runs (`ingest.md` §1.3), replacing any minter
@@ -601,11 +632,12 @@ impl Vocabularies {
     /// caller has already refused a redeclaration under a different identity, so a replacement
     /// here is the same vocabulary seen twice.
     pub fn insert(&mut self, minter: VocabularyMinter) {
-        self.by_name.insert(minter.name().to_string(), minter);
+        self.by_name
+            .insert(minter.name().to_string(), Arc::new(minter));
     }
 
     pub fn get_mut(&mut self, name: &str) -> Option<&mut VocabularyMinter> {
-        self.by_name.get_mut(name)
+        self.by_name.get_mut(name).map(Arc::make_mut)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -638,6 +670,11 @@ impl Vocabularies {
     ) -> Vec<VocabularyExtension> {
         let mut out = Vec::new();
         for (name, minter) in &self.by_name {
+            // A vocabulary that has bound nothing and retitled nothing since its manifest seed
+            // owes an extension nothing, so its bindings are not walked at all.
+            if !minter.has_bindings_beyond_manifest() {
+                continue;
+            }
             let held: BTreeMap<&str, Option<&str>> = vocabularies
                 .iter()
                 .find(|v| &v.name == name)
@@ -1013,6 +1050,18 @@ mod tests {
         assert_eq!(
             reopened.get("departments").unwrap().code_of("k9-unit"),
             Some(minted.code())
+        );
+        // And it still owes the extension those bindings came from. A publication after a restart
+        // carries `vocabulary_extensions` forward, so a view that offered nothing here would drop
+        // every binding made since the build at the first publication after one.
+        assert_eq!(
+            reopened
+                .extensions_beyond(&built)
+                .iter()
+                .flat_map(|extension| extension.values.iter())
+                .map(|value| (value.key.clone(), value.code))
+                .collect::<Vec<_>>(),
+            vec![("k9-unit".to_string(), minted.code())]
         );
     }
 

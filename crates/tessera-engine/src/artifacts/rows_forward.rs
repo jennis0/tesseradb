@@ -74,7 +74,7 @@ impl ArtifactRows {
         space: &RowSpace,
     ) -> Arc<Bitmap> {
         let idx = ordinal as usize;
-        self.records.put(idx, record);
+        Arc::make_mut(&mut self.records).put(idx, record);
         self.membership.put(idx, record, space)
     }
 
@@ -87,7 +87,7 @@ impl ArtifactRows {
         space: &RowSpace,
     ) -> Arc<Bitmap> {
         let idx = ordinal as usize;
-        self.records.put(idx, record);
+        Arc::make_mut(&mut self.records).put(idx, record);
         self.membership.put_resolved(idx, record, rows, space)
     }
 
@@ -125,7 +125,7 @@ impl ArtifactRows {
         if idx >= self.records.len() {
             return;
         }
-        self.records.put(idx, record);
+        Arc::make_mut(&mut self.records).put(idx, record);
         if whole {
             self.membership.project_generating(idx, record, space);
         }
@@ -273,10 +273,9 @@ impl ArtifactRows {
         // A column-only form has no row form to re-derive from, so the extents take the same delta
         // the column does: widening by `added` is exact where rows are only added ([`TileIndex::amend`]).
         if self.membership.rows_held() {
-            self.index = TileIndex::build(&self.membership, row_count);
+            self.index = Arc::new(TileIndex::build(&self.membership, row_count));
         } else {
-            self.index
-                .amend(added, self.membership.len() as u32, row_count);
+            Arc::make_mut(&mut self.index).amend(added, self.membership.len() as u32, row_count);
         }
         let Some(column) = &mut self.column else {
             return false;
@@ -389,9 +388,8 @@ impl ArtifactRows {
             return false;
         };
         let live = self.membership.live_slots();
-        self.index = TileIndex::of_bytes(tessera_store::membership::pack_tile_index(
-            row_count,
-            &listed.extents(&live),
+        self.index = Arc::new(TileIndex::of_bytes(
+            tessera_store::membership::pack_tile_index(row_count, &listed.extents(&live)),
         ));
         self.layout = listed.layout();
         self.column = Some(Arc::new(listed));

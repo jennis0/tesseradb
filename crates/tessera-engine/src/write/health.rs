@@ -229,8 +229,28 @@ pub struct ExecutorHealth {
 pub enum WriteStage {
     /// `CommitWindow::allocate` — entity-id assignment and the signature sort.
     Allocate,
-    /// The per-entry WAL append loop: serialise and write.
+    /// The per-entry WAL append loop: serialise and write. Three records go in it, and the
+    /// `Wal*` stages below say which.
     WalAppend,
+    /// Within [`WriteStage::WalAppend`]: the deep copy of the live vocabulary bindings the mint
+    /// pass draws against, and of the declared-scalar list beside it.
+    VocabularyClone,
+    /// Within [`WriteStage::WalAppend`]: padding every row's scalars to the declared schema.
+    PadSchema,
+    /// Within [`WriteStage::WalAppend`]: resolving every category value in every row to its code,
+    /// minting the keys the vocabulary does not hold.
+    VocabularyMint,
+    /// Within [`WriteStage::WalAppend`]: `mint_records` and `derive_records` — the artifacts the
+    /// window's rows named that no artifact holds, and the edges that come with them.
+    DeriveRecords,
+    /// Within [`WriteStage::WalAppend`]: the window's vocabulary mints and the records that create
+    /// the artifacts its rows named.
+    WalMints,
+    /// Within [`WriteStage::WalAppend`]: the `IngestBatch` records themselves.
+    WalBatches,
+    /// Within [`WriteStage::WalAppend`]: the membership growth records — one per `(layer, level)`,
+    /// built here from the window's joins and carrying a bitmap per artifact.
+    WalGrowth,
     /// One `fsync` for the whole window — group commit's amortisation half.
     WalFsync,
     /// `apply_window`'s deep copy of the ingest buffer (F3's operand).
@@ -263,10 +283,17 @@ pub enum WriteStage {
 }
 
 impl WriteStage {
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 20;
     pub const ALL: [WriteStage; Self::COUNT] = [
         WriteStage::Allocate,
         WriteStage::WalAppend,
+        WriteStage::VocabularyClone,
+        WriteStage::PadSchema,
+        WriteStage::VocabularyMint,
+        WriteStage::DeriveRecords,
+        WriteStage::WalMints,
+        WriteStage::WalBatches,
+        WriteStage::WalGrowth,
         WriteStage::WalFsync,
         WriteStage::ApplyBufferClone,
         WriteStage::ApplyRows,
@@ -283,6 +310,13 @@ impl WriteStage {
         match self {
             WriteStage::Allocate => "allocate",
             WriteStage::WalAppend => "wal_append",
+            WriteStage::VocabularyClone => "  .vocab_clone",
+            WriteStage::PadSchema => "  .pad_schema",
+            WriteStage::VocabularyMint => "  .vocab_mint",
+            WriteStage::DeriveRecords => "  .derive_records",
+            WriteStage::WalMints => "  .wal_mints",
+            WriteStage::WalBatches => "  .wal_batches",
+            WriteStage::WalGrowth => "  .wal_growth",
             WriteStage::WalFsync => "wal_fsync",
             WriteStage::ApplyBufferClone => "buffer_clone",
             WriteStage::ApplyRows => "apply_rows",

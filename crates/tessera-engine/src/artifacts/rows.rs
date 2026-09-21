@@ -69,11 +69,20 @@ pub struct MembershipRows {
 /// narrow extent settles an artifact whose members reach outside the viewport.
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactRows {
-    pub(super) records: ArtifactRecords,
+    /// **`Arc`, because a flush clones this form and never writes here.** A publication takes
+    /// `Arc::make_mut` on the whole form to extend one level's membership; the entity-space half
+    /// is untouched by that, and a deep copy of it is three vectors per artifact. That copy and
+    /// [`Self::index`]'s together were 82 ms a publication on a level holding a quarter of a
+    /// million admin divisions. The writers, [`ArtifactRows::put`] and its siblings, copy it then.
+    pub(super) records: Arc<ArtifactRecords>,
     pub(super) membership: MembershipRows,
     /// The hierarchical row-range index and the per-artifact extents — always present, because the
     /// walk is how candidacy is answered. A level with no artifacts has an empty one.
-    pub(super) index: TileIndex,
+    ///
+    /// **`Arc` for the same reason as [`Self::records`], and more sharply**: a flush's publication
+    /// rebuilds this wholesale a moment after cloning it ([`ArtifactRows::amend_derived`]), so the
+    /// copy of its per-node bitmaps was thrown away every time.
+    pub(super) index: Arc<TileIndex>,
     /// The containment partition, where this level has one. `None` under any plugin but the
     /// builtin — see [`crate::containment`] — and containment then stays on the masked-count route.
     pub(super) partition: Option<ContainmentPartition>,

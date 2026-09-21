@@ -37,9 +37,9 @@ pub(super) fn rows_of(sets: &[&[u32]]) -> ArtifactRows {
 pub(super) fn assembled(records: ArtifactRecords, membership: MembershipRows) -> ArtifactRows {
     let index = TileIndex::build(&membership, 0);
     ArtifactRows {
-        records,
+        records: std::sync::Arc::new(records),
         membership,
-        index,
+        index: std::sync::Arc::new(index),
         partition: None,
         layout: ServingLayout::ArtifactMajor,
         column: None,
