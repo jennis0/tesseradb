@@ -2212,6 +2212,17 @@ pub fn load(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
+/// [`discover`] then [`load`], with the path the deployment was found at.
+///
+/// Every caller that starts from "where is this deployment" wants both halves and the path, and
+/// keeping the pair here is what stops a second caller from discovering one file and loading
+/// another.
+pub fn open(explicit: Option<&Path>, from: &Path) -> std::result::Result<(PathBuf, Config), String> {
+    let path = discover(explicit, from).map_err(|e| e.to_string())?;
+    let config = load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok((path, config))
+}
+
 fn parse(text: &str) -> Result<Config> {
     let raw: RawConfig = toml::from_str(text)?;
 

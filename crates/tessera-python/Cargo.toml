@@ -1,0 +1,35 @@
+[package]
+name = "tessera-python"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[lib]
+# The Python module's own name: `import _tessera` loads this object, so the library name and the
+# `#[pymodule]` function's name must agree.
+name = "_tessera"
+# A Python extension module and nothing else. Nothing in the workspace may depend on this crate —
+# it is the top of the graph, above the server, as `tessera-bench` is — so there is no rlib to
+# link against, and `scripts/check-layers.sh` asserts the edge stays one-way.
+crate-type = ["cdylib"]
+# `pyo3/extension-module` leaves libpython's symbols to be resolved by the interpreter that loads
+# the object. That is what a wheel needs and it is fine for a cdylib, but an executable cannot be
+# linked with them undefined — so this crate has no Rust test target, and its behaviour is tested
+# from Python, through the module, by `check.sh`.
+test = false
+doctest = false
+
+[dependencies]
+# The declaration: parsing it, checking it, and the control-plane payloads it serialises to.
+# The whole crate, not a slice of it: the engine follows here, and the point of this module is
+# that the SDK runs the same code the binary runs rather than a second copy of the rules.
+tessera-build = { path = "../tessera-build" }
+# The deployment file — where the declaration is — is the server's to read, and `config::open`
+# is the pair the CLI's `check` verb resolves it with.
+tessera-server = { path = "../tessera-server" }
+serde_json = { workspace = true }
+
+[dependencies.pyo3]
+version = "0.29"
+# `abi3-py310` builds against the stable ABI, so one object serves every Python from 3.10 up.
+features = ["abi3-py310", "extension-module"]

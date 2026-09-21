@@ -1,0 +1,8 @@
+# The two artifacts the build hook copies in from a cargo build; never committed — 34 MB of
+# binary would otherwise land in git on every change to any crate.
+tesseradb_native/tessera
+tesseradb_native/tessera.exe
+tesseradb_native/_tessera.*
+dist/
+build/
+*.egg-info/

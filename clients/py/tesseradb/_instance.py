@@ -16,16 +16,21 @@ kill by name reaches every other server on the machine.
 from __future__ import annotations
 
 import atexit
+import importlib
 import json
 import os
 import queue
 import secrets
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
+from importlib.machinery import ExtensionFileLoader
+from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+from types import ModuleType
 
 from ._refusal import Refusal
 from ._toml import dumps
@@ -281,8 +286,10 @@ def _stop_everything() -> None:
 def find_binary() -> tuple[str, str]:
     """The `tessera` binary and where it came from (§7).
 
-    `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
-    directory, release before debug. At release a platform wheel carries it (§11.2 E).
+    `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else the `tesseradb-native`
+    platform wheel, else a checkout's target directory, release before debug. An explicit
+    override and a developer's own build both win over the wheel; the wheel is what makes a
+    fresh `pip install tesseradb` work.
     """
     named = os.environ.get("TESSERA_BIN")
     if named:
@@ -294,12 +301,46 @@ def find_binary() -> tuple[str, str]:
     found = which("tessera")
     if found:
         return found, "PATH"
+    try:
+        from tesseradb_native import binary_path
+    except ImportError:
+        pass
+    else:
+        return binary_path(), "the tesseradb-native wheel"
     for parent in Path(__file__).resolve().parents:
         for profile in ("release", "debug"):
             candidate = parent / "target" / profile / "tessera"
             if candidate.exists():
                 return str(candidate), f"this checkout's target/{profile}"
     raise Refusal(
-        "no `tessera` binary at TESSERA_BIN, on PATH, or in a checkout's target directory. "
-        "Build it with `cargo build --release -p tessera-cli`"
+        "no `tessera` binary at TESSERA_BIN, on PATH, in the tesseradb-native wheel, or in a "
+        "checkout's target directory. Install it with `pip install tesseradb-native`, or build "
+        "it with `cargo build --release -p tessera-cli`"
     )
+
+
+def find_extension() -> ModuleType | None:
+    """The `_tessera` extension module, or `None` where nothing carries it.
+
+    The same order as `find_binary`: whatever is already importable as `_tessera`, then the
+    `tesseradb-native` wheel, then a checkout's target directory — where cargo leaves the object
+    under `lib_tessera.so`, a name Python will not import, so it is loaded by path.
+    """
+    for name in ("_tessera", "tesseradb_native._tessera"):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            pass
+    for parent in Path(__file__).resolve().parents:
+        for profile in ("release", "debug"):
+            for built in ("lib_tessera.so", "lib_tessera.dylib", "_tessera.dll"):
+                candidate = parent / "target" / profile / built
+                if not candidate.exists():
+                    continue
+                loader = ExtensionFileLoader("_tessera", str(candidate))
+                spec = spec_from_loader("_tessera", loader)
+                module = module_from_spec(spec)
+                sys.modules["_tessera"] = module
+                loader.exec_module(module)
+                return module
+    return None

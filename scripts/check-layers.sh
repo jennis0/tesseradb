@@ -90,13 +90,20 @@ fi
 # `tessera-bench` sits ABOVE every other crate: it reaches across authz + store + spatial +
 # engine + build + server together, which no shipped crate may do. The edge must stay one-way, so
 # nothing may depend on it.
-for c in types plugin cache authz store spatial lifecycle engine wire server build cli; do
-  # Match a dependency declaration (`tessera-bench = ...` or a path to it), not prose -- these
-  # manifests discuss the harness in comments, and a substring grep flags its own documentation.
-  if grep -nE '^[[:space:]]*tessera-bench[[:space:]]*=|\.\./tessera-bench' "crates/tessera-$c/Cargo.toml" >/dev/null 2>&1; then
-    echo "FAIL: tessera-$c depends on tessera-bench; the measurement harness must stay a leaf"
-    fail=1
-  fi
+#
+# `tessera-python` sits there too, and for the same reason from the other end: it is a Python
+# extension module built as a cdylib, so there is no rlib for a workspace crate to link even if one
+# tried, and an edge into it would put the interpreter's ABI underneath the binary.
+for leaf in bench python; do
+  for c in types plugin cache authz store spatial lifecycle engine wire server build cli; do
+    # Match a dependency declaration (`tessera-bench = ...` or a path to it), not prose -- these
+    # manifests discuss the harness in comments, and a substring grep flags its own documentation.
+    if grep -nE "^[[:space:]]*tessera-$leaf[[:space:]]*=|\.\./tessera-$leaf" \
+         "crates/tessera-$c/Cargo.toml" >/dev/null 2>&1; then
+      echo "FAIL: tessera-$c depends on tessera-$leaf; it must stay a leaf"
+      fail=1
+    fi
+  done
 done
 
 # The stage-timing header must not exist in a shipped binary. `tessera-bench` enables
