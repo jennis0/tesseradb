@@ -74,12 +74,21 @@ env:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    env:
+      # `ld terminated with signal 7 [Bus error]` while linking two `tessera-engine` test binaries,
+      # with 32 GB of disk free, so the constraint is memory and not space. rustc links with `lld`,
+      # which writes its output through an `mmap`; a page the kernel cannot back raises SIGBUS
+      # rather than reporting a failed allocation. Cargo defaults to one job per core, so four of
+      # the workspace's largest binaries link at once on a 16 GB runner, each pulling in arrow,
+      # parquet, croaring and zstd statically. Two at a time halves the peak. The debug level stays
+      # `line-tables-only` (Cargo.toml) so a CI backtrace still names a line; drop that next if
+      # this is not enough.
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
-      # The workspace's 161 test binaries link to more than a stock runner has room for: the job
-      # died in `ld` with a bus error, which is how a full disk reaches a linker. The runner ships
-      # ~25 GB of toolchains this build never touches, and removing them is the whole fix — the
-      # debug level stays `line-tables-only` (Cargo.toml) so a CI backtrace still names a line.
+      # Headroom, not the fix: the runner ships ~25 GB of toolchains this build never touches, and
+      # 161 test binaries plus their incrementals fill what is left. Measured on this runner, the
+      # step takes / from 14 GB free to 32 GB.
       - name: make room for the test binaries
         run: |
           df -h /
