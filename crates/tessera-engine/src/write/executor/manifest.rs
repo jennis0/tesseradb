@@ -204,7 +204,7 @@ mod vocabulary_extensions_tests {
         ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension, VocabularyKind,
     };
 
-    pub(super) fn empty_vocabulary(name: &str) -> ManifestVocabulary {
+    fn empty_vocabulary(name: &str) -> ManifestVocabulary {
         ManifestVocabulary {
             name: name.to_string(),
             kind: VocabularyKind::Discovered,
@@ -218,7 +218,7 @@ mod vocabulary_extensions_tests {
     /// A carried binding must survive even when the live view has nothing to say about it: a write
     /// touching an unrelated vocabulary must not erase an extension already held.
     #[test]
-    pub(super) fn a_carried_extension_survives_a_write_the_live_view_recomputes_nothing_for() {
+    fn a_carried_extension_survives_a_write_the_live_view_recomputes_nothing_for() {
         let mut manifest = SegmentsManifest::empty();
         manifest.vocabulary_extensions.push(VocabularyExtension {
             name: "legacy".to_string(),
@@ -245,7 +245,7 @@ mod vocabulary_extensions_tests {
 
     /// A fresh mint is appended beside what is already carried, and a restated binding is not duplicated.
     #[test]
-    pub(super) fn a_fresh_binding_is_appended_beside_what_is_already_carried_and_not_duplicated() {
+    fn a_fresh_binding_is_appended_beside_what_is_already_carried_and_not_duplicated() {
         let mut manifest = SegmentsManifest::empty();
         manifest.vocabulary_extensions.push(VocabularyExtension {
             name: "department".to_string(),
