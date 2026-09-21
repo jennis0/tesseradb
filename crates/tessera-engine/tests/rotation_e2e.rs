@@ -11,7 +11,11 @@ mod common;
 use std::time::Duration;
 
 use common::*;
+use tessera_engine::Engine;
+use tessera_lifecycle::command::UnallocatedRow;
+use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::ChangeOp;
+use tessera_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -185,4 +189,170 @@ fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
         reopened.allocator_high_water() >= deleted.raw(),
         "the id stays burned (I9) — a deletion never returns one to the allocator"
     );
+}
+
+/// One row for `external_id` in `view`, for a batch of its own. A second view of an item already
+/// ingested is a join: admission resolves the external id to the entity it already names.
+fn ingest_into(engine: &Engine, batch: &str, external_id: &str, view: &str) -> EntityId {
+    let descriptors = vec![b"0".to_vec()];
+    let mut hash = [0u8; 32];
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
+        *slot = *byte;
+    }
+    let row = UnallocatedRow {
+        external_id: Some(external_id.as_bytes().to_vec()),
+        view: view.to_string(),
+        join: None,
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
+    };
+    engine
+        .accept_ingest(vec![row], batch.to_string(), hash)
+        .expect("the batch is accepted")[0]
+}
+
+/// A second plain view, so an item can hold a row in two of them.
+fn create_second_view(engine: &Engine) {
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+}
+
+/// Wake the reopened engine, and answer whether every member the restart inherited has gone.
+///
+/// A rotation reclaims below the buffer's oldest position, so a member holding a record nothing
+/// will ever consume stays for the life of the process, and so does every member after it.
+fn inherited_members_reclaimed(engine: &Engine, tmp: &std::path::Path, inherited: &[String]) {
+    ingest_into(engine, "wake", "ext-wake", "s0");
+    flush(engine);
+    wait_until("the inherited members to be reclaimed", WAIT, || {
+        let now = members(tmp);
+        !inherited.iter().any(|name| now.contains(name))
+    });
+}
+
+/// **A deleted entity's join row does not survive a restart, and does not pin the log.**
+///
+/// The live delete takes every row the entity holds, in whichever view. Replay rebuilds the buffer
+/// from the log and has to take the same set: a join carries no terms and is invisible to the
+/// entity-space walk, so a rule written over that walk leaves it behind — and no flush will ever
+/// consume a deleted entity's row, so it holds the rotation bound at its own position for the life
+/// of the process.
+#[test]
+fn a_deleted_entitys_join_row_is_not_rebuilt_at_a_restart() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+
+    let (deleted, inherited) = {
+        let engine = engine_at(tmp.path(), &root, 3600);
+        create_second_view(&engine);
+        let id = ingest_into(&engine, "b1", "ext-1", "s0");
+        flush(&engine);
+
+        // A row in the second view, unflushed, and then the delete that takes both.
+        assert_eq!(ingest_into(&engine, "b2", "ext-1", "s1"), id);
+        assert!(engine.generation().buffer.contains(id));
+        engine
+            .accept_change(id, ChangeOp::Delete)
+            .expect("the delete is accepted");
+        assert!(
+            !engine.generation().buffer.contains(id),
+            "the live path takes the join row with the rest"
+        );
+        (id, members(tmp.path()))
+    };
+
+    let reopened = engine_at(tmp.path(), &root, 1);
+    assert!(
+        !reopened.generation().buffer.contains(deleted),
+        "replay must take the join row too: nothing will ever flush it"
+    );
+    assert_eq!(
+        reopened.generation().buffer.len(),
+        0,
+        "and nothing else of the deleted entity is buffered either"
+    );
+    inherited_members_reclaimed(&reopened, tmp.path(), &inherited);
+}
+
+/// **The same for a values fill: a deleted entity's unflushed cells are not rebuilt either.**
+///
+/// A fill is not a row — it creates nothing and names an entity that exists — so an entity may hold
+/// one and no buffered row at all. It pins the log exactly as a row does, because the record is the
+/// only copy of the values until a flush writes them, and no flush writes a deleted entity's.
+#[test]
+fn a_deleted_entitys_values_fill_is_not_rebuilt_at_a_restart() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+
+    let (deleted, inherited) = {
+        let engine = engine_at(tmp.path(), &root, 3600);
+        engine
+            .declare_attribute(tessera_engine::AttributeRequest {
+                name: "note".to_string(),
+                title: None,
+                ty: "keyword".to_string(),
+                vocabulary: None,
+                analyser: None,
+                index: true,
+                render: false,
+                scope: tessera_types::layer::LayerScope::Entity,
+            })
+            .expect("the column is declared");
+        let id = ingest_into(&engine, "b1", "ext-1", "s0");
+        flush(&engine);
+        assert!(
+            !engine.generation().buffer.contains(id),
+            "the flush consumed the row, so the fill below is all the buffer holds for it"
+        );
+
+        engine
+            .fill_values(tessera_engine::ValuesRequest {
+                batch_id: "v1".to_string(),
+                body_hash: [1u8; 32],
+                view: "s0".to_string(),
+                columns: vec!["note".to_string()],
+                rows: vec![tessera_engine::IncomingValues {
+                    entity: id,
+                    values: vec![WalScalar::Utf8("a private note".to_string())],
+                }],
+                artifacts: Default::default(),
+            })
+            .expect("the fill is accepted");
+        assert_eq!(engine.generation().buffer.fill_count(), 1);
+        engine
+            .accept_change(id, ChangeOp::Delete)
+            .expect("the delete is accepted");
+        assert_eq!(
+            engine.generation().buffer.fill_count(),
+            0,
+            "the live path takes the fill with the rows"
+        );
+        (id, members(tmp.path()))
+    };
+
+    let reopened = engine_at(tmp.path(), &root, 1);
+    assert_eq!(
+        reopened.generation().buffer.fill_count(),
+        0,
+        "replay must take the deleted entity's fill too"
+    );
+    assert!(!reopened.generation().buffer.contains(deleted));
+    inherited_members_reclaimed(&reopened, tmp.path(), &inherited);
 }
