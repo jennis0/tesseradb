@@ -24,6 +24,60 @@ impl Undurable {
     }
 }
 
+/// The executor's WAL and what the executor remembers about it: where the log stood when this
+/// node last rotated it, and when the gauge was last walked.
+///
+/// Both are read off the WAL held here rather than passed in, so neither can be stamped from a
+/// position the log does not have.
+pub(in crate::write) struct ExecutorLog {
+    pub(super) wal: ExecutorWal,
+    /// The sequence position after the last rotation, so a tick can tell whether the log has grown
+    /// since: the deny-only regime's rotation trigger.
+    position_at_last_rotation: u64,
+    /// When [`ExecutorLog::sample_due`] last let a walk begin, or `None` before the first one.
+    last_sample: Option<std::time::Instant>,
+    /// Walks taken, published as [`WalGauge::samples`] so a reader can tell a refreshed reading
+    /// from one the rate limit held back.
+    samples: u64,
+}
+
+impl ExecutorLog {
+    /// Open over a WAL at `position`, which a freshly started node treats as its last rotation so
+    /// it rotates nothing until something is appended in this run.
+    pub(in crate::write) fn new(wal: ExecutorWal, position: u64) -> Self {
+        ExecutorLog {
+            wal,
+            position_at_last_rotation: position,
+            last_sample: None,
+            samples: 0,
+        }
+    }
+
+    /// Whether anything has been appended since the last rotation.
+    fn has_grown(&self) -> bool {
+        self.wal.position() != self.position_at_last_rotation
+    }
+
+    /// Record that the log has just been rotated. Takes the position after the rotation, so the
+    /// next growth check counts only appends made after the snapshot it wrote.
+    fn mark_rotated(&mut self) {
+        self.position_at_last_rotation = self.wal.position();
+    }
+
+    /// Whether a gauge walk may begin, and the walk's number if it may. Stamped before the walk,
+    /// so a slow walk shortens the next interval rather than pushing it out.
+    fn sample_due(&mut self, period: std::time::Duration) -> Option<u64> {
+        if let Some(last) = self.last_sample {
+            if last.elapsed() < period {
+                return None;
+            }
+        }
+        self.last_sample = Some(std::time::Instant::now());
+        self.samples += 1;
+        Some(self.samples)
+    }
+}
+
 /// Which of a failed run's answers carries the real error.
 ///
 /// The one the failure belongs to gets it; every other gets [`WalError::Poisoned`], which is
@@ -61,15 +115,15 @@ impl Executor {
     /// undo a suppression the operator was told still stood. The region is discarded instead. A
     /// torn append does not recover: such a node stays `WalPoisoned` until restarted.
     pub(super) fn recover_wal(&mut self) {
-        if !self.wal.is_poisoned() {
+        if !self.log.wal.is_poisoned() {
             return;
         }
-        if !self.wal.is_recoverable() {
+        if !self.log.wal.is_recoverable() {
             return;
         }
         // Deliberately silent about failing: a log line per attempt would turn one storage fault
         // into an unbounded stream of them.
-        if self.wal.discard_undurable().is_ok() {
+        if self.log.wal.discard_undurable().is_ok() {
             // The discard did not un-apply anything: every deletion and suppression applied under
             // the apply-anyway rule is in force in memory with no record behind it.
             if !self.health.overlay_diverged.swap(true, Ordering::SeqCst) {
@@ -103,8 +157,8 @@ impl Executor {
         let mut positions = Vec::with_capacity(records.len());
         let mut failed = None;
         for (at, record) in records.iter().enumerate() {
-            let before = self.wal.position();
-            if let Err(error) = self.wal.append(record) {
+            let before = self.log.wal.position();
+            if let Err(error) = self.log.wal.append(record) {
                 failed = Some(Undurable::Append { at, error });
                 break;
             }
@@ -112,7 +166,7 @@ impl Executor {
         }
         let mark = laps.map(|mark| self.health.lap(WriteStage::WalAppend, mark));
         if failed.is_none() {
-            if let Err(error) = self.wal.fsync() {
+            if let Err(error) = self.log.wal.fsync() {
                 failed = Some(Undurable::Fsync(error));
             }
         }
@@ -149,7 +203,7 @@ impl Executor {
     /// diverged from its durable WAL must rotate nothing, since writing a snapshot from that
     /// overlay would make a 500'd, never-acked deny permanent. Nothing here is fatal.
     pub(super) fn rotate_wal(&mut self) {
-        if self.wal.is_poisoned() {
+        if self.log.wal.is_poisoned() {
             return;
         }
         if !self.may_publish() {
@@ -178,7 +232,7 @@ impl Executor {
         let reclaim_below = match generation.buffer.oldest_wal_pos() {
             // Nothing buffered: every ingest row has geometry, so the whole durable prefix is
             // reclaimable.
-            None => self.wal.position(),
+            None => self.log.wal.position(),
             Some(Some(oldest)) => oldest,
             // A buffered row of unknown position pins the log: fail-safe by construction, since the
             // sequence grows visibly rather than a record vanishing.
@@ -193,18 +247,18 @@ impl Executor {
         };
 
         let snapshot = generation.overlay.snapshot();
-        match self.wal.rotate(&snapshot, reclaim_below) {
+        match self.log.wal.rotate(&snapshot, reclaim_below) {
             Ok(deleted) => {
                 // Post-rotation position, so the next growth check counts only appends made
                 // after the snapshot this rotation just wrote.
-                self.wal_position_at_last_rotation = self.wal.position();
+                self.log.mark_rotated();
                 if !deleted.is_empty() {
                     // The idempotency index follows the log it caches, so entries whose records
                     // lay in the members just deleted go now: otherwise this process would answer
                     // a batch id as a replay that the same node would call unknown after a restart.
-                    let forgotten = self.live.forget_batches_below(self.wal.retained_from());
+                    let forgotten = self.live.forget_batches_below(self.log.wal.retained_from());
                     tracing::info!(
-                        members = ?self.wal.members(),
+                        members = ?self.log.wal.members(),
                         reclaimed = ?deleted,
                         forgotten_batch_ids = forgotten,
                         "WAL members reclaimed below the oldest unconsumed row"
@@ -225,7 +279,7 @@ impl Executor {
     /// Gated on growth, so an idle node rotates nothing: a rotation writes an O(overlay) snapshot
     /// and a new member, which would be churn for no reclaim on a quiet deployment.
     pub(super) fn rotate_if_grown(&mut self) {
-        if self.wal.position() == self.wal_position_at_last_rotation {
+        if !self.log.has_grown() {
             return;
         }
         self.rotate_wal();
@@ -239,23 +293,18 @@ impl Executor {
     /// gets worse. The rate limit below bounds it to once per `flush_max_age_secs`.
     pub(super) fn sample_wal_gauge(&mut self) {
         let period = std::time::Duration::from_secs(self.deps.flush_max_age_secs);
-        if let Some(last) = self.last_wal_sample {
-            if last.elapsed() < period {
-                return;
-            }
-        }
-        // Before the walk, so a slow walk shortens the next interval rather than pushing it out.
-        self.last_wal_sample = Some(std::time::Instant::now());
-        self.wal_samples += 1;
-        let position = self.wal.position();
+        let Some(samples) = self.log.sample_due(period) else {
+            return;
+        };
+        let position = self.log.wal.position();
         let pin = self.live.with_artifacts(|store| store.wal_pin());
         self.health.record_wal_gauge(WalGauge {
-            members: self.wal.member_count(),
-            bytes: self.wal.disc_bytes(),
+            members: self.log.wal.member_count(),
+            bytes: self.log.wal.disc_bytes(),
             position,
             pin,
             pin_span_bytes: pin.map_or(0, |(_, pos)| position.saturating_sub(pos)),
-            samples: self.wal_samples,
+            samples,
         });
     }
 
@@ -264,6 +313,6 @@ impl Executor {
     /// Asked of the WAL rather than remembered from the last error this loop happened to see, so
     /// the posture cannot drift from the thing it describes.
     pub(super) fn observe_wal(&self) {
-        self.health.mirror_wal(self.wal.is_poisoned());
+        self.health.mirror_wal(self.log.wal.is_poisoned());
     }
 }

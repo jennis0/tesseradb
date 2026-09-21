@@ -188,7 +188,7 @@ impl Executor {
         // uses: a coalesce's manifest carries the live deny state, and writing that from an
         // overlay with no durable record behind it would make a deny that returned 500 and was
         // never acknowledged permanent on every restore.
-        if self.wal.is_poisoned() || self.health.overlay_diverged.load(Ordering::SeqCst) {
+        if self.log.wal.is_poisoned() || self.health.overlay_diverged.load(Ordering::SeqCst) {
             return;
         }
         let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
@@ -259,7 +259,7 @@ impl Executor {
         if !self.deps.switches.merge_enabled.load(Ordering::SeqCst)
             || self.merge_outstanding()
             || self.fold_outstanding()
-            || self.wal.is_poisoned()
+            || self.log.wal.is_poisoned()
             || !self.may_publish()
         {
             return;
@@ -1500,7 +1500,7 @@ impl Executor {
         if !self.side_manifests.behind_live {
             return;
         }
-        if self.wal.is_poisoned() || !self.may_publish() {
+        if self.log.wal.is_poisoned() || !self.may_publish() {
             tracing::warn!(
                 "ALARM: deny state is unpublished and this node is poisoned or diverged, so it \
                  will not write a side-manifest. The dispositions are in force and WAL-durable; \

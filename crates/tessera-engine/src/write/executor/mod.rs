@@ -13,6 +13,7 @@ mod window;
 
 pub(super) use background::Background;
 pub(super) use manifest::SideManifests;
+pub(super) use wal::ExecutorLog;
 
 pub use commands::*;
 pub use deny::*;
@@ -34,7 +35,7 @@ pub(super) const FAILED_CYCLE_RETRY: std::time::Duration = std::time::Duration::
 
 /// The single writer. One per partition, on its own thread, owning the WAL by value.
 pub(super) struct Executor {
-    pub(super) wal: ExecutorWal,
+    pub(super) log: ExecutorLog,
     pub(super) live: Arc<LiveState>,
     /// The only publishing capability in the write path. Not in [`LiveState`], which the handler
     /// side shares.
@@ -81,14 +82,6 @@ pub(super) struct Executor {
     /// What every accepted write since the last tick did to each level's row forms, applied at the
     /// next tick. One level's deltas carry consecutive level versions.
     pub(super) pending_forms: std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
-    /// The WAL's sequence position after the last rotation, so a tick can tell whether the log has
-    /// grown since: the deny-only regime's rotation trigger.
-    pub(super) wal_position_at_last_rotation: u64,
-    /// When [`Executor::sample_wal_gauge`] last began a walk, or `None` before the first one.
-    pub(super) last_wal_sample: Option<std::time::Instant>,
-    /// Walks taken, published as [`WalGauge::samples`] so a reader can tell a refreshed reading
-    /// from one the rate limit held back.
-    pub(super) wal_samples: u64,
     #[cfg(feature = "fault-injection")]
     pub(super) faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
@@ -238,7 +231,7 @@ impl Executor {
             match crate::flush::plan_flush(
                 generation,
                 &view,
-                self.wal.is_poisoned(),
+                self.log.wal.is_poisoned(),
                 self.health.overlay_diverged.load(Ordering::SeqCst),
             ) {
                 Ok(plan) => {
@@ -317,7 +310,7 @@ impl Executor {
         // Bounded by the next tick, always, so a quiescent node still runs reclaim.
         let until_tick = std::time::Duration::from_secs(self.deps.flush_max_age_secs)
             .saturating_sub(self.last_tick.elapsed());
-        let wait = if self.wal.is_poisoned() {
+        let wait = if self.log.wal.is_poisoned() {
             until_tick.min(WAL_RECOVERY_POLL_INTERVAL)
         } else if let Some(backoff) = self.health.failed_cycle_backoff() {
             until_tick.min(backoff)

@@ -202,7 +202,7 @@ impl Executor {
         let mut last = first;
         for delay in DENY_DURABILITY_BACKOFF {
             std::thread::sleep(delay);
-            match self.wal.retry_durability(&records) {
+            match self.log.wal.retry_durability(&records) {
                 Ok(_) => return Ok(()),
                 Err(e) => last = e,
             }

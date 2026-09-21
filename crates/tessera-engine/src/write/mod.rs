@@ -414,7 +414,7 @@ impl WritePath {
             .name("tessera-lifecycle".to_string())
             .spawn(move || {
                 let mut executor = Executor {
-                    wal: exec_wal,
+                    log: ExecutorLog::new(exec_wal, wal_position_at_start),
                     live,
                     generation,
                     row_projection_cache,
@@ -455,11 +455,6 @@ impl WritePath {
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     pending_forms: std::collections::BTreeMap::new(),
-                    // Seeded from the opened WAL's position so a freshly started node does not
-                    // rotate until something is appended in this run.
-                    wal_position_at_last_rotation: wal_position_at_start,
-                    last_wal_sample: None,
-                    wal_samples: 0,
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };

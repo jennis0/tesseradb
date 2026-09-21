@@ -584,7 +584,7 @@ impl Executor {
 
         let plan = match crate::compact::plan_fold(
             generation,
-            self.wal.is_poisoned(),
+            self.log.wal.is_poisoned(),
             self.health.overlay_diverged.load(Ordering::SeqCst),
             crate::compact::FoldResources {
                 available_memory: available_memory(),
@@ -819,7 +819,7 @@ impl Executor {
         // Re-asked here, not just at the plan: a fold's flight is long enough for the WAL to
         // poison after `plan_fold` checked it, and this manifest would then publish deny state no
         // durable record backs. The divergence half is already asked by `may_publish` above.
-        if self.wal.is_poisoned() {
+        if self.log.wal.is_poisoned() {
             return Err("the WAL poisoned during its flight, so its manifest would publish deny state \
                      no durable record backs"
                 .to_string());
