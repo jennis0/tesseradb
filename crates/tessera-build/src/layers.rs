@@ -1107,27 +1107,12 @@ fn plan_inline(
                 dedup_keys(&mut keys);
                 keys
             },
-            shape: match shapes.as_deref_mut() {
-                Some(reader) => {
-                    let input = inline_shape(row, reader.kind())
-                        .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))?;
-                    reader.row(&row.key, input, row.space.as_deref())?
-                }
-                None => {
-                    if row.bbox.is_some()
-                        || row.circle.is_some()
-                        || row.ellipse.is_some()
-                        || row.wkt.is_some()
-                    {
-                        return Err(BuildError::Invalid(format!(
-                            "layer '{layer}': artifact {} carries a shape, and the layer \
-                                 declares no `[layer.shape]`. Its members come from the stored \
-                                 set its membership names, so a shape beside them is a region \
-                                 nothing evaluates",
-                            row.key
-                        )));
-                    }
-                    None
+            shape: {
+                let input = inline_shape(row, shapes.as_deref().map(ShapeReader::kind))
+                    .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))?;
+                match shapes.as_deref_mut() {
+                    Some(reader) => reader.row(&row.key, input, row.space.as_deref())?,
+                    None => None,
                 }
             },
             space: row.space.clone(),

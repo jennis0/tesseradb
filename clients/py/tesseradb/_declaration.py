@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Iterable, Sequence
 
-from ._inserts import ARTIFACT_FIELDS, MEMBER_FIELDS, SHAPE_FIELDS, VOCABULARY_FIELDS
+from ._inserts import ARTIFACT_FIELDS, MEMBER_FIELDS, VOCABULARY_FIELDS
 from ._refusal import Refusal
 from ._toml import Inline
 
@@ -367,7 +367,7 @@ def layer_block(
     shape_block = _shape(name, shape)
     if how == "spatial":
         computed = SPATIAL_DERIVED if computed is DERIVED else computed
-    rows = _artifact_rows(name, artifacts, shape_block is not None)
+    rows = _artifact_rows(name, artifacts)
 
     block: dict[str, Any] = {"name": name}
     if title is not None:
@@ -470,13 +470,13 @@ ARTIFACT_KEYS = (
 )
 
 
-def _artifact_rows(layer: str, artifacts: Any, shaped: bool) -> list[dict] | None:
+def _artifact_rows(layer: str, artifacts: Any) -> list[dict] | None:
     """Inline `artifacts=`: a list of dicts, or a frame carrying the artifact table's columns."""
     if artifacts is None:
         return None
     if not isinstance(artifacts, (list, tuple)):
         artifacts = rows_of(artifacts)
-    rows = [_artifact_row(layer, row, shaped) for row in artifacts]
+    rows = [_artifact_row(layer, row) for row in artifacts]
     if not rows:
         raise Refusal(
             f"layer {layer!r}: artifacts= carries no row. Leave it out to declare an empty layer"
@@ -503,7 +503,7 @@ def rows_of(frame: Any) -> list[dict]:
 ATTACHMENT_KEYS = ("layer", "key", "level")
 
 
-def _artifact_row(layer: str, row: Any, shaped: bool) -> dict:
+def _artifact_row(layer: str, row: Any) -> dict:
     row = {key: value for key, value in dict(row).items() if value is not None}
     attached = row.pop("attached_to", None)
     if attached is not None:
@@ -517,18 +517,6 @@ def _artifact_row(layer: str, row: Any, shaped: bool) -> dict:
         row["attached_key"] = attached["key"]
         if attached.get("level") is not None:
             row["attached_level"] = int(attached["level"])
-    carried = [field for field in SHAPE_FIELDS if field in row]
-    key = row.get("key")
-    if carried and not shaped:
-        raise Refusal(
-            f"layer {layer!r}, artifact {key!r}: {carried[0]} is a shape, and this layer declares "
-            f'none. Give membership="spatial" with shape=, or drop it'
-        )
-    if len(carried) > 1:
-        raise Refusal(
-            f"layer {layer!r}, artifact {key!r}: an artifact carries its shape in its layer's "
-            f"kind's field and no other, so {sorted(carried)!r} is two shapes"
-        )
     # The declaration's own key order, with anything else after it, so a key the artifact table
     # does not carry reaches the check rather than being dropped here.
     ordered = {name: row[name] for name in ARTIFACT_KEYS if name in row}

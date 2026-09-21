@@ -837,11 +837,24 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
                 object: object.clone(),
                 path: None,
             }),
-            // Inline rows are the canonical spelling and there is no file to locate them in.
-            Some(ArtifactSource::Inline(rows)) => report.sources.push(SourceChecked {
-                object: object.part(format!("({} inline artifact(s))", rows.len())),
-                path: None,
-            }),
+            // Inline rows are the canonical spelling and there is no file to locate them in, so
+            // the rules the build's reader states over a row are answerable from the declaration:
+            // `crate::shapes`'s `inline_shape`, which `crate::layers`'s `plan_inline` calls for
+            // the same rows.
+            Some(ArtifactSource::Inline(rows)) => {
+                report.sources.push(SourceChecked {
+                    object: object.part(format!("({} inline artifact(s))", rows.len())),
+                    path: None,
+                });
+                if let Some(declaration) = config.layers.iter().find(|d| d.name == sources.name) {
+                    let kind = crate::shapes::shape_declared(declaration);
+                    for row in rows {
+                        if let Err(detail) = crate::shapes::inline_shape(row, kind) {
+                            report.note(&object, detail);
+                        }
+                    }
+                }
+            }
             Some(ArtifactSource::File { path, fields, .. }) => {
                 if let Some(schema) = open(report, &object, path) {
                     // `key` is the one field a build-published artifact cannot do without: it is

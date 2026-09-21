@@ -343,14 +343,20 @@ pub fn space_at<'a>(column: Option<crate::utf8::Utf8Column<'a>>, row: usize) -> 
     column.and_then(|c| c.at(row))
 }
 
-/// An inline row's geometry, in its layer's kind's field.
-pub fn inline_shape(row: &InlineArtifact, kind: ShapeKind) -> Result<Option<ShapeInput>> {
+/// An inline row's geometry, in its layer's kind's field. `kind` is the layer's `[layer.shape]`,
+/// or `None` where it declares none.
+///
+/// The refusal names the artifact and not its layer, so a caller that knows the layer prefixes it.
+pub fn inline_shape(
+    row: &InlineArtifact,
+    kind: Option<ShapeKind>,
+) -> std::result::Result<Option<ShapeInput>, String> {
     let mut carried: Vec<(&str, ShapeInput)> = Vec::new();
     let refuse_count = |field: &str, n: usize, want: usize| {
-        BuildError::Invalid(format!(
+        format!(
             "artifact {}: `{field}` has {n} value(s); it is exactly {want}",
             row.key
-        ))
+        )
     };
     if let Some(v) = &row.bbox {
         let [a, b, c, d] = v[..] else {
@@ -373,30 +379,36 @@ pub fn inline_shape(row: &InlineArtifact, kind: ShapeKind) -> Result<Option<Shap
     if let Some(text) = &row.wkt {
         carried.push(("wkt", ShapeInput::Wkt(text.clone())));
     }
-    match carried.len() {
-        0 => Ok(None),
-        1 => {
+    let fields = carried
+        .iter()
+        .map(|(f, _)| format!("`{f}`"))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    match (carried.len(), kind) {
+        (0, _) => Ok(None),
+        (_, None) => Err(format!(
+            "artifact {}: carries {fields} and the layer declares no `[layer.shape]`; give the \
+             layer `membership = \"spatial\"` and a `[layer.shape]`, or drop the geometry from \
+             the row",
+            row.key
+        )),
+        (1, Some(kind)) => {
             let (_, input) = carried.pop().expect("one");
             if input.kind() != kind {
-                return Err(BuildError::Invalid(format!(
+                return Err(format!(
                     "artifact {}: carries a {} and the layer's `shape.kind` is \"{}\"; a row's \
                      geometry is in its layer's kind's field and no other",
                     row.key,
                     input.kind().as_str(),
                     kind.as_str()
-                )));
+                ));
             }
             Ok(Some(input))
         }
-        _ => Err(BuildError::Invalid(format!(
-            "artifact {}: carries {} — one row has one shape, in its layer's kind's field",
-            row.key,
-            carried
-                .iter()
-                .map(|(f, _)| format!("`{f}`"))
-                .collect::<Vec<_>>()
-                .join(" and ")
-        ))),
+        (_, Some(_)) => Err(format!(
+            "artifact {}: carries {fields} — one row has one shape, in its layer's kind's field",
+            row.key
+        )),
     }
 }
 
@@ -668,7 +680,8 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
                     let mut reader =
                         ShapeReader::new(&declaration.name, kind, ctx, ShapeSpace::View);
                     for row in rows {
-                        reader.row(&row.key, inline_shape(row, kind)?, row.space.as_deref())?;
+                        let input = inline_shape(row, Some(kind)).map_err(BuildError::Invalid)?;
+                        reader.row(&row.key, input, row.space.as_deref())?;
                         for parent in &row.parent {
                             parents.push((row.key.clone(), parent.clone()));
                         }
