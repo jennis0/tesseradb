@@ -2236,7 +2236,7 @@ impl Config {
     /// the names that exist, an override naming no key is a refusal too, and an override never
     /// *creates* a source — so a closed vocabulary cannot be opened from the command line.
     pub fn parse(path: &Path, overrides: &HashMap<String, PathBuf>) -> Result<Config> {
-        Config::parse_as(path, overrides, Strictness::Build)
+        Config::parse_with(path, overrides, Strictness::Build)
     }
 
     /// Parse `path` for `tessera check`: a block that names no file compiles as declared and
@@ -2244,10 +2244,15 @@ impl Config {
     ///
     /// [`parse`]: Config::parse
     pub fn parse_declared(path: &Path, overrides: &HashMap<String, PathBuf>) -> Result<Config> {
-        Config::parse_as(path, overrides, Strictness::Declared)
+        Config::parse_with(path, overrides, Strictness::Declared)
     }
 
-    fn parse_as(
+    /// [`parse`] or [`parse_declared`], chosen by `strictness` — for a caller that holds the
+    /// strictness as a value rather than knowing which reader it is.
+    ///
+    /// [`parse`]: Config::parse
+    /// [`parse_declared`]: Config::parse_declared
+    pub fn parse_with(
         path: &Path,
         overrides: &HashMap<String, PathBuf>,
         strictness: Strictness,

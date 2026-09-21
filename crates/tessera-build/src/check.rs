@@ -37,11 +37,57 @@ use crate::config::{
 use crate::ids::Addressing;
 use crate::input::{column_carries, TERM_ID};
 
+/// The declaration a finding or a source is about, in its parts.
+///
+/// **Split rather than a sentence**, because the readers are two: an operator reads
+/// `view group 'quarters' view 'q1'`, and a client that has to raise an error against the block
+/// the author wrote reads the block and its name without parsing anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Object {
+    /// The block kind as the declaration spells it — `source`, `attribute`, `view`,
+    /// `view group`, `layer`.
+    pub block: &'static str,
+    /// The name the block was declared under.
+    pub name: String,
+    /// The part of it at fault, where a block has several: a group's view key, its roster table, a
+    /// view's `point_visibility`, a layer's `[layer.members]`.
+    pub part: Option<String>,
+}
+
+impl Object {
+    pub fn new(block: &'static str, name: impl Into<String>) -> Object {
+        Object {
+            block,
+            name: name.into(),
+            part: None,
+        }
+    }
+
+    /// The same block, narrowed to one part of it.
+    pub fn part(&self, part: impl Into<String>) -> Object {
+        Object {
+            block: self.block,
+            name: self.name.clone(),
+            part: Some(part.into()),
+        }
+    }
+}
+
+impl std::fmt::Display for Object {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut rendered = format!("{} '{}'", self.block, self.name);
+        if let Some(part) = &self.part {
+            rendered.push(' ');
+            rendered.push_str(part);
+        }
+        f.pad(&rendered)
+    }
+}
+
 /// One thing wrong, named the way the reader that would have refused it names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
-    /// The declaration that owns it — `source 'points'`, `view 's0'`, `layer 'clusters/a'`.
-    pub object: String,
+    pub object: Object,
     pub detail: String,
 }
 
@@ -50,7 +96,7 @@ pub struct Finding {
 /// examined everything.
 #[derive(Debug, Clone)]
 pub struct SourceChecked {
-    pub object: String,
+    pub object: Object,
     /// The path as the declaration resolved it, or `None` for an object declared with no source —
     /// which is legal and is the normal state for a deployment that writes through the service
     /// (`configuration.md` §2).
@@ -132,16 +178,16 @@ impl CheckReport {
         self.findings.is_empty()
     }
 
-    fn note(&mut self, object: impl Into<String>, detail: impl Into<String>) {
+    fn note(&mut self, object: &Object, detail: impl Into<String>) {
         self.findings.push(Finding {
-            object: object.into(),
+            object: object.clone(),
             detail: detail.into(),
         });
     }
 
-    fn warn(&mut self, object: impl Into<String>, detail: impl Into<String>) {
+    fn warn(&mut self, object: &Object, detail: impl Into<String>) {
         self.warnings.push(Finding {
-            object: object.into(),
+            object: object.clone(),
             detail: detail.into(),
         });
     }
@@ -179,7 +225,7 @@ fn column_type<'a>(
 /// was looked for under. This is `crate::input`'s `field_index` refusal, made collectable.
 fn require(
     report: &mut CheckReport,
-    object: &str,
+    object: &Object,
     schema: &ArrowSchema,
     fields: &Fields,
     canonical: &str,
@@ -203,7 +249,7 @@ fn require(
 /// `configuration.md` §8's rule, and the one the parser cannot make.
 fn require_named(
     report: &mut CheckReport,
-    object: &str,
+    object: &Object,
     schema: &ArrowSchema,
     fields: &Fields,
     candidates: &[&str],
@@ -216,9 +262,9 @@ fn require_named(
 }
 
 /// Open one source, or record why it could not be opened. `None` means: reported, move on.
-fn open(report: &mut CheckReport, object: &str, path: &Path) -> Option<ArrowSchema> {
+fn open(report: &mut CheckReport, object: &Object, path: &Path) -> Option<ArrowSchema> {
     report.sources.push(SourceChecked {
-        object: object.to_string(),
+        object: object.clone(),
         path: Some(path.display().to_string()),
     });
     match schema_of(path) {
@@ -280,13 +326,13 @@ fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut
     for (index, attribute) in config.schema.attributes.iter().enumerate() {
         if carried.binary_search(&index).is_err() {
             report.sources.push(SourceChecked {
-                object: format!("attribute '{}'", attribute.name),
+                object: Object::new("attribute", &attribute.name),
                 path: None,
             });
         }
     }
     for group in &config.attribute_sources {
-        let object = format!("source '{}'", group.name);
+        let object = Object::new("source", &group.name);
         let Some(schema) = open(report, &object, &group.path) else {
             continue;
         };
@@ -301,7 +347,7 @@ fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut
         // anticipate.
         for &index in &group.attributes {
             let attribute = &config.schema.attributes[index];
-            let object = format!("attribute '{}'", attribute.name);
+            let object = Object::new("attribute", &attribute.name);
             let Some((_, field)) = schema.column_with_name(attribute.column()) else {
                 report.note(
                     &object,
@@ -343,7 +389,12 @@ fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut
 /// An indexed keyword whose source footer records a distinct count within a few per cent of its
 /// non-null values (`crate::unique_key`): the one thing about a unique key a check that reads no
 /// row can see, and only where the writer recorded it. A warning, never a finding.
-fn unique_key_by_footer(report: &mut CheckReport, object: &str, path: &Path, column: &str) {
+fn unique_key_by_footer(
+    report: &mut CheckReport,
+    object: &Object,
+    path: &Path,
+    column: &str,
+) {
     match crate::unique_key::footer_distinct_count(path, column) {
         Ok(Some(count)) => {
             if let Some(warning) = count.warning() {
@@ -375,7 +426,7 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
             continue;
         };
         let attribute = &scoped.attribute;
-        let object = format!("attribute '{}'", attribute.name);
+        let object = Object::new("attribute", &attribute.name);
         let Some(schema) = open(report, &object, &source.path) else {
             continue;
         };
@@ -445,7 +496,7 @@ fn check_identity(
     config: &Config,
     view: &crate::config::View,
     schema: &ArrowSchema,
-    object: &str,
+    object: &Object,
     report: &mut CheckReport,
 ) {
     if column_type(schema, &view.fields, ENTITY_ID).is_some() {
@@ -491,7 +542,7 @@ fn check_identity(
 }
 
 fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckReport) {
-    let object = format!("view '{}'", view.name);
+    let object = Object::new("view", &view.name);
     // **The frame, before the file** — a projected view's square is a function of its declaration
     // alone, so it is answered here whether or not the source opens.
     if view.projection != tessera_spatial::Projection::None {
@@ -554,7 +605,7 @@ fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckRep
 /// nobody named — and the group-scoped attribute columns, which live in the views' own files where
 /// the attribute declares no source of its own (`views.md` §5).
 fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport) {
-    let object = format!("view group '{}'", group.name);
+    let object = Object::new("view group", &group.name);
     if group.projection != tessera_spatial::Projection::None {
         report.frames.push(FramePreview {
             view: group.name.clone(),
@@ -588,7 +639,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
     match &group.roster {
         Roster::Inline(views) => {
             for view in views {
-                let object = format!("{object}, view '{}'", view.key);
+                let object = object.part(format!("view '{}'", view.key));
                 let Some(path) = &view.source else {
                     report.sources.push(SourceChecked { object, path: None });
                     continue;
@@ -641,7 +692,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
         }
     }
     if let Roster::Table(table) = &group.roster {
-        let object = format!("{object} `[view_group.views]`");
+        let object = object.part("`[view_group.views]`");
         let Some(schema) = open(report, &object, &table.source) else {
             return;
         };
@@ -658,7 +709,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
 
 /// One points file's identity and geometry, and — where the group carries one — its discriminator.
 fn check_points(
-    object: &str,
+    object: &Object,
     schema: &ArrowSchema,
     fields: &Fields,
     discriminator: bool,
@@ -685,7 +736,7 @@ fn check_points(
 /// A group's `point_visibility` against one of its views' files — [`check_point_visibility`]'s
 /// rule, over a group's shared declaration rather than a view's own.
 fn check_group_labels(
-    object: &str,
+    object: &Object,
     point_visibility: &PointVisibility,
     schema: &ArrowSchema,
     report: &mut CheckReport,
@@ -731,7 +782,7 @@ fn check_point_visibility(
     view_schema: Option<&ArrowSchema>,
     report: &mut CheckReport,
 ) {
-    let object = format!("view '{}' `point_visibility`", view.name);
+    let object = Object::new("view", &view.name).part("`point_visibility`");
     if let Some(field) = &view.point_visibility.field {
         if let Some(schema) = view_schema {
             match schema.column_with_name(field) {
@@ -769,7 +820,7 @@ fn check_point_visibility(
         let Some(schema) = open(report, &object, path) else {
             return;
         };
-        let fields = Fields::canonical(object.clone());
+        let fields = Fields::canonical(object.to_string());
         require(report, &object, &schema, &fields, ENTITY_ID);
         require(report, &object, &schema, &fields, TERM_ID);
     }
@@ -777,7 +828,7 @@ fn check_point_visibility(
 
 fn check_layers(config: &Config, report: &mut CheckReport) {
     for sources in &config.layer_sources {
-        let object = format!("layer '{}'", sources.name);
+        let object = Object::new("layer", &sources.name);
         match &sources.artifacts {
             None => report.sources.push(SourceChecked {
                 object: object.clone(),
@@ -785,7 +836,7 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
             }),
             // Inline rows are the canonical spelling and there is no file to locate them in.
             Some(ArtifactSource::Inline(rows)) => report.sources.push(SourceChecked {
-                object: format!("{object} ({} inline artifact(s))", rows.len()),
+                object: object.part(format!("({} inline artifact(s))", rows.len())),
                 path: None,
             }),
             Some(ArtifactSource::File { path, fields, .. }) => {
@@ -823,7 +874,7 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
             }
         }
         if let Some(members) = &sources.members {
-            let object = format!("{object} `[layer.members]`");
+            let object = object.part("`[layer.members]`");
             if let Some(schema) = open(report, &object, &members.path) {
                 require(report, &object, &schema, &members.fields, "key");
                 require(report, &object, &schema, &members.fields, "entity");
