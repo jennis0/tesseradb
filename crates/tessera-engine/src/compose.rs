@@ -782,3 +782,185 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod walk_tests {
+    //! [`compose`]'s buffer walk against a reference walk that resolves every buffered entity
+    //! through [`verdict`] before it asks whether the entity has a row. Randomised states, so the
+    //! two are compared over entities with a row and without, with an overlay entry and without,
+    //! and against several satisfied sets.
+
+    use super::*;
+
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use tessera_lifecycle::wal::WalRow;
+    use tessera_lifecycle::ChangeOp;
+    use tessera_store::write::write_permutation;
+    use tessera_store::Permutation;
+
+    const BOUND: u64 = 2_000;
+
+    /// The reference walk's `(minus, plus)`: every buffered entity resolved through [`verdict`],
+    /// which looks its item up in the buffer again, and its row asked for only once its terms have
+    /// decided. The clamp and deny arithmetic is [`compose`]'s, restated so that what is compared
+    /// is the walk alone.
+    fn reference_diffs(
+        satisfied: &FxHashSet<TermId>,
+        overlay: &Overlay,
+        buffer: &IngestBuffer,
+        base: &RowProjection,
+        row_space: &RowSpace,
+        denied: &Bitmap,
+    ) -> (Bitmap, Bitmap) {
+        let mut fail_rows: Vec<u32> = Vec::new();
+        let mut pass_rows: Vec<u32> = Vec::new();
+        for (&entity, _) in buffer.iter() {
+            if overlay.touches(entity) {
+                continue;
+            }
+            if let Some(pass) = verdict(overlay, buffer, satisfied, entity) {
+                if let Some(row) = row_space.row_of(entity) {
+                    if pass {
+                        pass_rows.push(row.raw());
+                    } else {
+                        fail_rows.push(row.raw());
+                    }
+                }
+            }
+        }
+        fail_rows.sort_unstable();
+        pass_rows.sort_unstable();
+        let base_bitmap = base.bitmap();
+        (
+            Bitmap::of(&fail_rows)
+                .and(base_bitmap)
+                .or(&denied.and(base_bitmap)),
+            Bitmap::of(&pass_rows).andnot(base_bitmap).andnot(denied),
+        )
+    }
+
+    fn buffer_row(
+        buffer: &mut IngestBuffer,
+        entity: u64,
+        view: &str,
+        join: bool,
+        terms: Vec<TermId>,
+    ) {
+        let row = WalRow {
+            external_id: Some(entity.to_le_bytes().to_vec()),
+            entity_id: EntityId::new(entity),
+            view: view.to_string(),
+            join,
+            descriptors: Vec::new(),
+            x: 0.0,
+            y: 0.0,
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+        };
+        buffer.insert_row_with_terms(&row, terms);
+    }
+
+    /// The four grants the states below are composed against, from holding nothing to holding
+    /// every term a buffered item can carry.
+    fn grants() -> Vec<FxHashSet<TermId>> {
+        vec![
+            FxHashSet::default(),
+            [0u32, 1].into_iter().map(TermId::new).collect(),
+            [2u32, 3, 4].into_iter().map(TermId::new).collect(),
+            (0u32..8).map(TermId::new).collect(),
+        ]
+    }
+
+    #[test]
+    fn the_walk_composes_the_diffs_the_per_entity_resolution_composes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut saw_pass = false;
+        let mut saw_fail = false;
+
+        for seed in 0..16u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+
+            // Two entities in three hold a row, so the walk takes the no-row path for the rest,
+            // as a real buffer's walk does for almost all of it.
+            let with_row: Vec<EntityId> = (0..BOUND)
+                .filter(|entity| entity % 3 != 0)
+                .map(EntityId::new)
+                .collect();
+            let path = temp.path().join(format!("permutation-{seed}.bin"));
+            write_permutation(&path, &with_row, BOUND).unwrap();
+            let row_space = RowSpace::new(
+                Arc::new(Permutation::load(&path).unwrap()),
+                with_row.len() as u32,
+            );
+
+            // The frozen fragment reaches `compose` already projected, so a bitmap of rows is the
+            // whole of what the walk clamps against.
+            let mut base_rows = Bitmap::new();
+            for row in 0..with_row.len() as u32 {
+                if rng.gen_bool(0.5) {
+                    base_rows.add(row);
+                }
+            }
+            let base = Arc::new(RowProjection::from_rows(base_rows));
+
+            let mut buffer = IngestBuffer::new();
+            let mut overlay = Overlay::new();
+            for entity in 0..BOUND {
+                if !rng.gen_bool(0.2) {
+                    continue;
+                }
+                let terms: Vec<TermId> = (0..rng.gen_range(0..3u32))
+                    .map(|_| TermId::new(rng.gen_range(0..8)))
+                    .collect();
+                if rng.gen_bool(0.2) {
+                    // Join-only: the walk never sees it, exactly as `get` answers `None` for it.
+                    buffer_row(&mut buffer, entity, "s1", true, Vec::new());
+                } else {
+                    if rng.gen_bool(0.3) {
+                        buffer_row(&mut buffer, entity, "s1", true, Vec::new());
+                    }
+                    buffer_row(&mut buffer, entity, "s0", false, terms);
+                }
+                match rng.gen_range(0..10u32) {
+                    0 => overlay.apply(EntityId::new(entity), ChangeOp::Delete),
+                    1 => overlay.apply(EntityId::new(entity), ChangeOp::Suppress),
+                    2 => {
+                        overlay.apply(EntityId::new(entity), ChangeOp::Suppress);
+                        overlay.apply(EntityId::new(entity), ChangeOp::Unsuppress);
+                    }
+                    _ => {}
+                }
+            }
+            let denied = denied_rows_of(&overlay, &row_space);
+
+            for satisfied in grants() {
+                let mask = compose(
+                    &satisfied,
+                    &overlay,
+                    &buffer,
+                    Arc::clone(&base),
+                    &row_space,
+                    &denied,
+                );
+                let (minus, plus) =
+                    reference_diffs(&satisfied, &overlay, &buffer, &base, &row_space, &denied);
+                assert_eq!(mask.minus, minus, "seed {seed}: minus differs");
+                assert_eq!(mask.plus, plus, "seed {seed}: plus differs");
+                saw_pass = saw_pass || !plus.is_empty();
+                saw_fail = saw_fail || !minus.andnot(&denied).is_empty();
+            }
+        }
+
+        assert!(
+            saw_pass,
+            "no state gave a buffered entity with a row whose terms pass: the `plus` branch went \
+             untested"
+        );
+        assert!(
+            saw_fail,
+            "no state gave a buffered entity with a row in `base` whose terms fail: the `minus` \
+             branch went untested"
+        );
+    }
+}
