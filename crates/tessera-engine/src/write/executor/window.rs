@@ -476,91 +476,71 @@ impl Executor {
             }
         }
 
-        // One record per entry, appended in entries order, which is also apply order.
-        let mut failed_at: Option<(usize, WalError)> = None;
+        // The joins this window's rows declared, prepared with everything else before anything is
+        // appended.
+        let growth = growth_records(&closed);
 
-        // Mint records land first, ahead of every batch record, inside the one fsync below, so a
-        // mint is durable in the same commit as the rows it colours.
-        for (vocabulary, key, code) in &fresh_bindings {
-            if let Err(e) = self.wal.append(&WalRecord::VocabularyMint {
+        // One sequence, one fsync: the vocabulary mints first, so a mint is durable in the same
+        // commit as the rows it colours; then one record per entry in entries order, which is also
+        // apply order; then the artifact publications, since an artifact must exist before
+        // anything addresses it; then the growths against them.
+        let vocabulary_records: Vec<WalRecord> = fresh_bindings
+            .iter()
+            .map(|(vocabulary, key, code)| WalRecord::VocabularyMint {
                 vocabulary: vocabulary.clone(),
                 key: key.clone(),
                 code: *code,
-            }) {
-                failed_at = Some((0, e));
-                break;
-            }
-        }
+            })
+            .collect();
+        let entries_at = vocabulary_records.len();
+        let artifacts_at = entries_at + closed.len();
+        let growth_at = artifacts_at + mint_records.len();
+        let durable: Vec<&WalRecord> = vocabulary_records
+            .iter()
+            .chain(closed.iter().map(|entry| &entry.record))
+            .chain(mint_records.iter())
+            .chain(growth.iter().map(|(record, _)| record))
+            .collect();
 
-        // The position before each append is the only moment it can be read: afterwards the log
-        // has moved on. A rotation reclaims by it below, so a failed append contributes none.
-        let mut positions: Vec<u64> = Vec::with_capacity(closed.len());
-        if failed_at.is_none() {
-            for (i, entry) in closed.iter().enumerate() {
-                let at = self.wal.position();
-                if let Err(e) = self.wal.append(&entry.record) {
-                    failed_at = Some((i, e));
-                    break;
-                }
-                positions.push(at);
+        let positions = match self.append_and_sync(&durable, Some(mark)) {
+            Ok(positions) => positions,
+            Err(failure) => {
+                // Which entry the failure is blamed for: a vocabulary mint or a publication
+                // belongs to the window rather than to one entry, and a sync belongs to none of
+                // them, so all three blame the first.
+                let blamed = match failure {
+                    Undurable::Append { at, .. } if (entries_at..artifacts_at).contains(&at) => {
+                        at - entries_at
+                    }
+                    Undurable::Append { at, .. } if at >= growth_at => growth[at - growth_at].1,
+                    _ => 0,
+                };
+                drop(durable);
+                self.fail_window_wal(closed, blamed, failure.into_error(), entries, started);
+                return;
             }
-        }
-
-        // The joins this window's rows declared, appended behind the batch records. The
-        // publications that minted come first, since an artifact must exist before anything
-        // addresses it.
-        let mut minted: Vec<(WalRecord, u64)> = Vec::new();
-        if failed_at.is_none() {
-            for record in mint_records {
-                let at = self.wal.position();
-                if let Err(e) = self.wal.append(&record) {
-                    failed_at = Some((0, e));
-                    break;
-                }
-                minted.push((record, at));
-            }
-        }
-        let mut growth: Vec<(WalRecord, u64)> = Vec::new();
-        if failed_at.is_none() {
-            for (record, i) in growth_records(&closed) {
-                let at = self.wal.position();
-                if let Err(e) = self.wal.append(&record) {
-                    failed_at = Some((i, e));
-                    break;
-                }
-                growth.push((record, at));
-            }
-        }
-        mark = self.health.lap(WriteStage::WalAppend, mark);
-        // One fsync for the whole window: the amortisation half of group commit.
-        if failed_at.is_none() {
-            if let Err(e) = self.wal.fsync() {
-                // The first waiter gets the real error arbitrarily and the rest `Poisoned`.
-                failed_at = Some((0, e));
-            }
-        }
-        self.health.lap(WriteStage::WalFsync, mark);
-        self.observe_wal();
-        if let Some((index, error)) = failed_at {
-            self.fail_window_wal(closed, index, error, entries, started);
-            return;
-        }
+        };
+        drop(durable);
 
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
-        self.apply_window(&mut closed, &positions, vocabularies, &fresh_bindings);
+        self.apply_window(
+            &mut closed,
+            &positions[entries_at..artifacts_at],
+            vocabularies,
+            &fresh_bindings,
+        );
 
         // After the rows are in force, never before: a membership is projected through rows.
-        let (artifact_records, artifact_positions): (Vec<&WalRecord>, Vec<u64>) = minted
+        let artifact_records: Vec<&WalRecord> = mint_records
             .iter()
-            .chain(growth.iter())
-            .map(|(record, position)| (record, *position))
-            .unzip();
-        self.apply_artifact_records(&artifact_records, &artifact_positions);
+            .chain(growth.iter().map(|(record, _)| record))
+            .collect();
+        self.apply_artifact_records(&artifact_records, &positions[artifacts_at..]);
 
         // Recorded after the swap, so a replay can never see it swapped but not yet indexed.
         let m = StageMark::now();
-        for (entry, wal_pos) in closed.iter().zip(&positions) {
+        for (entry, wal_pos) in closed.iter().zip(&positions[entries_at..artifacts_at]) {
             let (batch_id, body_hash) = entry.batch_key();
             debug_assert_eq!(
                 tessera_lifecycle::batch_identity(&entry.record),
@@ -587,9 +567,9 @@ impl Executor {
         if created > 0 {
             tracing::info!(
                 minted = created,
-                artifacts = ?minted
+                artifacts = ?mint_records
                     .iter()
-                    .flat_map(|(record, _)| match record {
+                    .flat_map(|record| match record {
                         WalRecord::ArtifactPublish { layer, level, artifacts, .. } => artifacts
                             .iter()
                             .filter_map(|a| a.key.as_ref())
