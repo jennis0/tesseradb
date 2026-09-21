@@ -341,7 +341,7 @@ impl WritePath {
         sweep_orphan_prefixes(&flush.bundle_root, &generation.load().prefix);
 
         // Above every `SEGMENTS-<n>.json` on disc, not above what a manifest names: see
-        // [`Executor::next_manifest_n`]. The sweep above has already removed the unpublished
+        // [`SideManifests`]. The sweep above has already removed the unpublished
         // prefixes, so what is left is what a reader could resolve.
         let next_manifest_n = tessera_store::highest_side_manifest_n(&flush.bundle_root)
             .map_err(|e| ExecutorStartError::SideManifestScan(e.to_string()))?
@@ -427,9 +427,12 @@ impl WritePath {
                     },
                     health: Arc::clone(&health),
                     window_seq: 0,
-                    next_manifest_n,
-                    deny_dirty: false,
-                    windows_since_publication: 0,
+                    side_manifests: SideManifests::seeded(
+                        next_manifest_n,
+                        seeded_membership_extents,
+                        seeded_derived_extents,
+                        seeded_content_extents,
+                    ),
                     coalesce: executor::Background::new(worker_bell.clone()),
                     merge: executor::Background::sharing(
                         worker_bell.clone(),
@@ -449,9 +452,6 @@ impl WritePath {
                     ),
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
-                    membership_extents: seeded_membership_extents,
-                    derived_extents: seeded_derived_extents,
-                    artifact_record_extents: seeded_content_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     pending_forms: std::collections::BTreeMap::new(),

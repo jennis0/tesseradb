@@ -723,6 +723,6 @@ impl Executor {
             self.hold_delta(record, before, refused);
         }
         // Durable in the log and not yet in a manifest.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
     }
 }

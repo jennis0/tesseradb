@@ -690,7 +690,7 @@ impl Executor {
         // The registry is durable in the log but not yet in a manifest, and a rotation reclaims the
         // log. Marking the manifest dirty is what gets it published at the next flush, on the same
         // mechanism a deny uses to reach `SEGMENTS-<n>.json`.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(ack);
     }
 
@@ -756,7 +756,7 @@ impl Executor {
         self.publish_roster(&generation, started, &[]);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: so the
         // roster reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(());
     }
 
@@ -1083,7 +1083,7 @@ impl Executor {
         self.publish(next, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(false);
     }
 
@@ -1134,7 +1134,7 @@ impl Executor {
         self.publish_view_manifest(&generation, manifest, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(false);
     }
 
@@ -1180,7 +1180,7 @@ impl Executor {
             .manifest
             .with_plain_views(std::slice::from_ref(&compiled));
         self.publish_view_manifest(&generation, manifest, started);
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(false);
     }
 
@@ -1298,7 +1298,7 @@ impl Executor {
         self.publish(next, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(VocabularyDeclared {
             existing: false,
             added,
@@ -1434,7 +1434,7 @@ impl Executor {
         // A binding of a *built* vocabulary reaches the manifest as a `vocabulary_extensions`
         // entry and one of a runtime-declared vocabulary as a value of its own runtime entry;
         // both are written at the next side-manifest publication, which this marks due.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(answer(VocabularyValues {
             added,
             existing,
@@ -1499,7 +1499,7 @@ impl Executor {
         }
         self.live.with_roster(|roster| roster.apply(&record));
         let fills_dropped = self.publish_roster(&generation, started, &ids);
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         // Ordinary deletions, through the ordinary lane. They are appended, fsynced and applied by
         // the same path a `/control/changes` delete takes, so they retire at the fold and nowhere
         // else. A failure here is reported the way that lane reports one, in force and possibly

@@ -529,7 +529,10 @@ impl Executor {
             &live.bundle.manifest.vocabularies,
         );
 
-        let manifest_n = match self.allocate_manifest_n() {
+        let manifest_n = match self
+            .side_manifests
+            .allocate_manifest_n(&self.deps.bundle_root, &self.health)
+        {
             Ok(n) => n,
             Err(e) => {
                 discard(&format!(
@@ -835,7 +838,10 @@ impl Executor {
             &live.bundle.manifest.vocabularies,
         );
 
-        let manifest_n = match self.allocate_manifest_n() {
+        let manifest_n = match self
+            .side_manifests
+            .allocate_manifest_n(&self.deps.bundle_root, &self.health)
+        {
             Ok(n) => n,
             Err(e) => {
                 discard(&format!(
@@ -1104,7 +1110,7 @@ impl Executor {
             };
 
             // A label, not an allocation. `n` is allocated by the executor at publication
-            // (`next_manifest_n`), because a deny publication may take one while this flush is in
+            // (`SideManifests`), because a deny publication may take one while this flush is in
             // flight. What the plan needs is a component that makes `seg_id` unique, and the
             // sequence it was planned against is exactly that: the never-reused property rests on
             // this plus the attempt counter.
@@ -1491,7 +1497,7 @@ impl Executor {
     /// published since the last one. Does nothing unless something is unpublished. A poisoned or
     /// diverged node writes nothing, and the state stays unpublished until it recovers.
     pub(super) fn publish_overlay_state(&mut self) {
-        if !self.deny_dirty {
+        if !self.side_manifests.behind_live {
             return;
         }
         if self.wal.is_poisoned() || !self.may_publish() {
@@ -1506,9 +1512,12 @@ impl Executor {
         let live = self.generation.load_full();
         // One scan for the publication, not one per partition. Each partition takes its own `n`,
         // and the floor under all of them is the same disc state
-        // ([`Executor::raise_manifest_floor`]); scanning inside the loop would cost a `readdir`
+        // ([`SideManifests::raise_manifest_floor`]); scanning inside the loop would cost a `readdir`
         // per partition instead.
-        if let Err(e) = self.raise_manifest_floor() {
+        if let Err(e) = self
+            .side_manifests
+            .raise_manifest_floor(&self.deps.bundle_root, &self.health)
+        {
             tracing::error!(
                 error = %e,
                 "ALARM: the side-manifest numbers on disc could not be read; the memberships stay \
@@ -1539,7 +1548,7 @@ impl Executor {
             // log records holding the only other copy.
             // Allocated first so the extents can be named after the publication that carries them:
             // one sequence, not two, and a file whose name says which manifest introduced it.
-            let n = self.take_manifest_n();
+            let n = self.side_manifests.take_manifest_n();
             let prefix_dir = self.prefix_dir(&live);
             let published = match self.write_membership_extents(&prefix_dir, partition, n) {
                 Ok(published) => published,
@@ -1554,8 +1563,10 @@ impl Executor {
                     return;
                 }
             };
-            self.membership_extents.extend(published.clone());
-            manifest.membership_extents = self.membership_extents.clone();
+            self.side_manifests
+                .membership_extents
+                .extend(published.clone());
+            manifest.membership_extents = self.side_manifests.membership_extents.clone();
             if !published.is_empty() {
                 written.push((prefix_dir.clone(), published));
             }
@@ -1572,11 +1583,13 @@ impl Executor {
                 // with the log already released. The membership list above takes this posture for
                 // the same reason.
                 Ok(Some(extent)) => {
-                    self.artifact_record_extents.push(extent);
-                    manifest.artifact_record_extents = self.artifact_record_extents.clone();
+                    self.side_manifests.artifact_record_extents.push(extent);
+                    manifest.artifact_record_extents =
+                        self.side_manifests.artifact_record_extents.clone();
                 }
                 Ok(None) => {
-                    manifest.artifact_record_extents = self.artifact_record_extents.clone();
+                    manifest.artifact_record_extents =
+                        self.side_manifests.artifact_record_extents.clone();
                 }
                 Err(e) => {
                     tracing::error!(
@@ -1643,8 +1656,8 @@ impl Executor {
             }
         }
 
-        self.deny_dirty = false;
-        self.windows_since_publication = 0;
+        self.side_manifests.behind_live = false;
+        self.side_manifests.windows_since_publication = 0;
         self.health
             .overlay_publications
             .fetch_add(1, Ordering::Relaxed);
@@ -1949,7 +1962,10 @@ impl Executor {
             .flush_lap(crate::flush::FlushStage::Compose, *mark);
 
         let mut manifest = partition_data.manifest.clone();
-        let manifest_n = match self.allocate_manifest_n() {
+        let manifest_n = match self
+            .side_manifests
+            .allocate_manifest_n(&self.deps.bundle_root, &self.health)
+        {
             Ok(n) => n,
             Err(e) => {
                 discard(&format!(

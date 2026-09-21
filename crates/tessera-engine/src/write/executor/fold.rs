@@ -977,7 +977,10 @@ impl Executor {
         };
         let live_manifest = &live.bundle.partitions[&plan.partition].manifest;
         let retired_count = executed.cardinality();
-        let manifest_n = match self.allocate_manifest_n() {
+        let manifest_n = match self
+            .side_manifests
+            .allocate_manifest_n(&self.deps.bundle_root, &self.health)
+        {
             Ok(n) => n,
             Err(e) => {
                 discard(&format!(
@@ -1113,7 +1116,7 @@ impl Executor {
                 .iter()
                 .map(|images| images.extent.clone())
                 .collect(),
-            artifact_record_extents: self.artifact_record_extents.clone(),
+            artifact_record_extents: self.side_manifests.artifact_record_extents.clone(),
             segments,
             deltas: forward.tiers.clone(),
             // The live list, not the plan's: a flush that promoted during the flight appended an
@@ -1150,7 +1153,7 @@ impl Executor {
         // Content extents carry no entry in either manifest's `files`, so they are linked here
         // rather than through the digest loop above, from the held list rather than the manifest
         // (which can be behind the live generation).
-        for extent in &self.artifact_record_extents {
+        for extent in &self.side_manifests.artifact_record_extents {
             carried_rels.extend(extent.files().map(String::from));
         }
         if let Err(e) =
@@ -1234,7 +1237,7 @@ impl Executor {
                  disagree for those ordinals"
             );
         }
-        self.membership_extents = repacked;
+        self.side_manifests.membership_extents = repacked;
         // Checked, not assumed: a pending level's structures were stamped with the version the
         // level would have after this retirement ([`PendingRetirement`]). If `retire` ever moves a
         // different set, a stamped structure would be carried at a version it does not describe.
@@ -1250,7 +1253,7 @@ impl Executor {
                  carry is dropped and its level recomposes on first use"
             );
         }
-        self.derived_extents = self.live.with_artifacts(|store| {
+        self.side_manifests.derived_extents = self.live.with_artifacts(|store| {
             held_at_current_version(store, &segments_manifest.derived_extents)
         });
         *lock_recover(&self.health.last_fold_report) = degraded;
@@ -1273,7 +1276,7 @@ impl Executor {
             self.deps.artifact_projections.adopt_derived(
                 &to_prefix_dir,
                 &completed.prefix,
-                &self.derived_extents,
+                &self.side_manifests.derived_extents,
                 store,
             )
         });

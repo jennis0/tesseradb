@@ -12,6 +12,7 @@ mod wal;
 mod window;
 
 pub(super) use background::Background;
+pub(super) use manifest::SideManifests;
 
 pub use commands::*;
 pub use deny::*;
@@ -47,14 +48,8 @@ pub(super) struct Executor {
     pub(super) health: Arc<ExecutorHealth>,
     /// The last window's sequence number; all it has to be is distinct per window.
     pub(super) window_seq: u64,
-    /// The next `SEGMENTS-<n>.json` number, taken at the moment a writer writes rather than when a
-    /// flush is planned. [`Executor::allocate_manifest_n`] also raises it over the files on disc.
-    pub(super) next_manifest_n: u64,
-    /// Whether live state holds something no side-manifest carries yet.
-    pub(super) deny_dirty: bool,
-    /// Deny windows applied since the last publication, the counter
-    /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
-    pub(super) windows_since_publication: u64,
+    /// What this node has published into side-manifests, and what live state holds beyond them.
+    pub(super) side_manifests: SideManifests,
     /// The entity-space coalesce, with its in-flight flag, attempt counter and completion channel:
     /// separate from a flush so the cheap one does not wait on the expensive one.
     pub(super) coalesce: Background<crate::coalesce::CompletedCoalesce>,
@@ -76,16 +71,6 @@ pub(super) struct Executor {
     /// whether one is still alive without keeping its mappings alive itself. Moved into
     /// [`PendingReclaim`] at a fold.
     pub(super) superseded_sidecars: Vec<std::sync::Weak<crate::engine::ExternalIdIndex>>,
-    /// Every membership extent this node has published: the complete list, not a diff, since a
-    /// publication clones a manifest that may be stale and extending that clone would drop entries.
-    pub(super) membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
-    /// Every derived file the current prefix holds. What reaches a manifest is this list filtered
-    /// to the files the store's level versions still make adoptable ([`artifact_coordinates`]); a
-    /// fold replaces it wholesale.
-    pub(super) derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
-    /// Every artifact content extent, held and written like `membership_extents`, which it travels
-    /// with: a membership without its content withholds the artifact.
-    pub(super) artifact_record_extents: Vec<tessera_store::manifest::RecordExtent>,
     /// Superseded prefixes awaiting reclamation, each held by the generation that named it. A
     /// prefix is deleted only once nothing else holds that generation or its external-id sidecar. A
     /// process that exits first leaves the tree for the startup sweep.
@@ -198,7 +183,8 @@ impl Executor {
     /// Whether this tick fires, and on what. `None` is a wake that is not a tick.
     fn tick_due(&self) -> Option<TickDue> {
         let period = std::time::Duration::from_secs(self.deps.flush_max_age_secs);
-        let rows_due = self.health.buffered_items.load(Ordering::SeqCst) >= self.deps.flush_max_items;
+        let rows_due =
+            self.health.buffered_items.load(Ordering::SeqCst) >= self.deps.flush_max_items;
         let period_due = self.last_tick.elapsed() >= period;
         let due = period_due || rows_due;
         let requested = self.health.flush_requested.load(Ordering::SeqCst);

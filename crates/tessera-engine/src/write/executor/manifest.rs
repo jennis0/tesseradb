@@ -95,14 +95,62 @@ pub(super) fn write_vocabulary_extensions(
     }
 }
 
-impl Executor {
+/// What this executor has published into side-manifests, and whether live state is ahead of the
+/// newest one.
+///
+/// The extent lists are complete lists, not diffs: a publication clones a manifest that may be
+/// stale, and extending that clone would drop entries.
+pub(in crate::write) struct SideManifests {
+    /// The next `SEGMENTS-<n>.json` number, taken at the moment a writer writes rather than when a
+    /// flush is planned. Private: it moves only by an allocation, which raises it over disc first.
+    next_n: u64,
+    /// Whether live state holds something no side-manifest carries yet. Set by an artifact write
+    /// as well as by a deny; cleared by the publication that writes them out.
+    pub(super) behind_live: bool,
+    /// Deny windows applied since the last publication, the counter
+    /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
+    pub(super) windows_since_publication: u64,
+    /// Every membership extent this node has published.
+    pub(super) membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
+    /// Every derived file the current prefix holds. What reaches a manifest is this list filtered
+    /// to the files the store's level versions still make adoptable ([`artifact_coordinates`]); a
+    /// fold replaces it wholesale.
+    pub(super) derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
+    /// Every artifact content extent, held and written like `membership_extents`, which it travels
+    /// with: a membership without its content withholds the artifact.
+    pub(super) artifact_record_extents: Vec<tessera_store::manifest::RecordExtent>,
+}
+
+impl SideManifests {
+    /// Open over what the bundle's manifests already carry: the counter above every
+    /// `SEGMENTS-<n>.json` on disc, and the three extent lists the build or the last fold wrote.
+    pub(in crate::write) fn seeded(
+        next_n: u64,
+        membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
+        derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
+        artifact_record_extents: Vec<tessera_store::manifest::RecordExtent>,
+    ) -> Self {
+        SideManifests {
+            next_n,
+            behind_live: false,
+            windows_since_publication: 0,
+            membership_extents,
+            derived_extents,
+            artifact_record_extents,
+        }
+    }
+
     /// Take the next side-manifest number: this executor's counter, raised over every
     /// `SEGMENTS-<n>.json` present under the bundle root.
     ///
     /// One publication, one scan: a caller allocating several numbers at once raises the floor
-    /// itself and then takes each number from [`Executor::take_manifest_n`].
-    pub(super) fn allocate_manifest_n(&mut self) -> tessera_store::Result<u64> {
-        self.raise_manifest_floor()?;
+    /// itself and then takes each number from [`SideManifests::take_manifest_n`].
+    pub(super) fn allocate_manifest_n(
+        &mut self,
+        bundle_root: &std::path::Path,
+        health: &ExecutorHealth,
+    ) -> tessera_store::Result<u64> {
+        self.raise_manifest_floor(bundle_root, health)?;
         Ok(self.take_manifest_n())
     }
 
@@ -114,33 +162,37 @@ impl Executor {
     ///
     /// A bundle root that cannot be listed fails the allocation and so the publication: the caller
     /// discards, its files are orphans, and the next tick re-plans.
-    pub(super) fn raise_manifest_floor(&mut self) -> tessera_store::Result<()> {
-        let on_disk = tessera_store::highest_side_manifest_n(&self.deps.bundle_root)?;
+    pub(super) fn raise_manifest_floor(
+        &mut self,
+        bundle_root: &std::path::Path,
+        health: &ExecutorHealth,
+    ) -> tessera_store::Result<()> {
+        let on_disk = tessera_store::highest_side_manifest_n(bundle_root)?;
         let floor = on_disk.map_or(0, |highest| highest + 1);
-        if floor > self.next_manifest_n {
-            self.health
-                .foreign_side_manifests
-                .fetch_add(1, Ordering::Relaxed);
+        if floor > self.next_n {
+            health.foreign_side_manifests.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 floor,
-                counter = self.next_manifest_n,
-                root = %self.deps.bundle_root.display(),
+                counter = self.next_n,
+                root = %bundle_root.display(),
                 "ALARM: a side-manifest this executor did not write is on disc. One executor owns \
                  a bundle root; publications continue above it, and what the other writer has \
                  published is not reconciled with what this node holds"
             );
-            self.next_manifest_n = floor;
+            self.next_n = floor;
         }
         Ok(())
     }
 
     /// The counter alone, for a caller that has just raised the floor.
     pub(super) fn take_manifest_n(&mut self) -> u64 {
-        let n = self.next_manifest_n;
-        self.next_manifest_n += 1;
+        let n = self.next_n;
+        self.next_n += 1;
         n
     }
+}
 
+impl Executor {
     /// Commits one partition's side-manifest. Every publication writes its manifest through here,
     /// so two things are done once: the manifest's ordered scalars are checked against
     /// `live_manifest` ([`crate::geometry::check_manifest_publishable`]), since a manifest is
@@ -159,7 +211,7 @@ impl Executor {
         // publication carries the held list forward.
         let (derived, pending) = match &fold {
             Some(fold) => (fold.written, Some(fold.pending_retirement)),
-            None => (self.derived_extents.as_slice(), None),
+            None => (self.side_manifests.derived_extents.as_slice(), None),
         };
         let (level_versions, derived_extents) = self
             .live

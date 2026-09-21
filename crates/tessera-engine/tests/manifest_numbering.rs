@@ -46,7 +46,7 @@ fn side_manifest_numbers(dir: &Path) -> Vec<u64> {
 /// discard a segment it had already written — and the next tick would do it again, because the
 /// counter it re-planned from is the one that produced the refused number.
 ///
-/// **Mutation:** drop the disc scan from `Executor::allocate_manifest_n` and the flush below never
+/// **Mutation:** drop the disc scan from `SideManifests::allocate_manifest_n` and the flush below never
 /// publishes.
 #[test]
 fn a_flush_publishes_above_a_side_manifest_a_second_writer_left() {

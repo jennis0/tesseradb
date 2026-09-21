@@ -2680,7 +2680,7 @@ fn drain_deny_windows(
 /// drain's close; a burst one window past it publishes twice, at the floor and then at the close.
 ///
 /// **One window past, not exactly at it**, and the difference is the whole discrimination. The
-/// floor's publication clears `deny_dirty`, so a burst ending exactly at the floor publishes once
+/// floor's publication clears `behind_live`, so a burst ending exactly at the floor publishes once
 /// whichever route did it and the gauge cannot tell the two apart. The extra window re-dirties the
 /// overlay, which is what makes the floor's publication visible as a second one.
 ///

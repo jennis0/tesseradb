@@ -168,9 +168,9 @@ impl Executor {
         let applied: Vec<(EntityId, ChangeOp)> = entries.iter().map(|e| (e.entity, e.op)).collect();
 
         self.apply_changes(applied);
-        self.deny_dirty = true;
-        self.windows_since_publication += 1;
-        if self.windows_since_publication >= OVERLAY_PUBLICATION_MAX_WINDOWS {
+        self.side_manifests.behind_live = true;
+        self.side_manifests.windows_since_publication += 1;
+        if self.side_manifests.windows_since_publication >= OVERLAY_PUBLICATION_MAX_WINDOWS {
             self.publish_overlay_state();
         }
 
