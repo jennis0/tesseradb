@@ -129,6 +129,88 @@ impl ClosingWindow {
     }
 }
 
+/// What a window's vocabulary pass drew.
+pub(super) struct MintedCodes {
+    /// The bindings the window publishes if it survives, the live ones plus whatever it drew.
+    pub(super) vocabularies: Vocabularies,
+    /// `(vocabulary, key, code)` per key this window bound, in the order the records that make
+    /// them durable are appended.
+    pub(super) fresh: Vec<(String, String, u32)>,
+}
+
+/// Tell the operator what a window's keys created.
+///
+/// Under `value_set = "open"` a typo creates a permanent object rather than being refused, so the
+/// caller is told the count in its own 200 and the operator gets this line.
+fn log_minted_artifacts(minted_per_entry: &[u64], mint_records: &[WalRecord]) {
+    let created: u64 = minted_per_entry.iter().sum();
+    if created == 0 {
+        return;
+    }
+    tracing::info!(
+        minted = created,
+        artifacts = ?mint_records
+            .iter()
+            .flat_map(|record| match record {
+                WalRecord::ArtifactPublish { layer, level, artifacts, .. } => artifacts
+                    .iter()
+                    .filter_map(|a| a.key.as_ref())
+                    .map(|key| format!("{key} in level {level} of {layer}"))
+                    .take(8)
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>(),
+        "an ingest batch named keys no artifact held, and this layer's value set is open, \
+         so they were created carrying nothing but their names"
+    );
+}
+
+/// Draw a code for every novel vocabulary key one positional cell list carries, and rewrite each
+/// such cell to its code at the column's declared width.
+///
+/// `columns` is the list the cells are positional against: the declared scalars for a row's own
+/// values, the owning group's families for its scoped tail. A key that is already bound costs a
+/// lookup and no copy; only a key this call draws is kept, for the record that binds it.
+fn mint_cells<'a>(
+    cells: &mut [WalScalar],
+    columns: impl Iterator<Item = (&'a str, Option<&'a str>, ScalarType)>,
+    vocabularies: &mut Vocabularies,
+    fresh: &mut Vec<(String, String, u32)>,
+) -> std::result::Result<(), MintError> {
+    for (index, (name, vocabulary, arrow_type)) in columns.enumerate() {
+        let Some(vocabulary) = vocabulary else {
+            continue;
+        };
+        let code = {
+            let Some(WalScalar::Utf8(key)) = cells.get(index) else {
+                continue;
+            };
+            let minter = vocabularies.get_mut(vocabulary).unwrap_or_else(|| {
+                panic!(
+                    "column '{name}' names vocabulary '{vocabulary}', which the live bindings do \
+                     not carry"
+                )
+            });
+            match minter.code_of(key) {
+                Some(code) => code,
+                None => {
+                    let key = key.clone();
+                    match minter.mint(&key)? {
+                        Minted::Fresh(code) => {
+                            fresh.push((vocabulary.to_string(), key, code));
+                            code
+                        }
+                        Minted::Existing(code) => code,
+                    }
+                }
+            }
+        };
+        cells[index] = code_at_declared_width(arrow_type, code);
+    }
+    Ok(())
+}
+
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
 /// mark did not move. `AllocError` is `Copy`, so every waiter gets the real one.
 ///
@@ -427,6 +509,58 @@ impl Executor {
         })
     }
 
+    /// Pad every row to the declared schema and draw a code for every discovered-vocabulary key
+    /// the window carries, in place and before anything is appended.
+    ///
+    /// The bindings are a mutable copy of the published ones, which becomes the next generation's
+    /// if the window survives. One copy for the whole window, not one per row: a second row naming
+    /// an already-minted-this-window key sees the first row's binding. Answers the copy and the
+    /// keys it drew, which the records at the head of the append make durable.
+    pub(super) fn mint_window_codes(
+        &self,
+        closing: &mut ClosingWindow,
+    ) -> std::result::Result<MintedCodes, MintError> {
+        let generation = self.generation.load_full();
+        let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
+        let declared_scalars = &generation.bundle.manifest.declared_scalars;
+        // The group-scoped families, by the view a row names, derived once for the window.
+        let scoped_by_view: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
+            scoped_families_by_view(&generation.bundle.manifest);
+        let mut fresh: Vec<(String, String, u32)> = Vec::new();
+        for entry in closing.entries_mut() {
+            for row in entry.rows_mut() {
+                // A row admitted under an earlier generation is padded here: a column declared
+                // since admission appended at the tail of `declared_scalars`. Before the mint
+                // below indexes by declared position, and before the append.
+                crate::attributes::pad_to_schema(&mut row.scalars, declared_scalars);
+                mint_cells(
+                    &mut row.scalars,
+                    declared_scalars
+                        .iter()
+                        .map(|d| (d.name.as_str(), d.vocabulary.as_deref(), d.arrow_type)),
+                    &mut vocabularies,
+                    &mut fresh,
+                )?;
+                // The same mint, over the row's scoped tail.
+                let Some(families) = scoped_by_view.get(row.view.as_str()) else {
+                    continue;
+                };
+                mint_cells(
+                    &mut row.scoped,
+                    families
+                        .iter()
+                        .map(|f| (f.name.as_str(), f.vocabulary.as_deref(), f.arrow_type)),
+                    &mut vocabularies,
+                    &mut fresh,
+                )?;
+            }
+        }
+        Ok(MintedCodes {
+            vocabularies,
+            fresh,
+        })
+    }
+
     /// Close a commit window: one signature-sorted allocation run, one WAL record per entry, one
     /// fsync, one generation swap, then every waiter is acked. Allocation is unchanged from a
     /// single batch's, except that the sort scope is the window.
@@ -458,100 +592,20 @@ impl Executor {
 
         mark = self.health.lap(WriteStage::Allocate, mark);
 
-        // Mint every novel discovered-vocabulary key this window's rows carry, in place, before
-        // anything is appended, against a mutable copy of the published bindings that becomes the
-        // next generation's if the window survives. One copy for the whole window, not one per
-        // row: a second row naming an already-minted-this-window key sees the first row's binding.
-        let generation = self.generation.load_full();
-        let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
-        let declared_scalars = generation.bundle.manifest.declared_scalars.clone();
-        // A row admitted under an earlier generation is padded here: a column declared since
-        // admission appended at the tail of `declared_scalars`. Padded before the mint pass below
-        // indexes by declared position, and before the append.
-        for entry in closing.entries_mut() {
-            for row in entry.rows_mut() {
-                crate::attributes::pad_to_schema(&mut row.scalars, &declared_scalars);
+        let MintedCodes {
+            vocabularies,
+            fresh: fresh_bindings,
+        } = match self.mint_window_codes(&mut closing) {
+            Ok(minted) => minted,
+            Err(e) => {
+                // Nothing has been appended yet, so the window has no effect.
+                let detail = e.to_string();
+                closing.fail_all(&self.health, || ExecError::VocabularyRefused {
+                    detail: detail.clone(),
+                });
+                return;
             }
-        }
-        // The group-scoped families, by the view a row names, derived once for the window.
-        let scoped_by_view: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
-            scoped_families_by_view(&generation.bundle.manifest);
-        let mut fresh_bindings: Vec<(String, String, u32)> = Vec::new();
-        let mut mint_failed: Option<MintError> = None;
-        'minting: for entry in closing.entries_mut() {
-            for row in entry.rows_mut() {
-                for (index, declared) in declared_scalars.iter().enumerate() {
-                    let Some(vocabulary) = declared.vocabulary.as_deref() else {
-                        continue;
-                    };
-                    let WalScalar::Utf8(key) = &row.scalars[index] else {
-                        continue;
-                    };
-                    let key = key.clone();
-                    let minter = vocabularies.get_mut(vocabulary).unwrap_or_else(|| {
-                        panic!(
-                            "column '{}' names vocabulary '{vocabulary}', which the live bindings \
-                             do not carry",
-                            declared.name
-                        )
-                    });
-                    match minter.mint(&key) {
-                        Ok(Minted::Fresh(code)) => {
-                            fresh_bindings.push((vocabulary.to_string(), key, code));
-                            row.scalars[index] = code_at_declared_width(declared.arrow_type, code);
-                        }
-                        Ok(Minted::Existing(code)) => {
-                            row.scalars[index] = code_at_declared_width(declared.arrow_type, code);
-                        }
-                        Err(e) => {
-                            mint_failed = Some(e);
-                            break 'minting;
-                        }
-                    }
-                }
-                // The same mint, over the row's scoped tail.
-                let Some(families) = scoped_by_view.get(row.view.as_str()) else {
-                    continue;
-                };
-                for (index, family) in families.iter().enumerate() {
-                    let Some(vocabulary) = family.vocabulary.as_deref() else {
-                        continue;
-                    };
-                    let Some(WalScalar::Utf8(key)) = row.scoped.get(index) else {
-                        continue;
-                    };
-                    let key = key.clone();
-                    let minter = vocabularies.get_mut(vocabulary).unwrap_or_else(|| {
-                        panic!(
-                            "scoped column family '{}' names vocabulary '{vocabulary}', which \\
-                             the live bindings do not carry",
-                            family.name
-                        )
-                    });
-                    match minter.mint(&key) {
-                        Ok(Minted::Fresh(code)) => {
-                            fresh_bindings.push((vocabulary.to_string(), key, code));
-                            row.scoped[index] = code_at_declared_width(family.arrow_type, code);
-                        }
-                        Ok(Minted::Existing(code)) => {
-                            row.scoped[index] = code_at_declared_width(family.arrow_type, code);
-                        }
-                        Err(e) => {
-                            mint_failed = Some(e);
-                            break 'minting;
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(e) = mint_failed {
-            // Nothing has been appended yet, so the window has no effect.
-            let detail = e.to_string();
-            closing.fail_all(&self.health, || ExecError::VocabularyRefused {
-                detail: detail.clone(),
-            });
-            return;
-        }
+        };
 
         // Prepared before anything is appended, so a refusal spends nothing.
         let (mut mint_records, minted_per_entry) = match self.mint_records(closing.entries_mut()) {
@@ -637,13 +691,20 @@ impl Executor {
             .collect();
         self.apply_artifact_records(&artifact_records, &positions[artifacts_at..]);
 
-        // Recorded after the swap, so a replay can never see it swapped but not yet indexed.
+        self.record_accepted_batches(closing.entries(), &positions[entries_at..artifacts_at]);
+        log_minted_artifacts(&minted_per_entry, &mint_records);
+        closing.ack(&self.health, minted_per_entry);
+    }
+
+    /// Index every entry of a committed window by its batch id, at the position of the record
+    /// that carries it. After the swap, so a replay can never see it swapped but not yet indexed.
+    pub(super) fn record_accepted_batches(
+        &mut self,
+        closed: &[ClosedEntry<Reply<Ingested>>],
+        positions: &[u64],
+    ) {
         let m = StageMark::now();
-        for (entry, wal_pos) in closing
-            .entries()
-            .iter()
-            .zip(&positions[entries_at..artifacts_at])
-        {
+        for (entry, wal_pos) in closed.iter().zip(positions) {
             let (batch_id, body_hash) = entry.batch_key();
             debug_assert_eq!(
                 tessera_lifecycle::batch_identity(&entry.record),
@@ -663,31 +724,6 @@ impl Executor {
         }
         self.health.lap(WriteStage::RecordBatch, m);
         self.observe_wal();
-
-        // Under `value_set = "open"` a typo creates a permanent object rather than being refused,
-        // so the caller is told the count in its own 200 and the operator gets this line.
-        let created: u64 = minted_per_entry.iter().sum();
-        if created > 0 {
-            tracing::info!(
-                minted = created,
-                artifacts = ?mint_records
-                    .iter()
-                    .flat_map(|record| match record {
-                        WalRecord::ArtifactPublish { layer, level, artifacts, .. } => artifacts
-                            .iter()
-                            .filter_map(|a| a.key.as_ref())
-                            .map(|key| format!("{key} in level {level} of {layer}"))
-                            .take(8)
-                            .collect::<Vec<_>>(),
-                        _ => Vec::new(),
-                    })
-                    .collect::<Vec<_>>(),
-                "an ingest batch named keys no artifact held, and this layer's value set is open, \
-                 so they were created carrying nothing but their names"
-            );
-        }
-
-        closing.ack(&self.health, minted_per_entry);
     }
 
     /// Clone the buffer once, insert every entry in the window, publish once. The clone is
