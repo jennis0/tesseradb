@@ -286,12 +286,12 @@ impl Executor {
             self.health.deferred_plans.store(false, Ordering::SeqCst);
             self.rotate_if_grown();
             if gated {
-                self.note_publication_failure();
+                self.health.fail_publication_cycle();
             } else {
                 self.health.close_publication_cycle();
             }
         } else if !self.dispatch_flushes(&generation, plans) {
-            self.note_publication_failure();
+            self.health.fail_publication_cycle();
         }
         // Dispatched before the two it suspends, so a tick that starts a fold does not also start
         // a merge that the flip would orphan.
@@ -302,12 +302,6 @@ impl Executor {
         // Last, so a reader that sees the count move sees everything this tick did on this
         // thread: the plans dispatched, the log rotated.
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Record that this cycle published nothing it was asked to publish: the cycle stays open, the
-    /// request is re-armed, and the retry is floored.
-    pub(super) fn note_publication_failure(&self) {
-        self.health.fail_publication_cycle();
     }
 
     /// Whether this executor may still write durable state: the two latching postures, asked in
