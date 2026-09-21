@@ -101,8 +101,8 @@ pub struct ExecutorHealth {
     /// Buffer occupancy as of the last apply. What `/control/ingest`'s occupancy bound is checked
     /// against.
     pub(crate) buffered_items: AtomicUsize,
-    /// Items that would acquire geometry at the last tick. Zero on a gated node; growing without
-    /// bound on one whose flush keeps failing.
+    /// Rows that would acquire geometry at the last tick, joins included. Zero on a gated node;
+    /// growing without bound on one whose flush keeps failing.
     pub(crate) flushable_items: AtomicUsize,
     /// Flushes published since the executor started.
     pub(crate) flushes: AtomicU64,
@@ -163,6 +163,9 @@ pub struct ExecutorHealth {
     pub(crate) last_fold_passes: Mutex<Vec<crate::compact::PassCost>>,
     /// The last fold's degradation report. The durable copy is the file in `reports/`.
     pub(crate) last_fold_report: Mutex<Vec<tessera_lifecycle::membership::Degradation>>,
+    /// A flush has finished on the pool and is holding at the test hook. Always `false` outside
+    /// tests.
+    pub(crate) flush_holding: AtomicBool,
     /// A fold has finished its passes and is holding at the test hook. Always `false` outside tests.
     pub(crate) fold_holding: AtomicBool,
     /// Nanoseconds spent in the whole apply step (clone, inserts, generation, swap), summed over
@@ -399,8 +402,8 @@ pub struct ExecutorStats {
     /// Items in the ingest buffer as of the last apply — the figure `/control/ingest`'s occupancy
     /// bound is checked against.
     pub buffered_items: usize,
-    /// Items that would acquire geometry at the last tick (§3.5) — zero on a gated node, growing
-    /// without bound on one whose flush keeps failing.
+    /// Rows that would acquire geometry at the last tick (§3.5), joins included — zero on a gated
+    /// node, growing without bound on one whose flush keeps failing.
     pub flushable_items: usize,
     /// Flushes published since the executor started.
     pub flushes: u64,
@@ -565,6 +568,7 @@ impl ExecutorHealth {
             last_fold_attr_written: AtomicU64::new(0),
             last_fold_passes: Mutex::new(Vec::new()),
             last_fold_report: Mutex::new(Vec::new()),
+            flush_holding: AtomicBool::new(false),
             fold_holding: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
             stage_nanos: Default::default(),

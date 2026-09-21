@@ -1265,11 +1265,20 @@ impl Executor {
         let unit = self.flush.start();
         self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
+        let switches = Arc::clone(&self.deps.switches);
         self.deps.pool.spawn(move || {
             let mut laps = crate::flush::FlushLaps::default();
             match crate::flush::execute_flush(plan, context, &mut laps) {
                 Ok(completed) => {
                     health.record_flush_execution(&laps, Some(completed.consumed.len()));
+                    // Test hook; always false otherwise. See `Engine::set_flush_paused_for_test`.
+                    // The unit is still in flight while this holds, which is the state the tick
+                    // behind a flush is about.
+                    health.flush_holding.store(true, Ordering::SeqCst);
+                    while switches.flush_paused.load(Ordering::SeqCst) {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    health.flush_holding.store(false, Ordering::SeqCst);
                     unit.complete(completed);
                 }
                 Err(e) => {

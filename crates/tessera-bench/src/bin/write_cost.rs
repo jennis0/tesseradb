@@ -828,11 +828,11 @@ fn experiment_d(depths: &[usize], rounds: usize) {
             best = best.min(at.elapsed().as_nanos() as u64);
             std::hint::black_box(flushable);
         }
-        // What the tick asks for now: a maintained count, read rather than walked.
+        // What the tick asks for now: the maintained row count, read rather than walked.
         let mut maintained = u64::MAX;
         for _ in 0..rounds.max(5) {
             let at = Instant::now();
-            let flushable = buffer.owning_entities();
+            let flushable = buffer.len();
             maintained = maintained.min(at.elapsed().as_nanos() as u64);
             std::hint::black_box(flushable);
         }
@@ -847,7 +847,7 @@ fn experiment_d(depths: &[usize], rounds: usize) {
     println!(
         "One tick, not one window: it is paid only when a tick lands while a flush is in flight. \
          `walk` is the filtered walk with its Roaring `contains` per buffered entity; \
-         `maintained` is the counter the buffer keeps, which is what the tick reads."
+         `maintained` is the row counter the buffer keeps, which is what the tick reads."
     );
 }
 

@@ -41,6 +41,35 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
     .expect("engine opens")
 }
 
+/// One row for `external_id` in `view`, for a batch of its own. A second view of an item already
+/// ingested is a join: admission resolves the external id to the entity it already names.
+fn ingest_into_view(
+    engine: &Engine,
+    batch: &str,
+    external_id: &str,
+    view: &str,
+) -> tessera_types::EntityId {
+    let descriptors = vec![b"0".to_vec()];
+    let mut hash = [0u8; 32];
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
+        *slot = *byte;
+    }
+    let row = tessera_lifecycle::command::UnallocatedRow {
+        external_id: Some(external_id.as_bytes().to_vec()),
+        view: view.to_string(),
+        join: None,
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
+    };
+    engine
+        .accept_ingest(vec![row], batch.to_string(), hash)
+        .expect("the batch is accepted")[0]
+}
+
 /// The tick plans what it would flush, and the gauge separates a stalled flush from healthy
 /// backlog: `flushable_items` is the buffer minus what the three dispositions exclude (§3.5).
 #[test]
@@ -305,4 +334,56 @@ fn a_flushed_item_is_visible_in_a_viewport() {
         out.tiles.iter().any(|t| t.tile == containing_tile),
         "the drawn point lies in one of the tiles this response reported"
     );
+}
+
+/// **The gauge counts rows at both writers.** An item in two views is two rows to flush, and the
+/// tick that lands behind a flush in flight has to say the same thing the tick that plans one says,
+/// or an operator watching the backlog reads a figure that changes meaning with the flush's timing.
+#[test]
+fn the_backlog_gauge_counts_rows_in_every_view_whether_or_not_a_flush_is_in_flight() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+
+    // One item, a row in each view: the second is a join, which carries geometry and no terms.
+    let entity = ingest(&engine, "ext-1");
+    assert_eq!(ingest_into_view(&engine, "b2", "ext-1", "s1"), entity);
+
+    engine.set_flush_paused_for_test(true);
+    wait_until("the planning tick", WAIT, || {
+        engine.write_executor_stats().flushable_items == 2
+    });
+    wait_until("the flush to reach its hold", WAIT, || {
+        engine.flush_is_holding_for_test()
+    });
+
+    // A tick with the flush still in flight publishes nothing and re-counts the buffer.
+    let behind = engine.write_executor_stats().ticks;
+    wait_until("a tick behind the flush", WAIT, || {
+        engine.write_executor_stats().ticks > behind
+    });
+    assert_eq!(
+        engine.write_executor_stats().flushable_items,
+        2,
+        "the item's row in each view is two rows to flush, whichever writer last wrote the gauge"
+    );
+
+    engine.set_flush_paused_for_test(false);
+    wait_until("both views to flush", WAIT, || {
+        engine.write_executor_stats().flushable_items == 0
+    });
 }

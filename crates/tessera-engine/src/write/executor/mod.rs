@@ -206,10 +206,10 @@ impl Executor {
         self.last_tick = std::time::Instant::now();
         self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
-        // No deletion filter: the buffer never holds a deleted entity's own row. A live deletion
-        // drops its rows in the same swap that marks it deleted, and replay drops them before the
-        // buffer is published.
-        let flushable = generation.buffer.owning_entities();
+        // Rows, as the planning tick counts them, and no deletion filter: the buffer never holds
+        // anything of a deleted entity. A live deletion drops its rows in the same swap that marks
+        // it deleted, and replay drops them before the buffer is published.
+        let flushable = generation.buffer.len();
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);
