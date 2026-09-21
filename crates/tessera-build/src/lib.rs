@@ -118,7 +118,7 @@ pub(crate) fn report_shapes(reports: &[crate::shapes::ShapeLayerReport]) {
     }
     eprintln!("shape layers, from the geometry alone:");
     for report in reports {
-        report.print();
+        eprintln!("{report}");
     }
 }
 

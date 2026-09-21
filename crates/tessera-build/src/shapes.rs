@@ -142,51 +142,52 @@ pub struct ResolutionReport {
     pub elapsed_ms: u64,
 }
 
-impl ShapeLayerReport {
-    /// One block of the build's or the check's report, on stderr like the rest of them.
-    pub fn print(&self) {
-        eprintln!(
-            "  {} [{}]: {} artifact(s) with a shape, {} without geometry; {} part(s), {} ring(s); \
-             vertices {} in → {} out",
-            self.layer,
-            self.kind,
-            self.artifacts,
-            self.no_geometry,
-            self.parts,
-            self.rings,
-            self.vertices_in,
-            self.vertices_out
-        );
-        eprintln!(
-            "    clipped to the extent {}, wholly outside {}, rings dropped {}, degrees-looking \
-             {}, children escaping their parent's bounds {}",
-            self.clipped,
-            self.outside,
-            self.rings_dropped,
-            self.degrees_looking,
-            self.children_escaping
-        );
-        eprintln!(
-            "    decomposition: {} interior tile(s) (max {} per artifact), {} boundary cell(s) \
-             (max {} per artifact); canonical {} B, held {} B",
-            self.interior_tiles,
-            self.max_interior_tiles,
-            self.boundary_cells,
-            self.max_boundary_cells,
-            self.canonical_bytes,
-            self.held_bytes
-        );
+/// One block of the build's or the check's report.
+impl std::fmt::Display for ShapeLayerReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut lines = vec![
+            format!(
+                "  {} [{}]: {} artifact(s) with a shape, {} without geometry; {} part(s), {} \
+                 ring(s); vertices {} in → {} out",
+                self.layer,
+                self.kind,
+                self.artifacts,
+                self.no_geometry,
+                self.parts,
+                self.rings,
+                self.vertices_in,
+                self.vertices_out
+            ),
+            format!(
+                "    clipped to the extent {}, wholly outside {}, rings dropped {}, \
+                 degrees-looking {}, children escaping their parent's bounds {}",
+                self.clipped,
+                self.outside,
+                self.rings_dropped,
+                self.degrees_looking,
+                self.children_escaping
+            ),
+            format!(
+                "    decomposition: {} interior tile(s) (max {} per artifact), {} boundary \
+                 cell(s) (max {} per artifact); canonical {} B, held {} B",
+                self.interior_tiles,
+                self.max_interior_tiles,
+                self.boundary_cells,
+                self.max_boundary_cells,
+                self.canonical_bytes,
+                self.held_bytes
+            ),
+        ];
         // **Per view, and only where the views disagree.** One view, or several agreeing, says
         // nothing a reader cannot read off the totals above; a difference between them is a
-        // frame difference, which is what decision 0111 made possible and what an operator has to
-        // be able to see.
+        // frame difference, which an operator has to be able to see.
         let differ = self
             .by_view
             .iter()
             .any(|v| v.counts() != self.by_view[0].counts());
         if self.by_view.len() > 1 && differ {
             for view in &self.by_view {
-                eprintln!(
+                lines.push(format!(
                     "    view '{}': clipped {}, wholly outside {}, rings dropped {}, \
                      degrees-looking {}; {} interior tile(s), {} boundary cell(s)",
                     view.view,
@@ -196,27 +197,27 @@ impl ShapeLayerReport {
                     view.degrees_looking,
                     view.interior_tiles,
                     view.boundary_cells
-                );
+                ));
             }
         }
-        // **Warned, never a refusal** (§4.3): a shape wholly outside a view's extent holds no rows
-        // there, is published, and the operator decides whether the extent or the geometry is
-        // wrong. The number is per view, because that is the number that says which.
+        // **Warned, never a refusal**: a shape wholly outside a view's extent holds no rows there,
+        // is published, and the operator decides whether the extent or the geometry is wrong. The
+        // number is per view, because that is the number that says which.
         for view in self.by_view.iter().filter(|v| v.outside > 0) {
-            eprintln!(
+            lines.push(format!(
                 "    WARNING: {} of this layer's {} shape(s) lie wholly outside view '{}''s \
-                 extent and hold no rows there; the other views are unaffected \
-                 (`polygon-membership.md` §4.3)",
+                 extent and hold no rows there; the other views are unaffected",
                 view.outside, self.artifacts, view.view
-            );
+            ));
         }
         if let Some(r) = &self.resolution {
-            eprintln!(
+            lines.push(format!(
                 "    resolved the build's segment: {} row(s), {} admitted from interior tiles, {} \
                  tested one by one in boundary cells, {} artifact(s) with a shape and no row, {} ms",
                 r.rows, r.rows_interior, r.rows_tested, r.artifacts_empty, r.elapsed_ms
-            );
+            ));
         }
+        f.write_str(&lines.join("\n"))
     }
 }
 

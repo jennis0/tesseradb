@@ -82,6 +82,14 @@ class ACleanDeclaration(unittest.TestCase):
         self.assertEqual([view["name"] for view in payloads["views"]], ["s0"])
         self.assertEqual([body["name"] for body in payloads["attributes"]], ["score"])
 
+    def test_carries_the_whole_page_the_binary_prints(self):
+        page = _tessera.check(project(DECLARED_AND_EMPTY)).page
+        self.assertIn("declared and empty", page)
+        # The disclosure table, which a caller rendering from the findings alone cannot write.
+        self.assertIn("\nviews\n", page)
+        self.assertIn("attributes (in declaration order", page)
+        self.assertIn("check OK:", page)
+
     def test_payloads_are_text_a_second_call_repeats(self):
         deployment = project(DECLARED_AND_EMPTY)
         self.assertEqual(_tessera.payloads(deployment), _tessera.payloads(deployment))
@@ -99,6 +107,11 @@ class ADeclarationThatDoesNotCheck(unittest.TestCase):
             self.assertIn(finding.object.block, ("view", "source", "attribute", "layer"))
             self.assertTrue(finding.object.name)
             self.assertTrue(finding.detail)
+
+    def test_its_page_states_the_verdict_and_discloses_nothing(self):
+        page = _tessera.check(project(NAMES_A_FILE_THAT_IS_NOT_THERE)).page
+        self.assertIn("check FAILED:", page)
+        self.assertNotIn("\nviews\n", page)
 
     def test_emits_no_payloads(self):
         with self.assertRaises(_tessera.DeclarationError) as refusal:

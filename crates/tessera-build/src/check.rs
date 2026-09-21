@@ -117,18 +117,20 @@ pub struct FramePreview {
     pub snapped: Option<(crate::config::LonLatBox, tessera_spatial::frame::Snap)>,
 }
 
-impl FramePreview {
-    /// One line for the view, and one for the snap where there is one.
-    pub fn print(&self) {
+/// One line for the view, and one for the snap where there is one.
+impl std::fmt::Display for FramePreview {
+    fn fmt(&self, f_: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.snapped {
-            None => eprintln!(
+            None => write!(
+                f_,
                 "  {:<20} {}, `extent = \"auto\"` — the frame is fitted to the data, so it is not \
                  known until the build reads the points",
                 self.view, self.projection
             ),
             Some((asked, snap)) => {
                 let f = snap.square.bounds();
-                eprintln!(
+                writeln!(
+                    f_,
                     "  {:<20} {}, asked for lon [{}, {}], lat [{}, {}]",
                     self.view,
                     self.projection,
@@ -136,8 +138,9 @@ impl FramePreview {
                     asked.lon_max,
                     asked.lat_min,
                     asked.lat_max
-                );
-                eprintln!(
+                )?;
+                write!(
+                    f_,
                     "  {:<20} {} to the square at z{} ({}, {}) — x [{}, {}], y [{}, {}]",
                     "",
                     if snap.floored {
@@ -152,7 +155,7 @@ impl FramePreview {
                     f.x_max,
                     f.y_min,
                     f.y_max
-                );
+                )
             }
         }
     }
@@ -879,6 +882,245 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
                 require(report, &object, &schema, &members.fields, "key");
                 require(report, &object, &schema, &members.fields, "entity");
                 require_named(report, &object, &schema, &members.fields, &["rank"]);
+            }
+        }
+    }
+}
+
+/// The check as one page: what was read, what is wrong, what the declaration implies about frames,
+/// view groups and shape layers, the disclosure decisions it makes, and the verdict.
+///
+/// Every caller renders through this — the binary, the Python extension module, and the SDK
+/// through it — so the page is the same bytes whichever of them ran the check. The disclosure
+/// table is written only on a clean check: a declaration with a finding in it has not been read
+/// far enough for what it discloses to be worth reading.
+pub fn page(config: &Config, report: &CheckReport) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for source in &report.sources {
+        match &source.path {
+            Some(path) => {
+                let _ = writeln!(out, "  read schema  {:<34} {path}", source.object);
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "  no source    {:<34} (declared and empty)",
+                    source.object
+                );
+            }
+        }
+    }
+    for finding in &report.findings {
+        let _ = writeln!(out, "  FAILED       {}: {}", finding.object, finding.detail);
+    }
+    // A warning leaves the check clean and the exit status untouched: an indexed keyword the
+    // source's footer says is unique per row is a cost to know about, not a mistake.
+    for warning in &report.warnings {
+        let _ = writeln!(out, "  WARNING      {}: {}", warning.object, warning.detail);
+    }
+    if !report.frames.is_empty() {
+        let _ = writeln!(out, "projected views, from the declaration alone:");
+        for frame in &report.frames {
+            let _ = writeln!(out, "{frame}");
+        }
+    }
+    if !config.view_groups.is_empty() {
+        let _ = writeln!(out, "view groups, from the declaration alone:");
+        for group in &config.view_groups {
+            let keys = group.declared_keys();
+            let roster = match (&group.members, keys.len()) {
+                (Some(owner), _) => format!("the views of '{owner}'"),
+                (None, 0) => group.form().to_string(),
+                (None, n) => format!("{}, {n} view(s): {}", group.form(), keys.join(", ")),
+            };
+            let _ = writeln!(out, "  {:<20} {roster}", group.name);
+            if !group.metadata.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "  {:<20} metadata: {}",
+                    "",
+                    group
+                        .metadata
+                        .iter()
+                        .map(|m| format!("{} ({})", m.name, m.ty.arrow_type_name()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        for (attribute, group) in &config.scopes.attributes {
+            let _ = writeln!(
+                out,
+                "  {:<20} attribute '{attribute}'",
+                format!("scope {group}")
+            );
+        }
+        for (layer, group) in &config.scopes.layers {
+            let _ = writeln!(out, "  {:<20} layer '{layer}'", format!("scope {group}"));
+        }
+    }
+    if !report.shapes.is_empty() {
+        let _ = writeln!(out, "shape layers, from the geometry alone:");
+        for shape in &report.shapes {
+            match shape {
+                Ok(shape) => {
+                    let _ = writeln!(out, "{shape}");
+                }
+                Err(why) => {
+                    let _ = writeln!(out, "  not sized: {why}");
+                }
+            }
+        }
+    }
+    if !report.is_clean() {
+        let _ = writeln!(
+            out,
+            "check FAILED: {} finding(s) across {} source(s). Nothing was read but Parquet \
+             schemas, so a clean check is not a clean build: it cannot see a value against a \
+             closed vocabulary, a member id that resolves to nothing, or where the data sits \
+             inside a view's extent",
+            report.findings.len(),
+            report.sources.len()
+        );
+        return out;
+    }
+    write_disclosure(&mut out, &crate::disclosure::Disclosure::of(config));
+    let _ = writeln!(
+        out,
+        "\ncheck OK: {} source(s), {} view(s), {} view group(s) over {} declared view(s), {} \
+         vocabulary(ies), {} attribute(s), {} layer(s), {} warning(s)",
+        report.sources.len(),
+        config.views.len(),
+        config.view_groups.len(),
+        config
+            .view_groups
+            .iter()
+            .map(|g| g.declared_keys().len())
+            .sum::<usize>(),
+        config.schema.vocabularies.len(),
+        // Every declared column, the group-scoped families included: they are held apart from the
+        // schema because a family has no slot in the manifest's flat list, not because they are
+        // fewer columns.
+        config.schema.attributes.len() + config.scoped_attributes.len(),
+        config.layers.len(),
+        report.warnings.len()
+    );
+    out
+}
+
+/// The disclosure decisions a declaration makes, as a table an operator reads.
+///
+/// The same values `reports/disclosure.json` carries, and deliberately a second rendering of one
+/// source rather than a second derivation: the file is for a diff between builds and this is for a
+/// person deciding whether the declaration says what they meant.
+fn write_disclosure(out: &mut String, disclosure: &crate::disclosure::Disclosure) {
+    use std::fmt::Write;
+    let _ = writeln!(out, "\nviews");
+    for view in &disclosure.views {
+        match &view.default {
+            Some(default) => {
+                let _ = writeln!(
+                    out,
+                    "  {:<26} labels from {}, default '{default}'",
+                    view.name, view.labels_from
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "  {:<26} labels from {}, no default: an unlabelled point is refused",
+                    view.name, view.labels_from
+                );
+            }
+        }
+    }
+    if !disclosure.vocabularies.is_empty() {
+        let _ = writeln!(out, "\nvocabularies");
+        for vocabulary in &disclosure.vocabularies {
+            let _ = writeln!(
+                out,
+                "  {:<26} {}, {}, {} declared value(s){}",
+                vocabulary.name,
+                vocabulary.visibility,
+                vocabulary.value_set,
+                vocabulary.declared_values,
+                if vocabulary.reserved.is_empty() {
+                    String::new()
+                } else {
+                    format!(", reserved {:?}", vocabulary.reserved)
+                }
+            );
+        }
+    }
+    if !disclosure.attributes.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nattributes (in declaration order, which is the stored column order)"
+        );
+        for attribute in &disclosure.attributes {
+            let _ = writeln!(
+                out,
+                "  {:<26} {}{}, {}, from column '{}'{}",
+                attribute.name,
+                attribute.ty,
+                match &attribute.vocabulary {
+                    Some(v) => format!(" over vocabulary '{v}'"),
+                    None => String::new(),
+                },
+                attribute.placement,
+                attribute.field,
+                // A family is one column per view of the group, read from those views' own points
+                // and stored under `attrs/<column>/<group>/<key>/`.
+                match &attribute.scope {
+                    Some(group) => format!(", one column per view of '{group}'"),
+                    None => String::new(),
+                }
+            );
+        }
+    }
+    if !disclosure.layers.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nlayers (in declaration order, which is registration order)"
+        );
+        for layer in &disclosure.layers {
+            let _ = writeln!(out, "  {}", layer.name);
+            if let Some(parent) = &layer.expanded_from {
+                let _ = writeln!(out, "      written by `[layer.labels]` on '{parent}'");
+            }
+            let _ = writeln!(
+                out,
+                "      gate '{}' | artifacts {} | members {}",
+                layer.visibility,
+                match &layer.artifact_visibility.field {
+                    Some(field) => format!(
+                        "carry their own in '{field}', else '{}'",
+                        layer.artifact_visibility.default
+                    ),
+                    None => format!("'{}'", layer.artifact_visibility.default),
+                },
+                match layer.require_member_visibility.as_str() {
+                    Some(word) => word.to_string(),
+                    None => layer.require_member_visibility.to_string(),
+                }
+            );
+            if !layer.depends_on.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "      served only where {} is served",
+                    layer.depends_on.join(", ")
+                );
+            }
+            if !layer.content.computed.is_empty() {
+                let _ = writeln!(out, "      computed {}", layer.content.computed.join(", "));
+            }
+            for supplied in &layer.content.supplied {
+                let _ = writeln!(
+                    out,
+                    "      supplied {} '{}' requires {}",
+                    supplied.ty, supplied.name, supplied.require_member_visibility
+                );
             }
         }
     }

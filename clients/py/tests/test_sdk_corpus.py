@@ -1,11 +1,11 @@
 """A corpus declaration regenerated from calls, and what it discloses.
 
-`tessera check` prints its disclosure table on stdout and the schemas it read, with their paths,
-on stderr, and it is run here over both declarations: the committed one and the one the verbs
-wrote. The two name the same files by different paths, one reading `data/notebook/` directly and
-one reading it through a relative path from a temporary directory. **Stdout is compared whole,
-and stderr by its file names.** That is the whole normalisation: the disclosure table carries no
-path, which is what makes it the thing to compare.
+`tessera check` prints one page: the schemas it read, with their paths, then what the declaration
+discloses. It is run here over both declarations: the committed one and the one the verbs wrote.
+The two name the same files by different paths, one reading `data/notebook/` directly and one
+reading it through a relative path from a temporary directory. **The lines that name a path are
+compared by file name, and the rest of the page whole.** That is the whole normalisation: nothing
+else on the page carries a path.
 
 Beside it, the first commit through `tessera build`.
 """
@@ -148,6 +148,15 @@ def insert_notebook(db, corpus: Path) -> None:
         )
 
 
+def page_without_sources(page: str) -> list[str]:
+    """The check's page but the lines that name a path: what two declarations must agree on."""
+    return [
+        line
+        for line in page.splitlines()
+        if "read schema" not in line and "no source" not in line
+    ]
+
+
 def read_schema_lines(stderr: str) -> list[str]:
     """`tessera check`'s "read schema" lines, with the path column cut to its file name.
 
@@ -171,8 +180,8 @@ def read_schema_lines(stderr: str) -> list[str]:
     return lines
 
 
-def check_committed(tessera: str, declaration: Path, directory: Path) -> tuple[str, str]:
-    """`tessera check` over a declaration this repository holds, and its disclosure table."""
+def check_committed(tessera: str, declaration: Path, directory: Path) -> str:
+    """`tessera check` over a declaration this repository holds, and the page it printed."""
     (directory / "cache").mkdir(parents=True, exist_ok=True)
     (directory / "tessera.toml").write_text(
         "[bundle]\n"
@@ -187,7 +196,7 @@ def check_committed(tessera: str, declaration: Path, directory: Path) -> tuple[s
         text=True,
     )
     assert done.returncode == 0, done.stderr
-    return done.stdout, done.stderr
+    return done.stdout + done.stderr
 
 
 def test_the_notebook_declaration_regenerated_discloses_what_the_committed_one_discloses(tmp_path):
@@ -197,18 +206,13 @@ def test_the_notebook_declaration_regenerated_discloses_what_the_committed_one_d
     declare_notebook(db, corpus)
     report = db.check()
     assert report.ok, report.output
-    committed, committed_stderr = check_committed(
-        tessera, corpus / "schema.toml", tmp_path / "committed"
-    )
-    # The binary over each declaration, so the two disclosure tables are printed by one printer.
-    generated, generated_stderr = check_committed(
-        tessera, db.path / "schema.toml", tmp_path / "generated"
-    )
-    assert generated.strip() == committed.strip()
+    committed = check_committed(tessera, corpus / "schema.toml", tmp_path / "committed")
+    generated = check_committed(tessera, db.path / "schema.toml", tmp_path / "generated")
+    assert page_without_sources(generated) == page_without_sources(committed)
     # And the same files read by the same objects: the paths differ, the file names do not.
-    read = read_schema_lines(generated_stderr)
+    read = read_schema_lines(generated)
     assert len(read) == 12
-    assert read == read_schema_lines(committed_stderr)
+    assert read == read_schema_lines(committed)
 
 
 def test_the_regenerated_declaration_states_what_the_committed_one_leaves_to_a_default(tmp_path):
@@ -334,10 +338,9 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
         )
     report = db.check()
     assert report.ok, report.output
-    committed, committed_stderr = check_committed(tessera, declaration, tmp_path / "committed")
-    generated = report.output[: report.output.index("  read schema")]
-    assert generated.strip() == committed.strip()
-    assert read_schema_lines(report.output) == read_schema_lines(committed_stderr)
+    committed = check_committed(tessera, declaration, tmp_path / "committed")
+    assert page_without_sources(report.output) == page_without_sources(committed)
+    assert read_schema_lines(report.output) == read_schema_lines(committed)
 
 
 def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
