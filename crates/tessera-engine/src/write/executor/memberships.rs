@@ -22,7 +22,7 @@ pub(super) fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
 pub(super) fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> Vec<(WalRecord, usize)> {
     use std::collections::BTreeMap;
     /// One `(layer, level)`'s joins: the entry to blame for the append, and a bitmap per ordinal.
-    pub(super) type Level = (usize, BTreeMap<u32, croaring::Bitmap>);
+    type Level = (usize, BTreeMap<u32, croaring::Bitmap>);
     // Ordered, so replay order does not depend on hash iteration: two nodes replaying one log must
     // read the same sequence.
     let mut by_level: BTreeMap<(&str, u32), Level> = BTreeMap::new();
@@ -125,17 +125,16 @@ pub(super) fn settle_resolved_ordinals(
     }
 }
 
-/// What [`Executor::prepare_mints`] answers: the publication records to append in order, the keys
-/// that turned out to be held after all and the ordinal each resolved to, and the keys this run
-/// created. `Err` is the refusal text the caller's waiters are answered with.
-pub(super) type PreparedMints = Result<
-    (
-        Vec<WalRecord>,
-        std::collections::BTreeMap<(String, u32, String), u32>,
-        std::collections::BTreeSet<(String, u32, String)>,
-    ),
-    String,
->;
+/// What [`Executor::prepare_mints`] answers.
+pub(super) struct PreparedMints {
+    /// The publication records to append, in that order.
+    pub(super) records: Vec<WalRecord>,
+    /// The keys that turned out to be held after all, and the ordinal each resolved to; their
+    /// caller grows into those rather than minting.
+    pub(super) resolved: std::collections::BTreeMap<(String, u32, String), u32>,
+    /// The keys this run created.
+    pub(super) minted: std::collections::BTreeSet<(String, u32, String)>,
+}
 
 /// The parent each child in these edges is named under, refusing a child named under two.
 ///
@@ -338,7 +337,11 @@ impl Executor {
         let Some((wanted, edges)) = mint_plan(closed) else {
             return Ok((Vec::new(), minted_per_entry));
         };
-        let (records, resolved, minted) = self.prepare_mints(&wanted, &edges)?;
+        let PreparedMints {
+            records,
+            resolved,
+            minted,
+        } = self.prepare_mints(&wanted, &edges)?;
 
         // A key that acquired an artifact between its batch's admission and this close is an
         // ordinary growth. See [`settle_resolved_ordinals`].
@@ -360,14 +363,13 @@ impl Executor {
     /// [`Executor::mint_records`] and `POST /control/values` through `values_mint_plan`, so a key
     /// arriving at either door creates the same artifact, with the same lineage and refusals.
     ///
-    /// The three answers: the records to append in order, ascending level, coarse first; the keys
-    /// that turned out to be held after all, which their caller grows into instead; and the keys
-    /// this run minted.
+    /// The records come back in the order they are appended: ascending level, coarse first. `Err`
+    /// is the refusal text the caller's waiters are answered with.
     pub(super) fn prepare_mints(
         &self,
         wanted: &MintPlan,
         edges: &[tessera_lifecycle::BatchEdge],
-    ) -> PreparedMints {
+    ) -> Result<PreparedMints, String> {
         use std::collections::BTreeMap;
         self.live.with_publication_state(|registry, store, alloc| {
             // Checked before anything is prepared, so a refusal spends nothing.
@@ -500,7 +502,11 @@ impl Executor {
                 .keys()
                 .map(|(layer, level, key)| ((*layer).to_string(), *level, (*key).to_string()))
                 .collect();
-            Ok((records, resolved, minted))
+            Ok(PreparedMints {
+                records,
+                resolved,
+                minted,
+            })
         })
     }
 

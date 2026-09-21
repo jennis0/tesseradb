@@ -127,21 +127,18 @@ impl Executor {
     /// restart: durability was owed and not reached, and the caller must retry. The item stays
     /// hidden in memory until then, and the node stops claiming readiness.
     pub(super) fn commit_denies(&mut self, entries: Vec<DenyEntry>) {
-        let mut failed_at: Option<(usize, WalError)> = None;
-        for (i, entry) in entries.iter().enumerate() {
-            if let Err(e) = self.wal.append(&entry.record) {
-                failed_at = Some((i, e));
-                break;
-            }
-        }
         // One fsync for the whole window. Every entry is durable when it returns, or none is.
-        if failed_at.is_none() {
-            if let Err(e) = self.wal.fsync() {
-                if let Err(e) = self.retry_deny_durability(&entries, e) {
-                    failed_at = Some((0, e));
-                }
-            }
-        }
+        let records: Vec<&WalRecord> = entries.iter().map(|entry| &entry.record).collect();
+        let failed_at = match self.append_and_sync(&records, None) {
+            Ok(_) => None,
+            Err(Undurable::Append { at, error }) => Some((at, error)),
+            // A sync is retried where a torn append is not; the first entry is blamed for an
+            // exhausted retry, since no one of them failed.
+            Err(Undurable::Fsync(error)) => self
+                .retry_deny_durability(&entries, error)
+                .err()
+                .map(|e| (0, e)),
+        };
         self.observe_wal();
 
         if let Some((index, error)) = failed_at {
@@ -155,13 +152,9 @@ impl Executor {
                 // never-acked deny permanent, since no durable record backs them.
                 self.apply_changes(applied);
             }
-            let mut real = Some(error);
+            let mut blame = Blame::new(index, error);
             for (i, entry) in entries.into_iter().enumerate() {
-                let e = if i == index {
-                    real.take().unwrap_or(WalError::Poisoned)
-                } else {
-                    WalError::Poisoned
-                };
+                let e = blame.at(i);
                 if let Some(reply) = &entry.reply {
                     reply.fail(ExecError::Wal(e));
                 }

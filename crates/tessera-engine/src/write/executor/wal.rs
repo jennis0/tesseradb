@@ -7,6 +7,52 @@ use super::*;
 /// Not a latency bound on anything a caller sees: a degraded node still answers denies immediately.
 pub(super) const WAL_RECOVERY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Why one [`Executor::append_and_sync`] run did not reach durability. The two are told apart
+/// because the deny lane retries a sync and not a torn append.
+pub(super) enum Undurable {
+    /// The record at this index into the run's input could not be appended.
+    Append { at: usize, error: WalError },
+    /// Every record was appended and none of them is durable.
+    Fsync(WalError),
+}
+
+impl Undurable {
+    pub(super) fn into_error(self) -> WalError {
+        match self {
+            Undurable::Append { error, .. } | Undurable::Fsync(error) => error,
+        }
+    }
+}
+
+/// Which of a failed run's answers carries the real error.
+///
+/// The one the failure belongs to gets it; every other gets [`WalError::Poisoned`], which is
+/// precisely what its own append would have returned had it been attempted after the failure, and
+/// what the WAL will in fact return for every subsequent call. Consumed as the answers are made,
+/// so the real error is handed out exactly once.
+pub(super) struct Blame {
+    real: Option<WalError>,
+    blamed: usize,
+}
+
+impl Blame {
+    pub(super) fn new(blamed: usize, error: WalError) -> Self {
+        Blame {
+            real: Some(error),
+            blamed,
+        }
+    }
+
+    /// The error answer `index` is owed.
+    pub(super) fn at(&mut self, index: usize) -> WalError {
+        if index == self.blamed {
+            self.real.take().unwrap_or(WalError::Poisoned)
+        } else {
+            WalError::Poisoned
+        }
+    }
+}
+
 impl Executor {
     /// If the WAL is degraded and the degradation is one a discard can end, end it.
     ///
@@ -38,25 +84,60 @@ impl Executor {
         self.observe_wal();
     }
 
-    /// Appends the records and fsyncs once, and returns the position each record took. The
-    /// position is read before the append, because it is the bound rotation must not reclaim past.
-    /// On failure nothing the command prepared is in force; ids it reserved stay spent, so a torn
-    /// append that replays cannot land them on entities a later command also holds.
-    pub(super) fn make_durable(&mut self, records: &[&WalRecord], what: &str) -> Result<Vec<u64>, ExecError> {
+    /// Append `records` in order and fsync once: the one path to durability, whichever lane asks
+    /// for it.
+    ///
+    /// Each record's position is read before its own append, because that is the only moment it
+    /// can be read, and the positions come back in input order; a rotation reclaims by them, so a
+    /// record that failed to append contributes none. On failure nothing the caller prepared is in
+    /// force; ids it reserved stay spent, so a torn append that replays cannot land them on
+    /// entities a later command also holds.
+    ///
+    /// `laps` times the appends against [`WriteStage::WalAppend`] and the sync against
+    /// [`WriteStage::WalFsync`] for the callers that measure them, and is `None` for the rest.
+    pub(super) fn append_and_sync(
+        &mut self,
+        records: &[&WalRecord],
+        laps: Option<StageMark>,
+    ) -> std::result::Result<Vec<u64>, Undurable> {
         let mut positions = Vec::with_capacity(records.len());
-        let appended = records.iter().try_for_each(|record| {
-            positions.push(self.wal.position());
-            self.wal.append(record)
-        });
-        let durable = appended.and_then(|()| self.wal.fsync());
-        self.observe_wal();
-        match durable {
-            Ok(_) => Ok(positions),
-            Err(e) => {
-                tracing::error!(error = %e, "ALARM: {what} could not be made durable; none of it is in force");
-                Err(ExecError::Wal(e))
+        let mut failed = None;
+        for (at, record) in records.iter().enumerate() {
+            let before = self.wal.position();
+            if let Err(error) = self.wal.append(record) {
+                failed = Some(Undurable::Append { at, error });
+                break;
+            }
+            positions.push(before);
+        }
+        let mark = laps.map(|mark| self.health.lap(WriteStage::WalAppend, mark));
+        if failed.is_none() {
+            if let Err(error) = self.wal.fsync() {
+                failed = Some(Undurable::Fsync(error));
             }
         }
+        if let Some(mark) = mark {
+            self.health.lap(WriteStage::WalFsync, mark);
+        }
+        self.observe_wal();
+        match failed {
+            Some(failure) => Err(failure),
+            None => Ok(positions),
+        }
+    }
+
+    /// [`Self::append_and_sync`] for a command that answers one caller: the failure is an
+    /// `ExecError` and the operator gets the line naming `what`.
+    pub(super) fn make_durable(
+        &mut self,
+        records: &[&WalRecord],
+        what: &str,
+    ) -> Result<Vec<u64>, ExecError> {
+        self.append_and_sync(records, None).map_err(|failure| {
+            let e = failure.into_error();
+            tracing::error!(error = %e, "ALARM: {what} could not be made durable; none of it is in force");
+            ExecError::Wal(e)
+        })
     }
 
     /// Reclaim what the publication just made redundant: after the generation swap and never
