@@ -518,11 +518,9 @@ pub(crate) fn verdict(
     verdict_of(overlay, satisfied, entity, buffer.get(entity))
 }
 
-/// [`verdict`] for a caller walking the buffer, which already holds the entity's item and would
-/// otherwise have it looked up a second time. `item` is [`IngestBuffer::get`]'s answer for
-/// `entity`: its own row, and `None` where the buffer holds none — which is what
-/// [`IngestBuffer::iter`] yields, the two selecting the same element of the same list by the same
-/// test.
+/// [`verdict`] for a caller walking the buffer, which already holds the entity's item. `item` must
+/// be [`IngestBuffer::get`]'s answer for `entity`; [`IngestBuffer::iter`] yields exactly that,
+/// both taking the first non-join row of the entity's list.
 pub(crate) fn verdict_of(
     overlay: &Overlay,
     satisfied: &FxHashSet<TermId>,
