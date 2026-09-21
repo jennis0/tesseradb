@@ -279,10 +279,14 @@ impl Generation {
         parts: &GenerationParts,
         inserted: &[EntityId],
     ) -> Arc<crate::BufferedRows> {
-        debug_assert!(
-            Arc::ptr_eq(&parts.bundle, &self.parts.bundle),
-            "an incremental buffered-row list needs the row space it was derived against"
-        );
+        // The held lists are against this generation's row spaces; against any other they are
+        // derived afresh, in a release build too.
+        if !Arc::ptr_eq(&parts.bundle, &self.parts.bundle) {
+            return Arc::new(crate::compose::derive_buffered_rows(
+                &parts.buffer,
+                &parts.bundle,
+            ));
+        }
         let mut next = crate::BufferedRows::default();
         for partition in parts.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
