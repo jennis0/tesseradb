@@ -47,6 +47,8 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 
 ## Clients and tests
 
+- Two rules about an inline artifact row are refused only when the build reads the artifacts — a row carrying a shape field on a layer that declares no shape (`crates/tessera-build/src/layers.rs:1117`) and a row carrying two shape fields (`crates/tessera-build/src/shapes.rs:373`). `check` does not reach either, so the Python SDK states both itself; they are the only declaration rules it still holds that are not below it. Moving them into the check would let the SDK drop them.
+
 - The Python oracle (`reference/oracle/wire.py`) does not decode the artifacts frame's `target` column, so no conformance case asserts it. `clients/py/tests/test_sdk_pages.py` checks it against a live server.
 - `clients/ts/components/src/artifact-list.ts` hides label rows only when some label attached to a cluster. That condition is left over from the join by count; labels are hidden whenever the layer depends on another.
 - The recorded frames under `clients/ts/core/test` have a null `target` added by `liftArtifactTarget` instead of being recaptured, so no recorded frame carries a label naming its cluster.
