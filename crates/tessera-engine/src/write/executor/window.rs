@@ -289,7 +289,7 @@ impl Executor {
                     respond,
                 } => {
                     let _ = respond.send(self.publish_geometry(publication));
-                    self.health.note_work_refused();
+                    self.health.note_work_finished();
                     did_work = true;
                     continue;
                 }
@@ -326,7 +326,7 @@ impl Executor {
                 // append order stops equalling submission order: tolerable here since none of
                 // these touch the buffer or swap the generation.
                 self.execute(command);
-                self.health.note_work_refused();
+                self.health.note_work_finished();
                 did_work = true;
                 continue;
             };
@@ -396,7 +396,7 @@ impl Executor {
                 } else {
                     reply.fail(ExecError::BatchConflict { batch_id });
                 }
-                self.health.note_work_refused();
+                self.health.note_work_finished();
                 (window, Admission::Answered)
             }
             BatchState::Held {
@@ -415,7 +415,7 @@ impl Executor {
                     // The 409 reaches the retry, not the held original, which is still owed its ack.
                     reply.fail(ExecError::BatchConflict { batch_id });
                 }
-                self.health.note_work_refused();
+                self.health.note_work_finished();
                 (window, Admission::Answered)
             }
             BatchState::Unknown => {
@@ -473,7 +473,7 @@ impl Executor {
             if let Err(detail) = settle_joins(&generation, &mut rows) {
                 drop(generation);
                 reply.fail(ExecError::JoinRefused { detail });
-                self.health.note_work_refused();
+                self.health.note_work_finished();
                 return None;
             }
         }
@@ -481,7 +481,7 @@ impl Executor {
         if collisions > 0 {
             reply.fail(ExecError::DuplicateExternalId { count: collisions },
             );
-            self.health.note_work_refused();
+            self.health.note_work_finished();
             return None;
         }
 
@@ -489,7 +489,7 @@ impl Executor {
             Ok(resolved) => resolved,
             Err(detail) => {
                 reply.fail(ExecError::LayerRefused { detail });
-                self.health.note_work_refused();
+                self.health.note_work_finished();
                 return None;
             }
         };

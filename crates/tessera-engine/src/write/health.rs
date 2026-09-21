@@ -1004,10 +1004,11 @@ impl ExecutorHealth {
         self.record_work_service(elapsed_nanos / entries);
     }
 
-    /// A work-lane job that was answered without being executed — an idempotent replay, a 409. It
-    /// occupied a queue slot and was counted at submission, so it must be counted here too or
-    /// [`ExecutorStats::work_depth`] drifts upward forever and every 429 inherits the drift.
-    pub(in crate::write) fn note_work_refused(&self) {
+    /// One work-lane job that finished without a commit window closing over it: a publication, a
+    /// command applied on its own, an idempotent replay, a 409. It occupied a queue slot and was
+    /// counted at submission, so it must be counted here or [`ExecutorStats::work_depth`] drifts
+    /// upward forever and every 429 inherits the drift.
+    pub(in crate::write) fn note_work_finished(&self) {
         self.work_completed.fetch_add(1, Ordering::Relaxed);
     }
 
