@@ -350,7 +350,7 @@ impl ArtifactProjections {
             store.level_in_view(at.layer, at.level, view_key(at.view)),
             space,
         );
-        built.index = TileIndex::build(&built.membership, total_rows(space));
+        built.index = Arc::new(TileIndex::build(&built.membership, total_rows(space)));
     }
 
     /// How many of this level's artifacts took a membership that is not their own. Applied last,

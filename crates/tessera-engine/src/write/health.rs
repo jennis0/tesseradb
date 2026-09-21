@@ -232,8 +232,16 @@ pub struct ExecutorHealth {
 pub enum WriteStage {
     /// `CommitWindow::allocate` — entity-id assignment and the signature sort.
     Allocate,
-    /// The per-entry WAL append loop: serialise and write.
+    /// The per-entry WAL append loop: serialise and write. Three records go in it, and the
+    /// `Wal*` stages below say which.
     WalAppend,
+    /// `mint_window_codes`: padding every row to the declared schema and resolving every category
+    /// value in it to its code, minting the keys the vocabulary does not hold.
+    VocabularyMint,
+    /// `mint_records`, `derive_records` and `growth_records`: the artifacts the window's rows
+    /// named that no artifact holds, the edges that come with them, and the memberships its joins
+    /// declared.
+    DeriveRecords,
     /// One `fsync` for the whole window — group commit's amortisation half.
     WalFsync,
     /// `apply_window`'s deep copy of the ingest buffer (F3's operand).
@@ -266,10 +274,12 @@ pub enum WriteStage {
 }
 
 impl WriteStage {
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 15;
     pub const ALL: [WriteStage; Self::COUNT] = [
         WriteStage::Allocate,
         WriteStage::WalAppend,
+        WriteStage::VocabularyMint,
+        WriteStage::DeriveRecords,
         WriteStage::WalFsync,
         WriteStage::ApplyBufferClone,
         WriteStage::ApplyRows,
@@ -286,6 +296,8 @@ impl WriteStage {
         match self {
             WriteStage::Allocate => "allocate",
             WriteStage::WalAppend => "wal_append",
+            WriteStage::VocabularyMint => "vocab_mint",
+            WriteStage::DeriveRecords => "derive_records",
             WriteStage::WalFsync => "wal_fsync",
             WriteStage::ApplyBufferClone => "buffer_clone",
             WriteStage::ApplyRows => "apply_rows",
