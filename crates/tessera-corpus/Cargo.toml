@@ -2,6 +2,7 @@
 name = "tessera-corpus"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 # The correctness suite's generator. `scripts/check-layers.sh` enforces the dependency rule:
 # tessera-types and tessera-spatial and nothing else in the workspace. A generator that can read

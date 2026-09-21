@@ -1,4 +1,4 @@
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm3 /home/joe/code/tessera/data/ladder/probe-suggest 10000000 uniform
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm3 /home/user/code/tessera/data/ladder/probe-suggest 10000000 uniform
 == arm3 uniform V=10000000
 open: PostingsReader::open(10000000 records) median of 3: mmap 0.057s, read 0.365s (page-cache warm)
 fixture: N=100000000 V=10000000; member counts read in 0.15s; 453 empty, 0 Roaring, max 31

@@ -142,7 +142,7 @@ tests).
 - `cargo clippy --workspace --all-targets -- -D warnings` — clean, no warnings.
 
 **Environmental incident, not a code issue**: the shared `target/` directory
-(`.cargo/config.toml`'s redirect to `/home/joe/code/tessera/target`, shared across this repo's
+(`.cargo/config.toml`'s redirect to `/home/user/code/tessera/target`, shared across this repo's
 worktrees per the task brief) intermittently produced a spurious
 `unresolved import tessera_authz::FragmentCacheError` compile error on `tessera-engine` — reproduced
 three times across separate `cargo build`/`cargo test` invocations, always the same error, despite

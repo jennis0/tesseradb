@@ -127,7 +127,6 @@ This separation means TesseraDB can sit underneath an application with its own u
 | [`docs/decisions/`](docs/decisions/) | Settled decisions, one per file, immutable |
 | [`docs/agents/`](docs/agents/) | How work is done here — process, parallelism, house style |
 | [`docs/evidence/`](docs/evidence/) | Measurements, investigations, prior art. Never normative |
-| [`probes/`](probes/) | Raw measurement campaigns |
 | [`crates/`](crates/) | The Rust workspace — one binary, `tessera build` and `tessera serve` |
 | [`clients/ts/`](clients/ts/) | The TypeScript client and a deck.gl viewer |
 | [`conformance/`](conformance/), [`reference/`](reference/) | The conformance suite and its independent Python oracle |
@@ -142,4 +141,4 @@ This separation means TesseraDB can sit underneath an application with its own u
 
 ## Licence
 
-Not yet determined.
+[Apache-2.0](LICENSE). Copyright 2026 Joe Ennis.

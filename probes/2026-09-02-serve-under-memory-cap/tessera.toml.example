@@ -1,10 +1,10 @@
 [bundle]
-path  = "/home/joe/code/tessera/data/ladder/medcpt/bundle"
+path  = "/home/user/code/tessera/data/ladder/medcpt/bundle"
 cache = "/tmp/claude-1000/-home-joe-code-tessera/33360fbb-27d0-434f-9d43-7de275c80a32/scratchpad/cgroup-serve/cache"
 wal   = "/tmp/claude-1000/-home-joe-code-tessera/33360fbb-27d0-434f-9d43-7de275c80a32/scratchpad/cgroup-serve/wal.log"
 
 [build]
-schema = "/home/joe/code/tessera/data/ladder/medcpt/corpus.toml"
+schema = "/home/user/code/tessera/data/ladder/medcpt/corpus.toml"
 
 [plugin]
 module = "builtin:passthrough"

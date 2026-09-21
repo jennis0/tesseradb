@@ -21,6 +21,9 @@ members = [
     "crates/tessera-bench",
 ]
 
+[workspace.package]
+license = "Apache-2.0"
+
 [workspace.dependencies]
 croaring = "2"
 rayon = "1"

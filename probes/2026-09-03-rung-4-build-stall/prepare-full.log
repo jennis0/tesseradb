@@ -1,5 +1,5 @@
-staging /home/joe/code/tessera/data/ladder/paperseek/staging
-output  /home/joe/code/tessera/data/ladder/paperseek
+staging /home/user/code/tessera/data/ladder/paperseek/staging
+output  /home/user/code/tessera/data/ladder/paperseek
 [sample] ...
 [sample] 0.24s
 102,117,343 works sampled from 102,117,343
@@ -11,7 +11,7 @@ output  /home/joe/code/tessera/data/ladder/paperseek
     place: 1208.3s
 [route knn] 1487.46s
   route knn: x [-17.67, 20.10] y [-13.09, 14.56]  (peak so far 18.4 GB)
-  dropped /home/joe/code/tessera/data/ladder/paperseek/staging/vectors.f16 — 194.8 GiB
+  dropped /home/user/code/tessera/data/ladder/paperseek/staging/vectors.f16 — 194.8 GiB
 [k-means] ...
 [k-means] 48.27s
 256 clusters by whole, sizes 187..1,056,873 (median 459,697)
@@ -134,9 +134,9 @@ licence: 22,814,890 of 102,117,343 (22.3%) carry a real one, over 11 keys; 98,89
 [write the demo's terms] ...
 11 terms; top five unlicensed 79,302,453, cc-by 14,028,593, cc-by-nc-nd 2,864,246, cc-by-nc 2,127,041, other-oa 1,503,856
 [write the demo's terms] 0.0s
-minted TESSERA_IDENTITY_KEY, TESSERA_PAPERSEEK_SESSION_CRED, TESSERA_PAPERSEEK_OPERATOR_CRED in /home/joe/code/tessera/data/ladder/paperseek/.env
+minted TESSERA_IDENTITY_KEY, TESSERA_PAPERSEEK_SESSION_CRED, TESSERA_PAPERSEEK_OPERATOR_CRED in /home/user/code/tessera/data/ladder/paperseek/.env
 
-wrote to /home/joe/code/tessera/data/ladder/paperseek:
+wrote to /home/user/code/tessera/data/ladder/paperseek:
   .env                                     0.00 MB
   clusters-kmeans-members.parquet        174.27 MB
   clusters-kmeans.parquet                  0.01 MB
@@ -153,4 +153,4 @@ wrote to /home/joe/code/tessera/data/ladder/paperseek:
   vocab-type.parquet                       0.00 MB
 
 next:
-  cd /home/joe/code/tessera/data/ladder/paperseek && tessera check --payloads && tessera build --stage-timings
+  cd /home/user/code/tessera/data/ladder/paperseek && tessera check --payloads && tessera build --stage-timings

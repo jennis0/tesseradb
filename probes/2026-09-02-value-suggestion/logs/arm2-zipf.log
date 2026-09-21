@@ -1,4 +1,4 @@
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm2 /home/joe/code/tessera/data/ladder/probe-suggest 10000000 zipf
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm2 /home/user/code/tessera/data/ladder/probe-suggest 10000000 zipf
 == arm2 zipf V=10000000
 open: PostingsReader::open(10000000 records) median of 3: mmap 1.572s, read 1.975s (page-cache warm)
 fixture: N=100000000 V=10000000; member counts read in 0.28s; 200000 empty, 169039 Roaring, max 10910812

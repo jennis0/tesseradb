@@ -23,7 +23,7 @@ had to be answered before anything was built. It does not
    positionless entity could be drawn nowhere and would still spend an entity id.
 
 ```bash
-export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+export TESSERA_LADDER="$PWD/data/ladder"
 
 # a fraction that finishes, into $TESSERA_LADDER/gbif-64p
 python3 -m test_corpora.gbif.prepare --parts 64 --spread

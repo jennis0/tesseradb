@@ -1,5 +1,5 @@
     Finished `release` profile [optimized] target(s) in 0.09s
-     Running `probes/2026-08-14-hidden-vs-absent/hiddentiming/target/release/hiddentiming --snapshot /home/joe/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json --scales 400000,1000000`
+     Running `probes/2026-08-14-hidden-vs-absent/hiddentiming/target/release/hiddentiming --snapshot /home/user/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json --scales 400000,1000000`
 reading 1000000 abstracts…
 | entities | terms | stratum | posting(s) | absent med/min ns | hidden med/min ns | visible ns | hidden/absent | separation |
 |---|---|---|---|---|---|---|---|---|
