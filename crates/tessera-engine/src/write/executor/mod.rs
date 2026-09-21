@@ -1329,6 +1329,16 @@ impl Executor {
             .with_artifacts(|store| artifact_coordinates(store, derived, pending_retirement));
         next.level_versions = level_versions;
         next.derived_extents = derived_extents;
+        // The artifact extents are restated from the held lists, on the derived files' rule: a
+        // publication edits a clone of the live generation's manifest, and an overlay publication
+        // writes its manifest without swapping the generation, so a flush or a merge landing after
+        // one starts from a manifest that predates its extents. Carrying that clone's lists forward
+        // drops them from the newest manifest, with the log already released. The fold brings its
+        // own, having just rewritten every level into the prefix it is publishing.
+        if fold.is_none() {
+            next.membership_extents = self.membership_extents.clone();
+            next.artifact_record_extents = self.artifact_record_extents.clone();
+        }
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         tessera_store::write_segments_manifest(prefix_dir, partition, n, next)

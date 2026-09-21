@@ -1555,8 +1555,9 @@ impl Executor {
                     return;
                 }
             };
+            // Onto the held list; [`Executor::commit_side_manifest`] restates it into the manifest
+            // below.
             self.membership_extents.extend(published.clone());
-            manifest.membership_extents = self.membership_extents.clone();
             if !published.is_empty() {
                 written.push((prefix_dir.clone(), published));
             }
@@ -1566,19 +1567,11 @@ impl Executor {
             // the rows never collide, and each side reads its tags against its own declaration.
             match self.write_content_extent(&prefix_dir, partition, live.bundle.partitions.len(), n)
             {
-                // Assigned from the held list, never pushed onto the clone. The manifest this
-                // publication started from is the stale generation's, so extending it would drop
-                // every earlier publication's entry. An artifact whose content extent is un-named
-                // comes back with its description unreadable and is withheld from every viewer,
-                // with the log already released. The membership list above takes this posture for
-                // the same reason.
-                Ok(Some(extent)) => {
-                    self.artifact_record_extents.push(extent);
-                    manifest.artifact_record_extents = self.artifact_record_extents.clone();
-                }
-                Ok(None) => {
-                    manifest.artifact_record_extents = self.artifact_record_extents.clone();
-                }
+                // Onto the held list, as the memberships are: an artifact whose content extent is
+                // un-named comes back with its description unreadable and is withheld from every
+                // viewer, with the log already released.
+                Ok(Some(extent)) => self.artifact_record_extents.push(extent),
+                Ok(None) => {}
                 Err(e) => {
                     tracing::error!(
                         error = %e,
