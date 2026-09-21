@@ -1342,13 +1342,18 @@ impl Default for DenySet {
 }
 
 impl Serialize for DenySet {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.encoded)
     }
 }
 
 impl<'de> Deserialize<'de> for DenySet {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let encoded = String::deserialize(deserializer)?;
         let entities = DenySet::decode(&encoded);
         Ok(DenySet { encoded, entities })

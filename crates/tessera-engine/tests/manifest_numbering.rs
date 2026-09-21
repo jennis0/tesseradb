@@ -351,7 +351,8 @@ fn pruning_bounds_the_directory_and_keeps_the_highest_number() {
         &tmp.path().join("pairs.parquet"),
     );
     let entities = source_to_new_map(&root, "v00000");
-    let engine = open_engine_publishing(&root, &tmp.path().join("cache"), &tmp.path().join("wal.log"));
+    let engine =
+        open_engine_publishing(&root, &tmp.path().join("cache"), &tmp.path().join("wal.log"));
     let dir = partition_dir(&root, &engine.generation().prefix);
 
     for (published, source) in (1..=6u64).enumerate() {

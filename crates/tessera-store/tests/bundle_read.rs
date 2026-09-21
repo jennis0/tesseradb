@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{fixed32, split32, tiles_for_bbox, Bounds, Tile};
 use tessera_store::manifest::{
-    CurrentPointer, DenySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
-    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+    CurrentPointer, DenySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
+    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{open_bundle, tile_ranges, StoreError};
