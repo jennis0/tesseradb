@@ -1491,13 +1491,17 @@ impl Executor {
     /// state, layers, views, runtime declarations, and the artifact memberships and content
     /// published since the last one. Does nothing unless something is unpublished. A poisoned or
     /// diverged node writes nothing, and the state stays unpublished until it recovers.
+    ///
+    /// Called after every deny drain for the prompt half and from the tick for a data door's
+    /// growth ([`Executor::growth_unpublished`]); either call writes both, since what reaches the
+    /// manifest is everything live state holds and no manifest does.
     pub(super) fn publish_overlay_state(&mut self) {
-        if !self.deny_dirty {
+        if !self.deny_dirty && !self.growth_unpublished {
             return;
         }
         if self.wal.is_poisoned() || !self.may_publish() {
             tracing::warn!(
-                "ALARM: deny state is unpublished and this node is poisoned or diverged, so it \
+                "ALARM: live state is unpublished and this node is poisoned or diverged, so it \
                  will not write a side-manifest. The dispositions are in force and WAL-durable; \
                  what is degraded is the restore path, until the node recovers or restarts"
             );
@@ -1638,6 +1642,7 @@ impl Executor {
         }
 
         self.deny_dirty = false;
+        self.growth_unpublished = false;
         self.windows_since_publication = 0;
         self.health
             .overlay_publications

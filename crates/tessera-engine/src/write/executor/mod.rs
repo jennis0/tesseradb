@@ -623,8 +623,17 @@ pub(super) struct Executor {
     /// The next `SEGMENTS-<n>.json` number, taken at the moment a writer writes rather than when a
     /// flush is planned. [`Executor::allocate_manifest_n`] also raises it over the files on disc.
     pub(super) next_manifest_n: u64,
-    /// Whether live state holds something no side-manifest carries yet.
+    /// Whether live state holds something no side-manifest carries yet, and that is published at
+    /// the first opportunity: deny state, declarations, and the artifact records an operator's own
+    /// publication route applied.
     pub(super) deny_dirty: bool,
+    /// Whether a data door's batch grew memberships or content that no side-manifest carries yet.
+    ///
+    /// Published at the tick rather than behind the batch: those are WAL-durable at the
+    /// acknowledgement and the log stays pinned until an extent holds them, so what a per-batch
+    /// manifest write buys is a shorter restore, and it buys it on the write thread while the next
+    /// batch queues.
+    pub(super) growth_unpublished: bool,
     /// Deny windows applied since the last publication, the counter
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
     pub(super) windows_since_publication: u64,
@@ -703,6 +712,16 @@ pub(super) struct Executor {
     pub(super) faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
 
+/// When the growth a set of artifact records carries has to reach a side-manifest.
+pub(super) enum Publish {
+    /// As soon as the deny lane is empty, which is where an operator's publication and growth
+    /// routes leave their records: one manifest per request, rarely per batch.
+    Promptly,
+    /// At the next tick, which is where a data door's batch leaves its records: a manifest write per
+    /// batch would hold the write thread while the next batch queues.
+    AtTick,
+}
+
 /// The parent each child in these edges is named under, refusing a child named under two.
 ///
 /// The child is keyed by its own level, which a levelled taxonomy needs: one key legitimately sits
@@ -755,7 +774,12 @@ impl Executor {
                 | self.publish_completed_suggests();
             self.tick_if_due();
             while self.run_deny_pass() {}
-            self.publish_overlay_state();
+            // The prompt half only: a batch's memberships wait for the tick, and this runs after
+            // every drain. A publication taken here carries them too, since it writes everything
+            // live state holds and no manifest does.
+            if self.deny_dirty {
+                self.publish_overlay_state();
+            }
             if self.run_work_pass() || published {
                 continue;
             }
@@ -795,6 +819,9 @@ impl Executor {
         self.reclaim_superseded_prefixes();
         self.dispatch_suggest_rebuild();
         self.publish_row_forms();
+        // The tick is where a data door's memberships and content reach a manifest. Above the
+        // in-flight gate below, so a tick that publishes no geometry still publishes them.
+        self.publish_overlay_state();
 
         let generation = self.generation.load_full();
 
@@ -2075,7 +2102,7 @@ impl Executor {
             .chain(growth.iter())
             .map(|(record, position)| (record, *position))
             .unzip();
-        self.apply_artifact_records(&artifact_records, &artifact_positions);
+        self.apply_artifact_records(&artifact_records, &artifact_positions, Publish::AtTick);
 
         // Recorded after the swap, so a replay can never see it swapped but not yet indexed.
         let m = StageMark::now();
@@ -2313,7 +2340,15 @@ impl Executor {
     /// Applies durable artifact records to the registry and the store, and holds the delta each
     /// made for the tick that brings the level's row forms forward. Each record moves its level's
     /// version by one, so the version a delta starts from walks with the records.
-    pub(super) fn apply_artifact_records(&mut self, records: &[&WalRecord], positions: &[u64]) {
+    ///
+    /// `publish` says when the growth these records carry has to reach a side-manifest; it changes
+    /// nothing about what is durable or what is served.
+    pub(super) fn apply_artifact_records(
+        &mut self,
+        records: &[&WalRecord],
+        positions: &[u64],
+        publish: Publish,
+    ) {
         if records.is_empty() {
             return;
         }
@@ -2356,7 +2391,10 @@ impl Executor {
             self.hold_delta(record, before, refused);
         }
         // Durable in the log and not yet in a manifest.
-        self.deny_dirty = true;
+        match publish {
+            Publish::Promptly => self.deny_dirty = true,
+            Publish::AtTick => self.growth_unpublished = true,
+        }
     }
 
     /// Clone the buffer once, insert every entry in the window, publish once. The clone is
