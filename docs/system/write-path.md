@@ -383,6 +383,12 @@ order. Where the two disagree, the later WAL record wins. This protects an unsup
 after replay instead would let a crash between an accepted unsuppress and the next published
 record put the suppression back.
 
+A partition keeps the newest manifest and the two before it; a publication deletes the rest.
+Each one is complete current state rather than a change to the one before, so the newest carries
+everything the deleted ones carried. Reading back through them is a step down to older state, and
+a server that runs out of manifests to step to refuses to serve that partition rather than
+reaching for one old enough to have forgotten a deny.
+
 The entity id allocator resumes from whichever is larger, the manifest's recorded high point or
 the value replay reaches, so an id already issued is never issued again. The buffer of rows
 awaiting flush is rebuilt as exactly the replayed rows whose entity has no row in any segment,

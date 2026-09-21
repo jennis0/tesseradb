@@ -191,15 +191,19 @@ impl Executor {
     /// `live_manifest` ([`crate::geometry::check_manifest_publishable`]), since a manifest is
     /// assembled by editing a clone that may be stale; and the level versions and derived files are
     /// stamped ([`artifact_coordinates`]). A refusal writes nothing.
+    ///
+    /// It is also where the partition's superseded side-manifests are pruned, so the directory
+    /// holds a bounded number of them however many publications a trickle of denies drives.
     pub(super) fn commit_side_manifest(
         &self,
-        live_manifest: &tessera_store::manifest::SegmentsManifest,
+        partition_data: &tessera_store::read::PartitionData,
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
         next: &mut tessera_store::manifest::SegmentsManifest,
         fold: Option<FoldDerived<'_>>,
     ) -> Result<(), ManifestCommitRefused> {
+        let live_manifest = &partition_data.manifest;
         // Only the fold brings its own derived files and levels pending retirement; every other
         // publication carries the held list forward.
         let (derived, pending) = match &fold {
@@ -214,7 +218,29 @@ impl Executor {
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         tessera_store::write_segments_manifest(prefix_dir, partition, n, next)
-            .map_err(ManifestCommitRefused::Store)
+            .map_err(ManifestCommitRefused::Store)?;
+        // Nothing is pruned on a stepped-down partition: this node serves an older `n`, and the
+        // manifests between it and the newest are what a reopen walks back through.
+        if !partition_data.stepped_down() {
+            // A publication that could not prune has still published: the manifest this call
+            // committed is durable, and the files left behind are superseded ones a later
+            // publication prunes.
+            match tessera_store::prune_superseded_segments_manifests(prefix_dir, partition) {
+                Ok(0) => {}
+                Ok(removed) => tracing::debug!(
+                    removed,
+                    partition = %partition,
+                    "superseded side-manifests were pruned"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    partition = %partition,
+                    "the partition's superseded side-manifests could not be pruned; they stay on \
+                     disc and the next publication prunes again"
+                ),
+            }
+        }
+        Ok(())
     }
 
     /// Restate the live row-less state into a side-manifest about to be committed: the registry

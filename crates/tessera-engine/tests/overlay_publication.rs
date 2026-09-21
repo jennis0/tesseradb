@@ -275,3 +275,65 @@ fn an_accepted_deny_publishes_without_moving_the_geometry_version() {
         "no flush was involved"
     );
 }
+
+/// **A trickle of denies does not grow the partition directory.** Every deny publishes a
+/// side-manifest of its own, and each one restates the whole deny state, so a directory that kept
+/// them all would hold the state once per deny for ever. What must survive the pruning is the deny
+/// state itself: a node reopened on the bundle alone still hides every suppression and every
+/// deletion.
+#[test]
+fn a_run_of_denies_leaves_a_bounded_directory_and_a_reopen_hides_every_one() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+
+    let (suppressed, deleted, visible_before, prefix) = {
+        let engine = engine_at(tmp.path(), &root, 3600);
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        let before = visible_count(&engine, &session);
+
+        // One at a time, so each is its own publication rather than one window's worth.
+        let suppressed: Vec<EntityId> = (1..=6).map(|s| entity_of_source(&root, s)).collect();
+        let deleted = entity_of_source(&root, 11);
+        for (index, entity) in suppressed.iter().enumerate() {
+            engine
+                .accept_change(*entity, ChangeOp::Suppress)
+                .expect("accepted");
+            let published = index as u64 + 1;
+            wait_until("the overlay publication", WAIT, || {
+                engine.write_executor_stats().overlay_publications >= published
+            });
+        }
+        engine
+            .accept_change(deleted, ChangeOp::Delete)
+            .expect("accepted");
+        wait_until("the deletion's publication", WAIT, || {
+            engine.write_executor_stats().overlay_publications > suppressed.len() as u64
+        });
+        (suppressed, deleted, before, engine.generation().prefix.clone())
+    };
+    let partition_dir = root.join(&prefix).join("partitions").join("default");
+    let present: Vec<String> = std::fs::read_dir(&partition_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("SEGMENTS-") && name.ends_with(".json"))
+        .collect();
+    assert!(
+        present.len() <= tessera_store::SIDE_MANIFESTS_KEPT,
+        "seven publications left {} side-manifests: {present:?}",
+        present.len()
+    );
+
+    // A fresh runtime directory: no WAL, so the newest manifest is the only surviving statement of
+    // the deny state.
+    let restored = engine_at(&tmp.path().join("restore"), &root, 3600);
+    let session = restored.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        visible_count(&restored, &session),
+        visible_before - suppressed.len() as u64 - 1,
+        "every suppression and the deletion survived the pruning"
+    );
+    for entity in suppressed {
+        assert!(restored.generation().overlay.is_suppressed(entity));
+    }
+    assert!(restored.generation().overlay.is_deleted(deleted));
+}

@@ -545,7 +545,7 @@ impl Executor {
         // them until this write returns.
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
         if let Err(e) = self.commit_side_manifest(
-            &partition_data.manifest,
+            partition_data,
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
@@ -854,7 +854,7 @@ impl Executor {
         // until this write returns.
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
         if let Err(e) = self.commit_side_manifest(
-            &partition_data.manifest,
+            partition_data,
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
@@ -1611,7 +1611,7 @@ impl Executor {
             // so a kill parked here loses only the restore path's freshness.
             self.pause_point(PauseSiteArg::BeforeManifestPublish);
             if let Err(e) = self.commit_side_manifest(
-                &partition_data.manifest,
+                partition_data,
                 &self.prefix_dir(&live),
                 partition,
                 n,
@@ -2084,7 +2084,7 @@ impl Executor {
         // every row they carry, and nothing durable names them until this write returns.
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
         if let Err(e) = self.commit_side_manifest(
-            &partition_data.manifest,
+            partition_data,
             &self.prefix_dir(&live),
             &completed.partition,
             manifest_n,

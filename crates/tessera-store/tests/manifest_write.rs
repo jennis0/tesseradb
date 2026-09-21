@@ -481,3 +481,51 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
         "a broken link holds no numbers and is not a failure"
     );
 }
+
+/// The pruner keeps the newest side-manifests and the highest `n` above all, whatever wrote it,
+/// and leaves a directory it cannot read whole.
+#[test]
+fn pruning_keeps_the_newest_manifests_and_never_the_lowest() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let prefix_dir = tmp.path().join("v00000");
+    let dir = prefix_dir.join("partitions").join("default");
+    fs::create_dir_all(&dir).unwrap();
+
+    let names = || {
+        let mut found: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    };
+
+    // Fewer than the number kept: nothing to prune.
+    for n in [0u64, 1] {
+        fs::write(dir.join(format!("SEGMENTS-{n}.json")), b"{}").unwrap();
+    }
+    assert_eq!(
+        tessera_store::prune_superseded_segments_manifests(&prefix_dir, "default").unwrap(),
+        0
+    );
+    assert_eq!(names(), vec!["SEGMENTS-0.json", "SEGMENTS-1.json"]);
+
+    for n in [2u64, 3, 40] {
+        fs::write(dir.join(format!("SEGMENTS-{n}.json")), b"{}").unwrap();
+    }
+    assert_eq!(
+        tessera_store::prune_superseded_segments_manifests(&prefix_dir, "default").unwrap(),
+        2
+    );
+    assert_eq!(
+        names(),
+        vec!["SEGMENTS-2.json", "SEGMENTS-3.json", "SEGMENTS-40.json"],
+        "the three highest stay, and 40 — the number a writer's floor comes from — above all"
+    );
+
+    // A name this reader would not open is a name it will not delete around, either: the
+    // directory is left as it stands.
+    fs::write(dir.join("SEGMENTS-05.json"), b"{}").unwrap();
+    assert!(tessera_store::prune_superseded_segments_manifests(&prefix_dir, "default").is_err());
+    assert_eq!(names().len(), 4);
+}
