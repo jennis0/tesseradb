@@ -40,30 +40,13 @@ pub(super) struct Executor {
     pub(super) generation: Arc<GenerationHandle>,
     /// The row-projection cache, pruned of generations older than the retention depth at the swap.
     pub(super) row_projection_cache: Arc<RowProjectionCache>,
-    /// See [`MaintenanceDeps::region_cache`].
-    pub(super) region_cache: Arc<
-        tessera_cache::SingleFlightCache<
-            crate::region::RegionKey,
-            crate::region::RegionDecomposition,
-        >,
-    >,
-    /// The artifact row forms, rebuilt here at the fold, and read by every viewport.
-    pub(super) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
-    /// See [`MaintenanceDeps::shapes`].
-    pub(super) shapes: Arc<crate::shapes::ShapeStore>,
-    /// The lineages, rebuilt beside them and for the same reason.
-    pub(super) lineages: Arc<crate::cut::Lineages>,
-    /// The supplied-content tables. Not warmed at the fold: a level is merely stale after one, and
-    /// the first request that wants it pays to read it.
-    pub(super) level_contents: Arc<crate::artifact_content::LevelContents>,
+    /// Everything the executor was handed at its start and never changes: policies, paths, the
+    /// shared pool and the shared caches.
+    pub(super) deps: MaintenanceDeps,
     pub(super) queues: LifecycleQueues,
     pub(super) health: Arc<ExecutorHealth>,
     /// The last window's sequence number; all it has to be is distinct per window.
     pub(super) window_seq: u64,
-    /// `flush_max_age_secs`, the tick's period.
-    pub(super) flush_max_age_secs: u64,
-    /// `flush_max_items`, buffered rows at which the tick comes due ahead of its period.
-    pub(super) flush_max_items: usize,
     /// The next `SEGMENTS-<n>.json` number, taken at the moment a writer writes rather than when a
     /// flush is planned. [`Executor::allocate_manifest_n`] also raises it over the files on disc.
     pub(super) next_manifest_n: u64,
@@ -72,42 +55,20 @@ pub(super) struct Executor {
     /// Deny windows applied since the last publication, the counter
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
     pub(super) windows_since_publication: u64,
-    /// The bundle root, not the prefix directory: a fold moves the prefix, so
-    /// [`Executor::prefix_dir`] derives it at each use.
-    pub(super) bundle_root: PathBuf,
-    pub(super) identity_key: IdentityKey,
-    /// The shared compute pool a flush executes on.
-    pub(super) pool: Arc<rayon::ThreadPool>,
-    /// See [`MaintenanceDeps::max_distinct_terms`].
-    pub(super) max_distinct_terms: u64,
-    /// The entity-space coalesce's policy, in-flight flag, attempt counter and completion channel:
+    /// The entity-space coalesce, with its in-flight flag, attempt counter and completion channel:
     /// separate from a flush so the cheap one does not wait on the expensive one.
-    pub(super) coalesce_policy: crate::coalesce::CoalescePolicy,
-    /// The entity-space coalesce.
     pub(super) coalesce: Background<crate::coalesce::CompletedCoalesce>,
-    /// The background refresh's dependencies. See [`crate::refresh`].
-    pub(super) refresh: crate::refresh::RefreshDeps,
-    /// The row-space merge's policy, in-flight flag, attempt counter and completion channel:
-    /// separate from the flush and the coalesce, since a merge publishes its own swap.
-    pub(super) merge_policy: MergePolicy,
-    /// The row-space merge.
+    /// The row-space merge, held separately from the flush and the coalesce since a merge
+    /// publishes its own swap.
     pub(super) merge: Background<crate::merge::CompletedMerge>,
     /// The compaction fold. It runs on its own thread, not the shared pool: it takes minutes to
     /// hours and the pool serves viewports.
     pub(super) fold: Background<crate::compact::CompletedFold>,
-    /// The suggestion index's rebuild. No plan, no gate, nothing to refuse: it reads a vocabulary
+    /// The suggestion-index rebuild. No plan, no gate, nothing to refuse: it reads a vocabulary
     /// out of the generation and writes files the manifest does not name.
-    pub(super) suggest_dir: PathBuf,
-    /// The suggestion-index rebuild.
     pub(super) suggest: Background<crate::suggest::CompletedSuggest>,
     /// The flush. Its in-flight flag is [`ExecutorHealth::flush_in_flight`], which status reads.
     pub(super) flush: Background<crate::flush::CompletedFlush>,
-    /// See [`MaintenanceDeps::configured_merge_bytes`].
-    pub(super) configured_merge_bytes: Option<u64>,
-    /// See [`MaintenanceDeps::switches`].
-    pub(super) switches: Arc<crate::switches::TestSwitches>,
-    /// See [`crate::compact::CompactionSchedule`]. Consulted at the tick, beside the flush's own.
-    pub(super) compaction: crate::compact::CompactionSchedule,
     /// When the last fold attempt started, as a unix second. Stamped by every dispatch whatever the
     /// attempt then does, so the interval limits attempts.
     pub(super) last_fold_start_unix: Option<u64>,
@@ -159,7 +120,7 @@ impl Executor {
     /// pass, at the same swap, as `RowProjectionCache::prune_generations_below`.
     pub(super) fn prune_region_cache(&self, segments_version: u64) {
         let floor = segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS);
-        self.region_cache
+        self.deps.region_cache
             .retain_keys(|key| key.segments_version >= floor);
     }
 
@@ -236,8 +197,8 @@ impl Executor {
 
     /// Whether this tick fires, and on what. `None` is a wake that is not a tick.
     fn tick_due(&self) -> Option<TickDue> {
-        let period = std::time::Duration::from_secs(self.flush_max_age_secs);
-        let rows_due = self.health.buffered_items.load(Ordering::SeqCst) >= self.flush_max_items;
+        let period = std::time::Duration::from_secs(self.deps.flush_max_age_secs);
+        let rows_due = self.health.buffered_items.load(Ordering::SeqCst) >= self.deps.flush_max_items;
         let period_due = self.last_tick.elapsed() >= period;
         let due = period_due || rows_due;
         let requested = self.health.flush_requested.load(Ordering::SeqCst);
@@ -368,7 +329,7 @@ impl Executor {
             return false;
         }
         // Bounded by the next tick, always, so a quiescent node still runs reclaim.
-        let until_tick = std::time::Duration::from_secs(self.flush_max_age_secs)
+        let until_tick = std::time::Duration::from_secs(self.deps.flush_max_age_secs)
             .saturating_sub(self.last_tick.elapsed());
         let wait = if self.wal.is_poisoned() {
             until_tick.min(WAL_RECOVERY_POLL_INTERVAL)
@@ -387,7 +348,7 @@ impl Executor {
     /// A fold flips `CURRENT`, changing which prefix is live. A stored `PathBuf` rotated at the
     /// flip would have to be got right at every site that uses it; a derived value cannot be missed.
     pub(super) fn prefix_dir(&self, generation: &Generation) -> PathBuf {
-        self.bundle_root.join(&generation.prefix)
+        self.deps.bundle_root.join(&generation.prefix)
     }
 
     /// Publish new geometry: check, swap, prune. The executor's own arm of the swap-only
@@ -471,7 +432,7 @@ impl Executor {
         // A rotation refreshes after the swap and does not arm the shed: after a fold a missing
         // projection is an ordinary cache miss.
         if rotation.is_some() {
-            self.refresh.spawn(next);
+            self.deps.refresh.spawn(next);
         }
 
         if !superseded.is_empty() {

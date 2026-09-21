@@ -115,7 +115,7 @@ impl Executor {
     /// A bundle root that cannot be listed fails the allocation and so the publication: the caller
     /// discards, its files are orphans, and the next tick re-plans.
     pub(super) fn raise_manifest_floor(&mut self) -> tessera_store::Result<()> {
-        let on_disk = tessera_store::highest_side_manifest_n(&self.bundle_root)?;
+        let on_disk = tessera_store::highest_side_manifest_n(&self.deps.bundle_root)?;
         let floor = on_disk.map_or(0, |highest| highest + 1);
         if floor > self.next_manifest_n {
             self.health
@@ -124,7 +124,7 @@ impl Executor {
             tracing::error!(
                 floor,
                 counter = self.next_manifest_n,
-                root = %self.bundle_root.display(),
+                root = %self.deps.bundle_root.display(),
                 "ALARM: a side-manifest this executor did not write is on disc. One executor owns \
                  a bundle root; publications continue above it, and what the other writer has \
                  published is not reconciled with what this node holds"

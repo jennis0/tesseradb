@@ -407,7 +407,7 @@ impl WritePath {
         let worker_bell = bell_tx.clone();
         // The tick clock a snapshot reads, seeded so `next_tick_in_nanos` is one period until
         // the executor's first tick rather than zero.
-        health.set_flush_period_secs(flush.max_age_secs);
+        health.set_flush_period_secs(flush.flush_max_age_secs);
         health.mark_tick(std::time::Instant::now());
 
         let join = std::thread::Builder::new()
@@ -418,11 +418,7 @@ impl WritePath {
                     live,
                     generation,
                     row_projection_cache,
-                    region_cache: flush.region_cache,
-                    artifact_projections: flush.artifact_projections,
-                    shapes: flush.shapes,
-                    lineages: flush.lineages,
-                    level_contents: flush.level_contents,
+                    deps: flush,
                     queues: LifecycleQueues {
                         work: work_rx,
                         deny: deny_rx,
@@ -431,20 +427,10 @@ impl WritePath {
                     },
                     health: Arc::clone(&health),
                     window_seq: 0,
-                    flush_max_age_secs: flush.max_age_secs,
-                    flush_max_items: flush.max_items,
                     next_manifest_n,
                     deny_dirty: false,
                     windows_since_publication: 0,
-                    bundle_root: flush.bundle_root,
-                    identity_key: flush.identity_key,
-                    pool: flush.pool,
-                    max_distinct_terms: flush.max_distinct_terms,
-                    coalesce_policy: flush.coalesce,
                     coalesce: executor::Background::new(worker_bell.clone()),
-                    refresh: flush.refresh,
-                    merge_policy: flush.merge,
-                    switches: flush.switches,
                     merge: executor::Background::sharing(
                         worker_bell.clone(),
                         Default::default(),
@@ -455,15 +441,12 @@ impl WritePath {
                         Default::default(),
                         Arc::clone(&health.fold_completed_pending),
                     ),
-                    suggest_dir: flush.suggest_dir,
                     suggest: executor::Background::new(worker_bell.clone()),
                     flush: executor::Background::sharing(
                         worker_bell,
                         Arc::clone(&health.flush_in_flight),
                         Default::default(),
                     ),
-                    configured_merge_bytes: flush.configured_merge_bytes,
-                    compaction: flush.compaction,
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
                     membership_extents: seeded_membership_extents,
@@ -1163,16 +1146,17 @@ pub(crate) struct LifecycleQueues {
 /// A struct because the alternative is a ten-argument `start_executor`, where the compiler stops
 /// distinguishing two `u64`s and a caller can transpose them silently.
 pub(crate) struct MaintenanceDeps {
-    pub(crate) max_age_secs: u64,
+    /// The tick's period.
+    pub(crate) flush_max_age_secs: u64,
     /// The tick's row trigger.
-    pub(crate) max_items: usize,
+    pub(crate) flush_max_items: usize,
     /// The entity-space coalesce's policy: see [`crate::coalesce::CoalescePolicy`].
-    pub(crate) coalesce: crate::coalesce::CoalescePolicy,
+    pub(crate) coalesce_policy: crate::coalesce::CoalescePolicy,
     /// What a geometry publication needs to start the background refresh rules: see
     /// [`crate::refresh`].
     pub(crate) refresh: crate::refresh::RefreshDeps,
     /// The row-space merge's policy: see [`crate::merge`].
-    pub(crate) merge: MergePolicy,
+    pub(crate) merge_policy: MergePolicy,
     /// The artifact row forms, shared for the one thing this thread does with them: rebuilding
     /// every level's projection inside the fold that invalidated it. A level is a deployment-wide
     /// artefact rather than a per-session value, so leaving it to the first request after the flip
@@ -1195,7 +1179,8 @@ pub(crate) struct MaintenanceDeps {
     /// [`Executor::warm_artifact_caches`].
     pub(crate) lineages: Arc<crate::cut::Lineages>,
     /// The supplied-content tables, shared for the one thing this thread does with them: dropping
-    /// a layer's when the layer is dropped, beside the two caches above.
+    /// a layer's when the layer is dropped, beside the two caches above. Not warmed at the fold: a
+    /// level is merely stale after one, and the first request that wants it pays to read it.
     pub(crate) level_contents: Arc<crate::artifact_content::LevelContents>,
     /// The bundle root, from which the live prefix directory is derived per use: see
     /// [`Executor::prefix_dir`] and `Engine::bundle_root`.
@@ -1239,6 +1224,6 @@ pub(crate) struct MaintenanceDeps {
     /// (`crate::merge::rebase_into`).
     pub(crate) switches: Arc<crate::switches::TestSwitches>,
     /// When a fold is dispatched with nobody asking for one: see
-    /// [`crate::compact::CompactionSchedule`].
+    /// [`crate::compact::CompactionSchedule`]. Consulted at the tick, beside the flush's own.
     pub(crate) compaction: crate::compact::CompactionSchedule,
 }

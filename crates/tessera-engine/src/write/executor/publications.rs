@@ -176,8 +176,8 @@ impl Executor {
         // [`Executor::fold_outstanding`] for why that later boundary is the one that matters. A
         // coalesce publishing under a fold would be orphaned by the flip and would be discarded at
         // its rebase check, so running it here is wasted work, not a hazard.
-        if self.coalesce_policy.width < 2
-            || !self.switches.coalesce_enabled.load(Ordering::SeqCst)
+        if self.deps.coalesce_policy.width < 2
+            || !self.deps.switches.coalesce_enabled.load(Ordering::SeqCst)
             || self.coalesce_outstanding()
             || self.fold_outstanding()
             || !self.may_publish()
@@ -201,7 +201,7 @@ impl Executor {
             partition,
             &partition_data.manifest,
             &generation.bundle.manifest.files,
-            self.coalesce_policy,
+            self.deps.coalesce_policy,
             // The roster as this generation has it: a scoped column of an incarnation that is no
             // longer live is for the fold to reclaim, not for this pass to merge.
             &|view, incarnation| {
@@ -229,7 +229,7 @@ impl Executor {
 
         let unit = self.coalesce.start();
         let health = Arc::clone(&self.health);
-        self.pool.spawn(move || {
+        self.deps.pool.spawn(move || {
             match crate::coalesce::execute_coalesce(plan, ctx) {
                 Ok(completed) => unit.complete(completed),
                 Err(e) => {
@@ -256,7 +256,7 @@ impl Executor {
     pub(super) fn dispatch_merge(&mut self, generation: &Arc<Generation>) {
         // Suspended until a fold is *published*, for the reason `dispatch_coalesce` states and on
         // the boundary `fold_outstanding` states.
-        if !self.switches.merge_enabled.load(Ordering::SeqCst)
+        if !self.deps.switches.merge_enabled.load(Ordering::SeqCst)
             || self.merge_outstanding()
             || self.fold_outstanding()
             || self.wal.is_poisoned()
@@ -264,7 +264,7 @@ impl Executor {
         {
             return;
         }
-        let Some(plan) = crate::merge::plan_merge(generation, self.merge_policy) else {
+        let Some(plan) = crate::merge::plan_merge(generation, self.deps.merge_policy) else {
             return;
         };
         let manifest = &generation.bundle.manifest;
@@ -291,7 +291,7 @@ impl Executor {
             // attempts at one `n` would otherwise write one path, and the second `File::create`
             // truncates files the first has memory-mapped.
             seg_id: format!("merge-{}-{attempt}", partition_data.segments_n),
-            identity_key: self.identity_key,
+            identity_key: self.deps.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
             absent_ok,
@@ -301,7 +301,7 @@ impl Executor {
 
         let unit = self.merge.start();
         let health = Arc::clone(&self.health);
-        self.pool.spawn(move || {
+        self.deps.pool.spawn(move || {
             match crate::merge::execute(plan, ctx) {
                 Ok(completed) => unit.complete(completed),
                 Err(e) => {
@@ -338,11 +338,11 @@ impl Executor {
         // next window publishes a new one, so the build must own its input.
         let values = crate::suggest::values_of(minter);
         let build = self.suggest.next_attempt();
-        let dir = self.suggest_dir.join(&vocabulary);
+        let dir = self.deps.suggest_dir.join(&vocabulary);
 
         let unit = self.suggest.start();
-        let pool = Arc::clone(&self.pool);
-        self.pool.spawn(move || {
+        let pool = Arc::clone(&self.deps.pool);
+        self.deps.pool.spawn(move || {
             match crate::suggest::SuggestIndex::build(&dir, build, &values, &pool) {
                 Ok(index) => unit.complete(crate::suggest::CompletedSuggest {
                     vocabulary,
@@ -404,9 +404,9 @@ impl Executor {
         };
         let values = crate::suggest::values_of(minter);
         let build = self.suggest.next_attempt();
-        let dir = self.suggest_dir.join(vocabulary);
+        let dir = self.deps.suggest_dir.join(vocabulary);
         let Ok(index) =
-            crate::suggest::SuggestIndex::build(&dir, build, &values, &self.pool)
+            crate::suggest::SuggestIndex::build(&dir, build, &values, &self.deps.pool)
         else {
             return;
         };
@@ -457,7 +457,7 @@ impl Executor {
     pub(super) fn publish_completed_merges(&mut self) -> bool {
         // Left in the channel rather than dropped; see
         // `MaintenanceDeps::switches`. Always false in a shipped build.
-        if self.switches.merge_publication_paused.load(Ordering::SeqCst) {
+        if self.deps.switches.merge_publication_paused.load(Ordering::SeqCst) {
             return false;
         }
         let mut any = false;
@@ -617,7 +617,7 @@ impl Executor {
                         store,
                     )
                 };
-                self.artifact_projections.rebase_merged(
+                self.deps.artifact_projections.rebase_merged(
                     &live.prefix,
                     &completed.plan.view,
                     store,
@@ -638,11 +638,11 @@ impl Executor {
         }));
         // The claim names the generation it is for, so a pass that is superseded mid-flight
         // releases nothing when it ends; see `refresh::clear_if_current`.
-        self.refresh
+        self.deps.refresh
             .in_flight
             .store(segments_version, Ordering::SeqCst);
         self.publish_arc(Arc::clone(&next), started);
-        self.refresh.spawn(next);
+        self.deps.refresh.spawn(next);
 
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
@@ -1209,7 +1209,7 @@ impl Executor {
                 // memory-mapped file, truncating the mapping and SIGBUS on the next read.
                 seg_id: format!("flush-{planned_at_n}-{}", self.flush.next_attempt()),
                 row_base,
-                identity_key: self.identity_key,
+                identity_key: self.deps.identity_key,
                 shard_id: manifest.identity.shard_id,
                 quantisation,
                 // This view's schema, entity-scoped tail then scoped render lanes: the same list a
@@ -1234,9 +1234,9 @@ impl Executor {
                 text_schema: text_schema.clone(),
                 dict: Arc::clone(&generation.dict),
                 novel_descriptors,
-                max_distinct_terms: self.max_distinct_terms,
+                max_distinct_terms: self.deps.max_distinct_terms,
                 prefix: generation.prefix.clone(),
-                shapes: self.shapes.levels_of_view(&view),
+                shapes: self.deps.shapes.levels_of_view(&view),
             }
         };
         self.health
@@ -1259,7 +1259,7 @@ impl Executor {
         let unit = self.flush.start();
         self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
-        self.pool.spawn(move || {
+        self.deps.pool.spawn(move || {
             let mut laps = crate::flush::FlushLaps::default();
             match crate::flush::execute_flush(plan, context, &mut laps) {
                 Ok(completed) => {
@@ -1345,7 +1345,7 @@ impl Executor {
             for (view, data) in views {
                 let Some(data) = data else { continue };
                 if stored {
-                    self.artifact_projections.publish(
+                    self.deps.artifact_projections.publish(
                         &generation.prefix,
                         view,
                         layer,
@@ -1376,7 +1376,7 @@ impl Executor {
                     continue;
                 }
                 let ordinals = &ordinals;
-                let held = self.shapes.level(
+                let held = self.deps.shapes.level(
                     view,
                     layer,
                     level,
@@ -1417,7 +1417,7 @@ impl Executor {
                         .flatten()
                         .unwrap_or_default()
                 };
-                self.artifact_projections.publish(
+                self.deps.artifact_projections.publish(
                     &generation.prefix,
                     view,
                     layer,
@@ -1455,7 +1455,7 @@ impl Executor {
         {
             return None;
         }
-        let held = self.shapes.level(
+        let held = self.deps.shapes.level(
             view,
             layer,
             level,
@@ -1881,7 +1881,7 @@ impl Executor {
         // stands, the next tick re-plans.
         // The record extent composes onto the live stack here, not only into the manifest: a
         // published extent that no live stack holds answers no drill-down until the next fold.
-        let record_dir = self.bundle_root.join(&completed.prefix);
+        let record_dir = self.deps.bundle_root.join(&completed.prefix);
         let record_paths: Vec<tessera_filter::RecordExtentPaths> = completed
             .record_extent
             .iter()
@@ -2245,7 +2245,7 @@ impl Executor {
                         store,
                     )
                 };
-                self.artifact_projections.extend_flushed(
+                self.deps.artifact_projections.extend_flushed(
                     &live.prefix,
                     &completed.view,
                     store,
@@ -2277,11 +2277,11 @@ impl Executor {
         // duration of the refresh instead.
         // The claim names the generation it is for, so a pass that is superseded mid-flight
         // releases nothing when it ends; see `refresh::clear_if_current`.
-        self.refresh
+        self.deps.refresh
             .in_flight
             .store(segments_version, Ordering::SeqCst);
         self.publish_arc(Arc::clone(&next), started);
-        self.refresh.spawn(next);
+        self.deps.refresh.spawn(next);
 
         // A flush supersedes geometry, so it prunes exactly as any other geometry publication
         // does: one swap, one `segments_version` bump, one retention pass. The superseded

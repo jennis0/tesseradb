@@ -506,7 +506,7 @@ impl Executor {
             .map(|descriptor| u64::from(descriptor.row_count))
             .sum();
         crate::compact::due(
-            &self.compaction,
+            &self.deps.compaction,
             now,
             self.fold_floor_from(),
             crate::compact::Gauges {
@@ -525,7 +525,7 @@ impl Executor {
     pub(super) fn fold_floor_from(&self) -> Option<u64> {
         let started = self.last_fold_start_unix?;
         let ended = self.health.fold_ended_unix.load(Ordering::SeqCst);
-        Some(started.max(ended.saturating_sub(self.compaction.min_interval_secs)))
+        Some(started.max(ended.saturating_sub(self.deps.compaction.min_interval_secs)))
     }
 
     /// Plan a fold and start it on its own thread, if one is requested and nothing blocks it. Not
@@ -588,7 +588,7 @@ impl Executor {
             self.health.overlay_diverged.load(Ordering::SeqCst),
             crate::compact::FoldResources {
                 available_memory: available_memory(),
-                free_disc: free_disc(&self.bundle_root),
+                free_disc: free_disc(&self.deps.bundle_root),
                 membership_containers: self
                     .live
                     .with_artifacts(|store| store.membership_containers()),
@@ -646,7 +646,7 @@ impl Executor {
                 })
                 .collect()
         };
-        let to_prefix = match crate::compact::next_prefix_name(&self.bundle_root) {
+        let to_prefix = match crate::compact::next_prefix_name(&self.deps.bundle_root) {
             Ok(prefix) => prefix,
             Err(e) => {
                 self.health.fold_requested.store(false, Ordering::SeqCst);
@@ -659,9 +659,9 @@ impl Executor {
         let attempt = self.fold.next_attempt();
         let ctx = crate::compact::FoldContext {
             from_prefix_dir: self.prefix_dir(generation),
-            to_prefix_dir: self.bundle_root.join(&to_prefix),
+            to_prefix_dir: self.deps.bundle_root.join(&to_prefix),
             to_prefix: to_prefix.clone(),
-            identity_key: self.identity_key,
+            identity_key: self.deps.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
             absent_ok,
@@ -700,7 +700,7 @@ impl Executor {
         self.health.fold_requested.store(false, Ordering::SeqCst);
         let unit = self.fold.start();
         let health = Arc::clone(&self.health);
-        let switches = Arc::clone(&self.switches);
+        let switches = Arc::clone(&self.deps.switches);
         let spawned = std::thread::Builder::new()
             .name("tessera-fold".to_string())
             .spawn(move || {
@@ -745,7 +745,7 @@ impl Executor {
     /// Apply every completed fold waiting from its thread, and report whether any did.
     pub(super) fn publish_completed_folds(&mut self) -> bool {
         // Test hook; always false in a shipped build. See `MaintenanceDeps::switches`.
-        if self.switches.fold_publication_paused.load(Ordering::SeqCst) {
+        if self.deps.switches.fold_publication_paused.load(Ordering::SeqCst) {
             return false;
         }
         let mut any = false;
@@ -795,7 +795,7 @@ impl Executor {
         let layouts = self.choose_layouts(&pass.spaces, pending, &pass.segments);
         for (layer, level, chosen) in &layouts {
             if self.live.record_layout(layer, *level, *chosen) {
-                self.artifact_projections.forget_level(layer, *level);
+                self.deps.artifact_projections.forget_level(layer, *level);
             }
         }
         self.pending_forms.clear();
@@ -908,7 +908,7 @@ impl Executor {
         //
         // `max_merged_segment_bytes` must stay strictly below the base segment's bytes, or the
         // next startup refuses the configuration. Refused here instead, loudly.
-        if let Some(configured) = self.configured_merge_bytes {
+        if let Some(configured) = self.deps.configured_merge_bytes {
             if completed.base_segment_bytes > 0 && configured >= completed.base_segment_bytes {
                 return Err(format!(
                     "merge.max_merged_segment_bytes ({configured}) is not strictly below the \
@@ -992,7 +992,7 @@ impl Executor {
         // Membership extent paths are prefix-relative, so they are written again into the new
         // prefix rather than carried forward or dropped. `repack_all` drops exactly the executed
         // deletions: a suppressed member keeps its bit (Rule S).
-        let to_prefix_dir = self.bundle_root.join(&completed.prefix);
+        let to_prefix_dir = self.deps.bundle_root.join(&completed.prefix);
         stairs.record("6 hand-off");
         let repacked = match self.rewrite_membership_extents(
             &to_prefix_dir,
@@ -1211,7 +1211,7 @@ impl Executor {
 
         self.pause_point(PauseSiteArg::BeforeCurrentFlip);
         if let Err(e) =
-            tessera_store::write_current(&self.bundle_root, &completed.prefix, &manifest_digest)
+            tessera_store::write_current(&self.deps.bundle_root, &completed.prefix, &manifest_digest)
         {
             discard(&format!("CURRENT would not flip ({e})"));
             return;
@@ -1270,7 +1270,7 @@ impl Executor {
         stairs.record("13 open");
 
         self.live.with_artifacts(|store| {
-            self.artifact_projections.adopt_derived(
+            self.deps.artifact_projections.adopt_derived(
                 &to_prefix_dir,
                 &completed.prefix,
                 &self.derived_extents,
@@ -1283,7 +1283,7 @@ impl Executor {
         // would be keyed to a generation no reader can ask for; built before the retire, it would
         // be keyed to a store version the retire is about to bump, discarding the warm.
         self.warm_artifact_caches();
-        self.shapes.clear_staged();
+        self.deps.shapes.clear_staged();
         stairs.record("15 warm");
 
         // ---- rotate the WAL ---------------------------------------------------------------------
@@ -1452,7 +1452,7 @@ impl Executor {
         retired: croaring::Bitmap,
     ) -> Result<(), String> {
         let (bundle, rotation) =
-            crate::engine::open_rotation(&self.bundle_root, prefix, &live.fragments, retired)
+            crate::engine::open_rotation(&self.deps.bundle_root, prefix, &live.fragments, retired)
                 .map_err(|e| format!("the folded prefix would not open ({e})"))?;
         let delta_postings = folded_tiers
             .iter()
@@ -1536,7 +1536,7 @@ impl Executor {
         prefix: &str,
         degraded: &[tessera_lifecycle::membership::Degradation],
     ) -> std::io::Result<()> {
-        let dir = self.bundle_root.join("reports");
+        let dir = self.deps.bundle_root.join("reports");
         std::fs::create_dir_all(&dir)?;
         let rows: Vec<serde_json::Value> = degraded
             .iter()
@@ -1760,7 +1760,7 @@ impl Executor {
                 if spatial {
                     let mut observed = None;
                     for (view, segment) in fold_segments {
-                        let held = self.shapes.level(
+                        let held = self.deps.shapes.level(
                             view,
                             &layer,
                             level,
@@ -1880,7 +1880,7 @@ impl Executor {
             return Vec::new();
         }
 
-        let scratch = self.artifact_projections.scratch();
+        let scratch = self.deps.artifact_projections.scratch();
         let written: Vec<(
             String,
             String,
@@ -1901,7 +1901,7 @@ impl Executor {
                     let composed = if spatial {
                         // The fold's segment is the whole base at row base 0, so the piece staged
                         // in `choose_layouts` is the level's membership in this view.
-                        let piece = self.shapes.get(view, layer, *level).and_then(|held| {
+                        let piece = self.deps.shapes.get(view, layer, *level).and_then(|held| {
                             fold_segments
                                 .iter()
                                 .find(|(v, _)| v == view)
@@ -2038,6 +2038,7 @@ impl Executor {
                     continue;
                 }
                 let Some(piece) = self
+                    .deps
                     .shapes
                     .get(view, layer, *level)
                     .and_then(|held| held.staged(&segment.seg_id))
@@ -2101,7 +2102,7 @@ impl Executor {
             for (layer, level) in &levels {
                 let version = store.level_version(layer, *level);
                 for (view, _) in fold_segments {
-                    let Some(held) = self.shapes.get(view, layer, *level) else {
+                    let Some(held) = self.deps.shapes.get(view, layer, *level) else {
                         continue;
                     };
                     if held.level_version != version {
@@ -2237,8 +2238,8 @@ impl Executor {
             return;
         }
         let started = std::time::Instant::now();
-        let before_projections = self.artifact_projections.builds();
-        let before_lineages = self.lineages.builds();
+        let before_projections = self.deps.artifact_projections.builds();
+        let before_lineages = self.deps.lineages.builds();
         for partition in generation.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
                 for (layer, level) in &levels {
@@ -2278,7 +2279,7 @@ impl Executor {
                         let predicate = segments.as_ref().map(|segments| {
                             crate::artifacts::PredicateSource::Spatial(
                                 crate::artifacts::SpatialSource {
-                                    level: self.shapes.level(
+                                    level: self.deps.shapes.level(
                                         view,
                                         layer,
                                         *level,
@@ -2291,7 +2292,7 @@ impl Executor {
                                 },
                             )
                         });
-                        self.artifact_projections.get_or_build(
+                        self.deps.artifact_projections.get_or_build(
                             &generation.prefix,
                             view,
                             layer,
@@ -2312,7 +2313,7 @@ impl Executor {
         }
         for (layer, level) in &levels {
             self.live.with_artifacts(|store| {
-                self.lineages.get_or_build(
+                self.deps.lineages.get_or_build(
                     layer,
                     *level,
                     store.lineage_version(layer, *level),
@@ -2332,8 +2333,8 @@ impl Executor {
             });
         }
         tracing::info!(
-            projections = self.artifact_projections.builds() - before_projections,
-            lineages = self.lineages.builds() - before_lineages,
+            projections = self.deps.artifact_projections.builds() - before_projections,
+            lineages = self.deps.lineages.builds() - before_lineages,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "the fold's artifact pass rebuilt every level's row form"
         );

@@ -238,7 +238,7 @@ impl Executor {
     /// as long as the fold that would release it is refused, so the walk gets dearer as the problem
     /// gets worse. The rate limit below bounds it to once per `flush_max_age_secs`.
     pub(super) fn sample_wal_gauge(&mut self) {
-        let period = std::time::Duration::from_secs(self.flush_max_age_secs);
+        let period = std::time::Duration::from_secs(self.deps.flush_max_age_secs);
         if let Some(last) = self.last_wal_sample {
             if last.elapsed() < period {
                 return;

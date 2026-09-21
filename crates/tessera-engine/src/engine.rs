@@ -998,10 +998,10 @@ impl Engine {
     /// The executor's maintenance dependencies, as both starters hand them over.
     fn maintenance_deps(&self) -> crate::write::MaintenanceDeps {
         crate::write::MaintenanceDeps {
-            max_age_secs: self.config.flush_max_age_secs,
-            max_items: self.config.flush_max_items,
-            coalesce: coalesce_policy(&self.config),
-            merge: merge_policy(&self.config),
+            flush_max_age_secs: self.config.flush_max_age_secs,
+            flush_max_items: self.config.flush_max_items,
+            coalesce_policy: coalesce_policy(&self.config),
+            merge_policy: merge_policy(&self.config),
             artifact_projections: Arc::clone(&self.artifact_projections),
             region_cache: Arc::clone(&self.region_cache),
             shapes: Arc::clone(&self.shapes),

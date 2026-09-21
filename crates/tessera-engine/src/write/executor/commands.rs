@@ -683,9 +683,9 @@ impl Executor {
         if let WalRecord::LayerDrop { name } = &record {
             // The deltas held for the tick describe forms that are going with the layer.
             self.pending_forms.retain(|(layer, _), _| layer != name);
-            self.artifact_projections.forget(name);
-            self.lineages.forget(name);
-            self.level_contents.forget(name);
+            self.deps.artifact_projections.forget(name);
+            self.deps.lineages.forget(name);
+            self.deps.level_contents.forget(name);
         }
         // The registry is durable in the log but not yet in a manifest, and a rotation reclaims the
         // log. Marking the manifest dirty is what gets it published at the next flush, on the same
@@ -1064,10 +1064,10 @@ impl Executor {
         let suggest = match compiled.category() {
             Some((vocabulary, _)) if generation.suggest.get(vocabulary).is_none() => {
                 let built = crate::suggest::SuggestIndexes::build(
-                    &self.suggest_dir,
+                    &self.deps.suggest_dir,
                     &vocabularies,
                     [vocabulary.to_string()],
-                    &self.pool,
+                    &self.deps.pool,
                 );
                 Arc::new(generation.suggest.with_built(built))
             }
