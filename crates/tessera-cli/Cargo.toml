@@ -23,6 +23,13 @@ path = "src/main.rs"
 # switchboard — and that this build does.
 fault-injection = ["tessera-server/fault-injection"]
 
+# The measurement build: a `tessera` binary whose write executor, flush and viewport laps are
+# recorded rather than compiled out, readable at `/control/status`. OFF by default, and it goes to
+# its own path for the same reason `fault-injection` does:
+#
+#   cargo build --release -p tessera-cli --features bench-timing --target-dir target/timing
+bench-timing = ["tessera-server/bench-timing"]
+
 [dependencies]
 tessera-build = { path = "../tessera-build" }
 # The `tokenise` verb only — the conformance oracle's access to the shipped analyser, so the two

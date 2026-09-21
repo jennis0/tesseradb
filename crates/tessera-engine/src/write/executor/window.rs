@@ -539,6 +539,8 @@ impl Executor {
             }
         };
 
+        mark = self.health.lap(WriteStage::VocabularyMint, mark);
+
         let (mut mint_records, minted_per_entry) = match self.mint_records(closing.entries_mut()) {
             Ok(minted) => minted,
             Err(detail) => {
@@ -583,6 +585,8 @@ impl Executor {
                 return;
             }
         };
+
+        mark = self.health.lap(WriteStage::DeriveRecords, mark);
 
         let vocabulary_records: Vec<WalRecord> = fresh_bindings
             .iter()

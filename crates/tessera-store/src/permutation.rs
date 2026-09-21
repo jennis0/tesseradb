@@ -1788,8 +1788,21 @@ impl RowSpace {
 
     /// The rows contributed by the extents at or after `from` — the only part a flush recomputes.
     pub fn project_extents_from(&self, mask: &croaring::Bitmap, from: usize) -> croaring::Bitmap {
+        let extents = &self.extents[from.min(self.extents.len())..];
+        // An extent maps only entities inside its own range, and entity ids are issued
+        // monotonically, so a mask whose highest entity is below the lowest floor here projects to
+        // nothing at all. One `maximum` against an iterator, a `Vec` and a bitmap per extent: a
+        // stored level's held form asks this of every artifact it holds at every flush, and on a
+        // corpus whose artifacts are hundreds of thousands of admin divisions almost every one of
+        // them has nothing in the extent a flush just wrote.
+        let floor = extents.iter().map(|extent| extent.entity_lo).min();
+        if let (Some(floor), Some(highest)) = (floor, mask.maximum()) {
+            if u64::from(highest) < floor {
+                return croaring::Bitmap::new();
+            }
+        }
         let mut rows = croaring::Bitmap::new();
-        for extent in &self.extents[from.min(self.extents.len())..] {
+        for extent in extents {
             rows.or_inplace(&extent.project(mask));
         }
         rows

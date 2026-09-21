@@ -81,6 +81,35 @@ def executor_laps(before: dict, after: dict, rows: int) -> dict:
         ) if rows else None,
         "apply_nanos_max_ms": round(after.get("apply_nanos_max", 0) / 1e6, 1),
         "work_service_nanos_ewma_ms": round(after.get("work_service_nanos_ewma", 0) / 1e6, 1),
+        "flush": flush_laps(before, after),
+    }
+
+
+def flush_laps(before: dict, after: dict) -> dict:
+    """The `FlushStage` laps across the same phase, in milliseconds per publication and per pool
+    execution. The two halves are wall clock on two threads and are reported apart: the executor's
+    are what an ack queues behind, the pool's are not. `publish_wall` overlaps the executor stages
+    beside it rather than adding to them.
+    """
+    now, prior = after.get("flush_stages") or {}, before.get("flush_stages") or {}
+
+    def delta(key):
+        return now.get(key, 0) - prior.get(key, 0)
+
+    def per(half, divisor):
+        was = prior.get(half) or {}
+        return {
+            name: round((nanos - was.get(name, 0)) / 1e6 / divisor, 2) if divisor else None
+            for name, nanos in (now.get(half) or {}).items()
+        }
+
+    publications, executions = delta("flushes"), delta("executions")
+    return {
+        "publications": publications,
+        "executions": executions,
+        "rows_published": delta("rows_published"),
+        "executor_ms_per_publication": per("executor_nanos", publications),
+        "pool_ms_per_execution": per("pool_nanos", executions),
     }
 
 

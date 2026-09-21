@@ -41,3 +41,8 @@ rustc-hash = "1"
 tessera-lifecycle = { path = ".", features = ["fault-injection"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+criterion = "0.5"
+
+[[bench]]
+name = "wal_record"
+harness = false
