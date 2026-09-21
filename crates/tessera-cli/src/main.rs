@@ -994,106 +994,6 @@ fn report_residency(schema: &tessera_build::config::Schema, limit: Option<u64>) 
     );
 }
 
-/// The disclosure decisions a declaration makes, as a table an operator reads.
-///
-/// **The same values `reports/disclosure.json` carries**, and deliberately a second rendering of
-/// one source rather than a second derivation: the file is for a diff between builds and this is
-/// for a person deciding whether the declaration says what they meant. Neither reads the other's
-/// format well.
-fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
-    println!("views");
-    for view in &disclosure.views {
-        match &view.default {
-            Some(default) => println!(
-                "  {:<26} labels from {}, default '{default}'",
-                view.name, view.labels_from
-            ),
-            None => println!(
-                "  {:<26} labels from {}, no default: an unlabelled point is refused",
-                view.name, view.labels_from
-            ),
-        }
-    }
-    if !disclosure.vocabularies.is_empty() {
-        println!("\nvocabularies");
-        for vocabulary in &disclosure.vocabularies {
-            println!(
-                "  {:<26} {}, {}, {} declared value(s){}",
-                vocabulary.name,
-                vocabulary.visibility,
-                vocabulary.value_set,
-                vocabulary.declared_values,
-                if vocabulary.reserved.is_empty() {
-                    String::new()
-                } else {
-                    format!(", reserved {:?}", vocabulary.reserved)
-                }
-            );
-        }
-    }
-    if !disclosure.attributes.is_empty() {
-        println!("\nattributes (in declaration order, which is the stored column order)");
-        for attribute in &disclosure.attributes {
-            println!(
-                "  {:<26} {}{}, {}, from column '{}'{}",
-                attribute.name,
-                attribute.ty,
-                match &attribute.vocabulary {
-                    Some(v) => format!(" over vocabulary '{v}'"),
-                    None => String::new(),
-                },
-                attribute.placement,
-                attribute.field,
-                // A family is one column per view of the group, read from those views' own
-                // points and stored under `attrs/<column>/<group>/<key>/` (`views.md` §5).
-                match &attribute.scope {
-                    Some(group) => format!(", one column per view of '{group}'"),
-                    None => String::new(),
-                }
-            );
-        }
-    }
-    if !disclosure.layers.is_empty() {
-        println!("\nlayers (in declaration order, which is registration order)");
-        for layer in &disclosure.layers {
-            println!("  {}", layer.name);
-            if let Some(parent) = &layer.expanded_from {
-                println!("      written by `[layer.labels]` on '{parent}'");
-            }
-            println!(
-                "      gate '{}' | artifacts {} | members {}",
-                layer.visibility,
-                match &layer.artifact_visibility.field {
-                    Some(field) => format!(
-                        "carry their own in '{field}', else '{}'",
-                        layer.artifact_visibility.default
-                    ),
-                    None => format!("'{}'", layer.artifact_visibility.default),
-                },
-                match layer.require_member_visibility.as_str() {
-                    Some(word) => word.to_string(),
-                    None => layer.require_member_visibility.to_string(),
-                }
-            );
-            if !layer.depends_on.is_empty() {
-                println!(
-                    "      served only where {} is served (decision 0089)",
-                    layer.depends_on.join(", ")
-                );
-            }
-            if !layer.content.computed.is_empty() {
-                println!("      computed {}", layer.content.computed.join(", "));
-            }
-            for supplied in &layer.content.supplied {
-                println!(
-                    "      supplied {} '{}' requires {}",
-                    supplied.ty, supplied.name, supplied.require_member_visibility
-                );
-            }
-        }
-    }
-}
-
 /// `tessera corpus items` (correctness-suite §12.1): served `fx_key` values in, their expected
 /// items out. The corpus is constructed with `n = 0` because the lookups take no part in it —
 /// see the verb's own doc. The `partition` column is answered here for the same reason: it is a
@@ -1988,90 +1888,16 @@ fn main() -> ExitCode {
             };
             let config = declaration.config;
             let report = tessera_build::check::check(&config);
-            for source in &report.sources {
-                match &source.path {
-                    Some(path) => eprintln!("  read schema  {:<34} {path}", source.object),
-                    None => eprintln!("  no source    {:<34} (declared and empty)", source.object),
-                }
-            }
-            for finding in &report.findings {
-                eprintln!("  FAILED       {}: {}", finding.object, finding.detail);
-            }
-            // Warnings leave the check clean and the exit status untouched: an indexed keyword the
-            // source's footer says is unique per row is a cost to know about, not a mistake.
-            for warning in &report.warnings {
-                eprintln!("  WARNING      {}: {}", warning.object, warning.detail);
-            }
-            // **The frame a projected view will quantise against** (`projections.md` §4.2) —
-            // computed from the declaration alone, so the square and the resolution the snap costs
-            // are readable without a build. Reported, never a finding.
-            if !report.frames.is_empty() {
-                eprintln!("projected views, from the declaration alone:");
-                for frame in &report.frames {
-                    frame.print();
-                }
-            }
-            // **The declaration's view groups, and what is scoped to them** (`views.md` §3, §5)
-            // — the shape of a declaration nothing yet builds, so that `tessera check` is where
-            // an author reads back what they wrote. Reported, never a finding.
-            if !config.view_groups.is_empty() {
-                eprintln!("view groups, from the declaration alone:");
-                for group in &config.view_groups {
-                    let keys = group.declared_keys();
-                    let roster = match (&group.members, keys.len()) {
-                        (Some(owner), _) => format!("the views of '{owner}'"),
-                        (None, 0) => group.form().to_string(),
-                        (None, n) => format!("{}, {n} view(s): {}", group.form(), keys.join(", ")),
-                    };
-                    eprintln!("  {:<20} {roster}", group.name);
-                    if !group.metadata.is_empty() {
-                        eprintln!(
-                            "  {:<20} metadata: {}",
-                            "",
-                            group
-                                .metadata
-                                .iter()
-                                .map(|m| format!("{} ({})", m.name, m.ty.arrow_type_name()))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        );
-                    }
-                }
-                for (attribute, group) in &config.scopes.attributes {
-                    eprintln!("  {:<20} attribute '{attribute}'", format!("scope {group}"));
-                }
-                for (layer, group) in &config.scopes.layers {
-                    eprintln!("  {:<20} layer '{layer}'", format!("scope {group}"));
-                }
-            }
-            // **The shape layers, sized from the geometry alone** (`polygon-membership.md` §6.5)
-            // — the decomposition an operator sizing a boundary set reads before a build commits
-            // memory to it. Reported, never a finding: nothing here refuses.
-            if !report.shapes.is_empty() {
-                eprintln!("shape layers, from the geometry alone:");
-                for shape in &report.shapes {
-                    match shape {
-                        Ok(shape) => shape.print(),
-                        Err(why) => eprintln!("  not sized: {why}"),
-                    }
-                }
-            }
+            // The page is rendered where the report is, so the binary and the Python extension
+            // module print the same bytes. Stdout carries the payloads and nothing else, which is
+            // what a CI job pipes into `curl`.
+            eprint!("{}", tessera_build::check::page(&config, &report));
             if !report.is_clean() {
-                eprintln!(
-                    "check FAILED: {} finding(s) across {} source(s). Nothing was read but \
-                     Parquet schemas, so a clean check is not a clean build: it cannot see a \
-                     value against a closed vocabulary, a member id that resolves to nothing, or \
-                     where the data sits inside a view's extent",
-                    report.findings.len(),
-                    report.sources.len()
-                );
                 return ExitCode::FAILURE;
             }
             if payloads {
-                // **The declaration, minus its acquisition keys, is the payload**
-                // (`configuration.md` §2) — so this is a serialisation and not a translation, and
-                // there is no second authority to drift. On stdout alone, so the stream a CI job
-                // pipes into `curl` carries nothing else.
+                // The declaration, minus its acquisition keys, is the payload, so this is a
+                // serialisation and not a translation and there is no second authority to drift.
                 match serde_json::to_string_pretty(&tessera_build::config::control_payloads(
                     &config,
                 )) {
@@ -2081,28 +1907,7 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
                 }
-            } else {
-                print_disclosure(&tessera_build::disclosure::Disclosure::of(&config));
             }
-            eprintln!(
-                "check OK: {} source(s), {} view(s), {} view group(s) over {} declared view(s), \
-                 {} vocabulary(ies), {} attribute(s), {} layer(s), {} warning(s)",
-                report.sources.len(),
-                config.views.len(),
-                config.view_groups.len(),
-                config
-                    .view_groups
-                    .iter()
-                    .map(|g| g.declared_keys().len())
-                    .sum::<usize>(),
-                config.schema.vocabularies.len(),
-                // Every declared column, the group-scoped families included: they are held apart
-                // from the schema because a family has no slot in the manifest's flat list
-                // (`views.md` §5), not because they are fewer columns.
-                config.schema.attributes.len() + config.scoped_attributes.len(),
-                config.layers.len(),
-                report.warnings.len()
-            );
             ExitCode::SUCCESS
         }
         Command::Serve { deployment } => {

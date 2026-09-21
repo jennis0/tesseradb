@@ -75,26 +75,6 @@ PLAIN_ROLE = {
 }
 
 
-def _check_page(sources, findings, warnings) -> str:
-    """The check as a page: what it read, what it refuses, and what it wants an eye on.
-
-    One line per source, so that a check which examined nothing says so as loudly as one that
-    examined everything, then the findings and the warnings. A warning leaves the check clean.
-    """
-    lines = []
-    for source in sources:
-        where = "(declared and empty)" if source.path is None else source.path
-        what = "no source   " if source.path is None else "read schema "
-        lines.append(f"  {what} {str(source.object):<34} {where}")
-    lines += [f"  FAILED       {finding}" for finding in findings]
-    lines += [f"  WARNING      {warning}" for warning in warnings]
-    lines.append(
-        f"check {'FAILED' if findings else 'OK'}: {len(sources)} source(s), "
-        f"{len(findings)} finding(s), {len(warnings)} warning(s)"
-    )
-    return "\n".join(lines)
-
-
 def _accepted(answer, what: str) -> dict:
     """The body of a control-plane answer, or a refusal naming the status and what it said."""
     if not answer.ok:
@@ -796,7 +776,8 @@ class Database:
         the page it printed.
 
         Through the extension module where it is installed, so a refusal arrives as the findings
-        the check made rather than as a page of text an exit code came with.
+        the check made rather than as a page of text an exit code came with. The page is the
+        binary's own either way: one renderer sits under both paths.
         """
         deployment = str(self.path / "tessera.toml")
         if _tessera is None:
@@ -805,8 +786,8 @@ class Database:
         try:
             report = _tessera.check(deployment)
         except _tessera.DeclarationError as refused:
-            return False, _check_page((), refused.findings, ())
-        return report.ok, _check_page(report.sources, report.findings, report.warnings)
+            return False, f"check FAILED: {refused}"
+        return report.ok, report.page
 
     def commit(self) -> CommitReport | PagedReport:
         """Make what was inserted part of the database: the build the first time, pages after.
@@ -937,7 +918,7 @@ class Database:
         try:
             return json.loads(_tessera.payloads(deployment))
         except _tessera.DeclarationError as why:
-            raise Refusal(refused + _check_page((), why.findings, ())) from None
+            raise Refusal(f"{refused}check FAILED: {why}") from None
 
     def token(self, terms: Sequence[str] | None = None):
         """A viewer token for this database, minted from its own session credential.

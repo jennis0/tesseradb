@@ -276,7 +276,7 @@ fn check_prints_every_disclosure_decision() {
     project(tmp.path());
     let output = run(tmp.path(), &["check"]);
     assert!(output.status.success(), "{}", stderr(&output));
-    let text = stdout(&output);
+    let text = stderr(&output);
     for expected in [
         "labels from field, default 'public'",
         "public, closed, 3 declared value(s), reserved [7]",
@@ -289,6 +289,8 @@ fn check_prints_every_disclosure_decision() {
     ] {
         assert!(text.contains(expected), "{expected}\nmissing from:\n{text}");
     }
+    // The whole page is one stream, so stdout carries the payloads and nothing else.
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
 }
 
 /// **Every finding, not the first.** A build stops at the first thing wrong because everything

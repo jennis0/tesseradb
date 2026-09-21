@@ -343,10 +343,6 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).to_string()
 }
 
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).to_string()
-}
-
 /// Every file under `root`, keyed by its `root`-relative slash-separated path.
 fn collect(root: &Path) -> BTreeMap<String, Vec<u8>> {
     fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
@@ -387,9 +383,11 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
         "a large_utf8 corpus must check clean:\n{}",
         stderr(&right)
     );
+    // The page names each source by the path it was read from, and the two projects sit in two
+    // temporary directories, so the root is the whole of the difference allowed.
     assert_eq!(
-        stdout(&left),
-        stdout(&right),
+        stderr(&left).replace(&narrow.path().display().to_string(), "<root>"),
+        stderr(&right).replace(&wide.path().display().to_string(), "<root>"),
         "the two widths must produce one report"
     );
 

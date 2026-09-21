@@ -7,7 +7,9 @@
 //! What a refusal carries is the point of the module. A subprocess hands back an exit code and a
 //! page of text, so a client that wants to raise an error naming the block an author wrote has to
 //! re-implement the rule in Python to know it first. Here the findings arrive as objects that name
-//! their block and its name, and a refusal is [`DeclarationError`] carrying them.
+//! their block and its name, and a refusal is [`DeclarationError`] carrying them. The page itself
+//! is rendered by `tessera_build::check::page`, which is what the binary prints, so a caller that
+//! has the module installed and one that shells out read the same bytes.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -128,6 +130,10 @@ pub struct CheckResult {
     warnings: Vec<Finding>,
     #[pyo3(get)]
     sources: Vec<Source>,
+    /// The page `tessera check` prints, rendered by the renderer the binary renders with, so the
+    /// two paths cannot disagree.
+    #[pyo3(get)]
+    page: String,
 }
 
 #[pymethods]
@@ -195,7 +201,7 @@ fn declaration(deployment_path: &str) -> Result<(Object, tessera_build::config::
 #[pyfunction]
 fn check(py: Python<'_>, deployment_path: &str) -> PyResult<CheckResult> {
     let (_, config) = declaration(deployment_path).map_err(|finding| refuse(py, vec![finding]))?;
-    Ok(report(&tessera_build::check::check(&config)))
+    Ok(report(&config, &tessera_build::check::check(&config)))
 }
 
 /// The control-plane payloads the declaration serialises to, as JSON text.
@@ -227,8 +233,12 @@ fn payloads(py: Python<'_>, deployment_path: &str) -> PyResult<String> {
     })
 }
 
-fn report(checked: &tessera_build::check::CheckReport) -> CheckResult {
+fn report(
+    config: &tessera_build::config::Config,
+    checked: &tessera_build::check::CheckReport,
+) -> CheckResult {
     CheckResult {
+        page: tessera_build::check::page(config, checked),
         ok: checked.is_clean(),
         findings: checked.findings.iter().map(Finding::of).collect(),
         warnings: checked.warnings.iter().map(Finding::of).collect(),
