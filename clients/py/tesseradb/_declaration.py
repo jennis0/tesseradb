@@ -1,10 +1,10 @@
-"""The declaration: blocks, the typed verbs' compilation into them, and the TOML (§4).
+"""The declaration: blocks, the typed verbs' compilation into them, and the TOML.
 
-Each `declare_*` verb builds one block of `configuration.md`'s declaration and appends it here.
+Each `declare_*` verb builds one block of the declaration and appends it here.
 The SDK writes the TOML and `tessera check` reads that file, so the mapping from verb to block is
 checked by the binary rather than mirrored in Python.
 
-What the TOML always says (§4.8): every source name on every block, the allocation view, the value
+What the TOML always says: every source name on every block, the allocation view, the value
 set on every layer, and the disclosure controls on every layer and vocabulary, whether the user
 said them or a default did. A reader of `schema.toml` sees the whole declaration without knowing
 the SDK's defaults.
@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Iterable, Sequence
 
-from ._inserts import ARTIFACT_FIELDS, MEMBER_FIELDS, VOCABULARY_FIELDS
+from ._inserts import ARTIFACT_FIELDS, MEMBER_FIELDS, SHAPE_FIELDS, VOCABULARY_FIELDS
 from ._refusal import Refusal
 from ._toml import Inline
 
@@ -31,22 +31,16 @@ ANCHOR = "__anchor__"
 
 #: An attribute declared at a running service, kept beside the block and never written. Such a
 #: column has no acquisition half: it is filled by `POST /control/values` rather than read from a
-#: file, so the block names no source (§6.2 step 1).
+#: file, so the block names no source.
 FILLED = "__filled__"
 
 #: `value_set` as the caller chose it, kept beside the block and never written: where the caller
-#: chose none, the layer's inserts decide it when the document is written (§4.6).
+#: chose none, the layer's inserts decide it when the document is written.
 CHOSEN_VALUE_SET = "__value_set__"
-
-HIERARCHY_KINDS = ("flat", "nested", "dag", "stacked", "tiered")
-LEVELLED = ("stacked", "tiered")
-SHAPE_KINDS = ("bbox", "circle", "ellipse", "polygon")
-LAYOUTS = ("rows", "column", "list")
-SPACES = ("view", "wgs84")
 
 #: What a layer's engine derives per viewer when the caller names nothing, and what a spatial layer
 #: derives instead: an artifact has one drawn geometry, so a hull beside a membership shape is
-#: refused at the build (python-sdk.md §4.6).
+#: refused at the declaration.
 DERIVED = ("centroid", "box", "hull")
 SPATIAL_DERIVED = ("centroid", "box")
 
@@ -63,8 +57,8 @@ class Declaration:
         if name is not None and any(b.get("name") == name for b in self.blocks[kind]):
             raise Refusal(f"declare: a {kind} named {name!r} is already declared")
         if kind in ("view", "view_group") and name is not None:
-            # A view of a group is addressed `<group>:<key>` and a plain view by its own name
-            # (decision 0113), so one name held by both would make a request mean two things.
+            # A view of a group is addressed `<group>:<key>` and a plain view by its own name, so
+            # one name held by both would make a request mean two things.
             other = "view_group" if kind == "view" else "view"
             if any(b.get("name") == name for b in self.blocks[other]):
                 held = "view group" if other == "view_group" else "view"
@@ -100,7 +94,7 @@ class Declaration:
         return {block["name"] for block in self.blocks["vocabulary"]}
 
     def allocation_view(self) -> str | None:
-        """The first declared view unless another says `anchor=True` (decision 0112).
+        """The first declared view unless another says `anchor=True`.
 
         Written into the TOML in either case, so a rebuild that reorders the blocks cannot re-key
         the corpus. A declaration carrying groups alone names none the SDK could write, a
@@ -113,12 +107,12 @@ class Declaration:
         return names[0] if names else None
 
     def document(self, sources: dict[str, str]) -> dict[str, Any]:
-        """The declaration as TOML's own shape (§4.8).
+        """The declaration as TOML's own shape.
 
         **`[defaults].source` is never written.** Every block names the source its own inserts
         gave it, which is what lets a reader of `schema.toml` see the whole declaration without
         knowing the SDK's defaults; a block with no insert names none and is declared and empty,
-        which configuration.md §2 allows.
+        which the declaration allows.
         """
         document: dict[str, Any] = {}
         if sources:
@@ -131,7 +125,7 @@ class Declaration:
             document["defaults"] = defaults
 
         # A layer that named no views takes every one: the plain views by name, and each group by
-        # its own, which draws the layer on every view of it, present and future (views.md §3.5).
+        # its own, which draws the layer on every view of it, present and future.
         views = self.view_names() + self.group_names()
         if self.blocks["view"]:
             document["view"] = [
@@ -144,7 +138,7 @@ class Declaration:
         if self.blocks["attribute"]:
             # `FILLED` is the SDK's own mark on a column declared at a running service and is
             # never written: such a block names no source, its cells being filled by the values
-            # route rather than read from a file (§6.2 step 1).
+            # route rather than read from a file.
             document["attribute"] = [
                 {k: v for k, v in block.items() if k != FILLED}
                 for block in self.blocks["attribute"]
@@ -174,7 +168,7 @@ def view_block(
     anchor: bool = False,
     title: str | None = None,
 ) -> dict:
-    """One `[[view]]`: a frame, a projection and a gate, and no data (§4.2).
+    """One `[[view]]`: a frame, a projection and a gate, and no data.
 
     Where its points are and which columns carry them come from `insert(view, table, id=, x=,
     y=, access=)`, which writes `source`, `fields` and `point_visibility.field` onto this block.
@@ -193,11 +187,6 @@ def view_block(
     return block
 
 
-#: The roster's own keys, which a metadata name may not take: the inline block and the roster
-#: table would otherwise be ambiguous (views.md §3.2).
-ROSTER_KEYS = ("key", "source", "visibility")
-
-
 def view_group_block(
     name: str,
     metadata: dict | None = None,
@@ -208,7 +197,7 @@ def view_group_block(
     visibility: Any = "public",
     title: str | None = None,
 ) -> dict:
-    """One `[[view_group]]`: a set of views sharing every setting, differing by a key (§4.3).
+    """One `[[view_group]]`: a set of views sharing every setting, differing by a key.
 
     The group's views and their metadata come from `insert(group, roster=table, key=, …)`, and
     its rows from `insert(group, table, id=, x=, y=, access=, view=)` with `view=` naming the
@@ -216,7 +205,7 @@ def view_group_block(
     this group shares, and such a group declares no roster and no metadata of its own.
     """
     projection = projection or "none"
-    declared = _metadata(name, metadata) if metadata else {}
+    declared = dict(metadata) if metadata else {}
     if members is not None and metadata:
         raise Refusal(
             f"view group {name!r}: keys, metadata and each view's own gate belong to the group "
@@ -245,26 +234,16 @@ def view_group_block(
     return block
 
 
-def _metadata(group: str, metadata: dict) -> dict:
-    for key in metadata:
-        if key in ROSTER_KEYS:
-            raise Refusal(
-                f"view group {group!r}: {key!r} is the roster's own key, so a per-view value of "
-                f"that name would make the roster record ambiguous. Rename the metadata name"
-            )
-    return dict(metadata)
-
-
 def metadata_names(block: dict) -> tuple[str, ...]:
     """The metadata names a group declared, which its roster insert names one column each of."""
     return tuple(dict(block.get("metadata") or {}))
 
 
 def roster_body(record: dict, names: Sequence[str]) -> dict:
-    """One roster row as `PUT /control/views/{group}/{key}` takes it (views.md §3.2).
+    """One roster row as `PUT /control/views/{group}/{key}` takes it.
 
-    Every metadata name the group declared is here and typed against it (contracts §3.4 r55); a
-    `timestamp_us` travels as microseconds since the epoch, JSON carrying no date type.
+    Every metadata name the group declared is here and typed against it. A `timestamp_us`
+    travels as microseconds since the epoch, JSON carrying no date type.
     """
     body: dict[str, Any] = {}
     if record.get("visibility") is not None:
@@ -288,7 +267,7 @@ def _extent(extent: Any, projection: str) -> Any:
         # refused, the outward snap already supplying headroom.
         return "auto"
     # The frame is fitted to the inserted rows and widened by half the fitted box's width on each
-    # side (§6.1, assumed). A frame is index configuration and does not change for the life of the
+    # side. A frame is index configuration and does not change for the life of the
     # view, so the headroom is for the rows a notebook adds later.
     return Inline({"auto": True, "margin": 0.5})
 
@@ -302,16 +281,11 @@ def vocabulary_block(
     reserved: Sequence[int] | None = None,
     title: str | None = None,
 ) -> dict:
-    """One `[[vocabulary]]`, with no data of its own (§4.4).
+    """One `[[vocabulary]]`, with no data of its own.
 
     A closed set gives `values` inline or takes an `insert(name, table, key=, title=, code=)`; an
     open one minted from the data needs neither and may take an insert for titles.
     """
-    if visibility not in ("public", "derived"):
-        raise Refusal(
-            f"vocabulary {name!r}: visibility is 'public' or 'derived'. The slot takes no access "
-            f"label (decision 0090), and {visibility!r} is neither word"
-        )
     block: dict[str, Any] = {"name": name}
     if title is not None:
         block["title"] = title
@@ -336,14 +310,12 @@ def attribute_block(
     scope: Any = "entity",
     title: str | None = None,
 ) -> dict:
-    """One `[[attribute]]`: a type and its two flags, and nothing else (§4.5).
+    """One `[[attribute]]`: a type and its two flags, and nothing else.
 
     It is filled by an `insert(name, table, id=, value=)`, or by name from a frame inserted into
-    the allocation view (§3).
+    the allocation view.
     """
-    if type == "category" and vocabulary is None:
-        raise Refusal(f"attribute {name!r}: a category names its vocabulary. Give vocabulary=")
-    group = _attribute_scope(name, scope)
+    group = _scope(scope)
     block: dict[str, Any] = {"name": name}
     if title is not None:
         block["title"] = title
@@ -359,18 +331,6 @@ def attribute_block(
     if index is not None:
         block["index"] = index
     return block
-
-
-def _attribute_scope(name: str, scope: Any) -> str | None:
-    """`entity`, or the view group whose views this column holds one value per (views.md §5)."""
-    if scope == "entity" or scope is None:
-        return None
-    if isinstance(scope, dict) and set(scope) != {"group"}:
-        raise Refusal(
-            f"attribute {name!r}: a scoped attribute names one view group, as {{'group': name}}, "
-            f"not {sorted(scope)!r}"
-        )
-    return scope["group"] if isinstance(scope, dict) else scope
 
 
 def layer_block(
@@ -395,51 +355,19 @@ def layer_block(
     artifacts: Any = None,
     title: str | None = None,
 ) -> dict:
-    """One `[[layer]]`, with no data of its own (§4.6).
+    """One `[[layer]]`, with no data of its own.
 
     Its artifacts and its memberships come from its inserts: a key column
     (`insert(layer, table, id=, key=)`), or an artifacts table and a members table. `artifacts=`
     is the one exception and is a declaration rather than data: an authored roster written in
-    the declaration itself, as configuration.md's inline `artifacts` array.
+    the declaration itself, as its inline `artifacts` array.
     """
-    if kind not in HIERARCHY_KINDS:
-        raise Refusal(f"layer {name!r}: {kind!r} is not a hierarchy kind: {HIERARCHY_KINDS}")
     membership_value, how = _membership(name, membership)
-    group = _scope(name, scope)
-    if withdraw_on_member_deletion:
-        raise Refusal(
-            f"layer {name!r}: withdraw_on_member_deletion is specified and not built "
-            f"(annotation-write-cycle.md §6.1). The fold has no artifact-withdrawal path, so a "
-            f"deleted member shrinks the membership and the artifact stands. Drop the parameter"
-        )
-    if kind in LEVELLED and not levels:
-        raise Refusal(f"layer {name!r}: a {kind} layer declares its levels. Give levels=")
-    if levels and kind in ("nested", "dag"):
-        raise Refusal(
-            f"layer {name!r}: a {kind} layer's structure is its edges, so levels are refused. "
-            f"Drop levels=, or declare the layer as tiered"
-        )
-    if layout is not None and layout not in LAYOUTS:
-        raise Refusal(f"layer {name!r}: the serving-layout pin is one of {LAYOUTS}, not {layout!r}")
-
-    shape_block = _shape(name, shape, how)
+    group = _scope(scope)
+    shape_block = _shape(name, shape)
     if how == "spatial":
         computed = SPATIAL_DERIVED if computed is DERIVED else computed
-        if "hull" in computed:
-            raise Refusal(
-                f"layer {name!r}: an artifact has one drawn geometry, served through one shape "
-                f"column pair, so a derived hull beside a membership shape is refused at the "
-                f'build. Drop "hull" from computed='
-            )
-    if how != "spatial" and default_space != "view":
-        raise Refusal(
-            f"layer {name!r}: default_space= is the space a shape is written in, and this layer "
-            f'declares no shape. Give membership="spatial" with shape=, or drop default_space='
-        )
-    if how == "attribute":
-        _refuse_beside_an_attribute_membership(name, kind, levels, supplied, depends_on, layout,
-                                               artifact_visibility)
-    rows = _artifact_rows(name, artifacts, how)
+    rows = _artifact_rows(name, artifacts, shape_block is not None)
 
     block: dict[str, Any] = {"name": name}
     if title is not None:
@@ -449,16 +377,18 @@ def layer_block(
     if views is not None:
         block["views"] = list(views)
     else:
-        # A scoped layer's views may name only its own group and the groups sharing its views
-        # (configuration.md §1), so "every view" is that group and nothing else.
+        # A scoped layer's views may name only its own group and the groups sharing its views, so
+        # "every view" is that group and nothing else.
         block["views"] = [group] if group is not None else VIEWS_ALL
     block["membership"] = membership_value
-    if how == "spatial":
+    if how == "spatial" or default_space != "view":
         block["default_space"] = default_space
     block["hierarchy"] = Inline({"kind": kind, "prune_children": prune_children})
+    if withdraw_on_member_deletion:
+        block["withdraw_on_member_deletion"] = True
     # Written whenever the SDK chose it, since under `open` a mistyped key is a permanent artifact.
-    # A layer whose artifacts arrive in a table is closed, and one with a key column alone is open
-    # (§4.6); which it is, is settled when the document is written, the inserts being made after.
+    # A layer whose artifacts arrive in a table is closed, and one with a key column alone is open;
+    # which it is, is settled when the document is written, the inserts being made after.
     block["value_set"] = value_set or _value_set(how, rows)
     if layout is not None:
         block["layout"] = layout
@@ -467,9 +397,9 @@ def layer_block(
     block["require_member_visibility"] = _requirement(require_member_visibility)
     if depends_on:
         block["depends_on"] = list(depends_on)
-    if how != "attribute":
-        # A predicate layer's artifacts are the column's distinct values, so it declares no
-        # content: the surface refuses one, there being nothing to carry it.
+    # A predicate layer's artifacts are the column's distinct values and carry no content, so the
+    # derived set the caller did not ask for is not written onto one.
+    if how != "attribute" or supplied or computed is not DERIVED:
         content: dict[str, Any] = {"computed": list(computed)}
         if supplied:
             content["supplied"] = [_supplied(name, entry) for entry in supplied]
@@ -503,90 +433,50 @@ def _membership(name: str, membership: Any) -> tuple[Any, str]:
     return membership, membership
 
 
-def _scope(name: str, scope: Any) -> str | None:
-    """`entity`, or the view group a group-scoped layer keeps one artifact set per view of."""
+def _scope(scope: Any) -> str | None:
+    """`entity`, or the view group whose views a scoped block keeps one value or artifact set per.
+
+    An attribute and a layer spell it the same way, `{"group": name}` or the name itself.
+    """
     if scope == "entity" or scope is None:
         return None
-    if isinstance(scope, dict) and set(scope) != {"group"}:
-        raise Refusal(
-            f"layer {name!r}: a scoped layer names one view group, as {{'group': name}}, not "
-            f"{sorted(scope)!r}"
-        )
-    return scope["group"] if isinstance(scope, dict) else scope
+    return scope.get("group") if isinstance(scope, dict) else scope
 
 
-def _shape(name: str, shape: Any, how: str) -> dict | None:
+def _shape(name: str, shape: Any) -> dict | None:
+    """The `[layer.shape]` block: `shape="polygon"`, or `{"kind": "polygon"}` spelled out."""
     if shape is None:
         return None
-    if how != "spatial":
-        raise Refusal(
-            f"layer {name!r}: a shape is the membership of a spatial layer, and nothing evaluates "
-            f'one elsewhere. Give membership="spatial", or drop shape='
-        )
     if isinstance(shape, dict) and set(shape) != {"kind"}:
         raise Refusal(
-            f"layer {name!r}: a shape declares its kind and nothing else, every kind being exact "
-            f"(polygon-membership.md §6.1). It names {sorted(shape)!r}"
+            f"layer {name!r}: a shape declares its kind and nothing else. It names "
+            f"{sorted(shape)!r}"
         )
-    kind = shape["kind"] if isinstance(shape, dict) else shape
-    if kind not in SHAPE_KINDS:
-        raise Refusal(f"layer {name!r}: a shape kind is one of {SHAPE_KINDS}, not {kind!r}")
-    return {"kind": kind}
-
-
-def _refuse_beside_an_attribute_membership(
-    name, kind, levels, supplied, depends_on, layout, artifact_visibility
-) -> None:
-    """A predicate layer's artifacts are a column's distinct values, so most keys have no subject.
-
-    Each of these would register a layer that is reachable and serves nothing
-    (configuration.md §1, `[[layer]]`'s `membership` row).
-    """
-    if kind != "flat":
-        raise Refusal(
-            f"layer {name!r}: an attribute membership has no edges to carry a hierarchy, so its "
-            f'kind is "flat", not {kind!r}'
-        )
-    for value, what, instead in (
-        (levels, "levels=", "declare the layer as tiered over a members table"),
-        (supplied, "supplied=", "supply the content on an enumerated layer"),
-        (depends_on, "depends_on=", "declare the dependency on an enumerated layer"),
-        (layout, "layout=", "drop it: the column is the membership, so there is no second form"),
-    ):
-        if value:
-            raise Refusal(
-                f"layer {name!r}: an attribute membership derives its artifacts from the column, "
-                f"so {what} names nothing it carries. Instead, {instead}"
-            )
-    if isinstance(artifact_visibility, dict) and artifact_visibility.get("field"):
-        raise Refusal(
-            f"layer {name!r}: an attribute membership publishes no artifact rows, so there is no "
-            f"column for artifact_visibility to read. Give a label or 'inherited'"
-        )
+    return {"kind": shape["kind"] if isinstance(shape, dict) else shape}
 
 
 def _value_set(how: str, rows: Any) -> str:
-    """`closed` where the layer's artifacts are a roster, `open` where they are minted (§4.6)."""
+    """`closed` where the layer's artifacts are a roster, `open` where they are minted."""
     # A predicate layer's artifacts are the column's values, which the vocabulary already bounds.
     if how == "attribute":
         return "closed"
     return "closed" if rows is not None else "open"
 
 
-#: The artifact table's own columns, which an inline row spells canonically (configuration.md §1).
+#: The artifact table's own columns, which an inline row spells canonically.
 ARTIFACT_KEYS = (
     "key", "level", "members", "excluding", "bbox", "circle", "ellipse", "wkt", "space",
     "contents", "parent", "attached_layer", "attached_level", "attached_key",
 )
 
 
-def _artifact_rows(layer: str, artifacts: Any, how: str) -> list[dict] | None:
+def _artifact_rows(layer: str, artifacts: Any, shaped: bool) -> list[dict] | None:
     """Inline `artifacts=`: a list of dicts, or a frame carrying the artifact table's columns."""
     if artifacts is None:
         return None
     if not isinstance(artifacts, (list, tuple)):
         artifacts = rows_of(artifacts)
-    rows = [_artifact_row(layer, row, how) for row in artifacts]
+    rows = [_artifact_row(layer, row, shaped) for row in artifacts]
     if not rows:
         raise Refusal(
             f"layer {layer!r}: artifacts= carries no row. Leave it out to declare an empty layer"
@@ -610,13 +500,10 @@ def rows_of(frame: Any) -> list[dict]:
     ]
 
 
-SHAPE_FIELDS = ("bbox", "circle", "ellipse", "wkt")
-
-
 ATTACHMENT_KEYS = ("layer", "key", "level")
 
 
-def _artifact_row(layer: str, row: Any, how: str) -> dict:
+def _artifact_row(layer: str, row: Any, shaped: bool) -> dict:
     row = {key: value for key, value in dict(row).items() if value is not None}
     attached = row.pop("attached_to", None)
     if attached is not None:
@@ -630,36 +517,23 @@ def _artifact_row(layer: str, row: Any, how: str) -> dict:
         row["attached_key"] = attached["key"]
         if attached.get("level") is not None:
             row["attached_level"] = int(attached["level"])
-    unknown = [key for key in row if key not in ARTIFACT_KEYS]
-    if unknown:
-        raise Refusal(
-            f"layer {layer!r}: an inline artifact is spelled with the artifact table's own keys, "
-            f"so {sorted(unknown)!r} names nothing. The keys are {list(ARTIFACT_KEYS)}"
-        )
-    if "key" not in row:
-        raise Refusal(f"layer {layer!r}: an inline artifact names itself. Give key=")
-    if "members" in row and "excluding" in row:
-        raise Refusal(
-            f"layer {layer!r}, artifact {row['key']!r}: a membership is spelled by inclusion or "
-            f"by exclusion, and both on one row name two sets. Drop members= or excluding="
-        )
     carried = [field for field in SHAPE_FIELDS if field in row]
-    if carried and how != "spatial":
+    key = row.get("key")
+    if carried and not shaped:
         raise Refusal(
-            f"layer {layer!r}, artifact {row['key']!r}: {carried[0]} is a shape, and this layer "
-            f'evaluates none. Give membership="spatial" with shape=, or drop it'
+            f"layer {layer!r}, artifact {key!r}: {carried[0]} is a shape, and this layer declares "
+            f'none. Give membership="spatial" with shape=, or drop it'
         )
     if len(carried) > 1:
         raise Refusal(
-            f"layer {layer!r}, artifact {row['key']!r}: an artifact carries its shape in its "
-            f"layer's kind's field and no other, so {sorted(carried)!r} is two shapes"
+            f"layer {layer!r}, artifact {key!r}: an artifact carries its shape in its layer's "
+            f"kind's field and no other, so {sorted(carried)!r} is two shapes"
         )
-    if "space" in row and row["space"] not in SPACES:
-        raise Refusal(
-            f"layer {layer!r}, artifact {row['key']!r}: a shape is written in {SPACES[0]!r} or "
-            f"{SPACES[1]!r}, not {row['space']!r}"
-        )
-    return {key: row[key] for key in ARTIFACT_KEYS if key in row}
+    # The declaration's own key order, with anything else after it, so a key the artifact table
+    # does not carry reaches the check rather than being dropped here.
+    ordered = {name: row[name] for name in ARTIFACT_KEYS if name in row}
+    ordered.update({name: value for name, value in row.items() if name not in ordered})
+    return ordered
 
 
 def labels_block(
@@ -670,7 +544,7 @@ def labels_block(
     artifact_visibility: Any = "inherited",
     title: str | None = None,
 ) -> dict:
-    """The `[layer.labels]` block: a label set over the clustering it hangs from (§4.7).
+    """The `[layer.labels]` block: a label set over the clustering it hangs from.
 
     Its text comes from `insert(name, {key: text})` or `insert(name, table, key=, text=)`, and,
     where the gate is `all`, its generating set from `insert(name, members=table, …)`.
@@ -737,18 +611,18 @@ def _level(entry: Any) -> dict:
 # ------------------------------------------------------------------ what the inserts wrote
 
 
-#: What configuration.md's own defaults call the identity column in each place one is read: a
-#: view's `fields.entity_id` and an attribute's `entity_id_field` (§1), and a member row's
+#: What the declaration's own defaults call the identity column in each place one is read: a
+#: view's `fields.entity_id` and an attribute's `entity_id_field`, and a member row's
 #: `fields.entity`.
 CANONICAL_ENTITY_ID = "entity_id"
 CANONICAL_MEMBER_ENTITY = "entity"
 
 
 def bind(document: dict, inserts: Sequence[Any]) -> None:
-    """Write onto every block the source and the column names its inserts gave it (§4.8).
+    """Write onto every block the source and the column names its inserts gave it.
 
     The SDK rewrites no file, so a column keeps whatever name it has in the user's own table and
-    the declaration is what says where each one is (§3, configuration.md §1).
+    the declaration is what says where each one is.
     """
     for block in document.get("view_group", []):
         _bind_group(
@@ -767,7 +641,7 @@ def bind(document: dict, inserts: Sequence[Any]) -> None:
 
 
 def bind_value_sets(document: dict, inserts: Sequence[Any]) -> None:
-    """A layer's value set, where the caller chose none: its inserts decide it (§4.6)."""
+    """A layer's value set, where the caller chose none: its inserts decide it."""
     for block in document.get("layer", []):
         _settle_value_set(block, inserts)
 
@@ -786,15 +660,20 @@ def _block_for(document: dict, insert: Any) -> dict | None:
 
 
 def _fields(block: dict, named: dict) -> None:
-    """Add to a block's `fields`, which the SDK writes as an inline table."""
-    named = {key: value for key, value in named.items() if value is not None}
+    """Add to a block's `fields`, which the SDK writes as an inline table.
+
+    One entry per column the call renamed. A column carrying the name the build reads it under is
+    not here: the map locates a block's columns in the file its source names, and a group whose
+    views each have their own file names no source for one to be read out of.
+    """
+    named = {key: value for key, value in named.items() if value is not None and value != key}
     if not named:
         return
     block["fields"] = Inline({**dict(block.get("fields") or {}), **named})
 
 
 def _bind_group(block: dict, inserts: Sequence[Any]) -> None:
-    """What a group's inserts write onto its block: one of views.md §3.2's two rosters.
+    """What a group's inserts write onto its block: one of the two roster forms.
 
     A group whose views each have their own file inserts one table per view, naming the view with
     `view_key=`, and the group's roster is those records: one `[[view_group.view]]` each, with
@@ -890,7 +769,7 @@ class _Bind:
 
     @staticmethod
     def layer_key(block: dict, insert: Any) -> None:
-        """A key column: `[layer.members]` over the points, the column as `key` (§4.6)."""
+        """A key column: `[layer.members]` over the points, the column as `key`."""
         block["members"] = {
             "source": insert.source,
             "fields": Inline(
@@ -913,7 +792,7 @@ class _Bind:
             members["fields"] = Inline(named)
         block["members"] = members
         # The view a scoped layer's rows belong to is the layer's own field, which covers its
-        # artifacts table and its members table alike (configuration.md §1).
+        # artifacts table and its members table alike.
         if insert.columns.get("view"):
             _fields(block, {"view": insert.columns["view"]})
 
@@ -927,7 +806,7 @@ class _Bind:
 
 
 def _renamed(insert: Any, canonical: Sequence[str]) -> dict:
-    """The `fields` entries an insert's names need: one per column it renamed (§4.8).
+    """The `fields` entries an insert's names need: one per column it renamed.
 
     The names are `_inserts`' own tables, which are the build's field set, so a column the build
     reads under its own name alone never reaches a `fields` map.
@@ -940,7 +819,7 @@ def _renamed(insert: Any, canonical: Sequence[str]) -> dict:
 
 
 def _attribute_of_a_view(document: dict, name: str, column: str, insert: Any) -> None:
-    """An attribute filled from the allocation view's own frame, by name or by `columns=` (§3)."""
+    """An attribute filled from the allocation view's own frame, by name or by `columns=`."""
     for block in document.get("attribute", []):
         if block.get("name") != name:
             continue
@@ -953,7 +832,7 @@ def _attribute_of_a_view(document: dict, name: str, column: str, insert: Any) ->
 
 
 def _settle_value_set(block: dict, inserts: Sequence[Any]) -> None:
-    """A layer whose artifacts arrive in a table is closed; one with a key column is open (§4.6)."""
+    """A layer whose artifacts arrive in a table is closed; one with a key column is open."""
     if block.pop(CHOSEN_VALUE_SET, False) or block.get("artifacts"):
         return
     for insert in inserts:

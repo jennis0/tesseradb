@@ -1,4 +1,4 @@
-"""``tesseradb``: Tessera's Python package (decision 0095).
+"""``tesseradb``: Tessera's Python package.
 
 The base install is ``authorise``, ``Token`` and ``connect`` — a hosted deployment's ``meta()``
 and ``item()`` — and depends on nothing outside the standard library; ``Viewer.viewport`` needs
@@ -6,7 +6,7 @@ pyarrow and ``Viewer.map`` needs anywidget, each imported where it is used.
 
 ``pip install tesseradb[widget]`` adds anywidget and the notebook widget, ``Map``;
 ``pip install tesseradb[local]`` adds the SDK, which creates a Tessera database in a directory,
-fills it from frames and files and commits it through the ``tessera`` binary (python-sdk.md).
+fills it from frames and files and commits it through the ``tessera`` binary.
 
 ``Map`` and the SDK's verbs are imported on first use rather than at import time, so the base
 install needs neither anywidget nor pyarrow to ``import tesseradb``.

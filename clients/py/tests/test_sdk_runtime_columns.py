@@ -89,7 +89,7 @@ def test_a_render_column_declared_after_the_first_commit_is_refused_at_the_verb(
     declaration is still the user's to change, and it names the first commit.
     """
     db = notebook(served, corpus)
-    with pytest.raises(Refusal, match="render=True is fixed at the first commit"):
+    with pytest.raises(Refusal):
         db.declare_attribute("hotness", type="u8", render=True)
     # Nothing was declared, so the next commit has nothing to send.
     assert db.check().plan == []

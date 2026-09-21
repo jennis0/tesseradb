@@ -52,6 +52,24 @@ def corpus() -> Path:
 
 
 @pytest.fixture
+def checked():
+    """The declaration check over a database, as whichever half of the SDK runs it.
+
+    In process where the extension module is installed, and through the binary where it is not,
+    which is what a test with neither is skipped for.
+    """
+    from tesseradb import _database
+
+    if _database._tessera is None:
+        binary()
+
+    def run(db):
+        return db.check()
+
+    return run
+
+
+@pytest.fixture
 def served(tmp_path, corpus):
     """A committed, served database over the notebook corpus, closed when the test ends.
 

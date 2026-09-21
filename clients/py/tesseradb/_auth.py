@@ -1,11 +1,10 @@
 """The session plane's ``authorise``, and the token it returns.
 
-Client-components §7: **the entry point is a token.** ``Map(url, token=...)`` is the primary form
-— an analyst holds a per-principal token their deployment issued them, as any application's user
-does. This module's ``authorise`` is the credential-holding form and is operator-only: the session
-credential can mint *any* principal, and a notebook that takes it is client-interaction §7's
-pooled-service-token anti-pattern in a cell. It exists for the local, single-principal case and
-for the demo, and it never lets the credential reach the browser — the token it mints does.
+**The entry point is a token.** ``Map(url, token=...)`` is the primary form: an analyst holds a
+per-principal token their deployment issued them, as any application's user does. This module's
+``authorise`` is the credential-holding form and is operator-only, the session credential being
+able to mint any principal. It exists for the local, single-principal case and for the demo, and
+it never lets the credential reach the browser: the token it mints does.
 """
 
 from __future__ import annotations
@@ -88,8 +87,8 @@ def authorise(
     The session credential this takes can mint a token for *any* principal, so whoever holds it
     holds every principal's view. That makes this the wrong entry point for an analyst's notebook:
     the shape a practitioner writes when the SDK offers nothing else is one credential in one cell
-    filtering per user afterwards — the pooled service token of client-interaction §7, under which
-    every count and density a user sees derives from the credential's mask, not theirs. Hand an
+    filtering per user afterwards, a pooled service token under which every count and density a
+    user sees derives from the credential's mask rather than theirs. Hand an
     analyst a token instead (``Map(url, token=...)``); use this for the local single-principal
     case and for the demo, where the operator and the analyst are one person.
 
