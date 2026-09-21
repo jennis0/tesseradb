@@ -467,6 +467,7 @@ impl Engine {
             Arc::clone(&geometry.projection),
             &view_data.row_space,
             denied,
+            generation.buffered_rows(view),
         );
         let mask_identity = self.mask_identity(session, &generation, &geometry);
         let served = ServedView {

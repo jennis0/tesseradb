@@ -67,7 +67,7 @@ pub use categories::{
 // is the only reader. The rest of `compact` stays private — what a fold *is* is this crate's
 // business, and when it runs is the deployment's.
 pub use compact::{CompactionSchedule, PassCost};
-pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask};
+pub use compose::{buffered_rows_of, compose, denied_rows_of, visible_to, EffectiveMask};
 pub use projection::{ProjectionInputs, ProjectionRoute, RowProjection};
 // The publication guard's refusal, which a publisher outside this crate must handle.
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's
@@ -173,6 +173,10 @@ pub use generation::{Generation, GenerationParts};
 
 /// Per-view row-space deny masks — see [`Generation::denied`].
 pub type DenyMask = rustc_hash::FxHashMap<String, croaring::Bitmap>;
+
+/// Per view, the buffered entities that already have a row there — see
+/// [`Generation::buffered_rows`].
+pub type BufferedRows = rustc_hash::FxHashMap<String, Vec<tessera_types::EntityId>>;
 
 /// The process-wide handle to the current generation. A request must load this pointer exactly
 /// **once**, at request start, before acquiring any fragment or cache entry — loading it more

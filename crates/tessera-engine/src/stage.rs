@@ -236,6 +236,7 @@ fn run(
         Arc::clone(&task.geometry.projection),
         &view_data.row_space,
         denied,
+        generation.buffered_rows(&task.view),
     );
     if cancel.is_cancelled() {
         return;

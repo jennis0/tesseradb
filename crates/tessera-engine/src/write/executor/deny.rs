@@ -229,15 +229,13 @@ impl Executor {
         // since subtracting a row would re-expose a still-deleted entity.
         let overlay_version = generation.overlay_version + 1;
         let next = if unsuppressed {
-            generation.with(|g| {
+            generation.with_buffer(buffer, &[], |g| {
                 g.overlay_version = overlay_version;
                 g.overlay = Arc::new(overlay);
-                g.buffer = buffer;
             })
         } else {
-            generation.with_denies(Arc::new(overlay), &newly_denied, |g| {
+            generation.with_denies(Arc::new(overlay), &newly_denied, buffer, |g| {
                 g.overlay_version = overlay_version;
-                g.buffer = buffer;
             })
         };
         self.publish(next, started)

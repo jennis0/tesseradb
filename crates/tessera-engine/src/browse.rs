@@ -312,6 +312,7 @@ impl crate::Engine {
             Arc::clone(&geometry.projection),
             &view_data.row_space,
             denied,
+            generation.buffered_rows(view),
         );
         let served = crate::viewport::ServedView {
             session,

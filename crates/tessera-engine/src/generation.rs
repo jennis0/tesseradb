@@ -149,6 +149,12 @@ pub struct Generation {
     /// this generation holds, and the read path treats that as fail-closed rather than as "nothing
     /// denied".
     denied: Arc<DenyMask>,
+    /// **Derived**: per view, the buffered entities [`crate::compose`]'s walk has anything to say
+    /// about, so a request pays for those rather than for the whole buffer. Entity ids, never row
+    /// ids, because a merge, coalesce or fold rewrites rows. The rule is
+    /// [`crate::compose::derive_buffered_rows`] and only this module sets it; a view with no entry
+    /// sends the walk back over the buffer, which is slow and never wrong.
+    buffered_rows: Arc<crate::BufferedRows>,
 }
 
 impl std::ops::Deref for Generation {
@@ -160,38 +166,86 @@ impl std::ops::Deref for Generation {
 }
 
 impl Generation {
-    /// Builds a generation and derives its deny mask.
+    /// Builds a generation and derives both its derived values.
     pub(crate) fn new(parts: GenerationParts) -> Generation {
         let denied = Arc::new(crate::compose::derive_denied(&parts.overlay, &parts.bundle));
-        Generation { parts, denied }
+        let buffered_rows = Arc::new(crate::compose::derive_buffered_rows(
+            &parts.buffer,
+            &parts.bundle,
+        ));
+        Generation {
+            parts,
+            denied,
+            buffered_rows,
+        }
     }
 
     /// A copy with `change` applied. The mask is derived again if the change replaced the bundle
-    /// or the overlay, and carried otherwise.
+    /// or the overlay, and the buffered-row lists if it replaced the bundle or the buffer; both
+    /// are carried otherwise. A buffer-only change has [`Generation::with_buffer`], which derives
+    /// neither, so a call site that forgets it is slow rather than wrong.
     pub(crate) fn with(&self, change: impl FnOnce(&mut GenerationParts)) -> Generation {
         let mut parts = self.parts.clone();
         change(&mut parts);
-        let same = Arc::ptr_eq(&parts.bundle, &self.parts.bundle)
-            && Arc::ptr_eq(&parts.overlay, &self.parts.overlay);
-        let denied = match same {
+        let same_bundle = Arc::ptr_eq(&parts.bundle, &self.parts.bundle);
+        let denied = match same_bundle && Arc::ptr_eq(&parts.overlay, &self.parts.overlay) {
             true => Arc::clone(&self.denied),
             false => Arc::new(crate::compose::derive_denied(&parts.overlay, &parts.bundle)),
         };
-        Generation { parts, denied }
+        let buffered_rows = match same_bundle && Arc::ptr_eq(&parts.buffer, &self.parts.buffer) {
+            true => Arc::clone(&self.buffered_rows),
+            false => Arc::new(crate::compose::derive_buffered_rows(
+                &parts.buffer,
+                &parts.bundle,
+            )),
+        };
+        Generation {
+            parts,
+            denied,
+            buffered_rows,
+        }
+    }
+
+    /// A copy whose buffer is `buffer` and whose bundle is this one's, so the buffered-row lists
+    /// are this one's minus the entities whose own row has left the buffer, plus those of
+    /// `inserted` that hold one and have a row. Cost is the lists and `inserted`, not the buffer.
+    pub(crate) fn with_buffer(
+        &self,
+        buffer: Arc<IngestBuffer>,
+        inserted: &[EntityId],
+        change: impl FnOnce(&mut GenerationParts),
+    ) -> Generation {
+        let mut parts = self.parts.clone();
+        change(&mut parts);
+        parts.buffer = buffer;
+        let denied = match Arc::ptr_eq(&parts.overlay, &self.parts.overlay) {
+            true => Arc::clone(&self.denied),
+            false => Arc::new(crate::compose::derive_denied(&parts.overlay, &parts.bundle)),
+        };
+        let buffered_rows = self.next_buffered_rows(&parts, inserted);
+        Generation {
+            parts,
+            denied,
+            buffered_rows,
+        }
     }
 
     /// A copy whose overlay differs from this one's only by deletions and suppressions of
     /// `newly_denied`, so their rows are added to the mask without walking the whole overlay. An
-    /// unsuppress may not take this route: the entity may still be deleted.
+    /// unsuppress may not take this route: the entity may still be deleted. `buffer` is the deleted
+    /// entities' rows removed, which inserts nothing, so the buffered-row lists lose those entities
+    /// and gain none.
     pub(crate) fn with_denies(
         &self,
         overlay: Arc<Overlay>,
         newly_denied: &[EntityId],
+        buffer: Arc<IngestBuffer>,
         change: impl FnOnce(&mut GenerationParts),
     ) -> Generation {
         let mut parts = self.parts.clone();
         change(&mut parts);
         parts.overlay = overlay;
+        parts.buffer = buffer;
         let mut denied = (*self.denied).clone();
         for partition in parts.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
@@ -210,15 +264,62 @@ impl Generation {
                 && denied == crate::compose::derive_denied(&parts.overlay, &parts.bundle),
             "the incremental deny mask does not equal a fresh derivation"
         );
+        let buffered_rows = self.next_buffered_rows(&parts, &[]);
         Generation {
             parts,
             denied: Arc::new(denied),
+            buffered_rows,
         }
+    }
+
+    /// The buffered-row lists for `parts`, whose bundle is this generation's and whose buffer is
+    /// this one's with `inserted` added and anything else only removed.
+    fn next_buffered_rows(
+        &self,
+        parts: &GenerationParts,
+        inserted: &[EntityId],
+    ) -> Arc<crate::BufferedRows> {
+        debug_assert!(
+            Arc::ptr_eq(&parts.bundle, &self.parts.bundle),
+            "an incremental buffered-row list needs the row space it was derived against"
+        );
+        let mut next = crate::BufferedRows::default();
+        for partition in parts.bundle.partitions.values() {
+            for (view, view_data) in &partition.views {
+                let mut entities: Vec<EntityId> = match self.buffered_rows.get(view) {
+                    Some(held) => held
+                        .iter()
+                        .copied()
+                        .filter(|entity| parts.buffer.get(*entity).is_some())
+                        .collect(),
+                    None => Vec::new(),
+                };
+                entities.extend(inserted.iter().copied().filter(|entity| {
+                    parts.buffer.get(*entity).is_some()
+                        && view_data.row_space.row_of(*entity).is_some()
+                }));
+                entities.sort_unstable();
+                entities.dedup();
+                next.insert(view.clone(), entities);
+            }
+        }
+        debug_assert!(
+            next == crate::compose::derive_buffered_rows(&parts.buffer, &parts.bundle),
+            "the incremental buffered-row lists do not equal a fresh derivation"
+        );
+        Arc::new(next)
     }
 
     /// The row-space deny mask, per view.
     pub fn denied(&self) -> &DenyMask {
         &self.denied
+    }
+
+    /// One view's buffered entities that have a row there — [`compose`](crate::compose::compose)'s
+    /// walk. `None` where this generation has no list for the view, which sends the walk over the
+    /// whole buffer instead.
+    pub fn buffered_rows(&self, view: &str) -> Option<&[EntityId]> {
+        self.buffered_rows.get(view).map(Vec::as_slice)
     }
 
     /// The MANIFEST digest of the prefix this generation's postings, dictionary and term index

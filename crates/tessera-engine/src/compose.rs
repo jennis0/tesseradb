@@ -2,7 +2,8 @@
 //! direct_eval(L)`, evaluated as diffs against a cached row-space projection of the frozen
 //! fragment, not by recomputing the whole mask.
 //!
-//! [`compose`] walks the buffer once per entity, resolving each with the precedence
+//! [`compose`] walks the generation's per-view list of buffered entities that have a row
+//! ([`derive_buffered_rows`]), resolving each with the precedence
 //! `deleted > suppressed > buffered` ([`verdict`]), into two row-space bitmaps against `base`:
 //! `minus = {row(e) : e fails} ∩ base`, `plus = {row(e) : e passes} ∖ base`. Without the
 //! `∩ base` / `∖ base` clamps, denying an entity the fragment never contained would drive a
@@ -571,6 +572,35 @@ pub fn denied_rows_of(overlay: &Overlay, row_space: &RowSpace) -> Bitmap {
     rows
 }
 
+/// Derive, per view, the buffered entities [`compose`]'s walk has anything to say about: those
+/// holding an own row in the buffer that already have a row in that view. An entity gains one only
+/// when a publication gives it one, so this is re-derived by every publication and may otherwise be
+/// carried; the result is the only legal value of [`Generation::buffered_rows`]. The overlay is not
+/// consulted, so a deny or its lift changes nothing here and `compose` asks [`Overlay::touches`]
+/// for itself.
+pub(crate) fn derive_buffered_rows(buffer: &IngestBuffer, bundle: &Bundle) -> crate::BufferedRows {
+    let mut out = crate::BufferedRows::default();
+    for partition in bundle.partitions.values() {
+        for (view, view_data) in &partition.views {
+            // Every view gets an entry, empty or not, on [`derive_denied`]'s rule.
+            out.insert(view.clone(), buffered_rows_of(buffer, &view_data.row_space));
+        }
+    }
+    out
+}
+
+/// One view's list — see [`derive_buffered_rows`]. Sorted, so two derivations of one state are the
+/// same vector whatever order the buffer's map was walked in.
+pub fn buffered_rows_of(buffer: &IngestBuffer, row_space: &RowSpace) -> Vec<EntityId> {
+    let mut entities: Vec<EntityId> = buffer
+        .iter()
+        .map(|(entity, _)| *entity)
+        .filter(|entity| row_space.row_of(*entity).is_some())
+        .collect();
+    entities.sort_unstable();
+    entities
+}
+
 /// Compose the effective mask for one request. See this module's doc for the precedence rule
 /// and the clamp rationale. `base` is already the frozen fragment's row-space projection, so the
 /// fragment itself is not a parameter: an entity with no verdict falls through directly to it.
@@ -584,6 +614,7 @@ pub fn compose(
     base: Arc<RowProjection>,
     row_space: &RowSpace,
     denied: &Bitmap,
+    buffered: Option<&[EntityId]>,
 ) -> EffectiveMask {
     let mut fail_rows: Vec<u32> = Vec::new();
     let mut pass_rows: Vec<u32> = Vec::new();
@@ -593,26 +624,34 @@ pub fn compose(
     // ever been accepted. `verdict` is still the single expression of the precedence, so the
     // entity-space verbs and this walk cannot drift apart. An overlay entry is a deny, covered
     // by the fold below, so a buffered entity with one is skipped here.
-    for (&entity, item) in buffer.iter() {
+    let mut visit = |entity: EntityId| {
         if overlay.touches(entity) {
-            continue;
+            return;
         }
-        // A buffered entity usually has no row, and contributes nothing to either diff, so the
-        // row is what the walk asks for first and the terms are tested only for the rest. It has
-        // a row where a flush of another view has published one for it while its own row is
-        // still buffered: an entity ingested into one view and joined to a second can have the
-        // second's row published first. A join writes no postings, so the entity is in no
-        // fragment, and the `plus` branch is what draws its mark there.
+        // The row is asked for here rather than carried, so an entity the list names and the row
+        // space does not contributes nothing. It has a row where a flush of another view has
+        // published one for it while its own row is still buffered: an entity ingested into one
+        // view and joined to a second can have the second's row published first. A join writes no
+        // postings, so the entity is in no fragment, and the `plus` branch is what draws its mark
+        // there.
         let Some(row) = row_space.row_of(entity) else {
-            continue;
+            return;
         };
-        if let Some(pass) = verdict_of(overlay, satisfied, entity, Some(item)) {
+        if let Some(pass) = verdict_of(overlay, satisfied, entity, buffer.get(entity)) {
             if pass {
                 pass_rows.push(row.raw());
             } else {
                 fail_rows.push(row.raw());
             }
         }
+    };
+    match buffered {
+        // The generation's list: the buffered entities with a row in this view, which is almost
+        // never any of them, so per-request work is independent of how much is buffered.
+        Some(entities) => entities.iter().copied().for_each(&mut visit),
+        // No list for this view: the whole buffer, which reaches the same entities the long way
+        // round.
+        None => buffer.iter().for_each(|(&entity, _)| visit(entity)),
     }
 
     fail_rows.sort_unstable();
@@ -797,10 +836,10 @@ mod tests {
 
 #[cfg(test)]
 mod walk_tests {
-    //! [`compose`]'s buffer walk against a reference walk that resolves every buffered entity
-    //! through [`verdict`] before it asks whether the entity has a row. Randomised states, so the
-    //! two are compared over entities with a row and without, with an overlay entry and without,
-    //! and against several satisfied sets.
+    //! [`compose`]'s walk over the derived list against a reference walk over the whole buffer,
+    //! which resolves every buffered entity through [`verdict`] before it asks whether the entity
+    //! has a row. Randomised states, so the two are compared over entities with a row and without,
+    //! with an overlay entry and without, and against several satisfied sets.
 
     use super::*;
 
@@ -946,6 +985,7 @@ mod walk_tests {
             }
             let denied = denied_rows_of(&overlay, &row_space);
 
+            let buffered = buffered_rows_of(&buffer, &row_space);
             for satisfied in grants() {
                 let mask = compose(
                     &satisfied,
@@ -954,6 +994,7 @@ mod walk_tests {
                     Arc::clone(&base),
                     &row_space,
                     &denied,
+                    Some(&buffered),
                 );
                 let (minus, plus) =
                     reference_diffs(&satisfied, &overlay, &buffer, &base, &row_space, &denied);

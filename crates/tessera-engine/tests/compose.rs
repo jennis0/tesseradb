@@ -124,6 +124,23 @@ fn fragment_for(fx: &Fixture) -> Arc<FrozenFragment> {
 /// No `FrozenFragment` is built: `fx.base` is already its row-space projection, which is all
 /// `compose` reads. `visible_to` still takes one, and `fragment_for` still exists for it.
 fn compose_with(fx: &Fixture, overlay: &Overlay, buffer: &IngestBuffer) -> EffectiveMask {
+    let mask = compose_through_the_list(fx, overlay, buffer);
+    let fallback = compose_with_the_fallback_walk(fx, overlay, buffer);
+    let (_, minus, plus, _) = mask.parts();
+    let (_, fallback_minus, fallback_plus, _) = fallback.parts();
+    assert_eq!(
+        (minus, plus),
+        (fallback_minus, fallback_plus),
+        "the list walk and the whole-buffer walk compose different diffs"
+    );
+    mask
+}
+
+fn compose_through_the_list(
+    fx: &Fixture,
+    overlay: &Overlay,
+    buffer: &IngestBuffer,
+) -> EffectiveMask {
     compose(
         &fx.satisfied,
         overlay,
@@ -133,6 +150,27 @@ fn compose_with(fx: &Fixture, overlay: &Overlay, buffer: &IngestBuffer) -> Effec
         // Derived here exactly as a publication derives it, so every case in this file exercises
         // the deny mask rather than the walk that used to answer for deletions and suppressions.
         &tessera_engine::denied_rows_of(overlay, &fx.perm),
+        // The derived list, on the same rule. Every case here is composed twice, once through it
+        // and once through the whole-buffer fallback, and the two are required to agree: the
+        // fallback is what a view with no list falls back to.
+        Some(&tessera_engine::buffered_rows_of(buffer, &fx.perm)),
+    )
+}
+
+/// [`compose_with`] with no list, so the walk goes over the whole buffer.
+fn compose_with_the_fallback_walk(
+    fx: &Fixture,
+    overlay: &Overlay,
+    buffer: &IngestBuffer,
+) -> EffectiveMask {
+    compose(
+        &fx.satisfied,
+        overlay,
+        buffer,
+        Arc::clone(&fx.base),
+        &fx.perm,
+        &tessera_engine::denied_rows_of(overlay, &fx.perm),
+        None,
     )
 }
 
@@ -654,6 +692,7 @@ fn visible_to_agrees_with_compose_over_every_precedence_case() {
         Arc::clone(&fx.base),
         &fx.perm,
         &tessera_engine::denied_rows_of(&overlay, &fx.perm),
+        Some(&tessera_engine::buffered_rows_of(&buffer, &fx.perm)),
     );
     assert!(mask.check_structural_invariants());
 

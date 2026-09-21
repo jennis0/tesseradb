@@ -156,6 +156,7 @@ fn bench_compose(c: &mut Criterion) {
     // Derived once, outside the timed loop, exactly as a publication derives it: the deny half of
     // composition is one `andnot` inside the loop whatever the deny depth, which is the point.
     let denied = tessera_engine::denied_rows_of(&overlay, &view.row_space);
+    let buffered = tessera_engine::buffered_rows_of(&buffer, &view.row_space);
 
     c.bench_function("compose", |b| {
         b.iter(|| {
@@ -166,6 +167,7 @@ fn bench_compose(c: &mut Criterion) {
                 Arc::clone(&base),
                 &view.row_space,
                 &denied,
+                Some(&buffered),
             )
         });
     });

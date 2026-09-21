@@ -692,6 +692,8 @@ impl Executor {
         let mut buffer = (*generation.buffer).clone();
         mark = self.health.lap(WriteStage::ApplyBufferClone, mark);
 
+        // What the buffered-row lists grow by: every entity this window buffered a row for.
+        let mut inserted: Vec<EntityId> = Vec::new();
         let mut established = lock_recover(&self.live.established);
         // Updated together in one critical section, so the two can never disagree about an item.
         let mut established_inverse = lock_recover(&self.live.established_inverse);
@@ -710,6 +712,7 @@ impl Executor {
                 let m = self.health.lap(WriteStage::RowBufferInsert, m);
                 buffer.set_wal_pos(row.entity_id, &row.view, *wal_pos);
                 self.health.lap(WriteStage::RowWalPos, m);
+                inserted.push(row.entity_id);
             }
         }
         drop(established);
@@ -721,9 +724,8 @@ impl Executor {
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
 
-        let next = generation.with(|g| {
+        let next = generation.with_buffer(Arc::new(buffer), &inserted, |g| {
             g.overlay_version = generation.overlay_version + 1;
-            g.buffer = Arc::new(buffer);
             g.vocabularies = Arc::new(vocabularies);
             g.suggest = suggest;
         });
