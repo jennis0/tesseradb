@@ -12,6 +12,9 @@ pub(crate) struct TestSwitches {
     pub(crate) coalesce_enabled: AtomicBool,
     /// Whether the row-space merge runs.
     pub(crate) merge_enabled: AtomicBool,
+    /// Whether a flush holds between finishing on the pool and submitting the result, so it is
+    /// still in flight when the next tick lands.
+    pub(crate) flush_paused: AtomicBool,
     /// Whether a fold holds between finishing its passes and submitting the result.
     pub(crate) fold_paused: AtomicBool,
     /// See [`crate::Engine::set_fold_publication_paused_for_test`].
@@ -54,6 +57,7 @@ impl Default for TestSwitches {
             refresh_paused: AtomicBool::new(false),
             coalesce_enabled: AtomicBool::new(true),
             merge_enabled: AtomicBool::new(true),
+            flush_paused: AtomicBool::new(false),
             fold_paused: AtomicBool::new(false),
             fold_publication_paused: AtomicBool::new(false),
             merge_publication_paused: AtomicBool::new(false),

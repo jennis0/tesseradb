@@ -1179,7 +1179,11 @@ fn a_suppression_still_publishes_at_once_and_takes_the_memberships_with_it() {
 
     let manifest = newest_side_manifest(&fx.root);
     assert!(
-        manifest.deny.iter().any(|e| e.entity_id == suppressed.raw()),
+        manifest
+            .deny
+            .entities()
+            .expect("the field a writer produced decodes")
+            .contains(suppressed.raw() as u32),
         "the suppression reached the manifest without waiting for a tick"
     );
     assert!(

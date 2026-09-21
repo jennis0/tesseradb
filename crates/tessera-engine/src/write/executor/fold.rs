@@ -975,7 +975,8 @@ impl Executor {
                 return;
             }
         };
-        let live_manifest = &live.bundle.partitions[&plan.partition].manifest;
+        let partition_data = &live.bundle.partitions[&plan.partition];
+        let live_manifest = &partition_data.manifest;
         let retired_count = executed.cardinality();
         let manifest_n = match self
             .side_manifests
@@ -1182,7 +1183,7 @@ impl Executor {
                 }
             };
         if let Err(e) = self.commit_side_manifest(
-            live_manifest,
+            partition_data,
             &to_prefix_dir,
             &plan.partition,
             manifest_n,

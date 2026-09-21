@@ -56,9 +56,17 @@ fn newest_manifest(root: &Path) -> (u64, SegmentsManifest) {
 }
 
 fn suppressed_in(manifest: &SegmentsManifest) -> Vec<u64> {
-    let mut ids: Vec<u64> = manifest.deny.iter().map(|e| e.entity_id).collect();
-    ids.sort_unstable();
-    ids
+    ids_of(&manifest.deny)
+}
+
+/// The ids one of a manifest's deny fields carries, ascending.
+fn ids_of(field: &tessera_store::manifest::DenySet) -> Vec<u64> {
+    field
+        .entities()
+        .expect("the field a writer produced decodes")
+        .iter()
+        .map(u64::from)
+        .collect()
 }
 
 fn entity_of_source(root: &Path, source_id: u64) -> EntityId {
@@ -162,11 +170,7 @@ fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
 
     let (_, manifest) = newest_manifest(&root);
     assert_eq!(suppressed_in(&manifest), vec![suppressed.raw()]);
-    assert_eq!(manifest.tombstones, vec![deleted.raw()]);
-    assert!(
-        manifest.deny.iter().all(|e| e.cause == "suppress"),
-        "contracts §2.3: `deny` carries the suppression set, and its cause says so"
-    );
+    assert_eq!(ids_of(&manifest.tombstones), vec![deleted.raw()]);
 }
 
 /// **The restore path this exists for**: a node opened from the bundle alone — no WAL — honours
@@ -270,4 +274,66 @@ fn an_accepted_deny_publishes_without_moving_the_geometry_version() {
         0,
         "no flush was involved"
     );
+}
+
+/// **A trickle of denies does not grow the partition directory.** Every deny publishes a
+/// side-manifest of its own, and each one restates the whole deny state, so a directory that kept
+/// them all would hold the state once per deny for ever. What must survive the pruning is the deny
+/// state itself: a node reopened on the bundle alone still hides every suppression and every
+/// deletion.
+#[test]
+fn a_run_of_denies_leaves_a_bounded_directory_and_a_reopen_hides_every_one() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+
+    let (suppressed, deleted, visible_before, prefix) = {
+        let engine = engine_at(tmp.path(), &root, 3600);
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        let before = visible_count(&engine, &session);
+
+        // One at a time, so each is its own publication rather than one window's worth.
+        let suppressed: Vec<EntityId> = (1..=6).map(|s| entity_of_source(&root, s)).collect();
+        let deleted = entity_of_source(&root, 11);
+        for (index, entity) in suppressed.iter().enumerate() {
+            engine
+                .accept_change(*entity, ChangeOp::Suppress)
+                .expect("accepted");
+            let published = index as u64 + 1;
+            wait_until("the overlay publication", WAIT, || {
+                engine.write_executor_stats().overlay_publications >= published
+            });
+        }
+        engine
+            .accept_change(deleted, ChangeOp::Delete)
+            .expect("accepted");
+        wait_until("the deletion's publication", WAIT, || {
+            engine.write_executor_stats().overlay_publications > suppressed.len() as u64
+        });
+        (suppressed, deleted, before, engine.generation().prefix.clone())
+    };
+    let partition_dir = root.join(&prefix).join("partitions").join("default");
+    let present: Vec<String> = std::fs::read_dir(&partition_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("SEGMENTS-") && name.ends_with(".json"))
+        .collect();
+    assert!(
+        present.len() <= tessera_store::SIDE_MANIFESTS_KEPT,
+        "seven publications left {} side-manifests: {present:?}",
+        present.len()
+    );
+
+    // A fresh runtime directory: no WAL, so the newest manifest is the only surviving statement of
+    // the deny state.
+    let restored = engine_at(&tmp.path().join("restore"), &root, 3600);
+    let session = restored.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        visible_count(&restored, &session),
+        visible_before - suppressed.len() as u64 - 1,
+        "every suppression and the deletion survived the pruning"
+    );
+    for entity in suppressed {
+        assert!(restored.generation().overlay.is_suppressed(entity));
+    }
+    assert!(restored.generation().overlay.is_deleted(deleted));
 }

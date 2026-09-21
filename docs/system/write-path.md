@@ -228,6 +228,13 @@ acknowledges the caller. The manifest takes its deletion and suppression records
 overlay directly, never from an earlier manifest, because copying one forward could republish an
 unsuppress the live overlay has already reversed.
 
+Each record reaches the manifest as the bitmap itself, serialised and text-encoded into one field,
+so the cost of publishing is the size of the set rather than a line per denied item. The two stay
+in two fields, one for deletions and one for suppressions, for the reason they are two stores. A
+field whose bytes do not decode is refused: the node will not serve that manifest, because a
+damaged record says nothing about how many items it named, and reading it as an empty set would
+put every one of them back on the map.
+
 ### When live state reaches a manifest
 
 Everything a manifest carries that no segment does — the deny records, the layers, views,
@@ -394,6 +401,12 @@ deletion and suppression records, and then replays the WAL's confirmed prefix ov
 order. Where the two disagree, the later WAL record wins. This protects an unsuppress. Seeding
 after replay instead would let a crash between an accepted unsuppress and the next published
 record put the suppression back.
+
+A partition keeps the newest manifest and the two before it; a publication deletes the rest.
+Each one is complete current state rather than a change to the one before, so the newest carries
+everything the deleted ones carried. Reading back through them is a step down to older state, and
+a server that runs out of manifests to step to refuses to serve that partition rather than
+reaching for one old enough to have forgotten a deny.
 
 The entity id allocator resumes from whichever is larger, the manifest's recorded high point or
 the value replay reaches, so an id already issued is never issued again. The buffer of rows

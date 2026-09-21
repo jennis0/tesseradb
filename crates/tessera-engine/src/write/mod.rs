@@ -58,9 +58,7 @@ use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
-use tessera_store::manifest::{
-    DenyEntry as ManifestDenyEntry, ManifestVocabulary, SegmentsManifest,
-};
+use tessera_store::manifest::{DenySet, ManifestVocabulary, SegmentsManifest};
 use tessera_store::merge::MergePolicy;
 use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_store::vocabulary::{MintError, Minted, Vocabularies};

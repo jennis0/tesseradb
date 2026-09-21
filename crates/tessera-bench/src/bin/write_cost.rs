@@ -26,6 +26,9 @@
 //! - **D** — `Executor::tick_behind_flush` walks the whole buffer to count flushable rows whenever
 //!   a tick lands while a flush is in flight. Priced directly over an [`IngestBuffer`] this binary
 //!   fills, at A's depths.
+//! - **E** — what a deny-only run leaves on disc: every deny publishes a side-manifest and every
+//!   side-manifest restates the whole deny state, so the bundle grows with the integral of the
+//!   overlay's depth. One cell per `target:window` pair, each over a fresh copy of the fixture.
 //!
 //! ```text
 //! cargo run --release -p tessera-bench --bin write_cost -- \
@@ -825,11 +828,11 @@ fn experiment_d(depths: &[usize], rounds: usize) {
             best = best.min(at.elapsed().as_nanos() as u64);
             std::hint::black_box(flushable);
         }
-        // What the tick asks for now: a maintained count, read rather than walked.
+        // What the tick asks for now: the maintained row count, read rather than walked.
         let mut maintained = u64::MAX;
         for _ in 0..rounds.max(5) {
             let at = Instant::now();
-            let flushable = buffer.owning_entities();
+            let flushable = buffer.len();
             maintained = maintained.min(at.elapsed().as_nanos() as u64);
             std::hint::black_box(flushable);
         }
@@ -844,11 +847,137 @@ fn experiment_d(depths: &[usize], rounds: usize) {
     println!(
         "One tick, not one window: it is paid only when a tick lands while a flush is in flight. \
          `walk` is the filtered walk with its Roaring `contains` per buffered entity; \
-         `maintained` is the counter the buffer keeps, which is what the tick reads."
+         `maintained` is the row counter the buffer keeps, which is what the tick reads."
     );
 }
 
 // =================================================================================================
+
+// =================================================================================================
+// E: what a deny-only run leaves on disc
+// =================================================================================================
+
+/// Every `SEGMENTS-<n>.json` under the bundle copy: how many, and the size of the newest.
+fn side_manifests(root: &Path) -> (usize, u64, u64) {
+    let mut count = 0usize;
+    let mut newest = (0u64, 0u64);
+    let mut total = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(n) = name
+                .strip_prefix("SEGMENTS-")
+                .and_then(|r| r.strip_suffix(".json"))
+                .and_then(|r| r.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            count += 1;
+            total += size;
+            if n >= newest.0 {
+                newest = (n, size);
+            }
+        }
+    }
+    (count, newest.1, total)
+}
+
+/// Every byte under `dir`, files only.
+fn bytes_under(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(meta) = entry.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+/// **What a deny-only run leaves behind.** Every deny is published, and every publication restates
+/// the whole deny state, so the bundle grows with the *integral* of the overlay's depth rather than
+/// with its depth. One cell is one run to `target` suppressions in windows of `window`, over a
+/// fresh copy of the fixture, reporting the bytes the copy holds at the end, how many
+/// side-manifests are there, the size of the newest, and the wall clock per deny.
+fn experiment_e(
+    fx: &Fixture,
+    scratch: &Path,
+    cells: &[(usize, usize)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n== E: what a deny-only run leaves on disc ==");
+    println!(
+        "{:>10} {:>8} {:>14} {:>14} {:>11} {:>14} {:>12}",
+        "denies", "window", "bundle MB", "manifest MB", "manifests", "newest KB", "us/deny"
+    );
+    for (target, window) in cells {
+        copy_bundle(&fx.source, &fx.root)?;
+        let empty = bytes_under(&fx.root);
+        let engine = open_engine(fx, scratch, &format!("e{target}-{window}"))?;
+        let at = Instant::now();
+        let mut done = 0usize;
+        while done < *target {
+            let count = (*window).min(target - done);
+            let pending: Vec<_> = (0..count)
+                .map(|i| {
+                    engine.submit_change(
+                        EntityId::new((done + i) as u64 * DENY_STRIDE),
+                        ChangeOp::Suppress,
+                    )
+                })
+                .collect::<Result<_, _>>()?;
+            for p in pending {
+                p.wait()?;
+            }
+            done += count;
+        }
+        // The last window's publication happens after its receipt, so the run is quiet before the
+        // disc is read.
+        let publications = engine.write_executor_stats().overlay_publications;
+        let deadline = Instant::now() + std::time::Duration::from_secs(120);
+        while engine.write_executor_stats().overlay_publications == publications
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let wall = at.elapsed();
+        drop(engine);
+        let (count, newest, manifest_bytes) = side_manifests(&fx.root);
+        println!(
+            "{:>10} {:>8} {:>14.1} {:>14.1} {:>11} {:>14.1} {:>12.1}",
+            target,
+            window,
+            (bytes_under(&fx.root) - empty) as f64 / 1e6,
+            manifest_bytes as f64 / 1e6,
+            count,
+            newest as f64 / 1e3,
+            wall.as_micros() as f64 / *target as f64,
+        );
+    }
+    println!(
+        "`bundle MB` is what the run added to the copy, `manifest MB` how much of that is \
+         side-manifests, and `us/deny` is wall clock over the whole run: at a window of 1 it is \
+         the per-publication cost, at 1,000 it is that cost spread over the window."
+    );
+    Ok(())
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fixture: Option<PathBuf> = None;
@@ -856,6 +985,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut only: Option<String> = None;
     let mut max_buffer = 1_000_000usize;
     let mut max_overlay = 5_000_000usize;
+    let mut e_cells: Vec<(usize, usize)> = vec![(100_000, 1), (100_000, 1_000), (1_000_000, 1_000)];
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -867,6 +997,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--max-overlay" => {
                 max_overlay = args.next().and_then(|v| v.parse().ok()).unwrap_or(max_overlay)
+            }
+            // `--e-cells 20000:1,300000:1000` — one `target:window` pair per cell. The default
+            // set writes tens of gigabytes on a build that keeps every side-manifest.
+            "--e-cells" => {
+                if let Some(raw) = args.next() {
+                    e_cells = raw
+                        .split(',')
+                        .map(|cell| {
+                            let (target, window) = cell.split_once(':').expect("target:window");
+                            (
+                                target.parse().expect("a target"),
+                                window.parse().expect("a window"),
+                            )
+                        })
+                        .collect();
+                }
             }
             other => return Err(format!("unknown argument {other:?}").into()),
         }
@@ -921,6 +1067,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if wanted("d") {
         experiment_d(&buffer_depths, rounds);
+    }
+    if wanted("e") {
+        experiment_e(&fx, &scratch, &e_cells)?;
     }
 
     let _ = std::fs::remove_dir_all(&scratch);

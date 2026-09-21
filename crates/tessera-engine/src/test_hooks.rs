@@ -81,6 +81,21 @@ impl Engine {
         self.switches.fold_paused.store(paused, Ordering::SeqCst);
     }
 
+    /// Hold a flush on the pool after it has executed, so it is still in flight when the next
+    /// tick lands and the tick takes the behind-a-flush branch.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_flush_paused_for_test(&self, paused: bool) {
+        self.switches.flush_paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// Whether a flush has executed and is holding at [`Self::set_flush_paused_for_test`].
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn flush_is_holding_for_test(&self) -> bool {
+        self.write.health().flush_holding.load(Ordering::SeqCst)
+    }
+
     /// Hold a completed fold in its channel, undrained, so a merge or coalesce can publish under
     /// it. Unpausing wakes the executor, since the pause is what parks it.
     #[cfg(feature = "fault-injection")]
