@@ -31,3 +31,6 @@ clients/ts/viewer/public/clusters.json
 *.env.local
 clients/ts/.vite.out
 **/target/
+
+# A local notebook and its virtualenv: a scratchpad, never the repository.
+notebooks/
