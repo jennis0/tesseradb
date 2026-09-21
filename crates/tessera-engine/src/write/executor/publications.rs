@@ -1491,13 +1491,17 @@ impl Executor {
     /// state, layers, views, runtime declarations, and the artifact memberships and content
     /// published since the last one. Does nothing unless something is unpublished. A poisoned or
     /// diverged node writes nothing, and the state stays unpublished until it recovers.
+    ///
+    /// Called after every deny drain for the prompt half and from the tick for a data door's
+    /// growth ([`Executor::growth_unpublished`]); either call writes both, since what reaches the
+    /// manifest is everything live state holds and no manifest does.
     pub(super) fn publish_overlay_state(&mut self) {
-        if !self.deny_dirty {
+        if !self.deny_dirty && !self.growth_unpublished {
             return;
         }
         if self.wal.is_poisoned() || !self.may_publish() {
             tracing::warn!(
-                "ALARM: deny state is unpublished and this node is poisoned or diverged, so it \
+                "ALARM: live state is unpublished and this node is poisoned or diverged, so it \
                  will not write a side-manifest. The dispositions are in force and WAL-durable; \
                  what is degraded is the restore path, until the node recovers or restarts"
             );
@@ -1555,8 +1559,9 @@ impl Executor {
                     return;
                 }
             };
+            // Onto the held list; [`Executor::commit_side_manifest`] restates it into the manifest
+            // below.
             self.membership_extents.extend(published.clone());
-            manifest.membership_extents = self.membership_extents.clone();
             if !published.is_empty() {
                 written.push((prefix_dir.clone(), published));
             }
@@ -1566,19 +1571,11 @@ impl Executor {
             // the rows never collide, and each side reads its tags against its own declaration.
             match self.write_content_extent(&prefix_dir, partition, live.bundle.partitions.len(), n)
             {
-                // Assigned from the held list, never pushed onto the clone. The manifest this
-                // publication started from is the stale generation's, so extending it would drop
-                // every earlier publication's entry. An artifact whose content extent is un-named
-                // comes back with its description unreadable and is withheld from every viewer,
-                // with the log already released. The membership list above takes this posture for
-                // the same reason.
-                Ok(Some(extent)) => {
-                    self.artifact_record_extents.push(extent);
-                    manifest.artifact_record_extents = self.artifact_record_extents.clone();
-                }
-                Ok(None) => {
-                    manifest.artifact_record_extents = self.artifact_record_extents.clone();
-                }
+                // Onto the held list, as the memberships are: an artifact whose content extent is
+                // un-named comes back with its description unreadable and is withheld from every
+                // viewer, with the log already released.
+                Ok(Some(extent)) => self.artifact_record_extents.push(extent),
+                Ok(None) => {}
                 Err(e) => {
                     tracing::error!(
                         error = %e,
@@ -1645,6 +1642,7 @@ impl Executor {
         }
 
         self.deny_dirty = false;
+        self.growth_unpublished = false;
         self.windows_since_publication = 0;
         self.health
             .overlay_publications

@@ -396,6 +396,10 @@ impl WritePath {
             .values()
             .flat_map(|p| p.manifest.artifact_record_extents.iter().cloned())
             .collect();
+        // What replay left in the log and no manifest carries: the same publication is owed for
+        // it, and without this a node that restarted between a batch and its tick would wait for
+        // the next batch to write one.
+        let growth_unpublished = live.with_artifacts(|store| store.has_unpublished());
         #[cfg(feature = "fault-injection")]
         let thread_faults = faults.clone();
         // The tick clock a snapshot reads, seeded so `next_tick_in_nanos` is one period until
@@ -427,6 +431,7 @@ impl WritePath {
                     flush_max_items: flush.max_items,
                     next_manifest_n,
                     deny_dirty: false,
+                    growth_unpublished,
                     windows_since_publication: 0,
                     bundle_root: flush.bundle_root,
                     identity_key: flush.identity_key,

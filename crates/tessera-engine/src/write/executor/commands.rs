@@ -451,7 +451,9 @@ impl Executor {
                 return;
             }
         };
-        self.apply_artifact_records(&records, &positions);
+        // Promptly: an operator's publication route, one request at a time, and a restore that
+        // needs no log for what it just published.
+        self.apply_artifact_records(&records, &positions, Publish::Promptly);
         reply.ack(PublishedBatch {
             entities: prepared.entities,
             created: prepared.created,
@@ -630,7 +632,8 @@ impl Executor {
                 return;
             }
         };
-        self.apply_artifact_records(&records, &positions);
+        // Promptly, on `commit_artifacts`' rule: this is the operator's own growth route.
+        self.apply_artifact_records(&records, &positions, Publish::Promptly);
         reply.ack(grown);
     }
 
@@ -896,7 +899,9 @@ impl Executor {
             }
         };
         let values_position = positions[0];
-        self.apply_artifact_records(&artifact_records, &positions[1..]);
+        // At the tick, on the ingest door's rule: this is a data door and its batches arrive in
+        // runs.
+        self.apply_artifact_records(&artifact_records, &positions[1..], Publish::AtTick);
 
         // The cells reach the buffer's fill map, which is what the next flush writes into the
         // family's entity-space extent and the record blob. The map is cloned with the buffer, on
