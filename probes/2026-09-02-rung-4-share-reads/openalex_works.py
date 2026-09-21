@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-BASE = "/mnt/nas/joe/tessera/datasets/openalex/2026-08-27/parquet/works"
-MANIFEST = "/mnt/nas/joe/tessera/datasets/openalex/2026-08-27/parquet/manifest.json"
+BASE = "/mnt/nas/tessera/datasets/openalex/2026-08-27/parquet/works"
+MANIFEST = "/mnt/nas/tessera/datasets/openalex/2026-08-27/parquet/manifest.json"
 OUT = Path(__file__).parent
 
 PROJECT_COLS = ["id", "publication_year", "type", "primary_topic", "open_access", "best_oa_location"]

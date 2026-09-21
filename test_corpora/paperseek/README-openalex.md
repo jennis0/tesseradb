@@ -13,7 +13,7 @@ The interface between the two tracks is fixed in
 README at merge.
 
 ```bash
-export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+export TESSERA_LADDER="$PWD/data/ladder"
 P=~/venvs/projection/bin/python
 
 $P -m test_corpora.paperseek.extract           # the id set, the one scan, the extract

@@ -34,9 +34,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from test_corpora.arxiv.writer import ArtifactSet
+from test_corpora.medcpt import sources
 from test_corpora.medcpt.mesh import LAYER, LAYER_TOML, SOURCES_TOML, Mesh
 
-SHARE = Path("/mnt/nas/joe/tessera/datasets/medcpt-pubmed/2026-08-27")
 CHUNK = 18
 LIMIT = 200_000
 
@@ -51,12 +51,13 @@ def read_chunk(chunk: int, limit: int | None) -> tuple[list[str], dict]:
     pretty-printed `{pmid: {...}}` object of 1.4 GB, decoded value by value rather than through
     `json.load` so the peak is the text plus one record (the probe's approach, kept).
     """
-    pmids = json.loads((SHARE / f"pmids_chunk_{chunk}.json").read_text())
+    share = sources.share()
+    pmids = json.loads((share / f"pmids_chunk_{chunk}.json").read_text())
     if limit is not None:
         pmids = pmids[:limit]
     wanted = set(pmids)
     records = {}
-    text = (SHARE / f"pubmed_chunk_{chunk}.json").read_text()
+    text = (share / f"pubmed_chunk_{chunk}.json").read_text()
     dec = json.JSONDecoder()
     i = text.index("{") + 1
     n = len(text)
@@ -273,7 +274,7 @@ def prepare(mesh: Mesh, out: Path, limit: int) -> dict:
     steps["mesh"] = time.time() - t0
 
     t0 = time.time()
-    xy = pca2(SHARE / f"embeds_chunk_{CHUNK}.npy", len(pmids))
+    xy = pca2(sources.share() / f"embeds_chunk_{CHUNK}.npy", len(pmids))
     steps["pca"] = time.time() - t0
 
     entity = np.arange(len(pmids), dtype=np.uint64)

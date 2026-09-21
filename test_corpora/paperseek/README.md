@@ -21,7 +21,7 @@ and a half times the size of the box, both are fixed, and **on 2026-09-04 the wh
 2 h 56 m to a 70.78 GB bundle**. Everything below the *Measured* heading is what that cost.
 
 ```bash
-export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+export TESSERA_LADDER="$PWD/data/ladder"
 
 # once: 235.6 GB off the share, resumable per chunk — the only pass over the publisher's bytes
 ~/venvs/projection/bin/python -m test_corpora.paperseek.stage

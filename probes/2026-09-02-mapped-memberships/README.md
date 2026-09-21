@@ -51,7 +51,7 @@ here (its `RssAnon` / `RssFile` split and its stage alignment are that probe's Â
 minutes.
 
 ```bash
-export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+export TESSERA_LADDER=/home/user/code/tessera/data/ladder
 cargo build --release -p tessera-cli                                  # in this worktree
 
 cd $TESSERA_LADDER/medcpt-1m && set -a && . ./.env && set +a

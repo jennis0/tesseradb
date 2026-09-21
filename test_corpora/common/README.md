@@ -22,7 +22,7 @@ files. The table is generated and the marked block is not hand-edited.
 ## Running one rung
 
 ```bash
-export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+export TESSERA_LADDER="$PWD/data/ladder"
 python3 -m test_corpora.common.workload --rung arxiv --work /tmp/wl [--quick]
 ```
 

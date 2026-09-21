@@ -267,7 +267,7 @@ disk pre-flight already report.
 ## 6. Method, load and reproduction
 
 ```bash
-export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+export TESSERA_LADDER=/home/user/code/tessera/data/ladder
 cargo build --release -p tessera-cli                                   # in this worktree
 
 ~/venvs/projection/bin/python -m test_corpora.medcpt.prepare \

@@ -1,4 +1,4 @@
-# SDD ledger — plan: /home/joe/.claude/plans/i-d-like-you-to-jiggly-cupcake.md
+# SDD ledger — plan: /home/user/.claude/plans/i-d-like-you-to-jiggly-cupcake.md
 Baseline: green at 6052af2 (cargo test --workspace, pipefail-verified). Env note: tessera-store test write_permutation_rejects_entity_id_not_fitting_u32 is OOM-SIGKILLed standalone under memory pressure — reproduces at base commit, pre-existing/environmental.
 Task 1: minor (deferred): warm-hit key.clone() in single_flight get_or_build — clone only on miss (single_flight.rs:81)
 Task 1: minor (deferred): single_flight unit tests hang-not-fail on regression — use recv_timeout (single_flight.rs:153,194)

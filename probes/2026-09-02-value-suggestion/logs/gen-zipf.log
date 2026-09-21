@@ -1,4 +1,4 @@
-cmd: ./suggestprobe/target/release/suggestprobe gen /home/joe/code/tessera/data/ladder/probe-suggest 10000000 100000000 zipf
+cmd: ./suggestprobe/target/release/suggestprobe gen /home/user/code/tessera/data/ladder/probe-suggest 10000000 100000000 zipf
 gen zipf: s=1, 9800000 live values (floor 1), 200000 empty, head count 10910812, H=16.68
 gen: value column written (2.9s)
 gen: postings.arrow written: 10000000 records, 169039 tag-1 (Roaring), 441037322 record bytes, 5.0s; file 522.3 MB; total 9.7s

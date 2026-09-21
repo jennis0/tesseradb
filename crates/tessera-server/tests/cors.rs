@@ -459,7 +459,7 @@ async fn a_non_loopback_origin_is_refused_under_the_loopback_rule() {
     let server = server_with_cors(&tmp, CorsOrigins::loopback()).await;
     let auth = authorise(&server, &["0"]).await;
 
-    for origin in ["https://app.example", "http://192.168.0.35:5173"] {
+    for origin in ["https://app.example", "http://192.0.2.35:5173"] {
         let resp = server
             .client
             .get(server.viewer_url("/v1/meta"))

@@ -1,6 +1,6 @@
 {
- "bundle": "/home/joe/code/tessera/data/ladder/.measure/medcpt36-foldprobe/bundle",
- "binary": "/home/joe/code/tessera/target/release/tessera",
+ "bundle": "/home/user/code/tessera/data/ladder/.measure/medcpt36-foldprobe/bundle",
+ "binary": "/home/user/code/tessera/target/release/tessera",
  "ports": [
   8221,
   8222,
