@@ -2290,3 +2290,24 @@ pub(super) fn fold_segments(
     }
     out
 }
+
+/// One superseded prefix awaiting reclamation, and the two `Arc`s whose release says no thread can
+/// still resolve a path inside it. See [`Executor::pending_reclaim`].
+pub(in crate::write) struct PendingReclaim {
+    generation: Arc<Generation>,
+    prefix_dir: PathBuf,
+    /// Every sidecar that was live over this prefix before the one the held generation carries.
+    /// See [`Executor::superseded_sidecars`].
+    superseded_sidecars: Vec<std::sync::Weak<crate::engine::ExternalIdIndex>>,
+}
+
+/// Seconds since the Unix epoch, or `None` if the clock is before it.
+///
+/// `None` reads as "no fold has ended yet", switching the interval floor off rather than jamming it
+/// on: the safe direction, and the same answer a fresh process gives.
+pub(in crate::write) fn unix_now() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_secs())
+}

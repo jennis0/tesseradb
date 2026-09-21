@@ -2318,3 +2318,89 @@ impl Executor {
     }
 
 }
+
+/// The one plan a dispatch sends, chosen by oldest unflushed row. Free and pure so the choice can
+/// be tested without an executor. See `Executor::dispatch_flushes` for why one plan.
+pub(super) fn plan_to_dispatch(
+    plans: Vec<(String, crate::flush::FlushPlan)>,
+) -> Option<(String, crate::flush::FlushPlan)> {
+    plans.into_iter().min_by_key(|(_, plan)| {
+        // `items` is ascending by entity id, so the first is this view's oldest waiting row. An
+        // empty plan cannot occur (`plan_flush` returns `NothingToFlush`); sorting it last keeps a
+        // hypothetical one from winning every tick.
+        plan.items
+            .first()
+            .map_or(u64::MAX, |(entity, _)| entity.raw())
+    })
+}
+
+/// Whether a completed flush's dictionary moved under it. See the call site in
+/// [`Executor::publish_flush`].
+///
+/// A flush that promoted nothing (`None`) is never discarded however far the dictionary has moved:
+/// its tier names only ordinals below the length it planned against, which append-only extension
+/// preserves.
+pub(super) fn dictionary_moved_under(promoted_from_dict_len: Option<u32>, live_len: u32) -> bool {
+    promoted_from_dict_len.is_some_and(|planned| planned != live_len)
+}
+
+/// The two rules the promotion design added to publication, tested where they are decided rather
+/// than through a second view no build produces.
+#[cfg(test)]
+mod dispatch_rules_tests {
+    use super::*;
+    use tessera_lifecycle::BufferedItem;
+
+    pub(super) fn plan_from(oldest: u64) -> crate::flush::FlushPlan {
+        let item = BufferedItem {
+            terms: Vec::new(),
+            view: "s".to_string(),
+            join: false,
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+            external_id: None,
+            wal_pos: None,
+        };
+        crate::flush::FlushPlan {
+            items: vec![(EntityId::new(oldest), item)],
+            fills: Vec::new(),
+            consumed_fills: Vec::new(),
+            consumed_scoped_fills: Vec::new(),
+        }
+    }
+
+    /// One plan is dispatched per tick, since a second unit in flight is discarded at its rebase.
+    /// The one sent is the view whose oldest waiting row is oldest, not the first by name, which
+    /// would let a continuously-fed `s0` deny `s1` a flush for ever.
+    #[test]
+    pub(super) fn a_dispatch_sends_the_plan_holding_the_oldest_unflushed_row() {
+        let plans = vec![
+            ("s0".to_string(), plan_from(900)),
+            ("s1".to_string(), plan_from(100)),
+            ("s2".to_string(), plan_from(500)),
+        ];
+        let (view, plan) = plan_to_dispatch(plans).expect("one of three");
+        assert_eq!(view, "s1", "oldest row wins, not lowest view id");
+        assert_eq!(plan.items[0].0.raw(), 100);
+    }
+
+    #[test]
+    pub(super) fn a_dispatch_with_no_plans_sends_nothing() {
+        assert!(plan_to_dispatch(Vec::new()).is_none());
+    }
+
+    /// The dictionary guard is scoped to flushes that wrote an extent. A flush that promoted
+    /// nothing names only ordinals below the length it planned against, which append-only
+    /// extension preserves, so discarding it would cost liveness and buy no safety.
+    #[test]
+    pub(super) fn only_a_promoting_flush_is_discarded_when_the_dictionary_moves() {
+        // Promoted: its extent's ordinals are positions, and the positions have moved.
+        assert!(dictionary_moved_under(Some(7), 9));
+        assert!(!dictionary_moved_under(Some(7), 7));
+        // Promoted nothing: never discarded, however far the dictionary has gone.
+        assert!(!dictionary_moved_under(None, 9));
+        assert!(!dictionary_moved_under(None, 0));
+    }
+}
