@@ -477,7 +477,9 @@ fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
         engine.generation().bundle.partitions["default"]
             .manifest
             .tombstones
-            .contains(&deleted.raw()),
+            .entities()
+            .expect("a written manifest's tombstones decode")
+            .contains(deleted.raw() as u32),
         "the merge's manifest must carry the tombstone forward — nothing retires it before the \
          fold, and no fold runs here"
     );

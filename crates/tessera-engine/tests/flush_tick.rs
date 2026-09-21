@@ -87,7 +87,9 @@ fn the_tick_fires_on_an_idle_node() {
 /// flag pulls the tick's deadline forward and the doorbell wakes an idle executor, so the flush
 /// runs at the next loop iteration — through the one tick path, never around it. With nothing
 /// buffered the triggered tick plans nothing and the request is consumed; with a buffered row it
-/// publishes long before the 3600 s deadline this test sets.
+/// publishes long before the 3600 s deadline this test sets. The second half needs the other ring
+/// too: nothing else wakes the executor before the deadline, so the row is served only because the
+/// finished flush rang the doorbell itself.
 #[test]
 fn a_requested_flush_executes_promptly_through_the_tick_path() {
     let tmp = tempfile::TempDir::new().unwrap();

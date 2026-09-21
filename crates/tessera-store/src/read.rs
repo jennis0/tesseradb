@@ -1253,7 +1253,10 @@ struct SelectedManifest {
 /// `SEGMENTS-<…>.json` family: the `SEGMENTS-<n>.json.tmp` orphan a crashed manifest write
 /// leaves behind ([`crate::manifest_write`]) does not end in `.json`, is not a candidate, and
 /// must not become a partition failure.
-fn list_segments_manifests(partition_dir: &Path, partition_label: &str) -> Result<Vec<u64>> {
+pub(crate) fn list_segments_manifests(
+    partition_dir: &Path,
+    partition_label: &str,
+) -> Result<Vec<u64>> {
     let entries = match std::fs::read_dir(partition_dir) {
         Ok(entries) => entries,
         // No such directory at all is not itself a hard read error here: the caller reports a

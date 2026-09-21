@@ -27,6 +27,12 @@ fn edit_segments_manifest(root: &Path, edit: impl FnOnce(&mut serde_json::Value)
     std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 }
 
+/// One of a manifest's deny fields, holding `ids`, as it is written into the JSON.
+fn deny_set(ids: &[u64]) -> serde_json::Value {
+    let entities: croaring::Bitmap = ids.iter().map(|id| *id as u32).collect();
+    serde_json::to_value(tessera_store::manifest::DenySet::of(&entities)).unwrap()
+}
+
 fn visible(engine: &Engine) -> u64 {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     engine
@@ -60,7 +66,7 @@ fn a_manifest_suppression_hides_its_entity_from_the_first_request() {
 
     let suppressed = entity_of_source(&root, 7);
     edit_segments_manifest(&root, |value| {
-        value["deny"] = serde_json::json!([{ "entity_id": suppressed, "cause": "suppress" }]);
+        value["deny"] = deny_set(&[suppressed]);
     });
 
     let after = visible(&open_engine(
@@ -95,7 +101,7 @@ fn a_manifest_tombstone_hides_its_entity_from_the_first_request() {
 
     let deleted = entity_of_source(&root, 11);
     edit_segments_manifest(&root, |value| {
-        value["tombstones"] = serde_json::json!([deleted]);
+        value["tombstones"] = deny_set(&[deleted]);
     });
 
     let after = visible(&open_engine(
@@ -124,8 +130,8 @@ fn an_empty_deny_state_hides_nothing() {
         &tmp.path().join("wal-0.log"),
     ));
     edit_segments_manifest(&root, |value| {
-        value["deny"] = serde_json::json!([]);
-        value["tombstones"] = serde_json::json!([]);
+        value["deny"] = deny_set(&[]);
+        value["tombstones"] = deny_set(&[]);
     });
     assert_eq!(
         visible(&open_engine(
@@ -185,7 +191,7 @@ fn a_wal_unsuppress_beats_a_manifest_suppression_that_predates_it() {
     // The manifest published between the two: it carries the suppression and knows nothing of the
     // unsuppress that followed.
     edit_segments_manifest(&root, |value| {
-        value["deny"] = serde_json::json!([{ "entity_id": entity, "cause": "suppress" }]);
+        value["deny"] = deny_set(&[entity]);
     });
 
     // Reopened on the **same** WAL — which is the whole point: the records that retire the

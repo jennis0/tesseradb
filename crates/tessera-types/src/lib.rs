@@ -178,9 +178,12 @@ pub struct GenerationStamp {
 // stops a 13 layer opening.
 // 16: a partition's five lists of derived artifact files are one list, `derived_extents`, whose
 // entries name their form. A 15 side-manifest carries the five and is refused as malformed.
+// 17: a side-manifest's `deny` and `tombstones` are each one base64 string holding a portable
+// Roaring bitmap of entity ids, where a 16 manifest carries an array of objects and an array of
+// numbers. A 16 manifest's arrays do not deserialise as strings, so a stale bundle refuses.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 16;
+pub const BUNDLE_FORMAT: u32 = 17;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

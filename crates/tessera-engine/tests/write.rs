@@ -2530,8 +2530,8 @@ fn a_refused_fold_is_counted_and_named_while_neither_fold_counter_moves() {
 /// **The WAL gauge is walked once a period, not once a tick.**
 ///
 /// The tick is not a cadence the gauge can ride: `flush_max_items` makes a tick due for as long as
-/// the buffer stays full, and a loader the flush cannot keep up with therefore ticks at
-/// `FLUSH_COMPLETION_POLL`, fifty times a second. The walk is two `stat`s per surviving member,
+/// the buffer stays full, and a loader the flush cannot keep up with therefore ticks once per
+/// completed flush, many times a second. The walk is two `stat`s per surviving member,
 /// and the member count is unbounded under exactly the pin the gauge exists to report, so an
 /// unlimited sample gets dearer as the condition gets worse.
 ///
@@ -2680,7 +2680,7 @@ fn drain_deny_windows(
 /// drain's close; a burst one window past it publishes twice, at the floor and then at the close.
 ///
 /// **One window past, not exactly at it**, and the difference is the whole discrimination. The
-/// floor's publication clears `deny_dirty`, so a burst ending exactly at the floor publishes once
+/// floor's publication clears `behind_live`, so a burst ending exactly at the floor publishes once
 /// whichever route did it and the gauge cannot tell the two apart. The extra window re-dirties the
 /// overlay, which is what makes the floor's publication visible as a second one.
 ///

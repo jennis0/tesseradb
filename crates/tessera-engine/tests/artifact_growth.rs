@@ -852,6 +852,165 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Restating a membership: the join that names an artifact its entity is already in
+// ---------------------------------------------------------------------------------------------
+
+/// One ingest batch of one point in `view`, joining whatever entity the external id already names
+/// and carrying the artifact the point belongs to. The join is the server's own: `/control/ingest`
+/// resolves an established external id to its entity and the executor settles it, so a second view
+/// of one item arrives here exactly like this.
+fn ingest_into_view(engine: &Engine, batch: &str, view: &str, external_id: &str, key: &str) {
+    let descriptors = vec![b"0".to_vec()];
+    let mut hash = [0u8; 32];
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
+        *slot = *byte;
+    }
+    let row = tessera_lifecycle::command::UnallocatedRow {
+        external_id: Some(external_id.as_bytes().to_vec()),
+        view: view.to_string(),
+        join: None,
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
+    };
+    engine
+        .accept_ingest_joining(
+            vec![row],
+            batch.to_string(),
+            hash,
+            tessera_lifecycle::BatchArtifacts {
+                memberships: vec![tessera_lifecycle::BatchMembership {
+                    layer: "clusters/a".to_string(),
+                    level: 0,
+                    key: key.to_string(),
+                    rows: vec![0],
+                }],
+                edges: Vec::new(),
+            },
+        )
+        .expect("a point naming an artifact of an open layer is an ordinary write");
+}
+
+/// **A join that restates a membership the artifact already holds appends nothing.**
+///
+/// A second view of one item is a join: it carries the entity the external id already names, and
+/// its membership column names the artifact that entity is already in. The growth that would be
+/// written for it adds no member, so it changes nothing — and a record that changes nothing still
+/// pins the log at itself until a fold rewrites the level, which is the one thing a pin costs.
+/// `POST /control/values` subtracts what the artifact already holds for this reason; the question
+/// here is the same one at the ingest door.
+///
+/// The fold before the second batch is what makes the pin the assertion: it releases every growth
+/// pin the first batch left, so anything the gauge names afterwards was written by the join.
+#[test]
+fn a_joining_row_restating_its_membership_appends_no_growth() {
+    let fx = fixture();
+    let engine = fx.open_with_short_tick();
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+    engine
+        .register_layer(LayerDeclaration {
+            views: vec!["s0".into(), "s1".into()],
+            ..open_declaration("clusters/a")
+        })
+        .expect("the layer is declared over both views");
+
+    ingest_into_view(&engine, "b1", "s0", "p1", "c9");
+    flush(&engine);
+    fold(&engine);
+    assert_eq!(
+        resampled_gauge(&engine).pin,
+        None,
+        "the fold rewrote the level whole, so nothing pins the log going in"
+    );
+
+    ingest_into_view(&engine, "b2", "s1", "p1", "c9");
+
+    assert_eq!(
+        engine.published_artifacts(),
+        1,
+        "one key, one artifact: the join created nothing"
+    );
+    assert_eq!(
+        resampled_gauge(&engine).pin,
+        None,
+        "the entity is already a member, so the join has nothing to write and nothing to pin the \
+         log with"
+    );
+}
+
+/// **The other half: a join naming a key its entity is not yet in still grows the artifact.** The
+/// subtraction above takes out what the artifact holds and nothing else, so a second view of an
+/// item that names a different cluster enters that cluster exactly as a fresh point would.
+#[test]
+fn a_joining_row_naming_another_artifact_still_grows_it() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+    engine
+        .register_layer(LayerDeclaration {
+            views: vec!["s0".into(), "s1".into()],
+            ..open_declaration("clusters/a")
+        })
+        .expect("the layer is declared over both views");
+
+    ingest_into_view(&engine, "b1", "s0", "p1", "c8");
+    ingest_into_view(&engine, "b2", "s0", "p2", "c9");
+    flush(&engine);
+    fold(&engine);
+
+    // A second view of p1, naming the cluster p2 created and p1 is in no part of.
+    ingest_into_view(&engine, "b3", "s1", "p1", "c9");
+    flush(&engine);
+    fold(&engine);
+
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
+    let count_of = |key: &str| {
+        artifacts
+            .iter()
+            .find(|a| a.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("{key} is one of the artifacts"))
+            .masked_count
+    };
+    assert_eq!(
+        count_of("c9"),
+        2,
+        "the joining row was not already a member, so it joined"
+    );
+    assert_eq!(count_of("c8"), 1, "and the cluster it was in is unchanged");
+}
+
+// ---------------------------------------------------------------------------------------------
 // When a batch's memberships reach a side-manifest
 // ---------------------------------------------------------------------------------------------
 
@@ -1020,7 +1179,11 @@ fn a_suppression_still_publishes_at_once_and_takes_the_memberships_with_it() {
 
     let manifest = newest_side_manifest(&fx.root);
     assert!(
-        manifest.deny.iter().any(|e| e.entity_id == suppressed.raw()),
+        manifest
+            .deny
+            .entities()
+            .expect("the field a writer produced decodes")
+            .contains(suppressed.raw() as u32),
         "the suppression reached the manifest without waiting for a tick"
     );
     assert!(

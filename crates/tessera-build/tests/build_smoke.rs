@@ -246,8 +246,8 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     assert_eq!(part.manifest.segments[0].entity_lo, 0);
     assert_eq!(part.manifest.segments[0].entity_hi, N_ITEMS - 1);
     assert!(part.manifest.deltas.is_empty());
-    assert!(part.manifest.tombstones.is_empty());
-    assert!(part.manifest.deny.is_empty());
+    assert!(!part.manifest.tombstones.carries());
+    assert!(!part.manifest.deny.carries());
     assert_eq!(part.manifest.dict_extents.len(), 1);
     assert_eq!(
         part.manifest.dict_extents[0].path,

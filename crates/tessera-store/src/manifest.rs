@@ -1286,11 +1286,78 @@ pub struct SegmentDescriptor {
     pub entity_hi: u64,
 }
 
-/// One entry of `deny`: the current suppression set (contracts §2.3's publication rule).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DenyEntry {
-    pub entity_id: u64,
-    pub cause: String,
+/// A set of entity ids under a deny, as `deny` and `tombstones` carry one: the portable Roaring
+/// serialisation, base64 in the JSON.
+///
+/// The bytes are decoded once, when the manifest is deserialised, and an id set that does not
+/// decode is held as undecodable rather than as the empty set. [`SegmentsManifest::honourability`]
+/// then refuses the manifest, because a reader that took undecodable bytes for "nothing is
+/// denied" would serve every entity the field names.
+#[derive(Debug, Clone)]
+pub struct DenySet {
+    encoded: String,
+    entities: Option<croaring::Bitmap>,
+}
+
+impl DenySet {
+    /// The set `entities` names, encoded for a manifest about to be written.
+    pub fn of(entities: &croaring::Bitmap) -> Self {
+        DenySet {
+            encoded: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                entities.serialize::<croaring::Portable>(),
+            ),
+            entities: Some(entities.clone()),
+        }
+    }
+
+    /// The ids, or `None` where the field's bytes did not decode.
+    pub fn entities(&self) -> Option<&croaring::Bitmap> {
+        self.entities.as_ref()
+    }
+
+    /// Whether this manifest exists because a deny was accepted. Undecodable counts as carrying:
+    /// the field was written by something, and what it said cannot be read.
+    pub fn carries(&self) -> bool {
+        self.entities
+            .as_ref()
+            .is_none_or(|entities| !entities.is_empty())
+    }
+
+    fn undecodable(&self) -> bool {
+        self.entities.is_none()
+    }
+
+    fn decode(encoded: &str) -> Option<croaring::Bitmap> {
+        let bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()?;
+        croaring::Bitmap::try_deserialize::<croaring::Portable>(&bytes)
+    }
+}
+
+impl Default for DenySet {
+    fn default() -> Self {
+        DenySet::of(&croaring::Bitmap::new())
+    }
+}
+
+impl Serialize for DenySet {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.encoded)
+    }
+}
+
+impl<'de> Deserialize<'de> for DenySet {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        let entities = DenySet::decode(&encoded);
+        Ok(DenySet { encoded, entities })
+    }
 }
 
 /// One entry of `vocabulary_extensions`: the bindings one named vocabulary has acquired since the
@@ -2006,10 +2073,14 @@ pub struct SegmentsManifest {
     /// it knows about.
     #[serde(default)]
     pub locator_extents: Vec<LocatorExtent>,
+    /// The entities already deleted whose rows a fold has not yet removed — see [`DenySet`].
     #[serde(default)]
-    pub tombstones: Vec<u64>,
+    pub tombstones: DenySet,
+    /// The suppression set as it stood when this manifest was written — see [`DenySet`]. A
+    /// separate field from [`SegmentsManifest::tombstones`] and never its union: publishing the
+    /// union would make every deletion look retirable by an unsuppress.
     #[serde(default)]
-    pub deny: Vec<DenyEntry>,
+    pub deny: DenySet,
     /// Category bindings minted since the last build or fold — see [`VocabularyExtension`]. Empty
     /// in a bundle straight out of `tessera build`, and emptied again by every fold.
     #[serde(default)]
@@ -2145,8 +2216,8 @@ impl SegmentsManifest {
             text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
-            tombstones: Vec::new(),
-            deny: Vec::new(),
+            tombstones: DenySet::default(),
+            deny: DenySet::default(),
             vocabulary_extensions: Vec::new(),
             files: BTreeMap::new(),
         }
@@ -2172,8 +2243,8 @@ impl SegmentsManifest {
     /// re-exposes every entity denied since the older manifest was written.
     pub fn deny_disposition_state(&self) -> Vec<&'static str> {
         [
-            ("tombstones", !self.tombstones.is_empty()),
-            ("deny", !self.deny.is_empty()),
+            ("tombstones", self.tombstones.carries()),
+            ("deny", self.deny.carries()),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && DENY_DISPOSITION_STATE.contains(name))
@@ -2184,9 +2255,20 @@ impl SegmentsManifest {
     pub fn unhonourable_state(&self) -> Vec<&'static str> {
         // Deny-disposition fields first, so a truncated message still names the field that
         // decided the posture.
-        [
-            ("tombstones", !self.tombstones.is_empty()),
-            ("deny", !self.deny.is_empty()),
+        //
+        // A deny field is honoured, and honouring it means acting on the ids it carries. Bytes
+        // that do not decode are ids this reader cannot act on, whatever the field name says, so
+        // they are listed here past the honoured-name filter below and the manifest is refused
+        // rather than served as though nothing were denied.
+        let mut fields: Vec<&'static str> = [
+            ("tombstones", self.tombstones.undecodable()),
+            ("deny", self.deny.undecodable()),
+        ]
+        .into_iter()
+        .filter(|(_, undecodable)| *undecodable)
+        .map(|(name, _)| name)
+        .collect();
+        fields.extend([
             ("deltas", !self.deltas.is_empty()),
             (
                 "vocabulary_extensions",
@@ -2207,8 +2289,8 @@ impl SegmentsManifest {
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
-        .map(|(name, _)| name)
-        .collect()
+        .map(|(name, _)| name));
+        fields
     }
 
     /// The posture a reader must take towards this manifest — **the only place the two
@@ -2432,15 +2514,12 @@ mod tests {
     #[test]
     fn a_honoured_field_no_longer_refuses_a_manifest_but_deny_state_stays_visible() {
         let mut with_tombstone = SegmentsManifest::empty();
-        with_tombstone.tombstones.push(17);
+        with_tombstone.tombstones = deny_set(&[17]);
         assert_eq!(with_tombstone.honourability(), Honourability::Honourable);
         assert_eq!(with_tombstone.deny_disposition_state(), vec!["tombstones"]);
 
         let mut with_deny = SegmentsManifest::empty();
-        with_deny.deny.push(DenyEntry {
-            entity_id: 17,
-            cause: "suppress".to_string(),
-        });
+        with_deny.deny = deny_set(&[17]);
         assert_eq!(with_deny.honourability(), Honourability::Honourable);
         assert_eq!(with_deny.deny_disposition_state(), vec!["deny"]);
 
@@ -2459,13 +2538,49 @@ mod tests {
     #[test]
     fn no_known_state_field_is_unhonourable_any_more() {
         let mut all_three = SegmentsManifest::empty();
-        all_three.tombstones.push(17);
+        all_three.tombstones = deny_set(&[17]);
         all_three.deltas.push("d.arrow".to_string());
-        all_three.deny.push(DenyEntry {
-            entity_id: 18,
-            cause: "suppress".to_string(),
-        });
+        all_three.deny = deny_set(&[18]);
         assert!(all_three.unhonourable_state().is_empty());
+    }
+
+    /// A `deny` set for the ids given.
+    fn deny_set(ids: &[u32]) -> DenySet {
+        DenySet::of(&ids.iter().copied().collect::<croaring::Bitmap>())
+    }
+
+    /// A deny field whose bytes do not decode is refused, never read as the empty set. Reading it
+    /// as empty would serve every entity it named; stepping past it would serve an older manifest
+    /// that predates the deny.
+    #[test]
+    fn a_deny_field_that_does_not_decode_makes_the_manifest_unready() {
+        for encoded in ["not base64 at all", "", "AAAA"] {
+            let mut manifest = SegmentsManifest::empty();
+            manifest.deny = serde_json::from_value(serde_json::json!(encoded)).unwrap();
+            assert!(manifest.deny.entities().is_none(), "{encoded} decoded");
+            assert_eq!(
+                manifest.honourability(),
+                Honourability::Unready {
+                    fields: vec!["deny"]
+                }
+            );
+            assert_eq!(manifest.deny_disposition_state(), vec!["deny"]);
+        }
+    }
+
+    /// A round trip through the JSON encoding keeps every id and keeps an empty set empty.
+    #[test]
+    fn a_deny_set_round_trips_through_its_json_encoding() {
+        for ids in [vec![], vec![0u32], vec![1, 2, 3, 70_000, u32::MAX]] {
+            let written = serde_json::to_value(deny_set(&ids)).unwrap();
+            let read: DenySet = serde_json::from_value(written).unwrap();
+            assert_eq!(
+                read.entities().unwrap().to_vec(),
+                ids,
+                "the ids a manifest carries must survive its encoding"
+            );
+            assert_eq!(read.carries(), !ids.is_empty());
+        }
     }
 
     /// **The common shape, and the one-identifier fail-open.** Contracts §2.3 makes a
@@ -2481,16 +2596,13 @@ mod tests {
     fn a_deny_beside_deltas_is_still_deny_disposition_state() {
         let mut manifest = SegmentsManifest::empty();
         manifest.deltas.push("d.arrow".to_string());
-        manifest.deny.push(DenyEntry {
-            entity_id: 17,
-            cause: "suppress".to_string(),
-        });
+        manifest.deny = deny_set(&[17]);
         assert_eq!(manifest.deny_disposition_state(), vec!["deny"]);
 
         // And the same for a tombstone beside deltas — the other deny-disposition field.
         let mut manifest = SegmentsManifest::empty();
         manifest.deltas.push("d.arrow".to_string());
-        manifest.tombstones.push(17);
+        manifest.tombstones = deny_set(&[17]);
         assert_eq!(manifest.deny_disposition_state(), vec!["tombstones"]);
     }
 

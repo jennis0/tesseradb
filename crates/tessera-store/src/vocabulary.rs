@@ -522,9 +522,13 @@ impl From<BindingConflict> for SeedError {
 ///
 /// **Its completeness *is* the never-reuse invariant.** Every home must be represented before the
 /// first draw; see this module's header.
+/// **Each minter is behind an `Arc`, so cloning this is a table of pointers.** A commit window
+/// takes a mutable copy of the whole set to mint into and publishes it if the window survives;
+/// almost every window binds no novel key and so changes no minter. [`Self::get_mut`] copies the
+/// one minter it hands out, and only where a published generation still shares it.
 #[derive(Debug, Clone, Default)]
 pub struct Vocabularies {
-    by_name: BTreeMap<String, VocabularyMinter>,
+    by_name: BTreeMap<String, Arc<VocabularyMinter>>,
 }
 
 impl Vocabularies {
@@ -566,15 +570,16 @@ impl Vocabularies {
                 vocabulary.width,
             );
             minter.seed_manifest(vocabulary)?;
-            by_name.insert(vocabulary.name.clone(), minter);
+            by_name.insert(vocabulary.name.clone(), Arc::new(minter));
         }
 
         for extension in extensions {
-            let minter = by_name.get_mut(&extension.name).ok_or_else(|| {
-                SeedError::ExtensionWithoutVocabulary {
+            let minter = by_name
+                .get_mut(&extension.name)
+                .map(Arc::make_mut)
+                .ok_or_else(|| SeedError::ExtensionWithoutVocabulary {
                     vocabulary: extension.name.clone(),
-                }
-            })?;
+                })?;
             for value in &extension.values {
                 minter.seed_value(&value.key, value.code)?;
                 // **The extension's title wins over the manifest's**, the manifest having been
@@ -590,7 +595,7 @@ impl Vocabularies {
     }
 
     pub fn get(&self, name: &str) -> Option<&VocabularyMinter> {
-        self.by_name.get(name)
+        self.by_name.get(name).map(|minter| &**minter)
     }
 
     /// Add a vocabulary declared while the service runs (`ingest.md` §1.3), replacing any minter
@@ -601,11 +606,14 @@ impl Vocabularies {
     /// caller has already refused a redeclaration under a different identity, so a replacement
     /// here is the same vocabulary seen twice.
     pub fn insert(&mut self, minter: VocabularyMinter) {
-        self.by_name.insert(minter.name().to_string(), minter);
+        self.by_name
+            .insert(minter.name().to_string(), Arc::new(minter));
     }
 
+    /// The minter under `name`, ready to be mutated: it is copied here where another generation
+    /// still holds it, so a caller that only reads a binding should use [`Self::get`].
     pub fn get_mut(&mut self, name: &str) -> Option<&mut VocabularyMinter> {
-        self.by_name.get_mut(name)
+        self.by_name.get_mut(name).map(Arc::make_mut)
     }
 
     pub fn is_empty(&self) -> bool {

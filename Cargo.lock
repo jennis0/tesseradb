@@ -2977,6 +2977,7 @@ name = "tessera-store"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "base64",
  "croaring",
  "memmap2",
  "parquet",

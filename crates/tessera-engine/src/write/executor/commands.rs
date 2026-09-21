@@ -686,14 +686,14 @@ impl Executor {
         if let WalRecord::LayerDrop { name } = &record {
             // The deltas held for the tick describe forms that are going with the layer.
             self.pending_forms.retain(|(layer, _), _| layer != name);
-            self.artifact_projections.forget(name);
-            self.lineages.forget(name);
-            self.level_contents.forget(name);
+            self.deps.artifact_projections.forget(name);
+            self.deps.lineages.forget(name);
+            self.deps.level_contents.forget(name);
         }
         // The registry is durable in the log but not yet in a manifest, and a rotation reclaims the
         // log. Marking the manifest dirty is what gets it published at the next flush, on the same
         // mechanism a deny uses to reach `SEGMENTS-<n>.json`.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(ack);
     }
 
@@ -759,7 +759,7 @@ impl Executor {
         self.publish_roster(&generation, started, &[]);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: so the
         // roster reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(());
     }
 
@@ -834,10 +834,13 @@ impl Executor {
         let mut minted_count = 0u64;
         if !wanted.is_empty() || !mint_edges.is_empty() {
             match self.prepare_mints(&wanted, &mint_edges) {
-                Ok((records, resolved, minted)) => {
-                    settle_resolved_ordinals(&mut memberships, &resolved);
-                    minted_count = wanted.keys().filter(|at| minted.contains(*at)).count() as u64;
-                    mints = records;
+                Ok(prepared) => {
+                    settle_resolved_ordinals(&mut memberships, &prepared.resolved);
+                    minted_count = wanted
+                        .keys()
+                        .filter(|at| prepared.minted.contains(*at))
+                        .count() as u64;
+                    mints = prepared.records;
                 }
                 Err(detail) => {
                     reply.fail(ExecError::LayerRefused { detail });
@@ -1066,10 +1069,10 @@ impl Executor {
         let suggest = match compiled.category() {
             Some((vocabulary, _)) if generation.suggest.get(vocabulary).is_none() => {
                 let built = crate::suggest::SuggestIndexes::build(
-                    &self.suggest_dir,
+                    &self.deps.suggest_dir,
                     &vocabularies,
                     [vocabulary.to_string()],
-                    &self.pool,
+                    &self.deps.pool,
                 );
                 Arc::new(generation.suggest.with_built(built))
             }
@@ -1085,7 +1088,7 @@ impl Executor {
         self.publish(next, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(false);
     }
 
@@ -1136,7 +1139,7 @@ impl Executor {
         self.publish_view_manifest(&generation, manifest, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(false);
     }
 
@@ -1182,7 +1185,7 @@ impl Executor {
             .manifest
             .with_plain_views(std::slice::from_ref(&compiled));
         self.publish_view_manifest(&generation, manifest, started);
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(false);
     }
 
@@ -1300,7 +1303,7 @@ impl Executor {
         self.publish(next, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(VocabularyDeclared {
             existing: false,
             added,
@@ -1436,7 +1439,7 @@ impl Executor {
         // A binding of a *built* vocabulary reaches the manifest as a `vocabulary_extensions`
         // entry and one of a runtime-declared vocabulary as a value of its own runtime entry;
         // both are written at the next side-manifest publication, which this marks due.
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         reply.ack(answer(VocabularyValues {
             added,
             existing,
@@ -1501,7 +1504,7 @@ impl Executor {
         }
         self.live.with_roster(|roster| roster.apply(&record));
         let fills_dropped = self.publish_roster(&generation, started, &ids);
-        self.deny_dirty = true;
+        self.side_manifests.behind_live = true;
         // Ordinary deletions, through the ordinary lane. They are appended, fsynced and applied by
         // the same path a `/control/changes` delete takes, so they retire at the fold and nowhere
         // else. A failure here is reported the way that lane reports one, in force and possibly

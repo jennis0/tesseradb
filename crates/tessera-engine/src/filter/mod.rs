@@ -62,7 +62,7 @@ use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 use tessera_types::TermId;
 
-use crate::compose::verdict;
+use crate::compose::verdict_of;
 use tessera_authz::fragment::FrozenFragment;
 use tessera_lifecycle::buffer::IngestBuffer;
 use tessera_lifecycle::overlay::Overlay;
@@ -112,8 +112,8 @@ pub fn candidate(
     buffer: &IngestBuffer,
 ) -> Bitmap {
     let mut live = fragment.view().andnot(&overlay.denied());
-    for (&entity, _) in buffer.iter() {
-        if let Some(true) = verdict(overlay, buffer, satisfied, entity) {
+    for (&entity, item) in buffer.iter() {
+        if let Some(true) = verdict_of(overlay, satisfied, entity, Some(item)) {
             // Entity ids are bounded by the allocator, so this cannot truncate; asserting it here
             // rather than casting keeps the cap a checked property at the one place entity space
             // meets a bitmap.
