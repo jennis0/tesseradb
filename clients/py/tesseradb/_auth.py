@@ -1,11 +1,10 @@
 """The session plane's ``authorise``, and the token it returns.
 
-Client-components §7: **the entry point is a token.** ``Map(url, token=...)`` is the primary form
-— an analyst holds a per-principal token their deployment issued them, as any application's user
-does. This module's ``authorise`` is the credential-holding form and is operator-only: the session
-credential can mint *any* principal, and a notebook that takes it is client-interaction §7's
-pooled-service-token anti-pattern in a cell. It exists for the local, single-principal case and
-for the demo, and it never lets the credential reach the browser — the token it mints does.
+**The entry point is a token.** ``Map(url, token=...)`` is the primary form: an analyst holds a
+per-principal token their deployment issued them, as any application's user does. This module's
+``authorise`` is the credential-holding form and is operator-only, the session credential being
+able to mint any principal. It exists for the local, single-principal case and for the demo, and
+it never lets the credential reach the browser: the token it mints does.
 """
 
 from __future__ import annotations
@@ -34,6 +33,8 @@ class Token:
 
     token: str
     expires_at: Optional[float] = None
+    #: The non-capability handle ``revoke`` takes, and ``None`` for a token handed in as a string.
+    token_id: Optional[int] = None
     renew: Optional[Callable[[], "Token"]] = field(default=None, repr=False, compare=False)
     terms: Optional[Sequence[str]] = field(default=None, repr=False, compare=False)
 
@@ -86,8 +87,8 @@ def authorise(
     The session credential this takes can mint a token for *any* principal, so whoever holds it
     holds every principal's view. That makes this the wrong entry point for an analyst's notebook:
     the shape a practitioner writes when the SDK offers nothing else is one credential in one cell
-    filtering per user afterwards — the pooled service token of client-interaction §7, under which
-    every count and density a user sees derives from the credential's mask, not theirs. Hand an
+    filtering per user afterwards, a pooled service token under which every count and density a
+    user sees derives from the credential's mask rather than theirs. Hand an
     analyst a token instead (``Map(url, token=...)``); use this for the local single-principal
     case and for the demo, where the operator and the analyst are one person.
 
@@ -122,6 +123,50 @@ def authorise(
     return Token(
         token=answer["token"],
         expires_at=float(answer["expires_at"]),
+        token_id=int(answer["token_id"]),
         renew=lambda: authorise(session_url, credential, terms, timeout=timeout),
         terms=list(terms),
     )
+
+
+def revoke(
+    session_url: str,
+    credential: str,
+    token_id: Union[int, Token],
+    *,
+    timeout: float = 10.0,
+) -> None:
+    """**Operator-only.** End a session by the ``token_id`` its minting returned.
+
+    It takes the ``token_id`` and never the token, so the capability itself never transits a
+    second time; a ``Token`` this process minted may be passed instead, and its handle is read off
+    it. A handle naming no live session is accepted in silence, there being nothing to say about
+    it that would not enumerate the sessions that are live.
+
+    This is the session plane and takes the session credential, as ``authorise`` does. A viewer
+    holding only a token cannot revoke itself.
+    """
+    if not credential:
+        raise ValueError("revoke needs the session credential (operator-only; see the docstring)")
+    if not session_url:
+        raise ValueError("revoke needs the session plane's URL")
+    handle = token_id.token_id if isinstance(token_id, Token) else token_id
+    if handle is None:
+        raise ValueError(
+            "revoke needs a token_id: this Token was handed in as a string and carries none. "
+            "Pass the token_id /session/authorise returned"
+        )
+    request = urllib.request.Request(
+        session_url.rstrip("/") + "/session/revoke",
+        data=json.dumps({"token_id": int(handle)}).encode(),
+        method="POST",
+        headers={
+            "authorization": f"Bearer {credential}",
+            "content-type": "application/json",
+        },
+    )
+    try:
+        urllib.request.urlopen(request, timeout=timeout).close()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        raise PermissionError(f"/session/revoke refused ({e.code}): {detail}") from None

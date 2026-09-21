@@ -1,6 +1,6 @@
 # `tesseradb`
 
-Tessera's Python package (decision 0095): one package whether you want the widget, the SDK or
+Tessera's Python package: one package whether you want the widget, the SDK or
 both. The widget and the SDK are here; the in-process instance joins them later. It shares no
 code with `reference/`, the test-only oracle.
 
@@ -45,7 +45,7 @@ compares the Jupyter twin cell for cell. A notebook that drifts from the package
 
 ## A database in a directory
 
-The SDK (`python-sdk.md`) makes a Tessera database out of frames and files. Three verbs carry it,
+The SDK makes a Tessera database out of frames and files. Three verbs carry it,
 and each does one thing. `declare_*` says what exists and takes no data. `insert(target, table,
 **columns)` hands a table to a declared thing and names every column it reads. `commit()` sends
 what was inserted since the last commit and forgets it: the first time through the build, after
@@ -60,19 +60,22 @@ db.declare_columns(df, skip=["paper", "x", "y", "cluster"], index=["title"])
 db.declare_layer("clusters", kind="flat")
 db.insert("map", df, id="paper", x="x", y="y")     # title is read by name
 db.insert("clusters", df, id="paper", key="cluster")
-print(db.check())                                  # what the declaration reads, and what it discloses
+print(db.check())                                  # what the declaration reads, and what refuses it
 print(db.commit())                                 # tessera check, tessera build, tessera serve
 ```
 
-`db.declaration` is the TOML the SDK wrote, and `tessera check` reads that file: the mapping from
-verb to block is checked by the binary rather than mirrored in Python. Every block names the source
+`db.declaration` is the TOML the SDK wrote, and the declaration check reads that file: the
+mapping from verb to block is checked below the SDK rather than mirrored in Python. `check()` and
+`commit()` run that check in this process where the `_tessera` extension module is installed, and
+through `tessera check` where it is not; the two read one declaration with one parser, and what
+the extension adds is a refusal naming the block it is about. Every block names the source
 and the column names its inserts gave it. The directory is everything the binary reads, so
 `db.save("~/somewhere")` and `tessera serve --deployment ~/somewhere/tessera.toml` on another
 machine serve the same database.
 
 `declare_view_group` is the group surface: its views and their metadata come from
-`insert(group, roster=table, key=, **metadata_columns)`, and its rows from one of views.md §3.2's
-two rosters. One file for every view names the column that says which with `view=`; a group whose
+`insert(group, roster=table, key=, **metadata_columns)`, and its rows from one of the two
+roster forms. One file for every view names the column that says which with `view=`; a group whose
 views each have their own file inserts one table per view, naming the one view it is for with
 `view_key=`, and the SDK writes a roster record per table with the metadata that key carries. An
 attribute or a layer scoped to a group takes `scope={"group": name}`, and every insert into one
@@ -155,11 +158,11 @@ narrower after the first commit than before it:
   against.
 - An **attribute** declared there is not a render column: a rendered value is served from the hot
   row that carries it, and `PUT /control/attributes` declares a column against entities that
-  already exist, so `render=True` is refused at the verb (decision 0136's amendment). An indexed
+  already exist, so `render=True` is refused at the verb. An indexed
   column is added at any time, and an insert into it fills it.
 
 A label set takes its text and needs nothing else: a label with no members of its own is the label
-of its cluster (decision 0145), drawn where the cluster is drawn, counted over its members and
+of its cluster, drawn where the cluster is drawn, counted over its members and
 served to whoever is served it. `insert(labels, members=…)` is for a generating set, the documents
 a content gated `all` was written from.
 
@@ -254,33 +257,82 @@ single-operator database and nowhere else.
 
 `viewer(terms)` mints for exactly the terms named, so the map of any principal is one call, and
 every count, density, cluster and label in it is computed inside that principal's mask rather
-than filtered out of the operator's. A term the database has inserted no label for is refused and
-named: a typo would otherwise draw an empty map with no error anywhere.
+than filtered out of the operator's. Which terms a session may hold is the session plane's to
+decide, so a term this database has inserted no label for is minted and reaches nothing: an empty
+map is what a principal who can see nothing is served.
 
-The three query verbs are `Viewer`'s and are reached on a database through its all-terms viewer.
-Each goes through the viewer plane with the token, never by reading the bundle:
+The query verbs are `Viewer`'s, one per operation the HTTP API publishes on the viewer plane,
+and are reached on a database through its all-terms viewer. Each goes through the viewer plane
+with the token, never by reading the bundle:
 
 ```python
 db.meta()                                      # the views, layers and schema this principal reads
-db.viewport(bbox=None, view=None, filters=None, k=None, zoom=0)   # the points served, as a table
+db.viewport(bbox=None, view=None, filters=None, k=None, zoom=0)   # what is served, as a table
 db.item(tessera_id)                            # one record: fields, labels, views
+
+v = db.viewer(["cs.LG"])
+v.categories("venue", limit=100)               # what a category column's codes stand for
+v.suggest_category_values("venue", "neur")     # the typeahead over its vocabulary
+v.browse_artifacts("s0", "clusters/kmeans")    # a layer's hierarchy, by lineage
+v.artifact(tessera_id, "s0")                   # one annotation: its count and its geometry
 ```
 
 `viewport()` returns a pyarrow table of `tessera_id`, `code` and the columns the schema declares
 as rendered. Those are points; a record is what `item()` returns. A served set is bounded by `k`,
 so the table's schema metadata carries what the response said about the set it came from:
 `tessera.counts` (`visible` is inside the mask and the tiles the box touches at the request's
-zoom, `matched` is that and the filter, `served` is that and `k`), `tessera.trailer` and
-`tessera.request`. `bbox` defaults to the view's whole extent and `view` to the first this
-principal is served.
+zoom, `matched` is that and the filter, `highlighted` that and the highlight, `served` is that
+and `k`), `tessera.trailer` and `tessera.request`. `bbox` defaults to the view's whole extent and
+`view` to the first this principal is served.
+
+Beside those five it takes the rest of the request body, each sent only where it was given:
+`tiles` in place of `bbox`, `highlight` (a second expression in `filters`' grammar, which lights
+the served set without moving it), `layers`, `levels`, `computed`, `artifact_budget`,
+`artifact_rows`, `point_rows`, `underlay_offset` and `pin`.
+
+```python
+served = db.viewport(view="map", layers="all", highlight={"venue": {"eq": "neurips"}})
+served.num_rows                                # the points, as before
+served.artifacts.to_pylist()                   # the annotation artifacts the response served
+served.sub_cells                               # the exact counts an underlay_offset asked for
+```
+
+The result reads as the points table wherever one is expected — `num_rows`, `column()`,
+`schema.metadata`, `to_pandas()` — and `points` names it outright. `artifacts` and `sub_cells`
+are `None` where the response carried no frame of that kind, which the wire makes an absence
+rather than an empty table.
+
+`categories()` and `browse_artifacts()` hand back the page the route served, `next` included, so
+paging is the caller's: hand `next` back as `after` and as `cursor`. Every count on those pages
+is this principal's — `masked_count` is how many of an artifact's members they can see, never how
+many it has.
 
 `item()` returns `fields` by declared column name, `labels` (the item's labels this principal
 also holds), `views`, and `external_id` where the database has one: on a `Database` it comes back
 as the type its id column carried, and on a `connect()` viewer as the bytes the wire carries.
+`artifact()` is the same drill-down for an annotation and takes a `view`, a masked count being an
+intersection in row space and row space being per view.
 
 `db.close()` stops the server. It invalidates nothing: a token this database minted stays good
-until its lifetime runs out (`[disclosure] token_max_lifetime`, an hour), and no route withdraws
-one.
+until its lifetime runs out (`[disclosure] token_max_lifetime`, an hour). `db.revoke(token)` is
+what ends one, by the `token_id` the `Token` carries — the capability never transits a second
+time, and a handle naming no live session is accepted in silence.
+
+## The operator's verbs
+
+```python
+db.status()                                    # the watermarks, queues and pagination units
+db.compact()                                   # ask for the fold that removes a deletion's rows
+db.drop_layer("clusters/kmeans")               # the inverse of declare_layer
+db.drop_view("slices", "a", delete_dangling=False)   # the inverse of create_view
+```
+
+`remove()` puts a deletion in the overlay, and the compaction that removes its rows is what ends
+it; `compact()` is how one is asked for, and it is accepted rather than finished when the call
+returns. `drop_layer()` tombstones the name rather than freeing it, so a later declaration under
+it is refused and no stale reference reaches a different layer. `drop_view()` deletes no entity;
+`delete_dangling=True` submits the entities holding a row in no other view as ordinary
+deletions, and the answer's `deleted` says how many.
 
 ## A deployment somebody else runs
 
@@ -291,8 +343,8 @@ v.viewport(k=64)
 ```
 
 `token` is a string, a `Token` or a callable returning either, as `Map` takes one. A `Viewer` from
-`connect` has `map()` and the three read verbs and nothing else: no `viewer(terms)`, minting
-another principal needing the session credential, and no write verb, the control plane having one
+`connect` has `map()` and the read verbs and nothing else: no `viewer(terms)`, minting another
+principal needing the session credential, and no write verb, the control plane having one
 operator credential and no per-principal authority.
 
 ## The widget, and the entry point being a token
@@ -313,7 +365,7 @@ counts, `m.bbox` where the camera settled; setting `m.filters`, `m.layers`, `m.c
 `.value` re-runs a cell at every settle; `m.observe(fn, names="selected")` reacts to a pick alone.
 
 `tesseradb.authorise(session_url, credential, terms)` is **operator-only**: the session credential
-mints any principal, and a notebook that holds it is client-interaction §7's pooled-service-token
+mints any principal, and a notebook that holds it is the pooled-service-token
 anti-pattern in a cell. It is for the local single-principal case and for the demo, where
 operator and analyst are one person. The credential stays in the kernel; the token it mints is
 what the page gets.

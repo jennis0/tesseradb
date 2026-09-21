@@ -1,0 +1,201 @@
+# The platform wheels for `tesseradb-native` — the companion distribution that carries the
+# `tessera` executable and the `_tessera` extension module.
+#
+# Not part of the per-PR gate and deliberately not attached to it. Seven cross-builds of the whole
+# workspace is minutes of runner time per platform, and nothing here checks behaviour: what a wheel
+# holds is checked by `clients/py/check.sh`, on one platform, in the gate. This job answers the
+# other question — whether the build works for a platform this machine is not.
+#
+# Nothing is published from here. The wheels are uploaded as artifacts and a human decides what to
+# do with them, because the version is pinned `==` on both sides: a `tesseradb` that reached PyPI
+# without its matching `tesseradb-native` is uninstallable, and the reverse is a stale binary
+# against a bundle format that refuses it.
+#
+# **One object per platform, not one per Python.** `tessera-python` builds against the stable ABI
+# (`abi3-py310`), so a platform's wheel is `cp310-abi3` and serves every Python from 3.10 up. That
+# is why this is cargo and not cibuildwheel: cibuildwheel's value is a matrix over interpreter
+# versions, and there is no such matrix here. Seven cargo builds and seven `python -m build` calls
+# are the whole job.
+#
+# **What the Linux tags claim.** Measured 2026-09-21 on a developer machine: the binary and the
+# extension link libc, libm, libgcc_s and nothing else — croaring, zstd and parquet are static and
+# TLS is rustls — so there is no bundling for auditwheel to do and the manylinux tag is the only
+# work. The tag is a claim about glibc symbol versions, though, not about which libraries are
+# linked: an ordinary `cargo build` on that machine required GLIBC_2.34 and would have been a lie
+# as `manylinux_2_28`. cargo-zigbuild's `.2.28` suffix is what makes the claim true, and the
+# `glibc` step below reads the symbols back rather than trusting it.
+#
+# **macOS** cross-compiles from the arm64 runner to x86_64 with a plain rustup target: the SDK
+# there serves both. **musl** builds with the static CRT turned off, because a cdylib linked
+# against a static libc is not loadable as an extension module; the binary in the same wheel then
+# needs musl's loader, which is what a musllinux wheel's platform has.
+
+name: wheels
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  native:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: manylinux_2_28_x86_64
+            target: x86_64-unknown-linux-gnu.2.28
+            cargo: zigbuild
+          - runner: ubuntu-latest
+            platform: manylinux_2_28_aarch64
+            target: aarch64-unknown-linux-gnu.2.28
+            cargo: zigbuild
+          - runner: ubuntu-latest
+            platform: musllinux_1_2_x86_64
+            target: x86_64-unknown-linux-musl
+            cargo: zigbuild
+          - runner: ubuntu-latest
+            platform: musllinux_1_2_aarch64
+            target: aarch64-unknown-linux-musl
+            cargo: zigbuild
+          - runner: macos-14
+            platform: macosx_11_0_arm64
+            target: aarch64-apple-darwin
+            cargo: build
+            deployment_target: "11.0"
+          - runner: macos-14
+            platform: macosx_10_12_x86_64
+            target: x86_64-apple-darwin
+            cargo: build
+            deployment_target: "10.12"
+          - runner: windows-latest
+            platform: win_amd64
+            target: x86_64-pc-windows-msvc
+            cargo: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # Keyed by platform: seven targets sharing one cache key would evict each other every run.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # zig is the cross-linker and the glibc version selector. Both come from PyPI so the runner
+      # needs no system packages and the version is the one this file pins.
+      - name: install cargo-zigbuild
+        if: matrix.cargo == 'zigbuild'
+        run: pip install cargo-zigbuild ziglang
+      - run: pip install build hatchling
+      - name: build the wheel
+        working-directory: clients/py-native
+        shell: bash
+        env:
+          TESSERA_NATIVE_TARGET: ${{ matrix.target }}
+          TESSERA_NATIVE_CARGO: ${{ matrix.cargo }}
+          TESSERA_NATIVE_PLATFORM: ${{ matrix.platform }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
+          # A cdylib for a musl target is linked against a static libc unless this says otherwise,
+          # and a statically linked libc inside a shared object is not loadable by an interpreter.
+          RUSTFLAGS: ${{ contains(matrix.target, 'musl') && '-C target-feature=-crt-static' || '' }}
+        run: python -m build --wheel --no-isolation --outdir dist .
+      # The tag is a promise about the oldest glibc the wheel runs on. Read it back from the
+      # symbols rather than trusting the linker flag that was meant to set it.
+      - name: the glibc versions the artifacts require
+        if: contains(matrix.target, 'linux-gnu')
+        run: |
+          cd clients/py-native/tesseradb_native
+          highest=$(objdump -T tessera _tessera.abi3.so \
+                    | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -n 1)
+          echo "highest required: $highest"
+          test "$highest" = "GLIBC_2.28" || {
+            echo "the wheel is tagged ${{ matrix.platform }} but needs $highest" >&2
+            exit 1
+          }
+      # What the wheel holds, from the wheel: a build that produced no extension module, or one
+      # the archive dropped as untracked, installs cleanly and fails at the first import.
+      - name: the wheel's contents
+        shell: bash
+        run: |
+          python - clients/py-native/dist/*.whl <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              names = z.namelist()
+              print("\n".join(f"{i.file_size:>10}  {i.filename}" for i in z.infolist()))
+          binary = [n for n in names if n.rsplit("/", 1)[-1] in ("tessera", "tessera.exe")]
+          extension = [n for n in names if "_tessera." in n and not n.endswith(".py")]
+          if not binary or not extension:
+              sys.exit(f"{sys.argv[1]} holds {binary} and {extension}; it needs one of each")
+          PY
+      # The native build is the one this runner can also run. The cross-builds are checked by
+      # their contents and their symbols only, which is what the gate can see from here.
+      - name: import it and run it
+        if: matrix.platform == 'manylinux_2_28_x86_64' || matrix.platform == 'macosx_11_0_arm64' || matrix.platform == 'win_amd64'
+        shell: bash
+        run: |
+          python -m venv /tmp/wheelcheck
+          vpy=$(ls /tmp/wheelcheck/bin/python /tmp/wheelcheck/Scripts/python.exe 2>/dev/null | head -n 1)
+          "$vpy" -m pip install --force-reinstall clients/py-native/dist/*.whl
+          cd /tmp
+          "$vpy" -c "
+          import subprocess, tesseradb_native, _tessera
+          print(_tessera)
+          print(subprocess.run([tesseradb_native.binary_path(), '--version'], check=True))
+          "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tesseradb-native-${{ matrix.platform }}
+          path: clients/py-native/dist/*.whl
+
+  # `tesseradb` itself: one `py3-none-any` wheel for every platform, built where the components'
+  # bundle can be built, which is the only reason this needs Node.
+  pure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: clients/ts/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm --prefix clients/ts ci
+      - run: pip install build hatchling
+      - run: python -m build --wheel --no-isolation --outdir dist clients/py
+      - name: it is pure and it is pinned
+        run: |
+          python - dist/*.whl <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              tag = dict(
+                  line.split(": ", 1)
+                  for line in z.read("tesseradb-0.1.0.dist-info/WHEEL").decode().splitlines()
+                  if ": " in line
+              )["Tag"]
+              requires = [
+                  line for line in z.read("tesseradb-0.1.0.dist-info/METADATA").decode().splitlines()
+                  if line.startswith("Requires-Dist:")
+              ]
+          print(tag, *requires, sep="\n")
+          if tag != "py3-none-any":
+              sys.exit(f"tesseradb is tagged {tag}; the base wheel carries no compiled artifact")
+          if not any("tesseradb-native==" in r and "platform_machine" in r for r in requires):
+              sys.exit("tesseradb must pin tesseradb-native exactly, behind a platform marker")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tesseradb
+          path: dist/*.whl

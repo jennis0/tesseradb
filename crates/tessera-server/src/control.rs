@@ -3378,9 +3378,9 @@ async fn changes(
 
 /// How often a `wait=visible` wait re-reads the publication counter.
 ///
-/// A tick's own completion poll is 20 ms, so anything finer only spends wakeups; anything much
-/// coarser puts a whole poll between the publication and the answer. The wait holds no lock and
-/// no executor thread, so its only cost is this timer.
+/// The executor publishes on a wake rather than on a cadence, so this timer is the whole delay
+/// between a publication and the answer: anything much coarser adds to it, anything finer only
+/// spends wakeups. The wait holds no lock and no executor thread, so its only cost is this timer.
 const VISIBLE_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// The `wait` query parameter every write route takes (contracts §3.4).
@@ -5917,8 +5917,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             // `flush_skips` rising is the alarm the log line carries — a flush persistently
             // slower than its tick is a visibility-latency breach — and `flushable_items` is the
             // backlog gauge that distinguishes a gated node (stays at zero) from a failing one
-            // (grows). `buffered_items` is the occupancy the ingest 429 is checked against; note
-            // it counts items, not bytes (write-path §2.1).
+            // (grows). It counts rows, joins included, so an item in two views counts twice.
+            // `buffered_items` is the occupancy the ingest 429 is checked against; note it counts
+            // items, not bytes (write-path §2.1).
             "flush": {
                 "ticks": executor.ticks,
                 "flushes": executor.flushes,

@@ -8,9 +8,20 @@ version = "0.1.0"
 description = "Tessera's Python package: the notebook widget as the [widget] extra, the SDK as the [local] one; the in-process instance joins them later (decision 0095)."
 license = "Apache-2.0"
 requires-python = ">=3.10"
-# The base install has no JavaScript in it and no dependency beyond the standard library:
-# `authorise` is one HTTPS call, made with `urllib`. A consumer, never a component (CLAUDE.md).
-dependencies = []
+# The base install has no JavaScript in it and no third-party Python in it: `authorise` is one
+# HTTPS call, made with `urllib`. A consumer, never a component (CLAUDE.md). The wheel stays
+# `py3-none-any`.
+#
+# The one dependency is the companion platform wheel, which carries the `tessera` binary and the
+# `_tessera` extension module, so `pip install tesseradb` reaches the server without a cargo
+# toolchain. It is pinned exactly: nothing is deployed and a format change refuses a stale bundle,
+# so the binary and the SDK move together. The marker keeps an unsupported platform installable —
+# there the base install is what it always was, pure Python with no binary.
+#
+# Opting out is `pip install tesseradb --no-deps`, which is exact because this is the only entry.
+dependencies = [
+  "tesseradb-native==0.1.0; platform_machine in 'x86_64 AMD64 aarch64 arm64'",
+]
 
 [project.optional-dependencies]
 # The widget: anywidget plus the components' single-file bundle, which the wheel's build hook

@@ -148,9 +148,8 @@ impl Executor {
     /// undrained is about to change the manifest, so a pass dispatched beside it is discarded at
     /// its rebase check.
     ///
-    /// A suspension does not stall: [`Executor::run`] drains every completed job before any
-    /// dispatcher runs, and [`Executor::wait_for_work`] treats a pending flag as a reason for the
-    /// fast completion poll.
+    /// A suspension does not stall: a finished job rings the doorbell, and [`Executor::run`]
+    /// drains every completed job before any dispatcher runs.
     pub(super) fn fold_outstanding(&self) -> bool {
         self.fold.outstanding()
     }
@@ -177,8 +176,8 @@ impl Executor {
         // [`Executor::fold_outstanding`] for why that later boundary is the one that matters. A
         // coalesce publishing under a fold would be orphaned by the flip and would be discarded at
         // its rebase check, so running it here is wasted work, not a hazard.
-        if self.coalesce_policy.width < 2
-            || !self.switches.coalesce_enabled.load(Ordering::SeqCst)
+        if self.deps.coalesce_policy.width < 2
+            || !self.deps.switches.coalesce_enabled.load(Ordering::SeqCst)
             || self.coalesce_outstanding()
             || self.fold_outstanding()
             || !self.may_publish()
@@ -189,7 +188,7 @@ impl Executor {
         // uses: a coalesce's manifest carries the live deny state, and writing that from an
         // overlay with no durable record behind it would make a deny that returned 500 and was
         // never acknowledged permanent on every restore.
-        if self.wal.is_poisoned() || self.health.overlay_diverged.load(Ordering::SeqCst) {
+        if self.log.wal.is_poisoned() || self.health.overlay_diverged.load(Ordering::SeqCst) {
             return;
         }
         let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
@@ -202,7 +201,7 @@ impl Executor {
             partition,
             &partition_data.manifest,
             &generation.bundle.manifest.files,
-            self.coalesce_policy,
+            self.deps.coalesce_policy,
             // The roster as this generation has it: a scoped column of an incarnation that is no
             // longer live is for the fold to reclaim, not for this pass to merge.
             &|view, incarnation| {
@@ -230,7 +229,7 @@ impl Executor {
 
         let unit = self.coalesce.start();
         let health = Arc::clone(&self.health);
-        self.pool.spawn(move || {
+        self.deps.pool.spawn(move || {
             match crate::coalesce::execute_coalesce(plan, ctx) {
                 Ok(completed) => unit.complete(completed),
                 Err(e) => {
@@ -257,15 +256,15 @@ impl Executor {
     pub(super) fn dispatch_merge(&mut self, generation: &Arc<Generation>) {
         // Suspended until a fold is *published*, for the reason `dispatch_coalesce` states and on
         // the boundary `fold_outstanding` states.
-        if !self.switches.merge_enabled.load(Ordering::SeqCst)
+        if !self.deps.switches.merge_enabled.load(Ordering::SeqCst)
             || self.merge_outstanding()
             || self.fold_outstanding()
-            || self.wal.is_poisoned()
+            || self.log.wal.is_poisoned()
             || !self.may_publish()
         {
             return;
         }
-        let Some(plan) = crate::merge::plan_merge(generation, self.merge_policy) else {
+        let Some(plan) = crate::merge::plan_merge(generation, self.deps.merge_policy) else {
             return;
         };
         let manifest = &generation.bundle.manifest;
@@ -292,7 +291,7 @@ impl Executor {
             // attempts at one `n` would otherwise write one path, and the second `File::create`
             // truncates files the first has memory-mapped.
             seg_id: format!("merge-{}-{attempt}", partition_data.segments_n),
-            identity_key: self.identity_key,
+            identity_key: self.deps.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
             absent_ok,
@@ -302,7 +301,7 @@ impl Executor {
 
         let unit = self.merge.start();
         let health = Arc::clone(&self.health);
-        self.pool.spawn(move || {
+        self.deps.pool.spawn(move || {
             match crate::merge::execute(plan, ctx) {
                 Ok(completed) => unit.complete(completed),
                 Err(e) => {
@@ -339,11 +338,11 @@ impl Executor {
         // next window publishes a new one, so the build must own its input.
         let values = crate::suggest::values_of(minter);
         let build = self.suggest.next_attempt();
-        let dir = self.suggest_dir.join(&vocabulary);
+        let dir = self.deps.suggest_dir.join(&vocabulary);
 
         let unit = self.suggest.start();
-        let pool = Arc::clone(&self.pool);
-        self.pool.spawn(move || {
+        let pool = Arc::clone(&self.deps.pool);
+        self.deps.pool.spawn(move || {
             match crate::suggest::SuggestIndex::build(&dir, build, &values, &pool) {
                 Ok(index) => unit.complete(crate::suggest::CompletedSuggest {
                     vocabulary,
@@ -405,9 +404,9 @@ impl Executor {
         };
         let values = crate::suggest::values_of(minter);
         let build = self.suggest.next_attempt();
-        let dir = self.suggest_dir.join(vocabulary);
+        let dir = self.deps.suggest_dir.join(vocabulary);
         let Ok(index) =
-            crate::suggest::SuggestIndex::build(&dir, build, &values, &self.pool)
+            crate::suggest::SuggestIndex::build(&dir, build, &values, &self.deps.pool)
         else {
             return;
         };
@@ -458,7 +457,7 @@ impl Executor {
     pub(super) fn publish_completed_merges(&mut self) -> bool {
         // Left in the channel rather than dropped; see
         // `MaintenanceDeps::switches`. Always false in a shipped build.
-        if self.switches.merge_publication_paused.load(Ordering::SeqCst) {
+        if self.deps.switches.merge_publication_paused.load(Ordering::SeqCst) {
             return false;
         }
         let mut any = false;
@@ -530,7 +529,10 @@ impl Executor {
             &live.bundle.manifest.vocabularies,
         );
 
-        let manifest_n = match self.allocate_manifest_n() {
+        let manifest_n = match self
+            .side_manifests
+            .allocate_manifest_n(&self.deps.bundle_root, &self.health)
+        {
             Ok(n) => n,
             Err(e) => {
                 discard(&format!(
@@ -543,7 +545,7 @@ impl Executor {
         // them until this write returns.
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
         if let Err(e) = self.commit_side_manifest(
-            &partition_data.manifest,
+            partition_data,
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
@@ -618,7 +620,7 @@ impl Executor {
                         store,
                     )
                 };
-                self.artifact_projections.rebase_merged(
+                self.deps.artifact_projections.rebase_merged(
                     &live.prefix,
                     &completed.plan.view,
                     store,
@@ -639,11 +641,11 @@ impl Executor {
         }));
         // The claim names the generation it is for, so a pass that is superseded mid-flight
         // releases nothing when it ends; see `refresh::clear_if_current`.
-        self.refresh
+        self.deps.refresh
             .in_flight
             .store(segments_version, Ordering::SeqCst);
         self.publish_arc(Arc::clone(&next), started);
-        self.refresh.spawn(next);
+        self.deps.refresh.spawn(next);
 
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
@@ -836,7 +838,10 @@ impl Executor {
             &live.bundle.manifest.vocabularies,
         );
 
-        let manifest_n = match self.allocate_manifest_n() {
+        let manifest_n = match self
+            .side_manifests
+            .allocate_manifest_n(&self.deps.bundle_root, &self.health)
+        {
             Ok(n) => n,
             Err(e) => {
                 discard(&format!(
@@ -849,7 +854,7 @@ impl Executor {
         // until this write returns.
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
         if let Err(e) = self.commit_side_manifest(
-            &partition_data.manifest,
+            partition_data,
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
@@ -1105,7 +1110,7 @@ impl Executor {
             };
 
             // A label, not an allocation. `n` is allocated by the executor at publication
-            // (`next_manifest_n`), because a deny publication may take one while this flush is in
+            // (`SideManifests`), because a deny publication may take one while this flush is in
             // flight. What the plan needs is a component that makes `seg_id` unique, and the
             // sequence it was planned against is exactly that: the never-reused property rests on
             // this plus the attempt counter.
@@ -1210,7 +1215,7 @@ impl Executor {
                 // memory-mapped file, truncating the mapping and SIGBUS on the next read.
                 seg_id: format!("flush-{planned_at_n}-{}", self.flush.next_attempt()),
                 row_base,
-                identity_key: self.identity_key,
+                identity_key: self.deps.identity_key,
                 shard_id: manifest.identity.shard_id,
                 quantisation,
                 // This view's schema, entity-scoped tail then scoped render lanes: the same list a
@@ -1235,19 +1240,19 @@ impl Executor {
                 text_schema: text_schema.clone(),
                 dict: Arc::clone(&generation.dict),
                 novel_descriptors,
-                max_distinct_terms: self.max_distinct_terms,
+                max_distinct_terms: self.deps.max_distinct_terms,
                 prefix: generation.prefix.clone(),
-                shapes: self.shapes.levels_of_view(&view),
+                shapes: self.deps.shapes.levels_of_view(&view),
             }
         };
         self.health
             .flush_lap(crate::flush::FlushStage::Dispatch, mark);
 
         if deferred > 0 {
-            // Re-armed, so `wait_for_work` polls at `FLUSH_COMPLETION_POLL` and the tick that
-            // takes the next view comes at the completion of this flush rather than at the next
-            // period. Set before the flag below, since a reader that saw the dispatch first and
-            // this second could close the cycle in between.
+            // Re-armed, so the tick that takes the next view comes at this flush's completion,
+            // which rings the doorbell, rather than at the next period. Set before the flag below,
+            // since a reader that saw the dispatch first and this second could close the cycle in
+            // between.
             self.health.deferred_plans.store(true, Ordering::SeqCst);
             self.health.flush_requested.store(true, Ordering::SeqCst);
             tracing::warn!(
@@ -1260,11 +1265,20 @@ impl Executor {
         let unit = self.flush.start();
         self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
-        self.pool.spawn(move || {
+        let switches = Arc::clone(&self.deps.switches);
+        self.deps.pool.spawn(move || {
             let mut laps = crate::flush::FlushLaps::default();
             match crate::flush::execute_flush(plan, context, &mut laps) {
                 Ok(completed) => {
                     health.record_flush_execution(&laps, Some(completed.consumed.len()));
+                    // Test hook; always false otherwise. See `Engine::set_flush_paused_for_test`.
+                    // The unit is still in flight while this holds, which is the state the tick
+                    // behind a flush is about.
+                    health.flush_holding.store(true, Ordering::SeqCst);
+                    while switches.flush_paused.load(Ordering::SeqCst) {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    health.flush_holding.store(false, Ordering::SeqCst);
                     unit.complete(completed);
                 }
                 Err(e) => {
@@ -1346,7 +1360,7 @@ impl Executor {
             for (view, data) in views {
                 let Some(data) = data else { continue };
                 if stored {
-                    self.artifact_projections.publish(
+                    self.deps.artifact_projections.publish(
                         &generation.prefix,
                         view,
                         layer,
@@ -1377,7 +1391,7 @@ impl Executor {
                     continue;
                 }
                 let ordinals = &ordinals;
-                let held = self.shapes.level(
+                let held = self.deps.shapes.level(
                     view,
                     layer,
                     level,
@@ -1418,7 +1432,7 @@ impl Executor {
                         .flatten()
                         .unwrap_or_default()
                 };
-                self.artifact_projections.publish(
+                self.deps.artifact_projections.publish(
                     &generation.prefix,
                     view,
                     layer,
@@ -1456,7 +1470,7 @@ impl Executor {
         {
             return None;
         }
-        let held = self.shapes.level(
+        let held = self.deps.shapes.level(
             view,
             layer,
             level,
@@ -1493,13 +1507,13 @@ impl Executor {
     /// diverged node writes nothing, and the state stays unpublished until it recovers.
     ///
     /// Called after every deny drain for the prompt half and from the tick for a data door's
-    /// growth ([`Executor::growth_unpublished`]); either call writes both, since what reaches the
+    /// growth ([`SideManifests::growth_unpublished`]); either call writes both, since what reaches the
     /// manifest is everything live state holds and no manifest does.
     pub(super) fn publish_overlay_state(&mut self) {
-        if !self.deny_dirty && !self.growth_unpublished {
+        if !self.side_manifests.behind_live && !self.side_manifests.growth_unpublished {
             return;
         }
-        if self.wal.is_poisoned() || !self.may_publish() {
+        if self.log.wal.is_poisoned() || !self.may_publish() {
             tracing::warn!(
                 "ALARM: live state is unpublished and this node is poisoned or diverged, so it \
                  will not write a side-manifest. The dispositions are in force and WAL-durable; \
@@ -1511,9 +1525,12 @@ impl Executor {
         let live = self.generation.load_full();
         // One scan for the publication, not one per partition. Each partition takes its own `n`,
         // and the floor under all of them is the same disc state
-        // ([`Executor::raise_manifest_floor`]); scanning inside the loop would cost a `readdir`
+        // ([`SideManifests::raise_manifest_floor`]); scanning inside the loop would cost a `readdir`
         // per partition instead.
-        if let Err(e) = self.raise_manifest_floor() {
+        if let Err(e) = self
+            .side_manifests
+            .raise_manifest_floor(&self.deps.bundle_root, &self.health)
+        {
             tracing::error!(
                 error = %e,
                 "ALARM: the side-manifest numbers on disc could not be read; the memberships stay \
@@ -1544,7 +1561,7 @@ impl Executor {
             // log records holding the only other copy.
             // Allocated first so the extents can be named after the publication that carries them:
             // one sequence, not two, and a file whose name says which manifest introduced it.
-            let n = self.take_manifest_n();
+            let n = self.side_manifests.take_manifest_n();
             let prefix_dir = self.prefix_dir(&live);
             let published = match self.write_membership_extents(&prefix_dir, partition, n) {
                 Ok(published) => published,
@@ -1561,7 +1578,9 @@ impl Executor {
             };
             // Onto the held list; [`Executor::commit_side_manifest`] restates it into the manifest
             // below.
-            self.membership_extents.extend(published.clone());
+            self.side_manifests
+                .membership_extents
+                .extend(published.clone());
             if !published.is_empty() {
                 written.push((prefix_dir.clone(), published));
             }
@@ -1574,7 +1593,7 @@ impl Executor {
                 // Onto the held list, as the memberships are: an artifact whose content extent is
                 // un-named comes back with its description unreadable and is withheld from every
                 // viewer, with the log already released.
-                Ok(Some(extent)) => self.artifact_record_extents.push(extent),
+                Ok(Some(extent)) => self.side_manifests.artifact_record_extents.push(extent),
                 Ok(None) => {}
                 Err(e) => {
                     tracing::error!(
@@ -1596,7 +1615,7 @@ impl Executor {
             // so a kill parked here loses only the restore path's freshness.
             self.pause_point(PauseSiteArg::BeforeManifestPublish);
             if let Err(e) = self.commit_side_manifest(
-                &partition_data.manifest,
+                partition_data,
                 &self.prefix_dir(&live),
                 partition,
                 n,
@@ -1641,9 +1660,9 @@ impl Executor {
             }
         }
 
-        self.deny_dirty = false;
-        self.growth_unpublished = false;
-        self.windows_since_publication = 0;
+        self.side_manifests.behind_live = false;
+        self.side_manifests.growth_unpublished = false;
+        self.side_manifests.windows_since_publication = 0;
         self.health
             .overlay_publications
             .fetch_add(1, Ordering::Relaxed);
@@ -1880,7 +1899,7 @@ impl Executor {
         // stands, the next tick re-plans.
         // The record extent composes onto the live stack here, not only into the manifest: a
         // published extent that no live stack holds answers no drill-down until the next fold.
-        let record_dir = self.bundle_root.join(&completed.prefix);
+        let record_dir = self.deps.bundle_root.join(&completed.prefix);
         let record_paths: Vec<tessera_filter::RecordExtentPaths> = completed
             .record_extent
             .iter()
@@ -1954,7 +1973,10 @@ impl Executor {
         n = self
             .health
             .flush_lap(crate::flush::FlushStage::ManifestClone, n);
-        let manifest_n = match self.allocate_manifest_n() {
+        let manifest_n = match self
+            .side_manifests
+            .allocate_manifest_n(&self.deps.bundle_root, &self.health)
+        {
             Ok(n) => n,
             Err(e) => {
                 discard(&format!(
@@ -2081,7 +2103,7 @@ impl Executor {
         // every row they carry, and nothing durable names them until this write returns.
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
         if let Err(e) = self.commit_side_manifest(
-            &partition_data.manifest,
+            partition_data,
             &self.prefix_dir(&live),
             &completed.partition,
             manifest_n,
@@ -2258,7 +2280,7 @@ impl Executor {
                         store,
                     )
                 };
-                self.artifact_projections.extend_flushed(
+                self.deps.artifact_projections.extend_flushed(
                     &live.prefix,
                     &completed.view,
                     store,
@@ -2290,11 +2312,11 @@ impl Executor {
         // duration of the refresh instead.
         // The claim names the generation it is for, so a pass that is superseded mid-flight
         // releases nothing when it ends; see `refresh::clear_if_current`.
-        self.refresh
+        self.deps.refresh
             .in_flight
             .store(segments_version, Ordering::SeqCst);
         self.publish_arc(Arc::clone(&next), started);
-        self.refresh.spawn(next);
+        self.deps.refresh.spawn(next);
 
         // A flush supersedes geometry, so it prunes exactly as any other geometry publication
         // does: one swap, one `segments_version` bump, one retention pass. The superseded
@@ -2329,4 +2351,90 @@ impl Executor {
         true
     }
 
+}
+
+/// The one plan a dispatch sends, chosen by oldest unflushed row. Free and pure so the choice can
+/// be tested without an executor. See `Executor::dispatch_flushes` for why one plan.
+pub(super) fn plan_to_dispatch(
+    plans: Vec<(String, crate::flush::FlushPlan)>,
+) -> Option<(String, crate::flush::FlushPlan)> {
+    plans.into_iter().min_by_key(|(_, plan)| {
+        // `items` is ascending by entity id, so the first is this view's oldest waiting row. An
+        // empty plan cannot occur (`plan_flush` returns `NothingToFlush`); sorting it last keeps a
+        // hypothetical one from winning every tick.
+        plan.items
+            .first()
+            .map_or(u64::MAX, |(entity, _)| entity.raw())
+    })
+}
+
+/// Whether a completed flush's dictionary moved under it. See the call site in
+/// [`Executor::publish_flush`].
+///
+/// A flush that promoted nothing (`None`) is never discarded however far the dictionary has moved:
+/// its tier names only ordinals below the length it planned against, which append-only extension
+/// preserves.
+pub(super) fn dictionary_moved_under(promoted_from_dict_len: Option<u32>, live_len: u32) -> bool {
+    promoted_from_dict_len.is_some_and(|planned| planned != live_len)
+}
+
+/// The two rules the promotion design added to publication, tested where they are decided rather
+/// than through a second view no build produces.
+#[cfg(test)]
+mod dispatch_rules_tests {
+    use super::*;
+    use tessera_lifecycle::BufferedItem;
+
+    pub(super) fn plan_from(oldest: u64) -> crate::flush::FlushPlan {
+        let item = BufferedItem {
+            terms: Vec::new(),
+            view: "s".to_string(),
+            join: false,
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+            external_id: None,
+            wal_pos: None,
+        };
+        crate::flush::FlushPlan {
+            items: vec![(EntityId::new(oldest), item)],
+            fills: Vec::new(),
+            consumed_fills: Vec::new(),
+            consumed_scoped_fills: Vec::new(),
+        }
+    }
+
+    /// One plan is dispatched per tick, since a second unit in flight is discarded at its rebase.
+    /// The one sent is the view whose oldest waiting row is oldest, not the first by name, which
+    /// would let a continuously-fed `s0` deny `s1` a flush for ever.
+    #[test]
+    pub(super) fn a_dispatch_sends_the_plan_holding_the_oldest_unflushed_row() {
+        let plans = vec![
+            ("s0".to_string(), plan_from(900)),
+            ("s1".to_string(), plan_from(100)),
+            ("s2".to_string(), plan_from(500)),
+        ];
+        let (view, plan) = plan_to_dispatch(plans).expect("one of three");
+        assert_eq!(view, "s1", "oldest row wins, not lowest view id");
+        assert_eq!(plan.items[0].0.raw(), 100);
+    }
+
+    #[test]
+    pub(super) fn a_dispatch_with_no_plans_sends_nothing() {
+        assert!(plan_to_dispatch(Vec::new()).is_none());
+    }
+
+    /// The dictionary guard is scoped to flushes that wrote an extent. A flush that promoted
+    /// nothing names only ordinals below the length it planned against, which append-only
+    /// extension preserves, so discarding it would cost liveness and buy no safety.
+    #[test]
+    pub(super) fn only_a_promoting_flush_is_discarded_when_the_dictionary_moves() {
+        // Promoted: its extent's ordinals are positions, and the positions have moved.
+        assert!(dictionary_moved_under(Some(7), 9));
+        assert!(!dictionary_moved_under(Some(7), 7));
+        // Promoted nothing: never discarded, however far the dictionary has gone.
+        assert!(!dictionary_moved_under(None, 9));
+        assert!(!dictionary_moved_under(None, 0));
+    }
 }

@@ -92,23 +92,33 @@ impl Overlay {
         self.deleted.or(&self.suppressed)
     }
 
-    /// The suppression set, ascending — `SEGMENTS-<n>.json`'s `deny` field.
+    /// The suppression set — `SEGMENTS-<n>.json`'s `deny` field, which a publication serialises
+    /// as it stands rather than enumerating.
     ///
-    /// Separate from [`Self::deleted_entities`] because the two manifest fields mean different
+    /// Separate from [`Self::deleted_set`] because the two manifest fields mean different
     /// things and leave under different rules (`write-path.md` §5.4): a suppression only by its
     /// unsuppress (Rule S), a tombstone only at the fold that executes it (Rule F).
     /// [`Self::denied`] deliberately
     /// hands out only the union, which is right for the row mask and wrong here — a writer that
     /// published the union under one field would make every deletion look retirable by an
     /// unsuppress.
-    pub fn suppressed_entities(&self) -> Vec<u64> {
-        self.suppressed.iter().map(u64::from).collect()
+    pub fn suppressed_set(&self) -> &Bitmap {
+        &self.suppressed
     }
 
-    /// The deleted set, ascending — `SEGMENTS-<n>.json`'s `tombstones` field. See
-    /// [`Self::suppressed_entities`].
-    pub fn deleted_entities(&self) -> Vec<u64> {
-        self.deleted.iter().map(u64::from).collect()
+    /// The deleted set — `SEGMENTS-<n>.json`'s `tombstones` field. See [`Self::suppressed_set`].
+    pub fn deleted_set(&self) -> &Bitmap {
+        &self.deleted
+    }
+
+    /// An overlay holding exactly these two sets, the form a manifest's deny fields seed at open.
+    /// The two are given separately because the manifest keeps them apart, and a seed that unioned
+    /// them would make every deletion retirable by an unsuppress.
+    pub fn seeded(deleted: &Bitmap, suppressed: &Bitmap) -> Self {
+        Overlay {
+            deleted: deleted.clone(),
+            suppressed: suppressed.clone(),
+        }
     }
 
     /// Every entity either store has an opinion on, ascending, without duplicates.
@@ -420,8 +430,10 @@ pub fn replay<'a>(
     (overlay, buffer, established, resolver)
 }
 
-/// Drop every buffered row whose entity the overlay has deleted — **the buffer never holds a
-/// deleted row** (write-path §4.2, decision 0047).
+/// Drop everything the buffer holds for an entity the overlay has deleted, its rows in every view
+/// and its fills — **the buffer never holds anything of a deleted entity** (write-path §4.2,
+/// decision 0047). A join carries no terms and so is absent from the entity-space walk, and a fill
+/// is not a row at all; both pin the log exactly as an own row does.
 ///
 /// A deleted row acquires no geometry: `plan_flush` skips it, so a flush never consumes it and
 /// its entry would sit in the buffer for the process's lifetime. That is not merely untidy —
@@ -440,14 +452,7 @@ pub fn replay<'a>(
 /// is applied *before* the walk: a tombstone the seed carries would otherwise miss the
 /// `IngestBatch` record replayed after it.
 fn drop_deleted(overlay: &Overlay, buffer: &mut IngestBuffer) {
-    let deleted: Vec<EntityId> = buffer
-        .iter()
-        .map(|(entity, _)| *entity)
-        .filter(|entity| overlay.is_deleted(*entity))
-        .collect();
-    for entity in deleted {
-        buffer.remove(entity);
-    }
+    buffer.remove_where(|entity| overlay.is_deleted(entity));
 }
 
 #[cfg(test)]

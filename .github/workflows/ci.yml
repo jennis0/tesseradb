@@ -194,6 +194,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # `tesseradb` depends on `tesseradb-native`, which carries the `tessera` binary and the
+      # `_tessera` extension module, so `clients/py/check.sh` now builds two crates before it can
+      # install anything. This job is no longer cargo-free and no longer cheap; the cache is what
+      # keeps it from being a second copy of the `rust` job's compile on every run.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       # `check-clients.sh` requires an installed tree rather than installing one itself, so that a
       # developer's stale `node_modules` fails loudly instead of being silently repaired.
       - run: npm --prefix clients/ts ci

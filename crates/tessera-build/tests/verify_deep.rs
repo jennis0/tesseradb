@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use tessera_build::{build, verify, verify_deep, verify_with_window_rows, BuildArgs, VerifyOpts};
 use tessera_spatial::Bounds;
 use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
-use tessera_store::manifest::{CurrentPointer, FileDigest, SegmentsManifest};
+use tessera_store::manifest::{CurrentPointer, DenySet, FileDigest, SegmentsManifest};
 use tessera_store::write_segments_manifest;
 use tessera_types::{EntityId, IdentityKey, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
@@ -234,7 +234,7 @@ fn flushed_bundle(root: &Path) {
         dict_extents: seg0.dict_extents.clone(),
         external_id_runs,
         locator_extents: vec![flush.locator_extent.clone()],
-        tombstones: vec![old_holder.raw()],
+        tombstones: DenySet::of(&croaring::Bitmap::of(&[old_holder.raw() as u32])),
         files,
         ..SegmentsManifest::empty()
     };

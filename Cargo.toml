@@ -19,6 +19,7 @@ members = [
     "crates/tessera-corpus",
     "crates/tessera-cli",
     "crates/tessera-bench",
+    "crates/tessera-python",
 ]
 
 [workspace.package]

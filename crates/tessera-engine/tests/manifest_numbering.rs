@@ -46,7 +46,7 @@ fn side_manifest_numbers(dir: &Path) -> Vec<u64> {
 /// discard a segment it had already written — and the next tick would do it again, because the
 /// counter it re-planned from is the one that produced the refused number.
 ///
-/// **Mutation:** drop the disc scan from `Executor::allocate_manifest_n` and the flush below never
+/// **Mutation:** drop the disc scan from `SideManifests::allocate_manifest_n` and the flush below never
 /// publishes.
 #[test]
 fn a_flush_publishes_above_a_side_manifest_a_second_writer_left() {
@@ -332,5 +332,69 @@ fn a_refused_publication_re_plans_above_the_number_it_was_refused_at() {
         engine.write_executor_stats().flush_rows_published,
         1,
         "the row the first attempt wrote is published by the second"
+    );
+}
+
+/// **Pruning bounds the directory and never takes the highest `n`.**
+///
+/// The number a publication may take is derived from the names present, and the artefact's refusal
+/// to replace an existing `SEGMENTS-<n>.json` is the only guard against two writers at one number:
+/// a directory whose highest name went missing would offer a number a file already occupies. The
+/// publication after the pruning is what says the floor survived it.
+#[test]
+fn pruning_bounds_the_directory_and_keeps_the_highest_number() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let entities = source_to_new_map(&root, "v00000");
+    let engine =
+        open_engine_publishing(&root, &tmp.path().join("cache"), &tmp.path().join("wal.log"));
+    let dir = partition_dir(&root, &engine.generation().prefix);
+
+    for (published, source) in (1..=6u64).enumerate() {
+        engine
+            .accept_change(
+                tessera_types::EntityId::new(entities[&source]),
+                tessera_lifecycle::wal::ChangeOp::Suppress,
+            )
+            .expect("a deny is never refused");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while engine.write_executor_stats().overlay_publications < published as u64 + 1 {
+            assert!(Instant::now() < deadline, "a deny never published");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    let present = side_manifest_numbers(&dir);
+    assert!(
+        present.len() <= tessera_store::SIDE_MANIFESTS_KEPT,
+        "six publications left {present:?}"
+    );
+    let highest = *present.last().unwrap();
+
+    // The floor survived: the next publication takes a number above the highest name present, and
+    // is not refused at the artefact.
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(entities[&7]),
+            tessera_lifecycle::wal::ChangeOp::Suppress,
+        )
+        .expect("a deny is never refused");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while engine.write_executor_stats().overlay_publications < 7 {
+        assert!(Instant::now() < deadline, "the seventh deny never published");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let after = side_manifest_numbers(&dir);
+    assert_eq!(*after.last().unwrap(), highest + 1);
+    assert_eq!(
+        engine.write_executor_stats().foreign_side_manifests,
+        0,
+        "no allocation had to rise over a file this node did not write: pruning must not look \
+         like a second writer"
     );
 }

@@ -60,7 +60,7 @@ impl WritePath {
         wal_path: &Path,
         seed: ManifestSeed<'_>,
         dict: &Dict,
-        initial_deny: &[(EntityId, ChangeOp)],
+        initial_deny: &Overlay,
         vocabularies: &mut Vocabularies,
         has_row: impl Fn(EntityId, &str) -> bool,
     ) -> Result<(Overlay, IngestBuffer, WritePathState), EngineError> {
@@ -402,13 +402,8 @@ impl WritePath {
         let view_ids_of_key = seed.view_ids_of_key;
         // Same ordering rule again, with one exception: `Unsuppress` needs the later record to
         // win, so seeding first and replaying on top reverts an acked unsuppress otherwise.
-        let mut seed = Overlay::new();
-        for (entity, op) in initial_deny {
-            seed.apply(*entity, *op);
-        }
-
         let (overlay, mut buffer, established, resolver) =
-            replay(&records, dict, seed, view_ids_of_key);
+            replay(&records, dict, initial_deny.clone(), view_ids_of_key);
         // Re-hashed once at open: `replay` builds this with `FxHashMap`, the live index does not
         // (see `WritePath::established`'s doc).
         let established: std::collections::HashMap<Vec<u8>, EntityId> =

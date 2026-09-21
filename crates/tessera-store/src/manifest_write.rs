@@ -262,3 +262,45 @@ pub fn write_segments_manifest(
         .map_err(|e| io("dir fsync", e))?;
     Ok(())
 }
+
+/// How many `SEGMENTS-<n>.json` one partition directory keeps: the newest and the two before it.
+pub const SIDE_MANIFESTS_KEPT: usize = 3;
+
+/// Delete every `SEGMENTS-<n>.json` under one partition directory below the
+/// [`SIDE_MANIFESTS_KEPT`] highest, and return how many were removed.
+///
+/// **Deleting a superseded candidate removes it from the step-down walk rather than letting the
+/// walk skip it, and that is what keeps the walk safe.** The walk's safety rests on never stepping
+/// *past* a deny-carrying manifest unexamined, and a side-manifest is complete current state for
+/// its partition rather than a diff: the newest one restates the whole deny state, serialised
+/// fresh from the live overlay, so nothing a pruned manifest carried is absent from the ones kept.
+/// What a reader loses is depth to step down into — below the kept three it errors with no
+/// verifying manifest, which is a refusal, never an older state served.
+///
+/// **The highest `n` is never deleted**, whoever wrote it: the next number a writer may take is
+/// derived from the names present ([`crate::highest_side_manifest_n`]), and
+/// [`write_segments_manifest`]'s refusal to replace an existing `n` is the only thing standing
+/// between two writers at one number.
+///
+/// The directory entry is left unsynced: a deletion lost to a crash leaves a superseded manifest
+/// that the next publication prunes again.
+pub fn prune_superseded_segments_manifests(prefix_dir: &Path, partition: &str) -> Result<usize> {
+    let dir = prefix_dir.join("partitions").join(partition);
+    let mut present = crate::read::list_segments_manifests(&dir, partition)?;
+    if present.len() <= SIDE_MANIFESTS_KEPT {
+        return Ok(0);
+    }
+    // Highest first, so the skip below keeps the newest and the two before it.
+    present.sort_unstable_by(|a, b| b.cmp(a));
+    let mut removed = 0;
+    for n in present.into_iter().skip(SIDE_MANIFESTS_KEPT) {
+        let path = dir.join(format!("SEGMENTS-{n}.json"));
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            // Another pass removed it, which is not a failure to remove it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StoreError::Io { path, source }),
+        }
+    }
+    Ok(removed)
+}

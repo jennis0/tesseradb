@@ -101,8 +101,8 @@ pub struct ExecutorHealth {
     /// Buffer occupancy as of the last apply. What `/control/ingest`'s occupancy bound is checked
     /// against.
     pub(crate) buffered_items: AtomicUsize,
-    /// Items that would acquire geometry at the last tick. Zero on a gated node; growing without
-    /// bound on one whose flush keeps failing.
+    /// Rows that would acquire geometry at the last tick, joins included. Zero on a gated node;
+    /// growing without bound on one whose flush keeps failing.
     pub(crate) flushable_items: AtomicUsize,
     /// Flushes published since the executor started.
     pub(crate) flushes: AtomicU64,
@@ -163,6 +163,9 @@ pub struct ExecutorHealth {
     pub(crate) last_fold_passes: Mutex<Vec<crate::compact::PassCost>>,
     /// The last fold's degradation report. The durable copy is the file in `reports/`.
     pub(crate) last_fold_report: Mutex<Vec<tessera_lifecycle::membership::Degradation>>,
+    /// A flush has finished on the pool and is holding at the test hook. Always `false` outside
+    /// tests.
+    pub(crate) flush_holding: AtomicBool,
     /// A fold has finished its passes and is holding at the test hook. Always `false` outside tests.
     pub(crate) fold_holding: AtomicBool,
     /// Nanoseconds spent in the whole apply step (clone, inserts, generation, swap), summed over
@@ -232,25 +235,13 @@ pub enum WriteStage {
     /// The per-entry WAL append loop: serialise and write. Three records go in it, and the
     /// `Wal*` stages below say which.
     WalAppend,
-    /// Within [`WriteStage::WalAppend`]: the deep copy of the live vocabulary bindings the mint
-    /// pass draws against, and of the declared-scalar list beside it.
-    VocabularyClone,
-    /// Within [`WriteStage::WalAppend`]: padding every row's scalars to the declared schema.
-    PadSchema,
-    /// Within [`WriteStage::WalAppend`]: resolving every category value in every row to its code,
-    /// minting the keys the vocabulary does not hold.
+    /// `mint_window_codes`: padding every row to the declared schema and resolving every category
+    /// value in it to its code, minting the keys the vocabulary does not hold.
     VocabularyMint,
-    /// Within [`WriteStage::WalAppend`]: `mint_records` and `derive_records` — the artifacts the
-    /// window's rows named that no artifact holds, and the edges that come with them.
+    /// `mint_records`, `derive_records` and `growth_records`: the artifacts the window's rows
+    /// named that no artifact holds, the edges that come with them, and the memberships its joins
+    /// declared.
     DeriveRecords,
-    /// Within [`WriteStage::WalAppend`]: the window's vocabulary mints and the records that create
-    /// the artifacts its rows named.
-    WalMints,
-    /// Within [`WriteStage::WalAppend`]: the `IngestBatch` records themselves.
-    WalBatches,
-    /// Within [`WriteStage::WalAppend`]: the membership growth records — one per `(layer, level)`,
-    /// built here from the window's joins and carrying a bitmap per artifact.
-    WalGrowth,
     /// One `fsync` for the whole window — group commit's amortisation half.
     WalFsync,
     /// `apply_window`'s deep copy of the ingest buffer (F3's operand).
@@ -283,17 +274,12 @@ pub enum WriteStage {
 }
 
 impl WriteStage {
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 15;
     pub const ALL: [WriteStage; Self::COUNT] = [
         WriteStage::Allocate,
         WriteStage::WalAppend,
-        WriteStage::VocabularyClone,
-        WriteStage::PadSchema,
         WriteStage::VocabularyMint,
         WriteStage::DeriveRecords,
-        WriteStage::WalMints,
-        WriteStage::WalBatches,
-        WriteStage::WalGrowth,
         WriteStage::WalFsync,
         WriteStage::ApplyBufferClone,
         WriteStage::ApplyRows,
@@ -310,13 +296,8 @@ impl WriteStage {
         match self {
             WriteStage::Allocate => "allocate",
             WriteStage::WalAppend => "wal_append",
-            WriteStage::VocabularyClone => "  .vocab_clone",
-            WriteStage::PadSchema => "  .pad_schema",
-            WriteStage::VocabularyMint => "  .vocab_mint",
-            WriteStage::DeriveRecords => "  .derive_records",
-            WriteStage::WalMints => "  .wal_mints",
-            WriteStage::WalBatches => "  .wal_batches",
-            WriteStage::WalGrowth => "  .wal_growth",
+            WriteStage::VocabularyMint => "vocab_mint",
+            WriteStage::DeriveRecords => "derive_records",
             WriteStage::WalFsync => "wal_fsync",
             WriteStage::ApplyBufferClone => "buffer_clone",
             WriteStage::ApplyRows => "apply_rows",
@@ -433,8 +414,8 @@ pub struct ExecutorStats {
     /// Items in the ingest buffer as of the last apply — the figure `/control/ingest`'s occupancy
     /// bound is checked against.
     pub buffered_items: usize,
-    /// Items that would acquire geometry at the last tick (§3.5) — zero on a gated node, growing
-    /// without bound on one whose flush keeps failing.
+    /// Rows that would acquire geometry at the last tick (§3.5), joins included — zero on a gated
+    /// node, growing without bound on one whose flush keeps failing.
     pub flushable_items: usize,
     /// Flushes published since the executor started.
     pub flushes: u64,
@@ -599,6 +580,7 @@ impl ExecutorHealth {
             last_fold_attr_written: AtomicU64::new(0),
             last_fold_passes: Mutex::new(Vec::new()),
             last_fold_report: Mutex::new(Vec::new()),
+            flush_holding: AtomicBool::new(false),
             fold_holding: AtomicBool::new(false),
             apply_nanos_total: AtomicU64::new(0),
             stage_nanos: Default::default(),
@@ -1038,10 +1020,11 @@ impl ExecutorHealth {
         self.record_work_service(elapsed_nanos / entries);
     }
 
-    /// A work-lane job that was answered without being executed — an idempotent replay, a 409. It
-    /// occupied a queue slot and was counted at submission, so it must be counted here too or
-    /// [`ExecutorStats::work_depth`] drifts upward forever and every 429 inherits the drift.
-    pub(in crate::write) fn note_work_refused(&self) {
+    /// One work-lane job that finished without a commit window closing over it: a publication, a
+    /// command applied on its own, an idempotent replay, a 409. It occupied a queue slot and was
+    /// counted at submission, so it must be counted here or [`ExecutorStats::work_depth`] drifts
+    /// upward forever and every 429 inherits the drift.
+    pub(in crate::write) fn note_work_finished(&self) {
         self.work_completed.fetch_add(1, Ordering::Relaxed);
     }
 

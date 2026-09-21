@@ -40,8 +40,8 @@ pub use error::{Result, StoreError};
 pub use flush::{digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow};
 pub use fold::{fold_row_space, FoldRowSpaceOutput, FoldRowSpaceSpec, FoldSegmentInput};
 pub use manifest_write::{
-    fsync_dir, fsync_written, write_and_fsync, write_current, write_manifest_json,
-    write_segments_manifest,
+    fsync_dir, fsync_written, prune_superseded_segments_manifests, write_and_fsync, write_current,
+    write_manifest_json, write_segments_manifest, SIDE_MANIFESTS_KEPT,
 };
 pub use pairs::PairsParquetWriter;
 pub use permutation::{Permutation, RowSpace, SegmentExtent};

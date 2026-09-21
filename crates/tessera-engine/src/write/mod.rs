@@ -58,9 +58,7 @@ use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
-use tessera_store::manifest::{
-    DenyEntry as ManifestDenyEntry, ManifestVocabulary, SegmentsManifest,
-};
+use tessera_store::manifest::{DenySet, ManifestVocabulary, SegmentsManifest};
 use tessera_store::merge::MergePolicy;
 use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_store::vocabulary::{MintError, Minted, Vocabularies};
@@ -341,7 +339,7 @@ impl WritePath {
         sweep_orphan_prefixes(&flush.bundle_root, &generation.load().prefix);
 
         // Above every `SEGMENTS-<n>.json` on disc, not above what a manifest names: see
-        // [`Executor::next_manifest_n`]. The sweep above has already removed the unpublished
+        // [`SideManifests`]. The sweep above has already removed the unpublished
         // prefixes, so what is left is what a reader could resolve.
         let next_manifest_n = tessera_store::highest_side_manifest_n(&flush.bundle_root)
             .map_err(|e| ExecutorStartError::SideManifestScan(e.to_string()))?
@@ -351,8 +349,12 @@ impl WritePath {
         let (deny_tx, deny_rx) = std::sync::mpsc::channel();
         // Capacity one, and `try_send` that discards `Full`: a token means something may be
         // waiting, and a second token while one is pending adds nothing. The executor only blocks
-        // on this after observing both queues empty: see [`Executor::run`].
+        // on this after observing both queues empty: see [`Executor::run`]. Rung by the handler
+        // side and by every background worker that finishes a unit.
         let (bell_tx, bell_rx) = std::sync::mpsc::sync_channel(1);
+        // Alive exactly as long as the `LifecycleHandle` below, which is the only holder of the
+        // two queue senders: see [`LifecycleQueues::handler`].
+        let alive = Arc::new(());
 
         // A clone, not a move: `ExecutorHealth` keeps the other end, which is what gives the
         // counters a reader outside the executor thread (`ExecutorStats::wal_fsyncs`).
@@ -402,75 +404,60 @@ impl WritePath {
         let growth_unpublished = live.with_artifacts(|store| store.has_unpublished());
         #[cfg(feature = "fault-injection")]
         let thread_faults = faults.clone();
+        let handler = Arc::downgrade(&alive);
+        // The end every background worker rings when its unit finishes.
+        let worker_bell = bell_tx.clone();
         // The tick clock a snapshot reads, seeded so `next_tick_in_nanos` is one period until
         // the executor's first tick rather than zero.
-        health.set_flush_period_secs(flush.max_age_secs);
+        health.set_flush_period_secs(flush.flush_max_age_secs);
         health.mark_tick(std::time::Instant::now());
 
         let join = std::thread::Builder::new()
             .name("tessera-lifecycle".to_string())
             .spawn(move || {
                 let mut executor = Executor {
-                    wal: exec_wal,
+                    log: ExecutorLog::new(exec_wal, wal_position_at_start),
                     live,
                     generation,
                     row_projection_cache,
-                    region_cache: flush.region_cache,
-                    artifact_projections: flush.artifact_projections,
-                    shapes: flush.shapes,
-                    lineages: flush.lineages,
-                    level_contents: flush.level_contents,
+                    deps: flush,
                     queues: LifecycleQueues {
                         work: work_rx,
                         deny: deny_rx,
                         bell: bell_rx,
+                        handler,
                     },
                     health: Arc::clone(&health),
                     window_seq: 0,
-                    flush_max_age_secs: flush.max_age_secs,
-                    flush_max_items: flush.max_items,
-                    next_manifest_n,
-                    deny_dirty: false,
-                    growth_unpublished,
-                    windows_since_publication: 0,
-                    bundle_root: flush.bundle_root,
-                    identity_key: flush.identity_key,
-                    pool: flush.pool,
-                    max_distinct_terms: flush.max_distinct_terms,
-                    coalesce_policy: flush.coalesce,
-                    coalesce: executor::Background::new(),
-                    refresh: flush.refresh,
-                    merge_policy: flush.merge,
-                    switches: flush.switches,
+                    side_manifests: SideManifests::seeded(
+                        next_manifest_n,
+                        seeded_membership_extents,
+                        seeded_derived_extents,
+                        seeded_content_extents,
+                        growth_unpublished,
+                    ),
+                    coalesce: executor::Background::new(worker_bell.clone()),
                     merge: executor::Background::sharing(
+                        worker_bell.clone(),
                         Default::default(),
                         Arc::clone(&health.merge_completed_pending),
                     ),
                     fold: executor::Background::sharing(
+                        worker_bell.clone(),
                         Default::default(),
                         Arc::clone(&health.fold_completed_pending),
                     ),
-                    suggest_dir: flush.suggest_dir,
-                    suggest: executor::Background::new(),
+                    suggest: executor::Background::new(worker_bell.clone()),
                     flush: executor::Background::sharing(
+                        worker_bell,
                         Arc::clone(&health.flush_in_flight),
                         Default::default(),
                     ),
-                    configured_merge_bytes: flush.configured_merge_bytes,
-                    compaction: flush.compaction,
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
-                    membership_extents: seeded_membership_extents,
-                    derived_extents: seeded_derived_extents,
-                    artifact_record_extents: seeded_content_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
                     pending_forms: std::collections::BTreeMap::new(),
-                    // Seeded from the opened WAL's position so a freshly started node does not
-                    // rotate until something is appended in this run.
-                    wal_position_at_last_rotation: wal_position_at_start,
-                    last_wal_sample: None,
-                    wal_samples: 0,
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };
@@ -504,6 +491,7 @@ impl WritePath {
             work: work_tx,
             deny: deny_tx,
             bell: bell_tx,
+            alive,
             health: Arc::clone(&self.health),
         });
         self.join = Some(join);
@@ -826,8 +814,10 @@ impl Drop for WritePath {
     /// caller's next statement is typically `TempDir::drop`, producing intermittent `ENOENT` from
     /// the sidecar rename in tests spread across many files.
     ///
-    /// The join is unconditional and cannot hang: [`LifecycleHandle`] is not `Clone` and this type
-    /// is its only owner, so dropping it below disconnects every sender.
+    /// The join is unconditional and does not wait on background work: [`LifecycleHandle`] is not
+    /// `Clone` and this type is its only owner, so dropping it below closes both queues, and the
+    /// ring that follows wakes a blocked loop to observe that. A fold still running keeps its own
+    /// thread, not this one.
     fn drop(&mut self) {
         // A test may have parked the executor at an armed pause point; release it first, or
         // teardown deadlocks on a fault the test forgot to clear.
@@ -835,7 +825,9 @@ impl Drop for WritePath {
         if let Some(faults) = &self.faults {
             faults.release();
         }
-        drop(self.handle.take());
+        if let Some(bell) = self.handle.take().map(LifecycleHandle::into_bell) {
+            let _ = bell.try_send(());
+        }
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -962,7 +954,13 @@ pub(crate) struct LifecycleHandle {
     /// alternatives were both worse: `crossbeam-channel` is a workspace dependency for one
     /// `select!`, and `recv_timeout` polling would put a latency floor on the one wait the
     /// never-shed lane exists to bound.
+    ///
+    /// Every background worker holds a clone of this sender too, so the doorbell stays connected
+    /// while one runs and its disconnection says nothing about shutdown: [`Self::alive`] does.
     bell: SyncSender<()>,
+    /// Held for exactly as long as this handle, and so for exactly as long as the two queue
+    /// senders above. The executor holds a `Weak` of it: see [`LifecycleQueues::handler`].
+    alive: Arc<()>,
     health: Arc<ExecutorHealth>,
 }
 
@@ -1032,6 +1030,17 @@ impl LifecycleHandle {
         }
         let _ = self.bell.try_send(());
         rx.recv().is_ok()
+    }
+
+    /// Drop the queue senders and the liveness token, keeping the doorbell.
+    ///
+    /// The caller rings it afterwards, so the executor woken by that token already observes the
+    /// queues closed. Ringing first would let the loop wake, find the handle still alive, and
+    /// block again until the tick deadline, which is `flush_max_age_secs` long.
+    fn into_bell(self) -> SyncSender<()> {
+        let Self { bell, alive, .. } = self;
+        drop(alive);
+        bell
     }
 
     /// Ring the executor's doorbell without submitting anything.
@@ -1123,6 +1132,11 @@ pub(crate) struct LifecycleQueues {
     deny: Receiver<Command>,
     /// The wake signal. Capacity one: see [`LifecycleHandle::bell`] and [`Executor::run`].
     bell: Receiver<()>,
+    /// The handler side's liveness. No strong count left means [`LifecycleHandle`] is gone, and
+    /// since it is the sole owner of both senders above, that both queues are disconnected:
+    /// [`Executor::wait_for_work`] reads it as the shutdown signal, with both queues by then
+    /// drained.
+    handler: std::sync::Weak<()>,
 }
 
 /// What the executor needs to run a flush, gathered rather than passed one by one.
@@ -1130,16 +1144,17 @@ pub(crate) struct LifecycleQueues {
 /// A struct because the alternative is a ten-argument `start_executor`, where the compiler stops
 /// distinguishing two `u64`s and a caller can transpose them silently.
 pub(crate) struct MaintenanceDeps {
-    pub(crate) max_age_secs: u64,
+    /// The tick's period.
+    pub(crate) flush_max_age_secs: u64,
     /// The tick's row trigger.
-    pub(crate) max_items: usize,
+    pub(crate) flush_max_items: usize,
     /// The entity-space coalesce's policy: see [`crate::coalesce::CoalescePolicy`].
-    pub(crate) coalesce: crate::coalesce::CoalescePolicy,
+    pub(crate) coalesce_policy: crate::coalesce::CoalescePolicy,
     /// What a geometry publication needs to start the background refresh rules: see
     /// [`crate::refresh`].
     pub(crate) refresh: crate::refresh::RefreshDeps,
     /// The row-space merge's policy: see [`crate::merge`].
-    pub(crate) merge: MergePolicy,
+    pub(crate) merge_policy: MergePolicy,
     /// The artifact row forms, shared for the one thing this thread does with them: rebuilding
     /// every level's projection inside the fold that invalidated it. A level is a deployment-wide
     /// artefact rather than a per-session value, so leaving it to the first request after the flip
@@ -1162,7 +1177,8 @@ pub(crate) struct MaintenanceDeps {
     /// [`Executor::warm_artifact_caches`].
     pub(crate) lineages: Arc<crate::cut::Lineages>,
     /// The supplied-content tables, shared for the one thing this thread does with them: dropping
-    /// a layer's when the layer is dropped, beside the two caches above.
+    /// a layer's when the layer is dropped, beside the two caches above. Not warmed at the fold: a
+    /// level is merely stale after one, and the first request that wants it pays to read it.
     pub(crate) level_contents: Arc<crate::artifact_content::LevelContents>,
     /// The bundle root, from which the live prefix directory is derived per use: see
     /// [`Executor::prefix_dir`] and `Engine::bundle_root`.
@@ -1206,6 +1222,6 @@ pub(crate) struct MaintenanceDeps {
     /// (`crate::merge::rebase_into`).
     pub(crate) switches: Arc<crate::switches::TestSwitches>,
     /// When a fold is dispatched with nobody asking for one: see
-    /// [`crate::compact::CompactionSchedule`].
+    /// [`crate::compact::CompactionSchedule`]. Consulted at the tick, beside the flush's own.
     pub(crate) compaction: crate::compact::CompactionSchedule,
 }

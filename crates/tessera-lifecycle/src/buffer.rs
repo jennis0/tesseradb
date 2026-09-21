@@ -347,18 +347,25 @@ impl IngestBuffer {
         // ingest join refuses a second row in a view the entity is already in — that is the arm
         // the permutation *and* this buffer are both consulted for — so a replacement here is
         // replay meeting a row it has already seen, never two acked rows for one position.
-        if let Some(existing) = rows.iter_mut().find(|held| held.view == row.view) {
-            *existing = item;
-            return;
+        let added = match rows.iter_mut().find(|held| held.view == row.view) {
+            Some(existing) => {
+                *existing = item;
+                false
+            }
+            // The entity's own row goes first, a join after it, so `get` answers with the row that
+            // carries the entity's terms whatever order the two arrived in.
+            None => {
+                if row.join {
+                    rows.push(item);
+                } else {
+                    rows.insert(0, item);
+                }
+                true
+            }
+        };
+        if added {
+            self.rows += 1;
         }
-        // The entity's own row goes first, a join after it, so `get` answers with the row that
-        // carries the entity's terms whatever order the two arrived in.
-        if row.join {
-            rows.push(item);
-        } else {
-            rows.insert(0, item);
-        }
-        self.rows += 1;
     }
 
     /// Record which WAL position `entity`'s row arrived at. No-op if the entity is not buffered,
@@ -529,6 +536,23 @@ impl IngestBuffer {
         self.scoped_fills.retain(|(held, _), _| *held != entity);
     }
 
+    /// Drop everything buffered for every entity `condemned` answers `true` for, on
+    /// [`Self::remove`]'s terms — asked of every entity this buffer holds anything for, rows, fills
+    /// and scoped fills alike, rather than of those holding an own row.
+    pub fn remove_where(&mut self, condemned: impl Fn(EntityId) -> bool) {
+        let held: Vec<EntityId> = self
+            .items
+            .keys()
+            .chain(self.fills.keys())
+            .copied()
+            .chain(self.scoped_fills.keys().map(|(entity, _)| *entity))
+            .filter(|entity| condemned(*entity))
+            .collect();
+        for entity in held {
+            self.remove(entity);
+        }
+    }
+
     /// Remove one **(entity, view)** row — what a flush's publication does with exactly the rows
     /// it consumed, and what a dropped view does with the rows that named it.
     ///
@@ -542,8 +566,10 @@ impl IngestBuffer {
         let before = rows.len();
         let rows = Arc::make_mut(rows);
         rows.retain(|item| item.view != view);
-        self.rows -= before - rows.len();
-        if rows.is_empty() {
+        let removed = before - rows.len();
+        let empty = rows.is_empty();
+        self.rows -= removed;
+        if empty {
             self.items.remove(&entity);
         }
     }
@@ -680,6 +706,55 @@ mod tests {
         assert_eq!(resolver.resolve(b"novel"), TermId::new(u32::MAX));
         // A second distinct novel descriptor gets the next (one lower) id.
         assert_eq!(resolver.resolve(b"novel-2"), TermId::new(u32::MAX - 1));
+    }
+
+    fn row(entity: u64, view: &str, join: bool) -> WalRow {
+        WalRow {
+            external_id: Some(format!("ext-{entity}-{view}").into_bytes()),
+            entity_id: EntityId::new(entity),
+            view: view.to_string(),
+            join,
+            descriptors: Vec::new(),
+            x: 0.0,
+            y: 0.0,
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+        }
+    }
+
+    /// The predicate is asked of every entity the buffer holds anything for, not of those holding
+    /// an own row: a join-only entity and a fill-only one are each taken whole.
+    #[test]
+    fn a_removal_by_predicate_reaches_a_join_and_a_fill() {
+        let mut buffer = IngestBuffer::new();
+        buffer.insert_row_with_terms(&row(1, "a", true), Vec::new());
+        buffer.fill(
+            EntityId::new(2),
+            Fill {
+                view: "a".to_string(),
+                scalars: vec![WalScalar::U8(1)],
+                wal_pos: Some(7),
+            },
+            |value| matches!(value, WalScalar::Null),
+        );
+        buffer.fill_scoped(
+            EntityId::new(3),
+            "g/k".to_string(),
+            ScopedFill {
+                view: "a".to_string(),
+                scoped: vec![WalScalar::U8(2)],
+                wal_pos: Some(8),
+            },
+            |value| matches!(value, WalScalar::Null),
+        );
+        buffer.insert_row_with_terms(&row(4, "a", false), vec![TermId::new(1)]);
+
+        buffer.remove_where(|entity| entity.raw() != 4);
+
+        assert!(!buffer.contains(EntityId::new(1)));
+        assert_eq!(buffer.fill_count(), 0);
+        assert_eq!(buffer.len(), 1, "the entity the predicate spared keeps its row");
+        assert_eq!(buffer.oldest_wal_pos(), Some(None), "and nothing else holds the log");
     }
 
     /// Extension ids must never be able to collide with a dictionary ordinal,

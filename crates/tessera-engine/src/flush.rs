@@ -208,6 +208,13 @@ impl FlushStage {
         FlushStage::DropPlan,
         FlushStage::Failed,
     ];
+    /// The stages that partition `Manifest`, in the order the publication runs them.
+    pub const MANIFEST: [FlushStage; 4] = [
+        FlushStage::ManifestClone,
+        FlushStage::ManifestLiveState,
+        FlushStage::ManifestDenyState,
+        FlushStage::ManifestVocabExtensions,
+    ];
     /// The stages that partition `TextExtents`, in the order they run for each text column.
     pub const TEXT: [FlushStage; 5] = [
         FlushStage::TextRows,
@@ -2177,6 +2184,12 @@ mod tests {
             assert!(FlushStage::POOL.contains(&stage));
             assert_ne!(stage, FlushStage::PoolWall);
         }
+        // The `Manifest*` sub-stages are on the executor, partition `Manifest`, and are in
+        // `PUBLISH` no more than the wall is: counted there they would double `Manifest`.
+        for stage in FlushStage::MANIFEST {
+            assert!(FlushStage::EXECUTOR.contains(&stage));
+            assert!(!FlushStage::PUBLISH.contains(&stage));
+        }
         // The `Text*` sub-stages are on the pool, partition `TextExtents`, and are in `EXECUTE`
         // no more than the wall is: counted there they would double `TextExtents`.
         for stage in FlushStage::TEXT {
@@ -2185,7 +2198,10 @@ mod tests {
         }
         // Everything on the executor that is not the tick's two stages or the wall partitions
         // the wall; everything on the pool that is not the wall or a sub-stage partitions it.
-        assert_eq!(FlushStage::PUBLISH.len() + 3, FlushStage::EXECUTOR.len());
+        assert_eq!(
+            FlushStage::PUBLISH.len() + FlushStage::MANIFEST.len() + 3,
+            FlushStage::EXECUTOR.len()
+        );
         assert_eq!(
             FlushStage::EXECUTE.len() + FlushStage::TEXT.len() + 1,
             FlushStage::POOL.len()

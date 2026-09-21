@@ -29,6 +29,87 @@ pub(super) fn available_memory() -> Option<u64> {
     Some(cgroup.map_or(available, |limit| limit.min(available)))
 }
 
+/// The levels a fold's retirement is about to move, and the set it retires.
+///
+/// A fold writes its manifest before it retires, since the retirement is not reversible: a
+/// manifest that would not commit must leave it undone. [`Self::records`] composes a level's
+/// records without the retired artifacts, and [`Self::version_after`] stamps them with the version
+/// the level will carry once the retirement has run. A containment partition and a spatial level's
+/// row forms are omitted for a pending level and recompose on first use.
+pub(super) struct PendingRetirement {
+    levels: Vec<(String, u32)>,
+    retired: croaring::Bitmap,
+}
+
+impl PendingRetirement {
+    fn is_pending(&self, layer: &str, level: u32) -> bool {
+        self.levels.iter().any(|(l, v)| l == layer && *v == level)
+    }
+
+    /// The version `layer`'s `level` will have once this fold's retirement has run.
+    pub(super) fn version_after(&self, store: &ArtifactStore, layer: &str, level: u32) -> u64 {
+        store.level_version(layer, level) + u64::from(self.is_pending(layer, level))
+    }
+
+    /// The level's records as the retirement will leave them: every artifact but those whose own
+    /// entity is retired.
+    fn records<'s>(
+        &'s self,
+        store: &'s ArtifactStore,
+        layer: &str,
+        level: u32,
+    ) -> impl Iterator<Item = (u32, &'s tessera_lifecycle::membership::ArtifactRecord)> + 's {
+        let retired = &self.retired;
+        store
+            .level(layer, level)
+            .filter(move |(_, record)| !retired.contains(record.entity.raw() as u32))
+    }
+}
+
+/// How many ordinals a level's derived structures cover: one past the highest live ordinal,
+/// which is the length the reader sizes the level at (`ArtifactRows::build_over`). A hole below
+/// it is covered and a hole at the top is not.
+fn level_length<'a>(
+    records: impl Iterator<Item = (u32, &'a tessera_lifecycle::membership::ArtifactRecord)>,
+) -> u32 {
+    records.map(|(ordinal, _)| ordinal + 1).max().unwrap_or(0)
+}
+
+/// What a fold hands the manifest commit in place of the held list: the derived files it has just
+/// written, and the retirement its levels are stamped for.
+pub(super) struct FoldDerived<'a> {
+    pub(super) written: &'a [tessera_store::manifest::DerivedExtent],
+    pub(super) pending_retirement: &'a PendingRetirement,
+}
+
+/// The fold-written files whose stamped version is the level's now, after the fold's retirement
+/// has run; every other one is dropped and named. See [`PendingRetirement`].
+fn held_at_current_version(
+    store: &ArtifactStore,
+    entries: &[tessera_store::manifest::DerivedExtent],
+) -> Vec<tessera_store::manifest::DerivedExtent> {
+    entries
+        .iter()
+        .filter(|entry| {
+            let now = store.level_version(&entry.layer, entry.level);
+            if now == entry.level_version {
+                return true;
+            }
+            tracing::error!(
+                layer = %entry.layer,
+                level = entry.level,
+                form = entry.form.dir(),
+                stamped = entry.level_version,
+                now,
+                "ALARM: a fold-written derived file is stamped with a version the level does not \
+                 carry after the retirement; it is dropped and the level recomposes on first use"
+            );
+            false
+        })
+        .cloned()
+        .collect()
+}
+
 /// Delete every `v#####` tree under the bundle root that `CURRENT` does not name, once, before
 /// the executor thread is spawned.
 ///
@@ -425,7 +506,7 @@ impl Executor {
             .map(|descriptor| u64::from(descriptor.row_count))
             .sum();
         crate::compact::due(
-            &self.compaction,
+            &self.deps.compaction,
             now,
             self.fold_floor_from(),
             crate::compact::Gauges {
@@ -444,7 +525,7 @@ impl Executor {
     pub(super) fn fold_floor_from(&self) -> Option<u64> {
         let started = self.last_fold_start_unix?;
         let ended = self.health.fold_ended_unix.load(Ordering::SeqCst);
-        Some(started.max(ended.saturating_sub(self.compaction.min_interval_secs)))
+        Some(started.max(ended.saturating_sub(self.deps.compaction.min_interval_secs)))
     }
 
     /// Plan a fold and start it on its own thread, if one is requested and nothing blocks it. Not
@@ -503,11 +584,11 @@ impl Executor {
 
         let plan = match crate::compact::plan_fold(
             generation,
-            self.wal.is_poisoned(),
+            self.log.wal.is_poisoned(),
             self.health.overlay_diverged.load(Ordering::SeqCst),
             crate::compact::FoldResources {
                 available_memory: available_memory(),
-                free_disc: free_disc(&self.bundle_root),
+                free_disc: free_disc(&self.deps.bundle_root),
                 membership_containers: self
                     .live
                     .with_artifacts(|store| store.membership_containers()),
@@ -565,7 +646,7 @@ impl Executor {
                 })
                 .collect()
         };
-        let to_prefix = match crate::compact::next_prefix_name(&self.bundle_root) {
+        let to_prefix = match crate::compact::next_prefix_name(&self.deps.bundle_root) {
             Ok(prefix) => prefix,
             Err(e) => {
                 self.health.fold_requested.store(false, Ordering::SeqCst);
@@ -578,9 +659,9 @@ impl Executor {
         let attempt = self.fold.next_attempt();
         let ctx = crate::compact::FoldContext {
             from_prefix_dir: self.prefix_dir(generation),
-            to_prefix_dir: self.bundle_root.join(&to_prefix),
+            to_prefix_dir: self.deps.bundle_root.join(&to_prefix),
             to_prefix: to_prefix.clone(),
-            identity_key: self.identity_key,
+            identity_key: self.deps.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
             absent_ok,
@@ -619,7 +700,7 @@ impl Executor {
         self.health.fold_requested.store(false, Ordering::SeqCst);
         let unit = self.fold.start();
         let health = Arc::clone(&self.health);
-        let switches = Arc::clone(&self.switches);
+        let switches = Arc::clone(&self.deps.switches);
         let spawned = std::thread::Builder::new()
             .name("tessera-fold".to_string())
             .spawn(move || {
@@ -664,7 +745,7 @@ impl Executor {
     /// Apply every completed fold waiting from its thread, and report whether any did.
     pub(super) fn publish_completed_folds(&mut self) -> bool {
         // Test hook; always false in a shipped build. See `MaintenanceDeps::switches`.
-        if self.switches.fold_publication_paused.load(Ordering::SeqCst) {
+        if self.deps.switches.fold_publication_paused.load(Ordering::SeqCst) {
             return false;
         }
         let mut any = false;
@@ -714,7 +795,7 @@ impl Executor {
         let layouts = self.choose_layouts(&pass.spaces, pending, &pass.segments);
         for (layer, level, chosen) in &layouts {
             if self.live.record_layout(layer, *level, *chosen) {
-                self.artifact_projections.forget_level(layer, *level);
+                self.deps.artifact_projections.forget_level(layer, *level);
             }
         }
         self.pending_forms.clear();
@@ -738,7 +819,7 @@ impl Executor {
         // Re-asked here, not just at the plan: a fold's flight is long enough for the WAL to
         // poison after `plan_fold` checked it, and this manifest would then publish deny state no
         // durable record backs. The divergence half is already asked by `may_publish` above.
-        if self.wal.is_poisoned() {
+        if self.log.wal.is_poisoned() {
             return Err("the WAL poisoned during its flight, so its manifest would publish deny state \
                      no durable record backs"
                 .to_string());
@@ -827,7 +908,7 @@ impl Executor {
         //
         // `max_merged_segment_bytes` must stay strictly below the base segment's bytes, or the
         // next startup refuses the configuration. Refused here instead, loudly.
-        if let Some(configured) = self.configured_merge_bytes {
+        if let Some(configured) = self.deps.configured_merge_bytes {
             if completed.base_segment_bytes > 0 && configured >= completed.base_segment_bytes {
                 return Err(format!(
                     "merge.max_merged_segment_bytes ({configured}) is not strictly below the \
@@ -894,9 +975,13 @@ impl Executor {
                 return;
             }
         };
-        let live_manifest = &live.bundle.partitions[&plan.partition].manifest;
+        let partition_data = &live.bundle.partitions[&plan.partition];
+        let live_manifest = &partition_data.manifest;
         let retired_count = executed.cardinality();
-        let manifest_n = match self.allocate_manifest_n() {
+        let manifest_n = match self
+            .side_manifests
+            .allocate_manifest_n(&self.deps.bundle_root, &self.health)
+        {
             Ok(n) => n,
             Err(e) => {
                 discard(&format!(
@@ -911,7 +996,7 @@ impl Executor {
         // Membership extent paths are prefix-relative, so they are written again into the new
         // prefix rather than carried forward or dropped. `repack_all` drops exactly the executed
         // deletions: a suppressed member keeps its bit (Rule S).
-        let to_prefix_dir = self.bundle_root.join(&completed.prefix);
+        let to_prefix_dir = self.deps.bundle_root.join(&completed.prefix);
         stairs.record("6 hand-off");
         let repacked = match self.rewrite_membership_extents(
             &to_prefix_dir,
@@ -1032,7 +1117,7 @@ impl Executor {
                 .iter()
                 .map(|images| images.extent.clone())
                 .collect(),
-            artifact_record_extents: self.artifact_record_extents.clone(),
+            artifact_record_extents: self.side_manifests.artifact_record_extents.clone(),
             segments,
             deltas: forward.tiers.clone(),
             // The live list, not the plan's: a flush that promoted during the flight appended an
@@ -1069,7 +1154,7 @@ impl Executor {
         // Content extents carry no entry in either manifest's `files`, so they are linked here
         // rather than through the digest loop above, from the held list rather than the manifest
         // (which can be behind the live generation).
-        for extent in &self.artifact_record_extents {
+        for extent in &self.side_manifests.artifact_record_extents {
             carried_rels.extend(extent.files().map(String::from));
         }
         if let Err(e) =
@@ -1098,14 +1183,14 @@ impl Executor {
                 }
             };
         if let Err(e) = self.commit_side_manifest(
-            live_manifest,
+            partition_data,
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
             &mut segments_manifest,
             Some(FoldDerived {
                 written: &derived,
-                pending_retirement: &pending.levels,
+                pending_retirement: &pending,
             }),
         ) {
             discard(&format!(
@@ -1130,7 +1215,7 @@ impl Executor {
 
         self.pause_point(PauseSiteArg::BeforeCurrentFlip);
         if let Err(e) =
-            tessera_store::write_current(&self.bundle_root, &completed.prefix, &manifest_digest)
+            tessera_store::write_current(&self.deps.bundle_root, &completed.prefix, &manifest_digest)
         {
             discard(&format!("CURRENT would not flip ({e})"));
             return;
@@ -1153,7 +1238,7 @@ impl Executor {
                  disagree for those ordinals"
             );
         }
-        self.membership_extents = repacked;
+        self.side_manifests.membership_extents = repacked;
         // Checked, not assumed: a pending level's structures were stamped with the version the
         // level would have after this retirement ([`PendingRetirement`]). If `retire` ever moves a
         // different set, a stamped structure would be carried at a version it does not describe.
@@ -1169,7 +1254,7 @@ impl Executor {
                  carry is dropped and its level recomposes on first use"
             );
         }
-        self.derived_extents = self.live.with_artifacts(|store| {
+        self.side_manifests.derived_extents = self.live.with_artifacts(|store| {
             held_at_current_version(store, &segments_manifest.derived_extents)
         });
         *lock_recover(&self.health.last_fold_report) = degraded;
@@ -1189,10 +1274,10 @@ impl Executor {
         stairs.record("13 open");
 
         self.live.with_artifacts(|store| {
-            self.artifact_projections.adopt_derived(
+            self.deps.artifact_projections.adopt_derived(
                 &to_prefix_dir,
                 &completed.prefix,
-                &self.derived_extents,
+                &self.side_manifests.derived_extents,
                 store,
             )
         });
@@ -1202,7 +1287,7 @@ impl Executor {
         // would be keyed to a generation no reader can ask for; built before the retire, it would
         // be keyed to a store version the retire is about to bump, discarding the warm.
         self.warm_artifact_caches();
-        self.shapes.clear_staged();
+        self.deps.shapes.clear_staged();
         stairs.record("15 warm");
 
         // ---- rotate the WAL ---------------------------------------------------------------------
@@ -1371,7 +1456,7 @@ impl Executor {
         retired: croaring::Bitmap,
     ) -> Result<(), String> {
         let (bundle, rotation) =
-            crate::engine::open_rotation(&self.bundle_root, prefix, &live.fragments, retired)
+            crate::engine::open_rotation(&self.deps.bundle_root, prefix, &live.fragments, retired)
                 .map_err(|e| format!("the folded prefix would not open ({e})"))?;
         let delta_postings = folded_tiers
             .iter()
@@ -1455,7 +1540,7 @@ impl Executor {
         prefix: &str,
         degraded: &[tessera_lifecycle::membership::Degradation],
     ) -> std::io::Result<()> {
-        let dir = self.bundle_root.join("reports");
+        let dir = self.deps.bundle_root.join("reports");
         std::fs::create_dir_all(&dir)?;
         let rows: Vec<serde_json::Value> = degraded
             .iter()
@@ -1679,7 +1764,7 @@ impl Executor {
                 if spatial {
                     let mut observed = None;
                     for (view, segment) in fold_segments {
-                        let held = self.shapes.level(
+                        let held = self.deps.shapes.level(
                             view,
                             &layer,
                             level,
@@ -1799,7 +1884,7 @@ impl Executor {
             return Vec::new();
         }
 
-        let scratch = self.artifact_projections.scratch();
+        let scratch = self.deps.artifact_projections.scratch();
         let written: Vec<(
             String,
             String,
@@ -1820,7 +1905,7 @@ impl Executor {
                     let composed = if spatial {
                         // The fold's segment is the whole base at row base 0, so the piece staged
                         // in `choose_layouts` is the level's membership in this view.
-                        let piece = self.shapes.get(view, layer, *level).and_then(|held| {
+                        let piece = self.deps.shapes.get(view, layer, *level).and_then(|held| {
                             fold_segments
                                 .iter()
                                 .find(|(v, _)| v == view)
@@ -1957,6 +2042,7 @@ impl Executor {
                     continue;
                 }
                 let Some(piece) = self
+                    .deps
                     .shapes
                     .get(view, layer, *level)
                     .and_then(|held| held.staged(&segment.seg_id))
@@ -2020,7 +2106,7 @@ impl Executor {
             for (layer, level) in &levels {
                 let version = store.level_version(layer, *level);
                 for (view, _) in fold_segments {
-                    let Some(held) = self.shapes.get(view, layer, *level) else {
+                    let Some(held) = self.deps.shapes.get(view, layer, *level) else {
                         continue;
                     };
                     if held.level_version != version {
@@ -2156,8 +2242,8 @@ impl Executor {
             return;
         }
         let started = std::time::Instant::now();
-        let before_projections = self.artifact_projections.builds();
-        let before_lineages = self.lineages.builds();
+        let before_projections = self.deps.artifact_projections.builds();
+        let before_lineages = self.deps.lineages.builds();
         for partition in generation.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
                 for (layer, level) in &levels {
@@ -2197,7 +2283,7 @@ impl Executor {
                         let predicate = segments.as_ref().map(|segments| {
                             crate::artifacts::PredicateSource::Spatial(
                                 crate::artifacts::SpatialSource {
-                                    level: self.shapes.level(
+                                    level: self.deps.shapes.level(
                                         view,
                                         layer,
                                         *level,
@@ -2210,7 +2296,7 @@ impl Executor {
                                 },
                             )
                         });
-                        self.artifact_projections.get_or_build(
+                        self.deps.artifact_projections.get_or_build(
                             &generation.prefix,
                             view,
                             layer,
@@ -2231,7 +2317,7 @@ impl Executor {
         }
         for (layer, level) in &levels {
             self.live.with_artifacts(|store| {
-                self.lineages.get_or_build(
+                self.deps.lineages.get_or_build(
                     layer,
                     *level,
                     store.lineage_version(layer, *level),
@@ -2251,8 +2337,8 @@ impl Executor {
             });
         }
         tracing::info!(
-            projections = self.artifact_projections.builds() - before_projections,
-            lineages = self.lineages.builds() - before_lineages,
+            projections = self.deps.artifact_projections.builds() - before_projections,
+            lineages = self.deps.lineages.builds() - before_lineages,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "the fold's artifact pass rebuilt every level's row form"
         );
@@ -2289,4 +2375,25 @@ pub(super) fn fold_segments(
         }
     }
     out
+}
+
+/// One superseded prefix awaiting reclamation, and the two `Arc`s whose release says no thread can
+/// still resolve a path inside it. See [`Executor::pending_reclaim`].
+pub(in crate::write) struct PendingReclaim {
+    generation: Arc<Generation>,
+    prefix_dir: PathBuf,
+    /// Every sidecar that was live over this prefix before the one the held generation carries.
+    /// See [`Executor::superseded_sidecars`].
+    superseded_sidecars: Vec<std::sync::Weak<crate::engine::ExternalIdIndex>>,
+}
+
+/// Seconds since the Unix epoch, or `None` if the clock is before it.
+///
+/// `None` reads as "no fold has ended yet", switching the interval floor off rather than jamming it
+/// on: the safe direction, and the same answer a fresh process gives.
+pub(in crate::write) fn unix_now() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_secs())
 }

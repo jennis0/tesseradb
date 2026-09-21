@@ -545,15 +545,12 @@ impl From<BindingConflict> for SeedError {
 ///
 /// **Its completeness *is* the never-reuse invariant.** Every home must be represented before the
 /// first draw; see this module's header.
+/// **Each minter is behind an `Arc`, so cloning this is a table of pointers.** A commit window
+/// takes a mutable copy of the whole set to mint into and publishes it if the window survives;
+/// almost every window binds no novel key and so changes no minter. [`Self::get_mut`] copies the
+/// one minter it hands out, and only where a published generation still shares it.
 #[derive(Debug, Clone, Default)]
 pub struct Vocabularies {
-    /// **`Arc<VocabularyMinter>`, because this map is cloned once per commit window and a mint is
-    /// rare.** Each minter carries a key-to-code map, its reverse, the titles and the assigned
-    /// set, so a deep copy walks every binding the corpus has: 98 ms a window on a corpus with
-    /// half a million admin keys, paid by every window whether or not it mints anything. Behind an
-    /// `Arc` the clone copies a pointer per vocabulary, and [`Self::get_mut`] copies the one
-    /// vocabulary a mint touches. The snapshot property is unchanged: a minter a published
-    /// generation holds is never mutated in place, because `Arc::make_mut` copies it first.
     by_name: BTreeMap<String, Arc<VocabularyMinter>>,
 }
 
@@ -636,6 +633,8 @@ impl Vocabularies {
             .insert(minter.name().to_string(), Arc::new(minter));
     }
 
+    /// The minter under `name`, ready to be mutated: it is copied here where another generation
+    /// still holds it, so a caller that only reads a binding should use [`Self::get`].
     pub fn get_mut(&mut self, name: &str) -> Option<&mut VocabularyMinter> {
         self.by_name.get_mut(name).map(Arc::make_mut)
     }

@@ -827,16 +827,6 @@ fn resolve_identity(
 ///
 /// The path comes back because two things are relative to it and to nothing else: the `.env` that
 /// may carry the identity key, and the paths inside the file.
-fn load_deployment(
-    explicit: Option<&Path>,
-) -> Result<(PathBuf, tessera_server::config::Config), String> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let path = tessera_server::config::discover(explicit, &cwd).map_err(|e| e.to_string())?;
-    let config =
-        tessera_server::config::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok((path, config))
-}
-
 /// Everything `tessera build` and `tessera check` both resolve, before either does its own work.
 ///
 /// **One resolution, not two.** The deployment file found by walking up, the declaration it names,
@@ -858,18 +848,12 @@ fn resolve_declaration(
     // declaration is, where the bundle goes, and which environment variable carries the key. A
     // missing one is a refusal naming what to create (configuration.md §3) — never a silent set of
     // defaults, since every path in it is a decision.
-    let (deployment_path, deployment) = load_deployment(deployment)?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let (deployment_path, deployment) = tessera_server::config::open(deployment, &cwd)?;
     let schema_path = config.unwrap_or_else(|| deployment.schema_path.clone());
     let bindings = collect_bindings(file)?;
-    let config = match strictness {
-        tessera_build::config::Strictness::Build => {
-            tessera_build::config::Config::parse(&schema_path, &bindings)
-        }
-        tessera_build::config::Strictness::Declared => {
-            tessera_build::config::Config::parse_declared(&schema_path, &bindings)
-        }
-    }
-    .map_err(|e| e.to_string())?;
+    let config = tessera_build::config::Config::parse_with(&schema_path, &bindings, strictness)
+        .map_err(|e| e.to_string())?;
     Ok(Declaration {
         deployment_path,
         deployment,

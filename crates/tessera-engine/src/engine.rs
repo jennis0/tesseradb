@@ -9,7 +9,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use rustc_hash::FxHashMap;
 use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
-use tessera_lifecycle::wal::ChangeOp;
+use tessera_lifecycle::Overlay;
 use tessera_plugin::Plugin;
 use tessera_store::{Bundle, StoreError};
 use tessera_store::manifest::{CurrentPointer, Declarations};
@@ -164,22 +164,33 @@ pub struct Engine {
     pub(crate) stage: crate::stage::StageDeps,
 }
 
-/// Every deny disposition the bundle's side-manifests carry, as overlay operations. `deny` is the
-/// current suppression set and `tombstones` names entities already deleted, read across every
-/// partition since the overlay is engine-wide. Only `Suppress` and `Delete`, never `Unsuppress`:
-/// inventing `Unsuppress` for an entity absent from the suppression set would let an older
-/// manifest clear a suppression the WAL still holds.
-fn initial_deny_of(bundle: &Bundle) -> Vec<(EntityId, ChangeOp)> {
-    let mut out = Vec::new();
-    for partition in bundle.partitions.values() {
-        for entry in &partition.manifest.deny {
-            out.push((EntityId::new(entry.entity_id), ChangeOp::Suppress));
-        }
-        for &entity_id in &partition.manifest.tombstones {
-            out.push((EntityId::new(entity_id), ChangeOp::Delete));
+/// Every deny disposition the bundle's side-manifests carry, as the overlay a replay starts from.
+/// `deny` is the current suppression set and `tombstones` names entities already deleted, unioned
+/// across every partition since the overlay is engine-wide. The two stay apart: a seed that
+/// unioned them would let an unsuppress retire a deletion.
+///
+/// A field whose bytes did not decode never reaches here — the reader refuses such a manifest
+/// rather than opening it — and the `Malformed` arm below is what keeps "did not decode" from
+/// becoming "nothing is denied" if it ever does.
+fn initial_deny_of(bundle: &Bundle) -> Result<Overlay> {
+    let mut deleted = croaring::Bitmap::new();
+    let mut suppressed = croaring::Bitmap::new();
+    for (key, partition) in &bundle.partitions {
+        let sets = [
+            (&partition.manifest.deny, &mut suppressed, "deny"),
+            (&partition.manifest.tombstones, &mut deleted, "tombstones"),
+        ];
+        for (field, into, name) in sets {
+            let entities = field.entities().ok_or_else(|| {
+                EngineError::Malformed(format!(
+                    "partition {key}'s side-manifest carries a {name} field that is not a \
+                     base64 portable Roaring bitmap of entity ids"
+                ))
+            })?;
+            into.or_inplace(entities);
         }
     }
-    out
+    Ok(Overlay::seeded(&deleted, &suppressed))
 }
 
 /// One of the side manifests' lists, concatenated: the partitions by key ascending, an item whose
@@ -493,7 +504,7 @@ fn reconstruct_writes(
     readers: &PrefixReaders,
     side: SideDeclarations,
 ) -> Result<ReconstructedWrites> {
-    let initial_deny = initial_deny_of(bundle);
+    let initial_deny = initial_deny_of(bundle)?;
     let mut vocabularies = initial_vocabularies_of(bundle)?;
     // The allocator floor comes from the side-manifest, never the build manifest alone: every
     // flush raises `entity_id_high_water` past the ids it consumed, while `MANIFEST.json`'s
@@ -998,10 +1009,10 @@ impl Engine {
     /// The executor's maintenance dependencies, as both starters hand them over.
     fn maintenance_deps(&self) -> crate::write::MaintenanceDeps {
         crate::write::MaintenanceDeps {
-            max_age_secs: self.config.flush_max_age_secs,
-            max_items: self.config.flush_max_items,
-            coalesce: coalesce_policy(&self.config),
-            merge: merge_policy(&self.config),
+            flush_max_age_secs: self.config.flush_max_age_secs,
+            flush_max_items: self.config.flush_max_items,
+            coalesce_policy: coalesce_policy(&self.config),
+            merge_policy: merge_policy(&self.config),
             artifact_projections: Arc::clone(&self.artifact_projections),
             region_cache: Arc::clone(&self.region_cache),
             shapes: Arc::clone(&self.shapes),
