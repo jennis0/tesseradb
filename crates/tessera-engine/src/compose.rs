@@ -21,7 +21,7 @@ use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 
 use tessera_authz::FrozenFragment;
-use tessera_lifecycle::{IngestBuffer, Overlay};
+use tessera_lifecycle::{BufferedItem, IngestBuffer, Overlay};
 use tessera_store::{Bundle, RowSpace};
 use tessera_types::{EntityId, TermId};
 
@@ -515,16 +515,28 @@ pub(crate) fn verdict(
     satisfied: &FxHashSet<TermId>,
     entity: EntityId,
 ) -> Option<bool> {
+    verdict_of(overlay, satisfied, entity, buffer.get(entity))
+}
+
+/// [`verdict`] for a caller walking the buffer, which already holds the entity's item and would
+/// otherwise have it looked up a second time. `item` is [`IngestBuffer::get`]'s answer for
+/// `entity`: its own row, and `None` where the buffer holds none — which is what
+/// [`IngestBuffer::iter`] yields, the two selecting the same element of the same list by the same
+/// test.
+pub(crate) fn verdict_of(
+    overlay: &Overlay,
+    satisfied: &FxHashSet<TermId>,
+    entity: EntityId,
+    item: Option<&BufferedItem>,
+) -> Option<bool> {
     if overlay.is_deleted(entity) || overlay.is_suppressed(entity) {
         return Some(false);
     }
 
-    // An entity's postings are written by the flush of its own row, and `buffer.get` answers only
-    // while that row is still buffered (replay drops a row its view already holds), so a hit here
-    // is never an entity the fragment covers.
-    buffer
-        .get(entity)
-        .map(|item| item.terms.iter().any(|t| satisfied.contains(t)))
+    // An entity's postings are written by the flush of its own row, and the buffer holds that row
+    // only until then (replay drops a row its view already holds), so an item here is never an
+    // entity the fragment covers.
+    item.map(|item| item.terms.iter().any(|t| satisfied.contains(t)))
 }
 
 /// Derive the row-space deny mask from the authoritative entity-space stores:
@@ -583,23 +595,25 @@ pub fn compose(
     // ever been accepted. `verdict` is still the single expression of the precedence, so the
     // entity-space verbs and this walk cannot drift apart. An overlay entry is a deny, covered
     // by the fold below, so a buffered entity with one is skipped here.
-    for (&entity, _) in buffer.iter() {
+    for (&entity, item) in buffer.iter() {
         if overlay.touches(entity) {
             continue;
         }
-        if let Some(pass) = verdict(overlay, buffer, satisfied, entity) {
-            if let Some(row) = row_space.row_of(entity) {
-                if pass {
-                    pass_rows.push(row.raw());
-                } else {
-                    fail_rows.push(row.raw());
-                }
+        // A buffered entity usually has no row, and contributes nothing to either diff, so the
+        // row is what the walk asks for first and the terms are tested only for the rest. It has
+        // a row where a flush of another view has published one for it while its own row is
+        // still buffered: an entity ingested into one view and joined to a second can have the
+        // second's row published first. A join writes no postings, so the entity is in no
+        // fragment, and the `plus` branch is what draws its mark there.
+        let Some(row) = row_space.row_of(entity) else {
+            continue;
+        };
+        if let Some(pass) = verdict_of(overlay, satisfied, entity, Some(item)) {
+            if pass {
+                pass_rows.push(row.raw());
+            } else {
+                fail_rows.push(row.raw());
             }
-            // A buffered entity usually has no row, and takes the "no row" path above. It has
-            // one where a flush of another view has published a row for it while its own row is
-            // still buffered: an entity ingested into one view and joined to a second can have
-            // the second's row published first. A join writes no postings, so the entity is in
-            // no fragment, and the `plus` branch is what draws its mark there.
         }
     }
 
