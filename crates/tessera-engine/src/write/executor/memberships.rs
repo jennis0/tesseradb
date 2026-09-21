@@ -358,15 +358,12 @@ impl Executor {
 
         let mut records = Vec::new();
         for (layer, index, vocabulary) in predicates {
-            // `code → key`, walked from the live bindings rather than inverted per row.
-            let mut key_of_code: std::collections::BTreeMap<u32, String> = Default::default();
-            if let Some(name) = &vocabulary {
-                if let Some(minter) = vocabularies.get(name) {
-                    for (key, code) in minter.bindings() {
-                        key_of_code.insert(code, key.to_string());
-                    }
-                }
-            }
+            // The codes this window's rows carry are resolved one at a time against the minter's
+            // own reverse map; building `code → key` over the whole vocabulary would be a pass
+            // over every binding the layer's column could name, per window.
+            let minter = vocabulary
+                .as_deref()
+                .and_then(|name| vocabularies.get(name));
             let mut wanted: std::collections::BTreeSet<String> = Default::default();
             for entry in closed {
                 for row in entry.rows() {
@@ -380,7 +377,7 @@ impl Executor {
                     }
                     wanted.insert(attribute_value_key(
                         code,
-                        key_of_code.get(&code).map(String::as_str),
+                        minter.and_then(|minter| minter.key_of(code)),
                     ));
                 }
             }

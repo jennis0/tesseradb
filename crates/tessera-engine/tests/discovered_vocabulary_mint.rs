@@ -522,6 +522,133 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
     );
 }
 
+/// **A predicate layer over a category column names its artifact by the value's key.** The code is
+/// internal and a viewer never sees one, so an artifact named by the number a row carries would be
+/// both unrecognisable and unreachable from the key a client asks about.
+#[test]
+fn a_predicate_layer_over_a_category_names_its_artifact_by_the_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_schema(&root, tmp.path(), DISCOVERED_WIDE, "department", 4);
+    let engine = engine_over(tmp.path(), &root, config());
+
+    const LAYER: &str = "departments/by-value";
+    engine
+        .register_layer(tessera_types::layer::LayerDeclaration {
+            scope: Default::default(),
+            name: LAYER.to_string(),
+            title: None,
+            views: vec!["s0".to_string()],
+            membership: tessera_types::layer::MembershipSource::Attribute("department".to_string()),
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            require_member_visibility: None,
+            hierarchy: tessera_types::layer::Hierarchy {
+                kind: tessera_types::layer::HierarchyKind::Flat,
+                prune_children: false,
+            },
+            content: Default::default(),
+            depends_on: Vec::new(),
+            levels: Vec::new(),
+            layout: None,
+            shape: None,
+        })
+        .expect("a predicate layer over the discovered column");
+
+    let before = engine.published_artifacts();
+    ingest_row(&engine, "finance-1", WalScalar::Utf8("finance".to_string()));
+    assert_eq!(
+        engine.published_artifacts(),
+        before + 1,
+        "the value the row carried created its artifact at the window's close"
+    );
+    // A second row under the same key names the artifact the first created, which it can only do
+    // if both windows derived the same key.
+    ingest_row(&engine, "finance-2", WalScalar::Utf8("finance".to_string()));
+    assert_eq!(
+        engine.published_artifacts(),
+        before + 1,
+        "the same key minted a second artifact"
+    );
+
+    // Read before any flush, which rotates the log these publications were written to.
+    drop(engine);
+    assert_eq!(
+        published_keys(&tmp.path().join("wal.log"), LAYER),
+        vec!["finance".to_string()],
+        "the artifact must be named by the vocabulary key, not by the code the mint drew"
+    );
+}
+
+/// The key of every artifact published into `layer` by the records in the WAL at `wal_path`.
+fn published_keys(wal_path: &Path, layer: &str) -> Vec<String> {
+    let (_wal, records) = Wal::open(wal_path).expect("the WAL reopens");
+    records
+        .into_iter()
+        .filter_map(|r| match r {
+            WalRecord::ArtifactPublish {
+                layer: named,
+                artifacts,
+                ..
+            } if named == layer => Some(artifacts),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|a| a.key)
+        .collect()
+}
+
+/// **A window that fails after minting publishes none of its mints.** The draw happens before
+/// anything is appended, so a later row refusing the window has to leave the bindings exactly as
+/// they were: a key bound by a window that never committed would colour nothing and would be
+/// undrawable for ever.
+#[test]
+fn a_refused_window_publishes_none_of_the_keys_it_drew() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_schema(&root, tmp.path(), DISCOVERED_WIDE, "department", 4);
+    let engine = engine_over(tmp.path(), &root, config());
+
+    let row = |external_id: &str, key: &str| UnallocatedRow {
+        external_id: Some(external_id.as_bytes().to_vec()),
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 1.0,
+        y: 1.0,
+        scalars: vec![WalScalar::Utf8(key.to_string())],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+
+    // The first row's key draws a code; the second is the empty string, which is not a value, so
+    // the window is refused after the first has already minted.
+    engine
+        .accept_ingest(
+            vec![row("drawn-1", "logistics"), row("empty-1", "")],
+            "batch-refused".to_string(),
+            [7u8; 32],
+        )
+        .expect_err("the empty key refuses the window");
+
+    let bound = |engine: &Engine| {
+        engine
+            .generation()
+            .vocabularies
+            .get("department")
+            .unwrap()
+            .code_of("logistics")
+    };
+    assert_eq!(bound(&engine), None, "the refused window bound nothing");
+
+    // And nothing durable carries it either: a restart replays the log the window did not write.
+    drop(engine);
+    let engine = engine_over(tmp.path(), &root, config());
+    assert_eq!(bound(&engine), None, "nor does a restart bind it");
+    drop(engine);
+}
+
 /// **Case 5**: a declared vocabulary is unaffected. Its column never carries `WalScalar::Utf8` at
 /// this boundary — the handler either resolves a known key to its code or refuses an unknown one
 /// with a 422 before the executor ever sees it (§5's declare-then-use rule) — so the executor's mint
