@@ -147,6 +147,13 @@ pub(super) struct Executor {
     pub(super) faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
 
+/// Why a tick is firing. `due` is the cadence itself, the period or the buffered-row count;
+/// `period_due` is the period alone. A tick that only a request brought on is not `due`.
+struct TickDue {
+    due: bool,
+    period_due: bool,
+}
+
 impl Executor {
     /// Drop the region decompositions of generations older than the retention depth: the same
     /// pass, at the same swap, as `RowProjectionCache::prune_generations_below`.
@@ -192,19 +199,9 @@ impl Executor {
     /// deny already queued. Three triggers reach this cadence and none publishes off it: the
     /// period, the buffered-row count, and `POST /control/flush`. It also drives `reclaim`.
     pub(super) fn tick_if_due(&mut self) {
-        let period = std::time::Duration::from_secs(self.flush_max_age_secs);
-        let rows_due = self.health.buffered_items.load(Ordering::SeqCst) >= self.flush_max_items;
-        let period_due = self.last_tick.elapsed() >= period;
-        let due = period_due || rows_due;
-        let requested = self.health.flush_requested.load(Ordering::SeqCst);
-        let fold_requested = self.health.fold_requested.load(Ordering::SeqCst);
-        if !due && !requested && !fold_requested {
+        let Some(TickDue { due, period_due }) = self.tick_due() else {
             return;
-        }
-        // Floored ([`FAILED_CYCLE_RETRY`]) so a retry does not re-plan the buffer at every wake.
-        if !due && self.health.failed_cycle_backoff().is_some() {
-            return;
-        }
+        };
         let flush_in_flight = self.flush.in_flight();
         if !flush_in_flight {
             self.health.open_publication_cycle();
@@ -221,26 +218,7 @@ impl Executor {
         // not consumed by a skip: the flag stays armed for the first iteration after it lands.
         if flush_in_flight {
             if due {
-                self.last_tick = std::time::Instant::now();
-                self.health.mark_tick(self.last_tick);
-                self.health.ticks.fetch_add(1, Ordering::Relaxed);
-                let flushable = generation
-                    .buffer
-                    .iter()
-                    .filter(|(entity, _)| !generation.overlay.is_deleted(**entity))
-                    .count();
-                self.health
-                    .flushable_items
-                    .store(flushable, Ordering::SeqCst);
-                // A missed period is the visibility-latency breach `flush_max_age_secs` guards.
-                if flushable > 0 && period_due {
-                    self.health.flush_skips.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(
-                        "ALARM: a flush was still running when the next tick came due, so this \
-                         tick published nothing. The effective publication period is longer \
-                         than flush_max_age_secs, which is a visibility-latency breach"
-                    );
-                }
+                self.tick_behind_flush(&generation, period_due);
             }
             return;
         }
@@ -248,13 +226,70 @@ impl Executor {
         self.last_tick = std::time::Instant::now();
         self.health.mark_tick(self.last_tick);
 
+        let (plans, gated) = self.plan_view_flushes(&generation);
+        self.dispatch_planned_tick(&generation, plans, gated);
+        drop(generation);
+        // Last, so a reader that sees the count move sees everything this tick did on this
+        // thread: the plans dispatched, the log rotated.
+        self.health.ticks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether this tick fires, and on what. `None` is a wake that is not a tick.
+    fn tick_due(&self) -> Option<TickDue> {
+        let period = std::time::Duration::from_secs(self.flush_max_age_secs);
+        let rows_due = self.health.buffered_items.load(Ordering::SeqCst) >= self.flush_max_items;
+        let period_due = self.last_tick.elapsed() >= period;
+        let due = period_due || rows_due;
+        let requested = self.health.flush_requested.load(Ordering::SeqCst);
+        let fold_requested = self.health.fold_requested.load(Ordering::SeqCst);
+        if !due && !requested && !fold_requested {
+            return None;
+        }
+        // Floored ([`FAILED_CYCLE_RETRY`]) so a retry does not re-plan the buffer at every wake.
+        if !due && self.health.failed_cycle_backoff().is_some() {
+            return None;
+        }
+        Some(TickDue { due, period_due })
+    }
+
+    /// The tick that lands while a flush is still running: it stamps the tick and counts what is
+    /// waiting, and publishes nothing.
+    fn tick_behind_flush(&mut self, generation: &Generation, period_due: bool) {
+        self.last_tick = std::time::Instant::now();
+        self.health.mark_tick(self.last_tick);
+        self.health.ticks.fetch_add(1, Ordering::Relaxed);
+        let flushable = generation
+            .buffer
+            .iter()
+            .filter(|(entity, _)| !generation.overlay.is_deleted(**entity))
+            .count();
+        self.health
+            .flushable_items
+            .store(flushable, Ordering::SeqCst);
+        // A missed period is the visibility-latency breach `flush_max_age_secs` guards.
+        if flushable > 0 && period_due {
+            self.health.flush_skips.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                "ALARM: a flush was still running when the next tick came due, so this \
+                 tick published nothing. The effective publication period is longer \
+                 than flush_max_age_secs, which is a visibility-latency breach"
+            );
+        }
+    }
+
+    /// Plan every view's flush, publish the row count they cover, and report whether any view was
+    /// refused rather than merely having nothing to flush.
+    fn plan_view_flushes(
+        &self,
+        generation: &Arc<Generation>,
+    ) -> (Vec<(String, crate::flush::FlushPlan)>, bool) {
         let mark = StageMark::now();
         let mut flushable = 0usize;
         let mut gated = false;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
-        for view in views_of(&generation) {
+        for view in views_of(generation) {
             match crate::flush::plan_flush(
-                &generation,
+                generation,
                 &view,
                 self.wal.is_poisoned(),
                 self.health.overlay_diverged.load(Ordering::SeqCst),
@@ -281,7 +316,17 @@ impl Executor {
         self.health
             .flushable_items
             .store(flushable, Ordering::SeqCst);
+        (plans, gated)
+    }
 
+    /// Dispatch what the tick planned: the flushes, and the three background units the tick also
+    /// drives.
+    fn dispatch_planned_tick(
+        &mut self,
+        generation: &Arc<Generation>,
+        plans: Vec<(String, crate::flush::FlushPlan)>,
+        gated: bool,
+    ) {
         if plans.is_empty() {
             self.health.deferred_plans.store(false, Ordering::SeqCst);
             self.rotate_if_grown();
@@ -290,18 +335,14 @@ impl Executor {
             } else {
                 self.health.close_publication_cycle();
             }
-        } else if !self.dispatch_flushes(&generation, plans) {
+        } else if !self.dispatch_flushes(generation, plans) {
             self.health.fail_publication_cycle();
         }
         // Dispatched before the two it suspends, so a tick that starts a fold does not also start
         // a merge that the flip would orphan.
-        self.dispatch_fold(&generation);
-        self.dispatch_coalesce(&generation);
-        self.dispatch_merge(&generation);
-        drop(generation);
-        // Last, so a reader that sees the count move sees everything this tick did on this
-        // thread: the plans dispatched, the log rotated.
-        self.health.ticks.fetch_add(1, Ordering::Relaxed);
+        self.dispatch_fold(generation);
+        self.dispatch_coalesce(generation);
+        self.dispatch_merge(generation);
     }
 
     /// Whether this executor may still write durable state: the two latching postures, asked in
