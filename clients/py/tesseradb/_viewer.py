@@ -1,21 +1,21 @@
-"""Reading a Tessera database: the widget and the query verbs, over the viewer plane (§8).
+"""Reading a Tessera database: the widget and the query verbs, over the viewer plane.
 
 A `Viewer` is a viewer-plane URL and a token source, and nothing else. It holds no bundle, no
 schema and no id map: every answer here is a request the server authorises, so a local database
 and a hosted deployment are read by the same three verbs and neither reads a file. The token is
 the whole of the authority. What `meta()` names, what `viewport()` counts and what `item()`
-returns are computed inside the principal's mask (I2), so two viewers over one database
+returns are computed inside the principal's mask, so two viewers over one database
 legitimately disagree.
 
 `connect(url, token)` is the hosted form: a token the deployment issued, as a string, a `Token`
 or a callable returning either. It has no `viewer(terms)`, minting for another principal needing
 the session credential a hosted analyst does not hold, and no write verb, the control plane
-having one operator credential and no per-principal authority (§1).
+having one operator credential and no per-principal authority.
 
 `Database.viewer(terms)` is the local form, whose token source mints from the directory's session
 credential through `authorise`. The credential stays in the kernel: the source is a closure the
 `Map` calls, and what reaches the page is the minted token, as a custom message that is never
-widget state (client-components §7).
+widget state.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ TOKEN_MARGIN = 60.0
 #: The fields of a `/v1/viewport` body that the wire carries as integers.
 _VIEWPORT_INTEGERS = {"k", "artifact_budget", "underlay_offset"}
 
-#: The frame kinds of a `/v1/viewport` body (contracts §3.2). The decoder below refuses one it
+#: The frame kinds of a `/v1/viewport` body. The decoder below refuses one it
 #: does not know rather than skipping it: a future kind carrying data an old reader drops would
 #: be a sample standing in for the set.
 FRAME_TILES = 1
@@ -52,7 +52,7 @@ def split_frames(body: bytes) -> list[tuple[int, bytes]]:
     """A framed viewport body as `(kind, payload)`, refusing anything that is not one.
 
     The framing is `u8 kind`, `u32` little-endian length, payload, repeated; every payload but the
-    trailer's is a complete Arrow IPC stream (contracts §3.2). Truncation, an unknown kind, a
+    trailer's is a complete Arrow IPC stream. Truncation, an unknown kind, a
     misplaced tiles frame and a missing trailer all raise. A truncated body must never decode as a
     plausible shorter response: the trailer's presence is the completeness signal, and a reader
     that accepted the prefix would present a sample as the set.
@@ -168,9 +168,9 @@ class Viewport:
 
 
 class Viewer:
-    """One principal's reading of one Tessera database (§8).
+    """One principal's reading of one Tessera database.
 
-    `map()` is the widget of client-components §7, pointed here with this viewer's token source.
+    `map()` is the widget, pointed here with this viewer's token source.
     The verbs beside it — `meta()`, `viewport()`, `item()`, `categories()`,
     `suggest_category_values()`, `browse_artifacts()` and `artifact()` — are the viewer plane's
     own, one method each, answered with the token and never by reading a bundle.
@@ -221,9 +221,9 @@ class Viewer:
         height: int = 480,
         **kwargs: Any,
     ):
-        """The explorer in this cell, against this viewer plane as this principal (§8).
+        """The explorer in this cell, against this viewer plane as this principal.
 
-        The widget is client-components §7's, unchanged. What crosses the kernel boundary is
+        The widget is `Map`, unchanged. What crosses the kernel boundary is
         control and selection, never data: the page fetches from the viewer plane itself with the
         token this viewer's source mints, and asks for another before expiry. The token is a
         custom message and no traitlet carries it, so nothing that saves widget state saves it.
@@ -256,7 +256,7 @@ class Viewer:
 
         `fields` is the record by declared column name, absent where the item has no value.
         `labels` is the item's own labels intersected with this session's satisfied set, never the
-        full set (decision 0114), and `views` is the views this principal may reach it in. An item
+        full set, and `views` is the views this principal may reach it in. An item
         this principal may not see is not found, on the refusal one that does not exist gets.
 
         `external_id` is present only where the caller supplied one, and it is bytes here. The
@@ -265,7 +265,7 @@ class Viewer:
 
         `idset` is the partitioning the id was minted under (the `idset` of `meta()`). A
         `tessera_id` is durable only within one: omitting it accepts that an id from a past idset
-        may now name a different item (contracts §2.6).
+        may now name a different item.
         """
         body = {} if idset is None else {"idset": int(idset)}
         record = json.loads(self._request("POST", f"/v1/items/{tessera_id}", body))
@@ -544,7 +544,7 @@ class Viewer:
 
 
 def connect(url: str, token: TokenSource) -> Viewer:
-    """Read a deployment somebody else runs (§8, §10.6).
+    """Read a deployment somebody else runs.
 
     `token` is the viewer token that deployment issued you: a string, a `Token`, or a callable
     returning either, which is called again when the one it gave expires. There is no

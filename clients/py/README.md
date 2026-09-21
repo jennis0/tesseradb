@@ -1,6 +1,6 @@
 # `tesseradb`
 
-Tessera's Python package (decision 0095): one package whether you want the widget, the SDK or
+Tessera's Python package: one package whether you want the widget, the SDK or
 both. The widget and the SDK are here; the in-process instance joins them later. It shares no
 code with `reference/`, the test-only oracle.
 
@@ -45,7 +45,7 @@ compares the Jupyter twin cell for cell. A notebook that drifts from the package
 
 ## A database in a directory
 
-The SDK (`python-sdk.md`) makes a Tessera database out of frames and files. Three verbs carry it,
+The SDK makes a Tessera database out of frames and files. Three verbs carry it,
 and each does one thing. `declare_*` says what exists and takes no data. `insert(target, table,
 **columns)` hands a table to a declared thing and names every column it reads. `commit()` sends
 what was inserted since the last commit and forgets it: the first time through the build, after
@@ -60,19 +60,22 @@ db.declare_columns(df, skip=["paper", "x", "y", "cluster"], index=["title"])
 db.declare_layer("clusters", kind="flat")
 db.insert("map", df, id="paper", x="x", y="y")     # title is read by name
 db.insert("clusters", df, id="paper", key="cluster")
-print(db.check())                                  # what the declaration reads, and what it discloses
+print(db.check())                                  # what the declaration reads, and what refuses it
 print(db.commit())                                 # tessera check, tessera build, tessera serve
 ```
 
-`db.declaration` is the TOML the SDK wrote, and `tessera check` reads that file: the mapping from
-verb to block is checked by the binary rather than mirrored in Python. Every block names the source
+`db.declaration` is the TOML the SDK wrote, and the declaration check reads that file: the
+mapping from verb to block is checked below the SDK rather than mirrored in Python. `check()` and
+`commit()` run that check in this process where the `_tessera` extension module is installed, and
+through `tessera check` where it is not; the two read one declaration with one parser, and what
+the extension adds is a refusal naming the block it is about. Every block names the source
 and the column names its inserts gave it. The directory is everything the binary reads, so
 `db.save("~/somewhere")` and `tessera serve --deployment ~/somewhere/tessera.toml` on another
 machine serve the same database.
 
 `declare_view_group` is the group surface: its views and their metadata come from
-`insert(group, roster=table, key=, **metadata_columns)`, and its rows from one of views.md §3.2's
-two rosters. One file for every view names the column that says which with `view=`; a group whose
+`insert(group, roster=table, key=, **metadata_columns)`, and its rows from one of the two
+roster forms. One file for every view names the column that says which with `view=`; a group whose
 views each have their own file inserts one table per view, naming the one view it is for with
 `view_key=`, and the SDK writes a roster record per table with the metadata that key carries. An
 attribute or a layer scoped to a group takes `scope={"group": name}`, and every insert into one
@@ -155,11 +158,11 @@ narrower after the first commit than before it:
   against.
 - An **attribute** declared there is not a render column: a rendered value is served from the hot
   row that carries it, and `PUT /control/attributes` declares a column against entities that
-  already exist, so `render=True` is refused at the verb (decision 0136's amendment). An indexed
+  already exist, so `render=True` is refused at the verb. An indexed
   column is added at any time, and an insert into it fills it.
 
 A label set takes its text and needs nothing else: a label with no members of its own is the label
-of its cluster (decision 0145), drawn where the cluster is drawn, counted over its members and
+of its cluster, drawn where the cluster is drawn, counted over its members and
 served to whoever is served it. `insert(labels, members=…)` is for a generating set, the documents
 a content gated `all` was written from.
 
@@ -254,8 +257,9 @@ single-operator database and nowhere else.
 
 `viewer(terms)` mints for exactly the terms named, so the map of any principal is one call, and
 every count, density, cluster and label in it is computed inside that principal's mask rather
-than filtered out of the operator's. A term the database has inserted no label for is refused and
-named: a typo would otherwise draw an empty map with no error anywhere.
+than filtered out of the operator's. Which terms a session may hold is the session plane's to
+decide, so a term this database has inserted no label for is minted and reaches nothing: an empty
+map is what a principal who can see nothing is served.
 
 The query verbs are `Viewer`'s, one per operation the HTTP API publishes on the viewer plane,
 and are reached on a database through its all-terms viewer. Each goes through the viewer plane
@@ -361,7 +365,7 @@ counts, `m.bbox` where the camera settled; setting `m.filters`, `m.layers`, `m.c
 `.value` re-runs a cell at every settle; `m.observe(fn, names="selected")` reacts to a pick alone.
 
 `tesseradb.authorise(session_url, credential, terms)` is **operator-only**: the session credential
-mints any principal, and a notebook that holds it is client-interaction §7's pooled-service-token
+mints any principal, and a notebook that holds it is the pooled-service-token
 anti-pattern in a cell. It is for the local single-principal case and for the demo, where
 operator and analyst are one person. The credential stays in the kernel; the token it mints is
 what the page gets.

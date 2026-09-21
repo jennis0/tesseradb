@@ -1,10 +1,9 @@
 """What the SDK's verbs hand back.
 
-`check()` and `commit()` return an object that prints as a table. The binary's own output is
-carried through rather than re-formatted, `tessera check`'s disclosure table being what a reader
-of the declaration is meant to read. Beside it the SDK states what it decided for the user: what
+`check()` and `commit()` return an object that prints as a table: what the declaration check read
+from each file and what it refuses. Beside it the SDK states what it decided for the user: what
 each insert read and ignored, the frame each view got, and the render columns the first commit
-froze. `declare_columns` prints the table it declared (§4.5).
+froze. `declare_columns` prints the table it declared.
 """
 
 from __future__ import annotations
@@ -15,9 +14,21 @@ from typing import Sequence
 from ._columns import DeclaredColumn
 
 
+class Printed:
+    """What a verb hands back and a cell prints: one `lines()`, and the text is those lines."""
+
+    def lines(self) -> list[str]:
+        raise NotImplementedError
+
+    def __str__(self) -> str:
+        return "\n".join(self.lines())
+
+    __repr__ = __str__
+
+
 @dataclass
-class Declared:
-    """The table `declare_columns` prints (§4.5)."""
+class Declared(Printed):
+    """The table `declare_columns` prints."""
 
     columns: list[DeclaredColumn] = field(default_factory=list)
     vocabularies: list[str] = field(default_factory=list)
@@ -42,15 +53,10 @@ class Declared:
             )
         return out
 
-    def __str__(self) -> str:
-        return "\n".join(self.lines())
-
-    __repr__ = __str__
-
 
 @dataclass
-class Report:
-    """The common shape: the SDK's own decisions, then the binary's output."""
+class Report(Printed):
+    """The common shape: the SDK's own decisions, then the check's page."""
 
     what: str
     ok: bool
@@ -80,11 +86,6 @@ class Report:
             out.append(self.output.rstrip())
         return out
 
-    def __str__(self) -> str:
-        return "\n".join(self.lines())
-
-    __repr__ = __str__
-
 
 @dataclass
 class CommitReport(Report):
@@ -93,7 +94,7 @@ class CommitReport(Report):
     viewer: str | None = None
     session: str | None = None
     control: str | None = None
-    #: How this database names a row: its id column, or the tessera_id (§3).
+    #: How this database names a row: its id column, or the tessera_id.
     identity: str = ""
 
     def lines(self) -> list[str]:
@@ -114,8 +115,8 @@ class CommitReport(Report):
 
 
 @dataclass
-class PagedReport:
-    """What a later `check()` and `commit()` hand back (§6.2's last paragraph, §6.3).
+class PagedReport(Printed):
+    """What a later `check()` and `commit()` hand back.
 
     `check()` returns it with `sent` false: the plan and the pre-flight, with nothing sent. The two
     are one object because they come from one planner, so what a check prints is what a commit
@@ -131,7 +132,7 @@ class PagedReport:
     values_filled: int = 0
     #: Vocabulary values this commit's declarations and value pages drew a code for.
     values_bound: int = 0
-    #: Held values whose title one of those pages replaced (contracts §3.4, the upsert rule).
+    #: Held values whose title one of those pages replaced.
     titles_set: int = 0
     #: Parts a page supplied that the database already held: the fill rule's no-effect arm.
     already_present: int = 0
@@ -140,19 +141,19 @@ class PagedReport:
     refusals: list = field(default_factory=list)
     #: The identities the ingest route answered with, one per accepted row.
     tessera_ids: list = field(default_factory=list)
-    #: The pages the server answered as a replay of one it had already applied (decision 0144).
+    #: The pages the server answered as a replay of one it had already applied.
     replayed: list = field(default_factory=list)
     #: The publication this commit's work is visible at, from the closing flush's answer.
     publication: int | None = None
     #: The identity each published artifact was given, by layer and key. A layer's own
-    #: `tessera_id` is the only address by which it can later be addressed (I10).
+    #: `tessera_id` is the only address by which it can later be addressed.
     artifact_ids: dict = field(default_factory=dict)
     flush_wait: float | None = None
     flush_reached: bool = True
 
     @property
     def ok(self) -> bool:
-        # A finding refuses the commit (§6.3): the pre-flight sends nothing while one stands, and
+        # A finding refuses the commit: the pre-flight sends nothing while one stands, and
         # a commit that sent pages is ok only where every one of them was accepted.
         return not self.refusals and not self.findings
 
@@ -164,7 +165,7 @@ class PagedReport:
         what = "commit" if self.sent else "check"
         out = [f"{what}: {'ok' if self.ok else 'FAILED'}"]
         if self.plan:
-            out.append(f"plan ({len(self.plan)} request(s), in the order §6.2 fixes)")
+            out.append(f"plan ({len(self.plan)} request(s), in the order they are sent)")
             out += [f"  {line}" for line in self.plan]
         else:
             out.append("plan: nothing to send")
@@ -201,15 +202,10 @@ class PagedReport:
             )
         return out
 
-    def __str__(self) -> str:
-        return "\n".join(self.lines())
-
-    __repr__ = __str__
-
 
 @dataclass
-class ChangeReport:
-    """What `remove`, `suppress` and `unsuppress` hand back (§6.5)."""
+class ChangeReport(Printed):
+    """What `remove`, `suppress` and `unsuppress` hand back."""
 
     op: str
     requested: int = 0
@@ -224,11 +220,6 @@ class ChangeReport:
         for refusal in self.refusals:
             out.append(f"  refused {refusal['status']}: {refusal['detail']}")
         return out
-
-    def __str__(self) -> str:
-        return "\n".join(self.lines())
-
-    __repr__ = __str__
 
 
 def render_columns_of(attributes: Sequence[dict]) -> list[str]:

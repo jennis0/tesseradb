@@ -1,4 +1,4 @@
-"""An insert: a table handed to a declared thing, with the columns it reads named (§3).
+"""An insert: a table handed to a declared thing, with the columns it reads named.
 
 `declare_*` says what exists and takes no data; `insert(target, table, **columns)` hands a table
 to a declared thing and names every column that thing needs. The SDK guesses no column name and
@@ -7,8 +7,8 @@ columns; a path is read where it lies. Every insert prints two lists, the column
 columns it ignored.
 
 **What is named and what is not.** The id, the coordinates, the access labels, a layer's key and
-a group's view column are named on every call and never matched (§3). An artifacts table, a
-members table, a roster and a value set are tables in Tessera's own shape, so a column of theirs
+a group's view column are named on every call and never matched. An artifacts table, a members
+table, a roster and a value set are tables in Tessera's own shape, so a column of theirs
 carrying its canonical name is named on the call like any other, and one the call passed over
 is refused rather than read silently: the build and the publication routes read such a column
 under its own name whatever this package prints. Two of them are read under their own names
@@ -34,14 +34,14 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ._refusal import Refusal
+from ._reports import Printed
 
 #: Where a frame inserted after the first commit is written. Not `sources/`: `tessera check` reads
 #: every key of `[sources]` as a file the declaration is built from.
 INSERT_FOLDER = ".tessera/inserts"
 
-#: An artifacts table's columns, in the build's own field set (`tessera-build`'s `config.rs`,
-#: configuration.md §1): the ones a declaration's `fields` map can move, so the call may name a
-#: column of any name for each.
+#: An artifacts table's columns, in the build's own field set: the ones a declaration's `fields`
+#: map can move, so the call may name a column of any name for each.
 ARTIFACT_FIELDS = (
     "key", "view", "space", "contents", "parent", "attached_layer", "attached_key", "members",
     "excluding",
@@ -53,13 +53,22 @@ ARTIFACT_FIELDS = (
 ARTIFACT_CANONICAL_ONLY = ("level", "attached_level")
 
 #: A membership shape's own columns, by the kind `shape=` names. Read under their own names, the
-#: build's `fields` map moving none of them (polygon-membership.md §6.1).
+#: build's `fields` map moving none of them.
 SHAPE_COLUMNS = {
     "bbox": ("min_x", "min_y", "max_x", "max_y"),
     "circle": ("cx", "cy", "r"),
     "ellipse": ("cx", "cy", "a", "b", "angle"),
     "polygon": ("geometry",),
 }
+
+#: The publication record's own field for each kind, the record carrying `bbox = [min_x, min_y,
+#: max_x, max_y]`, `circle = [cx, cy, r]` and `ellipse = [cx, cy, a, b, angle]`. A polygon's
+#: `geometry` column is WKB at the build and the record's `wkt` is text, so the two doors read one
+#: column two ways.
+SHAPE_RECORD_FIELD = {
+    "bbox": "bbox", "circle": "circle", "ellipse": "ellipse", "polygon": "wkt",
+}
+SHAPE_FIELDS = tuple(SHAPE_RECORD_FIELD.values())
 
 #: A members table's columns, likewise: `entity` is what `id=` names, and `level` is canonical.
 MEMBER_FIELDS = ("key", "entity", "rank")
@@ -71,14 +80,14 @@ ROSTER_FIELDS = ("key", "visibility")
 
 
 def _artifact_columns() -> tuple[str, ...]:
-    """Every column name an artifacts table carries meaning under (§3)."""
+    """Every column name an artifacts table carries meaning under."""
     shapes = tuple(dict.fromkeys(one for kind in SHAPE_COLUMNS for one in SHAPE_COLUMNS[kind]))
     return ARTIFACT_FIELDS + ARTIFACT_CANONICAL_ONLY + shapes
 
 
 @dataclass
 class Contract:
-    """Which columns one kind of target reads, and which of them the call must name (§3)."""
+    """Which columns one kind of target reads, and which of them the call must name."""
 
     required: tuple[str, ...]
     optional: tuple[str, ...] = ()
@@ -144,13 +153,13 @@ CONTRACTS: dict[tuple[str, str], Contract] = {
     ),
 }
 
-#: Under a projection a view's coordinates are `lon` and `lat` (configuration.md §1), so the two
-#: names the call gives are those rather than `x` and `y`.
+#: Under a projection a view's coordinates are `lon` and `lat`, so those are the two names the
+#: call gives rather than `x` and `y`.
 PROJECTED = {"x": "lon", "y": "lat"}
 
 
 @dataclass
-class Insert:
+class Insert(Printed):
     """One table bound to one declared thing, and the columns it reads."""
 
     target: str
@@ -197,7 +206,7 @@ class Insert:
         return pq.read_table(self.path)
 
     def lines(self) -> list[str]:
-        """What this insert prints: the columns it read, and the columns it ignored (§3)."""
+        """What this insert prints: the columns it read, and the columns it ignored."""
         where = "read in place" if self.in_place else "written to " + str(self.declared_path)
         named = ", ".join(f"{role}={column!r}" for role, column in self.columns.items())
         into = f"{self.kind} {self.target!r}"
@@ -212,14 +221,9 @@ class Insert:
             out.insert(1, f"  columns: {named}")
         return out
 
-    def __str__(self) -> str:
-        return "\n".join(self.lines())
-
-    __repr__ = __str__
-
 
 #: The integer types an id column may be read as, by the name `str(type)` gives them. The build
-#: reads an id column at 32 or 64 bits and refuses the narrower widths (configuration.md §8).
+#: reads an id column at 32 or 64 bits and refuses the narrower widths.
 INTEGER_TYPES = {f"{sign}int{width}" for sign in ("", "u") for width in (32, 64)}
 
 
@@ -239,6 +243,17 @@ def as_table(data: Any) -> pa.Table:
     if isinstance(data, pa.Table):
         return data
     return pa.table(data)
+
+
+def schema_of(data: Any) -> dict:
+    """One frame's or file's columns and their types, without reading a row where it is a file."""
+    if is_path(data):
+        return _named_types(pq.ParquetFile(Path(data).expanduser()).schema_arrow)
+    return _named_types(as_table(data).schema)
+
+
+def _named_types(schema) -> dict:
+    return dict(zip(schema.names, schema.types))
 
 
 def build(
@@ -262,7 +277,7 @@ def build(
         if not path.exists():
             raise Refusal(f"insert into {target!r}: {path} does not exist")
         file = pq.ParquetFile(path)
-        schema = dict(zip(file.schema_arrow.names, file.schema_arrow.types))
+        schema = _named_types(file.schema_arrow)
         rows = file.metadata.num_rows
         insert = Insert(
             target=target,
@@ -288,7 +303,7 @@ def build(
             path=path,
             declared_path=f"{folder}/{source}.parquet",
             rows=table.num_rows,
-            schema=dict(zip(table.schema.names, table.schema.types)),
+            schema=_named_types(table.schema),
         )
     _check(insert, contract, named, projected, metadata)
     insert.named_attributes = dict(named_attributes or {})
@@ -303,7 +318,7 @@ def _check(
     projected: bool,
     metadata: tuple[str, ...],
 ) -> None:
-    """Every column the target needs is named on the call, and every name is a column (§3)."""
+    """Every column the target needs is named on the call, and every name is a column."""
     required = tuple(
         PROJECTED[role] if projected and role in PROJECTED else role
         for role in contract.required
@@ -367,7 +382,7 @@ def _check(
                 f"column in the table"
             )
     # Each role keeps the name the call gave it: a projected view names `lon=` and `lat=`, which
-    # is what its declaration writes (configuration.md §1).
+    # is what its declaration writes.
     insert.columns = {
         role: column for role, column in named.items() if role not in metadata
     }
@@ -380,7 +395,7 @@ def _check(
 
 
 def _shape_columns(insert: Insert, shape: str | None) -> tuple[str, ...]:
-    """The columns `shape=` names, each read under its own name (polygon-membership.md §6.1)."""
+    """The columns `shape=` names, each read under its own name."""
     if shape is None:
         return ()
     if shape not in SHAPE_COLUMNS:
@@ -403,7 +418,7 @@ def _shape_columns(insert: Insert, shape: str | None) -> tuple[str, ...]:
 def _refuse_a_column_read_silently(
     insert: Insert, contract: Contract, shaped: tuple[str, ...]
 ) -> None:
-    """A canonical column the call did not name (§3).
+    """A canonical column the call did not name.
 
     A table in Tessera's own shape is no exception to the rule that every column a target reads
     is named on the call: the build reads such a column under its own name whatever the SDK
@@ -439,7 +454,7 @@ def _remedy(column: str) -> str:
 
 
 def _lists(insert: Insert, contract: Contract) -> None:
-    """The columns this insert read and the columns it ignored, in the table's own order (§3).
+    """The columns this insert read and the columns it ignored, in the table's own order.
 
     What is read is what the call named, and nothing else: a canonical column it did not name is
     refused above rather than read here, so the two lists say the same thing at both doors.

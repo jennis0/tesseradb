@@ -1,6 +1,6 @@
 """The notebook widget: ``Map``, the kernel half of the protocol in ``components/src/widget.ts``.
 
-Design client-components §7. The page half is the components' single-file bundle, which
+The page half is the components' single-file bundle, which
 anywidget evaluates as ``_esm``; this half holds the token, answers the page's ``ready`` and
 ``reauthorise`` with it as a **custom message**, and mirrors control and selection as traitlets.
 
@@ -79,7 +79,7 @@ class Map(anywidget.AnyWidget):
 
     ``layers`` names the annotation layers to draw (their dependents come with them); ``None``
     leaves the explorer's default and ``[]`` draws none. ``colour_by`` is a column, or
-    ``"cluster:<layer>"`` for the served clusters' exact membership (decision 0100).
+    ``"cluster:<layer>"`` for the served clusters' exact membership.
 
     Reading the widget in the next cell is the point: ``m.selected`` is the picked item's id,
     ``m.selected_artifact`` the opened artifact's, ``m.region`` the drawn box or lasso with its

@@ -6,7 +6,6 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 
 - `render` on a column declared at a running service is refused. A build accepts it. Needs a decision on where a rendered value lands for entities that already have rows.
 - Category-typed view metadata works at a build and is refused at a running service: the create route resolves no vocabulary key.
-- A closed vocabulary can now be declared empty, but the Python SDK still sends a closed set's keys inline to work round the old refusal (`clients/py/tesseradb/_commit.py`, `_database.py`).
 
 - A generating set that holds an ingested member is answered by the exact masked-count route until a fold, because the containment partition is composed from the build's postings and does not read the flushed term tiers. Correct, and slower for those sets. Composing over the tiers means recomposing at every flush; the cost is unmeasured.
 - No test publishes the same artifacts to a per-view layer through a build and through `PUT /control/layers/{name}/artifacts` and compares what is served. `crates/tessera-build/tests/scoped_layer_keys.rs` and `crates/tessera-server/tests/artifact_views.rs` each cover one path.

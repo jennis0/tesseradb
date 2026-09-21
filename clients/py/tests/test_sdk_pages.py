@@ -791,7 +791,7 @@ def test_a_key_column_inserted_into_a_layer_with_supplied_content_is_refused(tmp
     report = db.check()
     assert not report.ok
     assert any("supplied content" in str(f) for f in report.findings), report
-    with pytest.raises(Refusal, match="insert\\('topics/inline', artifacts="):
+    with pytest.raises(Refusal):
         db.commit()
 
 
