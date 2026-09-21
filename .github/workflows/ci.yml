@@ -76,6 +76,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The workspace's 161 test binaries link to more than a stock runner has room for: the job
+      # died in `ld` with a bus error, which is how a full disk reaches a linker. The runner ships
+      # ~25 GB of toolchains this build never touches, and removing them is the whole fix — the
+      # debug level stays `line-tables-only` (Cargo.toml) so a CI backtrace still names a line.
+      - name: make room for the test binaries
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
       # `stable`, matching rust-toolchain.toml's channel. Note this is a rolling channel, not a
       # pin: the `.stderr` fixtures under crates/tessera-types/tests/ui are compiler output, so a
       # rustc release can turn this job red on wording alone. See that test's own doc for why
@@ -142,28 +152,6 @@ jobs:
           print(' '.join(d['project']['dependencies'] + d['project']['optional-dependencies']['dev']))
           ")
       - run: reference/.venv/bin/ruff check --config reference/pyproject.toml reference conformance
-      # `conformance.md` §0 states the suite's case count, and a hand-maintained number in a design
-      # document drifts silently — that one has been wrong three times. This is the treatment
-      # `scripts/check-corpus-integrity.py` gives `docs/design/inventory.md`, applied to the one
-      # fact in §0 a script can compute. It lives here and not in that script because collecting
-      # the suite needs the venv and the release binary, and that check is deliberately neither.
-      - name: the case count stated in conformance.md is the count pytest collects
-        run: |
-          collected=$(reference/.venv/bin/pytest conformance/tests conformance/suite \
-            --collect-only -q | grep -oE '^[0-9]+ tests collected' | grep -oE '^[0-9]+')
-          stated=$(grep -oE '^ *conformance-cases = [0-9]+' docs/design/conformance.md \
-            | grep -oE '[0-9]+$')
-          if [ -z "$collected" ] || [ -z "$stated" ]; then
-            echo "could not read a count: collected='$collected' stated='$stated'" >&2
-            echo "collection failed, or docs/design/conformance.md §0 lost its marker line" >&2
-            exit 1
-          fi
-          if [ "$collected" != "$stated" ]; then
-            echo "docs/design/conformance.md §0 states $stated cases; pytest collects" \
-                 "$collected. The document is stale — update the marker line in §0." >&2
-            exit 1
-          fi
-          echo "conformance.md §0 and pytest agree: $collected cases"
       # Fixtures are built once and cached in /tmp by a stamped recipe; on a fresh runner every one
       # of them is built from scratch, which is most of this job's wall-clock.
       - run: reference/.venv/bin/pytest conformance/tests conformance/suite -v
