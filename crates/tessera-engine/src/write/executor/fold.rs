@@ -29,6 +29,87 @@ pub(super) fn available_memory() -> Option<u64> {
     Some(cgroup.map_or(available, |limit| limit.min(available)))
 }
 
+/// The levels a fold's retirement is about to move, and the set it retires.
+///
+/// A fold writes its manifest before it retires, since the retirement is not reversible: a
+/// manifest that would not commit must leave it undone. [`Self::records`] composes a level's
+/// records without the retired artifacts, and [`Self::version_after`] stamps them with the version
+/// the level will carry once the retirement has run. A containment partition and a spatial level's
+/// row forms are omitted for a pending level and recompose on first use.
+pub(super) struct PendingRetirement {
+    levels: Vec<(String, u32)>,
+    retired: croaring::Bitmap,
+}
+
+impl PendingRetirement {
+    fn is_pending(&self, layer: &str, level: u32) -> bool {
+        self.levels.iter().any(|(l, v)| l == layer && *v == level)
+    }
+
+    /// The version `layer`'s `level` will have once this fold's retirement has run.
+    pub(super) fn version_after(&self, store: &ArtifactStore, layer: &str, level: u32) -> u64 {
+        store.level_version(layer, level) + u64::from(self.is_pending(layer, level))
+    }
+
+    /// The level's records as the retirement will leave them: every artifact but those whose own
+    /// entity is retired.
+    fn records<'s>(
+        &'s self,
+        store: &'s ArtifactStore,
+        layer: &str,
+        level: u32,
+    ) -> impl Iterator<Item = (u32, &'s tessera_lifecycle::membership::ArtifactRecord)> + 's {
+        let retired = &self.retired;
+        store
+            .level(layer, level)
+            .filter(move |(_, record)| !retired.contains(record.entity.raw() as u32))
+    }
+}
+
+/// How many ordinals a level's derived structures cover: one past the highest live ordinal,
+/// which is the length the reader sizes the level at (`ArtifactRows::build_over`). A hole below
+/// it is covered and a hole at the top is not.
+fn level_length<'a>(
+    records: impl Iterator<Item = (u32, &'a tessera_lifecycle::membership::ArtifactRecord)>,
+) -> u32 {
+    records.map(|(ordinal, _)| ordinal + 1).max().unwrap_or(0)
+}
+
+/// What a fold hands the manifest commit in place of the held list: the derived files it has just
+/// written, and the retirement its levels are stamped for.
+pub(super) struct FoldDerived<'a> {
+    pub(super) written: &'a [tessera_store::manifest::DerivedExtent],
+    pub(super) pending_retirement: &'a PendingRetirement,
+}
+
+/// The fold-written files whose stamped version is the level's now, after the fold's retirement
+/// has run; every other one is dropped and named. See [`PendingRetirement`].
+fn held_at_current_version(
+    store: &ArtifactStore,
+    entries: &[tessera_store::manifest::DerivedExtent],
+) -> Vec<tessera_store::manifest::DerivedExtent> {
+    entries
+        .iter()
+        .filter(|entry| {
+            let now = store.level_version(&entry.layer, entry.level);
+            if now == entry.level_version {
+                return true;
+            }
+            tracing::error!(
+                layer = %entry.layer,
+                level = entry.level,
+                form = entry.form.dir(),
+                stamped = entry.level_version,
+                now,
+                "ALARM: a fold-written derived file is stamped with a version the level does not \
+                 carry after the retirement; it is dropped and the level recomposes on first use"
+            );
+            false
+        })
+        .cloned()
+        .collect()
+}
+
 /// Delete every `v#####` tree under the bundle root that `CURRENT` does not name, once, before
 /// the executor thread is spawned.
 ///
@@ -1105,7 +1186,7 @@ impl Executor {
             &mut segments_manifest,
             Some(FoldDerived {
                 written: &derived,
-                pending_retirement: &pending.levels,
+                pending_retirement: &pending,
             }),
         ) {
             discard(&format!(

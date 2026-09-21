@@ -1,76 +1,21 @@
 use super::*;
 
-/// The levels a fold's retirement is about to move, and the set it retires.
-///
-/// A fold writes its manifest before it retires, since the retirement is not reversible: a
-/// manifest that would not commit must leave it undone. [`Self::records`] composes a level's
-/// records without the retired artifacts, and [`Self::version_after`] stamps them with the version
-/// the level will carry once the retirement has run. A containment partition and a spatial level's
-/// row forms are omitted for a pending level and recompose on first use.
-pub(super) struct PendingRetirement {
-    pub(super) levels: Vec<(String, u32)>,
-    pub(super) retired: croaring::Bitmap,
-}
-
-impl PendingRetirement {
-    pub(super) fn is_pending(&self, layer: &str, level: u32) -> bool {
-        self.levels.iter().any(|(l, v)| l == layer && *v == level)
-    }
-
-    /// The version `layer`'s `level` will have once this fold's retirement has run.
-    pub(super) fn version_after(&self, store: &ArtifactStore, layer: &str, level: u32) -> u64 {
-        store.level_version(layer, level) + u64::from(self.is_pending(layer, level))
-    }
-
-    /// The level's records as the retirement will leave them: every artifact but those whose own
-    /// entity is retired.
-    pub(super) fn records<'s>(
-        &'s self,
-        store: &'s ArtifactStore,
-        layer: &str,
-        level: u32,
-    ) -> impl Iterator<Item = (u32, &'s tessera_lifecycle::membership::ArtifactRecord)> + 's {
-        let retired = &self.retired;
-        store
-            .level(layer, level)
-            .filter(move |(_, record)| !retired.contains(record.entity.raw() as u32))
-    }
-}
-
-/// How many ordinals a level's derived structures cover: one past the highest live ordinal,
-/// which is the length the reader sizes the level at (`ArtifactRows::build_over`). A hole below
-/// it is covered and a hole at the top is not.
-pub(super) fn level_length<'a>(
-    records: impl Iterator<Item = (u32, &'a tessera_lifecycle::membership::ArtifactRecord)>,
-) -> u32 {
-    records.map(|(ordinal, _)| ordinal + 1).max().unwrap_or(0)
-}
-
-/// What a fold hands the manifest commit in place of the held list: the derived files it has just
-/// written, and the levels its retirement is about to move.
-pub(super) struct FoldDerived<'a> {
-    pub(super) written: &'a [tessera_store::manifest::DerivedExtent],
-    pub(super) pending_retirement: &'a [(String, u32)],
-}
-
 /// Every level's version, and the derived files of `held` stamped with their level's version.
 ///
-/// A file whose level has moved is dropped, so a manifest never names one nothing could adopt. For
-/// a level in `pending_retirement` the version is the store's plus one: what the level will carry
-/// once the retirement has run.
+/// A file whose level has moved is dropped, so a manifest never names one nothing could adopt. A
+/// `pending` retirement states the version each level will carry once it has run
+/// ([`PendingRetirement::version_after`]); without one the store's version is the answer.
 pub(super) fn artifact_coordinates(
     store: &ArtifactStore,
     held: &[tessera_store::manifest::DerivedExtent],
-    pending_retirement: &[(String, u32)],
+    pending: Option<&PendingRetirement>,
 ) -> (
     Vec<tessera_store::manifest::LevelVersion>,
     Vec<tessera_store::manifest::DerivedExtent>,
 ) {
-    let expected = |layer: &str, level: u32| {
-        let pending = pending_retirement
-            .iter()
-            .any(|(l, v)| l == layer && *v == level);
-        store.level_version(layer, level) + u64::from(pending)
+    let expected = |layer: &str, level: u32| match pending {
+        Some(pending) => pending.version_after(store, layer, level),
+        None => store.level_version(layer, level),
     };
     let versions = store
         .level_versions()
@@ -86,34 +31,6 @@ pub(super) fn artifact_coordinates(
         .cloned()
         .collect();
     (versions, still_true)
-}
-
-/// The fold-written files whose stamped version is the level's now, after the fold's retirement
-/// has run; every other one is dropped and named. See [`PendingRetirement`].
-pub(super) fn held_at_current_version(
-    store: &ArtifactStore,
-    entries: &[tessera_store::manifest::DerivedExtent],
-) -> Vec<tessera_store::manifest::DerivedExtent> {
-    entries
-        .iter()
-        .filter(|entry| {
-            let now = store.level_version(&entry.layer, entry.level);
-            if now == entry.level_version {
-                return true;
-            }
-            tracing::error!(
-                layer = %entry.layer,
-                level = entry.level,
-                form = entry.form.dir(),
-                stamped = entry.level_version,
-                now,
-                "ALARM: a fold-written derived file is stamped with a version the level does not \
-                 carry after the retirement; it is dropped and the level recomposes on first use"
-            );
-            false
-        })
-        .cloned()
-        .collect()
 }
 
 /// Why [`Executor::commit_side_manifest`] did not commit: the manifest would regress durable
@@ -240,13 +157,13 @@ impl Executor {
     ) -> Result<(), ManifestCommitRefused> {
         // Only the fold brings its own derived files and levels pending retirement; every other
         // publication carries the held list forward.
-        let (derived, pending_retirement) = match &fold {
-            Some(fold) => (fold.written, fold.pending_retirement),
-            None => (self.derived_extents.as_slice(), &[][..]),
+        let (derived, pending) = match &fold {
+            Some(fold) => (fold.written, Some(fold.pending_retirement)),
+            None => (self.derived_extents.as_slice(), None),
         };
         let (level_versions, derived_extents) = self
             .live
-            .with_artifacts(|store| artifact_coordinates(store, derived, pending_retirement));
+            .with_artifacts(|store| artifact_coordinates(store, derived, pending));
         next.level_versions = level_versions;
         next.derived_extents = derived_extents;
         crate::geometry::check_manifest_publishable(live_manifest, next)
