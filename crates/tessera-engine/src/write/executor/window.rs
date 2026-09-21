@@ -625,8 +625,22 @@ impl Executor {
         }
 
         // The joins this window's rows declared, prepared with everything else before anything is
-        // appended.
-        let growth = growth_records(closing.entries());
+        // appended. A window carrying no join row reads no artifact: the store is only consulted
+        // for what a restating row might already be a member of.
+        let restating = joining_entities(closing.entries());
+        let growth = if restating.is_empty() {
+            growth_records(closing.entries(), None)
+        } else {
+            self.live.with_artifacts(|store| {
+                growth_records(
+                    closing.entries(),
+                    Some(HeldMembers {
+                        store,
+                        restating: Some(&restating),
+                    }),
+                )
+            })
+        };
 
         // One sequence, one fsync: the vocabulary mints first, so a mint is durable in the same
         // commit as the rows it colours; then one record per entry in entries order, which is also

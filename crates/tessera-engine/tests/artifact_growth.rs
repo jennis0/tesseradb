@@ -954,3 +954,58 @@ fn a_joining_row_restating_its_membership_appends_no_growth() {
          log with"
     );
 }
+
+/// **The other half: a join naming a key its entity is not yet in still grows the artifact.** The
+/// subtraction above takes out what the artifact holds and nothing else, so a second view of an
+/// item that names a different cluster enters that cluster exactly as a fresh point would.
+#[test]
+fn a_joining_row_naming_another_artifact_still_grows_it() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+    engine
+        .register_layer(LayerDeclaration {
+            views: vec!["s0".into(), "s1".into()],
+            ..open_declaration("clusters/a")
+        })
+        .expect("the layer is declared over both views");
+
+    ingest_into_view(&engine, "b1", "s0", "p1", "c8");
+    ingest_into_view(&engine, "b2", "s0", "p2", "c9");
+    flush(&engine);
+    fold(&engine);
+
+    // A second view of p1, naming the cluster p2 created and p1 is in no part of.
+    ingest_into_view(&engine, "b3", "s1", "p1", "c9");
+    flush(&engine);
+    fold(&engine);
+
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
+    let count_of = |key: &str| {
+        artifacts
+            .iter()
+            .find(|a| a.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("{key} is one of the artifacts"))
+            .masked_count
+    };
+    assert_eq!(
+        count_of("c9"),
+        2,
+        "the joining row was not already a member, so it joined"
+    );
+    assert_eq!(count_of("c8"), 1, "and the cluster it was in is unchanged");
+}

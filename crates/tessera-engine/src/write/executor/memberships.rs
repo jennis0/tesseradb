@@ -11,6 +11,26 @@ pub(super) fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
     }
 }
 
+/// What a joining set is subtracted against: the artifact store, and the entities that could be
+/// restating a membership it already holds. `restating` is `None` where any row could be.
+pub(super) struct HeldMembers<'a> {
+    pub(super) store: &'a tessera_lifecycle::ArtifactStore,
+    pub(super) restating: Option<&'a croaring::Bitmap>,
+}
+
+/// The entities of a window's join rows: the only rows that can restate a membership, since an
+/// entity this window allocated is a member of nothing yet.
+pub(super) fn joining_entities<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> croaring::Bitmap {
+    let mut restating = croaring::Bitmap::new();
+    for entry in closed {
+        for row in entry.rows().iter().filter(|row| row.join) {
+            // Entity space is `u32`-wide, so the narrowing is total.
+            restating.add(row.entity_id.raw() as u32);
+        }
+    }
+    restating
+}
+
 /// The growth records one closed window owes, with the index of the entry to blame if an append
 /// fails, in the order they are to be appended.
 ///
@@ -19,7 +39,10 @@ pub(super) fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
 ///
 /// The entities are `entity_ids[row]`, the assignment this window just made, in the caller's own
 /// row order.
-pub(super) fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> Vec<(WalRecord, usize)> {
+pub(super) fn growth_records<W>(
+    closed: &[tessera_lifecycle::ClosedEntry<W>],
+    held: Option<HeldMembers<'_>>,
+) -> Vec<(WalRecord, usize)> {
     use std::collections::BTreeMap;
     /// One `(layer, level)`'s joins: the entry to blame for the append, and a bitmap per ordinal.
     type Level = (usize, BTreeMap<u32, croaring::Bitmap>);
@@ -41,6 +64,24 @@ pub(super) fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) ->
                 let entity = entry.entity_ids[*row as usize];
                 // Entity space is `u32`-wide, so the narrowing is total.
                 joining.add(entity.raw() as u32);
+            }
+        }
+    }
+    // What the artifact already holds is not a join: a row restating a membership the store
+    // carries would otherwise append a record that changes nothing and pins the log at it, since
+    // `growth_record` drops an empty set.
+    //
+    // Read against the store before this window's artifact records are applied, the only moment
+    // the difference exists.
+    if let Some(held) = held {
+        for ((layer, level), (_, ordinals)) in &mut by_level {
+            for (ordinal, joining) in ordinals.iter_mut() {
+                if held.restating.is_some_and(|rows| !joining.intersect(rows)) {
+                    continue;
+                }
+                if let Some(record) = held.store.get(layer, *level, *ordinal) {
+                    joining.andnot_inplace(&record.members);
+                }
             }
         }
     }
