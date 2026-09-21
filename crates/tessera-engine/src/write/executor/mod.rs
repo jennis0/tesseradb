@@ -399,28 +399,19 @@ impl Executor {
 
         let next = previous.with(|g| {
             g.prefix = prefix;
-            // A rotation carries the new prefix's own columns; cloning the previous generation's
-            // would serve the superseded prefix's mappings out of files reclamation is unlinking.
-            g.filter_columns = rotation.as_ref().map_or_else(
-                || Arc::clone(&previous.filter_columns),
-                |r| Arc::clone(&r.filter_columns),
-            );
             g.segments_version = segments_version;
             g.watermark = watermark;
             g.bundle = bundle;
             g.dict = dict;
-            g.postings = rotation.as_ref().map_or_else(
-                || Arc::clone(&previous.postings),
-                |r| Arc::clone(&r.postings),
-            );
-            g.fragments = rotation.as_ref().map_or_else(
-                || Arc::clone(&previous.fragments),
-                |r| Arc::clone(&r.fragments),
-            );
-            g.external_index = rotation.as_ref().map_or_else(
-                || Arc::clone(&previous.external_index),
-                |r| Arc::clone(&r.external_index),
-            );
+            // A rotation carries the new prefix's own columns; the previous generation's, which
+            // `with` starts from, would serve the superseded prefix's mappings out of files
+            // reclamation is unlinking.
+            if let Some(r) = &rotation {
+                g.filter_columns = Arc::clone(&r.filter_columns);
+                g.postings = Arc::clone(&r.postings);
+                g.fragments = Arc::clone(&r.fragments);
+                g.external_index = Arc::clone(&r.external_index);
+            }
             g.delta_postings = delta_postings;
             g.overlay_version = overlay_version;
             g.overlay = overlay;
