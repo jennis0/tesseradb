@@ -1,10 +1,10 @@
-   Compiling tessera-authz v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-authz)
-   Compiling tessera-store v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-store)
-   Compiling tessera-lifecycle v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-lifecycle)
-   Compiling tessera-engine v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-engine)
-   Compiling tessera-build v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-build)
-   Compiling tessera-server v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-server)
-   Compiling tessera-cli v0.1.0 (/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-cli)
+   Compiling tessera-authz v0.1.0 (/home/user/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-authz)
+   Compiling tessera-store v0.1.0 (/home/user/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-store)
+   Compiling tessera-lifecycle v0.1.0 (/home/user/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-lifecycle)
+   Compiling tessera-engine v0.1.0 (/home/user/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-engine)
+   Compiling tessera-build v0.1.0 (/home/user/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-build)
+   Compiling tessera-server v0.1.0 (/home/user/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-server)
+   Compiling tessera-cli v0.1.0 (/home/user/code/tessera/.claude/worktrees/concurrency-viewpath/crates/tessera-cli)
     Finished `release` profile [optimized] target(s) in 6.49s
     Finished `release` profile [optimized] target(s) in 0.11s
     Finished `release` profile [optimized] target(s) in 0.12s

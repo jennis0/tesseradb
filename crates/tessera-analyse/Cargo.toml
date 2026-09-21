@@ -2,6 +2,7 @@
 name = "tessera-analyse"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 # These four crates are required at exactly this version. `UNICODE_VERSION` in src/lib.rs writes

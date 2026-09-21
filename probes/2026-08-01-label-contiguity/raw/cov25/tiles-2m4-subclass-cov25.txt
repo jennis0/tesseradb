@@ -1,4 +1,4 @@
-bundle: /home/joe/code/tessera/data/bench-fixtures/2m4
+bundle: /home/user/code/tessera/data/bench-fixtures/2m4
 grant mode: coverage-matched (random, --target-coverage 0.25) (w=19), dictionary=176, reps=25, max_tiles=131072
 
 grant contiguity (universe 2422486 rows): entity-space card=676459 cov=27.9242% containers=37 run_ratio=118.111 | row-space card=676459 cov=27.9242% containers=37 run_ratio=1.889

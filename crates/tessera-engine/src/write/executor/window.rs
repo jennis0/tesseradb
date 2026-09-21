@@ -186,16 +186,20 @@ fn mint_cells<'a>(
             let Some(WalScalar::Utf8(key)) = cells.get(index) else {
                 continue;
             };
-            let minter = vocabularies.get_mut(vocabulary).unwrap_or_else(|| {
+            let held = vocabularies.get(vocabulary).unwrap_or_else(|| {
                 panic!(
                     "column '{name}' names vocabulary '{vocabulary}', which the live bindings do \
                      not carry"
                 )
             });
-            match minter.code_of(key) {
+            // Asked of the shared minter, so a window binding no novel key copies none of them.
+            match held.code_of(key) {
                 Some(code) => code,
                 None => {
                     let key = key.clone();
+                    let minter = vocabularies
+                        .get_mut(vocabulary)
+                        .expect("the minter this call just read");
                     match minter.mint(&key)? {
                         Minted::Fresh(code) => {
                             fresh.push((vocabulary.to_string(), key, code));
@@ -511,6 +515,9 @@ impl Executor {
     /// if the window survives. One copy for the whole window, not one per row: a second row naming
     /// an already-minted-this-window key sees the first row's binding. Answers the copy and the
     /// keys it drew, which the records at the head of the append make durable.
+    ///
+    /// The copy is a table of pointers: only a vocabulary this window mints into is copied, and
+    /// only where a published generation still holds it.
     pub(super) fn mint_window_codes(
         &self,
         closing: &mut ClosingWindow,
@@ -707,7 +714,7 @@ impl Executor {
             .iter()
             .chain(growth.iter().map(|(record, _)| record))
             .collect();
-        self.apply_artifact_records(&artifact_records, &positions[artifacts_at..]);
+        self.apply_artifact_records(&artifact_records, &positions[artifacts_at..], Publish::AtTick);
 
         self.record_accepted_batches(closing.entries(), &positions[entries_at..artifacts_at]);
         log_minted_artifacts(&minted_per_entry, &mint_records);

@@ -347,7 +347,7 @@ cell both print and record the same three figures.
   parameter, criterion 4b's added large-work viewport sub-cell.
 
 Not committed (gitignored, machine-local, documented here instead):
-- `target` — a symlink at the worktree root to the shared `/home/joe/code/tessera/target`
+- `target` — a symlink at the worktree root to the shared `/home/user/code/tessera/target`
   (`.cargo/config.toml`'s redirect target). `bench_concurrency.py`/`bench_k_sweep.py` resolve
   binaries relative to the *worktree's own* `target/release/`, which does not otherwise exist in
   this worktree layout; the symlink is the minimal fix and does not touch `.cargo/config.toml`.

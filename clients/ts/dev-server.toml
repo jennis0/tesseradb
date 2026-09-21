@@ -1,7 +1,7 @@
 [bundle]
 path = "data/bench-fixtures/1e9"
-cache = "/home/joe/code/tessera/tessera-demo/dev-server/cache"
-wal = "/home/joe/code/tessera/tessera-demo/dev-server/wal.log"
+cache = "tessera-demo/dev-server/cache"
+wal = "tessera-demo/dev-server/wal.log"
 
 [plugin]
 module = "builtin:passthrough"

@@ -27,7 +27,7 @@ LABEL="${1:?usage: run-tier.sh <label> <n> [step ...]}"
 N="${2:?usage: run-tier.sh <label> <n> [step ...]}"
 shift 2
 
-WORK="${CAMPAIGN_WORK:-/home/joe/.cache/tessera-campaign}/t$LABEL"
+WORK="${CAMPAIGN_WORK:-/home/user/.cache/tessera-campaign}/t$LABEL"
 LOGS="$WORK/logs"
 ITERATIONS="${ITERATIONS:-9}"
 LOAD_SECONDS="${LOAD_SECONDS:-45}"

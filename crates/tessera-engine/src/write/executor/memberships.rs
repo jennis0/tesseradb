@@ -1,5 +1,15 @@
 use super::*;
 
+/// When the growth a set of artifact records carries has to reach a side-manifest.
+pub(super) enum Publish {
+    /// As soon as the deny lane is empty, which is where an operator's publication and growth
+    /// routes leave their records: one manifest per request, rarely per batch.
+    Promptly,
+    /// At the next tick, which is where a data door's batch leaves its records: a manifest write per
+    /// batch would hold the write thread while the next batch queues.
+    AtTick,
+}
+
 /// The `(layer, level)` a record changes the artifacts of, and `None` for every other record:
 /// what a caller needs to read that level's version before the record moves it.
 pub(super) fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
@@ -358,15 +368,12 @@ impl Executor {
 
         let mut records = Vec::new();
         for (layer, index, vocabulary) in predicates {
-            // `code → key`, walked from the live bindings rather than inverted per row.
-            let mut key_of_code: std::collections::BTreeMap<u32, String> = Default::default();
-            if let Some(name) = &vocabulary {
-                if let Some(minter) = vocabularies.get(name) {
-                    for (key, code) in minter.bindings() {
-                        key_of_code.insert(code, key.to_string());
-                    }
-                }
-            }
+            // The codes this window's rows carry are resolved one at a time against the minter's
+            // own reverse map; building `code → key` over the whole vocabulary would be a pass
+            // over every binding the layer's column could name, per window.
+            let minter = vocabulary
+                .as_deref()
+                .and_then(|name| vocabularies.get(name));
             let mut wanted: std::collections::BTreeSet<String> = Default::default();
             for entry in closed {
                 for row in entry.rows() {
@@ -380,7 +387,7 @@ impl Executor {
                     }
                     wanted.insert(attribute_value_key(
                         code,
-                        key_of_code.get(&code).map(String::as_str),
+                        minter.and_then(|minter| minter.key_of(code)),
                     ));
                 }
             }
@@ -680,7 +687,15 @@ impl Executor {
     /// Applies durable artifact records to the registry and the store, and holds the delta each
     /// made for the tick that brings the level's row forms forward. Each record moves its level's
     /// version by one, so the version a delta starts from walks with the records.
-    pub(super) fn apply_artifact_records(&mut self, records: &[&WalRecord], positions: &[u64]) {
+    ///
+    /// `publish` says when the growth these records carry has to reach a side-manifest; it changes
+    /// nothing about what is durable or what is served.
+    pub(super) fn apply_artifact_records(
+        &mut self,
+        records: &[&WalRecord],
+        positions: &[u64],
+        publish: Publish,
+    ) {
         if records.is_empty() {
             return;
         }
@@ -723,6 +738,9 @@ impl Executor {
             self.hold_delta(record, before, refused);
         }
         // Durable in the log and not yet in a manifest.
-        self.side_manifests.behind_live = true;
+        match publish {
+            Publish::Promptly => self.side_manifests.behind_live = true,
+            Publish::AtTick => self.side_manifests.growth_unpublished = true,
+        }
     }
 }

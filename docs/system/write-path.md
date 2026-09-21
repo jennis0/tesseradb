@@ -235,6 +235,25 @@ field whose bytes do not decode is refused: the node will not serve that manifes
 damaged record says nothing about how many items it named, and reading it as an empty set would
 put every one of them back on the map.
 
+### When live state reaches a manifest
+
+Everything a manifest carries that no segment does — the deny records, the layers, views,
+attributes and vocabularies declared while the service runs, and the artifact memberships and
+supplied content published since the last one — is written by one routine, and whatever is
+outstanding goes into whichever manifest it writes next. What differs is when that is.
+
+A deny, a declaration and an operator's own publication or growth of artifacts reach a manifest at
+the first opportunity, as soon as the deny queue is empty. Memberships that arrived as a column of
+an ingest or values batch wait for the next flush cadence instead. Those batches come in runs, and
+a manifest for each one would put an extent, a manifest and their syncs on the writer's thread
+while the next batch waits: measured at a fifth of a second per batch on a corpus whose batches
+carry two membership columns, more than closing the commit window itself cost. Nothing a caller was
+promised waits: the memberships are in the log when the batch is acknowledged and are served from
+that moment. What the manifest shortens is the restore, and until it is written the log keeps every
+record behind them, so a restart replays them and serves the same counts.
+
+An operator can pull that write forward with the same request that pulls a flush forward.
+
 ### If the write-ahead log fails
 
 If the fsync for a deny window fails, the executor first tries to repair it. It rewinds to the
@@ -398,6 +417,7 @@ allocation order have diverged from each other.
 | Crash point | Recovery | At risk |
 |---|---|---|
 | Mid-flush, files written, no manifest | The files are orphaned and ignored. Replay re-flushes | Nothing |
+| A batch acknowledged, then a crash before its memberships reach a manifest | Replay restores them from the log, which still holds every record behind them, and the first cadence after the restart writes them | Nothing |
 | A durability failure, then a restart | The undurable tail is discarded | An under-durable deny's hiding, which no acknowledgement ever claimed |
 | Corruption below the WAL's confirmed point | The partition stays unready. An operator restores from the bundle and object storage | Availability. Deny state is bounded by the last published record |
 

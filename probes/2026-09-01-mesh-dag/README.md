@@ -7,10 +7,10 @@ to the corpus.
 
 **Inputs.**
 
-- `/mnt/nas/joe/tessera/datasets/mesh/2025/mtrees2025.bin` — 64,883 `Descriptor Name;TreeNumber`
+- `/mnt/nas/tessera/datasets/mesh/2025/mtrees2025.bin` — 64,883 `Descriptor Name;TreeNumber`
   lines, 30,954 distinct descriptors. Lines carry a leading space; names are stripped and
   lowercased for the join.
-- `/mnt/nas/joe/tessera/datasets/medcpt-pubmed/2026-08-27/pubmed_chunk_18.json` — 1.39 GB,
+- `/mnt/nas/tessera/datasets/medcpt-pubmed/2026-08-27/pubmed_chunk_18.json` — 1.39 GB,
   940,707 articles keyed by PMID. The `m` field is parsed as `descriptor!qualifier*` entries,
   qualifier and major-topic star stripped, distinct descriptor set per article. Descriptors that
   do not resolve against the tree file are dropped (owner ruling).

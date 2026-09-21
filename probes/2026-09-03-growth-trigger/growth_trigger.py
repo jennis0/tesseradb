@@ -4,13 +4,13 @@ probe row (then deletes it, no flush), measures again, twice."""
 import json, sys, time, uuid, base64, os
 from pathlib import Path
 
-sys.path.insert(0, "/home/joe/code/tessera/test_corpora")
+sys.path.insert(0, "/home/user/code/tessera/test_corpora")
 import requests, pyarrow.parquet as pq
 from common import serve_battery
 from common.deployment import Deployment
 from common.ingest_cycle import Control, probe_batch
 
-R = Path("/home/joe/code/tessera")
+R = Path("/home/user/code/tessera")
 rung = R / "data/ladder/medcpt"
 scratch = Path(sys.argv[1])
 out = {}

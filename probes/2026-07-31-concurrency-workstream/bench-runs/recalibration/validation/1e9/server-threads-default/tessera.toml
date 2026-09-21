@@ -1,6 +1,6 @@
 
 [bundle]
-path = "/home/joe/code/tessera/data/bench-fixtures/1e9"
+path = "/home/user/code/tessera/data/bench-fixtures/1e9"
 cache = ".superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/1e9/server-threads-default/cache"
 wal = ".superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/1e9/server-threads-default/wal.log"
 

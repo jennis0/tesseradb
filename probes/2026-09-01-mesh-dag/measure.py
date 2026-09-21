@@ -15,8 +15,8 @@ import statistics
 import time
 from collections import Counter, defaultdict, deque
 
-TREE = "/mnt/nas/joe/tessera/datasets/mesh/2025/mtrees2025.bin"
-CHUNK = "/mnt/nas/joe/tessera/datasets/medcpt-pubmed/2026-08-27/pubmed_chunk_18.json"
+TREE = "/mnt/nas/tessera/datasets/mesh/2025/mtrees2025.bin"
+CHUNK = "/mnt/nas/tessera/datasets/medcpt-pubmed/2026-08-27/pubmed_chunk_18.json"
 CORPUS_ARTICLES = 35_920_666
 
 

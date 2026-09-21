@@ -97,9 +97,17 @@ pub(in crate::write) struct SideManifests {
     /// The next `SEGMENTS-<n>.json` number, taken at the moment a writer writes rather than when a
     /// flush is planned. Private: it moves only by an allocation, which raises it over disc first.
     next_n: u64,
-    /// Whether live state holds something no side-manifest carries yet. Set by an artifact write
-    /// as well as by a deny; cleared by the publication that writes them out.
+    /// Whether live state holds something no side-manifest carries yet, and that is published at
+    /// the first opportunity: deny state, declarations, and the artifact records an operator's own
+    /// publication route applied. Cleared by the publication that writes them out.
     pub(super) behind_live: bool,
+    /// Whether a data door's batch grew memberships or content that no side-manifest carries yet.
+    ///
+    /// Published at the tick rather than behind the batch: those are WAL-durable at the
+    /// acknowledgement and the log stays pinned until an extent holds them, so what a per-batch
+    /// manifest write buys is a shorter restore, and it buys it on the write thread while the next
+    /// batch queues.
+    pub(super) growth_unpublished: bool,
     /// Deny windows applied since the last publication, the counter
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
     pub(super) windows_since_publication: u64,
@@ -117,15 +125,18 @@ pub(in crate::write) struct SideManifests {
 impl SideManifests {
     /// Open over what the bundle's manifests already carry: the counter above every
     /// `SEGMENTS-<n>.json` on disc, and the three extent lists the build or the last fold wrote.
+    /// `growth_unpublished` is what replay left in the log and no manifest carries.
     pub(in crate::write) fn seeded(
         next_n: u64,
         membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
         derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
         artifact_record_extents: Vec<tessera_store::manifest::RecordExtent>,
+        growth_unpublished: bool,
     ) -> Self {
         SideManifests {
             next_n,
             behind_live: false,
+            growth_unpublished,
             windows_since_publication: 0,
             membership_extents,
             derived_extents,
@@ -215,6 +226,16 @@ impl Executor {
             .with_artifacts(|store| artifact_coordinates(store, derived, pending));
         next.level_versions = level_versions;
         next.derived_extents = derived_extents;
+        // The artifact extents are restated from the held lists, on the derived files' rule: a
+        // publication edits a clone of the live generation's manifest, and an overlay publication
+        // writes its manifest without swapping the generation, so a flush or a merge landing after
+        // one starts from a manifest that predates its extents. Carrying that clone's lists forward
+        // drops them from the newest manifest, with the log already released. The fold brings its
+        // own, having just rewritten every level into the prefix it is publishing.
+        if fold.is_none() {
+            next.membership_extents = self.side_manifests.membership_extents.clone();
+            next.artifact_record_extents = self.side_manifests.artifact_record_extents.clone();
+        }
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         tessera_store::write_segments_manifest(prefix_dir, partition, n, next)

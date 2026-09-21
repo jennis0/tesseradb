@@ -1,6 +1,6 @@
 #!/bin/bash
 # For each bundle root (dir containing CURRENT), report total and the artifact-related subtrees.
-for cur in $(find /home/joe/code/tessera/data -name CURRENT -type f 2>/dev/null); do
+for cur in $(find /home/user/code/tessera/data -name CURRENT -type f 2>/dev/null); do
   root=$(dirname "$cur")
   tot=$(du -sb "$root" 2>/dev/null | cut -f1)
   m=$(du -sb $root/*/partitions/*/members 2>/dev/null | awk '{s+=$1} END{print s+0}')

@@ -44,7 +44,7 @@ regenerated vocabulary file is byte-identical and no build silently recolours th
 
 Usage:
     reference/.venv/bin/python probes/2026-08-10-filter-lifecycle/make_fixture.py \
-        --data /home/joe/code/tessera/data --total 25200000
+        --data /home/user/code/tessera/data --total 25200000
 """
 
 import argparse

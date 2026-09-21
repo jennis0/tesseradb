@@ -1,5 +1,6 @@
 {
   "name": "@tesseradb/example-canvas-store",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "description": "C2 with none of Tessera's rendering: the store under a hand-rolled camera on a 2D canvas, the host formatting the counts itself.",
