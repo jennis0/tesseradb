@@ -555,6 +555,23 @@ impl IngestBuffer {
         self.scoped_fills.retain(|(held, _), _| *held != entity);
     }
 
+    /// Drop everything buffered for every entity `condemned` answers `true` for, on
+    /// [`Self::remove`]'s terms — asked of every entity this buffer holds anything for, rows, fills
+    /// and scoped fills alike, rather than of those holding an own row.
+    pub fn remove_where(&mut self, condemned: impl Fn(EntityId) -> bool) {
+        let held: Vec<EntityId> = self
+            .items
+            .keys()
+            .chain(self.fills.keys())
+            .copied()
+            .chain(self.scoped_fills.keys().map(|(entity, _)| *entity))
+            .filter(|entity| condemned(*entity))
+            .collect();
+        for entity in held {
+            self.remove(entity);
+        }
+    }
+
     /// Remove one **(entity, view)** row — what a flush's publication does with exactly the rows
     /// it consumed, and what a dropped view does with the rows that named it.
     ///

@@ -430,8 +430,10 @@ pub fn replay<'a>(
     (overlay, buffer, established, resolver)
 }
 
-/// Drop every buffered row whose entity the overlay has deleted — **the buffer never holds a
-/// deleted row** (write-path §4.2, decision 0047).
+/// Drop everything the buffer holds for an entity the overlay has deleted, its rows in every view
+/// and its fills — **the buffer never holds anything of a deleted entity** (write-path §4.2,
+/// decision 0047). A join carries no terms and so is absent from the entity-space walk, and a fill
+/// is not a row at all; both pin the log exactly as an own row does.
 ///
 /// A deleted row acquires no geometry: `plan_flush` skips it, so a flush never consumes it and
 /// its entry would sit in the buffer for the process's lifetime. That is not merely untidy —
@@ -450,14 +452,7 @@ pub fn replay<'a>(
 /// is applied *before* the walk: a tombstone the seed carries would otherwise miss the
 /// `IngestBatch` record replayed after it.
 fn drop_deleted(overlay: &Overlay, buffer: &mut IngestBuffer) {
-    let deleted: Vec<EntityId> = buffer
-        .iter()
-        .map(|(entity, _)| *entity)
-        .filter(|entity| overlay.is_deleted(*entity))
-        .collect();
-    for entity in deleted {
-        buffer.remove(entity);
-    }
+    buffer.remove_where(|entity| overlay.is_deleted(entity));
 }
 
 #[cfg(test)]
