@@ -513,7 +513,6 @@ pub(super) type PauseSiteArg = tessera_lifecycle::faults::PauseSite;
 #[derive(Debug, Clone, Copy)]
 pub(super) enum PauseSiteArg {
     AfterFsync,
-    BeforeAck,
     BeforeManifestPublish,
     BeforeCurrentFlip,
     BeforeMergePublish,

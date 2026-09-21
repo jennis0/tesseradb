@@ -26,7 +26,6 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 
 - `tessera-build` keeps a second whole implementation of the build (`build_in_memory`) as a test oracle for the streaming one. Every change to the build is made twice.
 - Things declared at a running service live in separate lists (`RuntimeAttributes`, `RuntimeVocabularies`, `RuntimeViewDeclarations`) until a fold writes them into `MANIFEST.json`, then are removed from those lists. Two manifests hold one schema.
-- `PauseSiteArg::BeforeAck` (`write/executor/mod.rs`) is never constructed in a build without `fault-injection`, so `cargo clippy -p tessera-engine --lib -- -D warnings` fails. The workspace clippy enables the feature and does not see it.
 - `Engine::request_flush`'s comment says `flush_max_items` was deleted. It is a live `EngineConfig` field and the tick reads it.
 - The dig once carried an unserved floor, removed on 2026-09-20 with the tests that measured it. Refusing a dig shallower than one quantising cell took the measurement layer's shapes from 26,740 to 18,414 vertices for an unchanged area and the members sitting outside their own shape from 1,809 to 2, at the cost of one artifact's deep narrow crevice — a boundary departure of 26% of that artifact's extent — while a floor on the bridge's own length was inert below 64 cells, because the dig already stops at α.
 
