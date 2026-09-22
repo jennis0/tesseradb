@@ -5,7 +5,8 @@
 //! Each axis merges several small extents into one, preserving the set of entries it holds. Some
 //! merges renumber ordinals against a merged dictionary; others concatenate. A coalesce changes no
 //! row id, bumps no `segments_version`, invalidates no cache or projection, and never takes the
-//! base external-id run or the base dictionary. It retires nothing: no posting is dropped and no tombstone is applied.
+//! base external-id run or the base dictionary. It retires nothing: no posting is dropped and no
+//! tombstone is applied.
 //!
 //! [`plan_coalesce`] runs on the executor and chooses what to take. [`execute_coalesce`] runs on
 //! the background pool and writes the merged files. [`rebased`] applies the result to the live
@@ -216,18 +217,18 @@ pub(crate) fn execute_coalesce(
     plan: CoalescePlan,
     ctx: CoalesceContext,
 ) -> Result<CompletedCoalesce, MaintenanceFailed> {
-    let out_dir = ctx.prefix_dir.join(&ctx.out_rel);
-    std::fs::create_dir_all(&out_dir).map_err(|e| MaintenanceFailed(format!("coalesce dir: {e}")))?;
+    std::fs::create_dir_all(ctx.prefix_dir.join(&ctx.out_rel))
+        .map_err(|e| MaintenanceFailed(format!("coalesce dir: {e}")))?;
     let mut files: BTreeMap<String, FileDigest> = BTreeMap::new();
 
     let tier = taken(plan.tiers)
-        .map(|w| Merged::of(w, |w| coalesce_tiers(w, &ctx, &out_dir, &mut files)))
+        .map(|w| Merged::of(w, |w| coalesce_tiers(w, &ctx, &mut files)))
         .transpose()?;
     let run = taken(plan.locators)
-        .map(|w| Merged::of(w, |w| coalesce_runs(w, &ctx, &out_dir, &mut files)))
+        .map(|w| Merged::of(w, |w| coalesce_runs(w, &ctx, &mut files)))
         .transpose()?;
     let dict = taken(plan.dicts)
-        .map(|w| Merged::of(w, |w| coalesce_dicts(w, &ctx, &out_dir, &mut files)))
+        .map(|w| Merged::of(w, |w| coalesce_dicts(w, &ctx, &mut files)))
         .transpose()?;
     let attrs = plan
         .attrs

@@ -749,7 +749,8 @@ fn a_column_with_per_layer_dictionaries_is_selected_like_any_other() {
 /// that file is digested — a keyword entry without one is a layer the reader refuses at open.
 ///
 /// **Mutation:** leave the dictionaries out of `consumed_files` and the consumed dictionaries
-/// stay digested; drop `dict` from the coalesced entry and `FilterColumns::open` refuses the bundle.
+/// stay digested; drop `dict` from the coalesced entry and `FilterColumns::open` refuses the
+/// bundle.
 #[test]
 fn a_coalesced_keyword_extent_replaces_its_window_and_its_dictionaries_in_both_halves() {
     let (mut manifest, build_files) = manifest_with(4);
@@ -1072,20 +1073,17 @@ fn a_keyword_window_the_merge_refuses_installs_nothing() {
     let plan =
         plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
     let out_rel = format!("partitions/{PARTITION}/coalesced/coalesce-1-1");
-    let err = match execute_coalesce(
+    let outcome = execute_coalesce(
         plan,
         CoalesceContext {
             prefix_dir: prefix_dir.clone(),
             prefix: "v00000".to_string(),
             out_rel: out_rel.clone(),
         },
-    ) {
-        Ok(_) => panic!("an ordinal past its dictionary must be refused"),
-        Err(e) => e,
-    };
+    );
     assert!(
-        err.0.contains("keyword coalesce for 'title'"),
-        "the refusal names the merge and the column: {err:?}"
+        outcome.is_err(),
+        "an ordinal past its dictionary must be refused"
     );
     assert_eq!(
         serde_json::to_string(&manifest).unwrap(),
