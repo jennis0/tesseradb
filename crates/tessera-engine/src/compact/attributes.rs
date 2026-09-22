@@ -3,26 +3,15 @@ use std::path::Path;
 use croaring::Bitmap;
 
 use tessera_spatial::tiler::ScalarType;
-use tessera_store::manifest::AttrExtent;
+use tessera_store::manifest::{AttrExtent, DeclaredScalar, ScopedScalar};
+use tessera_types::view::ViewIncarnation;
 
 use crate::flush::MaintenanceFailed;
 
 use super::execute::{failed, file_len, FoldContext, FoldOutput};
 use super::plan::FoldPlan;
 
-/// The path one view's column of a scoped family folds into, or `None` where this manifest
-/// cannot say which incarnation the view is.
-fn scoped_job_rel(plan: &FoldPlan, ctx: &FoldContext, family: &str, view: &str) -> Option<String> {
-    let incarnation = ctx.view_incarnations.get(view)?;
-    Some(tessera_store::scoped_column_rel(
-        &plan.partition,
-        family,
-        view,
-        *incarnation,
-    ))
-}
-
-/// One column the attribute pass folds: where its files live, and what its declaration says. One
+/// One column the attribute passes fold: where its files live, and what its declaration says. One
 /// shape covers both an entity-scoped column and one view of a group-scoped family.
 struct ColumnJob {
     /// Prefix-relative directory, the same under both prefixes.
@@ -30,51 +19,61 @@ struct ColumnJob {
     name: String,
     /// The view this column belongs to, for a scoped family; `None` for an entity-scoped column.
     view: Option<String>,
+    /// The view's live incarnation, for a scoped family; `None` for an entity-scoped column.
+    incarnation: Option<ViewIncarnation>,
+    /// False for an entity-scoped column declared at a running service, which has extents alone
+    /// until this pass writes its base.
+    has_base: bool,
     arrow_type: ScalarType,
     /// Does the folded column owe rebuilt keyed postings? True only for a category.
     postings: bool,
 }
 
-/// The incarnation an extent must carry to belong to this job: the view's live one for a scoped
-/// column, `None` for an entity-scoped one.
-fn job_incarnation(
-    ctx: &FoldContext,
-    job: &ColumnJob,
-) -> Option<tessera_types::view::ViewIncarnation> {
-    job.view
-        .as_ref()
-        .and_then(|view| ctx.view_incarnations.get(view).copied())
+impl ColumnJob {
+    /// Does an extent naming this column, view and incarnation belong to this job?
+    fn holds(&self, column: &str, view: Option<&str>, incarnation: Option<ViewIncarnation>) -> bool {
+        column == self.name && view == self.view.as_deref() && incarnation == self.incarnation
+    }
 }
 
-/// Every column the attribute pass folds, entity-scoped then group-scoped, in manifest order.
-/// Uses the same predicates `FilterColumns::open` does, so the columns this pass writes and the
-/// columns the opener demands are one set.
-fn value_column_jobs(plan: &FoldPlan, ctx: &FoldContext) -> Vec<ColumnJob> {
+/// The columns the two predicates select, entity-scoped then group-scoped, in manifest order. A
+/// view whose incarnation this manifest cannot say is skipped.
+fn column_jobs(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    entity: impl Fn(&DeclaredScalar) -> bool,
+    scoped: impl Fn(&ScopedScalar) -> bool,
+) -> Vec<ColumnJob> {
     let mut jobs: Vec<ColumnJob> = ctx
         .declared_scalars
         .iter()
-        .filter(|d| crate::filter::owes_value_column(d, &ctx.vocabularies))
+        .filter(|d| entity(d))
         .map(|d| ColumnJob {
             rel: format!("partitions/{}/attrs/{}", plan.partition, d.name),
             name: d.name.clone(),
             view: None,
+            incarnation: None,
+            has_base: !ctx.runtime_attributes.contains(&d.name),
             arrow_type: d.arrow_type,
-            postings: d.vocabulary.is_some(),
+            postings: crate::filter::owes_postings(d, &ctx.vocabularies),
         })
         .collect();
-    for family in &ctx.scoped_scalars {
-        // Text owes no value column: `fold_text_columns` merges its dictionary and postings instead.
-        if !crate::filter::scoped_has_value_column(family) {
-            continue;
-        }
+    for family in ctx.scoped_scalars.iter().filter(|f| scoped(f)) {
         for view in &family.views {
-            let Some(rel) = scoped_job_rel(plan, ctx, &family.name, view) else {
+            let Some(&incarnation) = ctx.view_incarnations.get(view) else {
                 continue;
             };
             jobs.push(ColumnJob {
-                rel,
+                rel: tessera_store::scoped_column_rel(
+                    &plan.partition,
+                    &family.name,
+                    view,
+                    incarnation,
+                ),
                 name: family.name.clone(),
                 view: Some(view.clone()),
+                incarnation: Some(incarnation),
+                has_base: true,
                 arrow_type: family.arrow_type,
                 postings: crate::filter::scoped_owes_postings(family),
             });
@@ -106,40 +105,13 @@ pub(super) fn fold_text_columns(
     ctx: &FoldContext,
     out: &mut FoldOutput,
 ) -> Result<(), MaintenanceFailed> {
-    // Entity-scoped indexed text columns, then one job per view of each indexed scoped text family.
-    let mut jobs: Vec<ColumnJob> = ctx
-        .declared_scalars
-        .iter()
-        .filter(|d| d.arrow_type == ScalarType::Text && d.index)
-        .map(|d| ColumnJob {
-            rel: format!("partitions/{}/attrs/{}", plan.partition, d.name),
-            name: d.name.clone(),
-            view: None,
-            arrow_type: d.arrow_type,
-            postings: false,
-        })
-        .collect();
-    for family in ctx
-        .scoped_scalars
-        .iter()
-        .filter(|f| f.arrow_type == ScalarType::Text && f.index)
-    {
-        for view in &family.views {
-            let Some(rel) = scoped_job_rel(plan, ctx, &family.name, view) else {
-                continue;
-            };
-            jobs.push(ColumnJob {
-                rel,
-                name: family.name.clone(),
-                view: Some(view.clone()),
-                arrow_type: family.arrow_type,
-                postings: false,
-            });
-        }
-    }
+    let jobs = column_jobs(
+        plan,
+        ctx,
+        |d| d.arrow_type == ScalarType::Text && d.index,
+        |f| f.arrow_type == ScalarType::Text && f.index,
+    );
     for job in &jobs {
-        let scalar = job;
-        let incarnation = job_incarnation(ctx, job);
         let column_rel = job.rel.clone();
         let from_dir = ctx.from_prefix_dir.join(&column_rel);
         let to_dir = ctx.to_prefix_dir.join(&column_rel);
@@ -147,11 +119,9 @@ pub(super) fn fold_text_columns(
 
         // The base build's layer first, then one per published extent. The dictionaries are
         // advised sequential; the postings are not, since the merge interleaves reads across layers.
-        // A text column declared at a running service has no base index until this pass writes one.
-        let unfolded = job.view.is_none() && ctx.runtime_attributes.contains(&job.name);
         let mut dicts = Vec::new();
         let mut postings = Vec::new();
-        if !unfolded {
+        if job.has_base {
             dicts.push(
                 tessera_filter::SortedDict::open_dir(
                     &from_dir,
@@ -166,9 +136,11 @@ pub(super) fn fold_text_columns(
             out.attr_read += file_len(&from_dir.join(tessera_filter::DICT_FILE))
                 + file_len(&from_dir.join("postings.arrow"));
         }
-        for extent in plan.text_extents.iter().filter(|e| {
-            e.column == scalar.name && e.view == job.view && e.incarnation == incarnation
-        }) {
+        for extent in plan
+            .text_extents
+            .iter()
+            .filter(|e| job.holds(&e.column, e.view.as_deref(), e.incarnation))
+        {
             dicts.push(
                 tessera_filter::SortedDict::open(
                     &ctx.from_prefix_dir.join(&extent.dict),
@@ -210,7 +182,7 @@ pub(super) fn fold_text_columns(
             &postings_path,
             &spool_path,
         )
-        .map_err(|e| failed(&format!("pass 4a (text: column '{}')", scalar.name), &e));
+        .map_err(|e| failed(&format!("pass 4a (text: column '{}')", job.name), &e));
         // `finish` removes the spool on success; on failure it is this function's to remove.
         if outcome.is_err() {
             let _ = std::fs::remove_file(&spool_path);
@@ -229,7 +201,14 @@ pub(super) fn fold_value_columns(
     ctx: &FoldContext,
     out: &mut FoldOutput,
 ) -> Result<(), MaintenanceFailed> {
-    for job in value_column_jobs(plan, ctx) {
+    // The opener's own predicates, so the columns written here are the columns it demands.
+    let jobs = column_jobs(
+        plan,
+        ctx,
+        |d| crate::filter::owes_value_column(d, &ctx.vocabularies),
+        crate::filter::scoped_has_value_column,
+    );
+    for job in jobs {
         fold_value_column(plan, ctx, &job, out)?;
     }
     Ok(())
@@ -246,22 +225,14 @@ fn fold_value_column(
     job: &ColumnJob,
     out: &mut FoldOutput,
 ) -> Result<(), MaintenanceFailed> {
-    let scalar = job;
-    let incarnation = job_incarnation(ctx, job);
-    let belongs = |e: &&AttrExtent| {
-        e.column == scalar.name && e.view == job.view && e.incarnation == incarnation
-    };
+    let belongs = |e: &&AttrExtent| job.holds(&e.column, e.view.as_deref(), e.incarnation);
     let column_rel = job.rel.clone();
     let from_dir = ctx.from_prefix_dir.join(&column_rel);
     let to_dir = ctx.to_prefix_dir.join(&column_rel);
     std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (attributes)", &e))?;
 
     // Advised sequential: the merge below streams each layer exactly once in entity order.
-    // A column declared at a running service has no base until this pass writes one.
-    let unfolded = job.view.is_none() && ctx.runtime_attributes.contains(&job.name);
-    let base = if unfolded {
-        None
-    } else {
+    let base = if job.has_base {
         let base = tessera_filter::ValueColumn::open_dir(
             &from_dir,
             tessera_filter::Access::MappedSequential,
@@ -270,6 +241,8 @@ fn fold_value_column(
         out.attr_read += file_len(&from_dir.join(tessera_filter::VALUES_FILE))
             + file_len(&from_dir.join(tessera_filter::PRESENCE_FILE));
         Some(base)
+    } else {
+        None
     };
     let mut extents = Vec::new();
     for extent in plan.attr_extents.iter().filter(belongs) {
@@ -288,8 +261,8 @@ fn fold_value_column(
     // A keyword layer's dictionary, opened beside its ordinals. Empty for every other family,
     // which selects the generic fold below.
     let mut keyword_dicts: Vec<tessera_filter::SortedDict> = Vec::new();
-    if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
-        if !unfolded {
+    if job.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
+        if job.has_base {
             keyword_dicts.push(
                 tessera_filter::SortedDict::open_dir(
                     &from_dir,
@@ -303,7 +276,7 @@ fn fold_value_column(
                 return Err(MaintenanceFailed(format!(
                     "pass 4a (attributes): keyword column '{}' has an extent with no \
                      dictionary; its ordinals name nothing",
-                    scalar.name
+                    job.name
                 )));
             };
             keyword_dicts.push(
@@ -334,10 +307,10 @@ fn fold_value_column(
         write_empty_value_column(
             &values_path,
             &presence_path,
-            column_kind_of(scalar.arrow_type, job.postings),
+            column_kind_of(job.arrow_type, job.postings),
         )
         .map_err(|e| failed("pass 4a (attributes: an empty base)", &e))?;
-        if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
+        if job.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
             write_empty_dictionary(&dict_path)
                 .map_err(|e| failed("pass 4a (attributes: an empty dictionary)", &e))?;
             out.wrote(dict_rel, dict_path.clone());
@@ -390,7 +363,7 @@ fn fold_value_column(
     let postings_path = ctx.to_prefix_dir.join(&postings_rel);
     tessera_filter_write::write_category_postings(
         &postings_path,
-        &scalar.name,
+        &job.name,
         &folded,
         tessera_filter_write::POSTINGS_BAND_ROWS,
     )
