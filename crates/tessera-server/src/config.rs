@@ -1274,7 +1274,7 @@ pub struct Config {
 /// Deliberately **above** [`DEFAULT_K_MAX_MARKS`]: the machine ceiling should not be the binding one
 /// — the overplot ceiling should be — so that raising what a screen can legibly show does not also
 /// require re-reasoning about transport.
-const DEFAULT_MAX_K: usize = 1_000;
+pub(crate) const DEFAULT_MAX_K: usize = 1_000;
 
 /// §7.2's floor clause: the fewest marks a non-empty tile draws. Provisional (density memo §4),
 /// pending that memo's §0 visual experiments.
@@ -1307,7 +1307,7 @@ const DEFAULT_THETA_TARGET_MARKS: u64 = 16;
 /// `serve.visible_wait_max_secs`. Long enough that a page and the tick it pulls forward complete
 /// on a loaded machine, short enough that a caller who set the parameter by mistake is not held
 /// for a tick period.
-const DEFAULT_VISIBLE_WAIT_MAX_SECS: u64 = 30;
+pub(crate) const DEFAULT_VISIBLE_WAIT_MAX_SECS: u64 = 30;
 
 /// The largest `underlay_offset` a request may ask for (§3.3): sub-cell depth is `zoom + offset`.
 const DEFAULT_MAX_UNDERLAY_OFFSET: u8 = 4;
@@ -1337,16 +1337,16 @@ const DEFAULT_MAX_TILES_PER_REQUEST: usize = 262_144;
 /// It bounds the pathological case instead — a `u16` vocabulary that has minted its way to tens of
 /// thousands of values, where an unpaged response is megabytes against a measured 79 KB viewport
 /// response and, being per-principal, shares no cache with anyone.
-const DEFAULT_MAX_CATEGORY_VALUES: usize = 1_000;
+pub(crate) const DEFAULT_MAX_CATEGORY_VALUES: usize = 1_000;
 
 /// `/v1/categories/{column}/suggest`'s page ceiling and default (`value-suggestion.md` §5.3,
 /// contracts §3.2's r72). The owner's recommended default: a typeahead page, not a legend.
-const DEFAULT_MAX_SUGGESTIONS: usize = 20;
+pub(crate) const DEFAULT_MAX_SUGGESTIONS: usize = 20;
 
 /// The suggestion walk's budget (`value-suggestion.md` §5.3, §6.2). The owner's recommended
 /// default — measured (`probes/2026-09-02-value-suggestion/`) as the smallest budget that fills
 /// the sparsest measured viewer's page on a one-character prefix at 10⁷ values.
-const DEFAULT_MAX_SUGGESTION_WALK: u64 = 100_000;
+pub(crate) const DEFAULT_MAX_SUGGESTION_WALK: u64 = 100_000;
 
 /// The composed cardinality at or under which a suggestion is answered from a per-session set of
 /// visible values rather than by probing a posting per value walked (`value-suggestion.md` §6.3,
@@ -1357,7 +1357,7 @@ const DEFAULT_MAX_SUGGESTION_WALK: u64 = 100_000;
 /// route, which fills that viewer's page in under a millisecond anyway. A deployment constant,
 /// identical for every principal — which is what makes a route keyed on the caller's own
 /// cardinality admissible under §8.2 at all.
-const DEFAULT_MAX_SUGGEST_SET_ENTITIES: u64 = 10_000_000;
+pub(crate) const DEFAULT_MAX_SUGGEST_SET_ENTITIES: u64 = 10_000_000;
 
 /// One page of a layer's hierarchy (`highlight-and-hierarchy.md` §4).
 ///
@@ -1367,14 +1367,14 @@ const DEFAULT_MAX_SUGGEST_SET_ENTITIES: u64 = 10_000_000;
 /// request; what this bounds is the pathological expansion — a node with thousands of children —
 /// where an unpaged answer is a scroll nobody reads and a response nobody shares, being
 /// per-principal.
-const DEFAULT_MAX_BROWSE_ROWS: usize = 200;
+pub(crate) const DEFAULT_MAX_BROWSE_ROWS: usize = 200;
 
 /// A `region` leaf's vertex cap. A lasso is drawn with a mouse at one vertex per pointer event, so
 /// a few hundred is an elaborate one; ten thousand leaves room for a client that hands over a
 /// polygon it holds rather than one it drew, and stays well inside what the descent's per-edge
 /// cost makes a millisecond's work. The publication cap (`max_shape_vertices`) is two orders
 /// larger because a held shape pays its decomposition once.
-const DEFAULT_MAX_REGION_VERTICES: u64 = 10_000;
+pub(crate) const DEFAULT_MAX_REGION_VERTICES: u64 = 10_000;
 
 /// The region decomposition cache's bound. A whole-world box at the cell budget is a few
 /// megabytes of ranges and contexts; this holds dozens of such shapes, and an ordinary lasso is
@@ -1414,19 +1414,19 @@ const DEFAULT_ADMISSION_TIMEOUT_MS: u64 = 250;
 /// The client's asked-for flush cadence is ~1–2 MB (the streaming handover memo, criterion 3);
 /// 1 MiB is its low end, favouring time-to-next-paint over per-frame overhead, which at ~5 header
 /// bytes plus a few hundred bytes of repeated Arrow schema per frame is noise against the payload.
-const DEFAULT_STREAM_FLUSH_BYTES: usize = 1 << 20;
+pub(crate) const DEFAULT_STREAM_FLUSH_BYTES: usize = 1 << 20;
 
 /// Ten seconds of a full channel before one send gives up. Generous against any healthy reader —
 /// the channel holds ~2 flushes, so a reader consuming a megabyte every ten seconds stays under
 /// it — while bounding what a stopped reader can hold. Modelled, not measured; the whole-stream
 /// deadline below is the bound that actually caps occupancy.
-const DEFAULT_STREAM_WRITE_STALL_MS: u64 = 10_000;
+pub(crate) const DEFAULT_STREAM_WRITE_STALL_MS: u64 = 10_000;
 
 /// Sixty seconds for the whole emit phase, from first flush. At the measured op point (a 42 MB
 /// heaviest arrival) this admits a reader as slow as ~0.7 MB/s before cutting it — well below any
 /// deployment link this pre-release system has — and caps one slot's occupancy at a minute
 /// (`streamed-serving.md` §5; owner-ruled — decision 0060).
-const DEFAULT_STREAM_DEADLINE_MS: u64 = 60_000;
+pub(crate) const DEFAULT_STREAM_DEADLINE_MS: u64 = 60_000;
 
 /// `compute_admission`'s default multiplier over `compute_threads`.
 ///
@@ -1778,7 +1778,7 @@ pub fn serving_blocking_threads(config: &Config) -> usize {
 /// size, which is exactly the property design §11.1 wants when it puts the sort scope on the
 /// server. The `rows` cap is the one that binds for ordinary point data; the byte cap
 /// below catches unusually wide rows.
-const DEFAULT_INGEST_MAX_BATCH_ROWS: usize = 10_000;
+pub(crate) const DEFAULT_INGEST_MAX_BATCH_ROWS: usize = 10_000;
 
 /// Per-request body-byte cap on `/control/ingest`; over is 422.
 ///
@@ -1787,28 +1787,28 @@ const DEFAULT_INGEST_MAX_BATCH_ROWS: usize = 10_000;
 /// pathological rows. **Without a byte cap the queue bound bounds nothing**: a queue bounded in
 /// entries lets one ten-million-row batch walk straight past it, which is why this key exists at all
 /// rather than the row cap alone.
-const DEFAULT_INGEST_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const DEFAULT_INGEST_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
 /// Per-request body-byte cap on `PUT` and `PATCH /control/layers/{name}/artifacts`; over is 422
 /// (ingest §2.1). A pagination unit, never a ceiling on reach: an artifact's membership travels
 /// in as many growth pages as it needs (decision 0127), and a publication carries a first page.
 /// 64 MiB carries about 4.4 million base64 external ids a page (measured on rung 3, 2026-09-05).
-const DEFAULT_PUBLISH_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const DEFAULT_PUBLISH_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Artifact records per `PUT /control/layers/{name}/artifacts`; over is 422 (ingest §2.1). The
 /// same shape as the row cap: a page's cost on the executor is linear in its records, and the
 /// count bounds one executor step where the bytes bound one connection.
-const DEFAULT_MAX_ARTIFACTS_PER_REQUEST: usize = 10_000;
+pub(crate) const DEFAULT_MAX_ARTIFACTS_PER_REQUEST: usize = 10_000;
 
 /// Members per `PATCH /control/layers/{name}/artifacts`, summed over the page's artifacts; over
 /// is 422 (ingest §2.1). Set above what the default byte cap admits (about 4.4 million ids at
 /// 15 bytes each), so at the defaults the byte cap is the one a page meets first.
-const DEFAULT_MAX_MEMBERS_PER_REQUEST: usize = 5_000_000;
+pub(crate) const DEFAULT_MAX_MEMBERS_PER_REQUEST: usize = 5_000_000;
 
 /// Entities an exclusion list may name in one request (ingest §2.3): published on
 /// `/control/status`. Not built yet: the `excluding` field does not exist on the publication
 /// route, so nothing is enforced against it; a client reads it as the bound the field will take.
-const DEFAULT_MAX_EXCLUDED_PER_REQUEST: usize = 1_000_000;
+pub(crate) const DEFAULT_MAX_EXCLUDED_PER_REQUEST: usize = 1_000_000;
 
 /// The WAL's byte ceiling, and the right-hand side of the startup headroom assertion
 /// (`ingest_queue_bound × ingest_max_batch_bytes` + reserved deny headroom must sit strictly below
@@ -1948,7 +1948,7 @@ const DEFAULT_COMPACTION_DEAD_BYTES_RATIO: f64 = 1.0;
 /// Sized well above anything a healthy tick leaves behind: what this bounds is the pathological
 /// case — repeated flush failure — where the buffer grows without a flush to drain it, and 429
 /// is the intended backpressure (§10).
-const DEFAULT_INGEST_BUFFER_MAX_ITEMS: usize = 1_000_000;
+pub(crate) const DEFAULT_INGEST_BUFFER_MAX_ITEMS: usize = 1_000_000;
 
 /// Below this, segments compare equal for merge selection (§5.1), so a tail of tiny segments does
 /// not dominate it.

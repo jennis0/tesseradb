@@ -1069,7 +1069,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     assert_eq!(meta_resp.status(), 200, "/v1/meta must never be gated");
 
     // `/session/revoke`: session-plane credential, never gated. Revokes the SECOND session
-    // (minted before saturation, above) so the slow request's own `Arc<SessionEntry>` — cloned
+    // (minted before saturation, above) so the slow request's own `Arc<Session>` — cloned
     // into its `spawn_blocking` closure before this point — is unaffected either way; this
     // assertion is purely about the revoke endpoint's own responsiveness under a saturated gate.
     let revoke_resp = server

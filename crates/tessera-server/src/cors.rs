@@ -64,12 +64,13 @@ const EXPOSED: [&str; 7] = [
 /// equality.
 pub fn viewer_layer(state: &AppState) -> Option<CorsLayer> {
     let origins: Vec<String> = state
+        .limits
         .dev_cors_origins
         .iter()
-        .chain(state.cors_origins.iter())
+        .chain(state.limits.cors_origins.iter())
         .cloned()
         .collect();
-    layer(&origins, state.cors_loopback)
+    layer(&origins, state.limits.cors_loopback)
 }
 
 /// The session plane's layer: the development list, and **only** the development list.
@@ -80,7 +81,7 @@ pub fn viewer_layer(state: &AppState) -> Option<CorsLayer> {
 /// decision 0102 declined. Reading the field here rather than taking it as an argument is what
 /// makes that a property of this module instead of a rule every caller has to remember.
 pub fn session_layer(state: &AppState) -> Option<CorsLayer> {
-    layer(&state.dev_cors_origins, false)
+    layer(&state.limits.dev_cors_origins, false)
 }
 
 /// The layer for a configured origin list, or `None` when there is nothing to configure.

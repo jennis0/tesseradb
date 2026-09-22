@@ -160,7 +160,7 @@ async fn meta(
     // so an unauthenticated `/v1/meta` would hand the corpus shape to anyone who can reach the
     // viewer listener. The bearer here is a session token, so a valid, unexpired session is
     // required exactly as for `/v1/viewport`.
-    let entry = state.viewer_session(&headers)?;
+    let session = state.viewer_session(&headers)?;
 
     let meta = state.engine.meta();
     let selection = state.engine.config();
@@ -170,12 +170,12 @@ async fn meta(
     // filtering is two steps in the engine — reachability by terms, then a live suppression check
     // on each layer's own entity — so a layer this caller may not know about is absent by the same
     // route a name nobody registered is.
-    let layers = state.engine.visible_layers(&entry.session);
+    let layers = state.engine.visible_layers(&session);
     // **The views, the groups and the scoped families this principal may reach** (`views.md` §6),
     // resolved at authorise and fixed for the session's life. Read here rather than recomputed:
     // this document is the discovery surface, and a roster that disagreed with what a viewer verb
     // will answer is an existence oracle by subtraction.
-    let visible = entry.session.visible_views();
+    let visible = session.visible_views();
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
@@ -489,7 +489,7 @@ async fn meta(
         "selection": {
             "k_min": selection.k_min,
             "k_max_marks": selection.k_max_marks,
-            "max_k": state.max_k,
+            "max_k": state.limits.max_k,
             "theta_target_marks": selection.theta_target_marks,
             "max_underlay_offset": selection.max_underlay_offset,
             // Published for exactly the reason `max_k` is: a client
@@ -501,14 +501,14 @@ async fn meta(
             // `/v1/categories`' page ceiling, published for the same reason the others are: a
             // client that pages must know when a short page means "the set ended" rather than
             // "the deployment truncated".
-            "max_category_values": state.max_category_values,
+            "max_category_values": state.limits.max_category_values,
             // `/v1/categories/{column}/suggest`'s two ceilings (`value-suggestion.md` §5.3),
             // published on `max_category_values`' own argument. `max_suggestions` is the page
             // ceiling and `limit`'s default; `max_suggestion_walk` is the walk budget a client
             // reads `more: true` against on a page it did not fill, rather than mistaking it for
             // its own arithmetic being wrong. Deployment constants, identical for every principal.
-            "max_suggestions": state.max_suggestions,
-            "max_suggestion_walk": state.max_suggestion_walk,
+            "max_suggestions": state.limits.max_suggestions,
+            "max_suggestion_walk": state.limits.max_suggestion_walk,
             // The cardinality at or under which a suggestion is answered from this session's own
             // set of visible values rather than by probing (`value-suggestion.md` §6.3, decision
             // 0124). Published on the same argument, and it is the one constant on this surface a
@@ -516,24 +516,24 @@ async fn meta(
             // which a zoom-0 viewport already returns exactly as `visible`. What they learn from
             // the pair is which side of a published constant their own mask falls on, which is a
             // self-disclosure; nothing about another principal's mask and no corpus statistic.
-            "max_suggest_set_entities": state.max_suggest_set_entities,
+            "max_suggest_set_entities": state.limits.max_suggest_set_entities,
             // The publication vertex cap a shape is held to (`polygon-membership.md` §9), so a
             // caller can simplify before submitting rather than learn the number from a `422`.
             // A deployment constant, identical for every principal.
-            "max_shape_vertices": state.max_shape_vertices,
+            "max_shape_vertices": state.limits.max_shape_vertices,
             // The `region` leaf's two bounds (selection-operand §2), on the same argument: a
             // client choosing a shape is choosing a cost, and a refusal it cannot predict is
             // indistinguishable from its own arithmetic being wrong. Over the first is a `422`
             // naming the count and the cap; over the second is **not a refusal** — the answer
             // is a cover, said on `x-tessera-region`. Deployment constants, identical for every
             // principal.
-            "max_region_vertices": state.max_region_vertices,
-            "max_region_cells": state.max_region_cells,
+            "max_region_vertices": state.limits.max_region_vertices,
+            "max_region_cells": state.limits.max_region_cells,
             // `POST /v1/artifacts/browse`'s page ceiling and default
             // (`highlight-and-hierarchy.md` §4), published for `max_category_values`' reason: a
             // client choosing a page size is choosing a cost, and a refusal it cannot predict is
             // indistinguishable from its own arithmetic being wrong.
-            "max_browse_rows": state.max_browse_rows,
+            "max_browse_rows": state.limits.max_browse_rows,
         },
         // The annotation layers this principal may know exist, and what each declared.
         //
@@ -650,10 +650,10 @@ async fn categories(
     AxumPath(column): AxumPath<String>,
     AxumQuery(query): AxumQuery<CategoriesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let entry = state.viewer_session(&headers)?;
+    let session = state.viewer_session(&headers)?;
 
     let meta = state.engine.meta();
-    let visible = entry.session.visible_views();
+    let visible = session.visible_views();
     let resolved =
         resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
 
@@ -667,8 +667,8 @@ async fn categories(
                 "limit must be at least 1; a zero-length page cannot make progress".to_string(),
             ))
         }
-        Some(n) => n.min(state.max_category_values),
-        None => state.max_category_values,
+        Some(n) => n.min(state.limits.max_category_values),
+        None => state.limits.max_category_values,
     };
 
     // Parsed before the engine call so a malformed code list is a 422 about the request rather
@@ -701,7 +701,7 @@ async fn categories(
             };
             state
                 .engine
-                .categories(&entry.session, &resolved, query)
+                .categories(&session, &resolved, query)
                 .map_err(map_engine_error)
         })
         .await?
@@ -825,7 +825,7 @@ async fn suggest(
     AxumPath(column): AxumPath<String>,
     query: Result<AxumQuery<SuggestQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let entry = state.viewer_session(&headers)?;
+    let session = state.viewer_session(&headers)?;
 
     // An unknown query parameter is `deny_unknown_fields`'s rejection, which axum reports as an
     // extractor error rather than routing it through `SuggestQuery`'s `Deserialize` impl and back
@@ -855,25 +855,25 @@ async fn suggest(
                     .to_string(),
             ))
         }
-        Some(n) => n.min(state.max_suggestions),
-        None => state.max_suggestions,
+        Some(n) => n.min(state.limits.max_suggestions),
+        None => state.limits.max_suggestions,
     };
     let counts = query.counts.unwrap_or(false);
 
     let meta = state.engine.meta();
-    let visible = entry.session.visible_views();
+    let visible = session.visible_views();
     let resolved = resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
 
     // **At most one walk in flight per session, refused before any work runs.** `token_id` rather
     // than the bearer token itself: the admission set is process-wide, and a token never crosses a
     // response or a log line here either way, but the id is the same handle `/session/revoke`
     // already addresses this session by.
-    let Some(_suggest_guard) = state.suggest_admission.try_begin(entry.session.token_id()) else {
+    let Some(_suggest_guard) = state.suggest_admission.try_begin(session.token_id()) else {
         return Err(ApiError::Backpressure);
     };
 
-    let walk_budget = state.max_suggestion_walk;
-    let max_suggest_set_entities = state.max_suggest_set_entities;
+    let walk_budget = state.limits.max_suggestion_walk;
+    let max_suggest_set_entities = state.limits.max_suggest_set_entities;
     let q = query.q.clone();
     let page = state
         .blocking(move |state| {
@@ -881,7 +881,7 @@ async fn suggest(
             state
                 .engine
                 .suggest(
-                    &entry.session,
+                    &session,
                     &resolved,
                     &q,
                     limit,
@@ -1483,7 +1483,7 @@ fn run_viewport_stream(
     let k = req
         .k
         .unwrap_or_else(|| state.engine.config().k_max_marks)
-        .min(state.max_k);
+        .min(state.limits.max_k);
 
     // **Deduplicated here, not trusted from the caller — first occurrence kept, order
     // preserved.** A repeated tile would be served — and drawn — twice, inflating every count a
@@ -1538,7 +1538,7 @@ fn run_viewport_stream(
             let region = crate::filter_dto::RegionContext {
                 extent: view_extent,
                 projection: view_projection,
-                max_vertices: state.max_region_vertices,
+                max_vertices: state.limits.max_region_vertices,
             };
             crate::filter_dto::parse(
                 value,
@@ -1675,7 +1675,7 @@ fn run_viewport_stream(
     let outcome =
         state
             .engine
-            .viewport_stream(session, request, state.stream_flush_bytes, &mut sink);
+            .viewport_stream(session, request, state.limits.stream_flush_bytes, &mut sink);
 
     match outcome {
         Ok(timings) => {
@@ -1690,7 +1690,7 @@ fn run_viewport_stream(
                 "points": sink.points_total,
                 "flushes": sink.flushes,
             });
-            if state.stage_timing {
+            if state.limits.stage_timing {
                 if let Some(csv) =
                     stage_header(&timings, sink.arrow_serialise_ns, sink.shape_guard_fired)
                 {
@@ -1809,7 +1809,7 @@ async fn viewport(
     headers: HeaderMap,
     Json(req): Json<ViewportReq>,
 ) -> Result<Response, ApiError> {
-    let entry = state.viewer_session(&headers)?;
+    let session = state.viewer_session(&headers)?;
 
     if req.zoom > 16 {
         return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
@@ -1908,7 +1908,7 @@ async fn viewport(
     // panic is observable as the oneshot closing (mapped to the same fail-closed 500 the old
     // `map_join_error` produced), or — after the first flush — as a body abort.
     //
-    // Closure capture: `state` is a cloned `Arc<AppState>`, `entry` the `Arc<SessionEntry>`,
+    // Closure capture: `state` is a cloned `Arc<AppState>`, `session` the `Arc<Session>`,
     // `req` moved whole, `sink` carries the `GatePermits` (released at the sweep/emit boundary
     // and at producer exit — see `WireSink`), and only a *clone* of `cancel` moves in:
     // `cancel_guard` keeps the original, first here, then inside the response body.
@@ -1921,8 +1921,8 @@ async fn viewport(
         tx,
         permits: gate_permits,
         start,
-        stall: Duration::from_millis(state.stream_write_stall_ms),
-        deadline: Duration::from_millis(state.stream_deadline_ms),
+        stall: Duration::from_millis(state.limits.stream_write_stall_ms),
+        deadline: Duration::from_millis(state.limits.stream_deadline_ms),
         first_flush_at: None,
         shed: None,
         // Re-derived from the request inside the producer; the default only carries this value
@@ -1940,7 +1940,7 @@ async fn viewport(
     drop(tokio::task::spawn_blocking(move || {
         run_viewport_stream(
             &closure_state,
-            &entry.session,
+            &session,
             req,
             closure_cancel,
             sink,
@@ -2479,7 +2479,7 @@ async fn browse(
     Json(req): Json<BrowseReq>,
 ) -> Result<Json<BrowseResp>, ApiError> {
     use tessera_engine::browse::{BrowseCursor, BrowseForm, BrowseRequest};
-    let entry = state.viewer_session(&headers)?;
+    let session = state.viewer_session(&headers)?;
     // **`limit` clamps and `0` refuses** — the page bound is `/v1/categories`' shape exactly.
     if req.limit == Some(0) {
         return Err(ApiError::Contract(
@@ -2490,7 +2490,7 @@ async fn browse(
     }
     let limit = req
         .limit
-        .map_or(state.max_browse_rows, |n| n.min(state.max_browse_rows));
+        .map_or(state.limits.max_browse_rows, |n| n.min(state.limits.max_browse_rows));
     // **Exactly one of `parent` and `q`, or neither** — three forms, and a request naming two
     // would need an order between them that nothing states.
     if req.parent.is_some() && req.q.is_some() {
@@ -2533,7 +2533,7 @@ async fn browse(
             let meta = state.engine.meta();
             // The same view resolution every other viewer verb takes, gate included.
             let view = meta
-                .resolve_visible_view(&req.view, entry.session.visible_views())
+                .resolve_visible_view(&req.view, session.visible_views())
                 .map(|v| v.id.clone())
                 .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
             // The filter is parsed against the live schema, before any compute — the viewport's own
@@ -2562,11 +2562,11 @@ async fn browse(
                             y_max: view_meta.quantisation.y_max,
                         },
                         projection: view_meta.projection,
-                        max_vertices: state.max_region_vertices,
+                        max_vertices: state.limits.max_region_vertices,
                     };
                     Some(crate::filter_dto::parse(
                         value,
-                        &|leaf| meta.resolve_filter_column(leaf, &view, entry.session.visible_views()),
+                        &|leaf| meta.resolve_filter_column(leaf, &view, session.visible_views()),
                         &|column, key| {
                             let name = column
                                 .split_once(tessera_engine::filter::PIN)
@@ -2581,7 +2581,7 @@ async fn browse(
             state
                 .engine
                 .browse(
-                    &entry.session,
+                    &session,
                     BrowseRequest {
                         view: &view,
                         layer: &req.layer,
@@ -2624,7 +2624,7 @@ async fn artifact(
     AxumPath(raw): AxumPath<u64>,
     Json(req): Json<ArtifactReq>,
 ) -> Result<Json<ArtifactResp>, ApiError> {
-    let entry = state.viewer_session(&headers)?;
+    let session = state.viewer_session(&headers)?;
     let served = state
         .gated(move |state| {
             // **The same view resolution the viewport takes** (`views.md` §3.2, §6), gate included,
@@ -2635,13 +2635,13 @@ async fn artifact(
             let view = state
                 .engine
                 .meta()
-                .resolve_visible_view(&req.view, entry.session.visible_views())
+                .resolve_visible_view(&req.view, session.visible_views())
                 .map(|v| v.id.clone())
                 .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
             state
                 .engine
                 .artifact(
-                    &entry.session,
+                    &session,
                     TesseraId::new(raw),
                     req.idset,
                     &view,
@@ -2673,7 +2673,7 @@ async fn item(
     AxumPath(raw): AxumPath<u64>,
     Json(req): Json<ItemReq>,
 ) -> Result<Json<ItemResp>, ApiError> {
-    let entry = state.viewer_session(&headers)?;
+    let session = state.viewer_session(&headers)?;
 
     // `engine.item` checks `req.idset` (if the caller sent one) against the ONE generation it
     // loads, inverts the id (pure, no IO), then reads the external-id sidecar for a visible item —
@@ -2686,7 +2686,7 @@ async fn item(
     // `spawn_blocking` call rather than being rejected before `admit()` runs; see `Engine::item`'s
     // doc for the full argument.
     let resp = state
-        .gated(move |state| run_item(state, &entry.session, raw, req.idset))
+        .gated(move |state| run_item(state, &session, raw, req.idset))
         .await?;
 
     Ok(Json(resp))

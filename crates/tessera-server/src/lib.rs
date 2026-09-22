@@ -349,16 +349,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         // Its baseline is the anonymous set as it stands here: the bundle is open and the caches
         // are empty, so the first trim answers serving growth rather than the open.
         heap: crate::memory::HeapWatch::default(),
-        max_k: config.max_k,
-        max_category_values: config.max_category_values,
-        max_suggestions: config.max_suggestions,
-        max_suggestion_walk: config.max_suggestion_walk,
-        max_suggest_set_entities: config.max_suggest_set_entities,
+        limits: state::ServeLimits::from_config(&config),
         suggest_admission: state::SuggestAdmission::new(),
-        max_shape_vertices: config.max_shape_vertices,
-        max_region_vertices: config.max_region_vertices,
-        max_region_cells: config.max_region_cells,
-        max_browse_rows: config.max_browse_rows,
         // Gates only /v1/viewport, /v1/items and /session/authorise (each handler wraps its own
         // closure); never the control plane, and never /healthz, /readyz, /meta or /revoke — the
         // probes are deliberately off the control plane and outside every gate
@@ -371,23 +363,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         // The control plane's own bounds, deliberately separate from `compute_gate`: the viewer
         // gate never covers the control plane, so writes need a limiter of their own.
         ingest_admission: state::IngestAdmission::new(config.ingest_admission),
-        ingest_max_batch_rows: config.ingest_max_batch_rows,
-        ingest_buffer_max_items: config.ingest_buffer_max_items,
-        ingest_max_batch_bytes: config.ingest_max_batch_bytes,
-        publish_max_body_bytes: config.publish_max_body_bytes,
-        max_artifacts_per_request: config.max_artifacts_per_request,
-        max_members_per_request: config.max_members_per_request,
-        max_excluded_per_request: config.max_excluded_per_request,
-        stage_timing: config.stage_timing,
-        stream_flush_bytes: config.stream_flush_bytes,
-        stream_write_stall_ms: config.stream_write_stall_ms,
-        stream_deadline_ms: config.stream_deadline_ms,
         session_credential,
         operator_credential,
-        dev_cors_origins: config.dev_cors_origins.clone(),
-        cors_origins: config.cors_origins.clone(),
-        cors_loopback: config.cors_loopback,
-        visible_wait_max_secs: config.visible_wait_max_secs,
         #[cfg(feature = "fault-injection")]
         faults,
     });

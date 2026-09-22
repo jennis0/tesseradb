@@ -236,7 +236,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     // the operator set, and the answer is the 422 §3.1's "bounds exceeded" row calls for. The
     // handler takes `Result<Bytes, _>` rather than `Bytes` so that mapping is possible at all.
     let ingest_route = post(ingest).layer(axum::extract::DefaultBodyLimit::max(
-        state.ingest_max_batch_bytes,
+        state.limits.ingest_max_batch_bytes,
     ));
     // The same remedy on the change lane. A bare `Json<..>` extractor answers axum's own **413** —
     // outside contracts §3.1's closed code list, with axum's own body, on the never-shed lane, to an
@@ -248,7 +248,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     // a row, and the cost it puts on the executor and on a connection is the same shape, so it
     // takes the same cap rather than a second key an operator would have to keep in step.
     let values_route = post(values).layer(axum::extract::DefaultBodyLimit::max(
-        state.ingest_max_batch_bytes,
+        state.limits.ingest_max_batch_bytes,
     ));
     let router = Router::new()
         .route("/control/ingest", ingest_route)
@@ -309,7 +309,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::put(publish_artifacts)
                 .patch(grow_memberships)
                 .layer(axum::extract::DefaultBodyLimit::max(
-                    state.publish_max_body_bytes,
+                    state.limits.publish_max_body_bytes,
                 )),
         );
     // The faults build's arming surface (decision 0071) — absent from a default build rather
@@ -1442,7 +1442,7 @@ async fn values(
             ApiError::Contract(format!(
                 "values body exceeds the {}-byte per-batch cap (ingest.ingest_max_batch_bytes); \
                  refused before decoding, so it cost no queue slot and no WAL append",
-                state.ingest_max_batch_bytes
+                state.limits.ingest_max_batch_bytes
             ))
         } else {
             ApiError::Contract(
@@ -1536,14 +1536,14 @@ fn run_values(
 
     // The row cap, on `/control/ingest`'s rule and with its cost: the whole decode is spent
     // before the count is knowable, which is why the byte cap sits on the route.
-    if rows.len() > state.ingest_max_batch_rows {
+    if rows.len() > state.limits.ingest_max_batch_rows {
         return Err(ApiError::Contract(format!(
             "values batch has {} rows, exceeding the {}-row per-batch cap \
              (ingest.ingest_max_batch_rows); refused before the WAL append, so it cost no queue \
              slot and no record. The body was hashed and decoded in full before this fired — the \
              row count is not knowable earlier",
             rows.len(),
-            state.ingest_max_batch_rows
+            state.limits.ingest_max_batch_rows
         )));
     }
 
@@ -2428,7 +2428,7 @@ fn run_ingest(
     // state grows even on refused batches; checking the row cap first keeps an over-large batch out
     // of that. A batch that is *under* the row cap and fails later still contributes. Stated because
     // the check narrows the path rather than closing it.
-    if items.len() > state.ingest_max_batch_rows {
+    if items.len() > state.limits.ingest_max_batch_rows {
         return Err(ApiError::Contract(format!(
             "ingest batch has {} rows, exceeding the {}-row per-batch cap \
              (ingest.ingest_max_batch_rows); refused before ENTITY-ID allocation, so it cost no \
@@ -2436,7 +2436,7 @@ fn run_ingest(
              before this fired — the row count is not knowable earlier — so it is not free; the \
              byte cap on the route is the refusal that costs nothing",
             items.len(),
-            state.ingest_max_batch_rows
+            state.limits.ingest_max_batch_rows
         )));
     }
 
@@ -2644,7 +2644,7 @@ fn run_ingest(
     // flushes were observed to take. A fixed period would tell a client behind a slow flush to
     // come back and be refused again.
     let buffered = state.engine.buffered_items();
-    if buffered >= state.ingest_buffer_max_items {
+    if buffered >= state.limits.ingest_buffer_max_items {
         return Err(ApiError::WriteBackpressure {
             retry_after_s: tessera_engine::estimate_buffer_retry_after_s(
                 &state.engine.write_executor_stats(),
@@ -2798,7 +2798,7 @@ async fn ingest(
             ApiError::Contract(format!(
                 "ingest body exceeds the {}-byte per-batch cap (ingest.ingest_max_batch_bytes); \
                  refused before decoding, so it cost no queue slot and no WAL append",
-                state.ingest_max_batch_bytes
+                state.limits.ingest_max_batch_bytes
             ))
         } else {
             ApiError::Contract(
@@ -3439,7 +3439,7 @@ async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<Publicati
 /// wait.
 async fn await_publication(state: &AppState, publication: u64) -> PublicationAck {
     let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(state.visible_wait_max_secs);
+        std::time::Instant::now() + std::time::Duration::from_secs(state.limits.visible_wait_max_secs);
     loop {
         if state.engine.publication() >= publication {
             return PublicationAck {
@@ -4260,7 +4260,7 @@ fn artifact_bytes(
                  (ingest.publish_max_body_bytes; limits.{noun}.max_body_bytes on \
                  /control/status); refused before decoding, so it allocated no ordinal and \
                  appended nothing. {remedy}",
-                state.publish_max_body_bytes
+                state.limits.publish_max_body_bytes
             ))
         } else {
             ApiError::Contract(format!(
@@ -4884,7 +4884,7 @@ fn canonical_for_layer(
         shape,
         &frames,
         space,
-        state.max_shape_vertices,
+        state.limits.max_shape_vertices,
     )
     .map_err(|e| refuse(e.to_string()))?;
     let report: Vec<serde_json::Value> = canonical
@@ -5007,14 +5007,14 @@ async fn publish_artifacts(
         ));
     }
     // The record count (ingest §2.1), before any shape is canonicalised or address resolved.
-    if artifacts.len() > state.max_artifacts_per_request {
+    if artifacts.len() > state.limits.max_artifacts_per_request {
         return Err(ApiError::Contract(format!(
             "the publication carries {} artifacts, exceeding the {}-artifact per-request limit \
              (ingest.max_artifacts_per_request; limits.publish.max_artifacts_per_request on \
              /control/status); refused before anything was resolved or allocated. Send fewer \
              artifacts per request",
             artifacts.len(),
-            state.max_artifacts_per_request
+            state.limits.max_artifacts_per_request
         )));
     }
 
@@ -5060,7 +5060,7 @@ async fn publish_artifacts(
                  leaves out (ingest.md §2.3)"
             )));
         }
-        if excluding.len() > state.max_excluded_per_request {
+        if excluding.len() > state.limits.max_excluded_per_request {
             return Err(ApiError::Contract(format!(
                 "artifact {index} of this publication excludes {} entities, exceeding the {} the \
                  exclusion spelling admits (ingest.max_excluded_per_request; \
@@ -5070,7 +5070,7 @@ async fn publish_artifacts(
                  this long is spelled as an inclusion instead, naming the members the artifact \
                  holds, which pages over as many requests as it takes (ingest.md §2.3)",
                 excluding.len(),
-                state.max_excluded_per_request
+                state.limits.max_excluded_per_request
             )));
         }
     }
@@ -5482,7 +5482,7 @@ async fn grow_memberships(
         .iter()
         .map(|a| a.members.len() + a.leaving.len())
         .sum();
-    if members > state.max_members_per_request {
+    if members > state.limits.max_members_per_request {
         return Err(ApiError::Contract(format!(
             "the growth names {} members, exceeding the {}-member per-request limit \
              (ingest.max_members_per_request; limits.grow.max_members_per_request on \
@@ -5490,7 +5490,7 @@ async fn grow_memberships(
              request: a growth is a delta, so a membership may be grown in as many requests as it \
              needs",
             members,
-            state.max_members_per_request
+            state.limits.max_members_per_request
         )));
     }
 
@@ -5994,28 +5994,28 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         "limits": {
             "ingest": {
                 "route": "POST /control/ingest",
-                "max_batch_rows": state.ingest_max_batch_rows,
-                "max_batch_bytes": state.ingest_max_batch_bytes,
+                "max_batch_rows": state.limits.ingest_max_batch_rows,
+                "max_batch_bytes": state.limits.ingest_max_batch_bytes,
             },
             // The two units the values route publishes (`ingest.md` §2.1, §1.4). They are the
             // ingest route's own numbers, not a second pair of keys: a values row is a row, and
             // the cost it puts on the executor and on a connection is the same shape.
             "values": {
                 "route": "POST /control/values",
-                "max_batch_rows": state.ingest_max_batch_rows,
-                "max_batch_bytes": state.ingest_max_batch_bytes,
+                "max_batch_rows": state.limits.ingest_max_batch_rows,
+                "max_batch_bytes": state.limits.ingest_max_batch_bytes,
             },
             "publish": {
                 "route": "PUT /control/layers/{name}/artifacts",
-                "max_artifacts_per_request": state.max_artifacts_per_request,
-                "max_body_bytes": state.publish_max_body_bytes,
-                "max_shape_vertices": state.max_shape_vertices,
-                "max_excluded_per_request": state.max_excluded_per_request,
+                "max_artifacts_per_request": state.limits.max_artifacts_per_request,
+                "max_body_bytes": state.limits.publish_max_body_bytes,
+                "max_shape_vertices": state.limits.max_shape_vertices,
+                "max_excluded_per_request": state.limits.max_excluded_per_request,
             },
             "grow": {
                 "route": "PATCH /control/layers/{name}/artifacts",
-                "max_members_per_request": state.max_members_per_request,
-                "max_body_bytes": state.publish_max_body_bytes,
+                "max_members_per_request": state.limits.max_members_per_request,
+                "max_body_bytes": state.limits.publish_max_body_bytes,
             },
             "changes": {
                 "route": "POST /control/changes",
