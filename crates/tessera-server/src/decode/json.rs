@@ -23,7 +23,7 @@ use arrow::array::{
     Int32Builder, Int64Builder, Int8Builder, ListBuilder, StringBuilder,
     TimestampMicrosecondBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use serde_json::{Map, Value};
@@ -35,133 +35,64 @@ use super::DecodeError;
 /// What the batch's columns may be, resolved once per batch from the manifest and the layer
 /// registry by the caller, in the same order the Arrow decode resolves them.
 pub(crate) struct JsonColumns<'a> {
-    pub x_name: &'a str,
-    pub y_name: &'a str,
+    /// The route's own columns, in the order the batch carries them.
+    pub fixed: &'a [Fixed<'a>],
+    /// Whether a declared column one row names must be on every row of the batch.
+    pub declared_on_every_row: bool,
     pub declared: &'a [DeclaredScalar],
     pub scoped: &'a [ScopedScalar],
     pub layer_of: &'a dyn Fn(&str) -> Option<LayerDeclaration>,
 }
 
-/// One JSON body as one record batch. The first three columns are the coordinate pair and
-/// `access`; `external_id` and `node_id` are present where any row carries them; then the
+/// A column a route gives a meaning of its own, whatever the manifest declares.
+#[derive(Clone, Copy)]
+pub(crate) enum Fixed<'a> {
+    ExternalId,
+    /// A coordinate, under the name the view's projection gives its axis.
+    Coordinate(&'a str),
+    Access,
+    NodeId,
+    TesseraId,
+    IdSet,
+}
+
+impl Fixed<'_> {
+    fn name(&self) -> &str {
+        match self {
+            Fixed::ExternalId => "external_id",
+            Fixed::Coordinate(name) => name,
+            Fixed::Access => "access",
+            Fixed::NodeId => "node_id",
+            Fixed::TesseraId => "tessera_id",
+            Fixed::IdSet => "idset",
+        }
+    }
+}
+
+/// One JSON body as one record batch. The route's fixed columns come first, in the order it lists
+/// them: a coordinate and `access` always, the others where any row carries them. Then the
 /// declared scalars in declared order, the scoped families any row names, and the layer columns
 /// in first-appearance order.
 pub(crate) fn record_batch(
+    body_name: &str,
     body: &[u8],
     columns: &JsonColumns<'_>,
 ) -> Result<RecordBatch, DecodeError> {
-    let body_name = "ingest body";
     let rows = records(body_name, body)?;
     let mut fields: Vec<Field> = Vec::new();
     let mut arrays: Vec<ArrayRef> = Vec::new();
 
     let has = |name: &str| rows.iter().any(|row| row.contains_key(name));
 
-    if has("external_id") {
-        let mut builder = BinaryBuilder::new();
-        for (row, record) in rows.iter().enumerate() {
-            match record.get("external_id") {
-                None | Some(Value::Null) => builder.append_null(),
-                Some(Value::String(text)) => {
-                    let bytes = base64::engine::general_purpose::STANDARD
-                        .decode(text)
-                        .map_err(|_| {
-                            refusal(
-                                body_name,
-                                row,
-                                "external_id",
-                                "is not base64; an external id is bytes",
-                            )
-                        })?;
-                    builder.append_value(bytes);
-                }
-                Some(_) => {
-                    return Err(refusal(
-                        body_name,
-                        row,
-                        "external_id",
-                        "is not a string; an external id is base64",
-                    ))
-                }
-            }
+    for fixed in columns.fixed {
+        let name = fixed.name();
+        let always = matches!(fixed, Fixed::Coordinate(_) | Fixed::Access);
+        if !always && !has(name) {
+            continue;
         }
-        fields.push(Field::new("external_id", DataType::Binary, true));
-        arrays.push(Arc::new(builder.finish()));
-    }
-
-    for name in [columns.x_name, columns.y_name] {
-        let mut builder = Float64Builder::new();
-        for (row, record) in rows.iter().enumerate() {
-            match record.get(name) {
-                Some(Value::Number(number)) => builder.append_value(
-                    number
-                        .as_f64()
-                        .ok_or_else(|| refusal(body_name, row, name, "is not a finite number"))?,
-                ),
-                None | Some(Value::Null) => {
-                    return Err(refusal(
-                        body_name,
-                        row,
-                        name,
-                        "is missing or null; a coordinate is required",
-                    ))
-                }
-                Some(_) => return Err(refusal(body_name, row, name, "is not a number")),
-            }
-        }
-        fields.push(Field::new(name, DataType::Float64, false));
-        arrays.push(Arc::new(builder.finish()));
-    }
-
-    {
-        let mut builder = ListBuilder::new(StringBuilder::new());
-        for (row, record) in rows.iter().enumerate() {
-            match record.get("access") {
-                // A row with no label (ingest §1.2, decision 0133): the view's declaration decides.
-                None | Some(Value::Null) => builder.append(true),
-                Some(Value::Array(labels)) => {
-                    for label in labels {
-                        match label {
-                            Value::String(text) => builder.values().append_value(text),
-                            _ => {
-                                return Err(refusal(
-                                    body_name,
-                                    row,
-                                    "access",
-                                    "has an element that is not a string; every element is one \
-                                     label, taken verbatim",
-                                ))
-                            }
-                        }
-                    }
-                    builder.append(true);
-                }
-                Some(_) => {
-                    return Err(refusal(
-                        body_name,
-                        row,
-                        "access",
-                        "is not a list of labels, one label per element (contracts §3.4)",
-                    ))
-                }
-            }
-        }
-        let array = builder.finish();
-        fields.push(Field::new("access", array.data_type().clone(), false));
-        arrays.push(Arc::new(array));
-    }
-
-    if has("node_id") {
-        let mut builder = StringBuilder::new();
-        for (row, record) in rows.iter().enumerate() {
-            match record.get("node_id") {
-                None | Some(Value::Null) => builder.append_null(),
-                Some(Value::String(text)) => builder.append_value(text),
-                Some(_) => return Err(refusal(body_name, row, "node_id", "is not a string")),
-            }
-        }
-        fields.push(Field::new("node_id", DataType::Utf8, true));
-        arrays.push(Arc::new(builder.finish()));
+        let column = fixed_column(body_name, &rows, *fixed)?;
+        fields.push(Field::new(name, column.data_type().clone(), !always));
+        arrays.push(column);
     }
 
     // **A declared column no row names is omitted from the batch**, which the Arrow decode reads
@@ -174,7 +105,13 @@ pub(crate) fn record_batch(
         if !has(&declared.name) {
             continue;
         }
-        let column = scalar_column(body_name, &rows, &declared.name, declared.wire_type(), true)?;
+        let column = scalar_column(
+            body_name,
+            &rows,
+            &declared.name,
+            declared.wire_type(),
+            columns.declared_on_every_row,
+        )?;
         fields.push(Field::new(&declared.name, column.data_type().clone(), true));
         arrays.push(column);
     }
@@ -190,9 +127,7 @@ pub(crate) fn record_batch(
 
     // Every other name is a layer's or is refused, on the Arrow decode's rule.
     let known = |name: &str| {
-        matches!(name, "external_id" | "access" | "node_id")
-            || name == columns.x_name
-            || name == columns.y_name
+        columns.fixed.iter().any(|f| f.name() == name)
             || columns.declared.iter().any(|d| d.name == name)
             || columns.scoped.iter().any(|f| f.name == name)
     };
@@ -204,159 +139,7 @@ pub(crate) fn record_batch(
             }
             if (columns.layer_of)(name).is_none() {
                 return Err(DecodeError(format!(
-                    "ingest body: row {row}, column '{name}' is neither in \
-                     MANIFEST.declared_scalars nor the name of a registered layer (contracts \
-                     §2.2). Scalars are stored positionally against the declared order, so an \
-                     undeclared column is refused rather than dropped"
-                )));
-            }
-            layers.push(name.clone());
-        }
-    }
-    for name in &layers {
-        let column = membership_column(body_name, &rows, name)?;
-        fields.push(Field::new(name, column.data_type().clone(), true));
-        arrays.push(column);
-    }
-
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
-        .map_err(|e| DecodeError(format!("ingest body: {e}")))
-}
-
-/// One `POST /control/values` body as one record batch (`ingest.md` §1.2, §1.4).
-///
-/// **The same coercion as the ingest door, over a different column set.** A values row addresses
-/// an entity that exists rather than creating one, so it carries no coordinates and no `access`
-/// list, and exactly one of `external_id` and `tessera_id`; everything after that is a declared
-/// column, a group-scoped family this batch's view may name, or a layer's, and every cell is
-/// coerced by the same functions the ingest door's cells are.
-pub(crate) fn values_record_batch(
-    body: &[u8],
-    columns: &JsonColumns<'_>,
-) -> Result<RecordBatch, DecodeError> {
-    let body_name = "values body";
-    let rows = records(body_name, body)?;
-    let mut fields: Vec<Field> = Vec::new();
-    let mut arrays: Vec<ArrayRef> = Vec::new();
-    let has = |name: &str| rows.iter().any(|row| row.contains_key(name));
-
-    if has("external_id") {
-        let mut builder = BinaryBuilder::new();
-        for (row, record) in rows.iter().enumerate() {
-            match record.get("external_id") {
-                None | Some(Value::Null) => builder.append_null(),
-                Some(Value::String(text)) => {
-                    let bytes = base64::engine::general_purpose::STANDARD
-                        .decode(text)
-                        .map_err(|_| {
-                            refusal(
-                                body_name,
-                                row,
-                                "external_id",
-                                "is not base64; an external id is bytes",
-                            )
-                        })?;
-                    builder.append_value(bytes);
-                }
-                Some(_) => {
-                    return Err(refusal(
-                        body_name,
-                        row,
-                        "external_id",
-                        "is not a string; an external id is base64",
-                    ))
-                }
-            }
-        }
-        fields.push(Field::new("external_id", DataType::Binary, true));
-        arrays.push(Arc::new(builder.finish()));
-    }
-    // **String-encoded, as it is on `/control/changes`**: a bare JSON number loses a `u64` past
-    // 2⁵³ in every JavaScript client, and a mis-parsed identifier fills the wrong entity.
-    if has("tessera_id") {
-        let mut builder = StringBuilder::new();
-        for (row, record) in rows.iter().enumerate() {
-            match record.get("tessera_id") {
-                None | Some(Value::Null) => builder.append_null(),
-                Some(Value::String(text)) => builder.append_value(text),
-                Some(_) => {
-                    return Err(refusal(
-                        body_name,
-                        row,
-                        "tessera_id",
-                        "is not a string; a tessera_id is decimal digits in a string, so that a \
-                         64-bit identifier survives a JavaScript client",
-                    ))
-                }
-            }
-        }
-        fields.push(Field::new("tessera_id", DataType::Utf8, true));
-        arrays.push(Arc::new(builder.finish()));
-    }
-    if has("idset") {
-        let mut builder = UInt32Builder::new();
-        for (row, record) in rows.iter().enumerate() {
-            match record.get("idset") {
-                None | Some(Value::Null) => builder.append_null(),
-                other => match integer(body_name, other.unwrap_or(&Value::Null), row, "idset")? {
-                    None => builder.append_null(),
-                    Some(value) => builder.append_value(u32::try_from(value).map_err(|_| {
-                        refusal(
-                            body_name,
-                            row,
-                            "idset",
-                            "is out of range for an identifier set",
-                        )
-                    })?),
-                },
-            }
-        }
-        fields.push(Field::new("idset", DataType::UInt32, true));
-        arrays.push(Arc::new(builder.finish()));
-    }
-
-    for declared in columns.declared {
-        if !has(&declared.name) {
-            continue;
-        }
-        // **Not `required`**: a values batch carries the subset of the schema the caller has, and
-        // a row of it may leave a column out, which is that cell unfilled rather than a malformed
-        // row. The ingest door's stricter reading is about a row that creates an entity, where a
-        // half-carried column shifts the positional tail.
-        let column = scalar_column(
-            body_name,
-            &rows,
-            &declared.name,
-            declared.wire_type(),
-            false,
-        )?;
-        fields.push(Field::new(&declared.name, column.data_type().clone(), true));
-        arrays.push(column);
-    }
-    for family in columns.scoped {
-        if !has(&family.name) {
-            continue;
-        }
-        let wire = super::scoped_wire_type(family);
-        let column = scalar_column(body_name, &rows, &family.name, wire, false)?;
-        fields.push(Field::new(&family.name, column.data_type().clone(), true));
-        arrays.push(column);
-    }
-
-    let known = |name: &str| {
-        matches!(name, "external_id" | "tessera_id" | "idset")
-            || columns.declared.iter().any(|d| d.name == name)
-            || columns.scoped.iter().any(|f| f.name == name)
-    };
-    let mut layers: Vec<String> = Vec::new();
-    for (row, record) in rows.iter().enumerate() {
-        for name in record.keys() {
-            if known(name) || layers.iter().any(|l| l == name) {
-                continue;
-            }
-            if (columns.layer_of)(name).is_none() {
-                return Err(DecodeError(format!(
-                    "values body: row {row}, column '{name}' is neither in \
+                    "{body_name}: row {row}, column '{name}' is neither in \
                      MANIFEST.declared_scalars, nor a group-scoped family whose key set holds \
                      this batch's view, nor the name of a registered layer (contracts §2.2, \
                      `views.md` §5). An undeclared column is refused rather than dropped"
@@ -372,7 +155,161 @@ pub(crate) fn values_record_batch(
     }
 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
-        .map_err(|e| DecodeError(format!("values body: {e}")))
+        .map_err(|e| DecodeError(format!("{body_name}: {e}")))
+}
+
+/// One of a route's fixed columns, over every row.
+fn fixed_column(
+    body_name: &str,
+    rows: &[Map<String, Value>],
+    fixed: Fixed<'_>,
+) -> Result<ArrayRef, DecodeError> {
+    Ok(match fixed {
+        Fixed::ExternalId => {
+            let mut builder = BinaryBuilder::new();
+            for (row, record) in rows.iter().enumerate() {
+                match record.get("external_id") {
+                    None | Some(Value::Null) => builder.append_null(),
+                    Some(Value::String(text)) => {
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(text)
+                            .map_err(|_| {
+                                refusal(
+                                    body_name,
+                                    row,
+                                    "external_id",
+                                    "is not base64; an external id is bytes",
+                                )
+                            })?;
+                        builder.append_value(bytes);
+                    }
+                    Some(_) => {
+                        return Err(refusal(
+                            body_name,
+                            row,
+                            "external_id",
+                            "is not a string; an external id is base64",
+                        ))
+                    }
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        Fixed::Coordinate(name) => {
+            let mut builder = Float64Builder::new();
+            for (row, record) in rows.iter().enumerate() {
+                match record.get(name) {
+                    Some(Value::Number(number)) => {
+                        builder.append_value(number.as_f64().ok_or_else(|| {
+                            refusal(body_name, row, name, "is not a finite number")
+                        })?)
+                    }
+                    None | Some(Value::Null) => {
+                        return Err(refusal(
+                            body_name,
+                            row,
+                            name,
+                            "is missing or null; a coordinate is required",
+                        ))
+                    }
+                    Some(_) => return Err(refusal(body_name, row, name, "is not a number")),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        Fixed::Access => {
+            let mut builder = ListBuilder::new(StringBuilder::new());
+            for (row, record) in rows.iter().enumerate() {
+                match record.get("access") {
+                    // A row with no label (ingest §1.2, decision 0133): the view's declaration
+                    // decides.
+                    None | Some(Value::Null) => builder.append(true),
+                    Some(Value::Array(labels)) => {
+                        for label in labels {
+                            match label {
+                                Value::String(text) => builder.values().append_value(text),
+                                _ => {
+                                    return Err(refusal(
+                                        body_name,
+                                        row,
+                                        "access",
+                                        "has an element that is not a string; every element is \
+                                         one label, taken verbatim",
+                                    ))
+                                }
+                            }
+                        }
+                        builder.append(true);
+                    }
+                    Some(_) => {
+                        return Err(refusal(
+                            body_name,
+                            row,
+                            "access",
+                            "is not a list of labels, one label per element (contracts §3.4)",
+                        ))
+                    }
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        Fixed::NodeId => {
+            let mut builder = StringBuilder::new();
+            for (row, record) in rows.iter().enumerate() {
+                match record.get("node_id") {
+                    None | Some(Value::Null) => builder.append_null(),
+                    Some(Value::String(text)) => builder.append_value(text),
+                    Some(_) => return Err(refusal(body_name, row, "node_id", "is not a string")),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        // **String-encoded, as it is on `/control/changes`**: a bare JSON number loses a `u64` past
+        // 2⁵³ in every JavaScript client, and a mis-parsed identifier fills the wrong entity.
+        Fixed::TesseraId => {
+            let mut builder = StringBuilder::new();
+            for (row, record) in rows.iter().enumerate() {
+                match record.get("tessera_id") {
+                    None | Some(Value::Null) => builder.append_null(),
+                    Some(Value::String(text)) => builder.append_value(text),
+                    Some(_) => {
+                        return Err(refusal(
+                            body_name,
+                            row,
+                            "tessera_id",
+                            "is not a string; a tessera_id is decimal digits in a string, so \
+                             that a 64-bit identifier survives a JavaScript client",
+                        ))
+                    }
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        Fixed::IdSet => {
+            let mut builder = UInt32Builder::new();
+            for (row, record) in rows.iter().enumerate() {
+                match record.get("idset") {
+                    None | Some(Value::Null) => builder.append_null(),
+                    other => {
+                        match integer(body_name, other.unwrap_or(&Value::Null), row, "idset")? {
+                            None => builder.append_null(),
+                            Some(value) => {
+                                builder.append_value(u32::try_from(value).map_err(|_| {
+                                    refusal(
+                                        body_name,
+                                        row,
+                                        "idset",
+                                        "is out of range for an identifier set",
+                                    )
+                                })?)
+                            }
+                        }
+                    }
+                }
+            }
+            Arc::new(builder.finish())
+        }
+    })
 }
 
 /// The body's records: a JSON array of objects, or one object per line.

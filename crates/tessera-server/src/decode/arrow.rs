@@ -7,6 +7,7 @@ use tessera_engine::{
 use tessera_lifecycle::{BatchArtifacts, WalScalar};
 use tessera_types::TesseraId;
 
+use super::json::Fixed;
 use super::membership::{membership_column, MembershipColumn, MembershipTally};
 use super::DecodeError;
 use super::{
@@ -273,7 +274,7 @@ pub(crate) fn parse_ingest_batch(
     let (x_name, y_name) = coordinate_columns(projection);
     // **One decode below this line, whichever encoding carried the batch** (ingest §1.2). A JSON
     // body is coerced into one record batch against the declared column types
-    // (`ingest_json::record_batch`) and then read by every rule the Arrow batches are.
+    // (`json::record_batch`) and then read by every rule the Arrow batches are.
     let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, DecodeError>>> =
         match encoding {
             BodyEncoding::Arrow => {
@@ -287,10 +288,17 @@ pub(crate) fn parse_ingest_batch(
                 }))
             }
             BodyEncoding::Json => Box::new(std::iter::once(super::json::record_batch(
+                "ingest body",
                 body,
                 &super::json::JsonColumns {
-                    x_name,
-                    y_name,
+                    fixed: &[
+                        Fixed::ExternalId,
+                        Fixed::Coordinate(x_name),
+                        Fixed::Coordinate(y_name),
+                        Fixed::Access,
+                        Fixed::NodeId,
+                    ],
+                    declared_on_every_row: true,
                     declared,
                     scoped,
                     layer_of,
@@ -581,14 +589,17 @@ pub(crate) fn parse_values_batch(
                 }))
             }
             BodyEncoding::Json => {
-                Box::new(std::iter::once(super::json::values_record_batch(
+                Box::new(std::iter::once(super::json::record_batch(
+                    "values body",
                     body,
                     &super::json::JsonColumns {
-                        // A values row carries no coordinates, so the axis names name nothing it
-                        // may hold; the two spellings below are refused as undeclared like any
-                        // other name, which is what a values row naming a coordinate is.
-                        x_name: "",
-                        y_name: "",
+                        fixed: &[Fixed::ExternalId, Fixed::TesseraId, Fixed::IdSet],
+                        // A values batch carries the subset of the schema the caller has, and a
+                        // row of it may leave a column out, which is that cell unfilled rather
+                        // than a malformed row. The ingest door's stricter reading is about a row
+                        // that creates an entity, where a half-carried column shifts the
+                        // positional tail.
+                        declared_on_every_row: false,
                         declared,
                         scoped,
                         layer_of,
