@@ -725,6 +725,7 @@ fn member_key_at(values: &dyn Array, index: usize) -> Option<String> {
 /// type alone would refuse every producer whose Arrow binding writes a plain list, which is most of
 /// them.
 fn membership_column<'a>(
+    body_name: &str,
     name: &'a str,
     column: &'a Arc<dyn Array>,
     declaration: &tessera_types::layer::LayerDeclaration,
@@ -738,7 +739,7 @@ fn membership_column<'a>(
     // rejected without effect.
     if declaration.membership != tessera_types::layer::MembershipSource::Enumerated {
         return Err(ApiError::Contract(format!(
-            "ingest body: column '{name}' names a layer whose membership is evaluated per \
+            "{body_name}: column '{name}' names a layer whose membership is evaluated per \
              request rather than enumerated — there is no stored membership for a point to join, \
              and one written beside the predicate would diverge from it at the first write"
         )));
@@ -756,7 +757,7 @@ fn membership_column<'a>(
             match meaning {
                 tessera_types::layer::ListMeaning::Lineage => {
                     return Err(ApiError::Contract(format!(
-                        "ingest body: column '{name}' is a fixed-size list of {size} and that \
+                        "{body_name}: column '{name}' is a fixed-size list of {size} and that \
                          layer is declared nested, whose lineage is as deep as each point's own \
                          branch — a fixed arity is one entry per level, which is the stacked and \
                          tiered shape"
@@ -766,7 +767,7 @@ fn membership_column<'a>(
                     if *size as usize != levels =>
                 {
                     return Err(ApiError::Contract(format!(
-                        "ingest body: column '{name}' is a fixed-size list of {size} and that \
+                        "{body_name}: column '{name}' is a fixed-size list of {size} and that \
                          layer declares {levels} levels. Entry k is the artifact at level k, so \
                          the two counts are one number written twice"
                     )))
@@ -796,7 +797,7 @@ fn membership_column<'a>(
             | DataType::UInt64
     ) {
         return Err(ApiError::Contract(format!(
-            "ingest body: column '{name}' names a layer and carries {element:?}; a member key is \
+            "{body_name}: column '{name}' names a layer and carries {element:?}; a member key is \
              text or an integer — an integer key is read as its decimal spelling, so `3` and \
              \"3\" name one artifact"
         )));
@@ -827,6 +828,7 @@ impl MembershipTally {
     /// stream may carry several record batches and the executor indexes one flat list of rows.
     fn read(
         &mut self,
+        body_name: &str,
         column: &MembershipColumn<'_>,
         row: usize,
         offset: usize,
@@ -846,7 +848,7 @@ impl MembershipTally {
         if let Some(levels) = column.meaning.arity().filter(|_| column.cells.is_list()) {
             if entries.len() != levels {
                 return Err(ApiError::Contract(format!(
-                    "ingest body: column '{}' names {} artifacts at row {row} and the layer \
+                    "{body_name}: column '{}' names {} artifacts at row {row} and the layer \
                      declares {levels} levels. A stacked or tiered layer's column is one entry \
                      per level, nullable where the point is in no artifact at that resolution",
                     column.layer,
@@ -974,6 +976,7 @@ fn scalar_at(col: &dyn Array, row: usize, ty: ScalarType) -> Option<WalScalar> {
 /// recolour the other's. Minting happens once, on the write executor, where windows close serially
 /// (write-path §1.1).
 fn category_code(
+    body_name: &str,
     col: &dyn Array,
     row: usize,
     declared: &DeclaredScalar,
@@ -991,7 +994,7 @@ fn category_code(
     let key = keys.value(row);
     if key.is_empty() {
         return Err(ApiError::Contract(format!(
-            "ingest body: column '{}' carries the empty string, which is not a value key. An \
+            "{body_name}: column '{}' carries the empty string, which is not a value key. An \
              item with no value for this column carries null, which is stored as *absent*; \
              minting a code for the empty string would make a typo a category \
              (per-point-attributes §3.4)",
@@ -1000,7 +1003,7 @@ fn category_code(
     }
     let minter = vocabularies.get(vocabulary).ok_or_else(|| {
         ApiError::Contract(format!(
-            "ingest body: column '{}' names vocabulary '{vocabulary}', which this bundle does \
+            "{body_name}: column '{}' names vocabulary '{vocabulary}', which this bundle does \
              not carry",
             declared.name
         ))
@@ -1014,7 +1017,7 @@ fn category_code(
         // refusal is here rather than on the executor because the whole batch can still be
         // rejected without effect at this point, which is what a 422 promises.
         VocabularyKind::Declared => Err(ApiError::Contract(format!(
-            "ingest body: column '{}' carries value '{key}', which vocabulary '{vocabulary}' \
+            "{body_name}: column '{}' carries value '{key}', which vocabulary '{vocabulary}' \
              does not list. Under `vocabulary = \"declared\"` there is no auto-mint: a category \
              carries properties and, through its postings, a visibility consequence, so a typo \
              must not create one (per-point-attributes §5)",
@@ -1226,7 +1229,7 @@ fn parse_ingest_batch(
             let column = batch
                 .column_by_name(name)
                 .expect("the column was found in this batch's own schema");
-            memberships.push(membership_column(name, column, declaration)?);
+            memberships.push(membership_column("ingest body", name, column, declaration)?);
         }
         // **A declared column the batch omits is absent in every row** (`ingest.md` §7.1): the
         // scalar tail is built below in declared order, so an omission misaligns nothing, and
@@ -1279,7 +1282,7 @@ fn parse_ingest_batch(
             // column refuses the batch with nothing decoded into `items` — the whole-batch rule
             // every other refusal here is held to.
             for column in &memberships {
-                tally.read(column, i, offset)?;
+                tally.read("ingest body", column, i, offset)?;
             }
             // Built in DECLARED order, not schema order — the vector is read back by position and
             // nothing downstream carries a name. Every column is present and correctly typed by the
@@ -1297,7 +1300,7 @@ fn parse_ingest_batch(
                     // resolves to the reserved code 0, which its vocabulary keeps out of the value
                     // space.
                     Some(vocabulary) => {
-                        category_code(col.as_ref(), i, d, vocabulary, vocabularies)?
+                        category_code("ingest body", col.as_ref(), i, d, vocabulary, vocabularies)?
                     }
                     // **Null is absence, and it must be carried rather than read through.**
                     // `a.value(row)` on a null slot returns whatever the values buffer holds
@@ -1328,6 +1331,7 @@ fn parse_ingest_batch(
                     None => scoped_absent(f),
                     Some(col) => match f.vocabulary.as_deref() {
                         Some(vocabulary) => category_code(
+                            "ingest body",
                             col.as_ref(),
                             i,
                             &scoped_as_declared(f),
@@ -1787,7 +1791,7 @@ fn parse_values_batch(
             let column = batch
                 .column_by_name(name)
                 .expect("the column was found in this batch's own schema");
-            memberships.push(membership_column(name, column, declaration)?);
+            memberships.push(membership_column("values body", name, column, declaration)?);
         }
 
         // A column present at the wrong type refuses the batch, on the ingest door's rule: a value
@@ -1853,7 +1857,7 @@ fn parse_values_batch(
 
         for i in 0..batch.num_rows() {
             for column in &memberships {
-                tally.read(column, i, offset)?;
+                tally.read("values body", column, i, offset)?;
             }
             let external = match &ext {
                 Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
@@ -1920,7 +1924,7 @@ fn parse_values_batch(
                     .expect("the column was found above");
                 values.push(match d.vocabulary.as_deref() {
                     Some(vocabulary) => {
-                        category_code(col.as_ref(), i, d, vocabulary, vocabularies)?
+                        category_code("values body", col.as_ref(), i, d, vocabulary, vocabularies)?
                     }
                     None if col.is_null(i) => WalScalar::Null,
                     None => scalar_at(col.as_ref(), i, d.wire_type())
@@ -1933,6 +1937,7 @@ fn parse_values_batch(
                     .expect("the column was found above");
                 values.push(match f.vocabulary.as_deref() {
                     Some(vocabulary) => category_code(
+                        "values body",
                         col.as_ref(),
                         i,
                         &scoped_as_declared(f),
@@ -5082,11 +5087,11 @@ async fn publish_artifacts(
     // executor, where the declaration is its own state; here the caller is told before a shape is
     // canonicalised or an id resolved. A layer this deployment does not hold is the engine's
     // refusal below, so an absent declaration checks nothing here.
-    if let Some(declaration) = state
+    let declaration = state
         .engine
         .registered_layer(&name)
-        .map(|registered| registered.declaration)
-    {
+        .map(|registered| registered.declaration);
+    if let Some(declaration) = &declaration {
         for (index, artifact) in artifacts.iter().enumerate() {
             match (declaration.scope.group(), artifact.view.as_deref()) {
                 (Some(_), Some(_)) | (None, None) => {}
@@ -5125,10 +5130,6 @@ async fn publish_artifacts(
                 Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
                     .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
             };
-            let declaration = state
-                .engine
-                .registered_layer(&name)
-                .map(|registered| registered.declaration);
             let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
                 Vec::with_capacity(artifacts.len());
             let mut shape_reports: Vec<serde_json::Value> = Vec::new();

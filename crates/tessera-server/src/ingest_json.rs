@@ -50,7 +50,8 @@ pub(crate) fn record_batch(
     body: &[u8],
     columns: &JsonColumns<'_>,
 ) -> Result<RecordBatch, ApiError> {
-    let rows = records(body)?;
+    let body_name = "ingest body";
+    let rows = records(body_name, body)?;
     let mut fields: Vec<Field> = Vec::new();
     let mut arrays: Vec<ArrayRef> = Vec::new();
 
@@ -65,12 +66,18 @@ pub(crate) fn record_batch(
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(text)
                         .map_err(|_| {
-                            refusal(row, "external_id", "is not base64; an external id is bytes")
+                            refusal(
+                                body_name,
+                                row,
+                                "external_id",
+                                "is not base64; an external id is bytes",
+                            )
                         })?;
                     builder.append_value(bytes);
                 }
                 Some(_) => {
                     return Err(refusal(
+                        body_name,
                         row,
                         "external_id",
                         "is not a string; an external id is base64",
@@ -89,16 +96,17 @@ pub(crate) fn record_batch(
                 Some(Value::Number(number)) => builder.append_value(
                     number
                         .as_f64()
-                        .ok_or_else(|| refusal(row, name, "is not a finite number"))?,
+                        .ok_or_else(|| refusal(body_name, row, name, "is not a finite number"))?,
                 ),
                 None | Some(Value::Null) => {
                     return Err(refusal(
+                        body_name,
                         row,
                         name,
                         "is missing or null; a coordinate is required",
                     ))
                 }
-                Some(_) => return Err(refusal(row, name, "is not a number")),
+                Some(_) => return Err(refusal(body_name, row, name, "is not a number")),
             }
         }
         fields.push(Field::new(name, DataType::Float64, false));
@@ -117,6 +125,7 @@ pub(crate) fn record_batch(
                             Value::String(text) => builder.values().append_value(text),
                             _ => {
                                 return Err(refusal(
+                                    body_name,
                                     row,
                                     "access",
                                     "has an element that is not a string; every element is one \
@@ -129,6 +138,7 @@ pub(crate) fn record_batch(
                 }
                 Some(_) => {
                     return Err(refusal(
+                        body_name,
                         row,
                         "access",
                         "is not a list of labels, one label per element (contracts §3.4)",
@@ -147,7 +157,7 @@ pub(crate) fn record_batch(
             match record.get("node_id") {
                 None | Some(Value::Null) => builder.append_null(),
                 Some(Value::String(text)) => builder.append_value(text),
-                Some(_) => return Err(refusal(row, "node_id", "is not a string")),
+                Some(_) => return Err(refusal(body_name, row, "node_id", "is not a string")),
             }
         }
         fields.push(Field::new("node_id", DataType::Utf8, true));
@@ -164,7 +174,7 @@ pub(crate) fn record_batch(
         if !has(&declared.name) {
             continue;
         }
-        let column = scalar_column(&rows, &declared.name, declared.wire_type(), true)?;
+        let column = scalar_column(body_name, &rows, &declared.name, declared.wire_type(), true)?;
         fields.push(Field::new(&declared.name, column.data_type().clone(), true));
         arrays.push(column);
     }
@@ -173,7 +183,7 @@ pub(crate) fn record_batch(
             continue;
         }
         let wire = crate::control::scoped_wire_type(family);
-        let column = scalar_column(&rows, &family.name, wire, false)?;
+        let column = scalar_column(body_name, &rows, &family.name, wire, false)?;
         fields.push(Field::new(&family.name, column.data_type().clone(), true));
         arrays.push(column);
     }
@@ -204,7 +214,7 @@ pub(crate) fn record_batch(
         }
     }
     for name in &layers {
-        let column = membership_column(&rows, name)?;
+        let column = membership_column(body_name, &rows, name)?;
         fields.push(Field::new(name, column.data_type().clone(), true));
         arrays.push(column);
     }
@@ -224,7 +234,8 @@ pub(crate) fn values_record_batch(
     body: &[u8],
     columns: &JsonColumns<'_>,
 ) -> Result<RecordBatch, ApiError> {
-    let rows = records(body)?;
+    let body_name = "values body";
+    let rows = records(body_name, body)?;
     let mut fields: Vec<Field> = Vec::new();
     let mut arrays: Vec<ArrayRef> = Vec::new();
     let has = |name: &str| rows.iter().any(|row| row.contains_key(name));
@@ -238,12 +249,18 @@ pub(crate) fn values_record_batch(
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(text)
                         .map_err(|_| {
-                            refusal(row, "external_id", "is not base64; an external id is bytes")
+                            refusal(
+                                body_name,
+                                row,
+                                "external_id",
+                                "is not base64; an external id is bytes",
+                            )
                         })?;
                     builder.append_value(bytes);
                 }
                 Some(_) => {
                     return Err(refusal(
+                        body_name,
                         row,
                         "external_id",
                         "is not a string; an external id is base64",
@@ -264,6 +281,7 @@ pub(crate) fn values_record_batch(
                 Some(Value::String(text)) => builder.append_value(text),
                 Some(_) => {
                     return Err(refusal(
+                        body_name,
                         row,
                         "tessera_id",
                         "is not a string; a tessera_id is decimal digits in a string, so that a \
@@ -280,10 +298,15 @@ pub(crate) fn values_record_batch(
         for (row, record) in rows.iter().enumerate() {
             match record.get("idset") {
                 None | Some(Value::Null) => builder.append_null(),
-                other => match integer(other.unwrap_or(&Value::Null), row, "idset")? {
+                other => match integer(body_name, other.unwrap_or(&Value::Null), row, "idset")? {
                     None => builder.append_null(),
                     Some(value) => builder.append_value(u32::try_from(value).map_err(|_| {
-                        refusal(row, "idset", "is out of range for an identifier set")
+                        refusal(
+                            body_name,
+                            row,
+                            "idset",
+                            "is out of range for an identifier set",
+                        )
                     })?),
                 },
             }
@@ -300,7 +323,13 @@ pub(crate) fn values_record_batch(
         // a row of it may leave a column out, which is that cell unfilled rather than a malformed
         // row. The ingest door's stricter reading is about a row that creates an entity, where a
         // half-carried column shifts the positional tail.
-        let column = scalar_column(&rows, &declared.name, declared.wire_type(), false)?;
+        let column = scalar_column(
+            body_name,
+            &rows,
+            &declared.name,
+            declared.wire_type(),
+            false,
+        )?;
         fields.push(Field::new(&declared.name, column.data_type().clone(), true));
         arrays.push(column);
     }
@@ -309,7 +338,7 @@ pub(crate) fn values_record_batch(
             continue;
         }
         let wire = crate::control::scoped_wire_type(family);
-        let column = scalar_column(&rows, &family.name, wire, false)?;
+        let column = scalar_column(body_name, &rows, &family.name, wire, false)?;
         fields.push(Field::new(&family.name, column.data_type().clone(), true));
         arrays.push(column);
     }
@@ -337,7 +366,7 @@ pub(crate) fn values_record_batch(
         }
     }
     for name in &layers {
-        let column = membership_column(&rows, name)?;
+        let column = membership_column(body_name, &rows, name)?;
         fields.push(Field::new(name, column.data_type().clone(), true));
         arrays.push(column);
     }
@@ -347,13 +376,13 @@ pub(crate) fn values_record_batch(
 }
 
 /// The body's records: a JSON array of objects, or one object per line.
-fn records(body: &[u8]) -> Result<Vec<Map<String, Value>>, ApiError> {
+fn records(body_name: &str, body: &[u8]) -> Result<Vec<Map<String, Value>>, ApiError> {
     let text = std::str::from_utf8(body)
-        .map_err(|_| ApiError::Contract("ingest body is not UTF-8 JSON".to_string()))?;
+        .map_err(|_| ApiError::Contract(format!("{body_name} is not UTF-8 JSON")))?;
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
         let values: Vec<Value> = serde_json::from_str(trimmed).map_err(|e| {
-            ApiError::Contract(format!("ingest body is not a JSON array of objects: {e}"))
+            ApiError::Contract(format!("{body_name} is not a JSON array of objects: {e}"))
         })?;
         return values
             .into_iter()
@@ -361,7 +390,7 @@ fn records(body: &[u8]) -> Result<Vec<Map<String, Value>>, ApiError> {
             .map(|(row, value)| match value {
                 Value::Object(record) => Ok(record),
                 _ => Err(ApiError::Contract(format!(
-                    "ingest body: row {row} is not an object; each record is one object whose \
+                    "{body_name}: row {row} is not an object; each record is one object whose \
                      names are the column names"
                 ))),
             })
@@ -377,13 +406,13 @@ fn records(body: &[u8]) -> Result<Vec<Map<String, Value>>, ApiError> {
             Ok(Value::Object(record)) => rows.push(record),
             Ok(_) => {
                 return Err(ApiError::Contract(format!(
-                    "ingest body: row {row} is not an object; each line is one object whose \
+                    "{body_name}: row {row} is not an object; each line is one object whose \
                      names are the column names"
                 )))
             }
             Err(e) => {
                 return Err(ApiError::Contract(format!(
-                    "ingest body: row {row} is not JSON: {e}. The body is an array of objects \
+                    "{body_name}: row {row} is not JSON: {e}. The body is an array of objects \
                      or one object per line"
                 )))
             }
@@ -392,8 +421,8 @@ fn records(body: &[u8]) -> Result<Vec<Map<String, Value>>, ApiError> {
     Ok(rows)
 }
 
-fn refusal(row: usize, column: &str, what: &str) -> ApiError {
-    ApiError::Contract(format!("ingest body: row {row}, column '{column}' {what}"))
+fn refusal(body_name: &str, row: usize, column: &str, what: &str) -> ApiError {
+    ApiError::Contract(format!("{body_name}: row {row}, column '{column}' {what}"))
 }
 
 /// One scalar column at its wire type. A declared scalar is `required`: a batch that carries the
@@ -402,6 +431,7 @@ fn refusal(row: usize, column: &str, what: &str) -> ApiError {
 /// caller having omitted the column (`ingest.md` §7.1). A scoped family's column is absent on the
 /// rows that omit it.
 fn scalar_column(
+    body_name: &str,
     rows: &[Map<String, Value>],
     name: &str,
     wire: ScalarType,
@@ -411,6 +441,7 @@ fn scalar_column(
         match rows[row].get(name) {
             Some(value) => Ok(value),
             None if required => Err(refusal(
+                body_name,
                 row,
                 name,
                 "is missing; a declared column a batch carries is on every row of it, null where \
@@ -423,10 +454,15 @@ fn scalar_column(
         ($builder:ty, $ty:ty, $spelling:literal) => {{
             let mut builder = <$builder>::new();
             for row in 0..rows.len() {
-                match integer(cell(row)?, row, name)? {
+                match integer(body_name, cell(row)?, row, name)? {
                     None => builder.append_null(),
                     Some(value) => builder.append_value(<$ty>::try_from(value).map_err(|_| {
-                        refusal(row, name, concat!("is out of range for ", $spelling))
+                        refusal(
+                            body_name,
+                            row,
+                            name,
+                            concat!("is out of range for ", $spelling),
+                        )
                     })?),
                 }
             }
@@ -440,7 +476,7 @@ fn scalar_column(
                 match cell(row)? {
                     Value::Null => builder.append_null(),
                     Value::Bool(value) => builder.append_value(*value),
-                    _ => return Err(refusal(row, name, "is not a boolean")),
+                    _ => return Err(refusal(body_name, row, name, "is not a boolean")),
                 }
             }
             Arc::new(builder.finish())
@@ -456,12 +492,11 @@ fn scalar_column(
         ScalarType::TimestampUs => {
             let mut builder = TimestampMicrosecondBuilder::new();
             for row in 0..rows.len() {
-                match integer(cell(row)?, row, name)? {
+                match integer(body_name, cell(row)?, row, name)? {
                     None => builder.append_null(),
-                    Some(value) => builder.append_value(
-                        i64::try_from(value)
-                            .map_err(|_| refusal(row, name, "is out of range for timestamp_us"))?,
-                    ),
+                    Some(value) => builder.append_value(i64::try_from(value).map_err(|_| {
+                        refusal(body_name, row, name, "is out of range for timestamp_us")
+                    })?),
                 }
             }
             Arc::new(builder.finish())
@@ -469,14 +504,19 @@ fn scalar_column(
         ScalarType::F32 => {
             let mut builder = Float32Builder::new();
             for row in 0..rows.len() {
-                match float(cell(row)?, row, name)? {
+                match float(body_name, cell(row)?, row, name)? {
                     None => builder.append_null(),
                     // Narrowed to the declared width, and refused where the narrowing would
                     // store an infinity for a finite number.
                     Some(value) => {
                         let narrowed = value as f32;
                         if !narrowed.is_finite() {
-                            return Err(refusal(row, name, "is outside f32's finite range"));
+                            return Err(refusal(
+                                body_name,
+                                row,
+                                name,
+                                "is outside f32's finite range",
+                            ));
                         }
                         builder.append_value(narrowed);
                     }
@@ -487,7 +527,7 @@ fn scalar_column(
         ScalarType::F64 => {
             let mut builder = Float64Builder::new();
             for row in 0..rows.len() {
-                match float(cell(row)?, row, name)? {
+                match float(body_name, cell(row)?, row, name)? {
                     None => builder.append_null(),
                     Some(value) => builder.append_value(value),
                 }
@@ -500,7 +540,7 @@ fn scalar_column(
                 match cell(row)? {
                     Value::Null => builder.append_null(),
                     Value::String(text) => builder.append_value(text),
-                    _ => return Err(refusal(row, name, "is not a string")),
+                    _ => return Err(refusal(body_name, row, name, "is not a string")),
                 }
             }
             Arc::new(builder.finish())
@@ -510,7 +550,12 @@ fn scalar_column(
 
 /// An integer, exactly: a JSON integer or a string of digits; a number with a fraction or
 /// exponent is refused rather than rounded.
-fn integer(value: &Value, row: usize, name: &str) -> Result<Option<i128>, ApiError> {
+fn integer(
+    body_name: &str,
+    value: &Value,
+    row: usize,
+    name: &str,
+) -> Result<Option<i128>, ApiError> {
     match value {
         Value::Null => Ok(None),
         Value::Number(number) => {
@@ -520,6 +565,7 @@ fn integer(value: &Value, row: usize, name: &str) -> Result<Option<i128>, ApiErr
                 Ok(Some(v as i128))
             } else {
                 Err(refusal(
+                    body_name,
                     row,
                     name,
                     "has a fraction or an exponent; an integer is parsed exactly from its digits",
@@ -528,24 +574,25 @@ fn integer(value: &Value, row: usize, name: &str) -> Result<Option<i128>, ApiErr
         }
         Value::String(text) => text.parse::<i128>().map(Some).map_err(|_| {
             refusal(
+                body_name,
                 row,
                 name,
                 "is a string that is not an integer; an integer is a JSON integer or a string of \
                  digits",
             )
         }),
-        _ => Err(refusal(row, name, "is not an integer")),
+        _ => Err(refusal(body_name, row, name, "is not an integer")),
     }
 }
 
-fn float(value: &Value, row: usize, name: &str) -> Result<Option<f64>, ApiError> {
+fn float(body_name: &str, value: &Value, row: usize, name: &str) -> Result<Option<f64>, ApiError> {
     match value {
         Value::Null => Ok(None),
         Value::Number(number) => number
             .as_f64()
             .map(Some)
-            .ok_or_else(|| refusal(row, name, "is not a finite number")),
-        _ => Err(refusal(row, name, "is not a number")),
+            .ok_or_else(|| refusal(body_name, row, name, "is not a finite number")),
+        _ => Err(refusal(body_name, row, name, "is not a number")),
     }
 }
 
@@ -556,7 +603,11 @@ fn float(value: &Value, row: usize, name: &str) -> Result<Option<f64>, ApiError>
 /// a list or null; a row of the other shape is refused, since a scalar names the artifact at
 /// level 0 and a list's positions mean what the layer's hierarchy says, and guessing which the
 /// caller meant would store a membership they did not write.
-fn membership_column(rows: &[Map<String, Value>], name: &str) -> Result<ArrayRef, ApiError> {
+fn membership_column(
+    body_name: &str,
+    rows: &[Map<String, Value>],
+    name: &str,
+) -> Result<ArrayRef, ApiError> {
     let is_list = rows
         .iter()
         .any(|record| matches!(record.get(name), Some(Value::Array(_))));
@@ -565,9 +616,11 @@ fn membership_column(rows: &[Map<String, Value>], name: &str) -> Result<ArrayRef
             Value::Null => Ok(None),
             Value::String(text) => Ok(Some(text.clone())),
             Value::Number(_) => {
-                Ok(integer(value, row, name)?.and_then(tessera_types::layer::integer_key))
+                Ok(integer(body_name, value, row, name)?
+                    .and_then(tessera_types::layer::integer_key))
             }
             _ => Err(refusal(
+                body_name,
                 row,
                 name,
                 "is not a member key; a key is text or an integer, and `null` or `-1` is a point \
@@ -591,6 +644,7 @@ fn membership_column(rows: &[Map<String, Value>], name: &str) -> Result<ArrayRef
                 }
                 Some(_) => {
                     return Err(refusal(
+                        body_name,
                         row,
                         name,
                         "is a single key where other rows of this column carry a list; a column \

@@ -1304,12 +1304,12 @@ const _: () = assert!(DEFAULT_MAX_K >= DEFAULT_K_MAX_MARKS);
 /// θ's anchor target: marks the mean occupied tile should draw at any depth. Provisional.
 const DEFAULT_THETA_TARGET_MARKS: u64 = 16;
 
-/// The largest `underlay_offset` a request may ask for (§3.3): sub-cell depth is `zoom + offset`.
 /// `serve.visible_wait_max_secs`. Long enough that a page and the tick it pulls forward complete
 /// on a loaded machine, short enough that a caller who set the parameter by mistake is not held
 /// for a tick period.
 const DEFAULT_VISIBLE_WAIT_MAX_SECS: u64 = 30;
 
+/// The largest `underlay_offset` a request may ask for (§3.3): sub-cell depth is `zoom + offset`.
 const DEFAULT_MAX_UNDERLAY_OFFSET: u8 = 4;
 
 /// The ceiling on sub-cells in one response. `tiles_for_bbox` is itself uncapped and the underlay
