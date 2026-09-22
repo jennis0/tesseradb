@@ -392,6 +392,46 @@ fn a_folds_carried_dictionary_extents_are_still_selected() {
     );
 }
 
+/// After a fold, the tiers and runs it carried forward are digested in the new prefix's
+/// `MANIFEST.json`. They are still taken, and the base run, which no locator extent names, is not.
+#[test]
+fn a_folds_carried_tiers_and_runs_are_still_selected() {
+    let (mut manifest, mut build_files) = manifest_with(3);
+    build_files.extend(std::mem::take(&mut manifest.files));
+
+    let plan =
+        plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
+    assert_eq!(plan.tiers, manifest.deltas);
+    assert_eq!(plan.runs, manifest.external_id_runs[1..]);
+    assert!(!plan.runs.contains(&"entities/external-ids-0.arrow".to_string()));
+}
+
+/// An entry naming a file neither manifest digests is not taken, on any kind.
+#[test]
+fn an_entry_with_an_undigested_file_is_not_selected() {
+    let (mut manifest, build_files) = manifest_with(3);
+    let seg = format!("partitions/{PARTITION}/views/s0/segments/flush-1-1");
+    for name in ["delta.arrow", "ext-locator.u32", "terms-0.dict"] {
+        manifest.files.remove(&format!("{seg}/{name}"));
+    }
+    let title = manifest
+        .attr_extents
+        .iter()
+        .find(|e| e.column == "title" && e.values.contains("flush-1-1"))
+        .expect("the fixture's title extent")
+        .presence
+        .clone();
+    manifest.files.remove(&title);
+
+    let plan =
+        plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
+    assert!(plan.tiers.is_empty());
+    assert!(plan.runs.is_empty());
+    assert!(plan.dicts.is_empty());
+    let columns: Vec<&str> = plan.attrs.iter().map(|w| w.column.as_str()).collect();
+    assert_eq!(columns, ["department"]);
+}
+
 /// Locator extents whose spans overlap are not one span. `external_id_of_checked` finds an
 /// extent by the first span containing the entity, so a coalesced extent overlapping another
 /// would answer one entity's ordinal against another run's keys.
