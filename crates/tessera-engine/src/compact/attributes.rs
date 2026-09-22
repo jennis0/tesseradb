@@ -11,33 +11,30 @@ use crate::flush::MaintenanceFailed;
 use super::execute::{failed, remove_spool_on_error, FoldContext, FoldOutput};
 use super::plan::FoldPlan;
 
-/// One column the attribute passes fold: where its files live, and what its declaration says. One
-/// shape covers both an entity-scoped column and one view of a group-scoped family.
+/// An entity-scoped column, or one view of a group-scoped family.
 struct ColumnJob {
     /// Prefix-relative directory, the same under both prefixes.
     rel: String,
     name: String,
-    /// The view this column belongs to, for a scoped family; `None` for an entity-scoped column.
+    /// `None`, like `incarnation`, for an entity-scoped column.
     view: Option<String>,
-    /// The view's live incarnation, for a scoped family; `None` for an entity-scoped column.
     incarnation: Option<ViewIncarnation>,
-    /// False for an entity-scoped column declared at a running service, which has extents alone
-    /// until this pass writes its base.
+    /// False for a column declared at a running service, which has extents only until this pass
+    /// writes its base.
     has_base: bool,
     arrow_type: ScalarType,
-    /// Does the folded column owe rebuilt keyed postings? True only for a category.
+    /// True for a category, whose postings are rebuilt from the folded column.
     postings: bool,
 }
 
 impl ColumnJob {
-    /// Does an extent naming this column, view and incarnation belong to this job?
     fn holds(&self, column: &str, view: Option<&str>, incarnation: Option<ViewIncarnation>) -> bool {
         column == self.name && view == self.view.as_deref() && incarnation == self.incarnation
     }
 }
 
-/// The columns the two predicates select, entity-scoped then group-scoped, in manifest order. A
-/// view whose incarnation this manifest cannot say is skipped.
+/// The columns the predicates select, entity-scoped then group-scoped, in manifest order. A view
+/// with no known incarnation is skipped.
 fn column_jobs(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -82,24 +79,9 @@ fn column_jobs(
     jobs
 }
 
-/// Rebuild each indexed `text` column's index from the layers the snapshot named, minus the
-/// tombstoned entities.
-///
-/// A text column has no value column: its index is a token dictionary plus postings, so its
-/// postings are merged directly, a union per term and a subtraction, rather than re-derived from
-/// a folded value column.
-///
-/// The blanked set is the tombstone set, the same set every other pass takes; a suppression
-/// touches no artefact here. A term whose only carriers were deleted is dropped from the merged
-/// dictionary, so the word itself leaves the corpus. Carrying the index forward untouched would
-/// leave a deleted entity's terms in the postings after its overlay entry retired.
-///
-/// Streamed one term at a time: the layers' dictionaries are merged by a k-way scan, each
-/// surviving term's posting is encoded and appended to a spool, and the dictionary is written
-/// through [`tessera_filter::SortedDictWriter`] as the merge decides each key.
-///
-/// The folded layer carries no presence bitmap: after this pass, "carries a value" is answered
-/// from the record blob instead.
+/// Pass 4a, text: each indexed text column's dictionary and postings merged across its layers,
+/// less the tombstone set. A suppression changes no artefact. A word whose only carriers were
+/// deleted leaves the dictionary. The folded base carries no presence bitmap.
 pub(super) fn fold_text_columns(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -117,8 +99,7 @@ pub(super) fn fold_text_columns(
         let to_dir = ctx.to_prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (text)", &e))?;
 
-        // The base build's layer first, then one per published extent. The dictionaries are
-        // advised sequential; the postings are not, since the merge interleaves reads across layers.
+        // Dictionaries are read sequentially; postings are not, since the merge interleaves layers.
         let mut layers = Vec::new();
         if job.has_base {
             layers.push((
@@ -157,7 +138,6 @@ pub(super) fn fold_text_columns(
         let postings_path = ctx.to_prefix_dir.join(&postings_rel);
         let spool_path = to_dir.join("postings.spool");
 
-        // No presence is passed: this pass writes a base, and a base carries no presence bitmap.
         let inputs: Vec<tessera_filter_write::TextLayerRef<'_>> = layers
             .iter()
             .map(|(dict, postings)| tessera_filter_write::TextLayerRef {
@@ -184,13 +164,15 @@ pub(super) fn fold_text_columns(
     Ok(())
 }
 
-/// Pass 4a: every declared filter column that owes a value column, in manifest order.
+/// Pass 4a, value columns. A value column is positional, so this is where a deleted entity's
+/// filter value leaves the corpus. A keyword's dictionary is rebuilt from the survivors and its
+/// ordinals renumbered; other families' values are carried byte for byte.
 pub(super) fn fold_value_columns(
     plan: &FoldPlan,
     ctx: &FoldContext,
     out: &mut FoldOutput,
 ) -> Result<(), MaintenanceFailed> {
-    // The opener's own predicates, so the columns written here are the columns it demands.
+    // The opener's predicates, so the fold writes exactly the columns the opener demands.
     let jobs = column_jobs(
         plan,
         ctx,
@@ -203,11 +185,8 @@ pub(super) fn fold_value_columns(
     Ok(())
 }
 
-/// Fold one value column: its base and every snapshot extent merged in entity order into one new
-/// base, the tombstoned entities blanked from presence with their value bytes never written, and
-/// a category's postings rebuilt whole from the folded column. This pass is where a deleted
-/// entity's filter value leaves the corpus, since the value column is positional. A suppression
-/// touches no attribute artefact.
+/// Merges one column's base and extents in entity order into a new base without the tombstoned
+/// entities, and rebuilds a category's postings from the result.
 fn fold_value_column(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -224,7 +203,6 @@ fn fold_value_column(
     let to_dir = ctx.to_prefix_dir.join(&column_rel);
     std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (attributes)", &e))?;
 
-    // Advised sequential: the merge below streams each layer exactly once in entity order.
     let mut opened = Vec::new();
     if job.has_base {
         opened.push(
@@ -251,8 +229,7 @@ fn fold_value_column(
         out.read(&ctx.from_prefix_dir, [&extent.values, &extent.presence]);
     }
     let layers: Vec<&tessera_filter::ValueColumn> = opened.iter().collect();
-    // A keyword layer's dictionary, opened beside its ordinals. Empty for every other family,
-    // which selects the generic fold below.
+    // Empty unless the column is a keyword; empty selects the generic fold below.
     let mut keyword_dicts: Vec<tessera_filter::SortedDict> = Vec::new();
     if job.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
         if job.has_base {
@@ -288,15 +265,12 @@ fn fold_value_column(
     let values_path = ctx.to_prefix_dir.join(&values_rel);
     let presence_path = ctx.to_prefix_dir.join(&presence_rel);
     let dict_path = ctx.to_prefix_dir.join(&dict_rel);
-    // The snapshot's entity space, which the folded column covers. A column dense to this bound
-    // writes no presence bitmap; a deletion below the bound is what takes that away.
+    // A column dense to this bound writes no presence bitmap.
     let bound = u32::try_from(plan.entity_bound).map_err(|_| {
         MaintenanceFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
     })?;
-    // A keyword folds through its own pass: its dictionary is rebuilt from the survivors and its
-    // ordinals renumbered, unlike the generic fold which carries values byte-preserved.
     let partial = if layers.is_empty() {
-        // Nothing has carried the column: an empty base with an empty presence.
+        // No layer holds the column yet.
         write_empty_value_column(
             &values_path,
             &presence_path,
@@ -344,8 +318,7 @@ fn fold_value_column(
     if !job.postings {
         return Ok(());
     }
-    // Rebuilt from the folded column, read back rather than from the layers it was merged from.
-    // Mapped without the sequential hint, since the banded emit scans this column once per band.
+    // No sequential hint: the banded emit scans the folded column once per band.
     let folded = tessera_filter::ValueColumn::open(
         &values_path,
         partial.then_some(presence_path.as_path()),
@@ -366,10 +339,9 @@ fn fold_value_column(
     Ok(())
 }
 
-/// Pass 4a, continued: the record blob rewritten without the tombstoned entities' rows, so a
-/// deleted entity's prose is absent from the folded artefact. A suppressed entity's row streams
-/// through unchanged. The blob exists only where the schema declares a blob-resident column, so a
-/// mismatch refuses rather than silently dropping extents' bytes.
+/// Pass 4a, record blob: rewritten without the tombstoned entities' rows. A suppressed entity's
+/// row streams through unchanged. Record extents with no blob-resident column declared are
+/// refused, since folding them would drop their bytes.
 pub(super) fn fold_record_blob(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -379,7 +351,7 @@ pub(super) fn fold_record_blob(
         .declared_scalars
         .iter()
         .any(|d| crate::filter::blob_resident(d, &ctx.vocabularies));
-    // A blob-resident column declared at a running service has extents alone until this pass writes the base.
+    // A blob-resident column declared at a running service has no base yet.
     let based_blob_resident = ctx.declared_scalars.iter().any(|d| {
         !ctx.runtime_attributes.contains(&d.name)
             && crate::filter::blob_resident(d, &ctx.vocabularies)
@@ -397,7 +369,6 @@ pub(super) fn fold_record_blob(
         let to_dir = ctx.to_prefix_dir.join(&record_rel);
         std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (record blob)", &e))?;
 
-        // The fold's own mappings, advised sequential: each layer streams once, block by block.
         let mut opened = Vec::with_capacity(plan.record_extents.len() + 1);
         if based_blob_resident {
             opened.push(
@@ -437,7 +408,7 @@ pub(super) fn fold_record_blob(
         let hasrow_path = ctx.to_prefix_dir.join(&hasrow_rel);
         let directory_path = ctx.to_prefix_dir.join(&directory_rel);
         if layers.is_empty() {
-            // No flush has carried this column yet: an empty base, so the reopen finds the blob.
+            // An empty base, so the reopen finds a blob.
             tessera_filter_write::RecordBlobWriter::create(
                 &blocks_path,
                 &hasrow_path,
@@ -469,10 +440,9 @@ pub(super) fn fold_record_blob(
     Ok(())
 }
 
-/// Pass 4c: the entity→term transpose, base plus every snapshot extent streamed in entity order
-/// into one new base, with the tombstoned entities emitting nothing. A suppressed entity's list
-/// streams through unchanged. No ordinal is remapped, since a stored ordinal is a position in the
-/// concatenation of the dictionary extents, carried forward verbatim.
+/// Pass 4c: the entity-to-term transpose streamed in entity order into one base without the
+/// tombstoned entities. No ordinal is remapped: a stored ordinal is a position in the dictionary
+/// extents, which are carried forward unchanged.
 pub(super) fn fold_entity_terms(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -510,8 +480,7 @@ pub(super) fn fold_entity_terms(
         .map_err(|e| failed("pass 4c (entity terms: the layers)", &e))?;
     let mut writer = tessera_store::EntityTermsWriter::create(&to_dir)
         .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
-    // One ascending pass over the union of the layers' has-row sets, the order the writer
-    // requires and every layer already holds.
+    // Ascending, the order the writer requires.
     let live = layers.entity_set();
     for entity in live.iter() {
         if plan.tombstones.contains(entity) {
@@ -543,8 +512,7 @@ pub(super) fn fold_entity_terms(
     Ok(())
 }
 
-/// An entity-space value column with no entity in it. Written with an empty presence bitmap, so
-/// the reader takes it as partial rather than as dense to the bound.
+/// The empty presence bitmap makes the reader take the column as partial, not dense.
 fn write_empty_value_column(
     values_path: &Path,
     presence_path: &Path,
@@ -554,7 +522,6 @@ fn write_empty_value_column(
         .finish(Some(&Bitmap::new()))
 }
 
-/// A keyword column's dictionary with no key in it, beside [`write_empty_value_column`]'s ordinals.
 fn write_empty_dictionary(dict_path: &Path) -> std::io::Result<()> {
     let file = std::io::BufWriter::new(std::fs::File::create(dict_path)?);
     tessera_filter::SortedDictWriter::new(file)
@@ -563,8 +530,6 @@ fn write_empty_dictionary(dict_path: &Path) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
-/// The storage kind a value column of this declared type is written at. A keyword's values are
-/// `u32` ordinals; a `bool` stores as a `u8`, a `timestamp_us` as the `i64` it is.
 fn column_kind_of(arrow_type: ScalarType, category: bool) -> tessera_filter::ColumnKind {
     use tessera_filter::ColumnKind;
     if arrow_type == ScalarType::Keyword {

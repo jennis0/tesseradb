@@ -19,45 +19,35 @@ use super::attributes::{
 use super::cost::{PassCost, Staircase};
 use super::plan::{FoldPlan, TERM_IMAGE_MANIFEST_N, TERM_IMAGE_THREADS};
 
-/// Everything [`execute`] needs beyond its plan. Taken from the generation on the executor thread
-/// and then immutable. The two `Arc`s are the live readers rather than reopened files: they are
-/// the same mappings every request is already serving from.
+/// Everything [`execute`] needs beyond its plan, taken from the generation and then immutable.
+/// The two `Arc`s are the live readers, so the fold reads the mappings requests are served from.
 pub(crate) struct FoldContext {
-    /// The prefix the fold reads: the live one when the plan was taken.
     pub(crate) from_prefix_dir: PathBuf,
-    /// The prefix the fold writes, which no `CURRENT` names until publication.
     pub(crate) to_prefix: String,
     pub(crate) to_prefix_dir: PathBuf,
     pub(crate) identity_key: IdentityKey,
     pub(crate) shard_id: u32,
-    /// One writer schema per view, keyed by view id: the bundle-wide render tail plus that view's
-    /// group-scoped render lanes.
+    /// Per view: the bundle-wide render tail plus that view's group-scoped render lanes.
     pub(crate) scalar_schema: BTreeMap<String, Vec<(String, ScalarType)>>,
-    /// Per view, the columns its schema may lawfully lack; missing otherwise is a torn segment.
+    /// Per view, the columns a segment may lack; any other missing column is a torn segment.
     pub(crate) absent_ok: BTreeMap<String, Vec<String>>,
-    /// Entity-scoped columns declared at a running service and not yet folded, by name.
+    /// Entity-scoped columns declared at a running service and not yet folded.
     pub(crate) runtime_attributes: Vec<String>,
-    /// The group-scoped families declared at a running service and not yet folded, by name.
     pub(crate) runtime_scoped_attributes: Vec<String>,
-    /// The new base segment's id, one per view. Never reused.
+    /// The new base segment's id in every view. Never reused.
     pub(crate) seg_id: String,
-    /// The live base postings and the live tiers: pass 2's inputs.
     pub(crate) base_postings: Arc<PostingsReader>,
     pub(crate) tiers: Vec<Arc<DeltaTier>>,
-    /// The bundle's declared scalars and vocabularies, taken from the manifest.
     pub(crate) declared_scalars: Vec<DeclaredScalar>,
-    /// Every group's group-scoped column families, flattened, owed one folded column per view.
+    /// Every group's scoped column families, flattened. Each owes a folded column per view.
     pub(crate) scoped_scalars: Vec<tessera_store::manifest::ScopedScalar>,
-    /// Which incarnation each view of the roster is. A scoped column's directory carries the
-    /// incarnation, so the fold has to place it where the opener will look.
+    /// A scoped column's directory names its view's incarnation.
     pub(crate) view_incarnations:
         std::collections::HashMap<String, tessera_types::view::ViewIncarnation>,
     pub(crate) vocabularies: Vec<ManifestVocabulary>,
 }
 
-/// One view's term images as pass 2b wrote them: what the new side-manifest must name, and what
-/// the publication logs about them. The summary is carried rather than recomputed from the file,
-/// since the wall clock and the counts are the pass's own and nothing in the file records them.
+/// The summary is carried to publication's log, since its timings and counts are not in the file.
 pub(crate) struct FoldedTermImages {
     pub(crate) extent: tessera_store::manifest::TermImageExtent,
     pub(crate) summary: tessera_store::term_images::TermImageSummary,
@@ -67,56 +57,43 @@ pub(crate) struct FoldedTermImages {
 pub(crate) struct CompletedFold {
     pub(crate) plan: FoldPlan,
     pub(crate) prefix: String,
-    /// The new base segment of each view, in the plan's view order.
     pub(crate) segments: Vec<SegmentDescriptor>,
-    /// Every file the fold itself wrote, prefix-relative, with its digest. Publication adds the
-    /// carried-forward files' digests to write `MANIFEST.json`.
+    /// The files the fold wrote. Publication adds the carried files' digests for `MANIFEST.json`.
     pub(crate) files: BTreeMap<String, FileDigest>,
-    /// The new run 0's prefix-relative path, or `None` when the deployment holds no external ids.
+    /// Run 0's path, or `None` when the deployment holds no external ids.
     pub(crate) external_id_run: Option<String>,
-    /// One entry per view pass 2b wrote images for. Goes into the new `SEGMENTS-<n>.json`
-    /// unchanged.
+    /// Written unchanged into the new `SEGMENTS-<n>.json`.
     pub(crate) term_images: Vec<FoldedTermImages>,
-    /// The largest new base segment's `columns.arrow + morton.u32 + cuts.u32` bytes.
     pub(crate) base_segment_bytes: u64,
-    /// One [`PassCost`] per pass, in execution order. Publication resumes the staircase with its
-    /// own phases.
     pub(crate) cost: Vec<PassCost>,
-    /// When the fold thread's last row ended, from which the publication's first row is measured.
+    /// Publication's first cost row is measured from here.
     pub(crate) finished: std::time::Instant,
-    /// Attribute bytes pass 4a read and wrote. Reported, never triggered on.
     pub(crate) attr_bytes_read: u64,
     pub(crate) attr_bytes_written: u64,
-    /// [`FoldContext::runtime_attributes`] and [`FoldContext::runtime_scoped_attributes`]: the
-    /// columns this fold gave a base, which publication moves off the runtime list.
+    /// The columns this fold gave a base, which publication takes off the runtime lists.
     pub(crate) runtime_attributes: Vec<String>,
     pub(crate) runtime_scoped_attributes: Vec<String>,
 }
 
-/// The state the fold's passes share: every file written so far, and the attribute passes' IO.
 #[derive(Default)]
 pub(super) struct FoldOutput {
-    /// Every file this fold writes, prefix-relative and resolved, in write order. Pass 5 digests
-    /// exactly this list; an unrecorded file is missing from the new `MANIFEST.json`.
+    /// Every file the fold writes, in order. Pass 5 digests exactly this list, so a file not
+    /// recorded here is missing from the new `MANIFEST.json`.
     written: Vec<(String, PathBuf)>,
-    /// Attribute bytes read and written. Reported, never triggered on.
     attr_read: u64,
     attr_written: u64,
 }
 
 impl FoldOutput {
-    /// Record a file the fold wrote.
     fn push(&mut self, rel: String, path: PathBuf) {
         self.written.push((rel, path));
     }
 
-    /// Record a file an attribute pass wrote, and charge its bytes to `attr_written`.
     pub(super) fn wrote(&mut self, rel: String, path: PathBuf) {
         self.attr_written += file_len(&path);
         self.written.push((rel, path));
     }
 
-    /// Charge the files an attribute pass read, each relative to `dir`, to `attr_read`.
     pub(super) fn read(&mut self, dir: &Path, files: impl IntoIterator<Item = impl AsRef<Path>>) {
         for file in files {
             self.attr_read += file_len(&dir.join(file));
@@ -124,18 +101,16 @@ impl FoldOutput {
     }
 }
 
-/// What a pass was doing when it failed, and what went wrong.
 pub(super) fn failed(what: &str, e: &dyn std::fmt::Display) -> MaintenanceFailed {
     MaintenanceFailed(format!("{what}: {e}"))
 }
 
-/// A written file's length, and zero where it cannot be read. Counts bytes for a report and never
-/// decides anything.
+/// Zero where the file cannot be read: the figure is only reported.
 fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-/// `outcome`, with the spool removed if it failed. A spool's `finish` removes it on success.
+/// Removes the spool if `outcome` failed. On success the writer's `finish` has removed it.
 pub(super) fn remove_spool_on_error<T, E>(outcome: Result<T, E>, spool: &Path) -> Result<T, E> {
     if outcome.is_err() {
         let _ = std::fs::remove_file(spool);
@@ -143,10 +118,8 @@ pub(super) fn remove_spool_on_error<T, E>(outcome: Result<T, E>, spool: &Path) -
     outcome
 }
 
-/// Run the fold's five passes into `ctx.to_prefix_dir`, on one dedicated thread. A failure
-/// discards the fold: its files are orphans under a prefix `CURRENT` does not name, and there is
-/// no resume. Digests are taken by reading each written file back rather than hashed as it is
-/// written, since none of the five writers this pass composes can hash at the source.
+/// Runs the fold's passes into `ctx.to_prefix_dir` on one dedicated thread. A failure discards the
+/// fold: its files are orphans under a prefix `CURRENT` does not name, and there is no resume.
 pub(crate) fn execute(
     plan: FoldPlan,
     ctx: FoldContext,
@@ -160,7 +133,6 @@ pub(crate) fn execute(
 
     let mut out = FoldOutput::default();
 
-    // `entry` is the reading every later pass cost is measured against.
     let mut stairs = Staircase::start();
     stairs.record("entry");
 
@@ -184,8 +156,7 @@ pub(crate) fn execute(
     fold_entity_terms(&plan, &ctx, &mut out)?;
     stairs.record("4c entity terms");
 
-    // Pass 4b writes nothing and is not marked: the term dictionary is carried forward by a hard
-    // link at publication.
+    // No pass 4b: the term dictionary is carried to the new prefix by a hard link at publication.
     let files = digest_and_sync(&out)?;
     stairs.record("5 digests + fsync");
 
@@ -207,10 +178,8 @@ pub(crate) fn execute(
     })
 }
 
-/// Pass 1: one new segment per (partition, view), and one `permutation.bin` beside it. Rows whose
-/// entity is tombstoned are dropped, which shifts the row id of every row after them. Returns the
-/// new base descriptors and the largest one's mapped bytes: `columns.arrow`, `morton.u32` and the
-/// cut index together.
+/// Pass 1: a new base segment and `permutation.bin` per view. Tombstoned rows are dropped, which
+/// shifts every later row id. Returns the descriptors and the largest segment's mapped bytes.
 fn fold_row_spaces(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -219,7 +188,7 @@ fn fold_row_spaces(
     let mut segments: Vec<SegmentDescriptor> = Vec::with_capacity(plan.views.len());
     let mut base_segment_bytes = 0u64;
     for view in &plan.views {
-        // Refused rather than defaulted: an empty schema would write a segment with no scalar tail.
+        // An empty schema would write a segment with no scalar tail.
         let Some(view_schema) = ctx.scalar_schema.get(&view.view) else {
             return Err(MaintenanceFailed(format!(
                 "pass 1 (row space): the fold plan names view '{}' but the fold has no writer \
@@ -278,7 +247,6 @@ fn fold_row_spaces(
             output.push(format!("{segment_rel}/{name}"), path);
         }
         base_segment_bytes = base_segment_bytes.max(view_bytes);
-        // The render columns' presence bitmaps, not counted into `view_bytes`.
         for column in &out.presence_columns {
             output.push(
                 format!("{segment_rel}/{RENDER_PRESENCE_DIR}/{column}.roaring"),
@@ -294,7 +262,7 @@ fn fold_row_spaces(
             seg_id: ctx.seg_id.clone(),
             row_count: out.row_count,
             entity_lo: 0,
-            // Inclusive, and the permutation's span rather than the highest surviving entity.
+            // Inclusive, and spans the permutation even past the last surviving entity.
             entity_hi: view.permutation_bound.saturating_sub(1),
         });
     }
@@ -302,10 +270,9 @@ fn fold_row_spaces(
     Ok((segments, base_segment_bytes))
 }
 
-/// Pass 2: the new base postings, and `pairs.parquet` beside them. Returns the postings' path,
-/// which pass 2b reads. Every ordinal below `dict_len` gets a record, empty or not, so ordinals
-/// stay stable across a fold. `pairs.parquet` is rewritten rather than carried forward, because
-/// a carried file would still list folded deletions.
+/// Pass 2: the new base postings and `pairs.parquet`. Every ordinal below `dict_len` gets a
+/// record, empty or not, so ordinals stay stable across a fold. `pairs.parquet` is rewritten
+/// because a carried copy would still list folded deletions.
 fn fold_postings(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -348,9 +315,9 @@ fn fold_postings(
     Ok(postings_path)
 }
 
-/// Pass 2b: one term-image file per view, each term's new base posting projected into that view's
-/// new row space. Reads the postings pass 2 has just written, from which every folded deletion is
-/// already gone. Covers the new base only; a later flush's rows are an extent and get no images.
+/// Pass 2b: one term-image file per view, projecting each new base posting into the view's new row
+/// space. It reads pass 2's postings, so folded deletions are already gone. A later flush's rows
+/// are an extent and get no images.
 fn derive_term_images(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -362,10 +329,8 @@ fn derive_term_images(
     let postings = PostingsReader::open(postings_path, true)
         .map_err(|e| failed("pass 2b (term images: the new postings)", &e))?;
     let dict_len = postings.term_count();
-    // Names the fold's own term-image files; the publication's own counter is created later.
     let mut index = tessera_store::derived::DerivedIndex::default();
     for segment in segments {
-        // A view with no row projects every posting to the empty set, so neither has an image.
         if segment.row_count == 0 || dict_len == 0 {
             continue;
         }
@@ -374,7 +339,7 @@ fn derive_term_images(
             plan.partition,
             tessera_store::view_rel(&segment.view)
         ));
-        // Reloaded from the file pass 1 wrote, so the images are a function of the published permutation.
+        // From pass 1's file, so the images match the permutation that is published.
         let permutation = tessera_store::Permutation::load(&permutation_path)
             .map_err(|e| failed("pass 2b (term images: the new permutation)", &e))?;
         let space = tessera_store::RowSpace::new(Arc::new(permutation), segment.row_count);
@@ -394,7 +359,7 @@ fn derive_term_images(
         )
         .map_err(|e| failed("pass 2b (term images: naming the file)", &e))?;
 
-        // Adapts the postings format for the derivation, since `tessera-store` cannot depend on `tessera-authz`.
+        // `tessera-store` cannot depend on `tessera-authz`, so the postings are adapted here.
         let walk = |term: u32,
                     visit: &mut dyn FnMut(tessera_store::derived::PostingSlice<'_>)|
          -> std::io::Result<()> {
@@ -422,7 +387,6 @@ fn derive_term_images(
         )
         .map_err(|e| failed("pass 2b (term images: the derivation)", &e))?;
 
-        // Pass 5 digests and syncs what `written` names, so this pass syncs nothing of its own.
         out.push(file.rel.clone(), file.path);
         term_images.push(FoldedTermImages {
             extent: tessera_store::manifest::TermImageExtent {
@@ -440,10 +404,9 @@ fn derive_term_images(
     Ok(term_images)
 }
 
-/// Pass 3: one external-id run 0 and one locator, bounded at the snapshot's entity space so
-/// post-snapshot locator extents stay reachable past it. Returns run 0's prefix-relative path.
-/// Drops the tombstoned entities' keys, since leaving one standing would turn a lawful re-ingest
-/// of that external id into a 409 once retirement makes `is_deleted` false.
+/// Pass 3: external-id run 0 and its locator, bounded at the snapshot's entity space so later
+/// locator extents stay reachable. Tombstoned entities' keys are dropped, or a lawful re-ingest of
+/// that external id would be refused once retirement lifts the deletion.
 fn fold_external_ids(
     plan: &FoldPlan,
     ctx: &FoldContext,
@@ -466,7 +429,7 @@ fn fold_external_ids(
             entities_dir,
         )
         .map_err(|e| failed("pass 3 (external ids)", &e))?;
-        // The sidecar derives the locator's path from run 0's directory, so run 0 must stay first.
+        // Run 0 stays first: the sidecar finds the base locator from its directory.
         let run_rel = format!("partitions/{}/entities/external-ids.arrow", plan.partition);
         let locator_rel = format!("partitions/{}/entities/ext-locator.u32", plan.partition);
         out.push(run_rel.clone(), entities_dir.join("external-ids.arrow"));
@@ -477,8 +440,8 @@ fn fold_external_ids(
     Ok(external_id_run)
 }
 
-/// Pass 5: a digest of every file the fold wrote, and an fsync of all of them, before a fold flips
-/// `CURRENT` onto this prefix and deletes the old tree.
+/// Pass 5: digests each file in `out.written` by reading it back, since the writers cannot hash as
+/// they write, and fsyncs them all before `CURRENT` is flipped onto this prefix.
 fn digest_and_sync(out: &FoldOutput) -> Result<BTreeMap<String, FileDigest>, MaintenanceFailed> {
     let mut files = BTreeMap::new();
     for (rel, path) in &out.written {
@@ -493,9 +456,8 @@ fn digest_and_sync(out: &FoldOutput) -> Result<BTreeMap<String, FileDigest>, Mai
     Ok(files)
 }
 
-/// The next `v#####` prefix name under `bundle_root`: one past the highest already present.
-/// Derived from the directory listing, since a discarded fold leaves a complete `v#####` tree
-/// that `CURRENT` never named.
+/// One past the highest `v#####` under `bundle_root`, from the directory listing, since a
+/// discarded fold leaves a complete tree that `CURRENT` never named.
 pub(crate) fn next_prefix_name(bundle_root: &Path) -> std::io::Result<String> {
     let mut highest = 0u64;
     for entry in std::fs::read_dir(bundle_root)? {
@@ -505,8 +467,7 @@ pub(crate) fn next_prefix_name(bundle_root: &Path) -> std::io::Result<String> {
         let Some(digits) = name.strip_prefix('v') else {
             continue;
         };
-        // At least five digits, not exactly five: `{:05}` is a minimum width, so the
-        // hundred-thousandth prefix is `v100000`, six digits.
+        // `{:05}` is a minimum width, so the hundred-thousandth prefix has six digits.
         if digits.len() < 5 || !digits.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
@@ -521,14 +482,7 @@ pub(crate) fn next_prefix_name(bundle_root: &Path) -> std::io::Result<String> {
 mod tests {
     use super::*;
 
-    /// **The next prefix is one past the highest `v#####` present, not one past the live one.**
-    ///
-    /// A discarded fold leaves a complete tree under a name `CURRENT` never took. Numbering from
-    /// the live prefix would hand the next fold that same name, whose first carry-forward link then
-    /// refuses — after the corpus has already been re-read.
-    ///
-    /// **Mutation this kills:** deriving the name from the live prefix (`v00003` here would come
-    /// back as `v00001`).
+    /// The next prefix steps past an orphaned tree a discarded fold left, as well as the live one.
     #[test]
     fn the_next_prefix_steps_past_every_name_present_including_an_orphan() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -538,13 +492,7 @@ mod tests {
         assert_eq!(next_prefix_name(tmp.path()).unwrap(), "v00004");
     }
 
-    /// **The scan does not stop seeing prefixes at the hundred-thousandth.** `{:05}` is a minimum
-    /// width, so `v100000` is a legitimate name this function itself produces — and a parser that
-    /// required exactly five digits would ignore it, recompute `v100000` at every fold for ever,
-    /// and collide with the tree already there after each fold had re-read the corpus.
-    ///
-    /// **Mutation this kills:** `digits.len() != 5` in place of `< 5` (the answer becomes
-    /// `v100000`, which already exists).
+    /// A six-digit prefix counts, or every later fold would reuse `v100000`.
     #[test]
     fn the_next_prefix_keeps_counting_past_five_digits() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -554,9 +502,7 @@ mod tests {
         assert_eq!(next_prefix_name(tmp.path()).unwrap(), "v100001");
     }
 
-    /// An empty bundle root still names a prefix rather than failing — the shape a fold would meet
-    /// only if the root held no prefix at all, which is not a state a fold reaches, but the
-    /// arithmetic must not underflow to reach it.
+    /// An empty bundle root names the first prefix.
     #[test]
     fn the_next_prefix_over_an_empty_root_is_the_first_one() {
         let tmp = tempfile::TempDir::new().unwrap();
