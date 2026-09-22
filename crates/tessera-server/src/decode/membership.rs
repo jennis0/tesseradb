@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arrow::array::Array;
 use tessera_lifecycle::{BatchArtifacts, BatchEdge, BatchMembership};
 
-use crate::error::ApiError;
+use super::DecodeError;
 
 /// A column named for a declared layer, and what its cells mean.
 ///
@@ -129,7 +129,7 @@ pub(super) fn membership_column<'a>(
     name: &'a str,
     column: &'a Arc<dyn Array>,
     declaration: &tessera_types::layer::LayerDeclaration,
-) -> Result<MembershipColumn<'a>, ApiError> {
+) -> Result<MembershipColumn<'a>, DecodeError> {
     use arrow::array::{FixedSizeListArray, ListArray};
     use arrow::datatypes::DataType;
 
@@ -138,7 +138,7 @@ pub(super) fn membership_column<'a>(
     // publication for, and this is the same refusal one step earlier, where the batch can still be
     // rejected without effect.
     if declaration.membership != tessera_types::layer::MembershipSource::Enumerated {
-        return Err(ApiError::Contract(format!(
+        return Err(DecodeError(format!(
             "{body_name}: column '{name}' names a layer whose membership is evaluated per \
              request rather than enumerated — there is no stored membership for a point to join, \
              and one written beside the predicate would diverge from it at the first write"
@@ -156,7 +156,7 @@ pub(super) fn membership_column<'a>(
         DataType::FixedSizeList(_, size) => {
             match meaning {
                 tessera_types::layer::ListMeaning::Lineage => {
-                    return Err(ApiError::Contract(format!(
+                    return Err(DecodeError(format!(
                         "{body_name}: column '{name}' is a fixed-size list of {size} and that \
                          layer is declared nested, whose lineage is as deep as each point's own \
                          branch — a fixed arity is one entry per level, which is the stacked and \
@@ -166,7 +166,7 @@ pub(super) fn membership_column<'a>(
                 tessera_types::layer::ListMeaning::Levelled { levels, .. }
                     if *size as usize != levels =>
                 {
-                    return Err(ApiError::Contract(format!(
+                    return Err(DecodeError(format!(
                         "{body_name}: column '{name}' is a fixed-size list of {size} and that \
                          layer declares {levels} levels. Entry k is the artifact at level k, so \
                          the two counts are one number written twice"
@@ -196,7 +196,7 @@ pub(super) fn membership_column<'a>(
             | DataType::UInt32
             | DataType::UInt64
     ) {
-        return Err(ApiError::Contract(format!(
+        return Err(DecodeError(format!(
             "{body_name}: column '{name}' names a layer and carries {element:?}; a member key is \
              text or an integer — an integer key is read as its decimal spelling, so `3` and \
              \"3\" name one artifact"
@@ -232,7 +232,7 @@ impl MembershipTally {
         column: &MembershipColumn<'_>,
         row: usize,
         offset: usize,
-    ) -> Result<(), ApiError> {
+    ) -> Result<(), DecodeError> {
         let Some(entries) = column.cells.entries(row) else {
             return Ok(());
         };
@@ -247,7 +247,7 @@ impl MembershipTally {
         // whole column is written against.
         if let Some(levels) = column.meaning.arity().filter(|_| column.cells.is_list()) {
             if entries.len() != levels {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "{body_name}: column '{}' names {} artifacts at row {row} and the layer \
                      declares {levels} levels. A stacked or tiered layer's column is one entry \
                      per level, nullable where the point is in no artifact at that resolution",

@@ -1,12 +1,26 @@
+//! A record-bearing body (`/control/ingest`, `/control/values`), in Arrow IPC or JSON, decoded
+//! into rows against the manifest's declarations and the layer registry.
+
 mod arrow;
 mod json;
 mod membership;
 
 use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar, ABSENT_CODE};
 use tessera_lifecycle::WalScalar;
+use tessera_types::TesseraId;
 
 use self::arrow::code_at;
 pub(crate) use self::arrow::{parse_ingest_batch, parse_values_batch, ParsedBatch, ParsedValues};
+
+/// A body the decoder refuses: the caller's input, naming the row or column at fault.
+#[derive(Debug)]
+pub(crate) struct DecodeError(pub(crate) String);
+
+/// How one item names its entity: the two address forms, already shape-validated.
+pub(crate) enum Address {
+    External(Vec<u8>),
+    Tessera { id: TesseraId, idset: u32 },
+}
 
 /// The two encodings a record-bearing route takes (ingest §1.2). JSON is the default and Arrow
 /// IPC is selected by content type; nothing about a route's semantics depends on which carried

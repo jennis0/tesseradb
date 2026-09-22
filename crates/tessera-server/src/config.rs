@@ -1703,7 +1703,7 @@ const _: () = assert!(INGEST_MAX_BATCH_BYTES_CEILING == 4 * DEFAULT_INGEST_MAX_B
 /// The WAL bytes reserved for change records above the ingest queue's own worst case.
 ///
 /// **Argued from the record, not chosen for roundness.** A change record is an op, an entity id and
-/// a caller-supplied external id capped at 64 bytes (`control.rs`'s `EXTERNAL_ID_MAX_LEN`) plus its
+/// a caller-supplied external id capped at 64 bytes (`decode`'s `EXTERNAL_ID_MAX_LEN`) plus its
 /// descriptors — order 200 B — so 1 GiB is room for roughly five million deny appends *above a
 /// completely full ingest queue*. Denies are never refused for load (contracts §3.1) and so have no
 /// admission control of their own to fall back on, which is why this is a term in the startup

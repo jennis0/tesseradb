@@ -35,7 +35,8 @@ use tessera_types::view::ViewMetadataValue;
 use tessera_types::{EntityId, TermId, TesseraId};
 
 use crate::decode::{
-    parse_ingest_batch, parse_values_batch, BodyEncoding, ParsedBatch, ParsedValues,
+    parse_ingest_batch, parse_values_batch, Address, BodyEncoding, DecodeError, ParsedBatch,
+    ParsedValues,
 };
 use crate::error::{
     map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
@@ -689,7 +690,8 @@ fn run_values(
         &scoped,
         &meta.vocabularies,
         &|name| state.engine.registered_layer(name).map(|l| l.declaration),
-    )?;
+    )
+    .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
 
     // The row cap, on `/control/ingest`'s rule and with its cost: the whole decode is spent
     // before the count is knowable, which is why the byte cap sits on the route.
@@ -944,7 +946,8 @@ fn run_ingest(
         &scoped,
         &meta.vocabularies,
         &|name| state.engine.registered_layer(name).map(|l| l.declaration),
-    )?;
+    )
+    .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
 
     // The row cap. 422 per contracts §3.1's "bounds exceeded" row, naming the bound and the
     // batch's own size.
@@ -1406,12 +1409,6 @@ struct ChangeItem {
     #[serde(default)]
     idset: Option<u32>,
     op: String,
-}
-
-/// How one item names its entity: the two address forms, already shape-validated.
-pub(crate) enum Address {
-    External(Vec<u8>),
-    Tessera { id: TesseraId, idset: u32 },
 }
 
 /// One `/control/changes` item whose shape is validated but whose external id is not yet resolved.

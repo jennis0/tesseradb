@@ -2,19 +2,17 @@ use std::sync::Arc;
 
 use arrow::array::Array;
 use tessera_engine::{
-    DeclaredScalar, Projection, ScalarType, ScopedScalar, Vocabularies, VocabularyKind,
-    ABSENT_CODE,
+    DeclaredScalar, Projection, ScalarType, ScopedScalar, Vocabularies, VocabularyKind, ABSENT_CODE,
 };
 use tessera_lifecycle::{BatchArtifacts, WalScalar};
 use tessera_types::TesseraId;
 
 use super::membership::{membership_column, MembershipColumn, MembershipTally};
+use super::DecodeError;
 use super::{
-    declared_as_scoped, scoped_absent, scoped_as_declared, scoped_wire_type, BodyEncoding,
+    declared_as_scoped, scoped_absent, scoped_as_declared, scoped_wire_type, Address, BodyEncoding,
     EXTERNAL_ID_MAX_LEN,
 };
-use crate::control::Address;
-use crate::error::ApiError;
 
 #[derive(Debug)]
 pub(crate) struct RawIngestItem {
@@ -137,7 +135,7 @@ fn category_code(
     declared: &DeclaredScalar,
     vocabulary: &str,
     vocabularies: &Vocabularies,
-) -> Result<WalScalar, ApiError> {
+) -> Result<WalScalar, DecodeError> {
     use arrow::array::StringArray;
     let keys = col
         .as_any()
@@ -148,7 +146,7 @@ fn category_code(
     }
     let key = keys.value(row);
     if key.is_empty() {
-        return Err(ApiError::Contract(format!(
+        return Err(DecodeError(format!(
             "{body_name}: column '{}' carries the empty string, which is not a value key. An \
              item with no value for this column carries null, which is stored as *absent*; \
              minting a code for the empty string would make a typo a category \
@@ -157,7 +155,7 @@ fn category_code(
         )));
     }
     let minter = vocabularies.get(vocabulary).ok_or_else(|| {
-        ApiError::Contract(format!(
+        DecodeError(format!(
             "{body_name}: column '{}' names vocabulary '{vocabulary}', which this bundle does \
              not carry",
             declared.name
@@ -171,7 +169,7 @@ fn category_code(
         // category carries properties and, through its postings, a visibility consequence. The
         // refusal is here rather than on the executor because the whole batch can still be
         // rejected without effect at this point, which is what a 422 promises.
-        VocabularyKind::Declared => Err(ApiError::Contract(format!(
+        VocabularyKind::Declared => Err(DecodeError(format!(
             "{body_name}: column '{}' carries value '{key}', which vocabulary '{vocabulary}' \
              does not list. Under `vocabulary = \"declared\"` there is no auto-mint: a category \
              carries properties and, through its postings, a visibility consequence, so a typo \
@@ -271,25 +269,21 @@ pub(crate) fn parse_ingest_batch(
     scoped: &[ScopedScalar],
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
-) -> Result<ParsedBatch, ApiError> {
+) -> Result<ParsedBatch, DecodeError> {
     let (x_name, y_name) = coordinate_columns(projection);
     // **One decode below this line, whichever encoding carried the batch** (ingest §1.2). A JSON
     // body is coerced into one record batch against the declared column types
     // (`ingest_json::record_batch`) and then read by every rule the Arrow batches are.
-    let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, ApiError>>> =
+    let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, DecodeError>>> =
         match encoding {
             BodyEncoding::Arrow => {
                 let cursor = std::io::Cursor::new(body);
                 let reader =
                     arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
-                        ApiError::Contract(format!(
-                            "ingest body is not a valid Arrow IPC stream: {e}"
-                        ))
+                        DecodeError(format!("ingest body is not a valid Arrow IPC stream: {e}"))
                     })?;
                 Box::new(reader.map(|batch| {
-                    batch.map_err(|e| {
-                        ApiError::Contract(format!("ingest body: arrow decode error: {e}"))
-                    })
+                    batch.map_err(|e| DecodeError(format!("ingest body: arrow decode error: {e}")))
                 }))
             }
             BodyEncoding::Json => Box::new(std::iter::once(super::json::record_batch(
@@ -328,7 +322,7 @@ pub(crate) fn parse_ingest_batch(
         // every existing ingest uses.
         for (wrong, right) in wrong_spellings(projection) {
             if batch.column_by_name(wrong).is_some() && batch.column_by_name(right).is_none() {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}', \
                      not '{wrong}' (projections.md §2, §3). The axes are named for what they hold \
                      because a corpus written with longitude and latitude exchanged is mirrored \
@@ -370,7 +364,7 @@ pub(crate) fn parse_ingest_batch(
                 continue;
             }
             let Some(declaration) = layer_of(name) else {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "ingest body: column '{name}' is neither in MANIFEST.declared_scalars nor the \
                      name of a registered layer (contracts §2.2). Scalars are stored positionally \
                      against the declared order, so an undeclared column is refused rather than \
@@ -400,7 +394,7 @@ pub(crate) fn parse_ingest_batch(
             // column is not what the manifest says an ingest batch carries for it.
             let expected = d.wire_type();
             if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "ingest body: column '{}' is {:?}, but MANIFEST.declared_scalars declares \
                      it {} (contracts §2.6); refused rather than dropped",
                     d.name,
@@ -422,7 +416,7 @@ pub(crate) fn parse_ingest_batch(
             };
             let expected = scoped_wire_type(f);
             if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "ingest body: column '{}' is {:?}, but it is a group-scoped attribute \
                      declared {} (views §5); refused rather than dropped",
                     f.name,
@@ -514,7 +508,7 @@ pub(crate) fn parse_ingest_batch(
             // 409 must.
             if let Some(external_id) = &external_id {
                 if external_id.len() > EXTERNAL_ID_MAX_LEN {
-                    return Err(ApiError::Contract(format!(
+                    return Err(DecodeError(format!(
                         "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte cap \
                          (contracts §1); refused rather than truncated",
                         external_id.len()
@@ -573,21 +567,17 @@ pub(crate) fn parse_values_batch(
     scoped: &[ScopedScalar],
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
-) -> Result<ParsedValues, ApiError> {
-    let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, ApiError>>> =
+) -> Result<ParsedValues, DecodeError> {
+    let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, DecodeError>>> =
         match encoding {
             BodyEncoding::Arrow => {
                 let cursor = std::io::Cursor::new(body);
                 let reader =
                     arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
-                        ApiError::Contract(format!(
-                            "values body is not a valid Arrow IPC stream: {e}"
-                        ))
+                        DecodeError(format!("values body is not a valid Arrow IPC stream: {e}"))
                     })?;
                 Box::new(reader.map(|batch| {
-                    batch.map_err(|e| {
-                        ApiError::Contract(format!("values body: arrow decode error: {e}"))
-                    })
+                    batch.map_err(|e| DecodeError(format!("values body: arrow decode error: {e}")))
                 }))
             }
             BodyEncoding::Json => {
@@ -632,7 +622,7 @@ pub(crate) fn parse_values_batch(
         if rows.is_empty() {
             columns = names;
         } else if columns != names {
-            return Err(ApiError::Contract(
+            return Err(DecodeError(
                 "values body: two record batches of one stream carry different columns; a batch \
                  is one column set, so every row's values are positional against one list"
                     .to_string(),
@@ -650,7 +640,7 @@ pub(crate) fn parse_values_batch(
                 continue;
             }
             let Some(declaration) = layer_of(name) else {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "values body: column '{name}' is neither in MANIFEST.declared_scalars, nor a \
                      group-scoped family whose key set holds this batch's view, nor the name of a \
                      registered layer (contracts §2.2, `views.md` §5). An undeclared column is \
@@ -675,7 +665,7 @@ pub(crate) fn parse_values_batch(
                 .expect("the column was found above");
             let expected = d.wire_type();
             if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "values body: column '{}' is {:?}, but MANIFEST.declared_scalars declares it \
                      {} (contracts §2.6); refused rather than dropped",
                     d.name,
@@ -690,7 +680,7 @@ pub(crate) fn parse_values_batch(
                 .expect("the column was found above");
             let expected = scoped_wire_type(f);
             if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "values body: column '{}' is {:?}, but it is a group-scoped attribute \
                      declared {} (views §5); refused rather than dropped",
                     f.name,
@@ -707,7 +697,7 @@ pub(crate) fn parse_values_batch(
                 col.as_any()
                     .downcast_ref::<arrow::array::StringArray>()
                     .ok_or_else(|| {
-                        ApiError::Contract(
+                        DecodeError(
                             "values body: column 'tessera_id' is present but not utf8; a \
                              tessera_id is decimal digits in a string"
                                 .to_string(),
@@ -721,7 +711,7 @@ pub(crate) fn parse_values_batch(
                 col.as_any()
                     .downcast_ref::<arrow::array::UInt32Array>()
                     .ok_or_else(|| {
-                        ApiError::Contract(
+                        DecodeError(
                             "values body: column 'idset' is present but not uint32".to_string(),
                         )
                     })?,
@@ -742,14 +732,14 @@ pub(crate) fn parse_values_batch(
             };
             let address = match (external, named) {
                 (Some(_), Some(_)) => {
-                    return Err(ApiError::Contract(format!(
+                    return Err(DecodeError(format!(
                         "values body: row {} names both an external_id and a tessera_id; a row \
                          names its entity exactly one way",
                         rows.len()
                     )))
                 }
                 (None, None) => {
-                    return Err(ApiError::Contract(format!(
+                    return Err(DecodeError(format!(
                         "values body: row {} names no entity; a values row carries an \
                          external_id, or a tessera_id with its idset (`ingest.md` §1.4)",
                         rows.len()
@@ -757,7 +747,7 @@ pub(crate) fn parse_values_batch(
                 }
                 (Some(external), None) => {
                     if external.len() > EXTERNAL_ID_MAX_LEN {
-                        return Err(ApiError::Contract(format!(
+                        return Err(DecodeError(format!(
                             "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte \
                              cap (contracts §1); refused rather than truncated",
                             external.len()
@@ -767,7 +757,7 @@ pub(crate) fn parse_values_batch(
                 }
                 (None, Some(named)) => {
                     let id = named.parse::<u64>().map_err(|_| {
-                        ApiError::Contract(format!(
+                        DecodeError(format!(
                             "values body: row {}'s tessera_id is not decimal digits",
                             rows.len()
                         ))
@@ -777,7 +767,7 @@ pub(crate) fn parse_values_batch(
                     // set it was minted under, and a rotation would otherwise silently redirect
                     // the fill onto another entity.
                     let Some(set) = idset.as_ref().filter(|arr| !arr.is_null(i)) else {
-                        return Err(ApiError::Contract(format!(
+                        return Err(DecodeError(format!(
                             "values body: row {} names a tessera_id with no idset; the \
                              identifier set is required beside one, from `/v1/meta`",
                             rows.len()
@@ -871,14 +861,18 @@ fn wrong_spellings(projection: Projection) -> [(&'static str, &'static str); 2] 
 ///
 /// `Projection::None` returns without touching either column — the identity, bit for bit, which is
 /// what keeps every existing ingest exactly as it was.
-fn project_columns(projection: Projection, x: &mut [f64], y: &mut [f64]) -> Result<u64, ApiError> {
+fn project_columns(
+    projection: Projection,
+    x: &mut [f64],
+    y: &mut [f64],
+) -> Result<u64, DecodeError> {
     if projection == Projection::None {
         return Ok(0);
     }
     let mut clipped = 0u64;
     for (row, (lon, lat)) in x.iter_mut().zip(y.iter_mut()).enumerate() {
         if !lon.is_finite() || !lat.is_finite() || lon.abs() > 180.0 || lat.abs() > 90.0 {
-            return Err(ApiError::Contract(format!(
+            return Err(DecodeError(format!(
                 "ingest body: row {row} is at lon {lon}, lat {lat}, which is not a place. This \
                  view is projected ({}), and the accepted input coordinate system is WGS84 \
                  degrees — longitude within ±180, latitude within ±90 (projections.md §2). The \
@@ -899,7 +893,7 @@ fn project_columns(projection: Projection, x: &mut [f64], y: &mut [f64]) -> Resu
 fn optional_binary_col<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
-) -> Result<Option<&'a arrow::array::BinaryArray>, ApiError> {
+) -> Result<Option<&'a arrow::array::BinaryArray>, DecodeError> {
     match batch.column_by_name(name) {
         None => Ok(None),
         Some(col) => col
@@ -907,7 +901,7 @@ fn optional_binary_col<'a>(
             .downcast_ref::<arrow::array::BinaryArray>()
             .map(Some)
             .ok_or_else(|| {
-                ApiError::Contract(format!(
+                DecodeError(format!(
                     "ingest body: column '{name}' present but not binary"
                 ))
             }),
@@ -927,9 +921,9 @@ fn optional_binary_col<'a>(
 fn coordinate_col(
     batch: &arrow::record_batch::RecordBatch,
     name: &str,
-) -> Result<Vec<f64>, ApiError> {
+) -> Result<Vec<f64>, DecodeError> {
     let column = batch.column_by_name(name).ok_or_else(|| {
-        ApiError::Contract(format!(
+        DecodeError(format!(
             "ingest body: column '{name}' missing or not float32/float64"
         ))
     })?;
@@ -939,7 +933,7 @@ fn coordinate_col(
     } else if let Some(a) = any.downcast_ref::<arrow::array::Float32Array>() {
         Ok(a.values().iter().map(|v| f64::from(*v)).collect())
     } else {
-        Err(ApiError::Contract(format!(
+        Err(DecodeError(format!(
             "ingest body: column '{name}' missing or not float32/float64"
         )))
     }
@@ -990,7 +984,7 @@ impl LabelCells<'_> {
     /// none is declared, refuses with the count; the JSON door reads an absent or null `access`
     /// the same way, so the two doors agree. A whole column absent is still refused at the
     /// schema. A null element has no bytes to be a label and is refused naming the row.
-    fn labels_at(&self, row: usize) -> Result<Vec<Vec<u8>>, ApiError> {
+    fn labels_at(&self, row: usize) -> Result<Vec<Vec<u8>>, DecodeError> {
         let Some(entries) = self.entries(row) else {
             return Ok(Vec::new());
         };
@@ -998,7 +992,7 @@ impl LabelCells<'_> {
         entries
             .map(|index| {
                 if values.is_null(index) {
-                    return Err(ApiError::Contract(format!(
+                    return Err(DecodeError(format!(
                         "ingest body: column 'access' has a null element at row {row}; every \
                          element of a row's list is one label, taken verbatim"
                     )));
@@ -1012,14 +1006,14 @@ impl LabelCells<'_> {
 fn labels_col<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
-) -> Result<LabelCells<'a>, ApiError> {
+) -> Result<LabelCells<'a>, DecodeError> {
     use arrow::array::{LargeListArray, ListArray};
     use arrow::datatypes::DataType;
 
     const SHAPE: &str = "list<utf8> or large_list<utf8>, one label per element, an empty list \
                          for a row with no label (contracts §3.4)";
     let Some(column) = batch.column_by_name(name) else {
-        return Err(ApiError::Contract(format!(
+        return Err(DecodeError(format!(
             "ingest body: column '{name}' missing; it is {SHAPE}"
         )));
     };
@@ -1037,14 +1031,14 @@ fn labels_col<'a>(
                 .expect("a LargeList column downcasts to a LargeListArray"),
         ),
         DataType::Utf8 | DataType::LargeUtf8 => {
-            return Err(ApiError::Contract(format!(
+            return Err(DecodeError(format!(
                 "ingest body: column '{name}' is utf8, one string per row; it is {SHAPE}. Each \
                  element is one label, verbatim, so a label containing a comma is one term \
                  (decision 0129)"
             )));
         }
         other => {
-            return Err(ApiError::Contract(format!(
+            return Err(DecodeError(format!(
                 "ingest body: column '{name}' is {other:?}; it is {SHAPE}"
             )));
         }
@@ -1054,7 +1048,7 @@ fn labels_col<'a>(
         LabelCells::Large(list) => list.values().data_type().clone(),
     };
     if element != DataType::Utf8 {
-        return Err(ApiError::Contract(format!(
+        return Err(DecodeError(format!(
             "ingest body: column '{name}' is a list of {element:?}; it is {SHAPE}"
         )));
     }
@@ -1154,7 +1148,7 @@ mod category_wire {
     fn parse(
         column: arrow::array::ArrayRef,
         nullable: bool,
-    ) -> Result<Vec<RawIngestItem>, ApiError> {
+    ) -> Result<Vec<RawIngestItem>, DecodeError> {
         parse_ingest_batch(
             BodyEncoding::Arrow,
             &body(column, nullable),
@@ -1194,9 +1188,7 @@ mod category_wire {
     fn an_unknown_key_is_refused_naming_the_column_and_the_key() {
         let err = parse(Arc::new(StringArray::from(vec!["k9-unit"])), false)
             .expect_err("an undeclared key is refused");
-        let ApiError::Contract(detail) = err else {
-            panic!("declare-then-use is a contract violation, not a server error");
-        };
+        let DecodeError(detail) = err;
         assert!(detail.contains("department"), "{detail}");
         assert!(detail.contains("k9-unit"), "{detail}");
     }
@@ -1208,9 +1200,7 @@ mod category_wire {
     fn a_code_on_the_wire_is_refused_where_it_used_to_be_stored() {
         let err = parse(Arc::new(UInt8Array::from(vec![9u8])), false)
             .expect_err("a category is utf8 on the wire, whatever stores its codes");
-        let ApiError::Contract(detail) = err else {
-            panic!("a wrong wire type is a contract violation");
-        };
+        let DecodeError(detail) = err;
         assert!(detail.contains("department"), "{detail}");
         assert!(detail.contains("utf8"), "{detail}");
     }
@@ -1233,9 +1223,7 @@ mod category_wire {
     fn the_empty_string_is_refused_rather_than_folded_into_absence() {
         let err = parse(Arc::new(StringArray::from(vec![""])), false)
             .expect_err("the empty string is not a value key");
-        let ApiError::Contract(detail) = err else {
-            panic!("an empty key is a contract violation");
-        };
+        let DecodeError(detail) = err;
         assert!(detail.contains("department"), "{detail}");
     }
 

@@ -30,7 +30,7 @@ use serde_json::{Map, Value};
 use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar};
 use tessera_types::layer::LayerDeclaration;
 
-use crate::error::ApiError;
+use super::DecodeError;
 
 /// What the batch's columns may be, resolved once per batch from the manifest and the layer
 /// registry by the caller, in the same order the Arrow decode resolves them.
@@ -49,7 +49,7 @@ pub(crate) struct JsonColumns<'a> {
 pub(crate) fn record_batch(
     body: &[u8],
     columns: &JsonColumns<'_>,
-) -> Result<RecordBatch, ApiError> {
+) -> Result<RecordBatch, DecodeError> {
     let body_name = "ingest body";
     let rows = records(body_name, body)?;
     let mut fields: Vec<Field> = Vec::new();
@@ -203,7 +203,7 @@ pub(crate) fn record_batch(
                 continue;
             }
             if (columns.layer_of)(name).is_none() {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "ingest body: row {row}, column '{name}' is neither in \
                      MANIFEST.declared_scalars nor the name of a registered layer (contracts \
                      §2.2). Scalars are stored positionally against the declared order, so an \
@@ -220,7 +220,7 @@ pub(crate) fn record_batch(
     }
 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
-        .map_err(|e| ApiError::Contract(format!("ingest body: {e}")))
+        .map_err(|e| DecodeError(format!("ingest body: {e}")))
 }
 
 /// One `POST /control/values` body as one record batch (`ingest.md` §1.2, §1.4).
@@ -233,7 +233,7 @@ pub(crate) fn record_batch(
 pub(crate) fn values_record_batch(
     body: &[u8],
     columns: &JsonColumns<'_>,
-) -> Result<RecordBatch, ApiError> {
+) -> Result<RecordBatch, DecodeError> {
     let body_name = "values body";
     let rows = records(body_name, body)?;
     let mut fields: Vec<Field> = Vec::new();
@@ -355,7 +355,7 @@ pub(crate) fn values_record_batch(
                 continue;
             }
             if (columns.layer_of)(name).is_none() {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "values body: row {row}, column '{name}' is neither in \
                      MANIFEST.declared_scalars, nor a group-scoped family whose key set holds \
                      this batch's view, nor the name of a registered layer (contracts §2.2, \
@@ -372,24 +372,23 @@ pub(crate) fn values_record_batch(
     }
 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
-        .map_err(|e| ApiError::Contract(format!("values body: {e}")))
+        .map_err(|e| DecodeError(format!("values body: {e}")))
 }
 
 /// The body's records: a JSON array of objects, or one object per line.
-fn records(body_name: &str, body: &[u8]) -> Result<Vec<Map<String, Value>>, ApiError> {
+fn records(body_name: &str, body: &[u8]) -> Result<Vec<Map<String, Value>>, DecodeError> {
     let text = std::str::from_utf8(body)
-        .map_err(|_| ApiError::Contract(format!("{body_name} is not UTF-8 JSON")))?;
+        .map_err(|_| DecodeError(format!("{body_name} is not UTF-8 JSON")))?;
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
-        let values: Vec<Value> = serde_json::from_str(trimmed).map_err(|e| {
-            ApiError::Contract(format!("{body_name} is not a JSON array of objects: {e}"))
-        })?;
+        let values: Vec<Value> = serde_json::from_str(trimmed)
+            .map_err(|e| DecodeError(format!("{body_name} is not a JSON array of objects: {e}")))?;
         return values
             .into_iter()
             .enumerate()
             .map(|(row, value)| match value {
                 Value::Object(record) => Ok(record),
-                _ => Err(ApiError::Contract(format!(
+                _ => Err(DecodeError(format!(
                     "{body_name}: row {row} is not an object; each record is one object whose \
                      names are the column names"
                 ))),
@@ -405,13 +404,13 @@ fn records(body_name: &str, body: &[u8]) -> Result<Vec<Map<String, Value>>, ApiE
         match serde_json::from_str::<Value>(line) {
             Ok(Value::Object(record)) => rows.push(record),
             Ok(_) => {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "{body_name}: row {row} is not an object; each line is one object whose \
                      names are the column names"
                 )))
             }
             Err(e) => {
-                return Err(ApiError::Contract(format!(
+                return Err(DecodeError(format!(
                     "{body_name}: row {row} is not JSON: {e}. The body is an array of objects \
                      or one object per line"
                 )))
@@ -421,8 +420,8 @@ fn records(body_name: &str, body: &[u8]) -> Result<Vec<Map<String, Value>>, ApiE
     Ok(rows)
 }
 
-fn refusal(body_name: &str, row: usize, column: &str, what: &str) -> ApiError {
-    ApiError::Contract(format!("{body_name}: row {row}, column '{column}' {what}"))
+fn refusal(body_name: &str, row: usize, column: &str, what: &str) -> DecodeError {
+    DecodeError(format!("{body_name}: row {row}, column '{column}' {what}"))
 }
 
 /// One scalar column at its wire type. A declared scalar is `required`: a batch that carries the
@@ -436,8 +435,8 @@ fn scalar_column(
     name: &str,
     wire: ScalarType,
     required: bool,
-) -> Result<ArrayRef, ApiError> {
-    let cell = |row: usize| -> Result<&Value, ApiError> {
+) -> Result<ArrayRef, DecodeError> {
+    let cell = |row: usize| -> Result<&Value, DecodeError> {
         match rows[row].get(name) {
             Some(value) => Ok(value),
             None if required => Err(refusal(
@@ -555,7 +554,7 @@ fn integer(
     value: &Value,
     row: usize,
     name: &str,
-) -> Result<Option<i128>, ApiError> {
+) -> Result<Option<i128>, DecodeError> {
     match value {
         Value::Null => Ok(None),
         Value::Number(number) => {
@@ -585,7 +584,12 @@ fn integer(
     }
 }
 
-fn float(body_name: &str, value: &Value, row: usize, name: &str) -> Result<Option<f64>, ApiError> {
+fn float(
+    body_name: &str,
+    value: &Value,
+    row: usize,
+    name: &str,
+) -> Result<Option<f64>, DecodeError> {
     match value {
         Value::Null => Ok(None),
         Value::Number(number) => number
@@ -607,11 +611,11 @@ fn membership_column(
     body_name: &str,
     rows: &[Map<String, Value>],
     name: &str,
-) -> Result<ArrayRef, ApiError> {
+) -> Result<ArrayRef, DecodeError> {
     let is_list = rows
         .iter()
         .any(|record| matches!(record.get(name), Some(Value::Array(_))));
-    let key = |value: &Value, row: usize| -> Result<Option<String>, ApiError> {
+    let key = |value: &Value, row: usize| -> Result<Option<String>, DecodeError> {
         match value {
             Value::Null => Ok(None),
             Value::String(text) => Ok(Some(text.clone())),
