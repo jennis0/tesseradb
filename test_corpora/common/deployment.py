@@ -63,16 +63,21 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 
 def minted_credentials(source_dir: Path) -> dict[str, str]:
-    """A value for every credential variable this deployment names that the environment and the
-    deployment's own `.env` do not carry, minted for this run only.
+    """A value for every credential and identity-key variable this deployment names that the
+    environment and the deployment's own `.env` do not carry, minted for this run only.
     """
-    serve = tomllib.loads((source_dir / "tessera.toml").read_text())["serve"]
+    declared = tomllib.loads((source_dir / "tessera.toml").read_text())
+    serve = declared["serve"]
     env = dict(os.environ) | read_env_file(source_dir / ".env")
-    return {
+    minted = {
         serve[f"{which}_credential_env"]: secrets.token_urlsafe(32)
         for which in ("session", "operator")
         if not env.get(serve[f"{which}_credential_env"])
     }
+    identity = declared.get("identity", {}).get("env", "TESSERA_IDENTITY_KEY")
+    if not env.get(identity):
+        minted[identity] = secrets.token_hex(16)
+    return minted
 
 
 class Deployment:
