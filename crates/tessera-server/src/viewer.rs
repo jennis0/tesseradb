@@ -1260,8 +1260,17 @@ enum Shed {
 impl Shed {
     fn detail(self) -> &'static str {
         match self {
-            Shed::Deadline => "the whole-stream deadline fired: the response was committed and the                                work behind its next frame outran serve.stream_deadline_ms. A cold                                request over a level whose derived structures the prefix does not                                carry is the shape to check first — the build's artifact pass                                writes them, and an open reporting no adoptions says they were not                                taken",
-            Shed::Stall => "the per-send stall budget fired: the client stopped reading and                             serve.stream_write_stall_ms elapsed with the body channel full",
+            Shed::Deadline => {
+                "the whole-stream deadline fired: the response was committed and the work behind \
+                 its next frame outran serve.stream_deadline_ms. A cold request over a level whose \
+                 derived structures the prefix does not carry is the shape to check first — the \
+                 build's artifact pass writes them, and an open reporting no adoptions says they \
+                 were not taken"
+            }
+            Shed::Stall => {
+                "the per-send stall budget fired: the client stopped reading and \
+                 serve.stream_write_stall_ms elapsed with the body channel full"
+            }
         }
     }
 }

@@ -530,7 +530,8 @@ fn parse_operand(
                 .as_str()
                 .ok_or_else(|| {
                     bad(format!(
-                        "column '{column}': `phrase` takes a string. There is no                          `minimum_should_match` for a phrase — adjacency is not a count"
+                        "column '{column}': `phrase` takes a string. There is no \
+                         `minimum_should_match` for a phrase — adjacency is not a count"
                     ))
                 })?
                 .to_string(),
