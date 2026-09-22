@@ -4760,7 +4760,7 @@ fn canonical_authored_content(
     ),
     ApiError,
 > {
-    use tessera_engine::shapes::{authored_shape_input, canonical_shapes, shape_input};
+    use tessera_engine::shapes::{authored_shape_input, shape_input};
     let refuse = |detail: String| {
         ApiError::Contract(format!(
             "artifact {index}: content {rank}: the authored {} content: {detail}",
@@ -4769,36 +4769,7 @@ fn canonical_authored_content(
     };
     let input = authored_shape_input(kind, text).map_err(|e| refuse(e.to_string()))?;
     let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
-    let meta = state.engine.meta();
-    let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
-    // **One frame per view of the layer**, and never the bundle's — the bundle has no frame of
-    // its own to read (decision 0040), and a layer's views need share neither projection nor
-    // extent (decision 0111). The shape goes through each view's own transform and is quantised
-    // against each view's own extent; [`layer_frames`] is where the two spans that cannot be
-    // resolved are refused instead.
-    let frames = layer_frames(&meta, &views)?;
-    let canonical = canonical_shapes(&shape, &frames, space, state.max_shape_vertices)
-        .map_err(|e| refuse(e.to_string()))?;
-    let report: Vec<serde_json::Value> = canonical
-        .reports
-        .iter()
-        .map(|(view, r, stats)| {
-            serde_json::json!({
-                "view": view,
-                "clipped": r.clipped,
-                "outside": r.outside,
-                "rings_dropped": r.rings_dropped,
-                "degrees_looking": r.degrees_looking,
-                "vertices_in": r.vertices_in,
-                "vertices_out": r.vertices_out,
-                "parts": stats.parts,
-                "rings": stats.rings,
-            })
-        })
-        .collect();
-    let shapes = tessera_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
-        .ok_or_else(|| refuse("canonicalised to no view".to_string()))?;
-    Ok((shapes, serde_json::Value::Array(report)))
+    canonical_for_layer(state, declaration, &shape, space, refuse)
 }
 
 /// One row's shape as the caller wrote it, canonicalised for every view of its layer.
@@ -4822,7 +4793,7 @@ fn canonical_row_shape(
     )>,
     ApiError,
 > {
-    use tessera_engine::shapes::{canonical_shapes, shape_input, ShapeInput, ShapeSpace};
+    use tessera_engine::shapes::{shape_input, ShapeInput, ShapeSpace};
     let refuse = |detail: String| ApiError::Contract(format!("artifact {index}: {detail}"));
     let mut carried: Vec<(&str, ShapeInput)> = Vec::new();
     let count = |field: &str, n: usize, want: usize| {
@@ -4886,6 +4857,23 @@ fn canonical_row_shape(
         }
     };
     let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
+    canonical_for_layer(state, declaration, &shape, space, refuse).map(Some)
+}
+
+/// One shape canonicalised for every view of its layer, and the per-view report of what that did.
+fn canonical_for_layer(
+    state: &AppState,
+    declaration: &tessera_types::layer::LayerDeclaration,
+    shape: &tessera_engine::shapes::ShapeF64,
+    space: tessera_engine::shapes::ShapeSpace,
+    refuse: impl Fn(String) -> ApiError,
+) -> Result<
+    (
+        tessera_lifecycle::membership::ArtifactShapes,
+        serde_json::Value,
+    ),
+    ApiError,
+> {
     let meta = state.engine.meta();
     let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
     // **One frame per view of the layer**, and never the bundle's — the bundle has no frame of
@@ -4894,8 +4882,13 @@ fn canonical_row_shape(
     // against each view's own extent; [`layer_frames`] is where the two spans that cannot be
     // resolved are refused instead.
     let frames = layer_frames(&meta, &views)?;
-    let canonical = canonical_shapes(&shape, &frames, space, state.max_shape_vertices)
-        .map_err(|e| refuse(e.to_string()))?;
+    let canonical = tessera_engine::shapes::canonical_shapes(
+        shape,
+        &frames,
+        space,
+        state.max_shape_vertices,
+    )
+    .map_err(|e| refuse(e.to_string()))?;
     let report: Vec<serde_json::Value> = canonical
         .reports
         .iter()
@@ -4917,7 +4910,7 @@ fn canonical_row_shape(
         .collect();
     let shapes = tessera_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
         .ok_or_else(|| refuse("the layer is drawn in no view".to_string()))?;
-    Ok(Some((shapes, serde_json::Value::Array(report))))
+    Ok((shapes, serde_json::Value::Array(report)))
 }
 
 /// How a caller names an attachment's target.
