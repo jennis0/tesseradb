@@ -1563,57 +1563,11 @@ fn run_values(
     }
 
     // **Every entity is resolved here, at the boundary, and the executor sees entities alone**
-    // (**I10**, `Command::Change`'s rule). One batched call per address form: the external half
-    // opens each bundle extent at most once, and the tessera half takes one generation snapshot
-    // for the idset check and every inversion.
-    let mut idsets = rows.iter().filter_map(|row| match &row.address {
-        Address::Tessera { idset, .. } => Some(*idset),
-        Address::External(_) => None,
-    });
-    let mut inverted = match idsets.next() {
-        None => Vec::new().into_iter(),
-        Some(idset) => {
-            if idsets.any(|other| other != idset) {
-                return Err(ApiError::Contract(
-                    "one batch carries two different idsets; there is one per deployment, so this \
-                     list was assembled from a state that never existed"
-                        .to_string(),
-                ));
-            }
-            let ids: Vec<TesseraId> = rows
-                .iter()
-                .filter_map(|row| match &row.address {
-                    Address::Tessera { id, .. } => Some(*id),
-                    Address::External(_) => None,
-                })
-                .collect();
-            // **An identifier that names nothing is not refused here.** The idset check is —
-            // it decides for the whole batch, before a single identifier is inverted (decision
-            // 0025) — but an unheld id is answered by the row loop below, so both addressing
-            // arms give one status and count rows in one space: the batch's own, rather than a
-            // position inside whichever subsequence the row happened to fall in.
-            state
-                .engine
-                .resolve_tessera_ids(&ids, idset)
-                .map_err(crate::error::map_engine_error)?
-                .into_iter()
-        }
-    };
-    let keys: Vec<Vec<u8>> = rows
-        .iter()
-        .filter_map(|row| match &row.address {
-            Address::External(key) => Some(key.clone()),
-            Address::Tessera { .. } => None,
-        })
-        .collect();
-    let mut external = state
-        .engine
-        .resolve_external_ids(&keys)
-        .map_err(map_store_error)?
-        .into_iter();
+    // (**I10**, `Command::Change`'s rule).
+    let entities = resolve_addresses(state, rows.iter().map(|row| &row.address))?;
 
     let mut request_rows = Vec::with_capacity(rows.len());
-    for (index, row) in rows.into_iter().enumerate() {
+    for (index, (row, held)) in rows.into_iter().zip(entities).enumerate() {
         // **A subject that does not exist refuses the batch** (`ingest.md` §1.6): a values batch
         // creates nothing, so an id nothing holds is the caller's ordering mistake and the remedy
         // is to ingest the point first. Named by the batch's own row index, never by the id
@@ -1621,10 +1575,6 @@ fn run_values(
         // unknown key — and **one status and one index space for both address forms**, so a
         // caller reading the refusal does not have to know which of the two subsequences their
         // row fell in.
-        let held = match &row.address {
-            Address::Tessera { .. } => inverted.next().flatten(),
-            Address::External(_) => external.next().flatten(),
-        };
         let Some(entity) = held else {
             return Err(ApiError::Contract(format!(
                 "row {index} names an identifier this deployment does not hold. A values batch \
@@ -3026,95 +2976,90 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
         decoded.push(DecodedChange { address, op });
     }
 
-    // **Each address form resolved in one batched call, both before anything is enqueued.** The
-    // external half opens each bundle extent at most once regardless of N; the tessera half takes
-    // one generation snapshot for the idset check and every inversion, so a swap cannot land
-    // between them.
-    //
-    // **The idset decides first, and for the whole request.** A caller whose list was gathered
-    // before a key rotation is refused as a 409 before a single identifier is inverted — its ids
-    // would otherwise be reinterpreted under the new key and name different live items (decision
-    // 0025). Every tessera-addressed item must agree on the idset, because there is one per
-    // deployment and a request mixing two was assembled from a state that never existed.
-    let mut idsets = decoded.iter().filter_map(|d| match &d.address {
+    // Resolved before anything is enqueued. An unissued `tessera_id` is answered ahead of an
+    // unknown external id, wherever each sits in the request.
+    let resolved = resolve_addresses(state, decoded.iter().map(|d| &d.address))?;
+    if let Some(index) = decoded
+        .iter()
+        .zip(&resolved)
+        .position(|(d, entity)| matches!(d.address, Address::Tessera { .. }) && entity.is_none())
+    {
+        return Err(ApiError::Unknown(format!(
+            "the tessera_id of item {index} names nothing this deployment issued"
+        )));
+    }
+    let validated = decoded
+        .into_iter()
+        .zip(resolved)
+        .map(|(d, entity)| {
+            let entity =
+                entity.ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
+            Ok(ValidatedChange { entity, op: d.op })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    apply_validated(state, validated)
+}
+
+/// Resolve each address to the entity it names, in the order given, and `None` where it names
+/// nothing.
+///
+/// Each form is resolved in one batched call: the external half opens each bundle extent at most
+/// once, and the tessera half takes one generation snapshot for the idset check and every
+/// inversion, so a swap cannot land between them. **The idset decides first, for the whole
+/// list**: a list gathered before a key rotation is refused as a 409 before a single identifier is
+/// inverted, and every tessera address must carry the same idset, since there is one per
+/// deployment.
+fn resolve_addresses<'a>(
+    state: &AppState,
+    addresses: impl IntoIterator<Item = &'a Address>,
+) -> Result<Vec<Option<EntityId>>, ApiError> {
+    let addresses: Vec<&Address> = addresses.into_iter().collect();
+    let mut idsets = addresses.iter().filter_map(|address| match address {
         Address::Tessera { idset, .. } => Some(*idset),
         Address::External(_) => None,
     });
-    if let Some(idset) = idsets.next() {
-        if idsets.any(|other| other != idset) {
-            return Err(ApiError::Contract(
-                "one request carries two different idsets; there is one per deployment, so this \
-                 list was assembled from a state that never existed"
-                    .to_string(),
-            ));
+    let tessera = match idsets.next() {
+        None => Vec::new(),
+        Some(idset) => {
+            if idsets.any(|other| other != idset) {
+                return Err(ApiError::Contract(
+                    "one request carries two different idsets; there is one per deployment, so \
+                     this list was assembled from a state that never existed"
+                        .to_string(),
+                ));
+            }
+            let ids: Vec<TesseraId> = addresses
+                .iter()
+                .filter_map(|address| match address {
+                    Address::Tessera { id, .. } => Some(*id),
+                    Address::External(_) => None,
+                })
+                .collect();
+            state
+                .engine
+                .resolve_tessera_ids(&ids, idset)
+                .map_err(crate::error::map_engine_error)?
         }
-        let ids: Vec<TesseraId> = decoded
-            .iter()
-            .filter_map(|d| match &d.address {
-                Address::Tessera { id, .. } => Some(*id),
-                Address::External(_) => None,
-            })
-            .collect();
-        // Refuses with `StaleIdSet` before inverting anything — see `resolve_tessera_ids`.
-        let resolved = state
-            .engine
-            .resolve_tessera_ids(&ids, idset)
-            .map_err(crate::error::map_engine_error)?;
-        if let Some(position) = resolved.iter().position(|e| e.is_none()) {
-            return Err(ApiError::Unknown(format!(
-                "tessera_id at tessera-addressed position {position} names nothing this \
-                 deployment issued"
-            )));
-        }
-        let mut resolved = resolved.into_iter();
-        let external_keys: Vec<Vec<u8>> = decoded
-            .iter()
-            .filter_map(|d| match &d.address {
-                Address::External(key) => Some(key.clone()),
-                Address::Tessera { .. } => None,
-            })
-            .collect();
-        let mut external = state
-            .engine
-            .resolve_external_ids(&external_keys)
-            .map_err(map_store_error)?
-            .into_iter();
-
-        let mut validated = Vec::with_capacity(decoded.len());
-        for d in decoded {
-            let entity = match &d.address {
-                Address::Tessera { .. } => resolved
-                    .next()
-                    .flatten()
-                    .expect("checked complete just above"),
-                Address::External(_) => external
-                    .next()
-                    .flatten()
-                    .ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?,
-            };
-            validated.push(ValidatedChange { entity, op: d.op });
-        }
-        return apply_validated(state, validated);
-    }
-
-    let keys: Vec<Vec<u8>> = decoded
+    };
+    let keys: Vec<Vec<u8>> = addresses
         .iter()
-        .map(|d| match &d.address {
-            Address::External(key) => key.clone(),
-            Address::Tessera { .. } => unreachable!("no tessera address reaches here"),
+        .filter_map(|address| match address {
+            Address::External(key) => Some(key.clone()),
+            Address::Tessera { .. } => None,
         })
         .collect();
-    let resolved = state
+    let external = state
         .engine
         .resolve_external_ids(&keys)
         .map_err(map_store_error)?;
-    let mut validated = Vec::with_capacity(decoded.len());
-    for (d, entity) in decoded.into_iter().zip(resolved) {
-        let entity = entity.ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
-        validated.push(ValidatedChange { entity, op: d.op });
-    }
-
-    apply_validated(state, validated)
+    let (mut tessera, mut external) = (tessera.into_iter(), external.into_iter());
+    Ok(addresses
+        .iter()
+        .map(|address| match address {
+            Address::Tessera { .. } => tessera.next().flatten(),
+            Address::External(_) => external.next().flatten(),
+        })
+        .collect())
 }
 
 /// Enqueue and collect a validated batch — the apply half of [`run_changes`], reached by both
