@@ -60,7 +60,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--source", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--papers", type=int, default=50_000)
+    ap.add_argument("--papers", type=int, default=200_000)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
