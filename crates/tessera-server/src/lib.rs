@@ -11,10 +11,10 @@
 pub mod config;
 pub mod control;
 pub mod cors;
+mod decode;
 pub mod error;
 mod filter_dto;
 pub mod health;
-mod ingest_json;
 pub mod memory;
 pub mod session;
 pub mod state;

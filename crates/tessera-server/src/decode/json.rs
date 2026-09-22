@@ -182,7 +182,7 @@ pub(crate) fn record_batch(
         if !has(&family.name) {
             continue;
         }
-        let wire = crate::control::scoped_wire_type(family);
+        let wire = super::scoped_wire_type(family);
         let column = scalar_column(body_name, &rows, &family.name, wire, false)?;
         fields.push(Field::new(&family.name, column.data_type().clone(), true));
         arrays.push(column);
@@ -337,7 +337,7 @@ pub(crate) fn values_record_batch(
         if !has(&family.name) {
             continue;
         }
-        let wire = crate::control::scoped_wire_type(family);
+        let wire = super::scoped_wire_type(family);
         let column = scalar_column(body_name, &rows, &family.name, wire, false)?;
         fields.push(Field::new(&family.name, column.data_type().clone(), true));
         arrays.push(column);
