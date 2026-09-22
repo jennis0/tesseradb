@@ -7,11 +7,9 @@ use tessera_store::merge::size_tier;
 
 use super::{CoalescePlan, CoalescePolicy, ColumnExtent, ColumnWindow, WindowKey};
 
-/// Plan a coalesce over `manifest`, reading file sizes from its digests and from `build_files`,
-/// the digests in the prefix's `MANIFEST.json`.
-///
-/// Pure, and takes the two manifests rather than a generation, so every selection rule is testable
-/// without an engine. Returns `None` when no axis qualifies.
+/// Plans a coalesce over `manifest`, sizing files from its digests and from `build_files`, the
+/// prefix's `MANIFEST.json` digests. Takes manifests rather than a generation so every selection
+/// rule is testable without an engine. `None` when no axis qualifies.
 pub(crate) fn plan_coalesce(
     partition: &str,
     manifest: &SegmentsManifest,
@@ -22,7 +20,7 @@ pub(crate) fn plan_coalesce(
     if policy.width < 2 {
         return None;
     }
-    // `None` for a file neither manifest digests, which makes its entry ineligible.
+    // A file neither manifest digests makes its entry ineligible.
     let size_of = |rel: &str| -> Option<u64> {
         manifest
             .files
@@ -36,17 +34,15 @@ pub(crate) fn plan_coalesce(
         ..Default::default()
     };
 
-    // Tiers are unioned into a fragment, so any contiguous same-tier window qualifies.
     if let Some(window) =
         select_window(&manifest.deltas, policy.width, policy, |rel| size_of(rel))
     {
         plan.tiers = manifest.deltas[window].to_vec();
     }
 
-    // Runs are driven from the locator extents, which name their run. The coalesced extent must
-    // cover one ascending, non-overlapping span: `external_id_of_checked` finds an extent by the
-    // first span containing the entity, so an overlapping span would answer against the wrong run.
-    // The base run is never taken: the build's and a fold's locator is not in this list.
+    // Spans must ascend without overlap, because a lookup takes the first span containing the
+    // entity. The runs must be a contiguous block of `external_id_runs` in the same order, because
+    // recency is list position. No locator extent names the base run, so it is never taken.
     let locator_size =
         |extent: &LocatorExtent| -> Option<u64> { extent.files().map(&size_of).sum() };
     if let Some(window) = select_window(
@@ -59,8 +55,6 @@ pub(crate) fn plan_coalesce(
         let adjacent = extents
             .windows(2)
             .all(|pair| pair[0].entity_hi < pair[1].entity_lo);
-        // The runs must be a contiguous block of `external_id_runs` in the same order: the
-        // coalesced run takes the block's position, and recency is list position.
         let runs: Vec<String> = extents.iter().map(|e| e.external_id_run.clone()).collect();
         let contiguous = manifest
             .external_id_runs
@@ -71,9 +65,9 @@ pub(crate) fn plan_coalesce(
         }
     }
 
-    // Dictionary extents are positional: an ordinal is an index into the concatenation in listed
-    // order. Position 0 is always the build's base dictionary and stays untakeable; the window
-    // over later entries must be contiguous and land in place, or every ordinal after it shifts.
+    // An ordinal indexes the concatenation of dictionary extents in list order. The first is the
+    // base dictionary and is never taken; the merged extent must land in the window's place, or
+    // every later ordinal shifts.
     if let Some((_base, promoted)) = manifest.dict_extents.split_first() {
         if let Some(window) =
             select_window(promoted, policy.width, policy, |extent: &DictExtent| {
@@ -84,15 +78,11 @@ pub(crate) fn plan_coalesce(
         }
     }
 
-    // Attribute extents: one window per column, keyed by `(column, view, incarnation)` so a
-    // group-scoped family's views are not merged into each other. A layer's dictionary counts
-    // toward the input cap along with its values.
+    // A layer's dictionary counts toward the input cap.
     plan.attrs = column_windows(&manifest.attr_extents, policy, is_live, |extent| {
         extent.files().map(&size_of).sum()
     });
 
-    // Record-blob extents: the attribute axis's selection over the record blob's one
-    // pseudo-column. A built bundle's list is empty; the base blob lives in `MANIFEST.files`.
     {
         let size = |extent: &RecordExtent| extent.files().map(&size_of).sum();
         if let Some(window) = widest_window(&manifest.record_extents, policy, size) {
@@ -100,15 +90,11 @@ pub(crate) fn plan_coalesce(
         }
     }
 
-    // Text extents: the attribute axis's per-column selection over their own list. A `TextExtent`
-    // names its dictionary, postings and presence together, so all three files count toward the
-    // input cap: the merge holds every input's postings and streams both dictionaries at once.
+    // A text extent's dictionary, postings and presence all count toward the input cap.
     plan.texts = column_windows(&manifest.text_extents, policy, is_live, |extent| {
         extent.files().map(&size_of).sum()
     });
 
-    // Entity-to-term extents: the record axis's selection over `entity_terms_extents`. A built
-    // bundle's list is empty; the base layer lives under `entities/terms/` in `MANIFEST.files`.
     {
         let size = |extent: &EntityTermsExtent| extent.files().map(&size_of).sum();
         if let Some(window) = widest_window(&manifest.entity_terms_extents, policy, size) {
@@ -119,12 +105,8 @@ pub(crate) fn plan_coalesce(
     (!plan.is_empty()).then_some(plan)
 }
 
-/// The first window of `width` consecutive entries that are all eligible, share one size tier, and
-/// total within `policy.max_input_bytes`. `size_of` returns `None` for an entry this axis may not
-/// take, which excludes it and also breaks the window.
-///
-/// `width` is a parameter rather than `policy.width` because the attribute axis narrows it to fit
-/// its per-column input cap; every other axis passes the policy's own.
+/// The first `width` consecutive entries that share one size tier and fit
+/// `policy.max_input_bytes`. An entry `size_of` gives `None` breaks any window containing it.
 pub(super) fn select_window<T>(
     entries: &[T],
     width: usize,
@@ -154,9 +136,8 @@ pub(super) fn select_window<T>(
     None
 }
 
-/// The widest window that fits the input cap. A run of `policy.width` entries in one size tier
-/// must exist first, ignoring the cap. Of the widths from there down to 2, the widest whose
-/// bytes fit the cap is taken, so a list with too few entries yields no window.
+/// The widest window, from `policy.width` down to 2, whose bytes fit the input cap. Nothing is
+/// taken unless `policy.width` same-tier entries exist with the cap ignored.
 fn widest_window<T>(
     entries: &[T],
     policy: CoalescePolicy,
@@ -173,10 +154,9 @@ fn widest_window<T>(
     })
 }
 
-/// One window per live `(column, view, incarnation)`, taken over that key's own subsequence of
-/// `entries`. Extents of a dropped view's incarnation are skipped: the output path is built
-/// from `(column, view)`, so a dead window would write over the live one's files. An entry
-/// with a view and no incarnation, or the reverse, is skipped too.
+/// One window per live (column, view, incarnation), over that key's own subsequence. A dead
+/// incarnation is skipped because the output path is built from (column, view) alone and would
+/// overwrite the live one's files. A view without an incarnation, or the reverse, is skipped.
 fn column_windows<E: ColumnExtent + Clone>(
     entries: &[E],
     policy: CoalescePolicy,
@@ -190,7 +170,6 @@ fn column_windows<E: ColumnExtent + Clone>(
     let mut windows = Vec::new();
     for ((column, view, incarnation), extents) in by_column {
         let live = match (view, incarnation) {
-            // Entity-scoped: one column bundle-wide, belonging to no view.
             (None, None) => true,
             (Some(view), Some(incarnation)) => is_live(view, incarnation),
             _ => false,

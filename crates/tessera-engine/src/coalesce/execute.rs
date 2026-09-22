@@ -1,3 +1,6 @@
+//! Each merged output is reopened, or its counts checked against the inputs, before the manifest
+//! can name it, so a merge defect fails the pass instead of being published.
+
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -13,12 +16,10 @@ use tessera_store::manifest::{
 use super::{coalesced_column_rel, CoalesceContext, ColumnWindow, OpenedTier};
 use crate::flush::{digest_of, MaintenanceFailed, SMALL_TERM_THRESHOLD};
 
-/// Turns an error into a failed pass, prefixed with what was being done.
 fn failed<E: Display>(what: impl Display) -> impl FnOnce(E) -> MaintenanceFailed {
     move |e| MaintenanceFailed(format!("{what}: {e}"))
 }
 
-/// Digests each written file, named prefix-relative, into `files`.
 fn digest_outputs<'r>(
     files: &mut BTreeMap<String, FileDigest>,
     ctx: &CoalesceContext,
@@ -30,7 +31,7 @@ fn digest_outputs<'r>(
     Ok(())
 }
 
-/// The consumed delta tiers unioned into one fragment, with the reopened reader.
+/// The delta tiers unioned into one fragment, with its reader reopened.
 pub(super) fn coalesce_tiers(
     tiers: &[String],
     ctx: &CoalesceContext,
@@ -45,7 +46,7 @@ pub(super) fn coalesce_tiers(
     Ok((rel, Arc::new(reader)))
 }
 
-/// The consumed external-id runs merged into one run, with the locator extent indexing it.
+/// The external-id runs merged into one, with a locator extent over their union span.
 pub(super) fn coalesce_runs(
     locators: &[LocatorExtent],
     ctx: &CoalesceContext,
@@ -55,8 +56,6 @@ pub(super) fn coalesce_runs(
         .iter()
         .map(|e| ctx.prefix_dir.join(&e.external_id_run))
         .collect();
-    // The planner has checked the spans are ascending and do not overlap, so their union is
-    // one span with the same coverage.
     let extent = LocatorExtent {
         path: format!("{}/ext-locator.u32", ctx.out_rel),
         entity_lo: locators[0].entity_lo,
@@ -70,7 +69,6 @@ pub(super) fn coalesce_runs(
     Ok(extent)
 }
 
-/// The consumed dictionary extents merged into one, its record count checked against theirs.
 pub(super) fn coalesce_dicts(
     dicts: &[DictExtent],
     ctx: &CoalesceContext,
@@ -94,15 +92,13 @@ pub(super) fn coalesce_dicts(
     Ok(DictExtent { path: rel, records })
 }
 
-/// Attribute extents: one merged extent per window, under its own `(column, view)` directory
-/// because two views of one scoped family share the column's name.
 pub(super) fn coalesce_attr_window(
     window: &ColumnWindow<AttrExtent>,
     ctx: &CoalesceContext,
     files: &mut BTreeMap<String, FileDigest>,
 ) -> Result<crate::filter::OpenedExtent, MaintenanceFailed> {
-    // A keyword layer's values are ordinals into its own dictionary and any other layer's are
-    // the values themselves, so a window mixing the two has no single reading.
+    // A keyword layer's values are ordinals into its own dictionary; a plain layer's are the
+    // values. A window mixing them has no single reading.
     let with_dict = window.extents.iter().filter(|e| e.dict.is_some()).count();
     let keyword = match with_dict {
         0 => false,
@@ -155,7 +151,6 @@ pub(super) fn coalesce_attr_window(
     }
     digest_outputs(files, ctx, extent.files())?;
 
-    // Reopened here, on the pool, so publication on the executor is a pointer push.
     let values =
         tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Mapped)
             .map_err(failed("coalesced attr extent"))?;
@@ -172,8 +167,6 @@ pub(super) fn coalesce_attr_window(
     })
 }
 
-/// A keyword window's layers merged into one, renumbered against one merged dictionary. The
-/// merge checks its remap against the written dictionary before writing an ordinal.
 fn merge_keyword_window(
     window: &ColumnWindow<AttrExtent>,
     inputs: &[tessera_filter::ValueColumn],
@@ -183,7 +176,7 @@ fn merge_keyword_window(
     dict_path: &Path,
 ) -> Result<(), MaintenanceFailed> {
     let column = &window.column;
-    // Opened sequentially: the merge's cursors walk each file once in ordinal order.
+    // Sequential: the merge walks each dictionary once in ordinal order.
     let dicts: Vec<tessera_filter::SortedDict> = window
         .extents
         .iter()
@@ -208,7 +201,6 @@ fn merge_keyword_window(
         .map_err(failed(format!("keyword coalesce for '{column}'")))
 }
 
-/// A plain window's layers concatenated: their values are the values, so nothing renumbers.
 fn merge_values_window(
     column: &str,
     inputs: &[tessera_filter::ValueColumn],
@@ -220,8 +212,7 @@ fn merge_values_window(
         .map_err(failed(format!("attr coalesce for '{column}'")))
 }
 
-/// Record-blob extents: the window merged by concatenation, re-blocking toward the format's
-/// target block size.
+/// The record extents concatenated and re-blocked toward the format's target block size.
 pub(super) fn coalesce_records(
     records: &[RecordExtent],
     ctx: &CoalesceContext,
@@ -259,14 +250,11 @@ pub(super) fn coalesce_records(
     )
     .map_err(failed("record coalesce"))?;
     digest_outputs(files, ctx, extent.files())?;
-    // Reopened so a merge defect fails the pass rather than publishing an extent the reader
-    // would refuse.
     open(&extent).map_err(failed("the coalesced record extent does not reopen"))?;
     Ok(extent)
 }
 
-/// Text extents: the window merged into one layer, dictionary and all. Nothing per entity
-/// stores a text ordinal, so nothing outside the three files needs remapping.
+/// Nothing per entity stores a text ordinal, so the merge changes only the extent's three files.
 pub(super) fn coalesce_text_window(
     window: &ColumnWindow<TextExtent>,
     ctx: &CoalesceContext,
@@ -277,8 +265,8 @@ pub(super) fn coalesce_text_window(
     let column_dir = ctx.prefix_dir.join(&column_rel);
     std::fs::create_dir_all(&column_dir).map_err(failed(format!("coalesce dir for '{column}'")))?;
 
-    // The dictionaries are streamed once each. The postings are read from whichever layer holds
-    // the least key, so they are not opened for sequential access.
+    // Dictionaries stream once each. Postings are read from whichever layer holds the least key,
+    // so they are not opened for sequential access.
     let dicts: Vec<tessera_filter::SortedDict> = window
         .extents
         .iter()
@@ -330,7 +318,7 @@ pub(super) fn coalesce_text_window(
     };
     let dict_path = ctx.prefix_dir.join(&extent.dict);
     let postings_path = ctx.prefix_dir.join(&extent.postings);
-    // Scratch, removed on every exit path.
+    // The spool file is removed on every exit path.
     let spool_path = column_dir.join("postings.spool");
     let outcome = tessera_filter_write::coalesce_text_extents(
         &inputs,
@@ -343,8 +331,7 @@ pub(super) fn coalesce_text_window(
     outcome.map_err(failed(format!("text coalesce for '{column}'")))?;
     digest_outputs(files, ctx, extent.files())?;
 
-    // Reopened so a dictionary and postings that disagree fail the pass rather than publish a
-    // layer whose ordinals name the wrong words.
+    // A dictionary and postings that disagree would give ordinals that name the wrong words.
     let no_reopen = "the coalesced text extent does not reopen";
     let reopened_dict = tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Read)
         .map_err(failed(no_reopen))?;
@@ -360,8 +347,7 @@ pub(super) fn coalesce_text_window(
     Ok(extent)
 }
 
-/// Entity-to-term extents: the window merged by concatenation. Each list is copied verbatim,
-/// because a term ordinal is a position in the append-only dictionary.
+/// Lists are copied verbatim, because a term ordinal is a position in the append-only dictionary.
 pub(super) fn coalesce_entity_terms(
     terms: &[EntityTermsExtent],
     ctx: &CoalesceContext,
@@ -400,7 +386,8 @@ pub(super) fn coalesce_entity_terms(
         &ctx.prefix_dir.join(&extent.bases),
     )
     .map_err(failed("entity-terms coalesce"))?;
-    // Short of the sum means an input's has-row bitmap named an entity its offsets did not.
+    // Fewer than the inputs hold means an input listed an entity with no offsets; publishing that
+    // would silently lose those entities' label sets.
     if written != expected {
         return Err(MaintenanceFailed(format!(
             "the coalesced entity-terms extent holds {written} entities where its inputs hold \
