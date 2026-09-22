@@ -4,6 +4,7 @@ The announce line is read from a fake child here, a Python script printing what 
 prints, so the parser is covered without a bundle and without the binary.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -147,3 +148,55 @@ def test_the_binary_is_found_at_tessera_bin(tmp_path, monkeypatch):
     monkeypatch.setenv("TESSERA_BIN", str(tmp_path / "absent"))
     with pytest.raises(Exception):
         _instance.find_binary()
+
+
+#: A committed database, left open at interpreter exit. `where` is `None` for a temporary one.
+LEFT_OPEN = """
+    import json, sys
+    import pyarrow as pa
+    import tesseradb as td
+
+    where = json.loads(sys.argv[1])
+    db = td.create(where)
+    db.declare_view("map", extent={"x": [0, 10], "y": [0, 10]})
+    rows = pa.table({"id": ["a", "b"], "x": [1.0, 2.0], "y": [1.0, 2.0],
+                     "access": [["public"], ["public"]]})
+    db.insert("map", rows, id="id", x="x", y="y", access="access")
+    db.commit()
+    saved = json.loads(sys.argv[2])
+    if saved is not None:
+        db.save(saved)
+        td.open(saved).serve()
+    print(json.dumps({"path": str(db.path), "pid": db._child.pid}))
+"""
+
+
+def left_open(where, saved=None) -> dict:
+    from conftest import binary
+
+    binary()
+    done = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(LEFT_OPEN), json.dumps(where), json.dumps(saved)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    left = json.loads(done.stdout.strip().splitlines()[-1])
+    with pytest.raises(OSError):
+        os.kill(left["pid"], 0)
+    return left
+
+
+def test_a_temporary_database_is_removed_at_interpreter_exit(tmp_path):
+    saved = tmp_path / "saved"
+    left = left_open(None, str(saved))
+    assert not os.path.exists(left["path"])
+    # The copy it was saved to, which a second database opened and served, is the user's.
+    assert (saved / "tessera.toml").exists()
+
+
+def test_a_database_at_a_path_the_user_named_is_kept_at_interpreter_exit(tmp_path):
+    left = left_open(str(tmp_path / "db"))
+    assert (tmp_path / "db" / "tessera.toml").exists()
+    assert left["path"] == str(tmp_path / "db")

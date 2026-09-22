@@ -14,6 +14,7 @@ import pyarrow as pa
 import pytest
 
 from conftest import browse, item, viewport
+from tesseradb._refusal import Refusal
 
 pytest.importorskip("pyarrow")
 
@@ -104,8 +105,9 @@ def test_a_delta_of_string_ids_is_ingested_and_a_second_page_of_them_is_refused(
 
     # The same keys again, moved a little so the bytes are a batch the server has not replayed.
     db.insert("map", papers(fresh, x=26.0), id="paper", x="x", y="y", access="labels")
-    again = db.commit()
-    assert not again.ok
+    with pytest.raises(Refusal) as raised:
+        db.commit()
+    again = raised.value.report
     assert [r["status"] for r in again.refusals] == [409]
     # The refusal names the ids it read, base64 as every external id on this plane is.
     assert base64.b64encode(b"q0").decode() in again.refusals[0]["detail"]

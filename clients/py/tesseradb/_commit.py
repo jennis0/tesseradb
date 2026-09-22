@@ -82,7 +82,9 @@ class Page:
     batch: str | None = None
     view: str | None = None
     rows: int = 0
-    artifacts: int = 0
+    #: The `(level, view, key)` of each artifact a publication carries, in the order its answer
+    #: names their `tessera_id`s.
+    artifacts: Sequence[tuple] = ()
     members: int = 0
     level: int = 0
 
@@ -791,7 +793,12 @@ class Planner:
 
         for level in sorted({int(row.get("level") or 0) for row in carried}):
             at_level = [row for row in carried if int(row.get("level") or 0) == level]
-            ordered = _placed(at_level, lambda row: row["key"], lambda row: row.get("parent") or [])
+            # A parent is a sibling in the artifact's own view.
+            ordered = _placed(
+                at_level,
+                _identity,
+                lambda row: [(level, row["view"], one) for one in row.get("parent") or []],
+            )
             for batch in _batched(ordered, cap, most):
                 blocks, artifacts, members = batch
                 body = _publish_body(level, blocks)
@@ -801,7 +808,7 @@ class Planner:
                     level,
                     f"publish {len(artifacts)} artifact(s) into '{layer}' level {level}",
                     body,
-                    artifacts=len(artifacts),
+                    artifacts=[_identity(row) for row in artifacts],
                     members=members,
                 )
                 for row in artifacts:
@@ -828,7 +835,7 @@ class Planner:
         level: int,
         line: str,
         body: bytes,
-        artifacts: int = 0,
+        artifacts: Sequence[tuple] = (),
         members: int = 0,
     ) -> None:
         """One publication or growth. The artifact routes carry no batch-id header."""
@@ -1061,6 +1068,11 @@ def _flush(what: str, why: str) -> Page:
     return Page(kind="flush", name=what, line=f"flush {what}, and wait for the publication that {why}")
 
 
+def _identity(row: dict) -> tuple:
+    """An artifact's identity: one key at two levels, or on two views of a group, is two."""
+    return (int(row.get("level") or 0), row.get("view"), row["key"])
+
+
 def _blank(key: str, level: int, view: str | None = None) -> dict:
     return {"key": key, "level": level, "view": view, "members": [], "sets": [], "content": [],
             "parent": [], "attached": None, "excluding": None, "space": None}
@@ -1182,22 +1194,23 @@ def _records(table: pa.Table, insert) -> list[dict]:
 # ---------------------------------------------------------------------------- the run
 
 
-def run(control: Control, pages: Sequence[Page], report) -> None:
+def run(control: Control, pages: Sequence[Page], report) -> int:
     """Send the plan, in order, then flush once and wait for the publication that flush arms.
 
     Every page goes unwaited and the flush is the commit's whole wait, whatever the pages did: a
     commit that reported a refusal on one page should not also leave its accepted ones sitting for
     the executor's own period. Where nothing was accepted there is nothing to publish and no flush
-    is sent.
+    is sent. Returns how many pages other than the plan's own flushes were accepted.
     """
     accepted = 0
     for page in pages:
         answer = _send(control, page)
         _fold(report, page, answer)
-        if answer.ok:
+        if answer.ok and page.kind != "flush":
             accepted += 1
     if accepted:
         _waited(report, control.flush(wait=True))
+    return accepted
 
 
 def _send(control: Control, page: Page) -> Answer:
@@ -1269,8 +1282,8 @@ def _fold(report, page: Page, answer: Answer) -> None:
         report.memberships_joined += int(body.get("joined", 0))
         report.without_content += int(body.get("without_content", 0))
         minted = report.artifact_ids.setdefault(page.name, {})
-        for one in body.get("artifacts", []):
-            minted[one["key"]] = str(one["tessera_id"])
+        for identity, one in zip(page.artifacts, body.get("artifacts", [])):
+            minted[identity] = str(one["tessera_id"])
     elif page.kind in ("attribute", "vocabulary"):
         # `existing: true` is the held-part arm of the fill rule: the name is there under this
         # identity and the request applied nothing but its values.

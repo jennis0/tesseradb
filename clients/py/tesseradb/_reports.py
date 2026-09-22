@@ -145,8 +145,9 @@ class PagedReport(Printed):
     replayed: list = field(default_factory=list)
     #: The publication this commit's work is visible at, from the closing flush's answer.
     publication: int | None = None
-    #: The identity each published artifact was given, by layer and key. A layer's own
-    #: `tessera_id` is the only address by which it can later be addressed.
+    #: The `tessera_id` each published artifact was given, by layer and then by the artifact's
+    #: `(level, view, key)`, the view being `None` on a layer not scoped to a group. An
+    #: artifact's `tessera_id` is the only address by which it can later be addressed.
     artifact_ids: dict = field(default_factory=dict)
     flush_wait: float | None = None
     flush_reached: bool = True
