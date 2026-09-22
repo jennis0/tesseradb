@@ -4,9 +4,8 @@
 //!
 //! Each axis merges several small extents into one, preserving the set of entries it holds. Some
 //! merges renumber ordinals against a merged dictionary; others concatenate. A coalesce changes no
-//! row id, bumps no `segments_version`, invalidates no cache or projection, and never touches the
-//! build's own artefacts (the files named in `MANIFEST.json` rather than in a side-manifest list).
-//! It retires nothing: no posting is dropped and no tombstone is applied.
+//! row id, bumps no `segments_version`, invalidates no cache or projection, and never takes the
+//! base external-id run or the base dictionary. It retires nothing: no posting is dropped and no tombstone is applied.
 //!
 //! [`plan_coalesce`] runs on the executor and chooses what to take. [`execute_coalesce`] runs on
 //! the background pool and writes the merged files. [`rebase_into`] applies the result to the live

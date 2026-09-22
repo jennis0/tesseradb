@@ -338,8 +338,8 @@ fn completed_attrs(plan: &CoalescePlan, out_rel: &str) -> Vec<crate::filter::Ope
 /// base locator's ordinals are positions in the build's runs, so consuming one renumbers the
 /// whole reverse direction for every entity the build knew about.
 ///
-/// **Mutation:** drop the run axis's `is_build` guard and the plan takes run 0; drop the
-/// dictionary axis's skip of its first entry and the plan takes dict extent 0.
+/// The base run is excluded because no locator extent names it; the base dictionary because
+/// the dictionary kind skips its first entry.
 #[test]
 fn the_builds_own_run_and_dictionary_extent_are_never_selected() {
     let (manifest, build_files) = manifest_with(3);

@@ -7,7 +7,8 @@ use tessera_store::merge::size_tier;
 
 use super::{CoalescePlan, CoalescePolicy, ColumnExtent, ColumnWindow, WindowKey};
 
-/// Plan a coalesce over `manifest`, taking `build_files` to be the build's own artefacts.
+/// Plan a coalesce over `manifest`, reading file sizes from its digests and from `build_files`,
+/// the digests in the prefix's `MANIFEST.json`.
 ///
 /// Pure, and takes the two manifests rather than a generation, so every selection rule is testable
 /// without an engine. Returns `None` when no axis qualifies.
@@ -21,14 +22,14 @@ pub(crate) fn plan_coalesce(
     if policy.width < 2 {
         return None;
     }
-    let size_of = |rel: &str| -> u64 {
+    // `None` for a file neither manifest digests, which makes its entry ineligible.
+    let size_of = |rel: &str| -> Option<u64> {
         manifest
             .files
             .get(rel)
             .or_else(|| build_files.get(rel))
-            .map_or(0, |d| d.size)
+            .map(|d| d.size)
     };
-    let is_build = |rel: &str| build_files.contains_key(rel);
 
     let mut plan = CoalescePlan {
         partition: partition.to_string(),
@@ -36,21 +37,18 @@ pub(crate) fn plan_coalesce(
     };
 
     // Tiers are unioned into a fragment, so any contiguous same-tier window qualifies.
-    if let Some(window) = select_window(&manifest.deltas, policy.width, policy, |rel| {
-        (!is_build(rel)).then(|| size_of(rel))
-    }) {
+    if let Some(window) =
+        select_window(&manifest.deltas, policy.width, policy, |rel| size_of(rel))
+    {
         plan.tiers = manifest.deltas[window].to_vec();
     }
 
     // Runs are driven from the locator extents, which name their run. The coalesced extent must
     // cover one ascending, non-overlapping span: `external_id_of_checked` finds an extent by the
     // first span containing the entity, so an overlapping span would answer against the wrong run.
-    let locator_size = |extent: &LocatorExtent| -> Option<u64> {
-        extent
-            .files()
-            .all(|rel| !is_build(rel))
-            .then(|| extent.files().map(&size_of).sum())
-    };
+    // The base run is never taken: the build's and a fold's locator is not in this list.
+    let locator_size =
+        |extent: &LocatorExtent| -> Option<u64> { extent.files().map(&size_of).sum() };
     if let Some(window) = select_window(
         &manifest.locator_extents,
         policy.width,
@@ -80,7 +78,7 @@ pub(crate) fn plan_coalesce(
     if let Some((_base, promoted)) = manifest.dict_extents.split_first() {
         if let Some(window) =
             select_window(promoted, policy.width, policy, |extent: &DictExtent| {
-                Some(size_of(&extent.path))
+                size_of(&extent.path)
             })
         {
             plan.dicts = manifest.dict_extents[window.start + 1..window.end + 1].to_vec();
@@ -91,13 +89,13 @@ pub(crate) fn plan_coalesce(
     // group-scoped family's views are not merged into each other. A layer's dictionary counts
     // toward the input cap along with its values.
     plan.attrs = column_windows(&manifest.attr_extents, policy, is_live, |extent| {
-        Some(extent.files().map(&size_of).sum())
+        extent.files().map(&size_of).sum()
     });
 
     // Record-blob extents: the attribute axis's selection over the record blob's one
     // pseudo-column. A built bundle's list is empty; the base blob lives in `MANIFEST.files`.
     {
-        let size = |extent: &RecordExtent| Some(extent.files().map(&size_of).sum());
+        let size = |extent: &RecordExtent| extent.files().map(&size_of).sum();
         if let Some(window) = widest_window(&manifest.record_extents, policy, size) {
             plan.records = manifest.record_extents[window].to_vec();
         }
@@ -107,13 +105,13 @@ pub(crate) fn plan_coalesce(
     // names its dictionary, postings and presence together, so all three files count toward the
     // input cap: the merge holds every input's postings and streams both dictionaries at once.
     plan.texts = column_windows(&manifest.text_extents, policy, is_live, |extent| {
-        Some(extent.files().map(&size_of).sum())
+        extent.files().map(&size_of).sum()
     });
 
     // Entity-to-term extents: the record axis's selection over `entity_terms_extents`. A built
     // bundle's list is empty; the base layer lives under `entities/terms/` in `MANIFEST.files`.
     {
-        let size = |extent: &EntityTermsExtent| Some(extent.files().map(&size_of).sum());
+        let size = |extent: &EntityTermsExtent| extent.files().map(&size_of).sum();
         if let Some(window) = widest_window(&manifest.entity_terms_extents, policy, size) {
             plan.terms = manifest.entity_terms_extents[window].to_vec();
         }
