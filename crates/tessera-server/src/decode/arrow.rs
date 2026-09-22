@@ -476,8 +476,8 @@ pub(crate) fn parse_ingest_batch(
                 )));
             }
         }
-        let mut x = coordinate_col(&batch, x_name)?;
-        let mut y = coordinate_col(&batch, y_name)?;
+        let mut x = coordinate_col(&batch, x_name, offset)?;
+        let mut y = coordinate_col(&batch, y_name, offset)?;
         // **The transform runs here, at the boundary, before anything else looks at the numbers**
         // (`projections.md` §3) — the same place `tessera_build::input` runs it, which is what
         // makes a projected view ingestable rather than only buildable (decision 0091).
@@ -835,15 +835,26 @@ fn optional_binary_col<'a>(
 /// decide the **cell** a point occupies (`projections.md` §6), and it would do so inside a request
 /// the caller was acked for. A whole-world frame is served perfectly well by `float32`, which is
 /// why the narrower width stays acceptable rather than being refused.
+///
+/// `offset` is where this record batch's rows start in the request, so a null names the request's
+/// row.
 fn coordinate_col(
     batch: &arrow::record_batch::RecordBatch,
     name: &str,
+    offset: usize,
 ) -> Result<Vec<f64>, DecodeError> {
     let column = batch.column_by_name(name).ok_or_else(|| {
         DecodeError(format!(
             "ingest body: column '{name}' missing or not float32/float64"
         ))
     })?;
+    if let Some(row) = (0..column.len()).find(|&row| column.is_null(row)) {
+        return Err(DecodeError(format!(
+            "ingest body: row {}, column '{name}' is null; write a number, since every row needs \
+             both coordinates",
+            offset + row
+        )));
+    }
     let any = column.as_any();
     if let Some(a) = any.downcast_ref::<arrow::array::Float64Array>() {
         Ok(a.values().to_vec())
