@@ -2036,8 +2036,32 @@ async fn register_layer(
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<tessera_types::layer::LayerDeclaration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let declaration = body.0;
+    let mut declaration = body.0;
     let name = declaration.name.clone();
+    // A group's name is every view the group holds now, as it is at a build.
+    let meta = state.engine.meta();
+    declaration.views = tessera_types::layer::expand_views(
+        &declaration.views,
+        |view| {
+            meta.groups
+                .iter()
+                .find(|g| g.name == view)
+                .map(|g| g.views.clone())
+        },
+        |view| meta.resolve_view(view).is_some(),
+    )
+    .map_err(|view| {
+        ApiError::Contract(format!(
+            "layer '{name}' declares view '{view}', which is neither a view nor a view group of \
+             this deployment; name one of: {}",
+            meta.views
+                .iter()
+                .map(|v| v.id.as_str())
+                .chain(meta.groups.iter().map(|g| g.name.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    })?;
     // **Decision 0111's layer-level span rule, at the declaration.** A shape layer whose views are
     // a mix of projected and unprojected row spaces has no geometry that could span them, so it is
     // refused here — naming the layer and both sides — rather than at the first artifact, where
@@ -2045,7 +2069,6 @@ async fn register_layer(
     // read per view at publication (`layer_frames`).
     if declaration.membership == tessera_types::layer::MembershipSource::Spatial {
         let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
-        let meta = state.engine.meta();
         let frames = layer_frames(&meta, &views)?;
         tessera_engine::shapes::check_shape_span(
             &frames,
