@@ -68,7 +68,6 @@ pub(crate) fn plan_coalesce(
             .any(|w| w == runs.as_slice());
         if adjacent && contiguous {
             plan.locators = extents.to_vec();
-            plan.runs = runs;
         }
     }
 

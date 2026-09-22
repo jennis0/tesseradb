@@ -9,46 +9,43 @@ use tessera_store::manifest::{
     TextExtent,
 };
 
-use super::{coalesced_column_rel, CoalesceContext, CoalescePlan, ColumnWindow};
+use super::{coalesced_column_rel, CoalesceContext, ColumnWindow, OpenedTier};
 use crate::flush::{digest_of, MaintenanceFailed, SMALL_TERM_THRESHOLD};
 
 /// The consumed delta tiers unioned into one fragment, with the reopened reader.
 pub(super) fn coalesce_tiers(
-    plan: &CoalescePlan,
+    tiers: &[String],
     ctx: &CoalesceContext,
     out_dir: &Path,
     files: &mut BTreeMap<String, FileDigest>,
-) -> Result<Option<(String, Arc<DeltaTier>)>, MaintenanceFailed> {
-    if plan.tiers.is_empty() {
-        return Ok(None);
-    }
+) -> Result<OpenedTier, MaintenanceFailed> {
     let rel = |name: &str| format!("{}/{name}", ctx.out_rel);
-    let inputs: Vec<PathBuf> = plan.tiers.iter().map(|p| ctx.prefix_dir.join(p)).collect();
+    let inputs: Vec<PathBuf> = tiers.iter().map(|p| ctx.prefix_dir.join(p)).collect();
     let path = out_dir.join("delta.arrow");
     coalesce_delta_tiers(&inputs, &path, SMALL_TERM_THRESHOLD)
         .map_err(|e| MaintenanceFailed(format!("delta tiers: {e}")))?;
     files.insert(rel("delta.arrow"), digest_of(&path)?);
     let reader =
         DeltaTier::open(&path).map_err(|e| MaintenanceFailed(format!("coalesced tier: {e}")))?;
-    Ok(Some((rel("delta.arrow"), Arc::new(reader))))
+    Ok((rel("delta.arrow"), Arc::new(reader)))
 }
 
 /// The consumed external-id runs merged into one run, with the locator extent indexing it.
 pub(super) fn coalesce_runs(
-    plan: &CoalescePlan,
+    locators: &[LocatorExtent],
     ctx: &CoalesceContext,
     out_dir: &Path,
     files: &mut BTreeMap<String, FileDigest>,
-) -> Result<Option<(String, LocatorExtent)>, MaintenanceFailed> {
-    if plan.runs.is_empty() {
-        return Ok(None);
-    }
+) -> Result<LocatorExtent, MaintenanceFailed> {
     let rel = |name: &str| format!("{}/{name}", ctx.out_rel);
-    let inputs: Vec<PathBuf> = plan.runs.iter().map(|p| ctx.prefix_dir.join(p)).collect();
+    let inputs: Vec<PathBuf> = locators
+        .iter()
+        .map(|e| ctx.prefix_dir.join(&e.external_id_run))
+        .collect();
     // The union of the consumed extents' spans: the planner has already checked they are one
     // ascending, non-overlapping sequence, so this is a single span with the same coverage.
-    let entity_lo = plan.locators[0].entity_lo;
-    let entity_hi = plan.locators[plan.locators.len() - 1].entity_hi;
+    let entity_lo = locators[0].entity_lo;
+    let entity_hi = locators[locators.len() - 1].entity_hi;
     coalesce_external_id_runs(&inputs, entity_lo, entity_hi, out_dir)
         .map_err(|e| MaintenanceFailed(format!("external-id runs: {e}")))?;
     files.insert(
@@ -59,30 +56,23 @@ pub(super) fn coalesce_runs(
         rel("ext-locator.u32"),
         digest_of(&out_dir.join("ext-locator.u32"))?,
     );
-    Ok(Some((
-        rel("external-ids.arrow"),
-        LocatorExtent {
-            path: rel("ext-locator.u32"),
-            entity_lo,
-            entity_hi,
-            external_id_run: rel("external-ids.arrow"),
-        },
-    )))
+    Ok(LocatorExtent {
+        path: rel("ext-locator.u32"),
+        entity_lo,
+        entity_hi,
+        external_id_run: rel("external-ids.arrow"),
+    })
 }
 
 /// The consumed dictionary extents merged into one, its record count checked against theirs.
 pub(super) fn coalesce_dicts(
-    plan: &CoalescePlan,
+    dicts: &[DictExtent],
     ctx: &CoalesceContext,
     out_dir: &Path,
     files: &mut BTreeMap<String, FileDigest>,
-) -> Result<Option<DictExtent>, MaintenanceFailed> {
-    if plan.dicts.is_empty() {
-        return Ok(None);
-    }
+) -> Result<DictExtent, MaintenanceFailed> {
     let rel = |name: &str| format!("{}/{name}", ctx.out_rel);
-    let inputs: Vec<PathBuf> = plan
-        .dicts
+    let inputs: Vec<PathBuf> = dicts
         .iter()
         .map(|e| ctx.prefix_dir.join(&e.path))
         .collect();
@@ -92,7 +82,7 @@ pub(super) fn coalesce_dicts(
     // The record count is checked against the inputs' declared counts, which differ only if
     // an input extent repeated a descriptor. That would renumber every ordinal after it, so
     // the pass fails here instead of publishing it.
-    let declared: u64 = plan.dicts.iter().map(|e| e.records).sum();
+    let declared: u64 = dicts.iter().map(|e| e.records).sum();
     if records != declared {
         return Err(MaintenanceFailed(format!(
             "the coalesced dictionary extent holds {records} records where its inputs declare \
@@ -101,10 +91,10 @@ pub(super) fn coalesce_dicts(
         )));
     }
     files.insert(rel("terms-0.dict"), digest_of(&path)?);
-    Ok(Some(DictExtent {
+    Ok(DictExtent {
         path: rel("terms-0.dict"),
         records,
-    }))
+    })
 }
 
 /// Attribute extents: one merged extent per window, under `<out>/attrs/<column>/`.
@@ -241,19 +231,15 @@ pub(super) fn coalesce_attr_window(
 /// Record-blob extents: the window merged by concatenation, re-blocking toward the format's
 /// target block size. The merge retires nothing; there is no tombstone parameter to pass.
 pub(super) fn coalesce_records(
-    plan: &CoalescePlan,
+    records: &[RecordExtent],
     ctx: &CoalesceContext,
     files: &mut BTreeMap<String, FileDigest>,
-) -> Result<Option<RecordExtent>, MaintenanceFailed> {
-    if plan.records.is_empty() {
-        return Ok(None);
-    }
+) -> Result<RecordExtent, MaintenanceFailed> {
     let record_rel = format!("{}/attrs/record", ctx.out_rel);
     let record_dir = ctx.prefix_dir.join(&record_rel);
     std::fs::create_dir_all(&record_dir)
         .map_err(|e| MaintenanceFailed(format!("coalesce dir for the record blob: {e}")))?;
-    let inputs: Vec<tessera_filter::RecordBlob> = plan
-        .records
+    let inputs: Vec<tessera_filter::RecordBlob> = records
         .iter()
         .map(|extent| {
             tessera_filter::RecordBlob::open(
@@ -295,7 +281,7 @@ pub(super) fn coalesce_records(
         tessera_filter::Access::Mapped,
     )
     .map_err(|e| MaintenanceFailed(format!("the coalesced record extent does not reopen: {e}")))?;
-    Ok(Some(extent))
+    Ok(extent)
 }
 
 /// Text extents: the window merged into one layer, dictionary and all. Nothing per entity
@@ -408,19 +394,15 @@ pub(super) fn coalesce_text_window(
 /// term ordinal is a dictionary position and the dictionary is append-only. It retires
 /// nothing: no tombstone parameter exists to pass.
 pub(super) fn coalesce_entity_terms(
-    plan: &CoalescePlan,
+    terms: &[EntityTermsExtent],
     ctx: &CoalesceContext,
     files: &mut BTreeMap<String, FileDigest>,
-) -> Result<Option<EntityTermsExtent>, MaintenanceFailed> {
-    if plan.terms.is_empty() {
-        return Ok(None);
-    }
+) -> Result<EntityTermsExtent, MaintenanceFailed> {
     let terms_rel = format!("{}/entities/terms", ctx.out_rel);
     let terms_dir = ctx.prefix_dir.join(&terms_rel);
     std::fs::create_dir_all(&terms_dir)
         .map_err(|e| MaintenanceFailed(format!("coalesce dir for the transpose: {e}")))?;
-    let inputs: Vec<tessera_store::EntityTerms> = plan
-        .terms
+    let inputs: Vec<tessera_store::EntityTerms> = terms
         .iter()
         .map(|extent| {
             tessera_store::EntityTerms::open(
@@ -473,5 +455,5 @@ pub(super) fn coalesce_entity_terms(
             "the coalesced entity-terms extent does not reopen: {e}"
         ))
     })?;
-    Ok(Some(extent))
+    Ok(extent)
 }

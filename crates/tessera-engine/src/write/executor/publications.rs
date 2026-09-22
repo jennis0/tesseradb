@@ -704,7 +704,7 @@ impl Executor {
             );
             return;
         }
-        let Some(partition_data) = live.bundle.partitions.get(&completed.plan.partition) else {
+        let Some(partition_data) = live.bundle.partitions.get(&completed.partition) else {
             return;
         };
 
@@ -722,12 +722,11 @@ impl Executor {
         let windows: Vec<crate::filter::CoalescedWindow> = completed
             .attrs
             .iter()
-            .zip(&completed.plan.attrs)
-            .map(|(attr, window)| crate::filter::CoalescedWindow {
-                consumed: window.extents.iter().map(|e| e.values.clone()).collect(),
+            .map(|merged| crate::filter::CoalescedWindow {
+                consumed: merged.consumed.extents.iter().map(|e| e.values.clone()).collect(),
                 // A keyword window's merged dictionary travels here beside the ordinals it
                 // numbers; the composition installs the pair as one layer or refuses.
-                replacement: attr.clone(),
+                replacement: merged.output.clone(),
             })
             .collect();
         // The text axis's windows, named by dictionary path on both sides. The paths are resolved
@@ -738,10 +737,9 @@ impl Executor {
         let text_windows: Vec<crate::filter::CoalescedTextWindow> = completed
             .texts
             .iter()
-            .zip(&completed.plan.texts)
-            .map(|(extent, window)| crate::filter::CoalescedTextWindow {
-                consumed: window.extents.iter().map(|e| e.dict.clone()).collect(),
-                paths: text_extent_paths(&prefix_dir, extent),
+            .map(|merged| crate::filter::CoalescedTextWindow {
+                consumed: merged.consumed.extents.iter().map(|e| e.dict.clone()).collect(),
+                paths: text_extent_paths(&prefix_dir, &merged.output),
             })
             .collect();
         // The transpose's stack is re-derived from the rebased manifest, not patched. This is the
@@ -755,7 +753,7 @@ impl Executor {
         } else {
             let partition_dir = prefix_dir
                 .join("partitions")
-                .join(&completed.plan.partition);
+                .join(&completed.partition);
             let extents: Vec<tessera_store::EntityTermsExtentPaths> = manifest
                 .entity_terms_extents
                 .iter()
@@ -784,7 +782,7 @@ impl Executor {
             } else {
                 let partition_dir = prefix_dir
                     .join("partitions")
-                    .join(&completed.plan.partition);
+                    .join(&completed.partition);
                 // Both lists, one stack, as the open composes them: an artifact's content extents
                 // hold the same format and the same reader, and the two never share an entity.
                 let extents: Vec<tessera_filter::RecordExtentPaths> = manifest
@@ -856,7 +854,7 @@ impl Executor {
         if let Err(e) = self.commit_side_manifest(
             partition_data,
             &self.prefix_dir(&live),
-            &completed.plan.partition,
+            &completed.partition,
             manifest_n,
             &mut manifest,
             None,
@@ -890,7 +888,7 @@ impl Executor {
         };
 
         let next_bundle = match live.bundle.with_manifest(
-            &completed.plan.partition,
+            &completed.partition,
             tessera_store::read::PublishedManifest {
                 manifest,
                 n: manifest_n,
@@ -908,10 +906,10 @@ impl Executor {
         // authority on which tiers are live, and re-deriving from it is the one form that cannot
         // drift from what a restart would open.
         let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
-        let coalesced = completed.tier.as_ref();
+        let coalesced = completed.tier.as_ref().map(|merged| &merged.output);
         for rel in &next_bundle
             .partitions
-            .get(&completed.plan.partition)
+            .get(&completed.partition)
             .expect("the partition this publication just rebased")
             .manifest
             .deltas

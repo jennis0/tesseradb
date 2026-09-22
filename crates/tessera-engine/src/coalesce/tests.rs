@@ -19,13 +19,24 @@ fn policy() -> CoalescePolicy {
 /// A real, empty coalesced tier — the reader `publish_coalesce` installs on the generation.
 /// Built rather than stubbed because `CompletedCoalesce` carries the opened reader, and a test
 /// double there would be a second definition of what a tier is.
-fn tier_at(dir: &std::path::Path) -> (String, Arc<DeltaTier>) {
+fn tier_at(dir: &std::path::Path) -> OpenedTier {
     let path = dir.join("delta.arrow");
     tessera_authz::write_delta_tier(&path, &[], SMALL_TERM_THRESHOLD).expect("a tier writes");
     (
         "c/delta.arrow".to_string(),
         Arc::new(DeltaTier::open(&path).expect("it opens")),
     )
+}
+
+/// The plan's tier window, merged into [`tier_at`]'s tier.
+fn merged_tier(
+    plan: &CoalescePlan,
+    dir: &std::path::Path,
+) -> Option<Merged<Vec<String>, OpenedTier>> {
+    Some(Merged {
+        consumed: plan.tiers.clone(),
+        output: tier_at(dir),
+    })
 }
 
 fn digest(size: u64) -> FileDigest {
@@ -303,13 +314,16 @@ fn attr_extent_at(partition: &str, column: &str, flush: &str) -> AttrExtent {
 /// standing in for the merged one. The reader is real — an empty extent is still a column —
 /// because `CompletedCoalesce` carries the opened reader and a double there would be a second
 /// definition of what an extent is.
-fn completed_attrs(plan: &CoalescePlan, out_rel: &str) -> Vec<crate::filter::OpenedExtent> {
+fn completed_attrs(
+    plan: &CoalescePlan,
+    out_rel: &str,
+) -> Vec<Merged<ColumnWindow<AttrExtent>, crate::filter::OpenedExtent>> {
     plan.attrs
         .iter()
         .map(|window| {
             let column_rel =
                 coalesced_column_rel(out_rel, &window.column, window.view.as_deref());
-            crate::filter::OpenedExtent {
+            let output = crate::filter::OpenedExtent {
                 extent: AttrExtent {
                     incarnation: window.incarnation,
                     column: window.column.clone(),
@@ -328,6 +342,10 @@ fn completed_attrs(plan: &CoalescePlan, out_rel: &str) -> Vec<crate::filter::Ope
                     .expect("an empty extent"),
                 ),
                 dict: None,
+            };
+            Merged {
+                consumed: window.clone(),
+                output,
             }
         })
         .collect()
@@ -347,10 +365,11 @@ fn the_builds_own_run_and_dictionary_extent_are_never_selected() {
         plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
     assert!(
         !plan
-            .runs
-            .contains(&"entities/external-ids-0.arrow".to_string()),
+            .locators
+            .iter()
+            .any(|e| e.external_id_run == "entities/external-ids-0.arrow"),
         "the build's run: {:?}",
-        plan.runs
+        plan.locators
     );
     assert!(
         !plan.dicts.iter().any(|e| e.path == "terms/terms-0.dict"),
@@ -402,8 +421,12 @@ fn a_folds_carried_tiers_and_runs_are_still_selected() {
     let plan =
         plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
     assert_eq!(plan.tiers, manifest.deltas);
-    assert_eq!(plan.runs, manifest.external_id_runs[1..]);
-    assert!(!plan.runs.contains(&"entities/external-ids-0.arrow".to_string()));
+    let runs: Vec<&str> = plan
+        .locators
+        .iter()
+        .map(|e| e.external_id_run.as_str())
+        .collect();
+    assert_eq!(runs, manifest.external_id_runs[1..]);
 }
 
 /// An entry naming a file neither manifest digests is not taken, on any kind.
@@ -426,7 +449,7 @@ fn an_entry_with_an_undigested_file_is_not_selected() {
     let plan =
         plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
     assert!(plan.tiers.is_empty());
-    assert!(plan.runs.is_empty());
+    assert!(plan.locators.is_empty());
     assert!(plan.dicts.is_empty());
     let columns: Vec<&str> = plan.attrs.iter().map(|w| w.column.as_str()).collect();
     assert_eq!(columns, ["department"]);
@@ -442,9 +465,9 @@ fn overlapping_locator_spans_are_refused_on_the_run_axis() {
     let plan =
         plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
     assert!(
-        plan.runs.is_empty(),
+        plan.locators.is_empty(),
         "the run axis must not select across overlapping spans: {:?}",
-        plan.runs
+        plan.locators
     );
     assert!(
         !plan.tiers.is_empty(),
@@ -490,19 +513,22 @@ fn the_coalesced_entry_takes_the_windows_position() {
     let dir = tempfile::TempDir::new().unwrap();
     let attrs = completed_attrs(&plan, "c");
     let completed = CompletedCoalesce {
-        tier: Some(tier_at(dir.path())),
-        run: Some((
-            "c/external-ids.arrow".to_string(),
-            LocatorExtent {
+        tier: merged_tier(&plan, dir.path()),
+        run: Some(Merged {
+            consumed: plan.locators.clone(),
+            output: LocatorExtent {
                 path: "c/ext-locator.u32".to_string(),
                 entity_lo: plan.locators[0].entity_lo,
                 entity_hi: plan.locators[plan.locators.len() - 1].entity_hi,
                 external_id_run: "c/external-ids.arrow".to_string(),
             },
-        )),
-        dict: Some(DictExtent {
-            path: "c/terms-0.dict".to_string(),
-            records: 3,
+        }),
+        dict: Some(Merged {
+            consumed: plan.dicts.clone(),
+            output: DictExtent {
+                path: "c/terms-0.dict".to_string(),
+                records: 3,
+            },
         }),
         attrs,
         record: None,
@@ -511,7 +537,7 @@ fn the_coalesced_entry_takes_the_windows_position() {
         files: [("c/delta.arrow".to_string(), digest(3072))]
             .into_iter()
             .collect(),
-        plan,
+        partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
     assert!(rebase_into(&mut manifest, &completed));
@@ -771,23 +797,24 @@ fn a_coalesced_keyword_extent_replaces_its_window_and_its_dictionaries_in_both_h
     let out_rel = "partitions/p0/coalesced/coalesce-1-1";
     let mut attrs = completed_attrs(&plan, out_rel);
     let merged_dict_rel = format!("{out_rel}/attrs/title/dict.bin");
-    for attr in attrs.iter_mut().filter(|a| a.extent.column == "title") {
-        attr.extent.dict = Some(merged_dict_rel.clone());
+    for attr in attrs.iter_mut().filter(|a| a.output.extent.column == "title") {
+        attr.output.extent.dict = Some(merged_dict_rel.clone());
     }
     let files: BTreeMap<String, FileDigest> = attrs
         .iter()
         .flat_map(|a| {
+            let extent = &a.output.extent;
             [
-                (a.extent.values.clone(), digest(3072)),
-                (a.extent.presence.clone(), digest(96)),
+                (extent.values.clone(), digest(3072)),
+                (extent.presence.clone(), digest(96)),
             ]
             .into_iter()
-            .chain(a.extent.dict.clone().map(|d| (d, digest(192))))
+            .chain(extent.dict.clone().map(|d| (d, digest(192))))
         })
         .collect();
     let dir = tempfile::TempDir::new().unwrap();
     let completed = CompletedCoalesce {
-        tier: Some(tier_at(dir.path())),
+        tier: merged_tier(&plan, dir.path()),
         run: None,
         dict: None,
         attrs,
@@ -795,7 +822,7 @@ fn a_coalesced_keyword_extent_replaces_its_window_and_its_dictionaries_in_both_h
         texts: Vec::new(),
         terms: None,
         files,
-        plan,
+        partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
     assert!(
@@ -945,7 +972,7 @@ fn a_keyword_window_executes_into_one_extent_whose_dictionary_numbers_its_ordina
     )
     .expect("the keyword window merges");
 
-    let attr = &completed.attrs[0];
+    let attr = &completed.attrs[0].output;
     let dict_rel = attr
         .extent
         .dict
@@ -1106,14 +1133,14 @@ fn a_coalesced_attr_extent_replaces_its_window_in_both_halves_of_the_manifest() 
         .iter()
         .flat_map(|a| {
             [
-                (a.extent.values.clone(), digest(3072)),
-                (a.extent.presence.clone(), digest(96)),
+                (a.output.extent.values.clone(), digest(3072)),
+                (a.output.extent.presence.clone(), digest(96)),
             ]
         })
         .collect();
     let dir = tempfile::TempDir::new().unwrap();
     let completed = CompletedCoalesce {
-        tier: Some(tier_at(dir.path())),
+        tier: merged_tier(&plan, dir.path()),
         run: None,
         dict: None,
         attrs,
@@ -1121,7 +1148,7 @@ fn a_coalesced_attr_extent_replaces_its_window_in_both_halves_of_the_manifest() 
         texts: Vec::new(),
         terms: None,
         files,
-        plan,
+        partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
     assert!(rebase_into(&mut manifest, &completed));
@@ -1150,7 +1177,7 @@ fn a_coalesced_attr_extent_replaces_its_window_in_both_halves_of_the_manifest() 
         );
     }
     for attr in &completed.attrs {
-        for rel in [&attr.extent.values, &attr.extent.presence] {
+        for rel in [&attr.output.extent.values, &attr.output.extent.presence] {
             assert!(
                 manifest.files.contains_key(rel),
                 "the coalesced extent's bytes are named in `attr_extents` but not digested: \
@@ -1171,7 +1198,7 @@ fn an_attr_window_rebases_through_another_columns_flush_but_not_through_its_own(
     let dir = tempfile::TempDir::new().unwrap();
     let attrs = completed_attrs(&plan, "c");
     let completed = CompletedCoalesce {
-        tier: Some(tier_at(dir.path())),
+        tier: merged_tier(&plan, dir.path()),
         run: None,
         dict: None,
         attrs,
@@ -1179,7 +1206,7 @@ fn an_attr_window_rebases_through_another_columns_flush_but_not_through_its_own(
         texts: Vec::new(),
         terms: None,
         files: BTreeMap::new(),
-        plan,
+        partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
 
@@ -1192,7 +1219,7 @@ fn an_attr_window_rebases_through_another_columns_flush_but_not_through_its_own(
     assert!(rebase_into(&mut interleaved, &completed));
 
     // Its own extent gone, however, is the state the plan was made against being gone.
-    let consumed = completed.plan.attrs[0].extents[1].values.clone();
+    let consumed = completed.attrs[0].consumed.extents[1].values.clone();
     manifest.attr_extents.retain(|e| e.values != consumed);
     assert!(!rebase_into(&mut manifest, &completed));
 }
@@ -1235,12 +1262,12 @@ fn a_scoped_columns_window_rebases_within_its_own_views_extents() {
         .iter()
         .flat_map(|a| {
             [
-                (a.extent.values.clone(), digest(3072)),
-                (a.extent.presence.clone(), digest(96)),
+                (a.output.extent.values.clone(), digest(3072)),
+                (a.output.extent.presence.clone(), digest(96)),
             ]
         })
         .collect();
-    let coalesced: Vec<String> = attrs.iter().map(|a| a.extent.values.clone()).collect();
+    let coalesced: Vec<String> = attrs.iter().map(|a| a.output.extent.values.clone()).collect();
     let completed = CompletedCoalesce {
         tier: None,
         run: None,
@@ -1250,7 +1277,7 @@ fn a_scoped_columns_window_rebases_within_its_own_views_extents() {
         texts: Vec::new(),
         terms: None,
         files,
-        plan,
+        partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
     assert!(rebase_into(&mut manifest, &completed));
@@ -1326,33 +1353,36 @@ fn a_scoped_text_columns_window_rebases_within_its_own_views_extents() {
         .collect();
 
     let out_rel = "partitions/p0/coalesced/coalesce-1-1";
-    let texts: Vec<TextExtent> = plan
+    let texts: Vec<Merged<ColumnWindow<TextExtent>, TextExtent>> = plan
         .texts
         .iter()
         .map(|window| {
             let column_rel =
                 coalesced_column_rel(out_rel, &window.column, window.view.as_deref());
-            TextExtent {
-                column: window.column.clone(),
-                view: window.view.clone(),
-                incarnation: window.incarnation,
-                dict: format!("{column_rel}/text.dict"),
-                postings: format!("{column_rel}/text.postings"),
-                presence: format!("{column_rel}/text.roaring"),
+            Merged {
+                consumed: window.clone(),
+                output: TextExtent {
+                    column: window.column.clone(),
+                    view: window.view.clone(),
+                    incarnation: window.incarnation,
+                    dict: format!("{column_rel}/text.dict"),
+                    postings: format!("{column_rel}/text.postings"),
+                    presence: format!("{column_rel}/text.roaring"),
+                },
             }
         })
         .collect();
     let files: BTreeMap<String, FileDigest> = texts
         .iter()
-        .flat_map(|e| {
+        .flat_map(|m| {
             [
-                (e.dict.clone(), digest(3072)),
-                (e.postings.clone(), digest(3072)),
-                (e.presence.clone(), digest(96)),
+                (m.output.dict.clone(), digest(3072)),
+                (m.output.postings.clone(), digest(3072)),
+                (m.output.presence.clone(), digest(96)),
             ]
         })
         .collect();
-    let coalesced: Vec<String> = texts.iter().map(|e| e.dict.clone()).collect();
+    let coalesced: Vec<String> = texts.iter().map(|m| m.output.dict.clone()).collect();
     let completed = CompletedCoalesce {
         tier: None,
         run: None,
@@ -1362,7 +1392,7 @@ fn a_scoped_text_columns_window_rebases_within_its_own_views_extents() {
         texts,
         terms: None,
         files,
-        plan,
+        partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
     assert!(rebase_into(&mut manifest, &completed));
@@ -1440,15 +1470,18 @@ fn the_record_axis_selects_a_window_and_replaces_it_in_both_manifest_halves() {
     .into_iter()
     .collect();
     let completed = CompletedCoalesce {
-        tier: Some(tier_at(dir.path())),
+        tier: merged_tier(&plan, dir.path()),
         run: None,
         dict: None,
         attrs,
-        record: Some(coalesced.clone()),
+        record: Some(Merged {
+            consumed: plan.records.clone(),
+            output: coalesced.clone(),
+        }),
         texts: Vec::new(),
         terms: None,
         files,
-        plan,
+        partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
     assert!(rebase_into(&mut manifest, &completed));
@@ -1477,7 +1510,7 @@ fn the_record_axis_selects_a_window_and_replaces_it_in_both_manifest_halves() {
     }
 
     // And a window a fold (or another pass) has since consumed no longer rebases.
-    let gone = completed.plan.records[1].blocks.clone();
+    let gone = completed.record.as_ref().unwrap().consumed[1].blocks.clone();
     manifest.record_extents.retain(|e| e.blocks != gone);
     assert!(!rebase_into(&mut manifest, &completed));
 }
@@ -1536,15 +1569,18 @@ fn the_entity_terms_axis_selects_a_window_and_replaces_it_in_both_manifest_halve
     .into_iter()
     .collect();
     let completed = CompletedCoalesce {
-        tier: Some(tier_at(dir.path())),
+        tier: merged_tier(&plan, dir.path()),
         run: None,
         dict: None,
         attrs,
         record: None,
         texts: Vec::new(),
-        terms: Some(coalesced.clone()),
+        terms: Some(Merged {
+            consumed: plan.terms.clone(),
+            output: coalesced.clone(),
+        }),
         files,
-        plan,
+        partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
     assert!(rebase_into(&mut manifest, &completed));
@@ -1573,7 +1609,7 @@ fn the_entity_terms_axis_selects_a_window_and_replaces_it_in_both_manifest_halve
     }
 
     // And a window a fold (or another pass) has since consumed no longer rebases.
-    let gone = completed.plan.terms[1].terms.clone();
+    let gone = completed.terms.as_ref().unwrap().consumed[1].terms.clone();
     manifest.entity_terms_extents.retain(|e| e.terms != gone);
     assert!(!rebase_into(&mut manifest, &completed));
 }
@@ -1588,7 +1624,7 @@ fn a_plan_whose_window_moved_does_not_rebase() {
     let dir = tempfile::TempDir::new().unwrap();
     let attrs = completed_attrs(&plan, "c");
     let completed = CompletedCoalesce {
-        tier: Some(tier_at(dir.path())),
+        tier: merged_tier(&plan, dir.path()),
         run: None,
         dict: None,
         attrs,
@@ -1596,7 +1632,7 @@ fn a_plan_whose_window_moved_does_not_rebase() {
         texts: Vec::new(),
         terms: None,
         files: BTreeMap::new(),
-        plan,
+        partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
     manifest.deltas.remove(1);

@@ -59,7 +59,8 @@ impl Default for CoalescePolicy {
     }
 }
 
-/// One coalesce's immutable plan: which entries of which axes it consumes.
+/// One coalesce's immutable plan: which entries of which kinds it consumes. An empty list is a
+/// kind this pass does not take.
 ///
 /// Entries are named by path, not index. Paths are never reused, so a path still in the live
 /// manifest at publication is still the same bytes: a flush that published while the pass ran can
@@ -67,23 +68,20 @@ impl Default for CoalescePolicy {
 #[derive(Debug, Default)]
 pub(crate) struct CoalescePlan {
     pub(crate) partition: String,
-    /// Consumed `deltas` entries, in list order. Empty if the tier axis did not qualify.
+    /// Consumed `deltas` entries, in list order.
     pub(crate) tiers: Vec<String>,
-    /// Consumed `external_id_runs` entries, oldest first — the order the keep-newest rule reads.
-    pub(crate) runs: Vec<String>,
-    /// The `locator_extents` entries indexing those runs, in list order.
+    /// Consumed `locator_extents` entries, in list order. Each names its run, and the runs are a
+    /// contiguous block of `external_id_runs` in the same order.
     pub(crate) locators: Vec<LocatorExtent>,
     /// Consumed `dict_extents` entries, in list order.
     pub(crate) dicts: Vec<DictExtent>,
     /// Consumed `attr_extents` entries, one window per column.
     pub(crate) attrs: Vec<ColumnWindow<AttrExtent>>,
-    /// Consumed `record_extents` entries: one contiguous window over the record blob's single
-    /// pseudo-column. Empty if the axis did not qualify.
+    /// Consumed `record_extents` entries, in list order.
     pub(crate) records: Vec<RecordExtent>,
     /// Consumed `text_extents` entries, one window per text column.
     pub(crate) texts: Vec<ColumnWindow<TextExtent>>,
-    /// Consumed `entity_terms_extents` entries: one contiguous window. Empty if the axis did not
-    /// qualify.
+    /// Consumed `entity_terms_extents` entries, in list order.
     pub(crate) terms: Vec<EntityTermsExtent>,
 }
 
@@ -143,7 +141,7 @@ pub(crate) struct ColumnWindow<E> {
 impl CoalescePlan {
     pub(crate) fn is_empty(&self) -> bool {
         self.tiers.is_empty()
-            && self.runs.is_empty()
+            && self.locators.is_empty()
             && self.dicts.is_empty()
             && self.attrs.is_empty()
             && self.records.is_empty()
@@ -151,6 +149,7 @@ impl CoalescePlan {
             && self.terms.is_empty()
     }
 }
+
 /// Everything [`execute_coalesce`] needs beyond its plan, taken from the generation on the
 /// executor thread and then immutable.
 pub(crate) struct CoalesceContext {
@@ -161,27 +160,49 @@ pub(crate) struct CoalesceContext {
     pub(crate) out_rel: String,
 }
 
+/// A window a coalesce consumed and the entry that replaces it.
+#[derive(Debug)]
+pub(crate) struct Merged<W, O> {
+    pub(crate) consumed: W,
+    pub(crate) output: O,
+}
+
+impl<W, O> Merged<W, O> {
+    fn of(
+        consumed: W,
+        merge: impl FnOnce(&W) -> Result<O, MaintenanceFailed>,
+    ) -> Result<Self, MaintenanceFailed> {
+        let output = merge(&consumed)?;
+        Ok(Merged { consumed, output })
+    }
+}
+
+/// A coalesced tier's path and its opened reader.
+pub(crate) type OpenedTier = (String, Arc<DeltaTier>);
+
 /// A coalesce whose files are durable, awaiting the manifest edit and the swap on the executor.
+/// `None` or empty is a kind the pass did not take.
 pub(crate) struct CompletedCoalesce {
-    pub(crate) plan: CoalescePlan,
+    pub(crate) partition: String,
     pub(crate) prefix: String,
-    /// The coalesced tier's path and its reopened reader, or `None` if the tier axis did not run.
-    pub(crate) tier: Option<(String, Arc<DeltaTier>)>,
-    /// The coalesced run's path, and the locator extent covering the consumed extents' union span.
-    pub(crate) run: Option<(String, LocatorExtent)>,
-    pub(crate) dict: Option<DictExtent>,
-    /// One coalesced extent per window the attribute axis took, already opened, so publication is
-    /// a pointer push on the executor and cannot fail on IO after the manifest edit.
-    pub(crate) attrs: Vec<crate::filter::OpenedExtent>,
-    /// The record window collapsed into one extent, or `None` if the axis did not run. The
-    /// entry only; the live stack is re-derived from the manifest at publication.
-    pub(crate) record: Option<RecordExtent>,
-    /// One coalesced extent per window the text axis took: the entry only.
-    pub(crate) texts: Vec<TextExtent>,
-    /// The entity-to-term window collapsed into one extent, or `None` if the axis did not run.
-    pub(crate) terms: Option<EntityTermsExtent>,
+    pub(crate) tier: Option<Merged<Vec<String>, OpenedTier>>,
+    /// The consumed locator extents and the one covering their union span, which names the
+    /// coalesced run.
+    pub(crate) run: Option<Merged<Vec<LocatorExtent>, LocatorExtent>>,
+    pub(crate) dict: Option<Merged<Vec<DictExtent>, DictExtent>>,
+    /// Opened, so publication is a pointer push on the executor and cannot fail on IO after the
+    /// manifest edit.
+    pub(crate) attrs: Vec<Merged<ColumnWindow<AttrExtent>, crate::filter::OpenedExtent>>,
+    pub(crate) record: Option<Merged<Vec<RecordExtent>, RecordExtent>>,
+    pub(crate) texts: Vec<Merged<ColumnWindow<TextExtent>, TextExtent>>,
+    pub(crate) terms: Option<Merged<Vec<EntityTermsExtent>, EntityTermsExtent>>,
     /// Every file this pass wrote, prefix-relative, with its digest.
     pub(crate) files: BTreeMap<String, FileDigest>,
+}
+
+/// A kind's consumed entries, or `None` if the plan does not take the kind.
+fn taken<E>(entries: Vec<E>) -> Option<Vec<E>> {
+    (!entries.is_empty()).then_some(entries)
 }
 
 /// Turn a plan into durable files. Runs on the background pool, over immutable inputs.
@@ -193,26 +214,34 @@ pub(crate) fn execute_coalesce(
     std::fs::create_dir_all(&out_dir).map_err(|e| MaintenanceFailed(format!("coalesce dir: {e}")))?;
     let mut files: BTreeMap<String, FileDigest> = BTreeMap::new();
 
-    let tier = coalesce_tiers(&plan, &ctx, &out_dir, &mut files)?;
-    let run = coalesce_runs(&plan, &ctx, &out_dir, &mut files)?;
-    let dict = coalesce_dicts(&plan, &ctx, &out_dir, &mut files)?;
-
-    let mut attrs = Vec::with_capacity(plan.attrs.len());
-    for window in &plan.attrs {
-        attrs.push(coalesce_attr_window(window, &ctx, &mut files)?);
-    }
-
-    let record = coalesce_records(&plan, &ctx, &mut files)?;
-
-    let mut texts = Vec::with_capacity(plan.texts.len());
-    for window in &plan.texts {
-        texts.push(coalesce_text_window(window, &ctx, &mut files)?);
-    }
-
-    let terms = coalesce_entity_terms(&plan, &ctx, &mut files)?;
+    let tier = taken(plan.tiers)
+        .map(|w| Merged::of(w, |w| coalesce_tiers(w, &ctx, &out_dir, &mut files)))
+        .transpose()?;
+    let run = taken(plan.locators)
+        .map(|w| Merged::of(w, |w| coalesce_runs(w, &ctx, &out_dir, &mut files)))
+        .transpose()?;
+    let dict = taken(plan.dicts)
+        .map(|w| Merged::of(w, |w| coalesce_dicts(w, &ctx, &out_dir, &mut files)))
+        .transpose()?;
+    let attrs = plan
+        .attrs
+        .into_iter()
+        .map(|w| Merged::of(w, |w| coalesce_attr_window(w, &ctx, &mut files)))
+        .collect::<Result<_, _>>()?;
+    let record = taken(plan.records)
+        .map(|w| Merged::of(w, |w| coalesce_records(w, &ctx, &mut files)))
+        .transpose()?;
+    let texts = plan
+        .texts
+        .into_iter()
+        .map(|w| Merged::of(w, |w| coalesce_text_window(w, &ctx, &mut files)))
+        .collect::<Result<_, _>>()?;
+    let terms = taken(plan.terms)
+        .map(|w| Merged::of(w, |w| coalesce_entity_terms(w, &ctx, &mut files)))
+        .transpose()?;
 
     Ok(CompletedCoalesce {
-        plan,
+        partition: plan.partition,
         prefix: ctx.prefix,
         tier,
         run,
