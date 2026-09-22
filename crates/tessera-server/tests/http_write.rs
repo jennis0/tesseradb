@@ -3457,112 +3457,16 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
 
 // --- The control plane's credential gate, at the router ---
 
-/// **Every route on the control plane answers 401 without a credential — asserted over the route
-/// list, not over three hand-written cases, and now with no exceptions at all.**
+/// **No path on the control listener answers without the credential: every mounted route, the
+/// health probes' names and unrouted paths alike.**
 ///
-/// This is the inverse of the usual auth test. `control_status_requires_bearer` names one endpoint
-/// and would stay green forever while a fourth control route shipped wide open; that is exactly how
-/// `/control/status` itself shipped returning `entity_id_high_water` unauthenticated. This iterates
-/// [`CONTROL_PLANE_ROUTES`] and requires **every** entry to refuse, with no exemption list to skip:
-/// `/healthz` and `/readyz` are not on this plane at all
-/// (docs/decisions/0011-health-probes-off-control-plane.md), so the rule under test is the stronger
-/// unconditional one.
+/// The mounted routes are read off `control::router`, the faults build's included; the rest are
+/// paths the router does not serve, so the check must sit ahead of its 404. Each is sent with no
+/// credential and with a wrong one, and each must answer `ApiError::BadCredential`'s own body.
 ///
-/// **What it does and does not guarantee, stated because the difference is the whole design.** The
-/// list is hard-coded: axum 0.8 exposes no route enumeration, so a route added to `control::router`
-/// and not added to `CONTROL_PLANE_ROUTES` is invisible here. What covers *that* case is not this
-/// test but the layer's shape — `require_operator_credential` wraps the whole router, so an
-/// unlisted route is authenticated anyway (and `every_path_on_the_control_listener_needs_the_credential`
-/// demonstrates that directly, on paths the router does not serve at all). This test's job is the
-/// other half: it goes red if the layer is removed or narrowed.
-///
-/// **The 401 must be `ApiError::BadCredential`'s existing shape**, byte for byte — contracts §3.1's
-/// code list is closed, and a layer that invented its own body would be a wire change dressed as a
-/// refactor. Asserted here on `error`, `detail` and the absence of `retry_after_s`.
-///
-/// **Mutations this kills:** deleting the `.layer(from_fn_with_state(..))` call from
-/// `control::router`; re-introducing any exemption in `require_operator_credential`; returning a
-/// bare `StatusCode::UNAUTHORIZED` from the layer instead of `ApiError::BadCredential`; emptying or
-/// shrinking `CONTROL_PLANE_ROUTES` (the count floor below).
-#[tokio::test]
-async fn every_control_route_requires_the_operator_credential() {
-    use tessera_server::control::CONTROL_PLANE_ROUTES;
-
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    let mut checked = 0usize;
-    for (method, path) in CONTROL_PLANE_ROUTES {
-        checked += 1;
-        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
-        for credential in [None, Some("not-the-operator-credential")] {
-            let mut req = server
-                .client
-                .request(method.clone(), server.control_url(path));
-            if let Some(credential) = credential {
-                req = req.bearer_auth(credential);
-            }
-            let resp = req.send().await.unwrap();
-            assert_eq!(
-                resp.status(),
-                401,
-                "{method} {path} answered {} for credential {credential:?}; every control route, \
-                 without exception, must be refused at the router",
-                resp.status()
-            );
-            let body: serde_json::Value = resp.json().await.unwrap();
-            assert_eq!(
-                body["error"], "bad-credential",
-                "{method} {path} must answer ApiError::BadCredential's own body, unchanged: {body}"
-            );
-            assert_eq!(body["detail"], "missing or invalid bearer credential");
-            assert!(
-                body.get("retry_after_s").is_none(),
-                "a 401 carries no retry hint: {body}"
-            );
-        }
-    }
-    assert_eq!(
-        checked,
-        CONTROL_PLANE_ROUTES.len(),
-        "the loop must visit every entry — there is no exemption left to skip one"
-    );
-    assert!(
-        checked >= 3,
-        "the route list has lost its /control/* entries; it is the only thing this test enumerates"
-    );
-}
-
-/// **No path on the control listener answers without the credential — routed, unrouted, or a health
-/// probe.**
-///
-/// The weaker property worth naming, because it is what an exemption list would reduce this to: that
-/// paths *nearly* spelled `/healthz` fall through to the credential check rather than out of it.
-/// There is no exemption to be nearly-matched, so what is asserted is the stronger rule directly —
-/// an arbitrary path answers 401. The near-miss spellings are in the list anyway, not because
-/// matching is a risk but because they are the exact strings a reintroduced exemption would be
-/// written against; and `/healthz` and `/readyz` are themselves *in* the list.
-///
-/// The unrouted paths carry the second half: the layer sits ahead of the router's 404, so probing
-/// the plane's surface unauthenticated yields nothing — an unauthenticated caller cannot even
-/// discover that `/healthz` was removed. That is a consequence of `Router::layer` rather than a
-/// goal, and it is pinned here so a future change to how the layer is mounted cannot flip it to 404
-/// unnoticed.
-///
-/// **Mutations this kills:** re-introducing an exemption list of any shape in
-/// `require_operator_credential` (the `/healthz`, `/readyz` legs go 200 or 404); moving the layer to
-/// a per-route `route_layer` (every unrouted leg goes 404); deleting the layer (401 → 404/405).
+/// **Mutations this kills:** deleting the layer (401 becomes 404 or 405); narrowing it to a
+/// `route_layer` or to some routes; adding an exemption of any shape in
+/// `require_operator_credential`; answering a bare 401 without the error body.
 #[tokio::test]
 async fn every_path_on_the_control_listener_needs_the_credential() {
     let tmp = TempDir::new().unwrap();
@@ -3579,7 +3483,29 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
     )
     .await;
 
-    for path in [
+    let mounted = [
+        ("POST", "/control/ingest"),
+        ("POST", "/control/values"),
+        ("POST", "/control/changes"),
+        ("GET", "/control/status"),
+        ("POST", "/control/flush"),
+        ("POST", "/control/compact"),
+        ("PUT", "/control/layers"),
+        ("DELETE", "/control/layers/topics"),
+        ("PUT", "/control/attributes"),
+        ("PUT", "/control/vocabularies/genre"),
+        ("PATCH", "/control/vocabularies/genre/values"),
+        ("PUT", "/control/views/quarter/2026-Q3"),
+        ("DELETE", "/control/views/quarter/2026-Q3"),
+        ("PUT", "/control/view_groups/quarter"),
+        ("PUT", "/control/views/plain"),
+        ("PUT", "/control/layers/topics/artifacts"),
+        ("PATCH", "/control/layers/topics/artifacts"),
+        ("POST", "/control/faults/arm"),
+        ("GET", "/control/faults/arrivals"),
+        ("POST", "/control/faults/release"),
+    ];
+    let unrouted = [
         "/healthz",
         "/readyz",
         "/healthz/",
@@ -3587,19 +3513,28 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
         "/readyz/x",
         "/control/healthz",
         "/no-such-route",
-    ] {
-        let resp = server
-            .client
-            .get(server.control_url(path))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            401,
-            "{path} must meet the credential check, not the router's 404 — the control plane is \
-             uniformly authenticated and exempts nothing"
-        );
+    ]
+    .map(|path| ("GET", path));
+
+    for (method, path) in mounted.into_iter().chain(unrouted) {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        for credential in [None, Some("not-the-operator-credential")] {
+            let mut req = server
+                .client
+                .request(method.clone(), server.control_url(path));
+            if let Some(credential) = credential {
+                req = req.bearer_auth(credential);
+            }
+            let resp = req.send().await.unwrap();
+            assert_eq!(
+                resp.status(),
+                401,
+                "{method} {path} with credential {credential:?} must meet the credential check"
+            );
+            let body: serde_json::Value = resp.json().await.unwrap();
+            assert_eq!(body["error"], "bad-credential", "{method} {path}: {body}");
+            assert!(body.get("retry_after_s").is_none(), "{method} {path}: {body}");
+        }
     }
 }
 

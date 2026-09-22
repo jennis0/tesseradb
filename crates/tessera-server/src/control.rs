@@ -467,34 +467,6 @@ fn layer_frames(
         .collect()
 }
 
-/// Every route [`router`] mounts, as `(method, path)` — the subject of
-/// `every_control_route_requires_the_operator_credential`.
-///
-/// **This list is the test's mechanism, and it is weaker than the layer it tests. Say so rather than
-/// claim otherwise.** axum 0.8's `Router` exposes no route enumeration — there is no public iterator
-/// over its `Method`/path table and no way to derive one — so a test cannot ask the router what it
-/// serves. A hard-coded list is what is available, and its limitation is exactly what you would
-/// expect: a route added to [`router`] and *not* added here is not covered by that test.
-///
-/// What makes that acceptable, and why this is not the discipline it replaces: the *layer* is
-/// router-wide, so an unlisted new route is authenticated anyway. The two mechanisms cover each
-/// other's gap — the layer makes a forgotten route safe, and this list makes a *removed or narrowed
-/// layer* fail the build. Neither alone would do; the pairing is the argument. If axum ever exposes
-/// its route table, this constant is the thing to delete.
-pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
-    ("POST", "/control/ingest"),
-    ("POST", "/control/values"),
-    ("POST", "/control/changes"),
-    ("GET", "/control/status"),
-    ("POST", "/control/flush"),
-    ("POST", "/control/compact"),
-    ("PUT", "/control/attributes"),
-    ("PUT", "/control/vocabularies/{name}"),
-    ("PATCH", "/control/vocabularies/{name}/values"),
-    ("PUT", "/control/view_groups/{name}"),
-    ("PUT", "/control/views/{name}"),
-];
-
 /// `/control/changes`'s request-body limit.
 ///
 /// **Deliberately not a config key, and deliberately axum's own default value.** 2 MiB is what this

@@ -1107,7 +1107,7 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
 /// credential is not a token — enumerated from the description, not listed by hand.**
 ///
 /// This is the viewer-plane counterpart of
-/// `every_control_route_requires_the_operator_credential` (`tests/http_write.rs`), and it exists
+/// `every_path_on_the_control_listener_needs_the_credential` (`tests/http_write.rs`), and it exists
 /// for the same reason that test names: a per-route 401 test stays green forever while a sixth
 /// route ships wide open. The control plane also has structural cover —
 /// `require_operator_credential` wraps its whole router — and **the viewer plane has none**.
