@@ -1,16 +1,11 @@
-//! Coalesces entity-space maintenance artefacts without touching row space: delta tiers,
-//! external-id runs and their locator extents, dictionary extents, attribute extents, the record
-//! blob, text extents and entity-to-term extents.
+//! Merges small maintenance extents in entity space: delta tiers, external-id runs with their
+//! locator extents, and dictionary, attribute, record, text and entity-to-term extents. A coalesce
+//! changes no row id, bumps no `segments_version`, invalidates no cache or projection, and retires
+//! nothing: no posting is dropped and no tombstone applied.
 //!
-//! Each axis merges several small extents into one, preserving the set of entries it holds. Some
-//! merges renumber ordinals against a merged dictionary; others concatenate. A coalesce changes no
-//! row id, bumps no `segments_version`, invalidates no cache or projection, and never takes the
-//! base external-id run or the base dictionary. It retires nothing: no posting is dropped and no
-//! tombstone is applied.
-//!
-//! [`plan_coalesce`] runs on the executor and chooses what to take. [`execute_coalesce`] runs on
-//! the background pool and writes the merged files. [`rebased`] applies the result to the live
-//! manifest, or discards it if a flush moved the entries it planned against.
+//! [`plan_coalesce`] runs on the executor, [`execute_coalesce`] writes on the background pool, and
+//! [`rebased`] applies the result to the manifest on the executor. That manifest edit is the only
+//! commit point: a pass discarded before it leaves orphan files and every consumed entry standing.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -37,20 +32,18 @@ use execute::{
 pub(crate) use plan::plan_coalesce;
 pub(crate) use rebase::rebased;
 
-/// What a coalesce is allowed to take, per axis.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CoalescePolicy {
-    /// How many same-tier entries select a coalesce. Below 2 the pass is disabled.
+    /// Same-tier entries needed to take a window. Below 2, no pass runs.
     pub(crate) width: usize,
-    /// Sizes at or below this compare equal (see [`size_tier`]). Without a floor, entries at a
-    /// modest ingest rate each fall in their own size class and the width is never reached.
+    /// Sizes at or below this share one size tier. Without it, at a modest ingest rate every entry
+    /// sits in its own tier and `width` is never reached.
     pub(crate) floor_bytes: u64,
-    /// The most input bytes one axis may take in one pass, bounding the memory held while merging.
+    /// Input bytes one axis may take in one pass, which bounds the memory held while merging.
     pub(crate) max_input_bytes: u64,
 }
 
 impl Default for CoalescePolicy {
-    /// Eight entries, a 1 MiB floor, a 256 MiB input cap.
     fn default() -> Self {
         CoalescePolicy {
             width: 8,
@@ -60,35 +53,23 @@ impl Default for CoalescePolicy {
     }
 }
 
-/// One coalesce's immutable plan: which entries of which kinds it consumes. An empty list is a
-/// kind this pass does not take.
-///
-/// Entries are named by path, not index. Paths are never reused, so a path still in the live
-/// manifest at publication is still the same bytes: a flush that published while the pass ran can
-/// only append, never move what the plan named.
+/// The entries one coalesce consumes; an empty list is a kind it does not take. Entries are named
+/// by path, and paths are never reused, so a path still listed when the pass publishes holds the
+/// bytes the plan saw. A flush while the pass ran only appends.
 #[derive(Debug, Default)]
 pub(crate) struct CoalescePlan {
     pub(crate) partition: String,
-    /// Consumed `deltas` entries, in list order.
     pub(crate) tiers: Vec<String>,
-    /// Consumed `locator_extents` entries, in list order. Each names its run, and the runs are a
-    /// contiguous block of `external_id_runs` in the same order.
     pub(crate) locators: Vec<LocatorExtent>,
-    /// Consumed `dict_extents` entries, in list order.
     pub(crate) dicts: Vec<DictExtent>,
-    /// Consumed `attr_extents` entries, one window per column.
     pub(crate) attrs: Vec<ColumnWindow<AttrExtent>>,
-    /// Consumed `record_extents` entries, in list order.
     pub(crate) records: Vec<RecordExtent>,
-    /// Consumed `text_extents` entries, one window per text column.
     pub(crate) texts: Vec<ColumnWindow<TextExtent>>,
-    /// Consumed `entity_terms_extents` entries, in list order.
     pub(crate) terms: Vec<EntityTermsExtent>,
 }
 
-/// Where a coalesced window's output lives, prefix-relative: `<out>/attrs/<column>/` for an
-/// entity-scoped column, and `<out>/attrs/<column>/<group>/<key>/` for one view's column of a
-/// group-scoped family.
+/// A window's output directory, prefix-relative: `<out>/attrs/<column>/`, with the view's group
+/// and key appended for a group-scoped family's column.
 fn coalesced_column_rel(out_rel: &str, column: &str, view: Option<&str>) -> String {
     let mut rel = format!("{out_rel}/attrs/{column}");
     if let Some(view) = view {
@@ -100,16 +81,14 @@ fn coalesced_column_rel(out_rel: &str, column: &str, view: Option<&str>) -> Stri
     rel
 }
 
-/// The key a coalesce window is grouped by: the column, the view whose column of a group-scoped
-/// family it is, and that view's incarnation. The last two are `None` together for an
-/// entity-scoped column, which belongs to no view.
+/// Column, view and the view's incarnation. The last two are `None` together for an
+/// entity-scoped column.
 type WindowKey<'a> = (
     &'a str,
     Option<&'a str>,
     Option<tessera_types::view::ViewIncarnation>,
 );
 
-/// An extent listed under one column, on an axis whose list interleaves the columns.
 trait ColumnExtent {
     fn key(&self) -> WindowKey<'_>;
 }
@@ -126,15 +105,13 @@ impl ColumnExtent for TextExtent {
     }
 }
 
-/// One column's contiguous window of its own subsequence of an axis's list.
+/// One key's contiguous window within its own subsequence of an axis's list.
 #[derive(Debug, Clone)]
 pub(crate) struct ColumnWindow<E> {
     pub(crate) column: String,
-    /// The view whose column of a group-scoped family this window belongs to, `None` for an
-    /// ordinary entity-scoped column. A family's columns share one name, so the key is
-    /// `(column, view)` rather than the column alone.
+    /// `None` for an entity-scoped column. A group-scoped family's views share one column name.
     pub(crate) view: Option<String>,
-    /// The incarnation of `view` these extents belong to, `None` exactly when `view` is.
+    /// `None` exactly when `view` is.
     pub(crate) incarnation: Option<tessera_types::view::ViewIncarnation>,
     pub(crate) extents: Vec<E>,
 }
@@ -157,17 +134,15 @@ impl CoalescePlan {
     }
 }
 
-/// Everything [`execute_coalesce`] needs beyond its plan, taken from the generation on the
-/// executor thread and then immutable.
 pub(crate) struct CoalesceContext {
     pub(crate) prefix_dir: PathBuf,
     pub(crate) prefix: String,
-    /// The directory every output of this pass is written into, prefix-relative. Never reused, so
-    /// two passes never write the same paths and truncate each other's mapped files.
+    /// Where this pass writes, prefix-relative. Never reused: two passes writing one path would
+    /// truncate files the other has memory-mapped.
     pub(crate) out_rel: String,
 }
 
-/// A window a coalesce consumed and the entry that replaces it.
+/// A consumed window and the entry that replaces it.
 #[derive(Debug)]
 pub(crate) struct Merged<W, O> {
     pub(crate) consumed: W,
@@ -184,35 +159,31 @@ impl<W, O> Merged<W, O> {
     }
 }
 
-/// A coalesced tier's path and its opened reader.
 pub(crate) type OpenedTier = (String, Arc<DeltaTier>);
 
-/// A coalesce whose files are durable, awaiting the manifest edit and the swap on the executor.
-/// `None` or empty is a kind the pass did not take.
+/// A coalesce whose files are durable, awaiting the manifest edit on the executor. `None` or
+/// empty is a kind the pass did not take.
 pub(crate) struct CompletedCoalesce {
     pub(crate) partition: String,
     pub(crate) prefix: String,
     pub(crate) tier: Option<Merged<Vec<String>, OpenedTier>>,
-    /// The consumed locator extents and the one covering their union span, which names the
-    /// coalesced run.
+    /// The consumed locator extents and one covering their union span, naming the merged run.
     pub(crate) run: Option<Merged<Vec<LocatorExtent>, LocatorExtent>>,
     pub(crate) dict: Option<Merged<Vec<DictExtent>, DictExtent>>,
-    /// Opened, so publication is a pointer push on the executor and cannot fail on IO after the
+    /// Opened on the pool, so publishing is a pointer push that cannot fail on IO after the
     /// manifest edit.
     pub(crate) attrs: Vec<Merged<ColumnWindow<AttrExtent>, crate::filter::OpenedExtent>>,
     pub(crate) record: Option<Merged<Vec<RecordExtent>, RecordExtent>>,
     pub(crate) texts: Vec<Merged<ColumnWindow<TextExtent>, TextExtent>>,
     pub(crate) terms: Option<Merged<Vec<EntityTermsExtent>, EntityTermsExtent>>,
-    /// Every file this pass wrote, prefix-relative, with its digest.
     pub(crate) files: BTreeMap<String, FileDigest>,
 }
 
-/// A kind's consumed entries, or `None` if the plan does not take the kind.
 fn taken<E>(entries: Vec<E>) -> Option<Vec<E>> {
     (!entries.is_empty()).then_some(entries)
 }
 
-/// Turn a plan into durable files. Runs on the background pool, over immutable inputs.
+/// Writes a plan's merged files. Runs on the background pool.
 pub(crate) fn execute_coalesce(
     plan: CoalescePlan,
     ctx: CoalesceContext,

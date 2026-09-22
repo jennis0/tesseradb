@@ -6,16 +6,9 @@ use tessera_store::manifest::{
 use super::{ColumnExtent, CompletedCoalesce};
 use crate::merge::contiguous;
 
-/// `manifest` with `completed` applied, or `None` if it no longer rebases.
-///
-/// Every consumed entry must still be present, contiguous and in order. A flush publishing while
-/// the pass ran only appends, so the ordinary case is that the window is exactly where it was;
-/// otherwise the plan is stale and is discarded, leaving the consumed entries standing for the
-/// next tick to re-plan.
-///
-/// The coalesced entry takes the window's position, never the end of the list. This preserves
-/// recency on the run list and every ordinal on the dictionary list, and keeps the manifest's
-/// bytes independent of when the pass ran.
+/// `manifest` with `completed` applied, or `None` if a consumed window has moved and the pass is
+/// discarded. Each replacement takes its window's position, never the end, which keeps run
+/// recency, every dictionary ordinal, and manifest bytes independent of timing.
 pub(crate) fn rebased(
     manifest: &SegmentsManifest,
     completed: &CompletedCoalesce,
@@ -62,9 +55,9 @@ pub(crate) fn rebased(
     Some(next)
 }
 
-/// Replaces `consumed` in `entries` with `replacement` at the window's first position, or `None`
-/// if the window is gone. The window must be contiguous among the entries `within` selects; an
-/// entry is recognised by `key`.
+/// Replaces `consumed` with `replacement` at the window's first position, or `None` if the window
+/// is gone. Attribute and text lists interleave columns, so there the window need be contiguous
+/// only among the entries `within` selects: its own (column, view, incarnation) subsequence.
 fn replace_window<T: Clone>(
     entries: &mut Vec<T>,
     consumed: &[T],
@@ -88,7 +81,6 @@ fn all<T>(_: &T) -> bool {
 }
 
 impl CompletedCoalesce {
-    /// Every file the consumed entries name.
     fn consumed_files(&self) -> impl Iterator<Item = &str> {
         let tiers = self.tier.iter().flat_map(|m| m.consumed.iter().map(String::as_str));
         let runs = self.run.iter().flat_map(|m| &m.consumed);
