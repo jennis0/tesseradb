@@ -127,16 +127,7 @@ pub async fn readyz(State(state): State<Arc<AppState>>) -> StatusCode {
 mod tests {
     use super::*;
 
-    /// The whole readiness table, including the row no HTTP test reaches today.
-    ///
-    /// `Dead` is the row this exists for; see [`is_ready`] for what blocks the end-to-end version of
-    /// it (a declined dev-dependency, not a race). The engine-level half — that a panicked executor
-    /// reaches `Dead` at all, and that its in-flight caller is handed `ReceiptLost` — is
-    /// `tessera-engine`'s `an_executor_panic_is_reported_dead`.
-    /// `/control/status`'s `posture` strings are an operator-facing contract, so a Rust variant
-    /// rename must not silently change one. Pinned here — where `/control/status` is consumed —
-    /// rather than beside `as_str`, so the spellings are asserted against the surface that
-    /// publishes them.
+    /// `/control/status`'s `posture` strings are an operator-facing contract.
     #[test]
     fn posture_spellings_are_stable() {
         assert_eq!(ExecutorPosture::NotStarted.as_str(), "not-started");
@@ -145,6 +136,12 @@ mod tests {
         assert_eq!(ExecutorPosture::Dead.as_str(), "dead");
     }
 
+    /// The whole readiness table, including the row no HTTP test reaches today.
+    ///
+    /// `Dead` is the row this exists for; see [`is_ready`] for what blocks the end-to-end version of
+    /// it (a declined dev-dependency, not a race). The engine-level half — that a panicked executor
+    /// reaches `Dead` at all, and that its in-flight caller is handed `ReceiptLost` — is
+    /// `tessera-engine`'s `an_executor_panic_is_reported_dead`.
     #[test]
     fn only_a_running_executor_is_ready() {
         assert!(is_ready(ExecutorPosture::Running));
