@@ -736,6 +736,33 @@ impl AppState {
         self.authenticated_session(bearer_token(headers).ok_or(ApiError::BadCredential)?)
     }
 
+    /// Run `f` on the blocking pool behind the compute gate. The permits move into the closure, so
+    /// they release when the work finishes, not when the caller stops waiting.
+    pub async fn gated<T, F>(self: &Arc<Self>, f: F) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&AppState) -> Result<T, ApiError> + Send + 'static,
+    {
+        let (permits, _admission_us) = self.compute_gate.admit().await?;
+        self.blocking(move |state| {
+            let _permits = permits;
+            f(state)
+        })
+        .await
+    }
+
+    /// Run `f` on the blocking pool, off the compute gate.
+    pub async fn blocking<T, F>(self: &Arc<Self>, f: F) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&AppState) -> Result<T, ApiError> + Send + 'static,
+    {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || f(&state))
+            .await
+            .map_err(crate::error::map_join_error)?
+    }
+
     /// Bearer-token lookup for the viewer plane: an unrecognised token is `bad-credential` (401);
     /// a recognised-but-expired one is `expired-token` (403) — the engine itself never checks
     /// `expires_at`, so enforcing the deadline is this method's job and nothing else's.
