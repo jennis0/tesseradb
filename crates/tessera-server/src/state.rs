@@ -362,7 +362,7 @@ pub struct ComputeGate {
     ///
     /// **Does not count every 429 the server can return.** The engine's single-flight builders
     /// (`EngineError::ProjectionBuilding`/`FragmentBuilding`) also emit the 429 `backpressure`
-    /// code, as [`crate::error::ApiError::SingleFlightBackpressure`], but those sheds happen
+    /// code, as [`crate::error::ShedCause::SingleFlight`], but those sheds happen
     /// *after* this gate has already admitted the request — a distinct mechanism this counter has
     /// no visibility into, and one whose `detail` says so. A caller correlating
     /// `shed_total` against the client-observed 429 rate should expect the latter to be equal or
@@ -426,7 +426,10 @@ impl ComputeGate {
             Ok(permit) => permit,
             Err(_) => {
                 self.shed_total.fetch_add(1, Ordering::Relaxed);
-                return Err(crate::error::ApiError::Backpressure);
+                return Err(crate::error::ApiError::Backpressure {
+                    retry_after_s: crate::error::RETRY_AFTER_SECS,
+                    cause: crate::error::ShedCause::ComputeGate,
+                });
             }
         };
 
@@ -446,7 +449,10 @@ impl ComputeGate {
             // both mean "no compute permit arrived in time".
             Ok(Err(_)) | Err(_) => {
                 self.shed_total.fetch_add(1, Ordering::Relaxed);
-                return Err(crate::error::ApiError::Backpressure);
+                return Err(crate::error::ApiError::Backpressure {
+                    retry_after_s: crate::error::RETRY_AFTER_SECS,
+                    cause: crate::error::ShedCause::ComputeGate,
+                });
             }
         };
 
@@ -959,7 +965,10 @@ mod compute_gate_tests {
 
         let second = gate.admit().await;
         assert!(
-            matches!(second, Err(ApiError::Backpressure)),
+            matches!(second, Err(ApiError::Backpressure {
+                cause: crate::error::ShedCause::ComputeGate,
+                ..
+            })),
             "a saturated gate must shed the second admission"
         );
         assert_eq!(gate.status().shed_total, 1);
@@ -978,7 +987,10 @@ mod compute_gate_tests {
 
         let second = gate.admit().await;
         assert!(
-            matches!(second, Err(ApiError::Backpressure)),
+            matches!(second, Err(ApiError::Backpressure {
+                cause: crate::error::ShedCause::ComputeGate,
+                ..
+            })),
             "a caller that cannot get a compute permit within the timeout must be shed"
         );
         assert_eq!(gate.status().shed_total, 1);
@@ -993,7 +1005,10 @@ mod compute_gate_tests {
     async fn no_permit_leak_after_a_shed() {
         let gate = ComputeGate::new(1, 0, 1);
         let (first_permits, _) = gate.admit().await.expect("first admit must succeed");
-        assert!(matches!(gate.admit().await, Err(ApiError::Backpressure)));
+        assert!(matches!(gate.admit().await, Err(ApiError::Backpressure {
+                cause: crate::error::ShedCause::ComputeGate,
+                ..
+            })));
 
         drop(first_permits);
 
@@ -1014,7 +1029,10 @@ mod compute_gate_tests {
     async fn no_slot_leak_on_a_compute_timeout_shed() {
         let gate = ComputeGate::new(1, 1, 1);
         let (first_permits, _) = gate.admit().await.expect("first admit must succeed");
-        assert!(matches!(gate.admit().await, Err(ApiError::Backpressure)));
+        assert!(matches!(gate.admit().await, Err(ApiError::Backpressure {
+                cause: crate::error::ShedCause::ComputeGate,
+                ..
+            })));
 
         // Two slots total (admission=1, queue=1); the first holder still has one. A second
         // *queued* admit (which will itself time out, since compute is still fully held) must

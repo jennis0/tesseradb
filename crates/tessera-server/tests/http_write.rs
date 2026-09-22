@@ -2761,7 +2761,7 @@ fn changes_never_429s() {
 /// what makes the wire path *live* is the defaults relation, and that is pinned in `config.rs`.
 ///
 /// **What this proves, and what it does not.** It proves the whole path from `TrySendError::Full`
-/// through `SubmitError::QueueFull`, `map_accept_error`, `ApiError::WriteBackpressure` and onto the
+/// through `SubmitError::QueueFull`, `map_accept_error`, `ShedCause::WriteQueue` and onto the
 /// wire, including the derived `retry_after_s` and its agreeing header. It does **not** prove
 /// anything about the *transition* into fullness — a queue that is never not full cannot
 /// distinguish "429 on Full" from "429 always". Inducing a real transition needs a controllable
@@ -2774,7 +2774,7 @@ fn changes_never_429s() {
 /// be the one firing.
 ///
 /// **Mutations this kills:** mapping `QueueFull` to anything but 429; deleting `retry_after_s`'s
-/// `WriteBackpressure` arm in `error.rs` (the header disappears); `estimate_retry_after_s`
+/// `WriteQueue` cause in `error.rs` (the header disappears); `estimate_retry_after_s`
 /// returning 0.
 #[tokio::test]
 async fn ingest_429s_when_the_queue_is_full() {

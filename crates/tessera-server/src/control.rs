@@ -1468,10 +1468,11 @@ async fn values(
     };
     let Some(permit) = state.ingest_admission.try_admit() else {
         tracing::debug!("the ingest admission bound is saturated; answering 429 backpressure");
-        return Err(ApiError::IngestAdmissionBackpressure {
+        return Err(ApiError::Backpressure {
             retry_after_s: crate::error::admission_retry_after_s(
                 &state.engine.write_executor_stats(),
             ),
+            cause: crate::error::ShedCause::IngestAdmission,
         });
     };
     let engine = Arc::clone(&state);
@@ -2639,11 +2640,12 @@ fn run_ingest(
     // come back and be refused again.
     let buffered = state.engine.buffered_items();
     if buffered >= state.limits.ingest_buffer_max_items {
-        return Err(ApiError::WriteBackpressure {
+        return Err(ApiError::Backpressure {
             retry_after_s: tessera_engine::estimate_buffer_retry_after_s(
                 &state.engine.write_executor_stats(),
                 buffered as u64,
             ),
+            cause: crate::error::ShedCause::WriteQueue,
         });
     }
 
@@ -2842,10 +2844,11 @@ async fn ingest(
         // line adds nothing a counter does not, which is the same argument `map_accept_error`
         // already makes for the queue's 429 one level down.
         tracing::debug!("the ingest admission bound is saturated; answering 429 backpressure");
-        return Err(ApiError::IngestAdmissionBackpressure {
+        return Err(ApiError::Backpressure {
             retry_after_s: crate::error::admission_retry_after_s(
                 &state.engine.write_executor_stats(),
             ),
+            cause: crate::error::ShedCause::IngestAdmission,
         });
     };
 

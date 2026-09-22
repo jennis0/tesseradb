@@ -815,7 +815,7 @@ struct SuggestQuery {
 /// `compute_gate` permit; a per-keystroke surface queued behind viewport renders would be
 /// unusable. What it takes instead is [`crate::state::SuggestAdmission`]'s one-per-session slot: a
 /// second request for a session already walking is refused with the shared `429 backpressure`
-/// (`ApiError::Backpressure`, `Retry-After: 1`) **before any work runs**, which is what stops a
+/// (`ShedCause::SuggestInFlight`, `Retry-After: 1`) **before any work runs**, which is what stops a
 /// client that does not debounce its keystrokes from turning a held key into a queue.
 async fn suggest(
     State(state): State<Arc<AppState>>,
@@ -867,7 +867,10 @@ async fn suggest(
     // response or a log line here either way, but the id is the same handle `/session/revoke`
     // already addresses this session by.
     let Some(_suggest_guard) = state.suggest_admission.try_begin(session.token_id()) else {
-        return Err(ApiError::Backpressure);
+        return Err(ApiError::Backpressure {
+            retry_after_s: crate::error::RETRY_AFTER_SECS,
+            cause: crate::error::ShedCause::SuggestInFlight,
+        });
     };
 
     let walk_budget = state.limits.max_suggestion_walk;
