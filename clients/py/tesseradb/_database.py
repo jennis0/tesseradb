@@ -892,11 +892,11 @@ class Database:
             return report
         if report.findings:
             raise Refusal(str(report), report)
-        C.run(control, pages, report)
+        accepted = C.run(control, pages, report)
         self._record_terms(self._document())
         self.pending.clear()
         self._save_state()
-        if pages and len(report.refusals) == len(pages):
+        if pages and not accepted:
             raise Refusal(str(report), report)
         return report
 

@@ -1194,22 +1194,23 @@ def _records(table: pa.Table, insert) -> list[dict]:
 # ---------------------------------------------------------------------------- the run
 
 
-def run(control: Control, pages: Sequence[Page], report) -> None:
+def run(control: Control, pages: Sequence[Page], report) -> int:
     """Send the plan, in order, then flush once and wait for the publication that flush arms.
 
     Every page goes unwaited and the flush is the commit's whole wait, whatever the pages did: a
     commit that reported a refusal on one page should not also leave its accepted ones sitting for
     the executor's own period. Where nothing was accepted there is nothing to publish and no flush
-    is sent.
+    is sent. Returns how many pages other than the plan's own flushes were accepted.
     """
     accepted = 0
     for page in pages:
         answer = _send(control, page)
         _fold(report, page, answer)
-        if answer.ok:
+        if answer.ok and page.kind != "flush":
             accepted += 1
     if accepted:
         _waited(report, control.flush(wait=True))
+    return accepted
 
 
 def _send(control: Control, page: Page) -> Answer:
