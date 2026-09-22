@@ -30,7 +30,7 @@ use serde_json::{Map, Value};
 use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar};
 use tessera_types::layer::LayerDeclaration;
 
-use super::DecodeError;
+use super::{DecodeError, Fixed};
 
 /// What the batch's columns may be, resolved once per batch from the manifest and the layer
 /// registry by the caller, in the same order the Arrow decode resolves them.
@@ -42,31 +42,6 @@ pub(crate) struct JsonColumns<'a> {
     pub declared: &'a [DeclaredScalar],
     pub scoped: &'a [ScopedScalar],
     pub layer_of: &'a dyn Fn(&str) -> Option<LayerDeclaration>,
-}
-
-/// A column a route gives a meaning of its own, whatever the manifest declares.
-#[derive(Clone, Copy)]
-pub(crate) enum Fixed<'a> {
-    ExternalId,
-    /// A coordinate, under the name the view's projection gives its axis.
-    Coordinate(&'a str),
-    Access,
-    NodeId,
-    TesseraId,
-    IdSet,
-}
-
-impl Fixed<'_> {
-    fn name(&self) -> &str {
-        match self {
-            Fixed::ExternalId => "external_id",
-            Fixed::Coordinate(name) => name,
-            Fixed::Access => "access",
-            Fixed::NodeId => "node_id",
-            Fixed::TesseraId => "tessera_id",
-            Fixed::IdSet => "idset",
-        }
-    }
 }
 
 /// One JSON body as one record batch. The route's fixed columns come first, in the order it lists
@@ -140,8 +115,8 @@ pub(crate) fn record_batch(
             if (columns.layer_of)(name).is_none() {
                 return Err(DecodeError(format!(
                     "{body_name}: row {row}, column '{name}' is neither in \
-                     MANIFEST.declared_scalars, nor a group-scoped family whose key set holds \
-                     this batch's view, nor the name of a registered layer (contracts §2.2, \
+                     MANIFEST.declared_scalars nor the name of a registered layer, nor a \
+                     group-scoped family whose key set holds this batch's view (contracts §2.2, \
                      `views.md` §5). An undeclared column is refused rather than dropped"
                 )));
             }

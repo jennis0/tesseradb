@@ -1,18 +1,20 @@
 use std::sync::Arc;
 
 use arrow::array::Array;
+use arrow::record_batch::RecordBatch;
 use tessera_engine::{
     DeclaredScalar, Projection, ScalarType, ScopedScalar, Vocabularies, VocabularyKind, ABSENT_CODE,
 };
 use tessera_lifecycle::{BatchArtifacts, WalScalar};
+use tessera_types::layer::LayerDeclaration;
 use tessera_types::TesseraId;
 
-use super::json::Fixed;
+use super::json::JsonColumns;
 use super::membership::{membership_column, MembershipColumn, MembershipTally};
 use super::DecodeError;
 use super::{
     declared_as_scoped, scoped_absent, scoped_as_declared, scoped_wire_type, Address, BodyEncoding,
-    EXTERNAL_ID_MAX_LEN,
+    Fixed, EXTERNAL_ID_MAX_LEN,
 };
 
 #[derive(Debug)]
@@ -36,11 +38,6 @@ pub(crate) struct RawIngestItem {
     /// that owns no family.
     pub(crate) scoped: Vec<WalScalar>,
 }
-
-/// The column names this schema gives a meaning of their own whatever the view, plus the
-/// coordinate pair [`coordinate_columns`] resolves; everything else in a batch is a
-/// caller-declared scalar **or a declared layer's name** (see [`parse_ingest_batch`]).
-const RESERVED_COLUMNS: [&str; 3] = ["external_id", "access", "node_id"];
 
 /// What this view's coordinate columns are called, and what the wrong spelling would have meant.
 ///
@@ -195,6 +192,154 @@ pub(super) fn code_at(width: ScalarType, code: u32) -> WalScalar {
     }
 }
 
+/// The body's record batches, whichever encoding carried it. A JSON body is coerced into one
+/// record batch against the declared column types (`json::record_batch`) and then read by every
+/// rule the Arrow batches are.
+fn record_batches<'a>(
+    body_name: &'static str,
+    encoding: BodyEncoding,
+    body: &'a [u8],
+    json: &JsonColumns<'_>,
+) -> Result<Box<dyn Iterator<Item = Result<RecordBatch, DecodeError>> + 'a>, DecodeError> {
+    Ok(match encoding {
+        BodyEncoding::Arrow => {
+            let cursor = std::io::Cursor::new(body);
+            let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
+                DecodeError(format!("{body_name} is not a valid Arrow IPC stream: {e}"))
+            })?;
+            Box::new(reader.map(move |batch| {
+                batch.map_err(|e| DecodeError(format!("{body_name}: arrow decode error: {e}")))
+            }))
+        }
+        BodyEncoding::Json => Box::new(std::iter::once(super::json::record_batch(
+            body_name, body, json,
+        ))),
+    })
+}
+
+/// Whole-batch schema validation, before a single row is read: a batch whose columns do not match
+/// the declarations has no effect at all, exactly as a duplicate 409 does. Returns the batch's
+/// layer columns.
+///
+/// A name is the route's own, a declared scalar, a group-scoped family in `scoped`, or a
+/// registered layer's, and is refused otherwise. A declared or scoped column present at the wrong
+/// type is refused; one the batch omits is for the route to read.
+fn check_columns<'b>(
+    body_name: &str,
+    batch: &'b RecordBatch,
+    fixed: &[Fixed<'_>],
+    declared: &[DeclaredScalar],
+    scoped: &[ScopedScalar],
+    layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
+) -> Result<Vec<MembershipColumn<'b>>, DecodeError> {
+    let mut declarations = Vec::new();
+    for field in batch.schema_ref().fields() {
+        let name = field.name().as_str();
+        if fixed.iter().any(|f| f.name() == name)
+            || declared.iter().any(|d| d.name == name)
+            // **A group-scoped family, under its plain name** (`views.md` §5): the view is
+            // known from the header, so the column is not qualified and the view decides
+            // which of the family's columns the value lands in. `scoped` is empty for every
+            // view outside a scope, so the refusal below is unchanged there — which is what
+            // keeps a scoped column un-nameable on an entity-space batch.
+            || scoped.iter().any(|f| f.name == name)
+        {
+            continue;
+        }
+        let Some(declaration) = layer_of(name) else {
+            return Err(DecodeError(format!(
+                "{body_name}: column '{name}' is neither in MANIFEST.declared_scalars nor the \
+                 name of a registered layer, nor a group-scoped family whose key set holds this \
+                 batch's view (contracts §2.2, `views.md` §5). An undeclared column is refused \
+                 rather than dropped"
+            )));
+        };
+        declarations.push((name, declaration));
+    }
+    let mut memberships = Vec::with_capacity(declarations.len());
+    for (name, declaration) in &declarations {
+        let column = batch
+            .column_by_name(name)
+            .expect("the column was found in this batch's own schema");
+        memberships.push(membership_column(body_name, name, column, declaration)?);
+    }
+    for d in declared {
+        let Some(col) = batch.column_by_name(&d.name) else {
+            continue;
+        };
+        // One row's worth is enough to identify the column's type, and a batch with no rows has
+        // no scalar to mistype. The decode is keyed by the declaration (see `scalar_at`), so
+        // "wrong type" and "a type this build cannot store" are one refusal: either way the
+        // column is not what the manifest says an ingest batch carries for it.
+        let expected = d.wire_type();
+        if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
+            return Err(DecodeError(format!(
+                "{body_name}: column '{}' is {:?}, but MANIFEST.declared_scalars declares it {} \
+                 (contracts §2.6); refused rather than dropped",
+                d.name,
+                col.data_type(),
+                expected.arrow_type_name()
+            )));
+        }
+    }
+    // **The scoped families' columns, checked on the declared ones' rule** (`views.md` §5): a
+    // value decoded against the wrong declaration is a wrong value stored with no error anywhere.
+    for f in scoped {
+        let Some(col) = batch.column_by_name(&f.name) else {
+            continue;
+        };
+        let expected = scoped_wire_type(f);
+        if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
+            return Err(DecodeError(format!(
+                "{body_name}: column '{}' is {:?}, but it is a group-scoped attribute declared {} \
+                 (views §5); refused rather than dropped",
+                f.name,
+                col.data_type(),
+                expected.arrow_type_name()
+            )));
+        }
+    }
+    Ok(memberships)
+}
+
+/// One row's value of a column `check_columns` has passed, read against `declared`: a scoped
+/// family's column is read against [`scoped_as_declared`]'s declaration.
+fn cell(
+    body_name: &str,
+    col: &dyn Array,
+    row: usize,
+    declared: &DeclaredScalar,
+    vocabularies: &Vocabularies,
+) -> Result<WalScalar, DecodeError> {
+    Ok(match declared.vocabulary.as_deref() {
+        // A category's absence is in band and `category_code` already spends it: null resolves to
+        // the reserved code 0, which its vocabulary keeps out of the value space.
+        Some(vocabulary) => category_code(body_name, col, row, declared, vocabulary, vocabularies)?,
+        // **Null is absence, and it must be carried rather than read through.** `a.value(row)` on
+        // a null slot returns whatever the values buffer holds there — 0 for every numeric width —
+        // so reading without this check stores an item with no score as one scoring zero, present
+        // and indistinguishable. It then matches `{gte: -10, lte: 10}`, which is a wrong answer
+        // rather than a missing feature (decision 0064). Every other family has somewhere in band
+        // to put absence; a number has no spare bit pattern, so it travels beside the value as
+        // `WalScalar::Null`.
+        None if col.is_null(row) => WalScalar::Null,
+        None => scalar_at(col, row, declared.wire_type())
+            .expect("every column's type was checked before a row was read"),
+    })
+}
+
+/// Contracts §1: a typed error, never a truncation -- see `EXTERNAL_ID_MAX_LEN`'s doc.
+fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
+    if external_id.len() > EXTERNAL_ID_MAX_LEN {
+        return Err(DecodeError(format!(
+            "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte cap (contracts \
+             §1); refused rather than truncated",
+            external_id.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Parse `/control/ingest`'s body: one Arrow IPC stream, schema
 /// `(external_id: binary, x: float32|float64, y: float32|float64, access: utf8, node_id: utf8?,
 /// ...scalars)` (R5). The coordinate columns take either float width and the narrower is widened —
@@ -269,49 +414,36 @@ pub(crate) fn parse_ingest_batch(
     // every view outside a scope (`views.md` §5). See the section on them in this function's doc.
     scoped: &[ScopedScalar],
     vocabularies: &Vocabularies,
-    layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
+    layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
 ) -> Result<ParsedBatch, DecodeError> {
+    let body_name = "ingest body";
     let (x_name, y_name) = coordinate_columns(projection);
-    // **One decode below this line, whichever encoding carried the batch** (ingest §1.2). A JSON
-    // body is coerced into one record batch against the declared column types
-    // (`json::record_batch`) and then read by every rule the Arrow batches are.
-    let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, DecodeError>>> =
-        match encoding {
-            BodyEncoding::Arrow => {
-                let cursor = std::io::Cursor::new(body);
-                let reader =
-                    arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
-                        DecodeError(format!("ingest body is not a valid Arrow IPC stream: {e}"))
-                    })?;
-                Box::new(reader.map(|batch| {
-                    batch.map_err(|e| DecodeError(format!("ingest body: arrow decode error: {e}")))
-                }))
-            }
-            BodyEncoding::Json => Box::new(std::iter::once(super::json::record_batch(
-                "ingest body",
-                body,
-                &super::json::JsonColumns {
-                    fixed: &[
-                        Fixed::ExternalId,
-                        Fixed::Coordinate(x_name),
-                        Fixed::Coordinate(y_name),
-                        Fixed::Access,
-                        Fixed::NodeId,
-                    ],
-                    declared_on_every_row: true,
-                    declared,
-                    scoped,
-                    layer_of,
-                },
-            ))),
-        };
+    let fixed = [
+        Fixed::ExternalId,
+        Fixed::Coordinate(x_name),
+        Fixed::Coordinate(y_name),
+        Fixed::Access,
+        Fixed::NodeId,
+    ];
+    let batches = record_batches(
+        body_name,
+        encoding,
+        body,
+        &JsonColumns {
+            fixed: &fixed,
+            declared_on_every_row: true,
+            declared,
+            scoped,
+            layer_of,
+        },
+    )?;
+    let scoped_declared: Vec<DeclaredScalar> = scoped.iter().map(scoped_as_declared).collect();
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
     let mut clipped = 0u64;
     let mut padded: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for batch in batches {
         let batch = batch?;
-        let schema = batch.schema();
         padded.extend(
             declared
                 .iter()
@@ -322,7 +454,7 @@ pub(crate) fn parse_ingest_batch(
         // membership names, since the executor indexes one flat list of rows per batch id.
         let offset = items.len();
 
-        let ext = optional_binary_col(&batch, "external_id")?;
+        let ext = optional_binary_col(body_name, &batch, "external_id")?;
         // **The spelling is checked before the columns are read**, so a batch that used the other
         // one meets a refusal naming what this view calls its axes rather than a bare "column 'x'
         // missing". Only fired where the right column is absent, so a `projection = "none"` view
@@ -352,98 +484,19 @@ pub(crate) fn parse_ingest_batch(
         clipped += project_columns(projection, &mut x, &mut y)?;
         let access = labels_col(&batch, "access")?;
 
-        // Whole-batch schema validation, before a single row is read: a batch whose scalar tail
-        // does not match the declaration has no effect at all, exactly as a duplicate 409 does.
-        let mut memberships: Vec<MembershipColumn> = Vec::new();
-        let mut declarations = Vec::new();
-        for field in schema.fields() {
-            let name = field.name().as_str();
-            if RESERVED_COLUMNS.contains(&name)
-                || name == x_name
-                || name == y_name
-                || declared.iter().any(|d| d.name == name)
-                // **A group-scoped family, under its plain name** (`views.md` §5): the view is
-                // known from the header, so the column is not qualified and the view decides
-                // which of the family's columns the value lands in. `scoped` is empty for every
-                // view outside a scope, so the refusal below is unchanged there — which is what
-                // keeps a scoped column un-nameable on an entity-space batch.
-                || scoped.iter().any(|f| f.name == name)
-            {
-                continue;
-            }
-            let Some(declaration) = layer_of(name) else {
-                return Err(DecodeError(format!(
-                    "ingest body: column '{name}' is neither in MANIFEST.declared_scalars nor the \
-                     name of a registered layer (contracts §2.2). Scalars are stored positionally \
-                     against the declared order, so an undeclared column is refused rather than \
-                     dropped — dropping it would shift every later scalar by one and acknowledge \
-                     that with a 200"
-                )));
-            };
-            declarations.push((name.to_string(), declaration));
-        }
-        for (name, declaration) in &declarations {
-            let column = batch
-                .column_by_name(name)
-                .expect("the column was found in this batch's own schema");
-            memberships.push(membership_column("ingest body", name, column, declaration)?);
-        }
-        // **A declared column the batch omits is absent in every row** (`ingest.md` §7.1): the
-        // scalar tail is built below in declared order, so an omission misaligns nothing, and
-        // a column declared at a running service is one an older client's batches do not
-        // carry. What is refused is a column present at the wrong type.
-        for d in declared {
-            let Some(col) = batch.column_by_name(&d.name) else {
-                continue;
-            };
-            // One row's worth is enough to identify the column's type, and a batch with no rows has
-            // no scalar to mistype. The decode is keyed by the declaration (see `scalar_at`), so
-            // "wrong type" and "a type this build cannot store" are one refusal: either way the
-            // column is not what the manifest says an ingest batch carries for it.
-            let expected = d.wire_type();
-            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(DecodeError(format!(
-                    "ingest body: column '{}' is {:?}, but MANIFEST.declared_scalars declares \
-                     it {} (contracts §2.6); refused rather than dropped",
-                    d.name,
-                    col.data_type(),
-                    expected.arrow_type_name()
-                )));
-            }
-        }
-
-        // **The scoped families' columns, checked on the declared ones' rule** (`views.md` §5) —
-        // but a *missing* column is not an error here, where a missing declared scalar is: a
-        // family has no slot in the positional tail, so its absence misaligns nothing and simply
-        // means every row of the batch is absent in it. What is refused is the same wrong type,
-        // for the same reason: a value decoded against the wrong declaration is a wrong value
-        // stored with no error anywhere.
-        for f in scoped {
-            let Some(col) = batch.column_by_name(&f.name) else {
-                continue;
-            };
-            let expected = scoped_wire_type(f);
-            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(DecodeError(format!(
-                    "ingest body: column '{}' is {:?}, but it is a group-scoped attribute \
-                     declared {} (views §5); refused rather than dropped",
-                    f.name,
-                    col.data_type(),
-                    expected.arrow_type_name()
-                )));
-            }
-        }
+        let memberships = check_columns(body_name, &batch, &fixed, declared, scoped, layer_of)?;
 
         for i in 0..batch.num_rows() {
             // The artifacts this row names, read before its scalars so a malformed membership
             // column refuses the batch with nothing decoded into `items` — the whole-batch rule
             // every other refusal here is held to.
             for column in &memberships {
-                tally.read("ingest body", column, i, offset)?;
+                tally.read(body_name, column, i, offset)?;
             }
             // Built in DECLARED order, not schema order — the vector is read back by position and
-            // nothing downstream carries a name. Every column is present and correctly typed by the
-            // validation above, so neither `expect` here can fire on a caller's input.
+            // nothing downstream carries a name. **A declared column the batch omits is absent in
+            // every row** (`ingest.md` §7.1): an omission misaligns nothing, and a column declared
+            // at a running service is one an older client's batches do not carry.
             let mut scalars = Vec::with_capacity(declared.len());
             for d in declared {
                 let Some(col) = batch.column_by_name(&d.name) else {
@@ -452,26 +505,7 @@ pub(crate) fn parse_ingest_batch(
                     scalars.push(scoped_absent(&declared_as_scoped(d)));
                     continue;
                 };
-                let value = match d.vocabulary.as_deref() {
-                    // A category's absence is in band and `category_code` already spends it: null
-                    // resolves to the reserved code 0, which its vocabulary keeps out of the value
-                    // space.
-                    Some(vocabulary) => {
-                        category_code("ingest body", col.as_ref(), i, d, vocabulary, vocabularies)?
-                    }
-                    // **Null is absence, and it must be carried rather than read through.**
-                    // `a.value(row)` on a null slot returns whatever the values buffer holds
-                    // there — 0 for every numeric width — so reading without this check stores an
-                    // item with no score as one scoring zero, present and indistinguishable. It
-                    // then matches `{gte: -10, lte: 10}`, which is a wrong answer rather than a
-                    // missing feature (decision 0064). Every other family has somewhere in band to
-                    // put absence; a number has no spare bit pattern, so it travels beside the
-                    // value as `WalScalar::Null`.
-                    None if col.is_null(i) => WalScalar::Null,
-                    None => scalar_at(col.as_ref(), i, d.wire_type())
-                        .expect("every declared column's type was checked above"),
-                };
-                scalars.push(value);
+                scalars.push(cell(body_name, col.as_ref(), i, d, vocabularies)?);
             }
             // **The scoped tail, in the families' own order** — a second positional list rather
             // than more slots in the one above, because the two are indexed against different
@@ -479,26 +513,14 @@ pub(crate) fn parse_ingest_batch(
             // reserved code 0 for a category, `WalScalar::Null` for everything else, which is
             // decision 0064's presence bitmap.
             let mut scoped_values = Vec::with_capacity(scoped.len());
-            for f in scoped {
+            for (f, as_declared) in scoped.iter().zip(&scoped_declared) {
                 let value = match batch.column_by_name(&f.name) {
                     // A family the batch does not mention: every row is absent in it, which is
                     // an ordinary state and not the omission a declared scalar's would be. A
                     // family has no bundle-wide column, so nothing downstream is misaligned by a
                     // batch that carries none of them.
                     None => scoped_absent(f),
-                    Some(col) => match f.vocabulary.as_deref() {
-                        Some(vocabulary) => category_code(
-                            "ingest body",
-                            col.as_ref(),
-                            i,
-                            &scoped_as_declared(f),
-                            vocabulary,
-                            vocabularies,
-                        )?,
-                        None if col.is_null(i) => WalScalar::Null,
-                        None => scalar_at(col.as_ref(), i, scoped_wire_type(f))
-                            .expect("every scoped column's type was checked above"),
-                    },
+                    Some(col) => cell(body_name, col.as_ref(), i, as_declared, vocabularies)?,
                 };
                 scoped_values.push(value);
             }
@@ -509,19 +531,11 @@ pub(crate) fn parse_ingest_batch(
                 Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
                 _ => None,
             };
-            // Contracts §1: a typed error, never a truncation -- see `EXTERNAL_ID_MAX_LEN`'s
-            // doc. Checked here, inside the whole-batch parse, so an over-length id anywhere in
-            // the batch fails the parse before anything downstream (replay check, dedup,
-            // allocation, WAL append) ever runs: the batch has no effect, exactly as a duplicate
-            // 409 must.
+            // Checked here, inside the whole-batch parse, so an over-length id anywhere in the
+            // batch fails the parse before anything downstream (replay check, dedup, allocation,
+            // WAL append) ever runs: the batch has no effect, exactly as a duplicate 409 must.
             if let Some(external_id) = &external_id {
-                if external_id.len() > EXTERNAL_ID_MAX_LEN {
-                    return Err(DecodeError(format!(
-                        "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte cap \
-                         (contracts §1); refused rather than truncated",
-                        external_id.len()
-                    )));
-                }
+                check_external_id(external_id)?;
             }
             items.push(RawIngestItem {
                 external_id,
@@ -574,62 +588,43 @@ pub(crate) fn parse_values_batch(
     declared: &[DeclaredScalar],
     scoped: &[ScopedScalar],
     vocabularies: &Vocabularies,
-    layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
+    layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
 ) -> Result<ParsedValues, DecodeError> {
-    let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, DecodeError>>> =
-        match encoding {
-            BodyEncoding::Arrow => {
-                let cursor = std::io::Cursor::new(body);
-                let reader =
-                    arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
-                        DecodeError(format!("values body is not a valid Arrow IPC stream: {e}"))
-                    })?;
-                Box::new(reader.map(|batch| {
-                    batch.map_err(|e| DecodeError(format!("values body: arrow decode error: {e}")))
-                }))
-            }
-            BodyEncoding::Json => {
-                Box::new(std::iter::once(super::json::record_batch(
-                    "values body",
-                    body,
-                    &super::json::JsonColumns {
-                        fixed: &[Fixed::ExternalId, Fixed::TesseraId, Fixed::IdSet],
-                        // A values batch carries the subset of the schema the caller has, and a
-                        // row of it may leave a column out, which is that cell unfilled rather
-                        // than a malformed row. The ingest door's stricter reading is about a row
-                        // that creates an entity, where a half-carried column shifts the
-                        // positional tail.
-                        declared_on_every_row: false,
-                        declared,
-                        scoped,
-                        layer_of,
-                    },
-                )))
-            }
-        };
+    let body_name = "values body";
+    let fixed = [Fixed::ExternalId, Fixed::TesseraId, Fixed::IdSet];
+    let batches = record_batches(
+        body_name,
+        encoding,
+        body,
+        &JsonColumns {
+            fixed: &fixed,
+            // A values batch carries the subset of the schema the caller has, and a row of it may
+            // leave a column out, which is that cell unfilled rather than a malformed row. The
+            // ingest door's stricter reading is about a row that creates an entity, where a
+            // half-carried column shifts the positional tail.
+            declared_on_every_row: false,
+            declared,
+            scoped,
+            layer_of,
+        },
+    )?;
+    let scoped_declared: Vec<DeclaredScalar> = scoped.iter().map(scoped_as_declared).collect();
 
     let mut rows: Vec<ParsedValuesRow> = Vec::new();
     let mut columns: Vec<String> = Vec::new();
     let mut tally = MembershipTally::default();
     for batch in batches {
         let batch = batch?;
-        let schema = batch.schema();
         let offset = rows.len();
 
-        // Which of the schema's names this batch's cells are, in one order for every row.
+        // Which of the schema's names this batch's cells are, in one order for every row: the
+        // declared columns, then the group-scoped families.
         let carried: Vec<&DeclaredScalar> = declared
             .iter()
+            .chain(&scoped_declared)
             .filter(|d| batch.column_by_name(&d.name).is_some())
             .collect();
-        let carried_scoped: Vec<&ScopedScalar> = scoped
-            .iter()
-            .filter(|f| batch.column_by_name(&f.name).is_some())
-            .collect();
-        let names: Vec<String> = carried
-            .iter()
-            .map(|d| d.name.clone())
-            .chain(carried_scoped.iter().map(|f| f.name.clone()))
-            .collect();
+        let names: Vec<String> = carried.iter().map(|d| d.name.clone()).collect();
         if rows.is_empty() {
             columns = names;
         } else if columns != names {
@@ -640,68 +635,9 @@ pub(crate) fn parse_values_batch(
             ));
         }
 
-        // Every other name is a layer's or is refused, on the ingest door's rule.
-        let mut declarations = Vec::new();
-        for field in schema.fields() {
-            let name = field.name().as_str();
-            if matches!(name, "external_id" | "tessera_id" | "idset")
-                || declared.iter().any(|d| d.name == name)
-                || scoped.iter().any(|f| f.name == name)
-            {
-                continue;
-            }
-            let Some(declaration) = layer_of(name) else {
-                return Err(DecodeError(format!(
-                    "values body: column '{name}' is neither in MANIFEST.declared_scalars, nor a \
-                     group-scoped family whose key set holds this batch's view, nor the name of a \
-                     registered layer (contracts §2.2, `views.md` §5). An undeclared column is \
-                     refused rather than dropped"
-                )));
-            };
-            declarations.push((name.to_string(), declaration));
-        }
-        let mut memberships: Vec<MembershipColumn> = Vec::new();
-        for (name, declaration) in &declarations {
-            let column = batch
-                .column_by_name(name)
-                .expect("the column was found in this batch's own schema");
-            memberships.push(membership_column("values body", name, column, declaration)?);
-        }
+        let memberships = check_columns(body_name, &batch, &fixed, declared, scoped, layer_of)?;
 
-        // A column present at the wrong type refuses the batch, on the ingest door's rule: a value
-        // decoded against the wrong declaration is a wrong value stored with no error anywhere.
-        for d in &carried {
-            let col = batch
-                .column_by_name(&d.name)
-                .expect("the column was found above");
-            let expected = d.wire_type();
-            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(DecodeError(format!(
-                    "values body: column '{}' is {:?}, but MANIFEST.declared_scalars declares it \
-                     {} (contracts §2.6); refused rather than dropped",
-                    d.name,
-                    col.data_type(),
-                    expected.arrow_type_name()
-                )));
-            }
-        }
-        for f in &carried_scoped {
-            let col = batch
-                .column_by_name(&f.name)
-                .expect("the column was found above");
-            let expected = scoped_wire_type(f);
-            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(DecodeError(format!(
-                    "values body: column '{}' is {:?}, but it is a group-scoped attribute \
-                     declared {} (views §5); refused rather than dropped",
-                    f.name,
-                    col.data_type(),
-                    expected.arrow_type_name()
-                )));
-            }
-        }
-
-        let ext = optional_binary_col(&batch, "external_id")?;
+        let ext = optional_binary_col(body_name, &batch, "external_id")?;
         let tessera = match batch.column_by_name("tessera_id") {
             None => None,
             Some(col) => Some(
@@ -731,7 +667,7 @@ pub(crate) fn parse_values_batch(
 
         for i in 0..batch.num_rows() {
             for column in &memberships {
-                tally.read("values body", column, i, offset)?;
+                tally.read(body_name, column, i, offset)?;
             }
             let external = match &ext {
                 Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
@@ -757,13 +693,7 @@ pub(crate) fn parse_values_batch(
                     )))
                 }
                 (Some(external), None) => {
-                    if external.len() > EXTERNAL_ID_MAX_LEN {
-                        return Err(DecodeError(format!(
-                            "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte \
-                             cap (contracts §1); refused rather than truncated",
-                            external.len()
-                        )));
-                    }
+                    check_external_id(&external)?;
                     Address::External(external)
                 }
                 (None, Some(named)) => {
@@ -791,37 +721,12 @@ pub(crate) fn parse_values_batch(
                 }
             };
 
-            let mut values = Vec::with_capacity(columns.len());
+            let mut values = Vec::with_capacity(carried.len());
             for d in &carried {
                 let col = batch
                     .column_by_name(&d.name)
                     .expect("the column was found above");
-                values.push(match d.vocabulary.as_deref() {
-                    Some(vocabulary) => {
-                        category_code("values body", col.as_ref(), i, d, vocabulary, vocabularies)?
-                    }
-                    None if col.is_null(i) => WalScalar::Null,
-                    None => scalar_at(col.as_ref(), i, d.wire_type())
-                        .expect("every declared column's type was checked above"),
-                });
-            }
-            for f in &carried_scoped {
-                let col = batch
-                    .column_by_name(&f.name)
-                    .expect("the column was found above");
-                values.push(match f.vocabulary.as_deref() {
-                    Some(vocabulary) => category_code(
-                        "values body",
-                        col.as_ref(),
-                        i,
-                        &scoped_as_declared(f),
-                        vocabulary,
-                        vocabularies,
-                    )?,
-                    None if col.is_null(i) => WalScalar::Null,
-                    None => scalar_at(col.as_ref(), i, scoped_wire_type(f))
-                        .expect("every scoped column's type was checked above"),
-                });
+                values.push(cell(body_name, col.as_ref(), i, d, vocabularies)?);
             }
             rows.push(ParsedValuesRow { address, values });
         }
@@ -902,6 +807,7 @@ fn project_columns(
 /// `external_id` is optional). A present-but-wrong-typed column is still a typed error — only
 /// "missing" and "null at this row" mean "no external id", never "this batch is malformed".
 fn optional_binary_col<'a>(
+    body_name: &str,
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
 ) -> Result<Option<&'a arrow::array::BinaryArray>, DecodeError> {
@@ -913,7 +819,7 @@ fn optional_binary_col<'a>(
             .map(Some)
             .ok_or_else(|| {
                 DecodeError(format!(
-                    "ingest body: column '{name}' present but not binary"
+                    "{body_name}: column '{name}' present but not binary"
                 ))
             }),
     }

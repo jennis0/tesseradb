@@ -16,6 +16,31 @@ pub(crate) use self::arrow::{parse_ingest_batch, parse_values_batch, ParsedBatch
 #[derive(Debug)]
 pub(crate) struct DecodeError(pub(crate) String);
 
+/// A column a route gives a meaning of its own, whatever the manifest declares.
+#[derive(Clone, Copy)]
+pub(crate) enum Fixed<'a> {
+    ExternalId,
+    /// A coordinate, under the name the view's projection gives its axis.
+    Coordinate(&'a str),
+    Access,
+    NodeId,
+    TesseraId,
+    IdSet,
+}
+
+impl Fixed<'_> {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Fixed::ExternalId => "external_id",
+            Fixed::Coordinate(name) => name,
+            Fixed::Access => "access",
+            Fixed::NodeId => "node_id",
+            Fixed::TesseraId => "tessera_id",
+            Fixed::IdSet => "idset",
+        }
+    }
+}
+
 /// How one item names its entity: the two address forms, already shape-validated.
 pub(crate) enum Address {
     External(Vec<u8>),
