@@ -15,7 +15,8 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
+use tessera_engine::{Engine, EngineConfig, ViewportRequest};
+use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::UnallocatedRow;
 use tessera_types::EntityId;
 
@@ -518,6 +519,240 @@ fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
         assert!(
             engine.flushed_terms(*entity).is_some_and(|t| !t.is_empty()),
             "a surviving entity lost its labels at the fold after a coalesce"
+        );
+    }
+}
+
+/// One item at (5, 5) under `key`, carrying `descriptors`.
+fn ingest_with(engine: &Engine, key: &[u8], descriptors: &[&[u8]], batch: &str) -> EntityId {
+    let descriptors: Vec<Vec<u8>> = descriptors.iter().map(|d| d.to_vec()).collect();
+    let row = UnallocatedRow {
+        external_id: Some(key.to_vec()),
+        view: "s0".to_string(),
+        join: None,
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+        descriptors,
+        scoped: Vec::new(),
+    };
+    engine
+        .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
+        .expect("ingest is accepted")[0]
+}
+
+/// A served item's external id and labels, or `None` when it is not served.
+type Served = Option<(Option<Vec<u8>>, Vec<String>)>;
+
+/// What the engine tells a viewer and the admin plane about `bindings`: each key's entity, each
+/// entity's key, and, under a credential for each fixture term, the visible count per tile and
+/// each entity's drill-down.
+struct Answers {
+    entities: Vec<Option<EntityId>>,
+    keys: Vec<Option<Vec<u8>>>,
+    tiles: Vec<Vec<(u64, u64)>>,
+    items: Vec<Vec<Served>>,
+}
+
+fn assert_same(got: &Answers, expected: &Answers, when: &str) {
+    assert_eq!(got.entities, expected.entities, "a key's entity changed at the {when}");
+    assert_eq!(got.keys, expected.keys, "an entity's key changed at the {when}");
+    assert_eq!(got.tiles, expected.tiles, "a masked count changed at the {when}");
+    assert_eq!(got.items, expected.items, "a drill-down changed at the {when}");
+}
+
+fn answers(engine: &Engine, bindings: &[(EntityId, Vec<u8>)]) -> Answers {
+    let sessions: Vec<_> = [full_coverage_credential(), subset_credential()]
+        .iter()
+        .map(|credential| engine.authorise(credential).expect("the session authorises"))
+        .collect();
+    Answers {
+        entities: bindings
+            .iter()
+            .map(|(_, key)| engine.resolve_external_id(key).expect("the sidecar reads"))
+            .collect(),
+        keys: bindings
+            .iter()
+            .map(|(entity, _)| engine.external_id_of(*entity).expect("the sidecar reads"))
+            .collect(),
+        tiles: sessions
+            .iter()
+            .map(|session| {
+                engine
+                    .viewport(
+                        session,
+                        ViewportRequest::new("s0", 2, WHOLE_MAP, N_ITEMS as usize),
+                    )
+                    .expect("the viewport answers")
+                    .tiles
+                    .iter()
+                    .map(|tile| (tile.tile, tile.visible))
+                    .collect()
+            })
+            .collect(),
+        items: sessions
+            .iter()
+            .map(|session| {
+                bindings
+                    .iter()
+                    .map(|(entity, _)| {
+                        let id = engine.tessera_id_of(*entity).expect("an opaque id");
+                        engine
+                            .item(session, id, None)
+                            .expect("the drill-down answers")
+                            .map(|item| (item.external_id, item.labels))
+                    })
+                    .collect()
+            })
+            .collect(),
+    }
+}
+
+/// A fold carries forward the tiers, runs and locator extents that flushes published during its
+/// flight, and their digests land in the new `MANIFEST.json`. A coalesce then takes them, and
+/// every binding, count, drill-down and deny is what it was before, live and after a restart. A
+/// later fold still retires what was deleted, and each retired key can be ingested again.
+#[test]
+fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a_restart() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let base = source_to_new_map(&root, "v00000");
+    let base_entity = |source: u64| EntityId::new(base[&source]);
+    let mut bindings: Vec<(EntityId, Vec<u8>)> = base
+        .iter()
+        .map(|(source, entity)| (EntityId::new(*entity), source_id_key(*source)))
+        .collect();
+
+    let engine = engine_at(tmp.path(), &root);
+    // Off until the answers after the fold are recorded, so the coalesce cannot run first.
+    engine.set_coalesce_for_test(false);
+    let baseline: u64 = answers(&engine, &bindings).tiles[0].iter().map(|t| t.1).sum();
+
+    // Denied before the fold: this deletion is the fold's to retire.
+    let deleted_before = base_entity(4);
+    let suppressed_before = base_entity(8);
+    engine
+        .accept_change(deleted_before, ChangeOp::Delete)
+        .expect("the delete is accepted");
+    engine
+        .accept_change(suppressed_before, ChangeOp::Suppress)
+        .expect("the suppression is accepted");
+
+    // Hold the fold after its passes, and publish WIDTH flushes while it waits.
+    engine.set_fold_paused_for_test(true);
+    let before_fold = engine.write_executor_stats();
+    engine.request_fold();
+    wait_until("the fold to reach its hold", WAIT, || {
+        engine.fold_is_holding_for_test()
+    });
+    let mut carried: Vec<(EntityId, Vec<u8>)> = Vec::new();
+    for i in 0..WIDTH {
+        let key = format!("carried-{i}").into_bytes();
+        let descriptors: &[&[u8]] = if i % 2 == 0 { &[b"0", b"1"] } else { &[b"0"] };
+        let entity = ingest_with(&engine, &key, descriptors, &format!("carried-{i}"));
+        carried.push((entity, key));
+        flush(&engine);
+    }
+
+    // Denied during the flight, after the fold's snapshot: these stand after the fold.
+    let deleted_during = carried[1].0;
+    let suppressed_during = carried[2].0;
+    let base_deleted_during = base_entity(9);
+    for (entity, op) in [
+        (deleted_during, ChangeOp::Delete),
+        (suppressed_during, ChangeOp::Suppress),
+        (base_deleted_during, ChangeOp::Delete),
+    ] {
+        engine
+            .accept_change(entity, op)
+            .expect("the deny is accepted during the fold");
+    }
+
+    engine.set_fold_paused_for_test(false);
+    wait_until("the fold to publish", WAIT, || {
+        let now = engine.write_executor_stats();
+        assert_eq!(now.fold_failures, before_fold.fold_failures, "the fold was discarded");
+        now.folds > before_fold.folds
+    });
+
+    // Every carried entry is digested in the new prefix's MANIFEST.json.
+    let folded = manifest_of(&root);
+    assert_eq!(folded.deltas.len(), WIDTH, "one carried tier per flush");
+    assert_eq!(folded.locator_extents.len(), WIDTH, "one carried locator extent per flush");
+    let digested = tessera_store::open_bundle(&root)
+        .expect("the bundle opens")
+        .manifest
+        .files;
+    assert!(folded.deltas.iter().all(|tier| digested.contains_key(tier)));
+    assert!(folded
+        .locator_extents
+        .iter()
+        .all(|extent| extent.files().all(|rel| digested.contains_key(rel))));
+
+    bindings.extend(carried.iter().cloned());
+    let expected = answers(&engine, &bindings);
+    assert_eq!(
+        expected.tiles[0].iter().map(|t| t.1).sum::<u64>(),
+        baseline - 3 + WIDTH as u64 - 2,
+        "three base items and two carried ones are denied"
+    );
+    for entity in [
+        deleted_before,
+        suppressed_before,
+        base_deleted_during,
+        deleted_during,
+        suppressed_during,
+    ] {
+        let at = bindings.iter().position(|(e, _)| *e == entity).unwrap();
+        assert_eq!(expected.items[0][at], None, "a denied item is not served");
+    }
+
+    engine.set_coalesce_for_test(true);
+    engine.request_flush();
+    wait_until("the coalesce to publish", WAIT, || {
+        engine.write_executor_stats().coalesces >= 1
+    });
+    let coalesced = manifest_of(&root);
+    assert_eq!(coalesced.deltas.len(), 1, "the carried tiers became one");
+    assert_eq!(coalesced.locator_extents.len(), 1, "the carried locator extents became one");
+    assert_eq!(
+        coalesced.external_id_runs.len(),
+        2,
+        "the fold's base run, untouched, and the coalesced run"
+    );
+    assert_eq!(coalesced.external_id_runs[0], folded.external_id_runs[0]);
+    assert_same(&answers(&engine, &bindings), &expected, "coalesce");
+
+    drop(engine);
+    let engine = engine_at(tmp.path(), &root);
+    assert_same(&answers(&engine, &bindings), &expected, "restart");
+
+    // A second fold retires the deletions the first could not, including one whose run the
+    // coalesce merged. Every retired key can then be ingested again, as a new entity.
+    fold(&engine);
+    let retired = [
+        (deleted_before, source_id_key(4)),
+        (base_deleted_during, source_id_key(9)),
+        (deleted_during, carried[1].1.clone()),
+    ];
+    for (i, (entity, key)) in retired.iter().enumerate() {
+        assert_eq!(
+            engine.resolve_external_id(key).expect("the sidecar reads"),
+            None,
+            "a retired entity's key resolves to nothing"
+        );
+        let reborn = ingest_with(&engine, key, &[b"0"], &format!("reborn-{i}"));
+        assert_ne!(reborn, *entity, "a re-ingest takes a fresh entity");
+        assert_eq!(
+            engine.resolve_external_id(key).expect("the sidecar reads"),
+            Some(reborn)
         );
     }
 }
