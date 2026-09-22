@@ -834,6 +834,17 @@ impl AppState {
             .map_err(crate::error::map_join_error)?
     }
 
+    /// Run the engine write `f` on the blocking pool, off the compute gate, answering its refusal
+    /// by [`crate::error::map_accept_error`].
+    pub async fn write<T, F>(self: &Arc<Self>, f: F) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&AppState) -> Result<T, tessera_engine::AcceptError> + Send + 'static,
+    {
+        self.blocking(move |state| f(state).map_err(crate::error::map_accept_error))
+            .await
+    }
+
     /// Bearer-token lookup for the viewer plane: an unrecognised token is `bad-credential` (401);
     /// a recognised-but-expired one is `expired-token` (403) — the engine itself never checks
     /// `expires_at`, so enforcing the deadline is this method's job and nothing else's.

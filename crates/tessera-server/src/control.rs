@@ -1475,13 +1475,12 @@ async fn values(
             cause: crate::error::ShedCause::IngestAdmission,
         });
     };
-    let engine = Arc::clone(&state);
-    let mut resp = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        run_values(&engine, encoding, &body, batch_id, view.as_deref())
-    })
-    .await
-    .map_err(map_join_error)??;
+    let mut resp = state
+        .blocking(move |state| {
+            let _permit = permit;
+            run_values(state, encoding, &body, batch_id, view.as_deref())
+        })
+        .await?;
     let ack = publication_ack(&state, &wait).await?;
     resp.publication = ack.publication;
     resp.visible = ack.visible;
@@ -2852,21 +2851,17 @@ async fn ingest(
         });
     };
 
-    // Closure capture is `state` (moved in directly — nothing after this
-    // `.await` needs the handler's own copy), `body` (an owned `Bytes` — cheap, refcounted clone
-    // of the request body already read off the socket, not a copy) and `batch_id` (owned
-    // `String`). Never gated by `ComputeGate` (see `run_ingest`'s doc).
+    // Never gated by `ComputeGate` (see `run_ingest`'s doc).
     //
     // The permit is **moved in**, not held across the `.await`: a disconnected client's handler
     // future is dropped while this closure keeps running and keeps its thread, so releasing on
     // handler-drop would under-count exactly when the pool is under pressure.
-    let engine = Arc::clone(&state);
-    let mut resp = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        run_ingest(&engine, encoding, &body, batch_id, view.as_deref())
-    })
-    .await
-    .map_err(map_join_error)??;
+    let mut resp = state
+        .blocking(move |state| {
+            let _permit = permit;
+            run_ingest(state, encoding, &body, batch_id, view.as_deref())
+        })
+        .await?;
 
     // **After the rows are buffered, never before**: the number names the cycle that carries
     // them, and a cycle that opened before they arrived is not it.
@@ -3337,10 +3332,8 @@ async fn changes(
     // this plane carries it and a client should not have to remember which ones mean something.
     // No reader needs to wait on it, and `wait=visible` here waits for the next cycle rather than
     // for this change.
-    let mut body = serde_json::json!({});
-    publication_ack(&state, &wait).await?.merge(&mut body);
     // R5: `/control/changes` is 200 after fsync, never 429.
-    Ok((StatusCode::OK, Json(body)))
+    acknowledge(&state, &wait, StatusCode::OK, serde_json::json!({})).await
 }
 
 /// How often a `wait=visible` wait re-reads the publication counter.
@@ -3392,18 +3385,25 @@ impl PublicationAck {
     }
 }
 
-/// [`publication_ack`] for a declaration route, where what the number adds is uniformity.
-///
-/// **A declaration is in force from its answer** (`ingest.md` §1.3). It is WAL-durable before the
-/// 201 and resolvable from it, so the next request may name the column, the vocabulary, the layer
-/// or the view, and `/v1/meta` lists it. What a publication adds is the manifest entry that
-/// carries the declaration without a WAL replay, and that lands with the next flush that writes a
-/// segment. **No reader waits on this number**; it is carried because every write acknowledgement
-/// on this plane carries one, and a client should not have to remember which ones mean something.
-/// `wait=visible` on one of these routes waits for the next cycle rather than for the
-/// declaration, which is already in force.
-async fn declaration_ack(state: &AppState, wait: &WaitQuery) -> Result<PublicationAck, ApiError> {
-    publication_ack(state, wait).await
+/// A write route's answer: `status`, and `body` carrying the publication ack.
+async fn acknowledge(
+    state: &AppState,
+    wait: &WaitQuery,
+    status: StatusCode,
+    mut body: serde_json::Value,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    publication_ack(state, wait).await?.merge(&mut body);
+    Ok((status, Json(body)))
+}
+
+/// A declaration's status: `200` where the name already carried this identity, `201` where the
+/// declaration created it.
+fn declared(existing: bool) -> StatusCode {
+    if existing {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    }
 }
 
 /// The publication number a write acknowledgement carries, and `wait=visible`'s wait.
@@ -3575,14 +3575,11 @@ async fn register_layer(
     // The **shared** blocking pool, not the deny runtime beside it. That runtime exists so a
     // suppression is never queued behind ingest; a registration is not a deny, and delaying one
     // under ingest load is backpressure working rather than a security operation refused.
-    let engine = Arc::clone(&state);
-    let id = tokio::task::spawn_blocking(move || engine.engine.register_layer(declaration))
-        .await
-        .map_err(crate::error::map_join_error)?
-        .map_err(crate::error::map_accept_error)?;
-    let mut body = serde_json::json!({ "name": name, "tessera_id": id.raw().to_string() });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((StatusCode::CREATED, Json(body)))
+    let id = state
+        .write(move |state| state.engine.register_layer(declaration))
+        .await?;
+    let body = serde_json::json!({ "name": name, "tessera_id": id.raw().to_string() });
+    acknowledge(&state, &wait, StatusCode::CREATED, body).await
 }
 
 /// `DELETE /control/layers/{name}` — drop a layer and tombstone its name for ever.
@@ -3600,16 +3597,12 @@ async fn drop_layer(
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let engine = Arc::clone(&state);
-    tokio::task::spawn_blocking(move || engine.engine.drop_layer(name))
-        .await
-        .map_err(crate::error::map_join_error)?
-        .map_err(crate::error::map_accept_error)?;
+    state
+        .write(move |state| state.engine.drop_layer(name))
+        .await?;
     // **200 with a body rather than 204**, so every write acknowledgement on this plane carries
     // its publication number and a client needs no table of which ones do.
-    let mut body = serde_json::json!({});
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((StatusCode::OK, Json(body)))
+    acknowledge(&state, &wait, StatusCode::OK, serde_json::json!({})).await
 }
 
 /// `PUT /control/attributes`' body: the `[[attribute]]` block minus its acquisition keys
@@ -3672,19 +3665,11 @@ async fn declare_attribute(
         scope: body.scope,
     };
     // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
-    let engine = Arc::clone(&state);
-    let existing = tokio::task::spawn_blocking(move || engine.engine.declare_attribute(request))
-        .await
-        .map_err(crate::error::map_join_error)?
-        .map_err(crate::error::map_accept_error)?;
-    let status = if existing {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    let mut body = serde_json::json!({ "name": name, "existing": existing });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((status, Json(body)))
+    let existing = state
+        .write(move |state| state.engine.declare_attribute(request))
+        .await?;
+    let body = serde_json::json!({ "name": name, "existing": existing });
+    acknowledge(&state, &wait, declared(existing), body).await
 }
 
 /// `PUT /control/vocabularies/{name}`' body: the `[[vocabulary]]` block minus its acquisition
@@ -3786,26 +3771,16 @@ async fn declare_vocabulary(
         reserved: body.reserved,
     };
     // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
-    let (existing, added, titles) = tokio::task::spawn_blocking({
-        let state = Arc::clone(&state);
-        move || state.engine.declare_vocabulary(request)
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
-    let status = if existing {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    let mut body = serde_json::json!({
+    let (existing, added, titles) = state
+        .write(move |state| state.engine.declare_vocabulary(request))
+        .await?;
+    let body = serde_json::json!({
         "name": name,
         "existing": existing,
         "added": added,
         "titles": titles
     });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((status, Json(body)))
+    acknowledge(&state, &wait, declared(existing), body).await
 }
 
 /// `PATCH /control/vocabularies/{name}/values` — a page of values for a vocabulary that exists
@@ -3827,7 +3802,7 @@ async fn mint_vocabulary_values(
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<VocabularyValuesBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let values: Vec<tessera_engine::DeclaredValue> = body
         .0
         .values
@@ -3838,21 +3813,16 @@ async fn mint_vocabulary_values(
         })
         .collect();
     let vocabulary = name.clone();
-    let engine = Arc::clone(&state);
-    let (added, existing, titles) = tokio::task::spawn_blocking(move || {
-        engine.engine.mint_vocabulary_values(vocabulary, values)
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
-    let mut body = serde_json::json!({
+    let (added, existing, titles) = state
+        .write(move |state| state.engine.mint_vocabulary_values(vocabulary, values))
+        .await?;
+    let body = serde_json::json!({
         "name": name,
         "added": added,
         "existing": existing,
         "titles": titles
     });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok(Json(body))
+    acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 
 /// The frame a view or a group declares, in **frame coordinates**: the four bounds a Morton code
@@ -3998,20 +3968,11 @@ async fn create_view_group(
             .collect(),
     };
     // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
-    let engine = Arc::clone(&state);
-    let existing =
-        tokio::task::spawn_blocking(move || engine.engine.create_view_group(declaration))
-            .await
-            .map_err(crate::error::map_join_error)?
-            .map_err(crate::error::map_accept_error)?;
-    let status = if existing {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    let mut body = serde_json::json!({ "group": name, "existing": existing });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((status, Json(body)))
+    let existing = state
+        .write(move |state| state.engine.create_view_group(declaration))
+        .await?;
+    let body = serde_json::json!({ "group": name, "existing": existing });
+    acknowledge(&state, &wait, declared(existing), body).await
 }
 
 /// `PUT /control/views/{name}` — create a plain view while the service runs (`ingest.md` §1.3
@@ -4041,20 +4002,11 @@ async fn create_plain_view(
             .map(tessera_types::view::DeclaredGate::into_labels),
         point_default: body.point_visibility.and_then(|p| p.default),
     };
-    let engine = Arc::clone(&state);
-    let existing =
-        tokio::task::spawn_blocking(move || engine.engine.create_plain_view(declaration))
-            .await
-            .map_err(crate::error::map_join_error)?
-            .map_err(crate::error::map_accept_error)?;
-    let status = if existing {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    let mut body = serde_json::json!({ "view": name, "existing": existing });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((status, Json(body)))
+    let existing = state
+        .write(move |state| state.engine.create_plain_view(declaration))
+        .await?;
+    let body = serde_json::json!({ "view": name, "existing": existing });
+    acknowledge(&state, &wait, declared(existing), body).await
 }
 
 /// `PUT /control/views/{group}/{key}`'s body: the roster record, which is the inline
@@ -4168,24 +4120,19 @@ async fn create_view(
     // The **shared** blocking pool, not the deny runtime beside it, on `register_layer`'s rule: a
     // creation is not a deny, and delaying one under ingest load is backpressure working rather
     // than a security operation refused.
-    tokio::task::spawn_blocking({
-        let state = Arc::clone(&state);
-        move || {
+    state
+        .write(move |state| {
             state
                 .engine
                 .create_view(group_name, view_key, visibility, metadata)
-        }
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
-    let mut body = serde_json::json!({
+        })
+        .await?;
+    let body = serde_json::json!({
         "view": format!("{group}:{key}"),
         "group": group,
         "key": key,
     });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((StatusCode::CREATED, Json(body)))
+    acknowledge(&state, &wait, StatusCode::CREATED, body).await
 }
 
 /// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key (`views.md` §3.4).
@@ -4205,21 +4152,16 @@ async fn drop_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<DropViewQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let wait = WaitQuery { wait: query.wait };
-    let engine = Arc::clone(&state);
-    let dropped = tokio::task::spawn_blocking(move || {
-        engine.engine.drop_view(group, key, query.delete_dangling)
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
-    let mut body = serde_json::json!({
+    let dropped = state
+        .write(move |state| state.engine.drop_view(group, key, query.delete_dangling))
+        .await?;
+    let body = serde_json::json!({
         "deleted": dropped.deleted,
         "fills_dropped": dropped.fills_dropped,
     });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok(Json(body))
+    acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 
 /// Turn a flat member offset back into `(artifact index, member index)`, so a refusal names the
@@ -5108,9 +5050,8 @@ async fn publish_artifacts(
     // The shared blocking pool, on `register_layer`'s argument: a publication is not a deny, and
     // delaying one under ingest load is backpressure working. Canonicalising the shapes and
     // resolving the members read the bundle, so they run here too.
-    let (batch, keys, shape_reports) = tokio::task::spawn_blocking({
-        let state = Arc::clone(&state);
-        move || -> Result<_, ApiError> {
+    let (batch, keys, shape_reports) = state
+        .blocking(move |state| {
             // **The shapes, canonicalised before anything is resolved or allocated** — a refusal spends
             // nothing, and the batch is the commit unit. The layer's declaration is the engine's state;
             // a layer this deployment does not hold is the engine's refusal below, so here it simply
@@ -5292,10 +5233,8 @@ async fn publish_artifacts(
                 .put_artifacts(name, level, incoming)
                 .map_err(crate::error::map_accept_error)?;
             Ok((batch, keys, shape_reports))
-        }
-    })
-    .await
-    .map_err(crate::error::map_join_error)??;
+        })
+        .await?;
 
     let published: Vec<serde_json::Value> = batch
         .tessera_ids
@@ -5321,13 +5260,7 @@ async fn publish_artifacts(
     if !shape_reports.is_empty() {
         body["shapes"] = serde_json::Value::Array(shape_reports);
     }
-    let status = if batch.created > 0 {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    publication_ack(&state, &wait).await?.merge(&mut body);
-    Ok((status, Json(body)))
+    acknowledge(&state, &wait, declared(batch.created == 0), body).await
 }
 
 /// `PATCH /control/layers/{name}/artifacts`'s body: the publication's addressing, and per artifact
@@ -5494,9 +5427,8 @@ async fn grow_memberships(
     // The shared blocking pool, on `publish_artifacts`'s argument: a growth is not a deny, and
     // delaying one under ingest load is backpressure working. Canonicalising the shapes and
     // resolving the members read the bundle, so they run here too.
-    let (grown, keys, shape_reports) = tokio::task::spawn_blocking({
-        let state = Arc::clone(&state);
-        move || -> Result<_, ApiError> {
+    let (grown, keys, shape_reports) = state
+        .blocking(move |state| {
             // **The shapes and the authored shape contents, canonicalised before anything is resolved**,
             // on the publication's rule and through the publication's own reader, so a shape filled here
             // is byte for byte the shape a publication would have stored. A row carrying no shape field
@@ -5635,10 +5567,8 @@ async fn grow_memberships(
                 .grow_memberships(name, level, joins)
                 .map_err(crate::error::map_accept_error)?;
             Ok((grown, keys, shape_reports))
-        }
-    })
-    .await
-    .map_err(crate::error::map_join_error)??;
+        })
+        .await?;
 
     let artifacts: Vec<serde_json::Value> = grown
         .iter()
@@ -5664,8 +5594,7 @@ async fn grow_memberships(
     if !shape_reports.is_empty() {
         body["shapes"] = serde_json::Value::Array(shape_reports);
     }
-    publication_ack(&state, &wait).await?.merge(&mut body);
-    Ok((StatusCode::OK, Json(body)))
+    acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 /// `POST /control/faults/arm` — the correctness suite's arming surface (decision 0071;
 /// correctness-suite §12.3). **The faults build only**; a default build does not mount the route.
