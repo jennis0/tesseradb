@@ -5145,195 +5145,201 @@ async fn publish_artifacts(
         }
     }
 
-    // **The shapes, canonicalised before anything is resolved or allocated** — a refusal spends
-    // nothing, and the batch is the commit unit. The layer's declaration is the engine's state;
-    // a layer this deployment does not hold is the engine's refusal below, so here it simply
-    // canonicalises nothing.
-    let default_space = match default_space.as_deref() {
-        None => tessera_engine::shapes::ShapeSpace::View,
-        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-            .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
-    };
-    let declaration = state
-        .engine
-        .registered_layer(&name)
-        .map(|registered| registered.declaration);
-    let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
-        Vec::with_capacity(artifacts.len());
-    let mut shape_reports: Vec<serde_json::Value> = Vec::new();
-    for (index, artifact) in artifacts.iter().enumerate() {
-        match &declaration {
-            Some(declaration) => {
-                match canonical_row_shape(
-                    &state,
-                    declaration,
-                    index,
-                    &artifact.row_shape(),
-                    default_space,
-                )? {
-                    Some((canonical, report)) => {
-                        shapes.push(Some(canonical));
-                        shape_reports.push(serde_json::json!({
-                            "key": artifact.key,
-                            "views": report,
-                        }));
+    // The shared blocking pool, on `register_layer`'s argument: a publication is not a deny, and
+    // delaying one under ingest load is backpressure working. Canonicalising the shapes and
+    // resolving the members read the bundle, so they run here too.
+    let (batch, keys, shape_reports) = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || -> Result<_, ApiError> {
+            // **The shapes, canonicalised before anything is resolved or allocated** — a refusal spends
+            // nothing, and the batch is the commit unit. The layer's declaration is the engine's state;
+            // a layer this deployment does not hold is the engine's refusal below, so here it simply
+            // canonicalises nothing.
+            let default_space = match default_space.as_deref() {
+                None => tessera_engine::shapes::ShapeSpace::View,
+                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
+                    .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
+            };
+            let declaration = state
+                .engine
+                .registered_layer(&name)
+                .map(|registered| registered.declaration);
+            let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
+                Vec::with_capacity(artifacts.len());
+            let mut shape_reports: Vec<serde_json::Value> = Vec::new();
+            for (index, artifact) in artifacts.iter().enumerate() {
+                match &declaration {
+                    Some(declaration) => {
+                        match canonical_row_shape(
+                            &state,
+                            declaration,
+                            index,
+                            &artifact.row_shape(),
+                            default_space,
+                        )? {
+                            Some((canonical, report)) => {
+                                shapes.push(Some(canonical));
+                                shape_reports.push(serde_json::json!({
+                                    "key": artifact.key,
+                                    "views": report,
+                                }));
+                            }
+                            None => shapes.push(None),
+                        }
                     }
                     None => shapes.push(None),
                 }
             }
-            None => shapes.push(None),
-        }
-    }
-    // **The authored shape content, read as a membership shape is** (`polygon-membership.md`
-    // §6.1, ruling (h)): where the layer declares a `polygon`, `circle` or `ellipse` content, that
-    // slot of every ranked content is canonicalised for every view of the layer — the same
-    // reader, the same report, the same vertex cap and **the same space**, the batch's
-    // `default_space` and the row's own `space` — and the slot then holds the canonical bytes
-    // in their content spelling, which is what the blob stores and the serve reads back into
-    // `shape_x`/`shape_y`. Refused as a membership shape is refused, naming the row.
-    if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
-        let declaration = declaration
-            .as_ref()
-            .expect("an authored slot names a declaration");
-        for (index, artifact) in artifacts.iter_mut().enumerate() {
-            let space = match artifact.space.as_deref() {
-                None => default_space,
-                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-                    .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
-            };
-            for (rank, content) in artifact.content.iter_mut().enumerate() {
-                let Some(text) = content.values.get_mut(slot) else {
-                    // Short of a value: the engine refuses the row below, naming the count.
-                    continue;
-                };
-                let (canonical, report) = canonical_authored_content(
-                    &state,
-                    declaration,
-                    index,
-                    rank,
-                    kind,
-                    space,
-                    text,
-                )?;
-                shape_reports.push(serde_json::json!({
-                    "key": artifact.key,
-                    "content": rank,
-                    "views": report,
-                }));
-                *text = canonical.content_text();
+            // **The authored shape content, read as a membership shape is** (`polygon-membership.md`
+            // §6.1, ruling (h)): where the layer declares a `polygon`, `circle` or `ellipse` content, that
+            // slot of every ranked content is canonicalised for every view of the layer — the same
+            // reader, the same report, the same vertex cap and **the same space**, the batch's
+            // `default_space` and the row's own `space` — and the slot then holds the canonical bytes
+            // in their content spelling, which is what the blob stores and the serve reads back into
+            // `shape_x`/`shape_y`. Refused as a membership shape is refused, naming the row.
+            if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
+                let declaration = declaration
+                    .as_ref()
+                    .expect("an authored slot names a declaration");
+                for (index, artifact) in artifacts.iter_mut().enumerate() {
+                    let space = match artifact.space.as_deref() {
+                        None => default_space,
+                        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
+                            .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
+                    };
+                    for (rank, content) in artifact.content.iter_mut().enumerate() {
+                        let Some(text) = content.values.get_mut(slot) else {
+                            // Short of a value: the engine refuses the row below, naming the count.
+                            continue;
+                        };
+                        let (canonical, report) = canonical_authored_content(
+                            &state,
+                            declaration,
+                            index,
+                            rank,
+                            kind,
+                            space,
+                            text,
+                        )?;
+                        shape_reports.push(serde_json::json!({
+                            "key": artifact.key,
+                            "content": rank,
+                            "views": report,
+                        }));
+                        *text = canonical.content_text();
+                    }
+                }
             }
-        }
-    }
 
-    // Flattened once, so each address form is resolved in a single batched call whatever the shape
-    // of the batch: the external half opens each bundle extent at most once regardless of N, and
-    // the tessera half takes one generation snapshot for the idset check and every inversion.
-    // **Members first, then each content's generating set**, per artifact — one flat list, one
-    // resolution pass, whatever the shape. A generating set is resolved by the same route and at
-    // the same boundary as a membership, and for the same reason: a `tessera_id` in durable state
-    // would be reinterpreted by the next key rotation, and a containment test over a set that names
-    // different documents than the caller wrote is a disclosure rather than a stale answer.
-    // **The exclusion list is resolved on the membership's own route**, in the members' place:
-    // an excluded entity is named the way a member is, and a list that named a blinded identifier
-    // the boundary did not invert would exclude a different document at the next key rotation
-    // (I10) — the same reason the membership is resolved here.
-    let widths: Vec<usize> = artifacts
-        .iter()
-        .map(|a| {
-            a.members.as_ref().map_or(0, |m| m.len())
-                + a.excluding.as_ref().map_or(0, |e| e.len())
-                + a.content
-                    .iter()
-                    .map(|v| v.generated_from.len())
-                    .sum::<usize>()
-        })
-        .collect();
-    let flat: Vec<&String> = artifacts
-        .iter()
-        .flat_map(|a| {
-            a.members
+            // Flattened once, so each address form is resolved in a single batched call whatever the shape
+            // of the batch: the external half opens each bundle extent at most once regardless of N, and
+            // the tessera half takes one generation snapshot for the idset check and every inversion.
+            // **Members first, then each content's generating set**, per artifact — one flat list, one
+            // resolution pass, whatever the shape. A generating set is resolved by the same route and at
+            // the same boundary as a membership, and for the same reason: a `tessera_id` in durable state
+            // would be reinterpreted by the next key rotation, and a containment test over a set that names
+            // different documents than the caller wrote is a disclosure rather than a stale answer.
+            // **The exclusion list is resolved on the membership's own route**, in the members' place:
+            // an excluded entity is named the way a member is, and a list that named a blinded identifier
+            // the boundary did not invert would exclude a different document at the next key rotation
+            // (I10) — the same reason the membership is resolved here.
+            let widths: Vec<usize> = artifacts
                 .iter()
-                .flatten()
-                .chain(a.excluding.iter().flatten())
-                .chain(a.content.iter().flat_map(|v| v.generated_from.iter()))
-        })
-        .collect();
-
-    let resolved = resolve_member_addresses(
-        &state,
-        addressing,
-        idset,
-        &flat,
-        &widths,
-        "its members first, then each content's generating set",
-    )?;
-
-    // Walked back in exactly the order it was flattened: members, then each content's set.
-    let mut entities = resolved.into_iter();
-    let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
-        .into_iter()
-        .zip(shapes)
-        .map(|(artifact, shape)| {
-            let members: Vec<tessera_types::EntityId> = entities
-                .by_ref()
-                .take(artifact.members.as_ref().map_or(0, |m| m.len()))
-                .collect();
-            let excluded: Option<Vec<tessera_types::EntityId>> = artifact
-                .excluding
-                .as_ref()
-                .map(|list| entities.by_ref().take(list.len()).collect());
-            let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
-                .content
-                .into_iter()
-                .map(|v| {
-                    let set: Vec<tessera_types::EntityId> =
-                        entities.by_ref().take(v.generated_from.len()).collect();
-                    tessera_lifecycle::membership::IncomingContent::new(v.values, set)
+                .map(|a| {
+                    a.members.as_ref().map_or(0, |m| m.len())
+                        + a.excluding.as_ref().map_or(0, |e| e.len())
+                        + a.content
+                            .iter()
+                            .map(|v| v.generated_from.len())
+                            .sum::<usize>()
                 })
                 .collect();
-            let attached_to =
-                artifact
-                    .attached_to
-                    .map(|a| tessera_lifecycle::membership::IncomingAttachment {
-                        layer: a.layer,
-                        level: a.level,
-                        key: a.key,
-                    });
-            let mut incoming = match attached_to {
-                None => tessera_lifecycle::IncomingArtifact::with_content(
-                    artifact.key,
-                    members,
-                    contents,
-                ),
-                Some(attached_to) => tessera_lifecycle::IncomingArtifact::attached(
-                    artifact.key,
-                    members,
-                    contents,
-                    attached_to,
-                ),
-            };
-            incoming.shape = shape;
-            incoming.parent_keys = artifact.parent;
-            incoming.view = artifact.view;
-            // The list travels; the complement is the executor's, taken against the view's
-            // entity set before the record is written (`ingest.md` §2.3).
-            if let Some(excluded) = excluded {
-                incoming.exclude(excluded);
-            }
-            incoming
-        })
-        .collect();
-    let keys: Vec<Option<String>> = incoming.iter().map(|a| a.key.clone()).collect();
+            let flat: Vec<&String> = artifacts
+                .iter()
+                .flat_map(|a| {
+                    a.members
+                        .iter()
+                        .flatten()
+                        .chain(a.excluding.iter().flatten())
+                        .chain(a.content.iter().flat_map(|v| v.generated_from.iter()))
+                })
+                .collect();
 
-    // The **shared** blocking pool, on `register_layer`'s argument: a publication is not a deny,
-    // and delaying one under ingest load is backpressure working.
-    let batch = tokio::task::spawn_blocking({
-        let state = Arc::clone(&state);
-        move || state.engine.put_artifacts(name, level, incoming)
+            let resolved = resolve_member_addresses(
+                &state,
+                addressing,
+                idset,
+                &flat,
+                &widths,
+                "its members first, then each content's generating set",
+            )?;
+
+            // Walked back in exactly the order it was flattened: members, then each content's set.
+            let mut entities = resolved.into_iter();
+            let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
+                .into_iter()
+                .zip(shapes)
+                .map(|(artifact, shape)| {
+                    let members: Vec<tessera_types::EntityId> = entities
+                        .by_ref()
+                        .take(artifact.members.as_ref().map_or(0, |m| m.len()))
+                        .collect();
+                    let excluded: Option<Vec<tessera_types::EntityId>> = artifact
+                        .excluding
+                        .as_ref()
+                        .map(|list| entities.by_ref().take(list.len()).collect());
+                    let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
+                        .content
+                        .into_iter()
+                        .map(|v| {
+                            let set: Vec<tessera_types::EntityId> =
+                                entities.by_ref().take(v.generated_from.len()).collect();
+                            tessera_lifecycle::membership::IncomingContent::new(v.values, set)
+                        })
+                        .collect();
+                    let attached_to =
+                        artifact
+                            .attached_to
+                            .map(|a| tessera_lifecycle::membership::IncomingAttachment {
+                                layer: a.layer,
+                                level: a.level,
+                                key: a.key,
+                            });
+                    let mut incoming = match attached_to {
+                        None => tessera_lifecycle::IncomingArtifact::with_content(
+                            artifact.key,
+                            members,
+                            contents,
+                        ),
+                        Some(attached_to) => tessera_lifecycle::IncomingArtifact::attached(
+                            artifact.key,
+                            members,
+                            contents,
+                            attached_to,
+                        ),
+                    };
+                    incoming.shape = shape;
+                    incoming.parent_keys = artifact.parent;
+                    incoming.view = artifact.view;
+                    // The list travels; the complement is the executor's, taken against the view's
+                    // entity set before the record is written (`ingest.md` §2.3).
+                    if let Some(excluded) = excluded {
+                        incoming.exclude(excluded);
+                    }
+                    incoming
+                })
+                .collect();
+            let keys: Vec<Option<String>> = incoming.iter().map(|a| a.key.clone()).collect();
+
+            let batch = state
+                .engine
+                .put_artifacts(name, level, incoming)
+                .map_err(crate::error::map_accept_error)?;
+            Ok((batch, keys, shape_reports))
+        }
     })
     .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
+    .map_err(crate::error::map_join_error)??;
 
     let published: Vec<serde_json::Value> = batch
         .tessera_ids
@@ -5511,161 +5517,172 @@ async fn grow_memberships(
         ));
     }
 
-    // **The shapes and the authored shape contents, canonicalised before anything is resolved**,
-    // on the publication's rule and through the publication's own reader, so a shape filled here
-    // is byte for byte the shape a publication would have stored. A row carrying no shape field
-    // fills no shape; one carrying a shape on a layer that declares none is refused as a
-    // publication's row is.
-    let default_space = match default_space.as_deref() {
-        None => tessera_engine::shapes::ShapeSpace::View,
-        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-            .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
-    };
-    let declaration = state
-        .engine
-        .registered_layer(&name)
-        .map(|registered| registered.declaration);
-    let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
-        Vec::with_capacity(artifacts.len());
-    let mut shape_reports: Vec<serde_json::Value> = Vec::new();
-    for (index, artifact) in artifacts.iter().enumerate() {
-        match &declaration {
-            Some(declaration) if artifact.carries_shape() => {
-                match canonical_row_shape(
-                    &state,
-                    declaration,
-                    index,
-                    &artifact.row_shape(),
-                    default_space,
-                )? {
-                    Some((canonical, report)) => {
-                        shapes.push(Some(canonical));
-                        shape_reports.push(serde_json::json!({
-                            "key": artifact.key,
-                            "views": report,
-                        }));
-                    }
-                    None => shapes.push(None),
-                }
-            }
-            _ => shapes.push(None),
-        }
-    }
-    if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
-        let declaration = declaration
-            .as_ref()
-            .expect("an authored slot names a declaration");
-        for (index, artifact) in artifacts.iter_mut().enumerate() {
-            let space = match artifact.space.as_deref() {
-                None => default_space,
-                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-                    .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
-            };
-            for content in artifact.content.iter_mut() {
-                let rank = content.rank as usize;
-                let Some(text) = content.values.get_mut(slot) else {
-                    // Short of a value: the engine refuses the row below, naming the count.
-                    continue;
-                };
-                let (canonical, report) = canonical_authored_content(
-                    &state,
-                    declaration,
-                    index,
-                    rank,
-                    kind,
-                    space,
-                    text,
-                )?;
-                shape_reports.push(serde_json::json!({
-                    "key": artifact.key,
-                    "content": rank,
-                    "views": report,
-                }));
-                *text = canonical.content_text();
-            }
-        }
-    }
-
-    // **A row's members and its leaving members are one list at the boundary**, resolved in one
-    // pass and walked back in the order they were flattened: the two are addresses of the same
-    // kind and a page that named an entity in both must resolve it to one entity (`ingest.md`
-    // §1.1). The joins come first in each row, which is the order they are applied in.
-    let widths: Vec<usize> = artifacts
-        .iter()
-        .map(|a| a.members.len() + a.leaving.len())
-        .collect();
-    let flat: Vec<&String> = artifacts
-        .iter()
-        .flat_map(|a| a.members.iter().chain(a.leaving.iter()))
-        .collect();
     // The record count (ingest §2.1): members summed over the page's artifacts, before any
     // address is resolved.
-    if flat.len() > state.max_members_per_request {
+    let members: usize = artifacts
+        .iter()
+        .map(|a| a.members.len() + a.leaving.len())
+        .sum();
+    if members > state.max_members_per_request {
         return Err(ApiError::Contract(format!(
             "the growth names {} members, exceeding the {}-member per-request limit \
              (ingest.max_members_per_request; limits.grow.max_members_per_request on \
              /control/status); refused before any address was resolved. Send fewer members per \
              request: a growth is a delta, so a membership may be grown in as many requests as it \
              needs",
-            flat.len(),
+            members,
             state.max_members_per_request
         )));
     }
-    let resolved =
-        resolve_member_addresses(&state, addressing, idset, &flat, &widths, "its members")?;
-
-    // Walked back in exactly the order it was flattened.
-    let mut entities = resolved.into_iter();
-    let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts
-        .into_iter()
-        .zip(shapes)
-        .map(|(artifact, shape)| {
-            let members: Vec<tessera_types::EntityId> =
-                entities.by_ref().take(artifact.members.len()).collect();
-            let leaving: Vec<tessera_types::EntityId> =
-                entities.by_ref().take(artifact.leaving.len()).collect();
-            // **One shape for every row, and the executor decides what the combination means.**
-            // A row naming a rank pages that content's generating set; one naming members leaving
-            // and no rank is refused there, which is where the caller is told that a membership
-            // never shrinks (`ingest.md` §10, R7); one naming a rank *and* a fixed part is refused
-            // there too. Dropping the parts here instead would answer `200` for a shape or a
-            // content the batch threw away.
-            let mut join = tessera_lifecycle::IncomingGrowth::page_of_entities(
-                artifact.key,
-                artifact.rank,
-                members,
-                leaving,
-            );
-            join.parts = tessera_lifecycle::FixedParts {
-                parent_keys: artifact.parent,
-                attached_to: artifact.attached_to.map(|a| {
-                    tessera_lifecycle::membership::IncomingAttachment {
-                        layer: a.layer,
-                        level: a.level,
-                        key: a.key,
-                    }
-                }),
-                contents: artifact
-                    .content
-                    .into_iter()
-                    .map(|c| (c.rank, c.values))
-                    .collect(),
-                shape,
-            };
-            join
-        })
-        .collect();
-    let keys: Vec<String> = joins.iter().map(|j| j.key.clone()).collect();
 
     // The shared blocking pool, on `publish_artifacts`'s argument: a growth is not a deny, and
-    // delaying one under ingest load is backpressure working.
-    let grown = tokio::task::spawn_blocking({
+    // delaying one under ingest load is backpressure working. Canonicalising the shapes and
+    // resolving the members read the bundle, so they run here too.
+    let (grown, keys, shape_reports) = tokio::task::spawn_blocking({
         let state = Arc::clone(&state);
-        move || state.engine.grow_memberships(name, level, joins)
+        move || -> Result<_, ApiError> {
+            // **The shapes and the authored shape contents, canonicalised before anything is resolved**,
+            // on the publication's rule and through the publication's own reader, so a shape filled here
+            // is byte for byte the shape a publication would have stored. A row carrying no shape field
+            // fills no shape; one carrying a shape on a layer that declares none is refused as a
+            // publication's row is.
+            let default_space = match default_space.as_deref() {
+                None => tessera_engine::shapes::ShapeSpace::View,
+                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
+                    .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
+            };
+            let declaration = state
+                .engine
+                .registered_layer(&name)
+                .map(|registered| registered.declaration);
+            let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
+                Vec::with_capacity(artifacts.len());
+            let mut shape_reports: Vec<serde_json::Value> = Vec::new();
+            for (index, artifact) in artifacts.iter().enumerate() {
+                match &declaration {
+                    Some(declaration) if artifact.carries_shape() => {
+                        match canonical_row_shape(
+                            &state,
+                            declaration,
+                            index,
+                            &artifact.row_shape(),
+                            default_space,
+                        )? {
+                            Some((canonical, report)) => {
+                                shapes.push(Some(canonical));
+                                shape_reports.push(serde_json::json!({
+                                    "key": artifact.key,
+                                    "views": report,
+                                }));
+                            }
+                            None => shapes.push(None),
+                        }
+                    }
+                    _ => shapes.push(None),
+                }
+            }
+            if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
+                let declaration = declaration
+                    .as_ref()
+                    .expect("an authored slot names a declaration");
+                for (index, artifact) in artifacts.iter_mut().enumerate() {
+                    let space = match artifact.space.as_deref() {
+                        None => default_space,
+                        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
+                            .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
+                    };
+                    for content in artifact.content.iter_mut() {
+                        let rank = content.rank as usize;
+                        let Some(text) = content.values.get_mut(slot) else {
+                            // Short of a value: the engine refuses the row below, naming the count.
+                            continue;
+                        };
+                        let (canonical, report) = canonical_authored_content(
+                            &state,
+                            declaration,
+                            index,
+                            rank,
+                            kind,
+                            space,
+                            text,
+                        )?;
+                        shape_reports.push(serde_json::json!({
+                            "key": artifact.key,
+                            "content": rank,
+                            "views": report,
+                        }));
+                        *text = canonical.content_text();
+                    }
+                }
+            }
+
+            // **A row's members and its leaving members are one list at the boundary**, resolved in one
+            // pass and walked back in the order they were flattened: the two are addresses of the same
+            // kind and a page that named an entity in both must resolve it to one entity (`ingest.md`
+            // §1.1). The joins come first in each row, which is the order they are applied in.
+            let widths: Vec<usize> = artifacts
+                .iter()
+                .map(|a| a.members.len() + a.leaving.len())
+                .collect();
+            let flat: Vec<&String> = artifacts
+                .iter()
+                .flat_map(|a| a.members.iter().chain(a.leaving.iter()))
+                .collect();
+            let resolved =
+                resolve_member_addresses(&state, addressing, idset, &flat, &widths, "its members")?;
+
+            // Walked back in exactly the order it was flattened.
+            let mut entities = resolved.into_iter();
+            let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts
+                .into_iter()
+                .zip(shapes)
+                .map(|(artifact, shape)| {
+                    let members: Vec<tessera_types::EntityId> =
+                        entities.by_ref().take(artifact.members.len()).collect();
+                    let leaving: Vec<tessera_types::EntityId> =
+                        entities.by_ref().take(artifact.leaving.len()).collect();
+                    // **One shape for every row, and the executor decides what the combination means.**
+                    // A row naming a rank pages that content's generating set; one naming members leaving
+                    // and no rank is refused there, which is where the caller is told that a membership
+                    // never shrinks (`ingest.md` §10, R7); one naming a rank *and* a fixed part is refused
+                    // there too. Dropping the parts here instead would answer `200` for a shape or a
+                    // content the batch threw away.
+                    let mut join = tessera_lifecycle::IncomingGrowth::page_of_entities(
+                        artifact.key,
+                        artifact.rank,
+                        members,
+                        leaving,
+                    );
+                    join.parts = tessera_lifecycle::FixedParts {
+                        parent_keys: artifact.parent,
+                        attached_to: artifact.attached_to.map(|a| {
+                            tessera_lifecycle::membership::IncomingAttachment {
+                                layer: a.layer,
+                                level: a.level,
+                                key: a.key,
+                            }
+                        }),
+                        contents: artifact
+                            .content
+                            .into_iter()
+                            .map(|c| (c.rank, c.values))
+                            .collect(),
+                        shape,
+                    };
+                    join
+                })
+                .collect();
+            let keys: Vec<String> = joins.iter().map(|j| j.key.clone()).collect();
+
+            let grown = state
+                .engine
+                .grow_memberships(name, level, joins)
+                .map_err(crate::error::map_accept_error)?;
+            Ok((grown, keys, shape_reports))
+        }
     })
     .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
+    .map_err(crate::error::map_join_error)??;
 
     let artifacts: Vec<serde_json::Value> = grown
         .iter()

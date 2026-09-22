@@ -697,19 +697,22 @@ async fn categories(
         None => None,
     };
 
-    let query = match &codes {
-        Some(codes) => tessera_engine::CategoryQuery::Codes(codes),
-        None => tessera_engine::CategoryQuery::Page {
-            after: query.after.as_deref(),
-            limit,
-        },
-    };
-
-    let page = state
-        .engine
-        .categories(&entry.session, &resolved, query)
-        .map_err(map_engine_error)?
-        .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
+    // A `derived` column probes a posting per value, so the listing runs off the reactor.
+    let after = query.after;
+    let page = tokio::task::spawn_blocking(move || {
+        let query = match &codes {
+            Some(codes) => tessera_engine::CategoryQuery::Codes(codes),
+            None => tessera_engine::CategoryQuery::Page {
+                after: after.as_deref(),
+                limit,
+            },
+        };
+        state.engine.categories(&entry.session, &resolved, query)
+    })
+    .await
+    .map_err(map_join_error)?
+    .map_err(map_engine_error)?
+    .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
 
     Ok(Json(serde_json::json!({
         // **The caller's own spelling**, not the resolved one: a scoped family's resolved column
