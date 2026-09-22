@@ -36,9 +36,7 @@ pub fn now_secs() -> u64 {
 /// every call while the registry holds one or two sessions, and so the threshold is never zero.
 /// What the number *does* fix is the residue a quiescent process keeps: with the live set below it,
 /// up to this many expired sessions — and the fragments they pin — survive until the next
-/// authorisation. 16 is twice `serve.expected_concurrent_sessions`' default of 8, which is the
-/// concurrency the cache bounds are already sized against, so the sweep's own slack is of the same
-/// order as the working set the deployment declared rather than a number chosen for roundness.
+/// authorisation.
 const SWEEP_FLOOR_ENTRIES: usize = 16;
 
 /// Every live session, indexed both by bearer token (the viewer plane's lookup) and by
@@ -339,9 +337,8 @@ impl Drop for GatePermits {
 /// on in-flight *requests*, not on runnable CPU: the rayon pool (`compute_threads`) is what bounds
 /// the parallel-sweep CPU any one admitted request may fan out across, and this gate deliberately
 /// lets the serialise phase oversubscribe up to `compute_admission` (default 4×
-/// `compute_threads` — `tessera-server::config::COMPUTE_ADMISSION_MULTIPLIER`'s doc has the
-/// measurement) because small requests at this corpus scale are latency-bound on scheduling, not
-/// CPU. Never wraps `/healthz`, `/readyz`, `/v1/meta`, `/session/revoke`, or any control-plane
+/// `compute_threads`) because small requests at this corpus scale are latency-bound on scheduling,
+/// not CPU. Never wraps `/healthz`, `/readyz`, `/v1/meta`, `/session/revoke`, or any control-plane
 /// route — a suppression must always reach the WAL, gate saturated or not, so the control plane
 /// carries its own bound (see [`IngestAdmission`]) rather than sharing this one.
 ///
