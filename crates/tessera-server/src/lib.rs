@@ -1,5 +1,5 @@
-//! `tessera-server` — the three HTTP planes (viewer/session/control), fail-closed config, and the
-//! `tessera serve` entry point.
+//! `tessera-server` — the three HTTP planes (viewer/session/control) and the `tessera serve` entry
+//! point.
 //!
 //! [`prepare`] does everything that can fail *before* any listener is bound: load `tessera.toml`
 //! (fail-closed on a missing `[disclosure]` section — design §7.5/§2.3), open the engine (bundle
@@ -8,7 +8,6 @@
 //! means "the process refuses to start" (test (h)) is observable without ever attempting to
 //! listen on a socket.
 
-pub mod config;
 pub mod control;
 pub mod cors;
 mod decode;
@@ -28,7 +27,7 @@ use parking_lot::Mutex;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
 
-use config::{Config, ControlListen};
+use tessera_config::{Config, ControlListen};
 use state::{AppState, ComputeGate, SessionRegistry};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -44,7 +43,7 @@ pub struct Prepared {
 /// unreadable bundle, or a WAL that fails the positional CRC rule all return `Err` here, before
 /// any socket is ever bound.
 pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
-    let config = config::load(config_path)?;
+    let config = tessera_config::load(config_path)?;
     // **Before the engine opens**, which is before the compute pool, the reactor and the write
     // executor exist: the cap bounds arena creation and does nothing about arenas already made.
     // See `memory::arena_max` for the width it takes and what capping costs.

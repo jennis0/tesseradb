@@ -21,6 +21,7 @@ fault-injection = ["tessera-engine/fault-injection", "tessera-lifecycle/fault-in
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }
+tessera-config = { path = "../tessera-config" }
 tessera-engine = { path = "../tessera-engine" }
 tessera-wire = { path = "../tessera-wire" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }
@@ -35,7 +36,6 @@ futures-core = "0.3"
 bytes = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = "0.8"
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 sha2 = { workspace = true }

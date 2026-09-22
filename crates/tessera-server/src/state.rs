@@ -697,7 +697,7 @@ pub struct ServeLimits {
 }
 
 impl ServeLimits {
-    pub fn from_config(config: &crate::config::Config) -> Self {
+    pub fn from_config(config: &tessera_config::Config) -> Self {
         ServeLimits {
             max_k: config.max_k,
             max_category_values: config.max_category_values,
@@ -729,7 +729,7 @@ impl ServeLimits {
 
 impl Default for ServeLimits {
     fn default() -> Self {
-        use crate::config as c;
+        use tessera_config::defaults as c;
         ServeLimits {
             max_k: c::DEFAULT_MAX_K,
             max_category_values: c::DEFAULT_MAX_CATEGORY_VALUES,

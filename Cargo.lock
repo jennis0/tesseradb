@@ -2803,6 +2803,7 @@ dependencies = [
  "tempfile",
  "tessera-analyse",
  "tessera-build",
+ "tessera-config",
  "tessera-corpus",
  "tessera-server",
  "tessera-spatial",
@@ -2811,6 +2812,18 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "tessera-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "tessera-engine",
+ "tessera-types",
+ "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -2921,7 +2934,7 @@ dependencies = [
  "pyo3",
  "serde_json",
  "tessera-build",
- "tessera-server",
+ "tessera-config",
 ]
 
 [[package]]
@@ -2951,6 +2964,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tessera-build",
+ "tessera-config",
  "tessera-engine",
  "tessera-lifecycle",
  "tessera-plugin",
@@ -2959,7 +2973,6 @@ dependencies = [
  "tessera-types",
  "tessera-wire",
  "tokio",
- "toml 0.8.23",
  "tower-http",
  "tracing",
 ]

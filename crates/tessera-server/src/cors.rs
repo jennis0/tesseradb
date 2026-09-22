@@ -93,8 +93,8 @@ pub fn session_layer(state: &AppState) -> Option<CorsLayer> {
 /// An origin that is not a valid header value is dropped rather than panicking the process. If
 /// that leaves the list empty the result is `None`, so an operator who typed something
 /// unparseable gets no CORS and no claim of CORS. A wildcard is dropped on the same footing:
-/// [`AllowOrigin::list`] panics on one, and `config::load` refuses one outright
-/// ([`crate::config::ConfigError::CorsWildcard`]), so this is the belt for a state assembled
+/// [`AllowOrigin::list`] panics on one, and `tessera_config::load` refuses one outright, so this
+/// is the belt for a state assembled
 /// without going through parse — the tests' path.
 fn layer(origins: &[String], loopback: bool) -> Option<CorsLayer> {
     let parsed: Vec<HeaderValue> = origins
