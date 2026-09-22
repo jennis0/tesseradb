@@ -190,7 +190,7 @@ def test_new_papers_with_a_cluster_and_a_label_are_served(served, corpus):
     # text is read through the cluster it attaches to: a label set expands to a layer whose
     # artifacts attach, and `browse` refuses such a layer directly.
     assert set(report.artifact_ids) == {"clusters/kmeans", "topics/kmeans"}
-    assert set(report.artifact_ids["topics/kmeans"]) == {"k-new-label"}
+    assert set(report.artifact_ids["topics/kmeans"]) == {(0, None, "k-new-label")}
 
 
 def test_the_new_label_is_served_over_the_rows_the_same_commit_ingested(served, corpus):
