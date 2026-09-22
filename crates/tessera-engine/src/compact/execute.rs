@@ -100,7 +100,7 @@ pub(super) struct FoldOutput {
     /// exactly this list; an unrecorded file is missing from the new `MANIFEST.json`.
     written: Vec<(String, PathBuf)>,
     /// Attribute bytes read and written. Reported, never triggered on.
-    pub(super) attr_read: u64,
+    attr_read: u64,
     attr_written: u64,
 }
 
@@ -115,6 +115,13 @@ impl FoldOutput {
         self.attr_written += file_len(&path);
         self.written.push((rel, path));
     }
+
+    /// Charge the files an attribute pass read, each relative to `dir`, to `attr_read`.
+    pub(super) fn read(&mut self, dir: &Path, files: impl IntoIterator<Item = impl AsRef<Path>>) {
+        for file in files {
+            self.attr_read += file_len(&dir.join(file));
+        }
+    }
 }
 
 /// What a pass was doing when it failed, and what went wrong.
@@ -124,8 +131,16 @@ pub(super) fn failed(what: &str, e: &dyn std::fmt::Display) -> MaintenanceFailed
 
 /// A written file's length, and zero where it cannot be read. Counts bytes for a report and never
 /// decides anything.
-pub(super) fn file_len(path: &Path) -> u64 {
+fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// `outcome`, with the spool removed if it failed. A spool's `finish` removes it on success.
+pub(super) fn remove_spool_on_error<T, E>(outcome: Result<T, E>, spool: &Path) -> Result<T, E> {
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(spool);
+    }
+    outcome
 }
 
 /// Run the fold's five passes into `ctx.to_prefix_dir`, on one dedicated thread. A failure
@@ -320,14 +335,11 @@ fn fold_postings(
                     .map_err(|e| std::io::Error::other(e.to_string()))
             },
         );
-        let outcome = sweep
-            .and_then(|()| spool.finish(&postings_path))
-            .map_err(|e| failed("pass 2 (postings)", &e));
-        // The spool is deleted by `finish` on success; on failure it is this function's to remove.
-        if outcome.is_err() {
-            let _ = std::fs::remove_file(&spool_path);
-        }
-        outcome?;
+        remove_spool_on_error(
+            sweep.and_then(|()| spool.finish(&postings_path)),
+            &spool_path,
+        )
+        .map_err(|e| failed("pass 2 (postings)", &e))?;
         pairs.finish().map_err(|e| failed("pass 2 (pairs)", &e))?;
     }
     out.push(postings_rel, postings_path.clone());
