@@ -151,6 +151,25 @@ fn metadata_value(value: &tessera_engine::ViewMetadataValue) -> serde_json::Valu
     serde_json::json!({"type": tag, "value": value})
 }
 
+/// A column's `category` block on `/v1/meta`: the vocabulary it draws from, that vocabulary's kind
+/// and its visibility. `None` for a column with no vocabulary, or one naming a vocabulary the
+/// snapshot does not hold.
+fn category_block(
+    meta: &tessera_engine::EngineMeta,
+    vocabulary: Option<&str>,
+) -> Option<serde_json::Value> {
+    let name = vocabulary?;
+    let vocabulary = meta.vocabularies.get(name)?;
+    Some(serde_json::json!({
+        "vocabulary": name,
+        "kind": match vocabulary.kind() {
+            tessera_engine::VocabularyKind::Declared => "declared",
+            tessera_engine::VocabularyKind::Discovered => "discovered",
+        },
+        "visibility": vocabulary.visibility().as_str(),
+    }))
+}
+
 async fn meta(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -279,21 +298,10 @@ async fn meta(
         // separate, paged, per-principal endpoint and this stays a small shared document
         // (per-point-attributes §3.8).
         "declared_scalars": meta.declared_scalars.iter().map(|s| {
-            let category = s.vocabulary.as_deref().and_then(|name| {
-                let vocabulary = meta.vocabularies.get(name)?;
-                Some(serde_json::json!({
-                    "vocabulary": name,
-                    "kind": match vocabulary.kind() {
-                        tessera_engine::VocabularyKind::Declared => "declared",
-                        tessera_engine::VocabularyKind::Discovered => "discovered",
-                    },
-                    "visibility": vocabulary.visibility().as_str(),
-                }))
-            });
             serde_json::json!({
                 "name": s.name,
                 "arrow_type": s.arrow_type.arrow_type_name(),
-                "category": category,
+                "category": category_block(&meta, s.vocabulary.as_deref()),
                 // **The analyser that produced a `text` column's terms**, as the full
                 // `<name>/<version>` identity the manifest records (decision 0070); `null` for
                 // every other type, which genuinely has none.
@@ -351,17 +359,7 @@ async fn meta(
                 // visibility — the three facts an entity-scoped category's entry gives, for the
                 // same reason: the hot column and the postings both carry a bare code, and a
                 // client with no block cannot tell a `u8` category from a `u8` number.
-                "category": f.vocabulary.as_deref().and_then(|name| {
-                    let vocabulary = meta.vocabularies.get(name)?;
-                    Some(serde_json::json!({
-                        "vocabulary": name,
-                        "kind": match vocabulary.kind() {
-                            tessera_engine::VocabularyKind::Declared => "declared",
-                            tessera_engine::VocabularyKind::Discovered => "discovered",
-                        },
-                        "visibility": vocabulary.visibility().as_str(),
-                    }))
-                }),
+                "category": category_block(&meta, f.vocabulary.as_deref()),
                 // The analyser a scoped `text` family's terms were produced by, for the reason
                 // `declared_scalars` publishes one: an empty `match` is otherwise
                 // indistinguishable from a query that segmented differently from the index.
@@ -445,7 +443,7 @@ async fn meta(
         // bare or pinned, takes the unknown-column 422 rather than a refusal that would confirm
         // the group or its keys.
         "filter_operands": meta.declared_scalars.iter().filter(|d| tessera_engine::filter::is_filterable(d)).map(|d| {
-            let family = family_of(d);
+            let family = tessera_engine::filter::Family::of(d);
             serde_json::json!({
                 "column": d.name,
                 "family": family.as_str(),
@@ -919,15 +917,6 @@ async fn suggest(
         }).collect::<Vec<_>>(),
         "more": page.more,
     })))
-}
-
-/// A filterable column's family — **one derivation, used by `/v1/meta`, the parser and the engine's
-/// own routing alike**, so the operator list a client is published cannot differ from the one it is
-/// held to, nor from the rules the scan reads its values by. It lives in the engine because the row
-/// route needs it too: a rendered `u8` category and a rendered `u8` number are the same bytes and
-/// have opposite absence rules.
-fn family_of(d: &tessera_engine::DeclaredScalar) -> tessera_engine::filter::Family {
-    tessera_engine::filter::Family::of(d)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1434,6 +1423,68 @@ impl ViewportSink for WireSink {
     }
 }
 
+/// What a request's filter expressions are parsed against: one `Engine::meta()` snapshot and the
+/// view the request names, whose frame and projection a `region` leaf is canonicalised in.
+struct FilterParser<'a> {
+    meta: &'a tessera_engine::EngineMeta,
+    view: &'a tessera_engine::MetaView,
+    visible: &'a tessera_engine::gate::VisibleViews,
+    region: crate::filter_dto::RegionContext,
+    /// Each category's vocabulary by the leaf's bare name, entity-scoped columns and group-scoped
+    /// families alike. Names are unique across the two lists, so one map cannot answer two things.
+    vocab_of: std::cell::OnceCell<std::collections::HashMap<&'a str, &'a str>>,
+}
+
+impl<'a> FilterParser<'a> {
+    fn new(
+        meta: &'a tessera_engine::EngineMeta,
+        view: &'a tessera_engine::MetaView,
+        visible: &'a tessera_engine::gate::VisibleViews,
+        max_region_vertices: u64,
+    ) -> Self {
+        FilterParser {
+            meta,
+            view,
+            visible,
+            region: crate::filter_dto::RegionContext {
+                extent: crate::filter_dto::view_extent(view),
+                projection: view.projection,
+                max_vertices: max_region_vertices,
+            },
+            vocab_of: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn parse(&self, value: &serde_json::Value) -> Result<tessera_engine::filter::FilterExpr, ApiError> {
+        let meta = self.meta;
+        let vocab_of = self.vocab_of.get_or_init(|| {
+            meta.declared_scalars
+                .iter()
+                .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
+                .chain(
+                    meta.scoped_scalars
+                        .iter()
+                        .filter_map(|f| Some((f.name.as_str(), f.vocabulary.as_deref()?))),
+                )
+                .collect()
+        });
+        crate::filter_dto::parse(
+            value,
+            &|leaf| meta.resolve_filter_column(leaf, &self.view.id, self.visible),
+            &|column, key| {
+                // A scoped family's pin decides which column is read, never which value set the
+                // key is in, so it is dropped before the lookup.
+                let name = column
+                    .split_once(tessera_engine::filter::PIN)
+                    .map_or(column, |(name, _)| name);
+                let vocabulary = vocab_of.get(name)?;
+                meta.vocabularies.get(vocabulary)?.code_of(key)
+            },
+            &self.region,
+        )
+    }
+}
+
 /// The producer: the engine call through frame serialisation, run inside `spawn_blocking` for
 /// the whole life of the stream. Returns nothing — every outcome is communicated through the
 /// oneshot (pre-first-flush errors), the channel (frames), or the shared state (completion
@@ -1468,13 +1519,6 @@ fn run_viewport_stream(
         return;
     };
     let view_id = view.id.clone();
-    let view_extent = tessera_engine::shapes::Bounds {
-        x_min: view.quantisation.x_min,
-        x_max: view.quantisation.x_max,
-        y_min: view.quantisation.y_min,
-        y_max: view.quantisation.y_max,
-    };
-    let view_projection = view.projection;
     // Contracts §3.2's default. It is the deployment's own overplot ceiling rather than a
     // literal, so a client that expresses no preference gets the full budget this deployment will
     // serve and §7.2's proportional window is realised in full — at the old default of 30 against a
@@ -1506,63 +1550,13 @@ fn run_viewport_stream(
     // more under streaming than it did before it: once a frame is out the status line is spent, and
     // a filter refused mid-stream could only be reported as a truncation.
     // **One parse for both expressions.** `filters` and `highlight` are two fields of one request
-    // in one grammar (`highlight-and-hierarchy.md` §2), so they are parsed by one closure against
-    // one schema — a second transcription here is a second surface, which is the argument the
-    // design makes for there being no list of highlights on the wire either.
-    let parse_expr = |value: &serde_json::Value| {
-        {
-            // **Keyed by the leaf's bare name**, the entity-scoped columns and the group-scoped
-            // families alike: a family's columns are one declaration and share one vocabulary, so
-            // a key resolves to the same code whichever view's column reads it. Names are unique
-            // across the two lists — the build refuses a family sharing a declared column's name —
-            // so one map cannot answer two things.
-            let vocab_of: std::collections::HashMap<&str, &str> = meta
-                .declared_scalars
-                .iter()
-                .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
-                .chain(
-                    meta.scoped_scalars
-                        .iter()
-                        .filter_map(|f| Some((f.name.as_str(), f.vocabulary.as_deref()?))),
-                )
-                .collect();
-            // A `region` leaf is canonicalised here, against the view's own extent — the one
-            // `/v1/meta` publishes — so the engine sees a grid-unit shape and the vertex cap and
-            // every coordinate refusal are `422`s before any compute (selection-operand §2).
-            // **The frame and the projection of the view this request names**, not the bundle's
-            // first: both are declared per view (decision 0040, `projections.md` §3). A `region`
-            // leaf declared in longitude and latitude is placed by the same function that placed
-            // the points it selects (`polygon-membership.md` R12), against the same grid — and
-            // reading any other view's would hold the wrong rows with nothing saying so. Both are
-            // taken from one lookup, so they cannot come from different views.
-            let region = crate::filter_dto::RegionContext {
-                extent: view_extent,
-                projection: view_projection,
-                max_vertices: state.limits.max_region_vertices,
-            };
-            crate::filter_dto::parse(
-                value,
-                // **The engine resolves the leaf's spelling**, against the same operand predicate
-                // `/v1/meta` publishes and the same view namespace a request's `view` is resolved
-                // through — so a column a client was told about parses, a column it was not stays
-                // the unknown-column 422, and a pinned leaf cannot mean one thing here and another
-                // on the discovery document (`views.md` §5).
-                &|leaf| meta.resolve_filter_column(leaf, &view_id, session.visible_views()),
-                &|column, key| {
-                    // The caller's own spelling reaches here, which for a scoped family may pin a
-                    // view (`views.md` §5). The pin decides which *column* is read and never which
-                    // value set the key is in — that is the family's — so it is dropped before the
-                    // lookup rather than being a second key space.
-                    let name = column
-                        .split_once(tessera_engine::filter::PIN)
-                        .map_or(column, |(name, _)| name);
-                    let vocabulary = vocab_of.get(name)?;
-                    meta.vocabularies.get(vocabulary)?.code_of(key)
-                },
-                &region,
-            )
-        }
-    };
+    // in one grammar (`highlight-and-hierarchy.md` §2), so they are parsed against one schema.
+    let parser = FilterParser::new(
+        &meta,
+        view,
+        session.visible_views(),
+        state.limits.max_region_vertices,
+    );
     // The pre-first-flush channel, the same one an engine refusal takes: nothing is committed, the
     // handler is still waiting on it, and the typed `422` reaches the client exactly as it did
     // before streaming.
@@ -1571,7 +1565,7 @@ fn run_viewport_stream(
             let _ = tx.send(Err(e));
         }
     };
-    let filter = match req.filters.as_ref().map(&parse_expr) {
+    let filter = match req.filters.as_ref().map(|v| parser.parse(v)) {
         None => None,
         Some(Ok(expr)) => Some(expr),
         Some(Err(e)) => {
@@ -1579,7 +1573,7 @@ fn run_viewport_stream(
             return;
         }
     };
-    let highlight = match req.highlight.as_ref().map(&parse_expr) {
+    let highlight = match req.highlight.as_ref().map(|v| parser.parse(v)) {
         None => None,
         Some(Ok(expr)) => Some(expr),
         Some(Err(e)) => {
@@ -2502,19 +2496,7 @@ async fn browse(
     }
     let form = match (&req.parent, &req.q) {
         (Some(value), _) => {
-            let id = match value {
-                serde_json::Value::Number(n) => n.as_u64(),
-                serde_json::Value::String(s) => s.parse::<u64>().ok(),
-                _ => None,
-            }
-            .ok_or_else(|| {
-                ApiError::Contract(
-                    "`parent` is a `tessera_id` — a JSON number, or a decimal string where the \
-                     caller cannot carry one intact"
-                        .to_string(),
-                )
-            })?;
-            BrowseForm::Children(TesseraId::new(id))
+            BrowseForm::Children(crate::filter_dto::tessera_id(Some(value), "parent")?)
         }
         (None, Some(q)) => BrowseForm::Search(q.clone()),
         (None, None) => BrowseForm::Roots,
@@ -2534,56 +2516,28 @@ async fn browse(
             // The same view resolution every other viewer verb takes, gate included.
             let view = meta
                 .resolve_visible_view(&req.view, session.visible_views())
-                .map(|v| v.id.clone())
                 .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
             // The filter is parsed against the live schema, before any compute — the viewport's own
             // rule, and the same parser, so one object means one thing on both verbs.
-            let filter = match &req.filters {
-                None => None,
-                Some(value) => {
-                    let view_meta = meta
-                        .resolve_view(&view)
-                        .ok_or_else(|| ApiError::Unknown(format!("unknown view '{view}'")))?;
-                    let vocab_of: std::collections::HashMap<&str, &str> = meta
-                        .declared_scalars
-                        .iter()
-                        .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
-                        .chain(
-                            meta.scoped_scalars
-                                .iter()
-                                .filter_map(|f| Some((f.name.as_str(), f.vocabulary.as_deref()?))),
-                        )
-                        .collect();
-                    let region = crate::filter_dto::RegionContext {
-                        extent: tessera_engine::shapes::Bounds {
-                            x_min: view_meta.quantisation.x_min,
-                            x_max: view_meta.quantisation.x_max,
-                            y_min: view_meta.quantisation.y_min,
-                            y_max: view_meta.quantisation.y_max,
-                        },
-                        projection: view_meta.projection,
-                        max_vertices: state.limits.max_region_vertices,
-                    };
-                    Some(crate::filter_dto::parse(
-                        value,
-                        &|leaf| meta.resolve_filter_column(leaf, &view, session.visible_views()),
-                        &|column, key| {
-                            let name = column
-                                .split_once(tessera_engine::filter::PIN)
-                                .map_or(column, |(name, _)| name);
-                            let vocabulary = vocab_of.get(name)?;
-                            meta.vocabularies.get(vocabulary)?.code_of(key)
-                        },
-                        &region,
-                    )?)
-                }
-            };
+            let filter = req
+                .filters
+                .as_ref()
+                .map(|value| {
+                    FilterParser::new(
+                        &meta,
+                        view,
+                        session.visible_views(),
+                        state.limits.max_region_vertices,
+                    )
+                    .parse(value)
+                })
+                .transpose()?;
             state
                 .engine
                 .browse(
                     &session,
                     BrowseRequest {
-                        view: &view,
+                        view: &view.id,
                         layer: &req.layer,
                         level: req.level,
                         form,

@@ -452,16 +452,10 @@ fn layer_frames(
                 .iter()
                 .find(|v| v.id == *name)
                 .ok_or_else(|| ApiError::Unknown(format!("unknown view '{name}'")))?;
-            let q = view.quantisation;
             Ok(tessera_engine::shapes::ViewFrame::new(
                 &view.id,
                 view.projection,
-                tessera_engine::shapes::Bounds {
-                    x_min: q.x_min,
-                    x_max: q.x_max,
-                    y_min: q.y_min,
-                    y_max: q.y_max,
-                },
+                crate::filter_dto::view_extent(view),
             ))
         })
         .collect()
