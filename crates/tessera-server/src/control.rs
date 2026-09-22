@@ -478,9 +478,9 @@ const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// naming the unit; a caller splits, and no deny is refused, only paged.
 const CHANGES_MAX_ITEMS: usize = 10_000;
 
-/// A declaration's body cap: axum's own default for the `Json` extractor, which `PUT
-/// /control/layers` and `PUT /control/views/{group}/{key}` inherit. Named so the `limits` block
-/// on `/control/status` can publish the number the extractor enforces.
+/// A declaration's body cap: axum's own default for the `Json` extractor, which every declaration
+/// route inherits. Named so the `limits` block on `/control/status` can publish the number the
+/// extractor enforces.
 const DECLARATION_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 /// What an over-cap `/control/ingest` or `/control/values` caller does next.
@@ -5097,7 +5097,7 @@ async fn publish_artifacts(
                 .collect();
 
             let resolved = resolve_member_addresses(
-                &state,
+                state,
                 addressing,
                 idset,
                 &flat,
@@ -5395,7 +5395,7 @@ async fn grow_memberships(
                 .flat_map(|a| a.members.iter().chain(a.leaving.iter()))
                 .collect();
             let resolved =
-                resolve_member_addresses(&state, addressing, idset, &flat, &widths, "its members")?;
+                resolve_member_addresses(state, addressing, idset, &flat, &widths, "its members")?;
 
             // Walked back in exactly the order it was flattened.
             let mut entities = resolved.into_iter();
@@ -5827,7 +5827,11 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "max_body_bytes": CHANGES_MAX_BODY_BYTES,
             },
             "declarations": {
-                "route": "PUT /control/layers, PUT /control/views/{group}/{key}",
+                "route": "PUT /control/layers, PUT /control/attributes, \
+                          PUT /control/vocabularies/{name}, \
+                          PATCH /control/vocabularies/{name}/values, \
+                          PUT /control/view_groups/{name}, PUT /control/views/{name}, \
+                          PUT /control/views/{group}/{key}",
                 "max_records_per_request": 1,
                 "max_body_bytes": DECLARATION_MAX_BODY_BYTES,
             },
