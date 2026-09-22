@@ -78,7 +78,7 @@ Holds both driver results whole, under `serve` and `ingest`, beside:
 | `started_at`, `host` | when and where |
 | `commit`, `dirty` | the checkout's git commit, and whether it had uncommitted changes |
 | `binary` | the path to the `tessera` binary measured |
-| `minted_credentials` | credential environment variables minted for this run, sorted |
+| `minted_credentials` | credential and identity-key environment variables minted for this run, sorted |
 | `steps` | wall time per top-level step: `binary`, `check`, `build`, `verify`, `serve`, `ingest` |
 | `check`, `build`, `verify` | each step's `returncode`, `stdout_tail`, `stderr_tail`; `build` also carries §1's fields |
 | `failures` | plain sentences: a refused check, a failed verify, an OOM kill, a dead server, a failed request, an unequal census or a rejected batch |
@@ -271,7 +271,7 @@ concatenated.
 | `ingested_view` | the anchor view's name, the one entities are allocated on |
 | `ingest_by_view` | one entry per declared view, on `ingest`'s shape; the anchor's is duplicated at the top level as `ingest` |
 | `publish_rosters` | a column-route layer's roster (key, content, parents, no members), published before the ingest since a hold-out row's column names a key that must exist. Keyed by layer; a missing roster or failed publish carries `{failed: true, reason}` |
-| `minted_credentials` | credential environment variables minted for this run, sorted |
+| `minted_credentials` | credential and identity-key environment variables minted for this run, sorted |
 | `restart` | the deployment stopped and reopened, compared against itself rather than the all-in build (a write cycle suppresses rows the all-in build still serves): `open_s`, `visible`, `visible_before`, per-view comparisons, `census_equal` |
 | `failures` | plain sentences for what did not hold — a blocked build or serve, a batch not fully accepted, a publication failure, an unequal census surface, a declared level the census compared no artifact at, a census request that did not arrive whole, a fold failure, a restart answering a different count. Empty means the cycle held |
 

@@ -153,8 +153,8 @@ class Cycle:
         return self.views[0]["name"]
 
     def credentials(self) -> dict[str, str]:
-        """A value for every credential variable the environment does not carry, minted for this
-        run only."""
+        """A value for every credential or identity-key variable the environment does not carry,
+        minted for this run only."""
         self.minted = minted_credentials(self.rung)
         self.result["minted_credentials"] = sorted(self.minted)
         if self.minted:
