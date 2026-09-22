@@ -88,6 +88,8 @@ class Database:
     def __init__(self, path: Path, temporary: bool = False) -> None:
         self.path = Path(path)
         self.temporary = temporary
+        if temporary:
+            _instance.temporary.add(self.path)
         #: The tables inserted before the first commit: what the build reads.
         self.inserts: list[Insert] = []
         #: The tables inserted since the last commit, which the next one sends and forgets.
@@ -1345,8 +1347,9 @@ class Database:
             _instance.stop(self._child)
             self._child = None
             self.listening = None
-        if self.temporary and self.path.exists():
+        if self.temporary:
             shutil.rmtree(self.path, ignore_errors=True)
+            _instance.temporary.discard(self.path)
 
     def __enter__(self) -> "Database":
         return self
@@ -1381,11 +1384,12 @@ def _extent_in_words(extent: Any) -> str:
 
 
 def create(path: str | os.PathLike | None = None, replace: bool = False) -> Database:
-    """A new database, in `path` or in a temporary directory `close()` removes.
+    """A new database, in `path` or in a temporary directory.
 
     With no path the directory is on a RAM-backed filesystem where the platform has one
     (`/dev/shm` on Linux and WSL2) and on disk otherwise, and the call says which: the build reads
     and the server maps that directory, so a small corpus on the RAM-backed path touches no disk.
+    `close()` removes a temporary directory, and so does interpreter exit.
     """
     if path is None:
         parent = RAM_BACKED if RAM_BACKED.is_dir() else None

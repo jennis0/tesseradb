@@ -240,7 +240,9 @@ its own session credential, operator credential and identity key under `.tessera
 owner-only. `commit()` starts `tessera serve` as a child process on loopback at port 0 and reads
 the three bound addresses from the JSON line the child prints once all three planes are listening;
 `db.viewer_url`, `db.session_url` and `db.session_credential` are what a token is minted against.
-The child is killed by its pid at `close()` and at interpreter exit.
+The child is killed by its pid at `close()` and at interpreter exit. A database `create()` made
+with no path is removed at both, after its child has stopped; a directory the user named, through
+`create(path)`, `open(path)` or `save(path)`, is never removed.
 
 The deployment file the SDK writes sets `serve.cors_loopback`, which admits a page served from a
 loopback address on the viewer plane. A notebook page's origin is the front end's, unknown at start
