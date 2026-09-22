@@ -799,6 +799,10 @@ class Database:
         the whole inserted corpus. Every commit after it pages what was inserted since the
         last one through the control plane in order, flushes once and waits for the
         publication that flush arms. Then the inserts are forgotten.
+
+        A commit that did not happen raises `Refusal` carrying its report as `report`: a finding
+        that stopped it before anything was sent, a failed build, or every page refused. A commit
+        some of whose pages landed returns its report.
         """
         if self.built:
             return self._paged(sent=True)
@@ -833,7 +837,7 @@ class Database:
             identity=self._identity_in_words(),
         )
         if build.returncode != 0:
-            raise Refusal("commit: the build failed\n" + report.output)
+            raise Refusal("commit: the build failed\n" + report.output, report)
         self.built = True
         self._record_terms(document)
         self.serve()
@@ -882,12 +886,16 @@ class Database:
             + (["flush, and wait for the publication it arms"] if pages else []),
             findings=findings,
         )
-        if not sent or not report.ok:
+        if not sent:
             return report
+        if report.findings:
+            raise Refusal(str(report), report)
         C.run(control, pages, report)
         self._record_terms(self._document())
         self.pending.clear()
         self._save_state()
+        if pages and len(report.refusals) == len(pages):
+            raise Refusal(str(report), report)
         return report
 
     @property

@@ -9,4 +9,11 @@ from __future__ import annotations
 
 
 class Refusal(ValueError):
-    """The SDK will not do this, and the message says what to do instead."""
+    """The SDK will not do this, and the message says what to do instead.
+
+    A `commit()` that did not happen carries its report as `report`, which is `None` otherwise.
+    """
+
+    def __init__(self, message: str = "", report=None) -> None:
+        super().__init__(message)
+        self.report = report
