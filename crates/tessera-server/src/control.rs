@@ -4529,7 +4529,23 @@ struct RowShape<'a> {
     space: &'a Option<String>,
 }
 
-impl IncomingArtifactBody {
+/// A publication's or a growth's row, as [`canonical_batch_shapes`] reads it.
+trait ShapedRow {
+    /// The row's key, as its shape report names it.
+    fn key(&self) -> serde_json::Value;
+    fn row_shape(&self) -> RowShape<'_>;
+    /// Whether the row's shape is read: a growth without a shape field fills no shape, where a
+    /// publication's row on a shape layer is refused without one.
+    fn fills_shape(&self) -> bool;
+    /// Each ranked content's rank and values.
+    fn contents_mut(&mut self) -> impl Iterator<Item = (usize, &mut Vec<String>)>;
+}
+
+impl ShapedRow for IncomingArtifactBody {
+    fn key(&self) -> serde_json::Value {
+        serde_json::json!(self.key)
+    }
+
     fn row_shape(&self) -> RowShape<'_> {
         RowShape {
             bbox: &self.bbox,
@@ -4538,10 +4554,25 @@ impl IncomingArtifactBody {
             wkt: &self.wkt,
             space: &self.space,
         }
+    }
+
+    fn fills_shape(&self) -> bool {
+        true
+    }
+
+    fn contents_mut(&mut self) -> impl Iterator<Item = (usize, &mut Vec<String>)> {
+        self.content
+            .iter_mut()
+            .enumerate()
+            .map(|(rank, content)| (rank, &mut content.values))
     }
 }
 
-impl GrowingArtifactBody {
+impl ShapedRow for GrowingArtifactBody {
+    fn key(&self) -> serde_json::Value {
+        serde_json::json!(self.key)
+    }
+
     fn row_shape(&self) -> RowShape<'_> {
         RowShape {
             bbox: &self.bbox,
@@ -4552,10 +4583,14 @@ impl GrowingArtifactBody {
         }
     }
 
-    /// Whether the row carries any shape field: a growth without one fills no shape, where a
-    /// publication's row on a shape layer is refused without one.
-    fn carries_shape(&self) -> bool {
+    fn fills_shape(&self) -> bool {
         self.bbox.is_some() || self.circle.is_some() || self.ellipse.is_some() || self.wkt.is_some()
+    }
+
+    fn contents_mut(&mut self) -> impl Iterator<Item = (usize, &mut Vec<String>)> {
+        self.content
+            .iter_mut()
+            .map(|content| (content.rank as usize, &mut content.values))
     }
 }
 
@@ -4733,6 +4768,86 @@ fn canonical_for_layer(
     let shapes = tessera_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
         .ok_or_else(|| refuse("the layer is drawn in no view".to_string()))?;
     Ok((shapes, serde_json::Value::Array(report)))
+}
+
+/// A batch's shapes, canonicalised before anything is resolved or allocated, and the report of
+/// what that did: each row's shape where it fills one, then each ranked content's authored shape.
+///
+/// **The authored shape content is read as a membership shape is** (`polygon-membership.md`
+/// §6.1, ruling (h)): where the layer declares a `polygon`, `circle` or `ellipse` content, that
+/// slot of every ranked content is canonicalised for every view of the layer — the same reader,
+/// the same report, the same vertex cap and **the same space**, the batch's `default_space` and
+/// the row's own `space` — and the slot then holds the canonical bytes in their content spelling,
+/// which is what the blob stores and the serve reads back into `shape_x`/`shape_y`. Refused as a
+/// membership shape is refused, naming the row. A layer this deployment does not hold
+/// canonicalises nothing here; the engine refuses it.
+fn canonical_batch_shapes(
+    state: &AppState,
+    declaration: Option<&tessera_types::layer::LayerDeclaration>,
+    default_space: Option<&str>,
+    rows: &mut [impl ShapedRow],
+) -> Result<
+    (
+        Vec<Option<tessera_lifecycle::membership::ArtifactShapes>>,
+        Vec<serde_json::Value>,
+    ),
+    ApiError,
+> {
+    use tessera_engine::shapes::ShapeSpace;
+    let default_space = match default_space {
+        None => ShapeSpace::View,
+        Some(word) => ShapeSpace::parse(word)
+            .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
+    };
+    let mut shapes = Vec::with_capacity(rows.len());
+    let mut reports: Vec<serde_json::Value> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let canonical = match declaration {
+            Some(declaration) if row.fills_shape() => {
+                canonical_row_shape(state, declaration, index, &row.row_shape(), default_space)?
+            }
+            _ => None,
+        };
+        match canonical {
+            Some((canonical, report)) => {
+                shapes.push(Some(canonical));
+                reports.push(serde_json::json!({
+                    "key": row.key(),
+                    "views": report,
+                }));
+            }
+            None => shapes.push(None),
+        }
+    }
+    let Some(declaration) = declaration else {
+        return Ok((shapes, reports));
+    };
+    let Some((slot, kind)) = declaration.authored_shape() else {
+        return Ok((shapes, reports));
+    };
+    for (index, row) in rows.iter_mut().enumerate() {
+        let space = match row.row_shape().space.as_deref() {
+            None => default_space,
+            Some(word) => ShapeSpace::parse(word)
+                .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
+        };
+        let key = row.key();
+        for (rank, values) in row.contents_mut() {
+            let Some(text) = values.get_mut(slot) else {
+                // Short of a value: the engine refuses the row, naming the count.
+                continue;
+            };
+            let (canonical, report) =
+                canonical_authored_content(state, declaration, index, rank, kind, space, text)?;
+            reports.push(serde_json::json!({
+                "key": key,
+                "content": rank,
+                "views": report,
+            }));
+            *text = canonical.content_text();
+        }
+    }
+    Ok((shapes, reports))
 }
 
 /// How a caller names an attachment's target.
@@ -4940,81 +5055,12 @@ async fn publish_artifacts(
     // resolving the members read the bundle, so they run here too.
     let (batch, keys, shape_reports) = state
         .blocking(move |state| {
-            // **The shapes, canonicalised before anything is resolved or allocated** — a refusal spends
-            // nothing, and the batch is the commit unit. The layer's declaration is the engine's state;
-            // a layer this deployment does not hold is the engine's refusal below, so here it simply
-            // canonicalises nothing.
-            let default_space = match default_space.as_deref() {
-                None => tessera_engine::shapes::ShapeSpace::View,
-                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-                    .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
-            };
-            let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
-                Vec::with_capacity(artifacts.len());
-            let mut shape_reports: Vec<serde_json::Value> = Vec::new();
-            for (index, artifact) in artifacts.iter().enumerate() {
-                match &declaration {
-                    Some(declaration) => {
-                        match canonical_row_shape(
-                            &state,
-                            declaration,
-                            index,
-                            &artifact.row_shape(),
-                            default_space,
-                        )? {
-                            Some((canonical, report)) => {
-                                shapes.push(Some(canonical));
-                                shape_reports.push(serde_json::json!({
-                                    "key": artifact.key,
-                                    "views": report,
-                                }));
-                            }
-                            None => shapes.push(None),
-                        }
-                    }
-                    None => shapes.push(None),
-                }
-            }
-            // **The authored shape content, read as a membership shape is** (`polygon-membership.md`
-            // §6.1, ruling (h)): where the layer declares a `polygon`, `circle` or `ellipse` content, that
-            // slot of every ranked content is canonicalised for every view of the layer — the same
-            // reader, the same report, the same vertex cap and **the same space**, the batch's
-            // `default_space` and the row's own `space` — and the slot then holds the canonical bytes
-            // in their content spelling, which is what the blob stores and the serve reads back into
-            // `shape_x`/`shape_y`. Refused as a membership shape is refused, naming the row.
-            if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
-                let declaration = declaration
-                    .as_ref()
-                    .expect("an authored slot names a declaration");
-                for (index, artifact) in artifacts.iter_mut().enumerate() {
-                    let space = match artifact.space.as_deref() {
-                        None => default_space,
-                        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-                            .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
-                    };
-                    for (rank, content) in artifact.content.iter_mut().enumerate() {
-                        let Some(text) = content.values.get_mut(slot) else {
-                            // Short of a value: the engine refuses the row below, naming the count.
-                            continue;
-                        };
-                        let (canonical, report) = canonical_authored_content(
-                            &state,
-                            declaration,
-                            index,
-                            rank,
-                            kind,
-                            space,
-                            text,
-                        )?;
-                        shape_reports.push(serde_json::json!({
-                            "key": artifact.key,
-                            "content": rank,
-                            "views": report,
-                        }));
-                        *text = canonical.content_text();
-                    }
-                }
-            }
+            let (shapes, shape_reports) = canonical_batch_shapes(
+                state,
+                declaration.as_ref(),
+                default_space.as_deref(),
+                &mut artifacts,
+            )?;
 
             // Flattened once, so each address form is resolved in a single batched call whatever the shape
             // of the batch: the external half opens each bundle extent at most once regardless of N, and
@@ -5325,75 +5371,16 @@ async fn grow_memberships(
             // is byte for byte the shape a publication would have stored. A row carrying no shape field
             // fills no shape; one carrying a shape on a layer that declares none is refused as a
             // publication's row is.
-            let default_space = match default_space.as_deref() {
-                None => tessera_engine::shapes::ShapeSpace::View,
-                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-                    .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
-            };
             let declaration = state
                 .engine
                 .registered_layer(&name)
                 .map(|registered| registered.declaration);
-            let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
-                Vec::with_capacity(artifacts.len());
-            let mut shape_reports: Vec<serde_json::Value> = Vec::new();
-            for (index, artifact) in artifacts.iter().enumerate() {
-                match &declaration {
-                    Some(declaration) if artifact.carries_shape() => {
-                        match canonical_row_shape(
-                            &state,
-                            declaration,
-                            index,
-                            &artifact.row_shape(),
-                            default_space,
-                        )? {
-                            Some((canonical, report)) => {
-                                shapes.push(Some(canonical));
-                                shape_reports.push(serde_json::json!({
-                                    "key": artifact.key,
-                                    "views": report,
-                                }));
-                            }
-                            None => shapes.push(None),
-                        }
-                    }
-                    _ => shapes.push(None),
-                }
-            }
-            if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
-                let declaration = declaration
-                    .as_ref()
-                    .expect("an authored slot names a declaration");
-                for (index, artifact) in artifacts.iter_mut().enumerate() {
-                    let space = match artifact.space.as_deref() {
-                        None => default_space,
-                        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-                            .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
-                    };
-                    for content in artifact.content.iter_mut() {
-                        let rank = content.rank as usize;
-                        let Some(text) = content.values.get_mut(slot) else {
-                            // Short of a value: the engine refuses the row below, naming the count.
-                            continue;
-                        };
-                        let (canonical, report) = canonical_authored_content(
-                            &state,
-                            declaration,
-                            index,
-                            rank,
-                            kind,
-                            space,
-                            text,
-                        )?;
-                        shape_reports.push(serde_json::json!({
-                            "key": artifact.key,
-                            "content": rank,
-                            "views": report,
-                        }));
-                        *text = canonical.content_text();
-                    }
-                }
-            }
+            let (shapes, shape_reports) = canonical_batch_shapes(
+                state,
+                declaration.as_ref(),
+                default_space.as_deref(),
+                &mut artifacts,
+            )?;
 
             // **A row's members and its leaving members are one list at the boundary**, resolved in one
             // pass and walked back in the order they were flattened: the two are addresses of the same
