@@ -718,7 +718,24 @@ pub struct AppState {
     pub faults: std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>,
 }
 
+/// The token of an `Authorization: Bearer` header, on every plane.
+pub fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
 impl AppState {
+    /// The viewer plane's authentication: the request's bearer token, looked up by
+    /// [`Self::authenticated_session`]. A missing token is `bad-credential`.
+    pub fn viewer_session(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<std::sync::Arc<SessionEntry>, ApiError> {
+        self.authenticated_session(bearer_token(headers).ok_or(ApiError::BadCredential)?)
+    }
+
     /// Bearer-token lookup for the viewer plane: an unrecognised token is `bad-credential` (401);
     /// a recognised-but-expired one is `expired-token` (403) — the engine itself never checks
     /// `expires_at`, so enforcing the deadline is this method's job and nothing else's.

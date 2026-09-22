@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{map_engine_error, map_join_error, ApiError};
 use crate::health::{healthz, readyz};
-use crate::state::AppState;
+use crate::state::{bearer_token, AppState};
 
 pub fn router(state: Arc<AppState>) -> Router {
     // The **development** seam covers this plane as well as the viewer plane: on a laptop the
@@ -40,13 +40,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         Some(layer) => router.layer(layer),
         None => router,
     }
-}
-
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
 }
 
 #[derive(Debug, Deserialize)]

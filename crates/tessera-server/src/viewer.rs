@@ -99,13 +99,6 @@ impl From<&GenerationStamp> for PinDto {
     }
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-}
-
 /// Flips a [`CancelToken`] on drop. Created before the admission-gate acquire, held by the
 /// `viewport` handler while it awaits the first flush, then moved into the [`StreamBody`] for
 /// the life of the response — so the one transport signal for "the client went away" (the
@@ -167,8 +160,7 @@ async fn meta(
     // so an unauthenticated `/v1/meta` would hand the corpus shape to anyone who can reach the
     // viewer listener. The bearer here is a session token, so a valid, unexpired session is
     // required exactly as for `/v1/viewport`.
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let entry = state.viewer_session(&headers)?;
 
     let meta = state.engine.meta();
     let selection = state.engine.config();
@@ -658,8 +650,7 @@ async fn categories(
     AxumPath(column): AxumPath<String>,
     AxumQuery(query): AxumQuery<CategoriesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let entry = state.viewer_session(&headers)?;
 
     let meta = state.engine.meta();
     let visible = entry.session.visible_views();
@@ -832,8 +823,7 @@ async fn suggest(
     AxumPath(column): AxumPath<String>,
     query: Result<AxumQuery<SuggestQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let entry = state.viewer_session(&headers)?;
 
     // An unknown query parameter is `deny_unknown_fields`'s rejection, which axum reports as an
     // extractor error rather than routing it through `SuggestQuery`'s `Deserialize` impl and back
@@ -1817,8 +1807,7 @@ async fn viewport(
     headers: HeaderMap,
     Json(req): Json<ViewportReq>,
 ) -> Result<Response, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let entry = state.viewer_session(&headers)?;
 
     if req.zoom > 16 {
         return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
@@ -2488,8 +2477,7 @@ async fn browse(
     Json(req): Json<BrowseReq>,
 ) -> Result<Json<BrowseResp>, ApiError> {
     use tessera_engine::browse::{BrowseCursor, BrowseForm, BrowseRequest};
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let entry = state.viewer_session(&headers)?;
     // **`limit` clamps and `0` refuses** — the page bound is `/v1/categories`' shape exactly.
     if req.limit == Some(0) {
         return Err(ApiError::Contract(
@@ -2636,8 +2624,7 @@ async fn artifact(
     AxumPath(raw): AxumPath<u64>,
     Json(req): Json<ArtifactReq>,
 ) -> Result<Json<ArtifactResp>, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let entry = state.viewer_session(&headers)?;
     let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
 
     let served = tokio::task::spawn_blocking(move || {
@@ -2689,8 +2676,7 @@ async fn item(
     AxumPath(raw): AxumPath<u64>,
     Json(req): Json<ItemReq>,
 ) -> Result<Json<ItemResp>, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let entry = state.viewer_session(&headers)?;
 
     // Gated the same way as `/v1/viewport` (see its handler's comment) — `admit()` sheds with 429
     // `backpressure` on either stage.

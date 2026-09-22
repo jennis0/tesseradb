@@ -417,7 +417,7 @@ async fn require_operator_credential(
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
     // Unconditional: no path, routed or not, is exempt. See "Why there is no exemption" above.
-    state.check_bearer(bearer_token(request.headers()), &state.operator_credential)?;
+    state.check_bearer(crate::state::bearer_token(request.headers()), &state.operator_credential)?;
     Ok(next.run(request).await)
 }
 
@@ -528,13 +528,6 @@ fn body_encoding(headers: &HeaderMap) -> Result<BodyEncoding, ApiError> {
              (ingest §1.2)"
         ))),
     }
-}
-
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
 }
 
 /// Contracts §1: external IDs are caller-supplied byte strings, capped at **≤ 64 bytes**.
