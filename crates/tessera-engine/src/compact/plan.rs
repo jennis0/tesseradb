@@ -301,12 +301,9 @@ pub(crate) fn plan_fold(
     // The two pre-flight refusals run last, once the plan's own quantities are known.
     let dict_len = generation.dict.len();
     if let Some(available) = resources.available_memory {
+        // The widest view's permutation bound is the partition's entity bound.
         let need = memory_estimate(
-            views
-                .iter()
-                .map(|view| view.permutation_bound)
-                .max()
-                .unwrap_or(0),
+            entity_bound,
             entity_bound,
             u64::from(dict_len),
             resources.membership_containers,

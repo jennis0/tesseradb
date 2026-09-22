@@ -222,8 +222,8 @@ fn fold_row_spaces(
         // Refused rather than defaulted: an empty schema would write a segment with no scalar tail.
         let Some(view_schema) = ctx.scalar_schema.get(&view.view) else {
             return Err(MaintenanceFailed(format!(
-                "pass 1 (row space): this fold holds no writer schema for view '{}', though \\
-                 its plan names it; the two disagree about what is being folded",
+                "pass 1 (row space): the fold plan names view '{}' but the fold has no writer \
+                 schema for it",
                 view.view
             )));
         };
