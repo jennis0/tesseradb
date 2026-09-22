@@ -8,7 +8,7 @@
 //! base external-id run or the base dictionary. It retires nothing: no posting is dropped and no tombstone is applied.
 //!
 //! [`plan_coalesce`] runs on the executor and chooses what to take. [`execute_coalesce`] runs on
-//! the background pool and writes the merged files. [`rebase_into`] applies the result to the live
+//! the background pool and writes the merged files. [`rebased`] applies the result to the live
 //! manifest, or discards it if a flush moved the entries it planned against.
 
 use std::collections::BTreeMap;
@@ -34,7 +34,7 @@ use execute::{
     coalesce_text_window, coalesce_tiers,
 };
 pub(crate) use plan::plan_coalesce;
-pub(crate) use rebase::rebase_into;
+pub(crate) use rebase::rebased;
 
 /// What a coalesce is allowed to take, per axis.
 #[derive(Debug, Clone, Copy)]
@@ -136,6 +136,12 @@ pub(crate) struct ColumnWindow<E> {
     /// The incarnation of `view` these extents belong to, `None` exactly when `view` is.
     pub(crate) incarnation: Option<tessera_types::view::ViewIncarnation>,
     pub(crate) extents: Vec<E>,
+}
+
+impl<E> ColumnWindow<E> {
+    fn key(&self) -> WindowKey<'_> {
+        (self.column.as_str(), self.view.as_deref(), self.incarnation)
+    }
 }
 
 impl CoalescePlan {

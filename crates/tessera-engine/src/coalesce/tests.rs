@@ -504,7 +504,7 @@ fn nothing_is_selected_below_the_width() {
 /// carries an old binding for outranks the flush that re-bound it.
 #[test]
 fn the_coalesced_entry_takes_the_windows_position() {
-    let (mut manifest, build_files) = manifest_with(4);
+    let (manifest, build_files) = manifest_with(4);
     let mut policy = policy();
     policy.width = 3;
     let plan =
@@ -540,7 +540,7 @@ fn the_coalesced_entry_takes_the_windows_position() {
         partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
-    assert!(rebase_into(&mut manifest, &completed));
+    let manifest = rebased(&manifest, &completed).expect("it rebases");
 
     assert_eq!(manifest.deltas.len(), 2, "3 tiers became 1, 1 untouched");
     assert_eq!(manifest.deltas[0], "c/delta.arrow");
@@ -748,8 +748,8 @@ fn a_column_with_per_layer_dictionaries_is_selected_like_any_other() {
 /// the manifest meanwhile misdescribes. The coalesced entry names its merged dictionary, and
 /// that file is digested — a keyword entry without one is a layer the reader refuses at open.
 ///
-/// **Mutation:** drop `e.dict` from the `attr_paths` chain and the consumed dictionaries stay
-/// digested; drop `dict` from the coalesced entry and `FilterColumns::open` refuses the bundle.
+/// **Mutation:** leave the dictionaries out of `consumed_files` and the consumed dictionaries
+/// stay digested; drop `dict` from the coalesced entry and `FilterColumns::open` refuses the bundle.
 #[test]
 fn a_coalesced_keyword_extent_replaces_its_window_and_its_dictionaries_in_both_halves() {
     let (mut manifest, build_files) = manifest_with(4);
@@ -825,10 +825,8 @@ fn a_coalesced_keyword_extent_replaces_its_window_and_its_dictionaries_in_both_h
         partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
-    assert!(
-        rebase_into(&mut manifest, &completed),
-        "a flush appending the same column's extent does not move the window"
-    );
+    let manifest = rebased(&manifest, &completed)
+        .expect("a flush appending the same column's extent does not move the window");
 
     let listed: Vec<&AttrExtent> = manifest
         .attr_extents
@@ -1003,7 +1001,7 @@ fn a_keyword_window_executes_into_one_extent_whose_dictionary_numbers_its_ordina
     }
 
     // The manifest edit, and the files it names reopened from disc as a restart would.
-    assert!(rebase_into(&mut manifest, &completed));
+    let manifest = rebased(&manifest, &completed).expect("it rebases");
     let listed: Vec<&AttrExtent> = manifest
         .attr_extents
         .iter()
@@ -1114,11 +1112,11 @@ fn a_keyword_window_the_merge_refuses_installs_nothing() {
 /// every entity the consumed window held — a wrong answer with no symptom, and strictly worse
 /// than a refusal to open (filter-index §6.2).
 ///
-/// **Mutation:** drop the `attr_paths` chain from the `files` removal and the consumed digests
+/// **Mutation:** leave the attribute extents out of `consumed_files` and the consumed digests
 /// stand; drop the `attr_extents` rebuild and the manifest names the coalesced bytes nowhere.
 #[test]
 fn a_coalesced_attr_extent_replaces_its_window_in_both_halves_of_the_manifest() {
-    let (mut manifest, build_files) = manifest_with(4);
+    let (manifest, build_files) = manifest_with(4);
     let plan =
         plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
     let consumed: Vec<String> = plan
@@ -1151,7 +1149,7 @@ fn a_coalesced_attr_extent_replaces_its_window_in_both_halves_of_the_manifest() 
         partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
-    assert!(rebase_into(&mut manifest, &completed));
+    let manifest = rebased(&manifest, &completed).expect("it rebases");
 
     for column in COLUMNS {
         let listed: Vec<&AttrExtent> = manifest
@@ -1216,12 +1214,12 @@ fn an_attr_window_rebases_through_another_columns_flush_but_not_through_its_own(
     interleaved
         .attr_extents
         .insert(1, attr_extent_at(PARTITION, "elsewhere", "flush-9-1"));
-    assert!(rebase_into(&mut interleaved, &completed));
+    assert!(rebased(&interleaved, &completed).is_some());
 
     // Its own extent gone, however, is the state the plan was made against being gone.
     let consumed = completed.attrs[0].consumed.extents[1].values.clone();
     manifest.attr_extents.retain(|e| e.values != consumed);
-    assert!(!rebase_into(&mut manifest, &completed));
+    assert!(rebased(&manifest, &completed).is_none());
 }
 
 /// **A group-scoped column's window rebases within its own view's subsequence**, which is the
@@ -1280,7 +1278,7 @@ fn a_scoped_columns_window_rebases_within_its_own_views_extents() {
         partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
-    assert!(rebase_into(&mut manifest, &completed));
+    let manifest = rebased(&manifest, &completed).expect("it rebases");
 
     let listed: Vec<&str> = manifest
         .attr_extents
@@ -1395,7 +1393,7 @@ fn a_scoped_text_columns_window_rebases_within_its_own_views_extents() {
         partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
-    assert!(rebase_into(&mut manifest, &completed));
+    let manifest = rebased(&manifest, &completed).expect("it rebases");
 
     let listed: Vec<&str> = manifest
         .text_extents
@@ -1484,7 +1482,7 @@ fn the_record_axis_selects_a_window_and_replaces_it_in_both_manifest_halves() {
         partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
-    assert!(rebase_into(&mut manifest, &completed));
+    let mut manifest = rebased(&manifest, &completed).expect("it rebases");
 
     assert_eq!(
         manifest.record_extents.len(),
@@ -1512,7 +1510,7 @@ fn the_record_axis_selects_a_window_and_replaces_it_in_both_manifest_halves() {
     // And a window a fold (or another pass) has since consumed no longer rebases.
     let gone = completed.record.as_ref().unwrap().consumed[1].blocks.clone();
     manifest.record_extents.retain(|e| e.blocks != gone);
-    assert!(!rebase_into(&mut manifest, &completed));
+    assert!(rebased(&manifest, &completed).is_none());
 }
 
 /// **The entity→term axis selects a window of `entity_terms_extents` and replaces it in place,
@@ -1583,7 +1581,7 @@ fn the_entity_terms_axis_selects_a_window_and_replaces_it_in_both_manifest_halve
         partition: plan.partition.clone(),
         prefix: "v00000".to_string(),
     };
-    assert!(rebase_into(&mut manifest, &completed));
+    let mut manifest = rebased(&manifest, &completed).expect("it rebases");
 
     assert_eq!(
         manifest.entity_terms_extents.len(),
@@ -1611,7 +1609,7 @@ fn the_entity_terms_axis_selects_a_window_and_replaces_it_in_both_manifest_halve
     // And a window a fold (or another pass) has since consumed no longer rebases.
     let gone = completed.terms.as_ref().unwrap().consumed[1].terms.clone();
     manifest.entity_terms_extents.retain(|e| e.terms != gone);
-    assert!(!rebase_into(&mut manifest, &completed));
+    assert!(rebased(&manifest, &completed).is_none());
 }
 
 /// A plan whose window is gone no longer rebases, and the publication is discarded rather than
@@ -1636,5 +1634,5 @@ fn a_plan_whose_window_moved_does_not_rebase() {
         prefix: "v00000".to_string(),
     };
     manifest.deltas.remove(1);
-    assert!(!rebase_into(&mut manifest, &completed));
+    assert!(rebased(&manifest, &completed).is_none());
 }

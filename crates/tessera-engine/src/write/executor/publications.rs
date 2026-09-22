@@ -708,13 +708,13 @@ impl Executor {
             return;
         };
 
-        let mut manifest = partition_data.manifest.clone();
-        if !crate::coalesce::rebase_into(&mut manifest, &completed) {
+        let Some(mut manifest) = crate::coalesce::rebased(&partition_data.manifest, &completed)
+        else {
             // The window it planned against is gone. Expected rather than exceptional, as
-            // `rebase_into` shows, and the files are orphans nothing references.
+            // `rebased` shows, and the files are orphans nothing references.
             tracing::warn!("discarding a completed coalesce that no longer rebases");
             return;
-        }
+        };
         // Composed before the manifest is written, in the flush's order and for its reason: a
         // composition that refuses must not leave a published manifest naming layers this process
         // cannot serve, and the reverse order commits a manifest whose own writer then refuses it.
