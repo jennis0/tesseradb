@@ -483,6 +483,10 @@ const CHANGES_MAX_ITEMS: usize = 10_000;
 /// on `/control/status` can publish the number the extractor enforces.
 const DECLARATION_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
+/// What an over-cap `/control/ingest` or `/control/values` caller does next.
+const INGEST_BODY_REMEDY: &str =
+    "The limit is ingest.ingest_max_batch_bytes. Send fewer rows per batch";
+
 /// The content type that selects Arrow IPC on a record-bearing route (ingest §1.2).
 const ARROW_CONTENT_TYPE: &str = "application/vnd.apache.arrow.stream";
 
@@ -522,6 +526,49 @@ fn body_encoding(headers: &HeaderMap) -> Result<BodyEncoding, ApiError> {
              (ingest §1.2)"
         ))),
     }
+}
+
+/// A body a write route could not take, as a 422 and never axum's own 413: over the route's `cap`
+/// bytes, where `remedy` says what to send instead, or not read to completion. The rejection's own
+/// text is not forwarded.
+fn body_refusal(status: StatusCode, body: &str, cap: usize, remedy: &str) -> ApiError {
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::Contract(format!(
+            "the {body} body exceeds the {cap}-byte per-request limit and was refused before \
+             decoding, so nothing was allocated or appended. {remedy}"
+        ))
+    } else {
+        ApiError::Contract(format!(
+            "the {body} body could not be read: the connection failed mid-upload, the transfer \
+             encoding is malformed, or it is not the body this route takes. This is not the size \
+             limit; nothing was allocated or appended"
+        ))
+    }
+}
+
+/// The `x-tessera-batch-id` header a batch is recorded under. A value that is not UTF-8 is
+/// refused as a missing one is.
+fn batch_id_header(headers: &HeaderMap) -> Result<String, ApiError> {
+    headers
+        .get("x-tessera-batch-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))
+}
+
+/// The `x-tessera-view` header, where one was given. A value that is not UTF-8 names no view any
+/// manifest can hold, so it is refused rather than lossily decoded.
+fn view_header(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    headers
+        .get("x-tessera-view")
+        .map(|value| {
+            value.to_str().map(str::to_string).map_err(|_| {
+                ApiError::Contract(
+                    "x-tessera-view is not valid UTF-8, so it names no view".to_string(),
+                )
+            })
+        })
+        .transpose()
 }
 
 /// Contracts §1: external IDs are caller-supplied byte strings, capped at **≤ 64 bytes**.
@@ -1429,43 +1476,17 @@ async fn values(
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<ValuesResp>, ApiError> {
-    // The route's byte cap, mapped as `/control/ingest`'s is: a 422 naming the unit, never axum's
-    // untyped 413, and told apart from a connection that failed mid-upload.
     let body = body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::Contract(format!(
-                "values body exceeds the {}-byte per-batch cap (ingest.ingest_max_batch_bytes); \
-                 refused before decoding, so it cost no queue slot and no WAL append",
-                state.limits.ingest_max_batch_bytes
-            ))
-        } else {
-            ApiError::Contract(
-                "the values request body could not be read to completion — the connection failed \
-                 mid-upload, or the transfer encoding is malformed. This is NOT the per-batch cap; \
-                 nothing was decoded, queued or appended"
-                    .to_string(),
-            )
-        }
+        body_refusal(
+            rejection.status(),
+            "values",
+            state.limits.ingest_max_batch_bytes,
+            INGEST_BODY_REMEDY,
+        )
     })?;
-    let batch_id = headers
-        .get("x-tessera-batch-id")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
-        .to_string();
+    let batch_id = batch_id_header(&headers)?;
     let encoding = body_encoding(&headers)?;
-    let view = match headers.get("x-tessera-view") {
-        None => None,
-        Some(value) => Some(
-            value
-                .to_str()
-                .map_err(|_| {
-                    ApiError::Contract(
-                        "x-tessera-view is not valid UTF-8, so it names no view".to_string(),
-                    )
-                })?
-                .to_string(),
-        ),
-    };
+    let view = view_header(&headers)?;
     let Some(permit) = state.ingest_admission.try_admit() else {
         tracing::debug!("the ingest admission bound is saturated; answering 429 backpressure");
         return Err(ApiError::Backpressure {
@@ -2782,53 +2803,17 @@ async fn ingest(
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
-    // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**, unknown filter operand",
-    // and a `BytesRejection` is either of the first two. **Branched on the rejection's own status,
-    // not collapsed**: this arm used to report every `BytesRejection` as "your batch is too big",
-    // and the variant also covers a client disconnecting mid-upload and a malformed transfer
-    // encoding — so an operator whose 4 KB batch was truncated by a flaky link was told to shrink
-    // their batches. The rejection's `Display` is still never forwarded (this module's rule).
     let body = body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::Contract(format!(
-                "ingest body exceeds the {}-byte per-batch cap (ingest.ingest_max_batch_bytes); \
-                 refused before decoding, so it cost no queue slot and no WAL append",
-                state.limits.ingest_max_batch_bytes
-            ))
-        } else {
-            ApiError::Contract(
-                "the ingest request body could not be read to completion — the connection failed \
-                 mid-upload, or the transfer encoding is malformed. This is NOT the per-batch cap; \
-                 nothing was decoded, queued or appended"
-                    .to_string(),
-            )
-        }
+        body_refusal(
+            rejection.status(),
+            "ingest",
+            state.limits.ingest_max_batch_bytes,
+            INGEST_BODY_REMEDY,
+        )
     })?;
-
-    let batch_id = headers
-        .get("x-tessera-batch-id")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
-        .to_string();
+    let batch_id = batch_id_header(&headers)?;
     let encoding = body_encoding(&headers)?;
-
-    // Read here rather than inside `run_ingest` because a `HeaderMap` is the handler's, not the
-    // blocking closure's. A header whose bytes are not valid UTF-8 names no view any manifest can
-    // hold, so it is refused rather than lossily decoded — the same rule this handler applies to
-    // external ids one function over.
-    let view = match headers.get("x-tessera-view") {
-        None => None,
-        Some(value) => Some(
-            value
-                .to_str()
-                .map_err(|_| {
-                    ApiError::Contract(
-                        "x-tessera-view is not valid UTF-8, so it names no view".to_string(),
-                    )
-                })?
-                .to_string(),
-        ),
-    };
+    let view = view_header(&headers)?;
 
     // The admission bound, **before** `spawn_blocking`. See `IngestAdmission`.
     let Some(permit) = state.ingest_admission.try_admit() else {
@@ -3275,26 +3260,14 @@ async fn changes(
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Result<Json<Vec<ChangeItem>>, axum::extract::rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**, unknown filter operand",
-    // which covers both shapes a `JsonRejection` carries. They are distinguished by the rejection's
-    // own status rather than collapsed, because "your batch is too large" and "your JSON is
-    // malformed" send an operator to different places. The rejection's `Display` is never forwarded
-    // — this module's rule.
     let Json(items) = body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::Contract(format!(
-                "the change request body exceeds the {CHANGES_MAX_BODY_BYTES}-byte per-request \
-                 cap; split it into smaller requests. Nothing in this request was applied — and \
-                 note that this is a cap on one REQUEST, never on a deny: /control/changes is never \
-                 load-shed (contracts §3.1)"
-            ))
-        } else {
-            ApiError::Contract(
-                "the change request body is not a valid JSON array of {external_id, op} \
-                 items; nothing in it was applied"
-                    .to_string(),
-            )
-        }
+        body_refusal(
+            rejection.status(),
+            "change request",
+            CHANGES_MAX_BODY_BYTES,
+            "Split it into smaller requests. This caps one request and never a deny: \
+             /control/changes is never load-shed",
+        )
     })?;
 
     // The record count (ingest §2.1), beside the byte cap the route enforced above: a 422 naming
@@ -4178,39 +4151,6 @@ fn position_in_batch(widths: &[usize], flat: usize) -> (usize, usize) {
     (widths.len(), 0)
 }
 
-/// The body refusals shared by the verbs on `/control/layers/{name}/artifacts`.
-///
-/// Contracts §3.1's 422 row is "malformed request, **bounds exceeded**", and a `BytesRejection`
-/// is one or the other. Branched on the rejection's own status rather than collapsed, on
-/// [`ingest`]'s argument: a caller whose 4 KB body was truncated mid-upload must not be told to
-/// send fewer artifacts. The rejection's `Display` is not forwarded (this module's rule). `noun`
-/// names the request in the refusal and `remedy` is what an over-cap caller does next: a
-/// publication pages by artifact and a growth by member (ingest §2.1).
-fn artifact_bytes(
-    state: &AppState,
-    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
-    noun: &str,
-    remedy: &str,
-) -> Result<Bytes, ApiError> {
-    body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::Contract(format!(
-                "the {noun} body exceeds the {}-byte per-request limit \
-                 (ingest.publish_max_body_bytes; limits.{noun}.max_body_bytes on \
-                 /control/status); refused before decoding, so it allocated no ordinal and \
-                 appended nothing. {remedy}",
-                state.limits.publish_max_body_bytes
-            ))
-        } else {
-            ApiError::Contract(format!(
-                "the {noun} body could not be read to completion: the connection failed \
-                 mid-upload, or the transfer encoding is malformed. Nothing was decoded, \
-                 allocated or appended"
-            ))
-        }
-    })
-}
-
 /// A JSON body on an artifact route, decoded against `T`'s own shape. A field the shape does not
 /// take is refused by the derive, so a growth still carries no content, lineage or shape.
 fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Result<T, ApiError> {
@@ -4915,13 +4855,16 @@ async fn publish_artifacts(
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let body = artifact_bytes(
-        &state,
-        body,
-        "publish",
-        "Send fewer artifacts per request; a membership that does not fit beside its record is \
-         published with a first page and grown with `PATCH` in pages (decision 0127)",
-    )?;
+    let body = body.map_err(|rejection| {
+        body_refusal(
+            rejection.status(),
+            "publish",
+            state.limits.publish_max_body_bytes,
+            "The limit is ingest.publish_max_body_bytes (limits.publish.max_body_bytes on \
+             /control/status). Send fewer artifacts per request; a membership that does not fit \
+             beside its record is published with a first page and grown with `PATCH` in pages",
+        )
+    })?;
     // An artifact record is object-shaped (nested content, lineage and a shape) and is the JSON
     // this route has always taken (ingest §1.2); the row-shaped routes are the ones with an
     // Arrow form.
@@ -5382,13 +5325,16 @@ async fn grow_memberships(
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let body = artifact_bytes(
-        &state,
-        body,
-        "grow",
-        "Send fewer members per request: a growth is a delta, so a membership may be grown in as \
-         many requests as it needs",
-    )?;
+    let body = body.map_err(|rejection| {
+        body_refusal(
+            rejection.status(),
+            "grow",
+            state.limits.publish_max_body_bytes,
+            "The limit is ingest.publish_max_body_bytes (limits.grow.max_body_bytes on \
+             /control/status). Send fewer members per request: a growth is a delta, so a \
+             membership may be grown in as many requests as it needs",
+        )
+    })?;
     let GrowBody {
         level,
         addressing,
