@@ -186,3 +186,94 @@ async fn the_arming_surface_is_gated_and_names_its_sites() {
         .unwrap();
     assert_eq!(resp.status(), 422, "an unknown site is a refusal, never a no-op");
 }
+
+/// An executor that panics reports itself dead: `/readyz` answers 503 on both listeners that
+/// carry it, and `/control/status` names the posture.
+#[tokio::test]
+async fn an_executor_panic_fails_readiness_and_reports_dead() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let config = default_engine_config();
+    let max_k = config.max_k;
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        config,
+    )
+    .expect("engine should open against a freshly built bundle");
+    let faults = Arc::new(FaultSwitchboard::new());
+    engine
+        .start_write_executor_with_faults(1024, Arc::clone(&faults))
+        .expect("the write executor starts once per engine");
+    let server = mount_server_with_faults(engine, max_k, generous_test_gate(), faults).await;
+
+    let ready = server
+        .client
+        .get(server.viewer_url("/readyz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), 200);
+
+    server.state.faults.arm_pause(
+        tessera_lifecycle::faults::PauseSite::BeforeManifestPublish,
+        tessera_lifecycle::faults::PauseAction::Panic,
+    );
+    let ext = external_id_of(N_ITEMS + 1);
+    let body = build_ingest_batch_optional(&[(Some(&ext[..]), 10.0, 10.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "faults-surface-panic")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = server
+            .client
+            .get(server.viewer_url("/readyz"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        if status == 503 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out: /readyz still answers {status} after the executor panicked"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let session_ready = server
+        .client
+        .get(server.session_url("/readyz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session_ready.status(), 503);
+    let status = control_status(&server).await;
+    assert_eq!(status["write_executor"]["posture"], "dead");
+    assert_eq!(status["write_executor"]["ready"], false);
+}

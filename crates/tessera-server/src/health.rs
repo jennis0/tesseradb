@@ -93,21 +93,7 @@ pub async fn healthz() -> StatusCode {
 
 /// The readiness predicate: **ready iff the write executor is `Running`.**
 ///
-/// A named function over the enum rather than an inline `matches!`, for two reasons. It is
-/// unit-testable across every posture without a running server, which is how the `Dead` row is
-/// asserted today; and it gives a future posture variant one obvious place to be classified.
-///
-/// **Why the `Dead` row is not *also* driven through the socket, stated as the dependency it is.**
-/// Not because the observation would race: [`ExecutorPosture`] is published with `fetch_max` and
-/// `Dead` is its maximum, so the posture is monotone and absorbing — a bounded poll of `/readyz`
-/// after inducing a panic converges or the property is broken, which is exactly the form
-/// `tessera-engine`'s `an_executor_panic_is_reported_dead` already uses, and the form this crate's
-/// own `a_deny_does_not_queue_behind_a_saturated_blocking_pool` accepts for a comparable property.
-/// What is missing is a way to **induce** an executor panic from this crate's test binary: that
-/// needs `tessera-engine`'s `fault-injection` feature as a `tessera-server` dev-dependency, which
-/// this crate deliberately does not take — the WAL fault cases are driven through a real `EACCES`
-/// instead, which exercises the production error path rather than a test-only one. Adding the
-/// dev-dependency is what unblocks the end-to-end row; nothing about the posture's shape does.
+/// A named function so every posture can be classified in a unit test.
 ///
 /// Every non-`Running` posture is not ready, `NotStarted` included. That is not a live state for a
 /// server — [`crate::prepare`] starts the executor and propagates its failure before any listener
