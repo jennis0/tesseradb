@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use arrow::array::Array;
+use tessera_engine::member_key::{KeyColumn, KEY_TYPES};
 use tessera_lifecycle::{BatchArtifacts, BatchEdge, BatchMembership};
 
 use super::DecodeError;
@@ -16,11 +17,13 @@ pub(super) struct MembershipColumn<'a> {
     layer: &'a str,
     meaning: tessera_types::layer::ListMeaning,
     cells: KeyCells<'a>,
+    /// The column's keys, or a list's elements, read by the rule a build reads a member table by.
+    keys: KeyColumn<'a>,
 }
 
 /// A key column's shape: one artifact per row, or a list of them.
 enum KeyCells<'a> {
-    Scalar(&'a dyn Array),
+    Scalar,
     /// A `List`, whose rows may differ in length — which is what a lineage is.
     Variable(&'a arrow::array::ListArray),
     /// A `FixedSizeList`, every row of the arity its own type states.
@@ -28,35 +31,20 @@ enum KeyCells<'a> {
 }
 
 impl KeyCells<'_> {
-    /// The element array a row's entries are read out of — the column itself where it is a scalar.
-    fn values(&self) -> &dyn Array {
-        match self {
-            KeyCells::Scalar(array) => *array,
-            KeyCells::Variable(list) => {
-                let values: &Arc<dyn Array> = list.values();
-                values.as_ref()
-            }
-            KeyCells::Fixed(list) => {
-                let values: &Arc<dyn Array> = list.values();
-                values.as_ref()
-            }
-        }
-    }
-
     /// Whether the cells are lists — a scalar carries one artifact per row and has no arity to
     /// disagree with a declaration.
     fn is_list(&self) -> bool {
-        !matches!(self, KeyCells::Scalar(_))
+        !matches!(self, KeyCells::Scalar)
     }
 
-    /// The range of `values()` one row occupies, or `None` where the row named no artifact at all.
+    /// The range of the keys one row occupies, or `None` where the row named no artifact at all.
     ///
     /// **A null cell and an empty list are the whole row's "in no artifact"**, which is the scalar
     /// rule applied to a cell that holds no key: a point may be in no artifact at any resolution,
     /// and a clusterer that emitted nothing for it is the ordinary way of saying so.
     fn entries(&self, row: usize) -> Option<std::ops::Range<usize>> {
         let (start, end) = match self {
-            KeyCells::Scalar(_) => (row, row + 1),
+            KeyCells::Scalar => (row, row + 1),
             KeyCells::Variable(list) => {
                 if list.is_null(row) {
                     return None;
@@ -74,46 +62,6 @@ impl KeyCells<'_> {
         };
         (start != end).then_some(start..end)
     }
-}
-
-/// The key one cell names, or `None` where it names no artifact.
-///
-/// **Text or an integer, and `null` or `-1` means this point is in no artifact**
-/// (`artifacts-from-points.md` §2). An integer key is read as its decimal spelling, so `3` and `"3"`
-/// name one artifact — the rule is [`tessera_types::layer::integer_key`]'s, which is also what a
-/// build reads a member table's key column by, because a membership spelled two ways must not
-/// resolve two ways.
-fn member_key_at(values: &dyn Array, index: usize) -> Option<String> {
-    use arrow::array::{
-        Int16Array, Int32Array, Int64Array, Int8Array, StringArray, UInt16Array, UInt32Array,
-        UInt64Array, UInt8Array,
-    };
-    if values.is_null(index) {
-        return None;
-    }
-    let any = values.as_any();
-    let integer: i128 = if let Some(a) = any.downcast_ref::<StringArray>() {
-        return Some(a.value(index).to_string());
-    } else if let Some(a) = any.downcast_ref::<Int8Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<Int16Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<Int32Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<Int64Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<UInt8Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<UInt16Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<UInt32Array>() {
-        a.value(index) as i128
-    } else {
-        // The last arm is `u64` and the fallthrough is unreachable: `membership_column` refuses any
-        // other element type before a row is read.
-        any.downcast_ref::<UInt64Array>()?.value(index) as i128
-    };
-    tessera_types::layer::integer_key(integer)
 }
 
 /// Read one column named for a layer, at the shapes that layer may carry.
@@ -146,13 +94,14 @@ pub(super) fn membership_column<'a>(
     }
 
     let meaning = declaration.list_meaning();
-    let cells = match column.data_type() {
-        DataType::List(_) => KeyCells::Variable(
-            column
+    let (cells, values): (KeyCells<'a>, &'a dyn Array) = match column.data_type() {
+        DataType::List(_) => {
+            let list = column
                 .as_any()
                 .downcast_ref::<ListArray>()
-                .expect("a List column downcasts to a ListArray"),
-        ),
+                .expect("a List column downcasts to a ListArray");
+            (KeyCells::Variable(list), list.values().as_ref())
+        }
         DataType::FixedSizeList(_, size) => {
             match meaning {
                 tessera_types::layer::ListMeaning::Lineage => {
@@ -174,38 +123,26 @@ pub(super) fn membership_column<'a>(
                 }
                 _ => {}
             }
-            KeyCells::Fixed(
-                column
-                    .as_any()
-                    .downcast_ref::<FixedSizeListArray>()
-                    .expect("a FixedSizeList column downcasts to a FixedSizeListArray"),
-            )
+            let list = column
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .expect("a FixedSizeList column downcasts to a FixedSizeListArray");
+            (KeyCells::Fixed(list), list.values().as_ref())
         }
-        _ => KeyCells::Scalar(column.as_ref()),
+        _ => (KeyCells::Scalar, column.as_ref()),
     };
-    let element = cells.values().data_type().clone();
-    if !matches!(
-        element,
-        DataType::Utf8
-            | DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-    ) {
-        return Err(DecodeError(format!(
-            "{body_name}: column '{name}' names a layer and carries {element:?}; a member key is \
-             text or an integer — an integer key is read as its decimal spelling, so `3` and \
-             \"3\" name one artifact"
-        )));
-    }
+    let keys = KeyColumn::new(values).ok_or_else(|| {
+        DecodeError(format!(
+            "{body_name}: column '{name}' names a layer and carries {:?}; a member key is {KEY_TYPES}, \
+             an integer key being read as its decimal spelling, so `3` and \"3\" name one artifact",
+            values.data_type()
+        ))
+    })?;
     Ok(MembershipColumn {
         layer: name,
         meaning,
         cells,
+        keys,
     })
 }
 
@@ -259,11 +196,13 @@ impl MembershipTally {
         // **Each entry carries its own position**, so the edge below reads the child's level off
         // the entry rather than searching for its key — a lineage may legitimately name one key
         // twice, and a search would then charge the edge to the wrong level.
-        let values = column.cells.values();
         let keys: Vec<Option<(u32, String)>> = entries
             .enumerate()
             .map(|(position, index)| {
-                member_key_at(values, index).map(|key| (column.meaning.level_of(position), key))
+                column
+                    .keys
+                    .member_key_at(index)
+                    .map(|key| (column.meaning.level_of(position), key))
             })
             .collect();
         for (level, key) in keys.iter().flatten() {
