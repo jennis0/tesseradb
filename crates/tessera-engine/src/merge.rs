@@ -299,8 +299,9 @@ fn locator_path(partition: &str, view: &str, seg_id: &str) -> String {
     )
 }
 
-/// Where `needle` sits in `haystack` as a contiguous run of equal keys, in order.
-fn contiguous<'a, T, K: PartialEq + 'a>(
+/// Where `needle` sits in `haystack` as a contiguous run of equal keys, in order, or `None` if
+/// it does not or is empty.
+pub(crate) fn contiguous<'a, T, K: PartialEq + 'a>(
     haystack: &'a [T],
     needle: &[K],
     key: impl Fn(&'a T) -> &'a K,
