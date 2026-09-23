@@ -35,7 +35,7 @@ from .publication import Publication
 from .split import (
     build_bundle,
     declared_layers,
-    ranks_file,
+    ranks_for,
     split_entities,
     state_extent,
     write_base_inputs,
@@ -449,7 +449,11 @@ class Cycle:
             return
         try:
             self.read_views()
-            ranks = json.loads(ranks_file(self.rung).read_text())
+            if self.args.ranks:
+                ranks_path = Path(self.args.ranks)
+            else:
+                ranks_path, self.result["ranks"] = ranks_for(self.rung, self.work)
+            ranks = json.loads(ranks_path.read_text())
             self.open_session(served, ranks)
 
             control = self.control_for(served, self.anchor)

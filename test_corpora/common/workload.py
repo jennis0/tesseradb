@@ -36,7 +36,7 @@ except ModuleNotFoundError:  # 3.10 on this box
 
 from . import serve_battery
 from .deployment import minted_credentials, read_env_file
-from .ingest_cycle import build_bundle, ranks_file
+from .ingest_cycle import build_bundle, ranks_for
 from .ingest_cycle import main as ingest_cycle_main
 from .paths import ladder
 from .timing import Steps
@@ -104,7 +104,9 @@ def cargo_release_binary() -> Path:
     return CHECKOUT / "target" / "release" / "tessera"
 
 
-def battery_argv(args, rung_dir: Path, bundle: Path, work: Path, binary: Path) -> list[str]:
+def battery_argv(
+    args, rung_dir: Path, bundle: Path, work: Path, binary: Path, ranks: Path
+) -> list[str]:
     argv = [
         "--boot-rung", str(rung_dir),
         "--boot-bundle", str(bundle),
@@ -112,7 +114,7 @@ def battery_argv(args, rung_dir: Path, bundle: Path, work: Path, binary: Path) -
         "--boot-binary", str(binary),
         "--boot-port0", str(args.port0),
         "--cap-bytes", str(args.cap_bytes),
-        "--ranks", str(ranks_file(rung_dir)),
+        "--ranks", str(ranks),
         "--out", str(work / "serve.json"),
     ]
     column = text_column(rung_dir)
@@ -127,12 +129,15 @@ def battery_argv(args, rung_dir: Path, bundle: Path, work: Path, binary: Path) -
     return argv
 
 
-def cycle_argv(args, rung_dir: Path, bundle: Path, work: Path, binary: Path) -> list[str]:
+def cycle_argv(
+    args, rung_dir: Path, bundle: Path, work: Path, binary: Path, ranks: Path
+) -> list[str]:
     return [
         "--rung-dir", str(rung_dir),
         "--work", str(work / "cycle"),
         "--binary", str(binary),
         "--out", str(work / "cycle.json"),
+        "--ranks", str(ranks),
         "--all-in-bundle", str(bundle),
         "--write-cycle",
         "--state-extent",
@@ -368,6 +373,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     result["binary"] = str(binary)
     print(f"{binary} at {result['commit'][:12]}{' (dirty tree)' if result['dirty'] else ''}")
 
+    ranks, result["ranks"] = ranks_for(rung_dir, work)
+    if result["ranks"]["derived"]:
+        print(f"{args.rung} has no ranks file; derived {ranks} from {result['ranks']['fields']}")
+
     with steps.step("check"):
         result["check"] = run([binary, "check"], rung_dir, dict(os.environ))
     if result["check"]["returncode"] != 0:
@@ -394,7 +403,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         with steps.step("serve"):
             try:
-                serve_battery.main(battery_argv(args, rung_dir, bundle, work, binary))
+                serve_battery.main(battery_argv(args, rung_dir, bundle, work, binary, ranks))
             except Exception as e:  # noqa: BLE001 — a battery that could not run is a failure, not a stop
                 failures.append(f"the serve battery raised {type(e).__name__}: {e}")
         serve_out = work / "serve.json"
@@ -402,7 +411,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         with steps.step("ingest"):
             try:
-                ingest_cycle_main(cycle_argv(args, rung_dir, bundle, work, binary))
+                ingest_cycle_main(cycle_argv(args, rung_dir, bundle, work, binary, ranks))
             except Exception as e:  # noqa: BLE001 — as for the battery
                 failures.append(f"the ingest cycle raised {type(e).__name__}: {e}")
         cycle_out = work / "cycle.json"

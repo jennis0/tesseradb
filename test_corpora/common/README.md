@@ -34,6 +34,11 @@ the same rung and shape. `--quick` is three zooms, three deciles, ten samples a 
 hold-out — about seven minutes on arXiv; full mode is every driver's own default and a 10%
 hold-out.
 
+The principal ladder is built from the rung's `<axis>-ranks.json`. A rung without one has it
+derived into `<work>/<rung>/derived-ranks.json`: one pair per (entity, label) of each view's
+`point_visibility` field across every view's points, a missing label counted under the view's
+default. The result's `ranks` says which it was.
+
 Each run writes `$TESSERA_LADDER/<rung>/workload-results/<timestamp>-<commit>.json`, holding both
 driver results whole. These are not committed: `data/` is git-ignored and they are one box's
 figures.
@@ -79,6 +84,7 @@ Holds both driver results whole, under `serve` and `ingest`, beside:
 | `commit`, `dirty` | the checkout's git commit, and whether it had uncommitted changes |
 | `binary` | the path to the `tessera` binary measured |
 | `minted_credentials` | credential and identity-key environment variables minted for this run, sorted |
+| `ranks` | the ranks file the ladder was built from; `derived` true, with the `fields` and the number of `terms`, where the rung had none |
 | `steps` | wall time per top-level step: `binary`, `check`, `build`, `verify`, `serve`, `ingest` |
 | `check`, `build`, `verify` | each step's `returncode`, `stdout_tail`, `stderr_tail`; `build` also carries §1's fields |
 | `failures` | plain sentences: a refused check, a failed verify, an OOM kill, a dead server, a failed request, an unequal census or a rejected batch |
