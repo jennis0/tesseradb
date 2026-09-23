@@ -3254,67 +3254,73 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
     }
 }
 
-/// **A JSON body of the wrong shape is refused with the error envelope and `contract` on every
-/// control route that takes one.**
+/// **A JSON body of the wrong shape, or a valid one carrying a field the route does not define, is
+/// refused with the error envelope and `contract` on every control route that takes one.** The
+/// refused arm leaves its site unarmed: a suppression afterwards is acknowledged and never reaches
+/// the site.
 #[tokio::test]
 async fn a_body_of_the_wrong_shape_is_a_contract_refusal_on_every_json_control_route() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let (server, _faults) = serve_with_faults(&tmp).await;
 
+    let wrong_shape = serde_json::json!({ "unexpected": 1 });
+    let unseen = base64::engine::general_purpose::STANDARD.encode(b"never-ingested");
     let routes = [
-        ("PUT", "/control/layers"),
-        ("PUT", "/control/attributes"),
-        ("PUT", "/control/vocabularies/genre"),
-        ("PATCH", "/control/vocabularies/genre/values"),
-        ("PUT", "/control/view_groups/quarter"),
-        ("PUT", "/control/views/plain"),
-        ("PUT", "/control/views/quarter/2026-Q3"),
-        ("POST", "/control/changes"),
-        ("POST", "/control/faults/arm"),
+        ("PUT", "/control/layers", wrong_shape.clone()),
+        ("PUT", "/control/attributes", wrong_shape.clone()),
+        ("PUT", "/control/vocabularies/genre", wrong_shape.clone()),
+        ("PATCH", "/control/vocabularies/genre/values", wrong_shape.clone()),
+        ("PUT", "/control/view_groups/quarter", wrong_shape.clone()),
+        ("PUT", "/control/views/plain", wrong_shape.clone()),
+        ("PUT", "/control/views/quarter/2026-Q3", wrong_shape.clone()),
+        ("POST", "/control/changes", wrong_shape.clone()),
+        ("POST", "/control/faults/arm", wrong_shape),
+        (
+            "POST",
+            "/control/changes",
+            serde_json::json!([{ "external_id": unseen, "op": "suppress", "unknown_field": 1 }]),
+        ),
+        (
+            "POST",
+            "/control/faults/arm",
+            serde_json::json!({ "site": "after_fsync", "unknown_field": 1 }),
+        ),
     ];
-    for (method, path) in routes {
+    for (method, path, body) in routes {
         let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
         let resp = server
             .client
             .request(method.clone(), server.control_url(path))
             .bearer_auth(OPERATOR_CREDENTIAL)
-            .json(&serde_json::json!({ "unexpected": 1 }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(refused(resp, 422).await, "contract", "{method} {path}");
-    }
-}
-
-/// A body the route accepts, plus one field it does not define, is refused before anything
-/// is resolved or armed.
-#[tokio::test]
-async fn an_unknown_field_is_a_contract_refusal_on_the_changes_and_fault_routes() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let unseen = base64::engine::general_purpose::STANDARD.encode(b"never-ingested");
-    let bodies = [
-        (
-            "/control/changes",
-            serde_json::json!([{ "external_id": unseen, "op": "suppress", "unknown_field": 1 }]),
-        ),
-        (
-            "/control/faults/arm",
-            serde_json::json!({ "site": "after_fsync", "unknown_field": 1 }),
-        ),
-    ];
-    for (path, body) in bodies {
-        let resp = server
-            .client
-            .post(server.control_url(path))
-            .bearer_auth(OPERATOR_CREDENTIAL)
             .json(&body)
             .send()
             .await
             .unwrap();
-        assert_eq!(refused(resp, 422).await, "contract", "POST {path}");
+        assert_eq!(refused(resp, 422).await, "contract", "{method} {path} {body}");
     }
+
+    // An armed `after_fsync` would park this suppression, so the request would time out.
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .timeout(std::time::Duration::from_secs(30))
+        .json(&serde_json::json!([{ "external_id": member(9), "op": "suppress" }]))
+        .send()
+        .await
+        .expect("the suppression is acknowledged, not parked at a site the refused arm armed");
+    assert_eq!(resp.status(), 200);
+    let arrivals: serde_json::Value = server
+        .client
+        .get(server.control_url("/control/faults/arrivals?site=after_fsync"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(arrivals["arrivals"], 0, "after_fsync is unarmed: {arrivals}");
 }
 
 /// **No request body is buffered on behalf of an unauthenticated caller** — the first and largest of

@@ -61,6 +61,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// header (the same JSON in both). The server always answers from live geometry; the stamp only
 /// sets the response's `stale` flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PinDto {
     prefix: String,
     segments_version: u64,

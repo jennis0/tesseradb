@@ -1345,21 +1345,9 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     );
 }
 
-/// Server-level twin of
-/// `tessera-engine`'s `viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles`
-/// (fix-wave minor: the headline test above, like its engine-level counterpart, never exercises
-/// `tile_result`'s `visible == 0 -> Ok(None)` empty-tile skip path). Same trick, no new fixture
-/// data: this file's fixture scatter is `(e*37, e*53) % 1000`, a bijection of `e % 1000` onto the
-/// 1000×1000 residue lattice, so `N_ITEMS = 1_000` items occupy up to 1,000 distinct locations
-/// spread across the full extent -- dense enough at `zoom = 3` (64 candidate tiles) to leave almost
-/// every tile non-empty, but at `zoom = 8` (up to 65,536 candidate tiles) sparse enough that most
-/// candidate tiles are genuinely empty while a real minority are not.
-///
-/// Same arrangement as the headline test above: each server's `Engine` has its
-/// threshold forced to 0 (`Engine::set_serial_fallback_max_rows_for_test`, `bench-timing`-gated)
-/// before being handed to `spawn_server_from_engine`, so both genuinely take `pool.install`. The
-/// occupied/empty tile mix this test is actually for (still 1,000 distinct locations, more items
-/// stacked on each) is unaffected — see the doc above.
+/// The byte-identity claim above, on the path that skips empty tiles. The fixture's 51,000 items
+/// sit on 1,000 locations, so at zoom 8 (65,536 candidate tiles) most tiles are empty and the
+/// occupied minority each hold more than `k`. Both engines take the parallel branch, as above.
 #[tokio::test]
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles(
 ) {
@@ -1476,6 +1464,14 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
     // any 429 here would be the single-flight builder's and not the gate's.
     let token = token_for(&server, &["0"]).await;
     server.state.engine.hold_next_projection_build_for_test();
+    // Released on drop, so a failed wait still frees the blocking thread the build holds.
+    struct ReleaseOnDrop(std::sync::Arc<tessera_server::state::AppState>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.engine.release_projection_build_for_test();
+        }
+    }
+    let held = ReleaseOnDrop(std::sync::Arc::clone(&server.state));
 
     const RACERS: u64 = 8;
     let mut racers = Vec::new();
@@ -1516,7 +1512,7 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
         },
     )
     .await;
-    server.state.engine.release_projection_build_for_test();
+    drop(held);
 
     for racer in racers {
         let (status, body) = racer.await.unwrap();
@@ -1778,10 +1774,7 @@ fn dechunk(body: &[u8]) -> (Vec<u8>, bool) {
 /// body channel. Measured on Linux with the default `tcp_wmem`: 2.8 MB of the 3.5 MB response is
 /// held there once the reader stops, and the rest parks the producer until the stall budget
 /// fires. The response is zoom 6 with `k` 200; its size is tiles × k, so more items than fill
-/// every occupied tile to `k` would not widen that margin. On 2026-08-16 this test failed on a host where the
-/// same binary had passed the same day; a code regression was ruled out by bisection and the
-/// kernel's socket buffers by a larger response failing identically against a fixed buffer
-/// ceiling, which left the client's buffering, and the raw reader removes it.
+/// every occupied tile to `k` would not widen that margin.
 #[tokio::test]
 async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero() {
     use tokio::io::AsyncReadExt as _;

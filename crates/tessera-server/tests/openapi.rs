@@ -1263,7 +1263,10 @@ async fn every_viewer_route_requires_a_session_token() {
                 if kind != Malformed::No {
                     let resp =
                         send_viewer_probe(&f.server, &method, path, kind, Some(token)).await;
-                    if matches!(kind, Malformed::Shape | Malformed::UnknownField) {
+                    if matches!(
+                        kind,
+                        Malformed::Shape | Malformed::UnknownField | Malformed::UnknownPinField
+                    ) {
                         assert_refusal(&doc, resp, with_token, "contract").await;
                     } else {
                         assert_eq!(
@@ -1310,6 +1313,8 @@ enum Malformed {
     Shape,
     /// A request the route accepts, plus one field the description does not name.
     UnknownField,
+    /// A request the route accepts, with a `pin` that carries one field `Pin` does not name.
+    UnknownPinField,
     /// `{tessera_id}` that is not a number.
     Identifier,
 }
@@ -1333,6 +1338,9 @@ fn malformed_viewer_requests(method: &reqwest::Method, path: &str) -> Vec<(Malfo
             (Malformed::Shape, 422),
             (Malformed::UnknownField, 422),
         ]);
+        if matches!(path, "/v1/viewport" | "/v1/items/{tessera_id}") {
+            kinds.push((Malformed::UnknownPinField, 422));
+        }
     }
     if path.contains("{tessera_id}") {
         kinds.push((Malformed::Identifier, 400));
@@ -1390,6 +1398,11 @@ fn with_body(
         Malformed::UnknownField => {
             let mut body = body.clone();
             body["unknown_field"] = json!(1);
+            req.json(&body)
+        }
+        Malformed::UnknownPinField => {
+            let mut body = body.clone();
+            body["pin"] = json!({ "prefix": "p", "segments_version": 0, "unknown_field": 1 });
             req.json(&body)
         }
         _ => req.json(body),
