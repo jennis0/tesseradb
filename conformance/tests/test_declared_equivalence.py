@@ -148,11 +148,11 @@ class EntityAttributes(Case):
         )
 
     def built(self, work) -> Deployment:
-        blocks = [fx.world_view_toml(), fx.fx_column().toml(), *(c.toml() for c in self.columns)]
+        blocks = [fx.plain_view_toml(), fx.fx_column().toml(), *(c.toml() for c in self.columns)]
         return Deployment(work, Corpus(blocks, _world(ALL, self.columns), [DEPT, GRADE]))
 
     def live(self, work) -> Deployment:
-        blocks = [fx.world_view_toml(), fx.fx_column().toml()]
+        blocks = [fx.plain_view_toml(), fx.fx_column().toml()]
         d = Deployment(work, Corpus(blocks, _world(BUILT), [DEPT, GRADE]))
         for column in self.columns:
             try:
@@ -219,13 +219,13 @@ class LiveVocabularies(Case):
     )
 
     def built(self, work) -> Deployment:
-        blocks = [fx.world_view_toml(), fx.fx_column().toml()]
+        blocks = [fx.plain_view_toml(), fx.fx_column().toml()]
         blocks += [c.toml() for c in VOCABULARY_COLUMNS]
         corpus = Corpus(blocks, _world(ALL, VOCABULARY_COLUMNS), [MOOD, TOPIC])
         return Deployment(work, corpus)
 
     def live(self, work) -> Deployment:
-        blocks = [fx.world_view_toml(), fx.fx_column().toml()]
+        blocks = [fx.plain_view_toml(), fx.fx_column().toml()]
         d = Deployment(work, Corpus(blocks, _world(BUILT)))
         first = MOOD.payload()
         first["values"] = first["values"][:3]
@@ -252,15 +252,6 @@ ATLAS_EXTENT = (-50.0, 50.0, -50.0, 50.0)
 ATLAS_MEMBERS = [i for i in ALL if i % 3 != 0]
 
 
-def _plain_view_toml(name: str, extent) -> str:
-    x0, x1, y0, y1 = extent
-    return (
-        f'[[view]]\nname = "{name}"\nextent = {{ x = [{x0}, {x1}], y = [{y0}, {y1}] }}\n'
-        f'source = "{name}"\nvisibility = "public"\n'
-        'point_visibility = { field = "access", default = "public" }\n'
-    )
-
-
 def _extent_body(extent) -> dict:
     x0, x1, y0, y1 = extent
     return {"x": [x0, x1], "y": [y0, y1]}
@@ -279,13 +270,13 @@ class PlainView(Case):
     )
 
     def built(self, work) -> Deployment:
-        blocks = [fx.world_view_toml(), _plain_view_toml(ATLAS, ATLAS_EXTENT),
+        blocks = [fx.plain_view_toml(), fx.plain_view_toml(ATLAS, ATLAS_EXTENT),
                   fx.fx_column().toml()]
         points = {**_world(ALL), ATLAS: (ATLAS_MEMBERS, [], 7, ATLAS_EXTENT)}
         return Deployment(work, Corpus(blocks, points))
 
     def live(self, work) -> Deployment:
-        d = Deployment(work, Corpus([fx.world_view_toml(), fx.fx_column().toml()], _world(ALL)))
+        d = Deployment(work, Corpus([fx.plain_view_toml(), fx.fx_column().toml()], _world(ALL)))
         body = {
             "projection": "none",
             "extent": _extent_body(ATLAS_EXTENT),
@@ -367,7 +358,7 @@ class GroupScoped(Case):
         )
 
     def built(self, work) -> Deployment:
-        blocks = [fx.world_view_toml(), _group_toml(), fx.fx_column().toml()]
+        blocks = [fx.plain_view_toml(), _group_toml(), fx.fx_column().toml()]
         blocks += [c.toml() for c in _scoped("Q1")]
         points = _world(ALL)
         for key, seed in KEYS.items():
@@ -376,7 +367,7 @@ class GroupScoped(Case):
 
     def live(self, work) -> Deployment:
         d = Deployment(
-            work, Corpus([fx.world_view_toml(), fx.fx_column().toml()], _world(ALL), [MOOD_Q])
+            work, Corpus([fx.plain_view_toml(), fx.fx_column().toml()], _world(ALL), [MOOD_Q])
         )
         group = {
             "projection": "none",
@@ -529,11 +520,11 @@ class Layers(Case):
             "strict_roster": pa.table({"key": pa.array(list(STRICT_MEMBERS), pa.string())}),
             "strict_members": _members_table(STRICT_MEMBERS),
         }
-        blocks = [fx.world_view_toml(), fx.fx_column().toml(), LAYERS_TOML]
+        blocks = [fx.plain_view_toml(), fx.fx_column().toml(), LAYERS_TOML]
         return Deployment(work, Corpus(blocks, _world(ALL), extra=extra))
 
     def live(self, work) -> Deployment:
-        d = Deployment(work, Corpus([fx.world_view_toml(), fx.fx_column().toml()], _world(ALL)))
+        d = Deployment(work, Corpus([fx.plain_view_toml(), fx.fx_column().toml()], _world(ALL)))
         topics = _layer_body(
             "topics", "Topics", "nested", None,
             {
@@ -782,10 +773,15 @@ class Walk:
             raise RuntimeError(f"stage {stage} asked for after {self.stage}")
         while self.stage != stage:
             nxt = STAGES[order(self.stage) + 1]
-            if nxt in ("restart", "fold-restart"):
-                self.live.restart()
-            else:
-                self.live.fold()
+            try:
+                if nxt in ("restart", "fold-restart"):
+                    self.live.restart()
+                else:
+                    self.live.fold()
+            except Exception as failed:
+                self.broken = failed
+                Deployment.stop_all()
+                raise
             self.stage = nxt
         return self.live
 

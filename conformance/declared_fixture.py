@@ -151,10 +151,6 @@ class Column:
             body["scope"] = {"group": self.scope}
         return body
 
-    def wire(self, i: int):
-        """The value as a JSON row carries it."""
-        return self.value(i)
-
 
 @dataclass(frozen=True)
 class Vocabulary:
@@ -254,11 +250,12 @@ class Corpus:
         return schema
 
 
-def world_view_toml() -> str:
-    x0, x1, y0, y1 = WORLD_EXTENT
+def plain_view_toml(name: str = WORLD, extent=WORLD_EXTENT) -> str:
+    """A public plain view reading its points from the source of its own name."""
+    x0, x1, y0, y1 = extent
     return (
-        f'[[view]]\nname = "{WORLD}"\nextent = {{ x = [{x0}, {x1}], y = [{y0}, {y1}] }}\n'
-        f'source = "{WORLD}"\nvisibility = "public"\n'
+        f'[[view]]\nname = "{name}"\nextent = {{ x = [{x0}, {x1}], y = [{y0}, {y1}] }}\n'
+        f'source = "{name}"\nvisibility = "public"\n'
         'point_visibility = { field = "access", default = "public" }\n'
     )
 
@@ -392,7 +389,7 @@ def point_rows(ids, columns: list[Column], seed: int = 0, extent=WORLD_EXTENT) -
         x, y = position(seed, i, extent)
         row = {"external_id": external_id(i), "x": x, "y": y, "access": [access_of(i)]}
         for column in columns:
-            row[column.name] = column.wire(i)
+            row[column.name] = column.value(i)
         out.append(row)
     return out
 
@@ -404,7 +401,7 @@ def value_rows(ids, columns: list[Column]) -> list[dict]:
     for i in ids:
         row = {"external_id": external_id(i)}
         for column in columns:
-            row[column.name] = column.wire(i)
+            row[column.name] = column.value(i)
         out.append(row)
     return out
 
@@ -791,7 +788,7 @@ __all__ = [
     "fx_column",
     "observe",
     "point_rows",
+    "plain_view_toml",
     "position",
     "value_rows",
-    "world_view_toml",
 ]
