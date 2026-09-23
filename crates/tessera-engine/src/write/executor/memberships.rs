@@ -111,7 +111,12 @@ pub(super) fn grouped_mints<'a>(
                 continue;
             }
             let (_, members) = wanted
-                .entry((join.layer.clone(), join.level, join.key.clone()))
+                .entry((
+                    join.layer.clone(),
+                    join.level,
+                    join.view.clone(),
+                    join.key.clone(),
+                ))
                 // The first source that named the key owns the mint.
                 .or_insert_with(|| (index, croaring::Bitmap::new()));
             for row in &join.rows {
@@ -156,16 +161,19 @@ pub(super) fn mint_plan<W>(
     Ok(Some((wanted, edges)))
 }
 
-/// What one commit is about to mint: `(layer, level, key)` to the source that first named it, and
-/// the entities joining it.
-pub(super) type MintPlan = std::collections::BTreeMap<(String, u32, String), (usize, croaring::Bitmap)>;
+/// An artifact a key names: `(layer, level, view, key)`, the view `None` on an entity-scoped layer.
+pub(super) type MintKey = (String, u32, Option<String>, String);
+
+/// What one commit is about to mint: each key to the source that first named it, and the entities
+/// joining it.
+pub(super) type MintPlan = std::collections::BTreeMap<MintKey, (usize, croaring::Bitmap)>;
 
 /// A key that acquired an artifact between its resolution and its preparation grows into it
 /// rather than minting a second one: writes the ordinals found back onto the memberships, so
 /// `growth_records` carries them as ordinary joins.
 pub(super) fn settle_resolved_ordinals(
     memberships: &mut [tessera_lifecycle::ResolvedMembership],
-    resolved: &std::collections::BTreeMap<(String, u32, String), u32>,
+    resolved: &std::collections::BTreeMap<MintKey, u32>,
 ) {
     if resolved.is_empty() {
         return;
@@ -174,7 +182,12 @@ pub(super) fn settle_resolved_ordinals(
         if join.ordinal.is_some() {
             continue;
         }
-        let at = (join.layer.clone(), join.level, join.key.clone());
+        let at = (
+            join.layer.clone(),
+            join.level,
+            join.view.clone(),
+            join.key.clone(),
+        );
         join.ordinal = resolved.get(&at).copied();
     }
 }
@@ -185,20 +198,28 @@ pub(super) struct PreparedMints {
     pub(super) records: Vec<WalRecord>,
     /// Keys that turned out already held, and the ordinal each resolved to; the caller grows into
     /// those instead of minting.
-    pub(super) resolved: std::collections::BTreeMap<(String, u32, String), u32>,
+    pub(super) resolved: std::collections::BTreeMap<MintKey, u32>,
     /// The keys this run created.
-    pub(super) minted: std::collections::BTreeSet<(String, u32, String)>,
+    pub(super) minted: std::collections::BTreeSet<MintKey>,
 }
+
+/// A borrowed [`MintKey`].
+type MintAt<'a> = (&'a str, u32, Option<&'a str>, &'a str);
 
 /// The parent each child in these edges is named under, refusing a child named under two. Keyed by
 /// the child's own level, since one key can legitimately sit at two levels with a different parent
 /// at each.
 pub(super) fn parent_of_each_child(
     edges: &[tessera_lifecycle::BatchEdge],
-) -> Result<std::collections::BTreeMap<(&str, u32, &str), &str>, String> {
-    let mut claimed: std::collections::BTreeMap<(&str, u32, &str), &str> = Default::default();
+) -> Result<std::collections::BTreeMap<MintAt<'_>, &str>, String> {
+    let mut claimed: std::collections::BTreeMap<MintAt<'_>, &str> = Default::default();
     for edge in edges {
-        let at = (edge.layer.as_str(), edge.level, edge.child.as_str());
+        let at = (
+            edge.layer.as_str(),
+            edge.level,
+            edge.view.as_deref(),
+            edge.child.as_str(),
+        );
         if let Some(first) = claimed.insert(at, edge.parent.as_str()) {
             if first != edge.parent {
                 return Err(format!(
@@ -235,10 +256,17 @@ impl Executor {
                 .iter()
                 .map(|join| {
                     registry
-                        .resolve_or_mint(&join.layer, join.level, &join.key, store)
+                        .resolve_or_mint(
+                            &join.layer,
+                            join.level,
+                            join.view.as_deref(),
+                            &join.key,
+                            store,
+                        )
                         .map(|ordinal| tessera_lifecycle::ResolvedMembership {
                             layer: join.layer.clone(),
                             level: join.level,
+                            view: join.view.clone(),
                             key: join.key.clone(),
                             ordinal,
                             rows: join.rows.clone(),
@@ -248,26 +276,26 @@ impl Executor {
                 .collect::<Result<_, String>>()?;
             // A child's level is asked precisely; a parent's is asked of the whole layer, since one
             // key can legitimately sit at two levels.
-            let minting: std::collections::BTreeSet<(&str, u32, &str)> = memberships
+            let minting: std::collections::BTreeSet<MintAt<'_>> = memberships
                 .iter()
                 .filter(|m| m.ordinal.is_none())
-                .map(|m| (m.layer.as_str(), m.level, m.key.as_str()))
+                .map(|m| (m.layer.as_str(), m.level, m.view.as_deref(), m.key.as_str()))
                 .collect();
-            let anywhere: std::collections::BTreeSet<(&str, &str)> = minting
+            let anywhere: std::collections::BTreeSet<(&str, Option<&str>, &str)> = minting
                 .iter()
-                .map(|(layer, _, key)| (*layer, *key))
+                .map(|(layer, _, view, key)| (*layer, *view, *key))
                 .collect();
 
             parent_of_each_child(&artifacts.edges)?;
 
             let mut settling = Vec::new();
             for edge in &artifacts.edges {
-                let layer = edge.layer.as_str();
+                let (layer, view) = (edge.layer.as_str(), edge.view.as_deref());
                 match registry.check_edge(
                     edge,
                     store,
-                    minting.contains(&(layer, edge.level, edge.child.as_str())),
-                    &|key| anywhere.contains(&(layer, key)),
+                    minting.contains(&(layer, edge.level, view, edge.child.as_str())),
+                    &|key| anywhere.contains(&(layer, view, key)),
                 ) {
                     Ok(tessera_lifecycle::EdgeCheck::Agrees) => {}
                     // Carried to the close: on the publication that creates the child, or as a
@@ -374,8 +402,8 @@ impl Executor {
         for entry in closed.iter_mut() {
             settle_resolved_ordinals(&mut entry.memberships, &resolved);
         }
-        for ((layer, level, key), (index, _)) in &wanted {
-            if minted.contains(&(layer.clone(), *level, key.clone())) {
+        for (at, (index, _)) in &wanted {
+            if minted.contains(at) {
                 minted_per_entry[*index] += 1;
             }
         }
@@ -394,36 +422,38 @@ impl Executor {
         self.live.with_publication_state(|registry, store, alloc| {
             let parents = parent_of_each_child(edges)?;
             // Re-resolved here, not trusted from admission, since a publication may land between.
-            let mut resolved: BTreeMap<(String, u32, String), u32> = BTreeMap::new();
-            let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> =
+            let mut resolved: BTreeMap<MintKey, u32> = BTreeMap::new();
+            // One publication per view, since a parent is resolved inside its child's view.
+            let mut to_mint: BTreeMap<(&str, u32, Option<&str>), Vec<(&str, &croaring::Bitmap)>> =
                 BTreeMap::new();
-            for ((layer, level, key), (_, members)) in wanted {
-                match store.ordinal_of_key(layer, *level, None, key) {
+            for (at, (_, members)) in wanted {
+                let (layer, level, view, key) = at;
+                match store.ordinal_of_key(layer, *level, view.as_deref(), key) {
                     Some(ordinal) => {
-                        resolved.insert((layer.clone(), *level, key.clone()), ordinal);
+                        resolved.insert(at.clone(), ordinal);
                     }
                     None => to_mint
-                        .entry((layer.as_str(), *level))
+                        .entry((layer.as_str(), *level, view.as_deref()))
                         .or_default()
                         .push((key.as_str(), members)),
                 }
             }
 
             // Ascending level, coarse first: a tiered chain's parent is fixed by the prior record.
-            let mut assigned: BTreeMap<(&str, u32, &str), u32> = BTreeMap::new();
+            let mut assigned: BTreeMap<MintAt<'_>, u32> = BTreeMap::new();
             let mut records = Vec::new();
-            for ((layer, level), keys) in &to_mint {
+            for ((layer, level, view), keys) in &to_mint {
                 let incoming: Vec<tessera_lifecycle::IncomingArtifact> = keys
                     .iter()
                     .map(|(key, members)| tessera_lifecycle::IncomingArtifact {
                         key: Some((*key).to_string()),
-                        view: None,
+                        view: view.map(str::to_string),
                         members: (*members).clone(),
                         excluding: None,
                         contents: Vec::new(),
                         attached_to: None,
                         parent_keys: parents
-                            .get(&(*layer, *level, *key))
+                            .get(&(*layer, *level, *view, *key))
                             .map(|parent| vec![(*parent).to_string()])
                             .unwrap_or_default(),
                         shape: None,
@@ -431,7 +461,7 @@ impl Executor {
                     .collect();
                 let pending = |key: &str| {
                     let coarser = level.checked_sub(1)?;
-                    assigned.get(&(*layer, coarser, key)).map(|ordinal| {
+                    assigned.get(&(*layer, coarser, *view, key)).map(|ordinal| {
                         tessera_lifecycle::wal::ParentRef {
                             level: coarser,
                             ordinal: *ordinal,
@@ -447,7 +477,7 @@ impl Executor {
                 // Read back off the record, not recomputed.
                 for ((key, _), artifact) in keys.iter().zip(artifacts) {
                     debug_assert_eq!(artifact.key.as_deref(), Some(*key));
-                    assigned.insert((*layer, *level, key), artifact.ordinal);
+                    assigned.insert((*layer, *level, *view, key), artifact.ordinal);
                 }
                 records.push(record);
             }
@@ -482,14 +512,18 @@ impl Executor {
             }
             let mut fills = Vec::new();
             for edge in edges {
-                if assigned.contains_key(&(edge.layer.as_str(), edge.level, edge.child.as_str())) {
+                let view = edge.view.as_deref();
+                if assigned.contains_key(&(edge.layer.as_str(), edge.level, view, edge.child.as_str()))
+                {
                     continue;
                 }
                 let pending = |key: &str| {
                     assigned
                         .iter()
-                        .find(|((layer, _, held), _)| *layer == edge.layer && *held == key)
-                        .map(|((_, level, _), ordinal)| tessera_lifecycle::wal::ParentRef {
+                        .find(|((layer, _, in_view, held), _)| {
+                            *layer == edge.layer && *in_view == view && *held == key
+                        })
+                        .map(|((_, level, _, _), ordinal)| tessera_lifecycle::wal::ParentRef {
                             level: *level,
                             ordinal: *ordinal,
                         })
@@ -510,7 +544,14 @@ impl Executor {
 
             let minted = assigned
                 .keys()
-                .map(|(layer, level, key)| ((*layer).to_string(), *level, (*key).to_string()))
+                .map(|(layer, level, view, key)| {
+                    (
+                        (*layer).to_string(),
+                        *level,
+                        view.map(str::to_string),
+                        (*key).to_string(),
+                    )
+                })
                 .collect();
             Ok(PreparedMints {
                 records,

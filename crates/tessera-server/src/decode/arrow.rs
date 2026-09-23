@@ -231,6 +231,7 @@ fn check_columns<'b>(
     declared: &[DeclaredScalar],
     scoped: &[ScopedScalar],
     layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
+    view_in: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<MembershipColumn<'b>>, DecodeError> {
     let mut declarations = Vec::new();
     for field in batch.schema_ref().fields() {
@@ -261,7 +262,13 @@ fn check_columns<'b>(
         let column = batch
             .column_by_name(name)
             .expect("the column was found in this batch's own schema");
-        memberships.push(membership_column(body_name, name, column, declaration)?);
+        memberships.push(membership_column(
+            body_name,
+            name,
+            column,
+            declaration,
+            view_in,
+        )?);
     }
     for d in declared {
         let Some(col) = batch.column_by_name(&d.name) else {
@@ -415,6 +422,8 @@ pub(crate) fn parse_ingest_batch(
     scoped: &[ScopedScalar],
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
+    // The key of the batch's view in a group, `None` where the view is none of the group's.
+    view_in: &dyn Fn(&str) -> Option<String>,
 ) -> Result<ParsedBatch, DecodeError> {
     let body_name = "ingest body";
     let (x_name, y_name) = coordinate_columns(projection);
@@ -484,7 +493,8 @@ pub(crate) fn parse_ingest_batch(
         clipped += project_columns(projection, &mut x, &mut y)?;
         let access = labels_col(&batch, "access")?;
 
-        let memberships = check_columns(body_name, &batch, &fixed, declared, scoped, layer_of)?;
+        let memberships =
+            check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
 
         for i in 0..batch.num_rows() {
             // The artifacts this row names, read before its scalars so a malformed membership
@@ -589,6 +599,8 @@ pub(crate) fn parse_values_batch(
     scoped: &[ScopedScalar],
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
+    // As on [`parse_ingest_batch`]; a batch that names no view is in no group.
+    view_in: &dyn Fn(&str) -> Option<String>,
 ) -> Result<ParsedValues, DecodeError> {
     let body_name = "values body";
     let fixed = [Fixed::ExternalId, Fixed::TesseraId, Fixed::IdSet];
@@ -635,7 +647,8 @@ pub(crate) fn parse_values_batch(
             ));
         }
 
-        let memberships = check_columns(body_name, &batch, &fixed, declared, scoped, layer_of)?;
+        let memberships =
+            check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
 
         let ext = optional_binary_col(body_name, &batch, "external_id")?;
         let tessera = match batch.column_by_name("tessera_id") {
@@ -1085,6 +1098,7 @@ mod category_wire {
             &[],
             &vocabularies(),
             &no_layers,
+            &|_| None,
         )
         .map(|parsed| parsed.items)
     }
@@ -1172,6 +1186,7 @@ mod category_wire {
             &[],
             &vocabularies_of(VocabularyKind::Discovered),
             &no_layers,
+            &|_| None,
         )
         .expect("a discovered vocabulary accepts a key it has not seen")
         .items;
@@ -1194,6 +1209,7 @@ mod category_wire {
             &[],
             &vocabularies_of(VocabularyKind::Discovered),
             &no_layers,
+            &|_| None,
         )
         .expect("a bound key is bound whatever the kind")
         .items;

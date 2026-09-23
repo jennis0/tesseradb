@@ -426,7 +426,11 @@ impl LayerPlan {
             std::collections::btree_map::Entry::Occupied(e) => *e.get(),
             std::collections::btree_map::Entry::Vacant(e) => {
                 e.insert(next);
-                self.bodies.push(PlannedArtifact::default());
+                // A key minted by a member row is in the view its row named.
+                self.bodies.push(PlannedArtifact {
+                    view_key: address.3.clone(),
+                    ..PlannedArtifact::default()
+                });
                 self.addresses.push(address);
                 next
             }

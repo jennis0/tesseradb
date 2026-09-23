@@ -2110,7 +2110,7 @@ impl LayerRegistry {
         let mut batch_edges = BTreeMap::new();
         let mut withdrawn = Vec::new();
         for (index, join) in incoming.iter().enumerate() {
-            let ordinal = self.resolve_growth_key(layer_name, level, &join.key, store)?;
+            let ordinal = self.resolve_growth_key(layer_name, level, None, &join.key, store)?;
             if let Some(rank) = join.rank {
                 if !join.parts.is_empty() {
                     return Err(RegistryError::SetBesidePart {
@@ -2215,10 +2215,11 @@ impl LayerRegistry {
         &self,
         layer_name: &str,
         level: u32,
+        view: Option<&str>,
         key: &str,
         store: &ArtifactStore,
     ) -> Result<Option<u32>, RegistryError> {
-        match self.resolve_growth_key(layer_name, level, key, store) {
+        match self.resolve_growth_key(layer_name, level, view, key, store) {
             Ok(ordinal) => Ok(Some(ordinal)),
             Err(RegistryError::NoSuchArtifact { layer, level, key }) => {
                 let declaration = &self
@@ -2274,10 +2275,14 @@ impl LayerRegistry {
     /// [`resolve_or_mint`], where the alternative reading would mint).
     ///
     /// [`resolve_or_mint`]: LayerRegistry::resolve_or_mint
+    ///
+    /// `view` is the key of the view the artifact is in, required on a group-scoped layer and
+    /// refused on an entity-scoped one. The growth route names none.
     pub fn resolve_growth_key(
         &self,
         layer_name: &str,
         level: u32,
+        view: Option<&str>,
         key: &str,
         store: &ArtifactStore,
     ) -> Result<u32, RegistryError> {
@@ -2296,13 +2301,9 @@ impl LayerRegistry {
                 level,
             });
         }
-        // **This route carries no view, so it addresses no group-scoped layer** (`ingest.md`
-        // §1.5): a key there names one artifact per view of the group, and resolving it under
-        // `None` would either miss every one of them or, worse, pick one. Refused where it is
-        // asked, naming what the caller has to use instead.
-        scoped_view(layer_name, &layer.declaration.scope, Some(key), None)?;
+        let view = scoped_view(layer_name, &layer.declaration.scope, Some(key), view)?;
         store
-            .ordinal_of_key(layer_name, level, None, key)
+            .ordinal_of_key(layer_name, level, view, key)
             .ok_or_else(|| RegistryError::NoSuchArtifact {
                 layer: layer_name.to_string(),
                 level,
@@ -2353,17 +2354,18 @@ impl LayerRegistry {
         let crate::command::BatchEdge {
             layer,
             level,
+            view,
             child,
             parent,
         } = edge;
-        let (layer, level) = (layer.as_str(), *level);
+        let (layer, level, view) = (layer.as_str(), *level, view.as_deref());
         if child_mints {
             return Ok(EdgeCheck::Mints);
         }
         if !self.layers.contains_key(layer) {
             return Err(RegistryError::NoSuchLayer(layer.to_string()));
         }
-        let ordinal = self.resolve_growth_key(layer, level, child, store)?;
+        let ordinal = self.resolve_growth_key(layer, level, view, child, store)?;
         let held: Vec<crate::wal::ParentRef> = store
             .get(layer, level, ordinal)
             .map(|r| r.parents.clone())
@@ -2386,7 +2388,7 @@ impl LayerRegistry {
             };
         }
         let claimed =
-            self.parent_ref(layer, level, None, Some(child), parent, store, &no_pending)?;
+            self.parent_ref(layer, level, view, Some(child), parent, store, &no_pending)?;
         if held.contains(&claimed) {
             return Ok(EdgeCheck::Agrees);
         }
@@ -2413,8 +2415,8 @@ impl LayerRegistry {
         pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
         window_edges: &mut BTreeMap<crate::wal::ParentRef, Vec<crate::wal::ParentRef>>,
     ) -> Result<Option<WalRecord>, RegistryError> {
-        let (layer, level) = (edge.layer.as_str(), edge.level);
-        let ordinal = self.resolve_growth_key(layer, level, &edge.child, store)?;
+        let (layer, level, view) = (edge.layer.as_str(), edge.level, edge.view.as_deref());
+        let ordinal = self.resolve_growth_key(layer, level, view, &edge.child, store)?;
         let parts = crate::membership::FixedParts {
             parent_keys: vec![edge.parent.clone()],
             ..Default::default()
@@ -2424,7 +2426,7 @@ impl LayerRegistry {
                 layer,
                 level,
                 ordinal,
-                None,
+                view,
                 &edge.child,
                 &parts,
                 store,
@@ -4458,10 +4460,40 @@ mod tests {
         let store = ArtifactStore::default();
         register(&mut reg, &mut alloc, scoped("clusters/q", "quarter")).unwrap();
         let refused = reg
-            .resolve_growth_key("clusters/q", 0, "c1", &store)
+            .resolve_growth_key("clusters/q", 0, None, "c1", &store)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::ViewIdentity { .. }),
+            "{refused:?}"
+        );
+    }
+
+    /// A member key on a group-scoped layer resolves inside the view it names, and on an open
+    /// layer a key that view does not hold is minted there, whatever another view holds.
+    #[test]
+    fn a_member_key_resolves_in_its_own_view_on_a_group_scoped_layer() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let mut d = scoped("clusters/q", "quarter");
+        d.value_set = tessera_types::layer::ValueSet::Open;
+        register(&mut reg, &mut alloc, d).unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/q",
+            &[in_view("c1", "q1", &[1])],
+        )
+        .unwrap();
+
+        let held = reg.resolve_or_mint("clusters/q", 0, Some("q1"), "c1", &store);
+        assert!(matches!(held, Ok(Some(_))), "{held:?}");
+        let minted = reg.resolve_or_mint("clusters/q", 0, Some("q2"), "c1", &store);
+        assert!(matches!(minted, Ok(None)), "{minted:?}");
+        let refused = reg.resolve_or_mint("clusters/q", 0, None, "c1", &store);
+        assert!(
+            matches!(refused, Err(RegistryError::ViewIdentity { .. })),
             "{refused:?}"
         );
     }

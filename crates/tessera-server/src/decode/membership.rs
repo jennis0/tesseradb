@@ -15,6 +15,8 @@ use super::DecodeError;
 /// running node had to be told about could not be checked against anything.
 pub(super) struct MembershipColumn<'a> {
     layer: &'a str,
+    /// The key of the view the column's artifacts are in, on a group-scoped layer.
+    view: Option<String>,
     meaning: tessera_types::layer::ListMeaning,
     cells: KeyCells<'a>,
     /// The column's keys, or a list's elements, read by the rule a build reads a member table by.
@@ -77,6 +79,7 @@ pub(super) fn membership_column<'a>(
     name: &'a str,
     column: &'a Arc<dyn Array>,
     declaration: &tessera_types::layer::LayerDeclaration,
+    view_in: &dyn Fn(&str) -> Option<String>,
 ) -> Result<MembershipColumn<'a>, DecodeError> {
     use arrow::array::{FixedSizeListArray, ListArray};
     use arrow::datatypes::DataType;
@@ -93,6 +96,17 @@ pub(super) fn membership_column<'a>(
         )));
     }
 
+    // A group-scoped layer's keys are a set per view, so the batch's view says which set.
+    let view = match declaration.scope.group() {
+        None => None,
+        Some(group) => Some(view_in(group).ok_or_else(|| {
+            DecodeError(format!(
+                "{body_name}: column '{name}' names a layer scoped to group '{group}', whose keys \
+                 are a set per view, and this batch names no view of it; name one in \
+                 x-tessera-view"
+            ))
+        })?),
+    };
     let meaning = declaration.list_meaning();
     let (cells, values): (KeyCells<'a>, &'a dyn Array) = match column.data_type() {
         DataType::List(_) => {
@@ -140,6 +154,7 @@ pub(super) fn membership_column<'a>(
     })?;
     Ok(MembershipColumn {
         layer: name,
+        view,
         meaning,
         cells,
         keys,
@@ -154,8 +169,8 @@ pub(super) fn membership_column<'a>(
 /// [`tessera_lifecycle::BatchMembership`].
 #[derive(Default)]
 pub(super) struct MembershipTally {
-    rows_of: std::collections::BTreeMap<(String, u32, String), Vec<u32>>,
-    edges: std::collections::BTreeSet<(String, u32, String, String)>,
+    rows_of: std::collections::BTreeMap<(String, u32, Option<String>, String), Vec<u32>>,
+    edges: std::collections::BTreeSet<(String, u32, Option<String>, String, String)>,
 }
 
 impl MembershipTally {
@@ -208,7 +223,12 @@ impl MembershipTally {
         for (level, key) in keys.iter().flatten() {
             let at = self
                 .rows_of
-                .entry((column.layer.to_string(), *level, key.clone()))
+                .entry((
+                    column.layer.to_string(),
+                    *level,
+                    column.view.clone(),
+                    key.clone(),
+                ))
                 .or_default();
             // A row naming one artifact twice — a lineage that repeats a key — joins it once.
             let index = (offset + row) as u32;
@@ -224,6 +244,7 @@ impl MembershipTally {
                 self.edges.insert((
                     column.layer.to_string(),
                     *level,
+                    column.view.clone(),
                     child.clone(),
                     parent.clone(),
                 ));
@@ -237,9 +258,10 @@ impl MembershipTally {
             memberships: self
                 .rows_of
                 .into_iter()
-                .map(|((layer, level, key), rows)| BatchMembership {
+                .map(|((layer, level, view, key), rows)| BatchMembership {
                     layer,
                     level,
+                    view,
                     key,
                     rows,
                 })
@@ -247,9 +269,10 @@ impl MembershipTally {
             edges: self
                 .edges
                 .into_iter()
-                .map(|(layer, level, child, parent)| BatchEdge {
+                .map(|(layer, level, view, child, parent)| BatchEdge {
                     layer,
                     level,
+                    view,
                     child,
                     parent,
                 })

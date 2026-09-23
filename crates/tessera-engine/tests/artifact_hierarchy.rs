@@ -1843,6 +1843,7 @@ fn ingest_edges(
                     .map(|key| tessera_lifecycle::BatchMembership {
                         layer: layer.to_string(),
                         level: 0,
+                        view: None,
                         key: key.to_string(),
                         rows: vec![0],
                     })
@@ -1852,6 +1853,7 @@ fn ingest_edges(
                     .map(|(child, parent)| tessera_lifecycle::BatchEdge {
                         layer: layer.to_string(),
                         level: 0,
+                        view: None,
                         child: child.to_string(),
                         parent: parent.to_string(),
                     })
@@ -2078,6 +2080,7 @@ fn ingest_levelled(
                     .map(|(level, key)| tessera_lifecycle::BatchMembership {
                         layer: layer.to_string(),
                         level: *level,
+                        view: None,
                         key: key.to_string(),
                         rows: vec![0],
                     })
@@ -2087,6 +2090,7 @@ fn ingest_levelled(
                     .map(|(level, child, parent)| tessera_lifecycle::BatchEdge {
                         layer: layer.to_string(),
                         level: *level,
+                        view: None,
                         child: child.to_string(),
                         parent: parent.to_string(),
                     })

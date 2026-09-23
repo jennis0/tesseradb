@@ -152,6 +152,9 @@ impl UnallocatedRow {
 pub struct BatchMembership {
     pub layer: String,
     pub level: u32,
+    /// The key of the view the artifact is in, on a group-scoped layer; `None` on an
+    /// entity-scoped one.
+    pub view: Option<String>,
     pub key: String,
     /// Indices into this batch's `rows`, ascending and without repeats.
     pub rows: Vec<u32>,
@@ -170,6 +173,8 @@ pub struct BatchEdge {
     /// The child's level; the parent sits at this level for a lineage and one coarser for a tiered
     /// containment, which is the resolution `LayerRegistry` already performs at publication.
     pub level: u32,
+    /// The view both ends are in, as on [`BatchMembership::view`].
+    pub view: Option<String>,
     pub child: String,
     pub parent: String,
 }

@@ -666,19 +666,21 @@ fn run_values(
     // view otherwise, on `/control/ingest`'s rule. It decides which flush pass writes the cells.
     let resolved = resolve_view(view, &meta)?;
     let resolved = resolved.id.clone();
-    // **The families this batch may name, and the header is half the answer** (`views.md` §5,
-    // decision 0116). The key is what addresses a scoped cell, so the check is
-    // `EngineMeta::owning_key` exactly as the ingest door's is — and the header is required
-    // beside it, because a batch that named no view has not said which key it is writing.
-    let scoped: Vec<ScopedScalar> = match view {
+    // **The families and group-scoped layers this batch may name, and the header is half the
+    // answer** (`views.md` §5, decision 0116). The key is what addresses a scoped cell or artifact,
+    // so the check is `EngineMeta::owning_key` exactly as the ingest door's is — and the header is
+    // required beside it, because a batch that named no view has not said which key it is writing.
+    let named = view.map(|_| resolved.as_str());
+    let scoped: Vec<ScopedScalar> = match named {
         None => Vec::new(),
-        Some(_) => meta
+        Some(resolved) => meta
             .scoped_scalars
             .iter()
-            .filter(|f| meta.owning_key(&resolved, &f.group).is_some())
+            .filter(|f| meta.owning_key(resolved, &f.group).is_some())
             .cloned()
             .collect(),
     };
+    let view_in = |group: &str| meta.owning_key(named?, group).map(str::to_string);
     let ParsedValues {
         columns,
         rows,
@@ -690,6 +692,7 @@ fn run_values(
         &scoped,
         &meta.vocabularies,
         &|name| state.engine.registered_layer(name).map(|l| l.declaration),
+        &view_in,
     )
     .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
 
@@ -946,6 +949,7 @@ fn run_ingest(
         &scoped,
         &meta.vocabularies,
         &|name| state.engine.registered_layer(name).map(|l| l.declaration),
+        &|group| meta.owning_key(&view, group).map(str::to_string),
     )
     .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
 
