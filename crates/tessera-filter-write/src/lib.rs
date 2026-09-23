@@ -280,13 +280,14 @@ pub(crate) fn merge_order(
 
 /// Stream the layers into one column in entity order, skipping `tombstones`.
 ///
-/// The layers' entity sets are disjoint but may interleave, so the merge walks every layer's runs
-/// of kept entities at once and takes the lowest next. A run is contiguous in entity space and in
-/// the layer's slots, so each is pushed as a borrowed slice of the layer's values.
+/// The layers' entity sets are disjoint but may interleave, so the merge takes the layer whose
+/// next run starts lowest and keeps taking its runs until another layer's next run is lower. A
+/// run is contiguous in entity space and in the layer's slots, so without a remap each is pushed
+/// as a borrowed slice of the layer's values.
 ///
 /// `presence` is the file the reader will address by, or `None` for a base column dense from
 /// zero. `remap` is the keyword family's `old ordinal -> new ordinal` table per layer; with it
-/// every value is rewritten, without it every value is borrowed unchanged.
+/// every value is rewritten into a buffer pushed a chunk at a time.
 pub(crate) fn write_merged(
     layers: &[&ValueColumn],
     order: &[(usize, Bitmap)],
@@ -302,40 +303,72 @@ pub(crate) fn write_merged(
     let mut writer = ValueColumnWriter::create(values_path, presence_path, kind)?;
     let keeps: Vec<Bitmap> = order.iter().map(|(_, p)| p.andnot(tombstones)).collect();
     let mut runs: Vec<Runs<'_>> = keeps.iter().map(Runs::new).collect();
-    let mut heads: Vec<Option<(u32, u32)>> = runs.iter_mut().map(Runs::next).collect();
-    // The window is a handful of layers, so a scan beats a heap.
-    while let Some((at, (start, last))) = heads
-        .iter()
+    // `(position in order, next run)` for every layer with runs left.
+    let mut live: Vec<(usize, (u32, u32))> = runs
+        .iter_mut()
         .enumerate()
-        .filter_map(|(i, head)| head.map(|run| (i, run)))
-        .min_by_key(|(_, (start, _))| *start)
-    {
+        .filter_map(|(at, r)| r.next().map(|run| (at, run)))
+        .collect();
+    let mut recoloured: Vec<u32> = Vec::new();
+    while !live.is_empty() {
+        // The window is a handful of layers, so a scan beats a heap.
+        let lowest = (0..live.len()).min_by_key(|&i| live[i].1 .0).expect("a live layer");
+        let bound = (0..live.len())
+            .filter(|&i| i != lowest)
+            .map(|i| live[i].1 .0)
+            .min()
+            .unwrap_or(u32::MAX);
+        let at = live[lowest].0;
         let (layer, layer_present) = &order[at];
         let codes = layers[*layer].codes();
-        let mut slot = (layer_present.rank(start) - 1) as usize;
-        let mut left = (last - start) as usize + 1;
-        while left > 0 {
-            let take = left.min(MERGE_CHUNK);
-            match remap {
-                None => writer.push(&slice_codes(codes, slot, take))?,
-                Some(tables) => writer.push(&recolour(codes, slot, take, &tables[*layer])?)?,
+        let mut next = Some(live[lowest].1);
+        while let Some((start, last)) = next.filter(|(start, _)| *start < bound) {
+            let slot = (layer_present.rank(start) - 1) as usize;
+            let len = (last - start) as usize + 1;
+            let mut done = 0;
+            while done < len {
+                let take = (len - done).min(MERGE_CHUNK - recoloured.len());
+                match remap {
+                    None => writer.push(&slice_codes(codes, slot + done, take))?,
+                    Some(tables) => {
+                        recolour(codes, slot + done, take, &tables[*layer], &mut recoloured)?;
+                        if recoloured.len() == MERGE_CHUNK {
+                            let chunk = std::mem::take(&mut recoloured);
+                            writer.push(&Codes::U32(ScalarBuffer::from(chunk)))?;
+                        }
+                    }
+                }
+                done += take;
             }
-            slot += take;
-            left -= take;
+            next = runs[at].next();
         }
-        heads[at] = runs[at].next();
+        match next {
+            Some(run) => live[lowest].1 = run,
+            None => {
+                live.swap_remove(lowest);
+            }
+        }
+    }
+    if !recoloured.is_empty() {
+        writer.push(&Codes::U32(ScalarBuffer::from(recoloured)))?;
     }
     writer.finish(presence)
 }
 
-/// `len` ordinals from `start`, each rewritten through this layer's remap.
+/// `len` ordinals from `start`, each rewritten through this layer's remap and appended to `out`.
 ///
 /// The one place in either pass where a merged value is **built** rather than borrowed, which is
-/// why the two refusals here are worth their cost per chunk. An ordinal past the end of the remap
-/// is a column paired with a dictionary that never coloured it; an ordinal mapping to
+/// why the two refusals here are worth their cost. An ordinal past the end of the remap is a
+/// column paired with a dictionary that never coloured it; an ordinal mapping to
 /// [`keyword::NO_KEY`] is an entity still reaching a key the rebuild found no survivor for. Both
 /// are contradictions, and both would otherwise be published as some other key.
-fn recolour(codes: &Codes, start: usize, len: usize, remap: &[u32]) -> io::Result<Codes> {
+fn recolour(
+    codes: &Codes,
+    start: usize,
+    len: usize,
+    remap: &[u32],
+    out: &mut Vec<u32>,
+) -> io::Result<()> {
     let Codes::U32(src) = codes else {
         return Err(invalid(format!(
             "a remapped merge was given a {:?} column; only a keyword layer's u32 ordinals are \
@@ -343,7 +376,6 @@ fn recolour(codes: &Codes, start: usize, len: usize, remap: &[u32]) -> io::Resul
             ColumnKind::of(codes)
         )));
     };
-    let mut out = Vec::with_capacity(len);
     for &ordinal in &src[start..start + len] {
         let new = *remap.get(ordinal as usize).ok_or_else(|| {
             invalid(format!(
@@ -360,7 +392,7 @@ fn recolour(codes: &Codes, start: usize, len: usize, remap: &[u32]) -> io::Resul
         }
         out.push(new);
     }
-    Ok(Codes::U32(ScalarBuffer::from(out)))
+    Ok(())
 }
 
 /// `len` values from `start`, borrowed rather than copied: every arm is a window onto the layer's
