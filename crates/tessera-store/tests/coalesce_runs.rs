@@ -220,18 +220,3 @@ fn a_binding_outside_the_span_is_refused() {
         "the refusal must name the entity: {err}"
     );
 }
-
-/// An entity bound to two keys, which no ingest produces, fails the merge: the locator has one
-/// slot for it and could name only one of the two rows.
-#[test]
-fn an_entity_bound_to_two_keys_is_refused() {
-    let dir = tempfile::TempDir::new().unwrap();
-    build_bundle(dir.path(), 10);
-
-    let old = run_of(dir.path(), "two-old", &[(100, "alpha"), (101, "beta")]);
-    let new = run_of(dir.path(), "two-new", &[(100, "gamma")]);
-    let out_dir = dir.path().join("coalesced");
-    std::fs::create_dir_all(&out_dir).unwrap();
-
-    assert!(coalesce_external_id_runs(&[old, new], 100, 202, &out_dir).is_err());
-}

@@ -1,6 +1,6 @@
 //! Each merged output is reopened, or its counts checked, before the manifest can name it, so a
-//! merge defect fails the pass instead of being published. The store checks an external-id run
-//! and its locator as it writes them.
+//! merge defect fails the pass instead of being published. For an external-id run, the store
+//! checks the rows it wrote against the rows the merge emitted.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

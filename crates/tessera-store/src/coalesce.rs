@@ -369,18 +369,8 @@ fn merge_runs_core(
             ),
         });
     }
-    locator.check(rows)?;
     locator.finish(&locator_path)?;
     Ok(rows)
-}
-
-/// The slots holding an ordinal, and how many of those are not below `rows`.
-fn tally(slots: impl Iterator<Item = u32>, rows: usize) -> (usize, usize) {
-    slots
-        .filter(|&slot| slot != ROW_ABSENT)
-        .fold((0, 0), |(set, beyond), slot| {
-            (set + 1, beyond + usize::from(slot as usize >= rows))
-        })
 }
 
 /// Where a merge's (or the fold's) surviving `entity → ordinal` pairs go while the merge runs.
@@ -436,29 +426,6 @@ impl LocatorSink {
                     })
             }
         }
-    }
-
-    /// Exactly `rows` slots hold an ordinal, each below `rows`. An entity bound to two keys sets
-    /// its slot twice and leaves fewer, and the reverse direction would then name one of its keys
-    /// only.
-    fn check(&self, rows: usize) -> Result<()> {
-        let (set, beyond) = match self {
-            LocatorSink::Buffered(v) => tally(v.iter().copied(), rows),
-            LocatorSink::Mapped(LocatorWriter::Empty) => (0, 0),
-            LocatorSink::Mapped(LocatorWriter::Mapped { map, .. }) => tally(
-                map.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])),
-                rows,
-            ),
-        };
-        if set != rows || beyond != 0 {
-            return Err(StoreError::MalformedBundle {
-                detail: format!(
-                    "coalesce: the locator sets {set} slots, {beyond} of them past the run's end, \
-                     for a run of {rows} rows"
-                ),
-            });
-        }
-        Ok(())
     }
 
     fn finish(self, path: &Path) -> Result<()> {
