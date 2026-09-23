@@ -44,7 +44,8 @@ pub(super) fn coalesce_tiers(
     Ok((rel, Arc::new(reader)))
 }
 
-/// The external-id runs merged into one, with a locator extent over their union span.
+/// The external-id runs merged into one, with a locator extent over their union span. The spans
+/// may overlap; each entity's slot comes from the newest run binding it.
 pub(super) fn coalesce_runs(
     locators: &[LocatorExtent],
     ctx: &CoalesceContext,
@@ -56,8 +57,8 @@ pub(super) fn coalesce_runs(
         .collect();
     let extent = LocatorExtent {
         path: format!("{}/ext-locator.u32", ctx.out_rel),
-        entity_lo: locators[0].entity_lo,
-        entity_hi: locators[locators.len() - 1].entity_hi,
+        entity_lo: locators.iter().map(|e| e.entity_lo).min().expect("a window has extents"),
+        entity_hi: locators.iter().map(|e| e.entity_hi).max().expect("a window has extents"),
         external_id_run: format!("{}/external-ids.arrow", ctx.out_rel),
     };
     let out_dir = ctx.prefix_dir.join(&ctx.out_rel);

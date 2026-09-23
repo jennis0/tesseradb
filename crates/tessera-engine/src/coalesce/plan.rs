@@ -37,9 +37,9 @@ pub(crate) fn plan_coalesce(
         plan.tiers = manifest.deltas[window].to_vec();
     }
 
-    // Spans must ascend without overlap, because a lookup takes the first span containing the
-    // entity. The runs must be a contiguous block of `external_id_runs` in the same order, because
-    // recency is list position. No locator extent names the base run, so it is never taken.
+    // Spans may overlap: a lookup asks every extent containing the entity. The runs must be a
+    // contiguous block of `external_id_runs` in the same order, because recency is list position.
+    // No locator extent names the base run, so it is never taken.
     let locator_size =
         |extent: &LocatorExtent| -> Option<u64> { extent.files().map(&size_of).sum() };
     let runs_policy = CoalescePolicy {
@@ -53,15 +53,12 @@ pub(crate) fn plan_coalesce(
         locator_size,
     ) {
         let extents = &manifest.locator_extents[window];
-        let adjacent = extents
-            .windows(2)
-            .all(|pair| pair[0].entity_hi < pair[1].entity_lo);
         let runs: Vec<String> = extents.iter().map(|e| e.external_id_run.clone()).collect();
         let contiguous = manifest
             .external_id_runs
             .windows(runs.len().max(1))
             .any(|w| w == runs.as_slice());
-        if adjacent && contiguous {
+        if contiguous {
             plan.locators = extents.to_vec();
         }
     }
