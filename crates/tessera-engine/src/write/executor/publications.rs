@@ -228,6 +228,7 @@ impl Executor {
 
         let unit = self.coalesce.start();
         let health = Arc::clone(&self.health);
+        let windows = plan.windows();
         self.deps.pool.spawn(move || {
             match crate::coalesce::execute_coalesce(plan, ctx) {
                 Ok(completed) => {
@@ -246,7 +247,8 @@ impl Executor {
                     // Nothing happened, retry next tick: the manifest is the only commit point,
                     // so a failure before it leaves orphan files nothing references and every
                     // consumed entry still stands.
-                    health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                    health.coalesce_failures.fetch_add(windows, Ordering::Relaxed);
+                    health.coalesce_passes_failed.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
                         error = %e,
                         "an entity-space coalesce failed; the axes it would have bounded keep \
@@ -692,10 +694,12 @@ impl Executor {
         }
         // Every counted discard below is the same posture, so it is one closure rather than the
         // shape repeated. It owns what it reports, so it borrows nothing the sequence below needs.
+        let taken = completed.windows();
         let discard = {
             let health = Arc::clone(&self.health);
             move |reason: &str| {
-                health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                health.coalesce_failures.fetch_add(taken, Ordering::Relaxed);
+                health.coalesce_passes_failed.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     "ALARM: discarding a completed coalesce: {reason}. Its files are orphans, \
                      every consumed entry still stands, and the next tick re-plans"
@@ -883,6 +887,9 @@ impl Executor {
                 // serving the pre-coalesce sidecar, which answers identically.
                 self.health
                     .coalesce_failures
+                    .fetch_add(taken, Ordering::Relaxed);
+                self.health
+                    .coalesce_passes_failed
                     .fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     error = %e,
@@ -928,6 +935,9 @@ impl Executor {
                 // The manifest is already committed, as at the sidecar exit above.
                 self.health
                     .coalesce_failures
+                    .fetch_add(taken, Ordering::Relaxed);
+                self.health
+                    .coalesce_passes_failed
                     .fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     tier = %rel,

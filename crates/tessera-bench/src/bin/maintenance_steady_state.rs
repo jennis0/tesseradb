@@ -326,6 +326,7 @@ struct Row {
     coalesce_dirs: u64,
     coalesces: u64,
     coalesce_failures: u64,
+    coalesce_passes_failed: u64,
     coalesce_abandoned: u64,
 }
 
@@ -353,7 +354,8 @@ impl Row {
             ("merge_abandoned", |r| r.merge_abandoned),
             ("coalesce_dirs", |r| r.coalesce_dirs),
             ("coalesces", |r| r.coalesces),
-            ("coalesce_failed", |r| r.coalesce_failures),
+            ("coalesce_windows_failed", |r| r.coalesce_failures),
+            ("coalesce_passes_failed", |r| r.coalesce_passes_failed),
             ("coalesce_abandoned", |r| r.coalesce_abandoned),
         ]
     }
@@ -375,8 +377,8 @@ impl Row {
 struct Probe {
     root: PathBuf,
     /// Published and failed counts of engines already closed: merges, merge failures, coalesces,
-    /// coalesce failures.
-    carried: [u64; 4],
+    /// failed coalesce windows, failed coalesce passes.
+    carried: [u64; 5],
     base_run: Option<String>,
     checked: BTreeSet<(String, u64)>,
     breaches: Vec<String>,
@@ -386,7 +388,7 @@ impl Probe {
     fn new(root: &Path, base_run: Option<String>) -> Self {
         Probe {
             root: root.to_path_buf(),
-            carried: [0; 4],
+            carried: [0; 5],
             base_run,
             checked: BTreeSet::new(),
             breaches: Vec::new(),
@@ -398,6 +400,7 @@ impl Probe {
         self.carried[1] += stats.merge_failures;
         self.carried[2] += stats.coalesces;
         self.carried[3] += stats.coalesce_failures;
+        self.carried[4] += stats.coalesce_passes_failed;
     }
 
     fn sample(&mut self, tick: usize, engine: &Engine) -> Result<Row, Box<dyn std::error::Error>> {
@@ -406,11 +409,13 @@ impl Probe {
         let (partition, data) = generation.bundle.partitions.iter().next().expect("one partition");
         let m = &data.manifest;
         let stats = engine.write_executor_stats();
-        let [merges, merge_failures, coalesces, coalesce_failures] = self.carried;
+        let [merges, merge_failures, coalesces, coalesce_failures, coalesce_passes_failed] =
+            self.carried;
         let merges = merges + stats.merges;
         let merge_failures = merge_failures + stats.merge_failures;
         let coalesces = coalesces + stats.coalesces;
         let coalesce_failures = coalesce_failures + stats.coalesce_failures;
+        let coalesce_passes_failed = coalesce_passes_failed + stats.coalesce_passes_failed;
 
         let (files, bytes) = walk(&prefix_dir, |_| true);
         let segments_dir = tessera_store::view_path(&prefix_dir.join("partitions").join(partition), VIEW).join("segments");
@@ -441,7 +446,9 @@ impl Probe {
             coalesce_dirs,
             coalesces,
             coalesce_failures,
-            coalesce_abandoned: coalesce_dirs.saturating_sub(coalesces + coalesce_failures),
+            coalesce_passes_failed,
+            // Every pass writes one directory and either publishes or fails as a whole.
+            coalesce_abandoned: coalesce_dirs.saturating_sub(coalesces + coalesce_passes_failed),
         })
     }
 
@@ -531,7 +538,7 @@ fn check_bindings(root: &Path, bindings: &[(EntityId, Vec<u8>)], high_water: u64
 fn settle(root: &Path, engine: &Engine) -> Result<(), Box<dyn std::error::Error>> {
     let state = || {
         let s = engine.write_executor_stats();
-        (walk(root, |_| true), s.merges, s.merge_failures, s.coalesces, s.coalesce_failures)
+        (walk(root, |_| true), s.merges, s.merge_failures, s.coalesces, s.coalesce_failures, s.coalesce_passes_failed)
     };
     let deadline = Instant::now() + WAIT;
     let mut last = state();

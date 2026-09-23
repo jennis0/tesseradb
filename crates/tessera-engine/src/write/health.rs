@@ -134,8 +134,10 @@ pub struct ExecutorHealth {
     pub(crate) foreign_side_manifests: AtomicU64,
     /// Entity-space coalesce publications since the executor started.
     pub(crate) coalesces: AtomicU64,
-    /// Coalesces that failed or no longer rebased.
+    /// Coalesce windows that failed, or were lost with a pass that did not publish.
     pub(crate) coalesce_failures: AtomicU64,
+    /// Coalesce passes that wrote a directory and published nothing.
+    pub(crate) coalesce_passes_failed: AtomicU64,
     /// Row-space merge publications.
     pub(crate) merges: AtomicU64,
     pub(crate) merge_failures: AtomicU64,
@@ -435,9 +437,12 @@ pub struct ExecutorStats {
     pub flush_failures: u64,
     /// See [`ExecutorHealth::foreign_side_manifests`].
     pub foreign_side_manifests: u64,
-    /// Entity-space coalesce publications, and the ones that produced nothing.
+    /// Entity-space coalesce publications.
     pub coalesces: u64,
+    /// Coalesce windows that failed, or were lost with a pass that did not publish.
     pub coalesce_failures: u64,
+    /// Coalesce passes that wrote a directory and published nothing.
+    pub coalesce_passes_failed: u64,
     /// Row-space merge publications, and the ones that produced nothing.
     pub merges: u64,
     pub merge_failures: u64,
@@ -582,6 +587,7 @@ impl ExecutorHealth {
             foreign_side_manifests: AtomicU64::new(0),
             coalesces: AtomicU64::new(0),
             coalesce_failures: AtomicU64::new(0),
+            coalesce_passes_failed: AtomicU64::new(0),
             merges: AtomicU64::new(0),
             merge_failures: AtomicU64::new(0),
             folds: AtomicU64::new(0),
@@ -822,6 +828,7 @@ impl ExecutorHealth {
             foreign_side_manifests: self.foreign_side_manifests.load(Ordering::Relaxed),
             coalesces: self.coalesces.load(Ordering::Relaxed),
             coalesce_failures: self.coalesce_failures.load(Ordering::Relaxed),
+            coalesce_passes_failed: self.coalesce_passes_failed.load(Ordering::Relaxed),
             merges: self.merges.load(Ordering::Relaxed),
             merge_failures: self.merge_failures.load(Ordering::Relaxed),
             folds: self.folds.load(Ordering::Relaxed),

@@ -131,6 +131,18 @@ impl<E> ColumnWindow<E> {
 }
 
 impl CoalescePlan {
+    /// How many windows the pass takes: one per kind taken, one per attribute or text column.
+    pub(crate) fn windows(&self) -> u64 {
+        let kinds = [
+            !self.tiers.is_empty(),
+            !self.locators.is_empty(),
+            !self.dicts.is_empty(),
+            !self.records.is_empty(),
+            !self.terms.is_empty(),
+        ];
+        (kinds.iter().filter(|&&k| k).count() + self.attrs.len() + self.texts.len()) as u64
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.tiers.is_empty()
             && self.locators.is_empty()
@@ -198,6 +210,20 @@ pub(crate) struct CompletedCoalesce {
     pub(crate) files: BTreeMap<String, FileDigest>,
     /// The windows whose merge failed. They stay in the manifest and are planned again.
     pub(crate) failures: Vec<MaintenanceFailed>,
+}
+
+impl CompletedCoalesce {
+    /// How many windows the pass merged, the failed ones not counted.
+    pub(crate) fn windows(&self) -> u64 {
+        let kinds = [
+            self.tier.is_some(),
+            self.run.is_some(),
+            self.dict.is_some(),
+            self.record.is_some(),
+            self.terms.is_some(),
+        ];
+        (kinds.iter().filter(|&&k| k).count() + self.attrs.len() + self.texts.len()) as u64
+    }
 }
 
 fn taken<E>(entries: Vec<E>) -> Option<Vec<E>> {
