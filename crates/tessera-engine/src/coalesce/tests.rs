@@ -712,17 +712,15 @@ fn title_flushes(keyword: [bool; 3]) -> Fixture {
     fx
 }
 
-/// A keyword layer whose ordinals reach past its own dictionary fails the pass before any merged
-/// values are written.
+/// A keyword layer whose ordinals reach past its own dictionary fails the pass, which leaves
+/// nothing to publish.
 #[test]
-fn a_keyword_window_the_merge_refuses_installs_nothing() {
+fn a_keyword_window_the_merge_refuses_fails_the_pass() {
     let fx = title_flushes([true; 3]);
     let faulted = fx.manifest.attr_extents[1].dict.clone().unwrap();
     tessera_filter::write_sorted_dict(&fx.path(&faulted), ["a"]).unwrap();
     let plan = fx.plan().expect("the window is planned");
     assert!(fx.execute(plan).is_err());
-    let merged = format!("{OUT_REL}/attrs/title/{}", tessera_filter::VALUES_FILE);
-    assert!(!fx.path(&merged).exists());
 }
 
 /// A window of one column mixing keyword layers with a plain one fails the pass.

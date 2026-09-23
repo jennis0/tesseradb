@@ -862,6 +862,17 @@ impl Executor {
             .iter()
             .map(|v| (v.id.as_str(), v.incarnation))
             .collect();
+        // A view dropped during the flight, or dropped and created again, would have its dead
+        // incarnation's base published as the live view's rows. The next fold plans the live one.
+        if plan
+            .views
+            .iter()
+            .any(|view| live_incarnations.get(view.view.as_str()) != Some(&view.incarnation))
+        {
+            return Err("a view it folded was dropped during its flight; the next fold plans over \
+                     the views as they now stand"
+                .to_string());
+        }
         let forward = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
 
         // Every carried-forward extent must begin at or above the fold's own base, per view, or
@@ -904,20 +915,6 @@ impl Executor {
             carried.add_locator_extent(extent);
         }
         let executed = crate::compact::executed(&plan.tombstones, &carried);
-        // ---- the merge-size relation, against the fold's own output -------------------------------
-        //
-        // `max_merged_segment_bytes` must stay strictly below the base segment's bytes, or the
-        // next startup refuses the configuration. Refused here instead, loudly.
-        if let Some(configured) = self.deps.configured_merge_bytes {
-            if completed.base_segment_bytes > 0 && configured >= completed.base_segment_bytes {
-                return Err(format!(
-                    "merge.max_merged_segment_bytes ({configured}) is not strictly below the \
-                     folded base segment's {} bytes, so the next startup would refuse the \
-                     deployment; lower it before the next fold",
-                    completed.base_segment_bytes
-                ));
-            }
-        }
         Ok(FoldApplies {
             carried_entities: carried.len(),
             forward,
@@ -926,8 +923,7 @@ impl Executor {
     }
 
     /// Publish a fold: rebase or discard, assemble `SEGMENTS-<n>` from the live partition
-    /// manifest, check the merge-size relation against the fold's own output, hard-link the
-    /// carry-forwards, write `MANIFEST.json`, write `SEGMENTS-<n>.json`, flip `CURRENT`, open the
+    /// manifest, hard-link the carry-forwards, write `MANIFEST.json`, write `SEGMENTS-<n>.json`, flip `CURRENT`, open the
     /// new prefix in-process, swap onto it, rotate the WAL, and reclaim the old prefix.
     ///
     /// What the fold carries forward is read from live state here, hours after the plan, not from

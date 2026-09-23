@@ -362,7 +362,13 @@ fn merge_runs_core(
     }
 
     let written = writer.finish().map_err(io)?;
-    debug_assert_eq!(written, rows);
+    if written != rows {
+        return Err(StoreError::MalformedBundle {
+            detail: format!(
+                "coalesce: the run writer wrote {written} rows where the merge emitted {rows}"
+            ),
+        });
+    }
     locator.finish(&locator_path)?;
     Ok(rows)
 }

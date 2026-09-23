@@ -1,9 +1,7 @@
 //! `tessera.toml`: what a deployment is, read by both `tessera build` and `tessera serve`.
 //!
-//! The file is found by walking up from the working directory ([`discover`]), and every path in
-//! it resolves against its own directory ([`load`]). The serving secrets are located here and read
-//! at startup ([`Credential::resolve`]), so a build never needs them. Every raw section refuses a
-//! key it does not know.
+//! Serving secrets are only located here and are read at startup ([`Credential::resolve`]), so a
+//! build never needs them. Every raw section refuses a key it does not know.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -208,7 +206,7 @@ pub struct Config {
     pub publish_max_body_bytes: usize,
     pub max_artifacts_per_request: usize,
     pub max_members_per_request: usize,
-    /// Published on `/control/status`; the field it bounds is not built yet.
+    /// The most entities one publication's `excluding` list may name.
     pub max_excluded_per_request: usize,
     pub overlay_soft_limit: usize,
     pub compaction: tessera_engine::CompactionSchedule,
@@ -226,9 +224,8 @@ pub struct Config {
     pub fragment_cache_bytes: u64,
 }
 
-/// The serving runtime's `max_blocking_threads`: every viewer and ingest request that admission
-/// lets through holds one blocking thread, plus [`BLOCKING_THREAD_RESERVE`]. A queued request
-/// holds none, so `compute_queue` is not a term.
+/// The serving runtime's `max_blocking_threads`: one per request either admission bound lets
+/// through, plus [`BLOCKING_THREAD_RESERVE`]. A queued request holds none.
 pub fn serving_blocking_threads(config: &Config) -> usize {
     config
         .compute_admission
@@ -264,7 +261,6 @@ fn or_off<T: Copy>(key: &'static str, raw: Option<&OrOff<T>>, default: T) -> Res
     }
 }
 
-/// The file name every deployment's configuration is found under.
 pub const DEPLOYMENT_FILE: &str = "tessera.toml";
 
 /// The environment variable holding the identity key when `[identity]` names none.
@@ -635,13 +631,10 @@ impl Credential {
 mod tests {
     use super::*;
 
-    /// A complete config with `[serve]` extras interpolated, so each case differs from a working
-    /// config in the keys it names.
     fn valid_toml(serve_extra: &str) -> String {
         valid_toml_with(serve_extra, "")
     }
 
-    /// [`valid_toml`] with an `[ingest]` section, emitted only when `ingest_extra` is non-empty.
     fn valid_toml_with(serve_extra: &str, ingest_extra: &str) -> String {
         let ingest_section = if ingest_extra.is_empty() {
             String::new()
@@ -761,7 +754,6 @@ mod tests {
         );
     }
 
-    /// A ratio gauge takes any number or `"off"`, and refuses any other word by name.
     #[test]
     fn a_ratio_gauge_takes_a_number_or_off() {
         let set = parse(&valid_toml_with(
@@ -801,7 +793,6 @@ mod tests {
         assert!(parsed.compaction.window_start_secs.is_some());
     }
 
-    /// The deletion route follows `overlay_soft_limit` unless it is set apart from it.
     #[test]
     fn the_deletion_route_follows_the_overlay_alarm_unless_set_apart_from_it() {
         let followed = parse(&valid_toml_with("", "overlay_soft_limit = 42")).unwrap();
@@ -870,7 +861,6 @@ mod tests {
         assert_eq!(config.identity_env, "ACME_KEY");
     }
 
-    /// The identity key itself is refused in this file, which belongs in git.
     #[test]
     fn a_key_written_into_the_deployment_file_is_refused() {
         let toml = format!("{}\n[identity]\nkey = \"00\"\n", valid_toml(""));
@@ -917,8 +907,6 @@ mod tests {
         assert_eq!(config.schema_path, tmp.path().join(DEFAULT_SCHEMA_FILE));
     }
 
-    /// A credential file resolves against the deployment file's directory, and one that is named
-    /// and absent is refused carrying the resolved path.
     #[test]
     fn a_credential_file_resolves_against_the_deployment_files_own_directory() {
         let tmp = tempfile::tempdir().unwrap();
@@ -966,7 +954,6 @@ mod tests {
         ));
     }
 
-    /// A serving secret is read at startup, never at parse, so a build needs none.
     #[test]
     fn a_serving_credential_is_read_at_startup_rather_than_at_parse() {
         let toml = valid_toml("").replace(
@@ -1037,7 +1024,6 @@ mod tests {
         assert_eq!(config.admission_timeout_ms, DEFAULT_ADMISSION_TIMEOUT_MS);
     }
 
-    /// An explicit `compute_threads` moves the default admission bound and queue with it.
     #[test]
     fn compute_admission_defaults_to_compute_threads() {
         let config = parse(&valid_toml("compute_threads = 7")).expect("must load");
@@ -1052,8 +1038,6 @@ mod tests {
         assert_eq!(config.compute_queue, 0);
     }
 
-    /// An admission gate past `Semaphore::MAX_PERMITS` is refused, whether it was written or
-    /// derived from `compute_threads`.
     #[test]
     fn an_admission_gate_past_the_semaphore_limit_refuses_to_start() {
         for (serve, ingest) in [
@@ -1123,7 +1107,6 @@ mod tests {
         assert_eq!(config.dev_cors_origins, config.cors_origins);
     }
 
-    /// A wildcard is refused in either list, whitespace and all, naming the key.
     #[test]
     fn a_wildcard_origin_is_refused_in_either_list() {
         let err = parse(&valid_toml("cors_origins = [\"*\"]")).unwrap_err();
@@ -1210,7 +1193,6 @@ mod tests {
         assert_eq!(config.flush_max_items, 55);
     }
 
-    /// A misspelt key, a key in the wrong section, and a misspelt section are all refused.
     #[test]
     fn a_misspelt_key_or_section_refuses_to_start() {
         for toml in [
@@ -1227,14 +1209,11 @@ mod tests {
         }
     }
 
-    /// The queue-full 429 is reachable at the defaults only while more handlers are admitted than
-    /// the queue holds, since each admitted handler holds at most one entry.
     #[test]
     fn the_default_admission_bound_exceeds_the_default_queue_bound() {
         assert!(DEFAULT_INGEST_ADMISSION.saturating_sub(1) > DEFAULT_INGEST_QUEUE_BOUND);
     }
 
-    /// The pool is derived from its consumers, so it covers both admission bounds.
     #[test]
     fn the_serving_blocking_pool_covers_its_declared_consumers() {
         let config = parse(&valid_toml_with(

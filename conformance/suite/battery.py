@@ -2,17 +2,19 @@
 
 A battery is a list of queries and a recorded response per query (§12.2):
 
-    Query    = Meta | Categories | Viewport | Region | Item
+    Query    = Meta | Categories | Suggest | Viewport | Region | Item | Browse | ArtifactCard
     Recorded = dict[Query, Canonical]
 
 The membership is §3's table, and it is small because the query surface is deliberately small —
 the same property that makes the leak register enumerable. Every served surface is here: the
-schema (`/v1/meta`), a category's values (`/v1/categories/{column}`), the viewport's three
-streamed surfaces (tiles, points, underlay — the underlay must be *requested*, since at
-`underlay_offset = 0` it emits nothing and silently drops out of every comparison), the region
-summary, and the drill-down (`/v1/items/{id}`), which earns its place twice over: it is the only
-surface that reads all three homes, so a blob-resident field dropped by a producer is visible
-nowhere else.
+schema (`/v1/meta`), a category's values (`/v1/categories/{column}`) and its typeahead
+(`/suggest`), the viewport's streamed surfaces (tiles, points, underlay and artifacts, with a
+filter or a highlight where asked — the underlay must be *requested*, since at
+`underlay_offset = 0` it emits nothing and silently drops out of every comparison, and the
+artifacts only where `layers` names some), the region summary, the drill-down
+(`/v1/items/{id}`), which earns its place twice over: it is the only surface that reads all three
+homes, so a blob-resident field dropped by a producer is visible nowhere else, and a layer's
+browse page (`/v1/artifacts/browse`) and one artifact's card (`/v1/artifacts/{id}`).
 
 `/v1/region` is specified (contracts §3.2) and **not in the router**, so the battery carries it as
 an [`Absent`] entry — an explicitly marked absence rather than a query that silently never runs.
@@ -83,6 +85,10 @@ class Viewport:
     #: Canonical JSON (`json.dumps(..., sort_keys=True)`) or None — text so the query is hashable.
     filters: str | None = None
     underlay_offset: int = 0
+    #: Canonical JSON for the `highlight` expression, or None.
+    highlight: str | None = None
+    #: Canonical JSON for `layers` (`"all"` or a list of names), or None for no artifact pass.
+    layers: str | None = None
 
     def __post_init__(self):
         if (self.bbox is None) == (self.tiles is None):
@@ -114,7 +120,38 @@ class Item:
     tessera_id: int
 
 
-Query = Union[Meta, Categories, Viewport, Region, Item]
+@dataclass(frozen=True)
+class Suggest:
+    """`GET /v1/categories/{column}/suggest`: the typeahead over a category's values, with the
+    per-principal counts when `counts` is set."""
+
+    column: str
+    q: str
+    counts: bool = False
+
+
+@dataclass(frozen=True)
+class Browse:
+    """`POST /v1/artifacts/browse`: one page of a layer's hierarchy. The roots form when `parent`
+    and `q` are both None, the children form with a `parent` tessera id, the search form with `q`."""
+
+    view_id: str
+    layer: str
+    parent: int | None = None
+    q: str | None = None
+    #: Canonical JSON, as on [`Viewport`].
+    filters: str | None = None
+
+
+@dataclass(frozen=True)
+class ArtifactCard:
+    """`POST /v1/artifacts/{tessera_id}`: one artifact as this principal sees it."""
+
+    tessera_id: int
+    view_id: str
+
+
+Query = Union[Meta, Categories, Suggest, Viewport, Region, Item, Browse, ArtifactCard]
 
 
 @dataclass(frozen=True)
@@ -237,6 +274,41 @@ def record_one(server, token: str, query: Query) -> Canonical:
         return Json(server.meta(token))
     if isinstance(query, Categories):
         return Json({"pages": _category_pages(server, token, query.column)})
+    if isinstance(query, Suggest):
+        params = {"q": query.q}
+        if query.counts:
+            params["counts"] = "true"
+        resp = requests.get(
+            f"{server.viewer_base}/v1/categories/{query.column}/suggest",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=10,
+        )
+        return _status_and_body(resp, (200, 404))
+    if isinstance(query, Browse):
+        body: dict = {"view": query.view_id, "layer": query.layer}
+        if query.parent is not None:
+            body["parent"] = str(query.parent)
+        if query.q is not None:
+            body["q"] = query.q
+        if query.filters is not None:
+            body["filters"] = json.loads(query.filters)
+        resp = requests.post(
+            f"{server.viewer_base}/v1/artifacts/browse",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=30,
+        )
+        # A layer this principal cannot reach is refused as an unknown one: a real answer here.
+        return _status_and_body(resp, (200, 422))
+    if isinstance(query, ArtifactCard):
+        resp = requests.post(
+            f"{server.viewer_base}/v1/artifacts/{query.tessera_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"view": query.view_id},
+            timeout=10,
+        )
+        return _status_and_body(resp, (200, 404))
     if isinstance(query, Viewport):
         return canonicalise_viewport(_viewport_body(server, token, query))
     if isinstance(query, Item):
@@ -254,6 +326,15 @@ def record_one(server, token: str, query: Query) -> Canonical:
             "lands, write its Batches canonicalisation and promote the marker."
         )
     raise TypeError(f"not a battery query: {query!r}")
+
+
+def _status_and_body(resp: requests.Response, answers: tuple[int, ...]) -> Json:
+    """A JSON surface whose refusals in `answers` are real answers; any other status is a harness
+    failure."""
+    if resp.status_code not in answers:
+        resp.raise_for_status()
+        raise RuntimeError(f"unexpected {resp.status_code}: {resp.text}")
+    return Json({"status": resp.status_code, "body": resp.json()})
 
 
 def _category_pages(server, token: str, column: str) -> list[dict]:
@@ -303,6 +384,10 @@ def _viewport_body(server, token: str, query: Viewport) -> bytes:
         body["filters"] = json.loads(query.filters)
     if query.underlay_offset:
         body["underlay_offset"] = query.underlay_offset
+    if query.highlight is not None:
+        body["highlight"] = json.loads(query.highlight)
+    if query.layers is not None:
+        body["layers"] = json.loads(query.layers)
     resp = requests.post(
         f"{server.viewer_base}/v1/viewport",
         headers={"Authorization": f"Bearer {token}"},
@@ -315,7 +400,9 @@ def _viewport_body(server, token: str, query: Viewport) -> bytes:
 
 __all__ = [
     "Absent",
+    "ArtifactCard",
     "Battery",
+    "Browse",
     "Categories",
     "DEEP_ZOOM",
     "Item",
@@ -323,6 +410,7 @@ __all__ = [
     "Query",
     "Recorded",
     "Region",
+    "Suggest",
     "Viewport",
     "build_battery",
     "record",

@@ -182,22 +182,29 @@ def build_divisions_lookup(con, src: Path) -> None:
     )
 
 
-PLACE_COLUMNS = """
+def present(expr: str) -> str:
+    """`expr`, or null where it is blank. A blank value is absent, and the build refuses an empty
+    vocabulary key."""
+    return f"CASE WHEN trim({expr}) <> '' THEN {expr} END"
+
+
+PLACE_COLUMNS = f"""
     id                                                          AS gers_id,
     ST_X(geometry)                                              AS lon,
     ST_Y(geometry)                                              AS lat,
     geometry                                                    AS geom,
     names.primary                                               AS name,
     taxonomy.hierarchy                                          AS category_path,
-    taxonomy.hierarchy[1]                                       AS category_root,
-    taxonomy.primary                                            AS category,
-    basic_category                                              AS basic_category,
+    {present("taxonomy.hierarchy[1]")}                          AS category_root,
+    {present("taxonomy.primary")}                               AS category,
+    {present("basic_category")}                                 AS basic_category,
     confidence::FLOAT                                           AS confidence,
-    operating_status                                            AS operating_status,
-    addresses[1].country                                        AS country,
+    {present("operating_status")}                               AS operating_status,
+    {present("addresses[1].country")}                           AS country,
     -- The feature-level source entry, which is the one whose `property` is empty. Exactly one per
     -- place, asserted at the end of the run over the whole corpus.
-    list_filter(sources, s -> s.property IS NULL OR s.property = '')[1].dataset  AS source_dataset,
+    {present("list_filter(sources, s -> s.property IS NULL OR s.property = '')[1].dataset")}
+                                                                AS source_dataset,
     try_cast(
         list_filter(sources, s -> s.property IS NULL OR s.property = '')[1].update_time
         AS TIMESTAMP)                                           AS update_time

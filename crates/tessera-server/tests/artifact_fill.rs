@@ -327,7 +327,7 @@ async fn a_parent_is_filled_by_patch_and_a_held_key_on_put_mints_nothing() {
     assert_eq!(body["artifacts"][1]["tessera_id"], child, "{body}");
 
     // A held key beside a new one: one created, the held one's members join, the new one under
-    // the held sibling.
+    // the held sibling. `joined` is the created leaf's ten members and the root's ten new ones.
     let (status, body) = put(
         &server,
         TREE,
@@ -339,7 +339,7 @@ async fn a_parent_is_filled_by_patch_and_a_held_key_on_put_mints_nothing() {
     .await;
     assert_eq!(status, 201, "{body}");
     assert_eq!(body["created"], 1, "{body}");
-    assert_eq!(body["joined"], 10, "{body}");
+    assert_eq!(body["joined"], 20, "{body}");
     assert_eq!(body["artifacts"][1]["tessera_id"], root, "{body}");
     assert_eq!(
         served(&server, TREE).await,

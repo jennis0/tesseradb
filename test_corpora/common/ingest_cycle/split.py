@@ -13,6 +13,7 @@ from typing import Sequence
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 # ---------------------------------------------------------------------------------------------
@@ -20,11 +21,32 @@ import pyarrow.parquet as pq
 # ---------------------------------------------------------------------------------------------
 
 
-def split_entities(points: Path, fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
+def declared_entities(rung: Path) -> np.ndarray:
+    """Every entity id the rung's views hold: the anchor view's in file order, then each other
+    view's ids the ones before it did not hold."""
+    parts: list[np.ndarray] = []
+    seen: np.ndarray | None = None
+    files: dict[Path, str] = {}
+    for view in declared_views(rung):
+        files.setdefault(view["points"], view["fields"]["entity_id"])
+    for path, column in files.items():
+        ids = pq.read_table(path, columns=[column]).column(column).to_numpy()
+        # Every file's ids in the first file's integer type: mixing int64 and uint64 in numpy
+        # promotes to float64, which cannot hold an id above 2**53.
+        if seen is None:
+            seen = np.zeros(0, ids.dtype)
+        ids = ids.astype(seen.dtype, copy=False)
+        fresh = ids[~in_sorted(ids, seen)]
+        fresh = fresh[np.sort(np.unique(fresh, return_index=True)[1])]
+        parts.append(fresh)
+        seen = np.sort(np.concatenate([seen, fresh]))
+    return np.concatenate(parts) if parts else np.zeros(0, np.uint64)
+
+
+def split_entities(ids: np.ndarray, fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
     """`(base entity ids, hold-out entity ids)` — a seeded uniform hold-out of `fraction`, over
     entities rather than rows, which differ once a rung has several views.
     """
-    ids = pq.read_table(points, columns=["entity_id"]).column("entity_id").to_numpy()
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(ids))
     cut = int(round(fraction * len(ids)))
@@ -92,6 +114,188 @@ def ranks_file(rung: Path) -> Path:
     return candidates[0]
 
 
+def ranks_for(rung: Path, work: Path) -> tuple[Path, dict]:
+    """The rung's ranks file, or one derived into `work` where the rung has none, and a record
+    of which it was."""
+    try:
+        found = ranks_file(rung)
+    except FileNotFoundError:
+        work.mkdir(parents=True, exist_ok=True)
+        out = work / "derived-ranks.json"
+        return out, {"file": str(out), "derived": True, **derive_ranks(rung, out)}
+    return found, {"file": str(found), "derived": False}
+
+
+def derive_ranks(rung: Path, out: Path) -> dict:
+    """Write a ranks file counted from the data: each view's `point_visibility` field, one pair
+    per (entity, label) across every view's points, a missing label counted under the view's
+    declared default."""
+    pairs = []
+    fields = set()
+    for view in declared_views(rung):
+        field = view["point_visibility"].get("field")
+        default = view["point_visibility"].get("default")
+        if field is None:
+            continue
+        fields.add(field)
+        table = read_view_rows(view, ["entity_id", field])
+        labels = table.column(field).combine_chunks()
+        entities = table.column("entity_id").combine_chunks()
+        if pa.types.is_list(labels.type) or pa.types.is_large_list(labels.type):
+            unlabelled = entities.filter(pc.equal(pc.fill_null(pc.list_value_length(labels), 0), 0))
+            entities = pc.take(entities, pc.list_parent_indices(labels))
+            labels = pc.list_flatten(labels).cast(pa.string())
+        else:
+            labels = labels.cast(pa.string())
+            unlabelled = entities.filter(pc.is_null(labels))
+        pairs.append(pa.table({"entity": entities, "term": labels}).filter(pc.is_valid(labels)))
+        if isinstance(default, str) and len(unlabelled):
+            filled = pa.array([default] * len(unlabelled), pa.string())
+            pairs.append(pa.table({"entity": unlabelled, "term": filled}))
+    if not pairs:
+        raise ValueError(f"{rung}: no view declares a point_visibility field to count terms from")
+    distinct = pa.concat_tables(pairs).group_by(["entity", "term"]).aggregate([])
+    counted = distinct.group_by("term").aggregate([("entity", "count")])
+    terms = counted.column("term").to_pylist()
+    counts = counted.column("entity_count").to_pylist()
+    ranks = sorted(
+        ({"term": term, "pairs": int(n)} for term, n in zip(terms, counts)),
+        key=lambda rank: (-rank["pairs"], rank["term"]),
+    )
+    out.write_text(json.dumps(ranks))
+    return {"fields": sorted(fields), "terms": len(ranks)}
+
+
+def declared_views(rung: Path) -> list[dict]:
+    """Every view the declaration names, the allocation view first: a plain view by its name and
+    a group's view as `group:key`, the id the server gives it. `points` is the file its rows are
+    read from, `select` the `(column, key)` picking them out of a file a group's views share, and
+    `fields` each canonical column name (`entity_id`, the coordinate pair, `view`) as that file
+    spells it. `record` is a group view's roster record under canonical names, on the group that
+    owns the keys, and `metadata` the names that group declares."""
+    declared = tomllib.loads((rung / "corpus.toml").read_text())
+    named = declared.get("sources", {})
+    defaults = declared.get("defaults", {})
+    entity = defaults.get("entity_id_field", "entity_id")
+    views = [
+        {
+            "id": view["name"],
+            "group": None,
+            "owner": None,
+            "key": None,
+            "points": source_path(rung, named, view.get("source", defaults.get("source"))),
+            "select": None,
+            "projection": view.get("projection", "none"),
+            "fields": view_fields(view, entity),
+            "point_visibility": view.get("point_visibility") or {},
+            "record": None,
+            "metadata": [],
+        }
+        for view in declared.get("view", [])
+    ]
+    groups = {group["name"]: group for group in declared.get("view_group", [])}
+    for group in groups.values():
+        owner = groups.get(group.get("members"), group)
+        fields = view_fields(group, entity)
+        # A group with its own `source` holds every view's rows in that file, picked out by its
+        # discriminator; otherwise each view's rows are the file its roster entry names.
+        shared = source_path(rung, named, group.get("source"))
+        for record, own in roster(rung, named, owner, entity):
+            views.append(
+                {
+                    "id": f"{group['name']}:{record['key']}",
+                    "group": group["name"],
+                    "owner": owner["name"],
+                    "key": record["key"],
+                    "points": shared or source_path(rung, named, own),
+                    "select": (fields["view"], record["key"]) if shared else None,
+                    "projection": group.get("projection", "none"),
+                    "fields": fields,
+                    "point_visibility": group.get("point_visibility") or {},
+                    "record": record,
+                    "metadata": list(owner.get("metadata") or {}),
+                }
+            )
+    anchor = defaults.get("allocation_view") or declared.get("allocation_view")
+    anchor = anchor or (views[0]["id"] if views else None)
+    views.sort(key=lambda view: view["id"] != anchor)
+    return views
+
+
+def view_fields(block: dict, entity: str) -> dict[str, str]:
+    """A view's or a group's canonical column names mapped to its file's: `entity_id`, `x`/`y`
+    for a view with no projection or `lon`/`lat` for a projected one, and the discriminator
+    `view`, each its own name unless `fields` renames it."""
+    projected = block.get("projection", "none") != "none"
+    renamed = block.get("fields") or {}
+    canonical = ["entity_id", *(("lon", "lat") if projected else ("x", "y")), "view"]
+    return {name: renamed.get(name, entity if name == "entity_id" else name) for name in canonical}
+
+
+def roster(rung: Path, named: dict, owner: dict, entity: str) -> list[tuple[dict, str | None]]:
+    """A group's views as `(roster record, the view's own source)`, in the build's three forms:
+    `[[view_group.view]]` blocks, a `[view_group.views]` table, or keys minted from the distinct
+    values of the group's discriminator, in key order."""
+    if owner.get("view"):
+        return [
+            ({key: value for key, value in entry.items() if key != "source"}, entry.get("source"))
+            for entry in owner["view"]
+        ]
+    table = owner.get("views")
+    if table is not None:
+        renamed = table.get("fields") or {}
+        names = ["key", "visibility", *(owner.get("metadata") or {})]
+        read = pq.read_table(source_path(rung, named, table["source"]))
+        columns = {name: renamed.get(name, name) for name in names}
+        rows = read.select([c for c in columns.values() if c in read.column_names]).to_pylist()
+        return [
+            (
+                {
+                    name: row[column]
+                    for name, column in columns.items()
+                    if row.get(column) is not None
+                },
+                None,
+            )
+            for row in rows
+        ]
+    source = source_path(rung, named, owner.get("source"))
+    if source is None:
+        return []
+    column = view_fields(owner, entity)["view"]
+    keys = pq.read_table(source, columns=[column]).column(column).unique().drop_null()
+    return [({"key": key}, None) for key in sorted(keys.to_pylist())]
+
+
+def read_view_rows(
+    view: dict, columns: Sequence[str], keep: np.ndarray | None = None, limit: int | None = None
+) -> pa.Table:
+    """`columns` of one view's rows under their canonical names, picked out of a shared file by
+    its discriminator, kept to the sorted entity ids `keep` where given, and stopping once `limit`
+    rows are held."""
+    fields = view.get("fields") or {}
+    spelt = {name: fields.get(name, name) for name in ["entity_id", *columns]}
+    select = view["select"]
+    wanted = list(dict.fromkeys([*spelt.values(), *([select[0]] if select else [])]))
+    reader = pq.ParquetFile(view["points"])
+    parts: list[pa.Table] = []
+    held = 0
+    for index in range(reader.metadata.num_row_groups):
+        table = reader.read_row_group(index, columns=wanted)
+        if select is not None:
+            table = table.filter(pc.equal(table.column(select[0]), select[1]))
+        if keep is not None:
+            table = table.filter(pa.array(in_sorted(table.column(spelt["entity_id"]).to_numpy(), keep)))
+        parts.append(table)
+        held += table.num_rows
+        if limit is not None and held >= limit:
+            break
+    table = pa.concat_tables(parts) if parts else reader.schema_arrow.empty_table().select(wanted)
+    if limit is not None:
+        table = table.slice(0, limit)
+    return pa.table({name: table.column(spelt[name]) for name in columns})
+
+
 def bundle_manifest(bundle: Path) -> tuple[str, dict] | None:
     """`(version prefix, manifest)` of the bundle's current version, or None for no bundle: the
     version `CURRENT` names, not the lexicographically last `v*`, which can be abandoned.
@@ -152,8 +356,8 @@ def base_declaration(
     text: str, keep_members: Sequence[str] = (), keep_sources: Sequence[str] = ()
 ) -> tuple[str, list[dict]]:
     """The rung's `corpus.toml` as the base's: every layer stated, and only a column-route
-    layer's member table kept. A `[[layer]]`'s `source` and `[layer.members]` are build-only
-    acquisition, removed except where `keep_members` or `keep_sources` names the layer. Returns
+    layer's member table kept. A `[[layer]]`'s `source`, its `fields` and `[layer.members]` are
+    build-only acquisition, removed except where `keep_members` or `keep_sources` names the layer. Returns
     the rewritten text and one record per layer, saying what was removed."""
     out: list[str] = []
     removed: list[dict] = []
@@ -185,7 +389,8 @@ def base_declaration(
             continue
         if layer is not None and head.startswith("name") and layer["layer"] is None:
             layer["layer"] = head.split("=", 1)[1].strip().strip('"')
-        if section == "[[layer]]" and head.startswith("source") and "=" in head:
+        # A layer's `fields` map names columns of the file its `source` names, so it goes with it.
+        if section == "[[layer]]" and head.startswith(("source", "fields")) and "=" in head:
             if layer is None or layer["layer"] not in keep_sources:
                 if layer is not None:
                     layer["removed"].append(head)
@@ -215,6 +420,7 @@ def declared_layers(rung: Path) -> list[dict]:
         roster = source_path(rung, named, layer.get("source"))
         members = source_path(rung, named, (layer.get("members") or {}).get("source"))
         supplied = bool((layer.get("content") or {}).get("supplied"))
+        scope = layer.get("scope")
         if attribute is not None:
             route = "attribute"
         elif members is not None and members.exists() and per_point_member_table(members):
@@ -231,6 +437,14 @@ def declared_layers(rung: Path) -> list[dict]:
                 "route": route,
                 "value_set": layer.get("value_set"),
                 "hierarchy": (layer.get("hierarchy") or {}).get("kind"),
+                "views": layer.get("views") or [],
+                # The group a group-scoped layer's artifact sets vary by, and the roster column
+                # naming each artifact's view.
+                "scope_group": scope.get("group") if isinstance(scope, dict) else None,
+                "view_column": (layer.get("fields") or {}).get("view", "view")
+                if isinstance(scope, dict)
+                else None,
+                "inline": bool(layer.get("artifacts")),
             }
         )
     return out
@@ -302,24 +516,16 @@ def build_bundle(
 
 
 def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
-    """The complement's inputs: the points, the declaration, and a column-route layer's member
-    table over the base's rows. Nothing else: a publication-route layer's artifacts are
-    published on the wire after the points they depend on have been ingested. `corpus.toml` is
-    rewritten by [`base_declaration`]."""
+    """The complement's inputs: every file a view or an attribute reads, over the base's
+    entities, the declaration, and a column-route layer's member table over the base's rows.
+    Nothing else: a publication-route layer's artifacts are published on the wire after the
+    points they depend on have been ingested. `corpus.toml` is rewritten by
+    [`base_declaration`]."""
     out.mkdir(parents=True, exist_ok=True)
     layers = declared_layers(rung)
     published = [layer["name"] for layer in layers if layer["route"] == "publication"]
     on_column = [layer for layer in layers if layer["route"] == "column"]
-    kept: dict = {
-        "points": filter_parquet(
-            rung / "points.parquet", out / "points.parquet", "entity_id", base_ids, drop=published
-        ),
-        "dropped_membership_columns": [
-            name
-            for name in pq.ParquetFile(rung / "points.parquet").schema_arrow.names
-            if name in set(published)
-        ],
-    }
+    kept: dict = {"entities": len(base_ids)}
     kept["member_tables"], rosters = write_base_members(out, on_column, base_ids)
     if rosters:
         kept["rosters"] = rosters
@@ -332,6 +538,7 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
     (out / "corpus.toml").write_text(declaration)
     kept["declaration_only"] = removed
     (out / "tessera.toml").write_text((rung / "tessera.toml").read_text())
+    (out / "base-inputs.json").write_text(json.dumps(kept))
     return kept
 
 
@@ -361,27 +568,31 @@ def copy_declared_inputs(
     rung: Path, out: Path, base_ids: np.ndarray, published: Sequence[str]
 ) -> dict:
     """Every other file the declaration still names, read off the declaration rather than listed
-    here: a vocabulary is copied whole, and any other view's points file is filtered by entity id
-    exactly as the anchor's is.
+    here: a vocabulary is copied whole, and every file a view or an attribute reads is filtered
+    to the base's entities, leaving out a publication-route layer's column.
     """
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
-    anchor = declared.get("defaults", {}).get("source", "points")
     kept: dict = {}
     for vocabulary in declared.get("vocabulary", []):
         got = source_path(rung, named, vocabulary.get("source"))
         if got is not None and got.exists():
             shutil.copy2(got, out / got.name)
             kept.setdefault("vocabularies", []).append(got.name)
-    for view in declared.get("view", []):
-        source = view.get("source", anchor)
-        if source == anchor:
-            continue
-        got = source_path(rung, named, source)
-        if got.exists():
-            kept.setdefault("views", {})[got.name] = filter_parquet(
-                got, out / got.name, "entity_id", base_ids, drop=published
-            )
+    entity = declared.get("defaults", {}).get("entity_id_field", "entity_id")
+    entity_files: dict[Path, str] = {}
+    for view in declared_views(rung):
+        entity_files.setdefault(view["points"], view["fields"]["entity_id"])
+    for attribute in declared.get("attribute", []):
+        got = source_path(rung, named, attribute.get("source"))
+        if got is not None:
+            entity_files.setdefault(got, (attribute.get("fields") or {}).get("entity_id", entity))
+    for got, column in entity_files.items():
+        dropped = [name for name in pq.ParquetFile(got).schema_arrow.names if name in set(published)]
+        kept.setdefault("entity_files", {})[got.name] = {
+            "rows": filter_parquet(got, out / got.name, column, base_ids, drop=published),
+            "dropped_membership_columns": dropped,
+        }
     for name in ("branch.parquet", ".env"):
         source = rung / name
         if source.exists() and not (out / name).exists():

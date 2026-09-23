@@ -7,12 +7,12 @@ two reloads and a fold — every §2 stage class the suite can currently drive.
 
 ## Why the writes are counted the way they are
 
-A pulled tick dispatches *everything* eligible (§12.3), and the running system's ladder constants
-are fixed (driver module doc: `tier_width` 4 and the coalesce width 8 are not reachable from
-configuration), so isolation is arithmetic:
+A pulled tick dispatches *everything* eligible (§12.3), and the driver's server runs at the
+default ladder widths (`tier_width` 4 and `coalesce_width` 8, which its config does not set), so
+isolation is arithmetic:
 
-- flush extents and their merged outputs all clamp to the 16 MiB floor tier, and the merge cap in
-  the suite's config keeps the base segment out of every window — so merge eligibility is simply
+- flush extents and their merged outputs all clamp to the 16 MiB floor tier, and a merge selects
+  from them only, never the base segment — so merge eligibility is simply
   "four of them exist". Four writes, then the merge tick; three more (the merged segment counts as
   one), then the second merge tick. No write's own tick ever sees four, because the extent that
   write publishes is not yet published when its tick plans.

@@ -569,14 +569,12 @@ async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
         Some(8 - BUILT),
         "the keys no artifact held were created: {body}"
     );
-    // **`joined` counts the artifacts that already existed.** The four built keys hold one member
-    // each, so the page adds five to each of them; the four keys it created carry their members as
-    // part of being created and are reported under `minted` alone, which is what the word means on
-    // the publication route.
+    // **`joined` counts every membership the page added**, to the artifacts it created and to the
+    // held ones alike: every row but the four the build had already placed.
     assert_eq!(
         body["joined"].as_u64(),
-        Some(BUILT * (N / 8 - 1)),
-        "the members that joined an artifact that already existed: {body}"
+        Some(N - BUILT),
+        "every row is placed, in a held artifact or a created one: {body}"
     );
 
     tick(&server).await;
@@ -714,8 +712,8 @@ async fn a_partly_restated_values_page_appends_only_the_new_members() {
     assert_eq!(body["minted"].as_u64(), Some(8 - BUILT), "{body}");
     assert_eq!(
         body["joined"].as_u64(),
-        Some(BUILT * (N / 2 / 8 - 1)),
-        "{body}"
+        Some(N / 2 - BUILT),
+        "every row but the four the build placed: {body}"
     );
     tick(&server).await;
 

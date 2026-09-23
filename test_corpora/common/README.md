@@ -34,6 +34,11 @@ the same rung and shape. `--quick` is three zooms, three deciles, ten samples a 
 hold-out — about seven minutes on arXiv; full mode is every driver's own default and a 10%
 hold-out.
 
+The principal ladder is built from the rung's `<axis>-ranks.json`. A rung without one has it
+derived into `<work>/<rung>/derived-ranks.json`: one pair per (entity, label) of each view's
+`point_visibility` field across every view's points, a missing label counted under the view's
+default. The result's `ranks` says which it was.
+
 Each run writes `$TESSERA_LADDER/<rung>/workload-results/<timestamp>-<commit>.json`, holding both
 driver results whole. These are not committed: `data/` is git-ignored and they are one box's
 figures.
@@ -79,6 +84,7 @@ Holds both driver results whole, under `serve` and `ingest`, beside:
 | `commit`, `dirty` | the checkout's git commit, and whether it had uncommitted changes |
 | `binary` | the path to the `tessera` binary measured |
 | `minted_credentials` | credential and identity-key environment variables minted for this run, sorted |
+| `ranks` | the ranks file the ladder was built from; `derived` true, with the `fields` and the number of `terms`, where the rung had none |
 | `steps` | wall time per top-level step: `binary`, `check`, `build`, `verify`, `serve`, `ingest` |
 | `check`, `build`, `verify` | each step's `returncode`, `stdout_tail`, `stderr_tail`; `build` also carries §1's fields |
 | `failures` | plain sentences: a refused check, a failed verify, an OOM kill, a dead server, a failed request, an unequal census or a rejected batch |
@@ -174,16 +180,28 @@ these under `shed` and percentiles the rest.
 
 ### §3 `ingest[]` — one cell
 
-An ingest cycle ingests every declared view, the anchor view first, since entities are allocated
-on its pass alone. The fields below are the anchor view's figures; the driver's own result file
-also carries every view's, under `ingest_by_view` (below, under "Beyond the schema").
+An ingest cycle ingests every declared view, the anchor view first, then each other plain view
+and each view of every group. An entity is allocated on the first pass that holds it and joins
+on each later one. The hold-out is a set of entities, drawn from every view's points, so an
+entity held back is held back from every view, and its rows are ingested in each view's own pass.
+A group's views read either their own file or one file shared by the group, picked out by its
+discriminator column (`view`, or the name its `fields.view` gives). A roster is read in any of the
+build's three forms: `[[view_group.view]]` blocks, a `[view_group.views]` table, or keys taken
+from the discriminator's distinct values. Not built yet: a view whose `fields` give its geometry
+as `morton` and `residual` rather than a coordinate pair stops the cycle with a driver failure,
+and a layer whose `fields` rename its roster's columns fails its publication, since the roster is
+read under the canonical names. An
+attribute read from a file of its own is joined on entity id onto the batches of every view it
+applies to, picked by view key for a group-scoped one, as the build reads it beside the points.
+The fields below are the anchor view's figures; the driver's own result file also carries every
+view's, under `ingest_by_view` (below, under "Beyond the schema").
 
 | field | unit | how it was measured |
 |---|---|---|
 | `fraction` | fraction | entities held back, seeded and uniform |
 | `concurrency` | count | concurrent callers on `/control/ingest` |
 | `seed` | — | the split's seed |
-| `base_rows`, `holdout_rows` | count | the split |
+| `base_rows`, `holdout_rows` | count | entities in the base and in the hold-out: the cycle's own `base_entities` and `holdout_entities` |
 | `blocked` | object/absent | the cell did not run: where, and the refusal, verbatim |
 | `base_build`, `base_build_stages` | — | `tessera build` over the complement alone, on §1's fields |
 | `publish` | — | the publication, per layer — below |
@@ -195,18 +213,21 @@ also carries every view's, under `ingest_by_view` (below, under "Beyond the sche
 | `bodies_split` | count | bodies over the cap, halved and re-encoded until each half fits; eight-way counts 7 |
 | `largest_body_bytes` | bytes | the largest body sent |
 | `bodies_over_cap` | count | single-row bodies over the cap, sent as they are and refused 422 |
-| `flush_s` | seconds | `POST /control/flush` to the `flushes` counter moving, or the buffer already empty |
+| `flush_s` | seconds | `POST /control/flush` to `/control/status`'s `publication` reaching the number the flush answered: the cycle carrying every buffered row has published |
 | `visibility_s` | seconds | the same request to a zoom-0 viewport reaching the expected count, not `flush_s` |
-| `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once |
+| `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once, and the wait ends when a fold lands or the server counts one discarded |
 | `fold_peak_rss` | bytes | the server's own `compaction.last_rss_bytes` |
 | `driver_peak_rss` | bytes/`null` | the driver's own `VmHWM` at the cell's end, not the server's |
 | `equivalence` | — | the masked-count equivalence test, by surface — below |
 | `<phase>.phase_s` | seconds | one phase's own wall — `flush`, `fold`, `equivalence`, `write_cycle`, `restart` — whether it held or failed |
-| `write_cycle` | — | deletes, suppressions, re-ingests, a fold and census again, each with its latency to visibility |
+| `write_cycle` | — | deletes, suppressions, re-ingests, a fold and every view's count again, each with its latency to visibility. A deleted item is re-ingested in every view it was in, the anchor's first; `by_view` holds each view's count before, the suppressed items it holds, and its count after against the expected one; `reingest.items_with_several_ids` counts items answered with different `tessera_id`s by different views' passes |
 
 `publish` covers one phase: the base bundle carries the built fraction's points and every layer's
 declaration; each layer's artifacts, memberships and supplied content are published through
-`PUT /control/layers/{name}/artifacts` after every point they depend on is ingested.
+`PUT /control/layers/{name}/artifacts` after every point they depend on is ingested. A roster
+may carry its members itself, as a `members` list column, and a group-scoped layer's rows name
+their view in its `fields.view` column. A layer whose artifacts are written in the declaration
+is carried by the base build and published nowhere.
 
 | field | unit | how it was measured |
 |---|---|---|
@@ -228,8 +249,9 @@ declaration; each layer's artifacts, memberships and supplied content are publis
 | `declined` | object | declared layers not published, each with a `reason`: attribute membership, supplied content with no roster, or a failure. Every layer is under `layers`, `on_column` or here |
 | `edges_declared`, `edges_published` | count | the two summed over the layers |
 
-`equivalence` compares masked counts, per view, on four surfaces that are not equally comparable:
-`zoom0_equal`, the whole extent under each principal, frame-independent; `boxes_equal`, a box at
+`equivalence` compares masked counts, per view, on five surfaces that are not equally comparable:
+`zoom0_equal`, the whole extent under each principal, frame-independent; `filters_equal`, below;
+`boxes_equal`, a box at
 each census zoom, frame-dependent (`extent = "auto"` fits a base built from the complement onto a
 slightly different grid, so a box's margins can disagree by a handful of rows — `frames` carries
 both quantisations, `frames_equal` whether they match); `layers_equal`, the served-artifact frame
@@ -249,14 +271,30 @@ deployments and every principal: a box with no artifacts in it compares nothing.
 parents difference found inside a box names the box and counts under `layers` or `parents` all the
 same.
 
-`equivalence.views` holds each view's own comparison, keyed by name, with the four flags above,
+Each view's census also asks, under the broadest and the narrowest principal, a filter or two per
+filter operand `/v1/meta` offers on that view, a group-scoped family on the views of its keys
+included: a numeric column's presence and upper half, a category or keyword column's three
+commonest values, and a text column's two commonest words of four letters or more, and
+`/v1/categories` for each category column, followed through every page. Each value is drawn from
+up to 200,000 rows of the file the view's batches take the column from, kept to the entities the
+view holds wherever that file is not the view's own points file, and a text column's words are
+the tokens `tessera tokenise` produces under the column's declared analyser. A matched count or
+value list that differs counts under `filters`, and a probe answer that did not arrive whole is a
+sentence under `incomplete`.
+
+`equivalence.views` holds each view's own comparison, keyed by name, with the five flags above,
 `frames`, `frames_equal`, `census_coverage`, `differences` and `differences_by_surface`.
 `census_coverage` is what the folded deployment's census reached, read from the principal that
 sees the most: `zooms`, the artifacts and parent edges compared at each census zoom, and `layers`,
 each layer's `declared_levels` against the levels an artifact was served at, with
 `levels_compared`, `levels_declared`, `levels_missing` and the layer's own parent edges. A level in
 `levels_missing` is a failure sentence, since a census that compares no artifact at a level proves
-nothing there. The top-level `equal` is every view's `equal`, `incomplete` is a sentence per census
+nothing there. `census_coverage.visible` is the broadest principal's zoom-0 count and
+`census_coverage.filters` counts the filter operands `/v1/meta` offers on the view (`offered`),
+the probes compared, those matching something, and the category lists, and names each operand that
+produced no probe (`unprobed`) and each probe whose answer on the all-in build matched nothing
+(`unmatched_on_all_in`). Each unprobed operand and each unmatched probe is a failure sentence. `equivalence.views_compared_nowhere` names every view the all-in build serves that the
+census did not reach or saw nothing in, each a failure sentence. The top-level `equal` is every view's `equal`, `incomplete` is a sentence per census
 request that did not arrive whole, and the other top-level fields are the views' own summed or
 concatenated.
 
@@ -272,6 +310,7 @@ concatenated.
 | `ingest_by_view` | one entry per declared view, on `ingest`'s shape; the anchor's is duplicated at the top level as `ingest` |
 | `publish_rosters` | a column-route layer's roster (key, content, parents, no members), published before the ingest since a hold-out row's column names a key that must exist. Keyed by layer; a missing roster or failed publish carries `{failed: true, reason}` |
 | `minted_credentials` | credential and identity-key environment variables minted for this run, sorted |
+| `view_recreate` | on a rung with a view group, before the write cycle: the last key of a group owning its views is dropped through `DELETE /control/views/{group}/{key}`, which drops it in every group sharing it, created again through `PUT` with its roster record, sent every row of that key's views and that key's artifacts of every layer scoped to one of their groups, and flushed. A column-route layer's roster rows for the key go before the rows, whose batches carry the member column of every column-route layer drawn on the view; `publish_rosters` and `publish` hold the two publications. `answers_after_drop` is each view's viewport status once dropped (404), and `census` each view's census against the all-in build's, which declared the view fresh |
 | `restart` | the deployment stopped and reopened, compared against itself rather than the all-in build (a write cycle suppresses rows the all-in build still serves): `open_s`, `visible`, `visible_before`, per-view comparisons, `census_equal` |
 | `failures` | plain sentences for what did not hold — a blocked build or serve, a batch not fully accepted, a publication failure, an unequal census surface, a declared level the census compared no artifact at, a census request that did not arrive whole, a fold failure, a restart answering a different count. Empty means the cycle held |
 

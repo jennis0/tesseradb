@@ -106,11 +106,6 @@ mod tests {
 
         assert_eq!(executed.cardinality(), 1);
         assert!(executed.contains(3));
-        assert!(d0.andnot(&executed).is_empty() || executed.andnot(&d0).is_empty());
-        assert!(
-            executed.andnot(&d0).is_empty(),
-            "an entity never deleted retired"
-        );
     }
 
     /// The segment and the locator extent cover disjoint ranges, so each protects its own

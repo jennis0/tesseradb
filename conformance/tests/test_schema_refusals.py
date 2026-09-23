@@ -2,8 +2,9 @@
 
 Each refused schema must fail the build. The positive control builds the same corpus under a
 well-formed schema whose one attribute sets neither `index` nor `render`, and must succeed and
-write the record blob's base files. That makes each refusal the schema's own rather than the
-corpus's, and shows a column with neither key is stored rather than merely tolerated.
+write the record blob's base files. Each refused schema differs from the control's by one line,
+and the corpus has a column for every name any schema declares, so the build has no reason to
+refuse other than that line.
 """
 
 from __future__ import annotations
@@ -26,8 +27,9 @@ N = 8
 
 @pytest.fixture(scope="module")
 def corpus_dir(tmp_path_factory) -> Path:
-    """One tiny corpus for every case: 8 items, one term, and a `margin` column so the control
-    schema's declared attribute has values to store."""
+    """One tiny corpus for every case: 8 items, one term, a `margin` column for the control
+    schema's attribute, and a `record` column so the reserved-name case names a column that
+    exists."""
     work = tmp_path_factory.mktemp("schema-refusals")
     pq.write_table(
         pa.table(
@@ -36,6 +38,7 @@ def corpus_dir(tmp_path_factory) -> Path:
                 "x": pa.array([10.0 * (i + 1) for i in range(N)], type=pa.float32()),
                 "y": pa.array([10.0 * (i + 1) for i in range(N)], type=pa.float32()),
                 "margin": pa.array([i * 3 for i in range(N)], type=pa.uint32()),
+                "record": pa.array([i * 5 for i in range(N)], type=pa.uint32()),
             }
         ),
         work / "points.parquet",
@@ -53,8 +56,8 @@ def corpus_dir(tmp_path_factory) -> Path:
 
 
 # Every case's schema declares the same corpus, the same view and the same frame; only the
-# attribute half differs. The points file carries identity, geometry and the one column, so the
-# view and every attribute name one source; `[sources]` writes each path once, relative to the
+# attribute half differs. The points file carries identity, geometry and the attribute columns, so
+# the view and every attribute name one source; `[sources]` writes each path once, relative to the
 # declaration (configuration.md §3).
 SCHEMA_HEAD = """\
 [sources]
@@ -83,7 +86,7 @@ def _build(corpus_dir: Path, schema_text: str, out: Path):
     return run_build(["--deployment", str(deployment)], key_hex=ID_KEY_HEX)
 
 
-# (case name, schema). Each schema is one change away from the control's.
+# (case name, schema). Each schema is the control's with one line added or changed.
 REFUSALS = [
     (
         "multi_is_refused",
@@ -91,7 +94,6 @@ REFUSALS = [
 [[attribute]]
 name  = "margin"
 type  = "u32"
-index = true
 multi = true
 """,
     ),
@@ -99,9 +101,8 @@ multi = true
         "record_is_a_reserved_name",
         """\
 [[attribute]]
-name  = "record"
-type  = "u32"
-index = true
+name = "record"
+type = "u32"
 """,
     ),
     (

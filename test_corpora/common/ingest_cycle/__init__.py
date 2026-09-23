@@ -62,7 +62,7 @@ from .split import (
     filter_parquet,
     in_sorted,
     member_table_columns,
-    ranks_file,
+    ranks_for,
     split_entities,
     state_extent,
     write_base_inputs,
@@ -80,6 +80,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--port0", type=int, default=8161)
     ap.add_argument("--targets", default="0.01,0.05,0.10,0.25,0.50,1.0")
+    ap.add_argument(
+        "--ranks",
+        default=None,
+        help="the principal ladder's ranks file. Default the rung's own, or one derived into "
+        "--work from each view's point_visibility field where the rung has none",
+    )
     ap.add_argument("--equivalence-boxes", type=int, default=8)
     ap.add_argument("--write-cycle", action="store_true")
     ap.add_argument("--write-cycle-n", type=int, default=1000)
