@@ -22,7 +22,7 @@ use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent};
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::SegmentData;
-use tessera_store::{write_flush_segment, FlushInput, FlushRow};
+use tessera_store::{write_flush_segment_with_joins, FlushInput, FlushRow};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::write::StageMark;
@@ -636,8 +636,8 @@ pub(crate) struct SegmentFlush {
     pub(crate) descriptor: tessera_store::manifest::SegmentDescriptor,
     pub(crate) watermark: u64,
     pub(crate) entity_id_high_water: u64,
-    pub(crate) external_id_run: String,
-    pub(crate) locator_extent: tessera_store::manifest::LocatorExtent,
+    /// The locator extent over the rows that bind an entity, and the run it indexes; `None` where every row is a join.
+    pub(crate) locator_extent: Option<tessera_store::manifest::LocatorExtent>,
     pub(crate) tier: Arc<DeltaTier>,
     /// The tier's prefix-relative path; carried rather than re-derived, since a coalesce moves it.
     pub(crate) tier_path: String,
@@ -717,11 +717,18 @@ fn execute_flush_stages(
         });
     }
     *mark = laps.lap(FlushStage::Rows, *mark);
+    // A join's external id is bound by its entity's own row, so it writes no binding.
+    let joins: Vec<EntityId> = plan
+        .items
+        .iter()
+        .filter(|(_, item)| item.join)
+        .map(|(entity, _)| *entity)
+        .collect();
     let out = if rows.is_empty() {
         None
     } else {
         Some(
-            write_flush_segment(
+            write_flush_segment_with_joins(
                 &ctx.prefix_dir,
                 &ctx.partition,
                 &ctx.view,
@@ -735,6 +742,7 @@ fn execute_flush_stages(
                     scalar_schema: &ctx.scalar_schema,
                     row_base: ctx.row_base,
                 },
+                &joins,
             )
             .map_err(|e| MaintenanceFailed(format!("segment: {e}")))?,
         )
@@ -912,7 +920,6 @@ fn execute_flush_stages(
             descriptor: out.segment,
             watermark: out.watermark,
             entity_id_high_water: out.entity_id_high_water,
-            external_id_run: out.external_id_run,
             locator_extent: out.locator_extent,
             tier,
             tier_path,

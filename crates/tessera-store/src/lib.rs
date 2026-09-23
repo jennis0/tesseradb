@@ -40,7 +40,10 @@ pub use entity_terms::{
     ENTITY_TERMS_HASROW_FILE, ENTITY_TERMS_OFFSETS_FILE, ENTITY_TERMS_TERMS_FILE,
 };
 pub use error::{Result, StoreError};
-pub use flush::{digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow};
+pub use flush::{
+    digest_of, write_flush_segment, write_flush_segment_with_joins, FlushInput, FlushOutput,
+    FlushRow, JoinedFlushOutput,
+};
 pub use fold::{fold_row_space, FoldRowSpaceOutput, FoldRowSpaceSpec, FoldSegmentInput};
 pub use manifest_write::{
     fsync_dir, fsync_written, prune_superseded_segments_manifests, write_and_fsync, write_current,
