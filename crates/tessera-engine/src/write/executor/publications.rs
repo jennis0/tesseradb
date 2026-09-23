@@ -1885,20 +1885,22 @@ impl Executor {
             );
             return false;
         };
-        // The rebase is asked before anything is written, as a merge's is: a side-manifest naming
-        // a segment the row space refuses is one a restart cannot open. The row space moves under
-        // a flush when the view is dropped or created again during its flight.
+        // Asked before anything is written: a side-manifest naming a segment the row space
+        // refuses is one a restart cannot open. A view dropped during the flight has no row
+        // space, or a new incarnation's; its rows went with the drop, and the segment takes
+        // neither, even where the new incarnation's empty row space would continue it.
         if let Some(segment) = &completed.segment {
             let continues = partition_data
                 .views
                 .get(&completed.view)
+                .filter(|view| view.incarnation == segment.descriptor.incarnation)
                 .and_then(|view| view.row_space.with_extent(segment.extent.clone()))
                 .is_some();
             if !continues {
                 tracing::warn!(
                     view = %completed.view,
-                    "discarding a completed flush whose segment no longer continues its view's \
-                     row space"
+                    "discarding a completed flush whose view was dropped during its flight, or \
+                     whose segment no longer continues the view's row space"
                 );
                 return false;
             }
