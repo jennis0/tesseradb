@@ -74,16 +74,20 @@ def scope_group(attribute: dict) -> str | None:
 
 
 def encode_batch(
-    table: pa.Table, access: str | None, attributes: list[str], columns: Sequence[str] = ()
+    table: pa.Table,
+    coordinates: Sequence[str],
+    access: str | None,
+    attributes: list[str],
+    columns: Sequence[str] = (),
 ) -> bytes:
-    """One Arrow IPC stream for a slice of the hold-out. `access` is the wire's list of labels,
-    a null becoming the empty list for the view's declaration to interpret. `external_id` is
-    the source entity id, eight bytes little-endian, the build's own form. `columns` names the
-    column-route layers, already named for the layer they belong to."""
+    """One Arrow IPC stream for a slice of the hold-out. `coordinates` is the view's pair,
+    `lon`/`lat` for a projected view and `x`/`y` for one with none, which the table and the wire
+    both spell so. `access` is the wire's list of labels, a null becoming the empty list for the
+    view's declaration to interpret. `external_id` is the source entity id, eight bytes
+    little-endian, the build's own form. `columns` names the column-route layers, already named
+    for the layer they belong to."""
     entities = table.column("entity_id").to_pylist()
-    # The points file's own spelling, which the build already held to the view's projection:
-    # `lon`/`lat` for a projected view, `x`/`y` for one with none.
-    names = ["x", "y"] if "x" in table.column_names else ["lon", "lat"]
+    names = list(coordinates)
     arrays = [table.column(name).cast(pa.float64()).combine_chunks() for name in names]
     if access is not None:
         column = table.column(access).combine_chunks()
@@ -212,7 +216,9 @@ class HoldOut:
         view = view or declared_views(rung)[0]
         self.points = view["points"]
         self.select = view["select"]
-        #: The file's spelling of each canonical column a batch reads by name.
+        #: The view's coordinate pair, and the file's spelling of each canonical column a batch
+        #: reads by name.
+        self.coordinates = [name for name in view["fields"] if name not in ("entity_id", "view")]
         self.renamed = {
             spelt: name for name, spelt in view["fields"].items() if name != "view" and spelt != name
         }
@@ -342,5 +348,5 @@ class HoldOut:
 
     def encode(self, table: pa.Table) -> bytes:
         """[`encode_batch`] over a slice of this hold-out, member columns included."""
-        return encode_batch(table, self.access, self.attributes, self.columns)
+        return encode_batch(table, self.coordinates, self.access, self.attributes, self.columns)
 
