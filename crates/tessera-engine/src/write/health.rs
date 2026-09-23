@@ -460,7 +460,7 @@ pub struct ExecutorStats {
     pub last_fold_attr_written: u64,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
-    /// Whether a flush unit is executing on the pool — see [`ExecutorHealth::flush_in_flight`].
+    /// Whether a flush is running on the pool or finished and not yet published.
     pub flush_in_flight: bool,
     /// Whether a merge is running on the pool or finished and not yet published.
     pub merge_in_flight: bool,
@@ -837,7 +837,7 @@ impl ExecutorHealth {
             last_fold_attr_written: self.last_fold_attr_written.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
-            flush_in_flight: self.flush_in_flight.load(Ordering::SeqCst),
+            flush_in_flight: outstanding(&self.flush_in_flight, &self.flush_completed_pending),
             merge_in_flight: outstanding(&self.merge_in_flight, &self.merge_completed_pending),
             coalesce_in_flight: outstanding(
                 &self.coalesce_in_flight,

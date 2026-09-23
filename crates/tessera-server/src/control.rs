@@ -3156,10 +3156,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "flush_failures": executor.flush_failures,
                 "flushable_items": executor.flushable_items,
                 "flush_requested": executor.flush_requested,
-                // Whether a flush is on the pool now, which the two flush counts cannot show.
+                // Whether a flush is running on the pool or finished and not yet published,
+                // which the two flush counts cannot show.
                 "in_flight": executor.flush_in_flight,
-                // The same for a merge and a coalesce: running on the pool, or finished and not
-                // yet published.
                 "merge_in_flight": executor.merge_in_flight,
                 "coalesce_in_flight": executor.coalesce_in_flight,
                 "buffered_items": executor.buffered_items,
