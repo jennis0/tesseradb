@@ -4,7 +4,7 @@ use tessera_spatial::tiler::ScalarType;
 
 use super::{RecordsOrder, RecordsRefused};
 use crate::error::{EngineError, Result};
-use crate::filter::{scoped_column_name, Family, FieldHomes};
+use crate::filter::{scoped_column_name, scoped_has_value_column, FieldHomes};
 use crate::viewport::{EngineMeta, Resolution};
 
 /// One named field, resolved.
@@ -124,7 +124,7 @@ fn resolve_field(
                 home,
             })
         }
-        Resolution::Scoped { family, .. } if Family::of_scoped(family) == Family::Text => {
+        Resolution::Scoped { family, .. } if !scoped_has_value_column(family) => {
             refused(RecordsRefused::ScopedText(spelling.to_string()))
         }
         Resolution::Scoped { family, view } => Ok(Named {

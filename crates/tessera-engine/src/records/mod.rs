@@ -302,8 +302,9 @@ struct Planned<'r> {
 impl Engine {
     /// Serve one `POST /v1/items` response into `sink` and return its trailer. Every refusal is
     /// decided before the head: the request's shape, the idset, the view, the cursor (before any
-    /// position in it is used), the fields, then the filter. An `Err` after the head leaves the response
-    /// without a trailer, which a client reads as incomplete and resumes from the last page end.
+    /// position in it is used), the fields, then the filter. An `Err` after the head leaves the
+    /// response without a trailer, which a client reads as incomplete and resumes from the last
+    /// page end.
     pub fn items_stream(
         &self,
         session: &Session,

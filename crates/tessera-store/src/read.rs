@@ -2363,8 +2363,9 @@ pub fn tile_ranges_within(seg: &SegmentData, tile: &Tile, within: Range<u32>) ->
     start..first_code_at_or_past(seg, hi, start..within.end)
 }
 
-/// The first row of `within` whose cell code is `code` or past it, or `within`'s end where none
-/// is: a binary search of the sorted Morton column, restricted to `within`.
+/// The first row of `within` whose cell code is `code` or past it, found by a binary search of the
+/// sorted Morton column over `within` alone. Where no row of `within` is, the answer is `within`'s
+/// end, held to the column's length; where `within` holds no row of the column, its start.
 pub fn first_code_at_or_past(seg: &SegmentData, code: u64, within: Range<u32>) -> u32 {
     let codes = seg.morton.u32();
     let lo_idx = within.start as usize;

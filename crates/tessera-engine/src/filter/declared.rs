@@ -300,7 +300,7 @@ impl FieldHomes {
         }
     }
 
-    /// The homes by the names `/v1/meta` publishes, in that order.
+    /// The homes by name, in the order rendered, value column, record.
     pub fn names(self) -> Vec<&'static str> {
         [
             (self.rendered, "rendered"),

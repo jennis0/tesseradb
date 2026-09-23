@@ -231,10 +231,9 @@ impl EngineMeta {
         .leaf_column(self)
     }
 
-    /// Resolve a `/v1/categories` column spelling — [`Self::resolve_filter_column`]'s question
-    /// asked by the value-list route, whose admission is not the filter surface's. A category has
-    /// a value list whether or not it is filterable, so an entity-scoped column is resolved by
-    /// declaration alone; a group-scoped one is admitted as the filter surface admits it.
+    /// Resolve a `/v1/categories` column spelling. A category has a value list whether or not it
+    /// is filterable, so an entity-scoped column resolves by declaration alone and a group-scoped
+    /// one as a filter admits it.
     pub fn resolve_category_column(
         &self,
         leaf: &str,
