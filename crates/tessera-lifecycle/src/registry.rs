@@ -920,6 +920,7 @@ impl LayerRegistry {
             declaration: Box::new(declaration),
             layer_entity,
             runs,
+            version: self.version + 1,
         })
     }
 
@@ -2664,6 +2665,7 @@ impl LayerRegistry {
         }
         Ok(WalRecord::LayerDrop {
             name: name.to_string(),
+            version: self.version + 1,
         })
     }
 
@@ -2747,16 +2749,12 @@ impl LayerRegistry {
                 declaration,
                 layer_entity,
                 runs,
+                version,
             } => {
-                // Replay over a seed that already holds this registration keeps its version:
-                // nothing about the layer changed.
-                let version = match self.layers.get(&declaration.name) {
-                    Some(held) if held.entity == *layer_entity => held.version,
-                    _ => {
-                        self.version += 1;
-                        self.version
-                    }
-                };
+                // The record's own version, so a replay over a seed that already counts it moves
+                // nothing.
+                let version = *version;
+                self.version = self.version.max(version);
                 self.layers.insert(
                     declaration.name.clone(),
                     RegisteredLayer {
@@ -2781,10 +2779,10 @@ impl LayerRegistry {
                     },
                 );
             }
-            WalRecord::LayerDrop { name } => {
+            WalRecord::LayerDrop { name, version } => {
                 self.layers.remove(name);
                 self.tombstones.insert(name.clone());
-                self.version += 1;
+                self.version = self.version.max(*version);
             }
             // A publication's only effect on the *registry* is the reservation it grew. The
             // artifacts themselves belong to the store, applied from the same record.

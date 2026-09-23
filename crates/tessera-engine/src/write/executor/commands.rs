@@ -684,7 +684,7 @@ impl Executor {
         // `ArtifactStore::remove_layer` is reached from nowhere: a drop touches the registry and
         // stops there. Releasing it changes what the next fold repacks and how far back the
         // rotation pin holds the log.
-        if let WalRecord::LayerDrop { name } = &record {
+        if let WalRecord::LayerDrop { name, .. } = &record {
             // The deltas held for the tick describe forms that are going with the layer.
             self.pending_forms.retain(|(layer, _), _| layer != name);
             self.deps.artifact_projections.forget(name);
