@@ -1,4 +1,4 @@
-"""The local instance: the deployment file, its secrets, and the `tessera serve` child (§7).
+"""The local server: the deployment file, its secrets, and the `tessera serve` child process.
 
 `commit()` starts `tessera serve` as a child of the kernel over the directory's `tessera.toml`.
 The three planes are on loopback at port 0, so the kernel picks no ports and the child says which
@@ -74,15 +74,14 @@ class Listening:
 
 
 def write_deployment(directory: Path) -> Path:
-    """`tessera.toml`, as `tessera build` and `tessera serve` both read it (SA §7).
+    """Write `tessera.toml`, which `tessera build` and `tessera serve` both read.
 
     Every path in it resolves against this file's own directory, so the database directory serves
     from wherever it is copied to.
 
-    `serve.cors_loopback` admits a page served from a loopback address on the viewer plane (§7).
-    A notebook page's origin is the front end's, unknown at start and not enumerable for a
-    webview, so it is what a widget in a notebook needs; the three planes bind loopback, so the
-    pages it admits are pages on this machine.
+    `serve.cors_loopback` lets a page served from this machine read from the server, which is
+    what a notebook's map needs, since its page's address is not known in advance. The server
+    listens on this machine only.
     """
     serve = {
         "viewer": "127.0.0.1:0",
@@ -172,7 +171,7 @@ def start(
 
 
 def read_announce(stdout, timeout: float, stderr_text) -> Listening:
-    """Read the child's stdout until one line is the announce line (§11.2 A).
+    """Read the child's output until the line announcing its addresses.
 
     The line is JSON carrying `event: "listening"` and the three planes' bound addresses. Lines
     that are not that are skipped, the child's own logging having shared the stream before now.
@@ -291,7 +290,7 @@ def _stop_everything() -> None:
 
 
 def find_binary() -> tuple[str, str]:
-    """The `tessera` binary and where it came from (§7).
+    """The `tessera` binary and where it was found.
 
     `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else the `tesseradb-native`
     platform wheel, else a checkout's target directory, release before debug. An explicit
@@ -330,8 +329,8 @@ def find_extension() -> ModuleType | None:
     """The `_tessera` extension module, or `None` where nothing carries it.
 
     The same order as `find_binary`: whatever is already importable as `_tessera`, then the
-    `tesseradb-native` wheel, then a checkout's target directory — where cargo leaves the object
-    under `lib_tessera.so`, a name Python will not import, so it is loaded by path.
+    `tesseradb-native` wheel, then a checkout's target directory, where cargo names it
+    `lib_tessera.so`, which Python will not import by name, so it is loaded by path.
     """
     for name in ("_tessera", "tesseradb_native._tessera"):
         try:
