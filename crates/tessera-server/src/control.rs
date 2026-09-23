@@ -2053,8 +2053,9 @@ async fn register_layer(
     let name = declaration.name.clone();
     // A group's name is every view the group holds now, as it is at a build.
     let meta = state.engine.meta();
+    let declared_views = std::mem::take(&mut declaration.views);
     declaration.views = tessera_types::layer::expand_views(
-        &declaration.views,
+        &declared_views,
         |view| {
             meta.groups
                 .iter()
@@ -2075,6 +2076,29 @@ async fn register_layer(
                 .join(", ")
         ))
     })?;
+    if let Some(group) = declaration.scope.group() {
+        tessera_types::layer::check_scoped_views(
+            &declared_views,
+            group,
+            meta.groups
+                .iter()
+                .map(|g| (g.name.as_str(), g.members_of.as_deref())),
+            |view| {
+                meta.resolve_view(view)
+                    .and_then(|v| v.roster.as_ref())
+                    .map(|roster| roster.group.clone())
+            },
+        )
+        .map_err(|outside| {
+            ApiError::Contract(format!(
+                "layer '{name}' is scoped to group '{group}' and names view '{}', which holds no \
+                 key of it; name {} or a view of {}, or drop the scope",
+                outside.view,
+                outside.sharing.join(" or "),
+                if outside.sharing.len() == 1 { "it" } else { "them" }
+            ))
+        })?;
+    }
     // **Decision 0111's layer-level span rule, at the declaration.** A shape layer whose views are
     // a mix of projected and unprojected row spaces has no geometry that could span them, so it is
     // refused here — naming the layer and both sides — rather than at the first artifact, where

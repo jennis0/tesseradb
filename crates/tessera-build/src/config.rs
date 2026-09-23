@@ -4162,16 +4162,6 @@ fn compile_scope(object: &str, value: Option<&toml::Value>, groups: &[ViewGroup]
     Ok(Scope::Group(named.to_string()))
 }
 
-/// Every group that draws on `group`'s key set: the group itself, and every group declaring
-/// `members = "<group>"` (`views.md` §3.3).
-fn groups_sharing<'a>(groups: &'a [ViewGroup], group: &str) -> Vec<&'a str> {
-    groups
-        .iter()
-        .filter(|g| g.name == group || g.members.as_deref() == Some(group))
-        .map(|g| g.name.as_str())
-        .collect()
-}
-
 /// Which attributes are bound to a group's views, by name (`views.md` §5).
 fn compile_attribute_scopes(
     blocks: &[AttributeBlock],
@@ -4656,25 +4646,25 @@ fn compile_layers(
             )));
         }
 
-        // **A scoped layer is a different artifact set per view of one group** (`views.md` §3.5),
-        // so the views it is drawn on can only be that group's: an artifact belongs to one view,
-        // and a plain view is not one of them. The groups sharing the key set are admitted with
-        // it, since their views *are* the same views.
+        // A scoped layer's artifacts are a set per view of one group's key set, so it is drawn on
+        // that key set's views alone. A build names a group's views by the group's name only.
         let scope = compile_scope(&object, block.scope.as_ref(), groups)?;
         if let Scope::Group(group) = &scope {
-            let sharing = groups_sharing(groups, group);
-            for view in declared_views {
-                if !sharing.contains(&view.as_str()) {
-                    return Err(declaration_error(format!(
-                        "{object}: `scope = {{ group = \"{group}\" }}` with `views` naming \
-                         '{view}'. A scoped layer's artifacts belong to one view each and are \
-                         keyed per `(layer, view)`, so the views it is drawn on are that group's \
-                         and no others (views §3.5). Nameable here: {}. Drop the scope for one \
-                         artifact set drawn on every view named, which is the default",
-                        names(sharing.iter().copied())
-                    )));
-                }
-            }
+            tessera_types::layer::check_scoped_views(
+                declared_views,
+                group,
+                groups.iter().map(|g| (g.name.as_str(), g.members.as_deref())),
+                |_| None,
+            )
+            .map_err(|outside| {
+                declaration_error(format!(
+                    "{object}: `scope = {{ group = \"{group}\" }}` with `views` naming '{}', \
+                     which holds no key of that group. Nameable here: {}. Drop the scope for one \
+                     artifact set drawn on every view named",
+                    outside.view,
+                    names(outside.sharing.iter().map(String::as_str))
+                ))
+            })?;
         }
 
         let membership = compile_membership(block, attributes)?;
