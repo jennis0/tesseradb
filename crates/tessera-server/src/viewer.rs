@@ -191,8 +191,8 @@ async fn meta(
                 // structure; neither: stored and returned on drill-down, but not filterable.
                 "render": s.render,
                 "index": s.index,
-                // Where `POST /v1/items` reads the value from. A field whose only home is
-                // `record` is read from the record store, in stored order.
+                // Where `POST /v1/items` reads the value from; a field whose only home is
+                // `record` reads fastest in stored order.
                 "homes": meta.homes[index].names(),
             })
         }).collect::<Vec<_>>(),
@@ -1202,7 +1202,7 @@ async fn viewport(
     }));
 
     // Every failure before the first flush arrives here with its status.
-    let (first, body) = pending.opened("viewport").await?;
+    let (first, body) = pending.opened("viewport", "first flush").await?;
 
     let pin_header = serde_json::to_string(&PinDto::from(&first.stamp))
         .expect("PinDto serialisation cannot fail");

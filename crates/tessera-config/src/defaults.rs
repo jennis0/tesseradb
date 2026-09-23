@@ -55,7 +55,7 @@ pub const DEFAULT_MAX_PAGE_BYTES: usize = 64 * 1024 * 1024;
 /// larger than the ceiling is sent alone past it.
 pub const MAX_PAGE_BYTES_CEILING: usize = 1 << 31;
 
-/// Bulk reads running at once.
+/// Bulk reads running at once. `0` refuses every bulk read with a 429.
 pub const DEFAULT_BULK_ADMISSION: usize = 2;
 
 /// Bytes one bulk-read response may carry.

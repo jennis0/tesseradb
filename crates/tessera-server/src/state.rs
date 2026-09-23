@@ -183,8 +183,9 @@ impl Drop for GatePermits {
 
 /// Admission for the CPU-bound viewer and session routes, never the control plane. `slots`
 /// bounds admitted requests and sheds at once when full; `compute` bounds running requests and
-/// sheds a caller that waits longer than `admission_timeout_ms`. Bulk reads have a gate of their
-/// own, [`ComputeGate::for_bulk_reads`], so a long read never holds a slot the viewport needs.
+/// sheds a caller that waits longer than `admission_timeout_ms`. Bulk reads run under their own
+/// admission limit, `serve.bulk_admission` ([`ComputeGate::for_bulk_reads`]), so a long read takes
+/// no slot from the viewport and item routes.
 pub struct ComputeGate {
     pub compute_admission: usize,
     pub compute_queue: usize,
@@ -560,8 +561,9 @@ pub struct AppState {
     pub suggest_admission: SuggestAdmission,
     /// The viewer/session admission gate. Never touched by the control plane.
     pub compute_gate: ComputeGate,
-    /// The bulk-read lane: `POST /v1/items` only, so a long read holds no slot of the gate
-    /// above. The compute threads and the memory cap are shared.
+    /// `POST /v1/items` only. Runs under its own admission limit, `serve.bulk_admission`, so a
+    /// long read takes no slot from the viewport and item routes. The compute threads and the
+    /// memory cap are shared.
     pub bulk_gate: ComputeGate,
     /// The control plane's own bound, so ingest is never throttled by what viewports consume.
     pub ingest_admission: IngestAdmission,

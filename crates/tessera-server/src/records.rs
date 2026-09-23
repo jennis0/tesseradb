@@ -2,8 +2,8 @@
 //! in the viewport's framing. The engine serves one response per request and keeps nothing
 //! between them; the caller carries the read forward by passing each response's cursor back.
 //!
-//! The route runs on the bulk-read gate, so a long read never holds a slot the viewport and item
-//! routes use, and on a blocking thread that streams each page as it is built. A client that goes
+//! Runs under its own admission limit, `serve.bulk_admission`, so a long read takes no slot from
+//! the viewport and item routes, and on a blocking thread that streams each page as it is built. A client that goes
 //! away cancels the engine through the body's guard. The stream deadline cancels it too, and the
 //! engine then ends the response with a short page and a trailer, so a read cut by the deadline
 //! resumes from that trailer's cursor.
@@ -196,7 +196,7 @@ pub(crate) async fn items(
         run_items_stream(&closure_state, &session, req, cancel, sink);
     }));
 
-    let (opening, body) = pending.opened("items").await?;
+    let (opening, body) = pending.opened("items", "first frame").await?;
     Ok(crate::stream::response_head(
         opening.identity_key.as_ref(),
         opening.server_us,

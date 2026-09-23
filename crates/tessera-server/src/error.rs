@@ -49,8 +49,8 @@ pub enum ShedCause {
     /// The compute-admission gate had no slot, or no permit within `admission_timeout_ms`.
     /// `Retry-After` is [`RETRY_AFTER_SECS`]. Counted in that gate's `shed_total`.
     ComputeGate,
-    /// The bulk-read gate had no slot, or no permit within `admission_timeout_ms`. As
-    /// [`Self::ComputeGate`], for its own gate.
+    /// `serve.bulk_admission` bulk reads were already running. `Retry-After` is
+    /// [`RETRY_AFTER_SECS`].
     BulkGate,
     /// The ingest work queue or the ingest buffer is full; `retry_after_s` is estimated from the
     /// drain rate. `/control/changes` never answers 429: [`map_change_batch_error`] has no route to

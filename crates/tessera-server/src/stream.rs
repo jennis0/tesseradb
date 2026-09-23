@@ -72,11 +72,8 @@ impl Shed {
     pub(crate) fn detail(self) -> &'static str {
         match self {
             Shed::Deadline => {
-                "the whole-stream deadline fired: the response was committed and the work behind \
-                 its next frame outran serve.stream_deadline_ms. A cold request over a level whose \
-                 derived structures the prefix does not carry is the shape to check first — the \
-                 build's artifact pass writes them, and an open reporting no adoptions says they \
-                 were not taken"
+                "the whole-stream deadline fired after the first flush: the work behind the next \
+                 frame outran serve.stream_deadline_ms."
             }
             Shed::Stall => {
                 "the per-send stall budget fired: the client stopped reading and \
@@ -237,13 +234,18 @@ impl<T> Producer<T> {
 
 impl<T> Pending<T> {
     /// Waits for the producer's opening. A refusal keeps its status; a producer that ended
-    /// without answering, which is a panic, is a fail-closed 500 with a fixed detail.
-    pub(crate) async fn opened(self, producer: &str) -> Result<(T, Opened), ApiError> {
+    /// without answering, which is a panic, is a fail-closed 500 with a fixed detail. `first`
+    /// names what the opening carries: the viewport's first flush, the items route's first frame.
+    pub(crate) async fn opened(
+        self,
+        producer: &str,
+        first: &str,
+    ) -> Result<(T, Opened), ApiError> {
         match self.opening.await {
             Ok(Ok(opening)) => Ok((opening, Opened(self.body))),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(ApiError::FailClosed(format!(
-                "the {producer} producer terminated before its first flush"
+                "the {producer} producer terminated before its {first}"
             ))),
         }
     }
