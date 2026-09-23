@@ -1,7 +1,7 @@
 """The endurance tier — correctness-suite §6's backstop, build-order row 9.
 
 **The axis here is the operation count, not the corpus size**, and it is the one axis nothing
-else in the tree exercises: the soak reaches forty flushes, the stage-invariance plan eight
+else in the tree exercises: the soak reaches forty flushes, the stage-invariance plan six
 writes and one fold, and every number they check is small enough to be right by accident. The
 defects this tier exists for need a long life — a `seg_id` allocator that wraps, a reclamation
 pass that takes back slightly less than each fold orphans, a maintenance width that holds for
@@ -940,6 +940,7 @@ def test_endurance_long_life(tmp_path_factory):
         bbox=BBOX,
         k=K,
         filters={"bay": {"eq": "cedar"}},
+        isolated_ticks=False,
     )
     t = Tracker()
     drainer = PipeDrainer()
