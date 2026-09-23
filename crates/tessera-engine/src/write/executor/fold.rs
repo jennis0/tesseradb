@@ -890,13 +890,12 @@ impl Executor {
                 return Err("a carried-forward segment begins below the fold's own base permutation".to_string());
             }
         }
-        // Checked partition-wide, not per view: `ext-locator.u32` is one array per partition, and
-        // `plan.entity_bound` is the maximum of the per-view bounds, so no view's extent can fall
-        // beneath it.
+        // Checked partition-wide: `ext-locator.u32` is one array per partition, and the sidecar
+        // asks it before any extent for an entity below its length.
         if forward
             .locators
             .iter()
-            .any(|extent| extent.entity_lo < plan.entity_bound)
+            .any(|extent| extent.entity_lo < plan.binding_bound)
         {
             return Err("a carried-forward locator extent begins below the fold's own base locator".to_string());
         }
@@ -1367,12 +1366,12 @@ impl Executor {
     /// The `MANIFEST.json` a fold's new prefix carries: the live one, with the schema wound back to
     /// what it was at the plan, every live vocabulary binding folded in, and the fold's own files.
     ///
-    /// `entity_id_high_water` here must stay the snapshot's value, not the live one: it is what
-    /// `ExternalIdSidecar::deferred_from_manifest` takes as the base locator's declared length, and
-    /// a live value would make the base locator claim every post-snapshot entity and answer "no
-    /// external id" for one that has it. `Engine::open` seeds the allocator's floor from the max of
-    /// this and the side-manifest's live value, so writing the lower value here is still safe for
-    /// the allocator.
+    /// `entity_id_high_water` here is where the base locator ends, the snapshot's recorded
+    /// bindings: it is what `ExternalIdSidecar::deferred_from_manifest` takes as the base locator's
+    /// declared length, and a higher value would make the base locator claim an entity whose
+    /// binding a later flush records and answer "no external id" for it. `Engine::open` seeds the
+    /// allocator's floor from the max of this and the side-manifest's live value, so the lower
+    /// value is safe for the allocator.
     ///
     /// The vocabulary bindings fold in verbatim, never re-derived, re-sorted or re-numbered: keys
     /// and codes are byte-identical everywhere, and `columns.arrow` stores the code alone, so
@@ -1410,7 +1409,7 @@ impl Executor {
                 .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
         }
         crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
-        bundle_manifest.entity_id_high_water = plan.entity_bound;
+        bundle_manifest.entity_id_high_water = plan.binding_bound;
         bundle_manifest.files = completed.files.clone();
         let carried_bindings: Vec<_> = live
             .bundle

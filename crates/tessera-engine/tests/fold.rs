@@ -2889,7 +2889,6 @@ fn dropping_the_engine_returns_while_a_fold_is_held_in_flight() {
 /// buffered, and they publish during the fold's flight. A fold discarded for that is asked for
 /// again; one of a bounded number of attempts must publish while the feed keeps running.
 #[test]
-#[ignore = "fails now and then: a view's joins can flush before their entities' own rows, and a fold planned then is discarded when those rows flush in its flight"]
 fn a_fold_lands_while_ingest_continues_into_several_views() {
     const ATTEMPTS: u64 = 5;
     let tmp = tempfile::TempDir::new().unwrap();
