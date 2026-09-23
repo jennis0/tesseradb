@@ -226,7 +226,7 @@ fn check_columns<'b>(
         let Some(col) = batch.column_by_name(&d.name) else {
             continue;
         };
-        if batch.num_rows() > 0 && !wire_carries(d, col.data_type()) {
+        if !wire_carries(d, col.data_type()) {
             return Err(DecodeError(format!(
                 "{body_name}: column '{}' is {:?}, but MANIFEST.declared_scalars declares it {} \
                  (contracts §2.6); refused rather than dropped",
@@ -242,7 +242,7 @@ fn check_columns<'b>(
         let Some(col) = batch.column_by_name(&f.name) else {
             continue;
         };
-        if batch.num_rows() > 0 && !wire_carries(&scoped_as_declared(f), col.data_type()) {
+        if !wire_carries(&scoped_as_declared(f), col.data_type()) {
             return Err(DecodeError(format!(
                 "{body_name}: column '{}' is {:?}, but it is a group-scoped attribute declared {} \
                  (views §5); refused rather than dropped",
@@ -491,9 +491,6 @@ pub(crate) fn parse_ingest_batch(
 
         let memberships =
             check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
-        if batch.num_rows() == 0 {
-            continue;
-        }
         let declared_cells: Vec<Option<Cells<'_>>> = declared
             .iter()
             .map(|d| batch.column_by_name(&d.name).map(|col| Cells::new(col, d)))
@@ -688,9 +685,6 @@ pub(crate) fn parse_values_batch(
             ),
         };
 
-        if batch.num_rows() == 0 {
-            continue;
-        }
         let cells: Vec<Cells<'_>> = carried
             .iter()
             .map(|d| {

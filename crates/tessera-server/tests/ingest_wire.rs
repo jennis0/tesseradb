@@ -1557,3 +1557,54 @@ async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
         "the build refuses the same column"
     );
 }
+
+/// **A column's type is checked on every record batch, an empty one included**, as the build
+/// checks it: a `utf8` column for the `f32` attribute `weight` is refused though no row carries a
+/// value, at both routes.
+#[tokio::test]
+async fn a_wrong_typed_column_in_an_empty_batch_is_refused() {
+    let (_tmp, server) = served_declared().await;
+    let access = access_column(std::iter::empty());
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        access_field(&access),
+        Field::new("weight", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(std::iter::empty::<&[u8]>())),
+            Arc::new(Float32Array::from(Vec::<f32>::new())),
+            Arc::new(Float32Array::from(Vec::<f32>::new())),
+            Arc::new(access),
+            Arc::new(StringArray::from(Vec::<&str>::new())),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    let (status, answer) =
+        ingest(&server, "empty", Some(ARROW), writer.into_inner().unwrap()).await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("weight", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(std::iter::empty::<&[u8]>())),
+            Arc::new(StringArray::from(Vec::<&str>::new())),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    let (status, answer) = post_values(&server, "empty", writer.into_inner().unwrap()).await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
+}
