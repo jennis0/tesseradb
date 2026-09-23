@@ -547,6 +547,11 @@ def labels_block(
         block["title"] = title
     block["type"] = type
     block["membership"] = "enumerated"
+    if isinstance(artifact_visibility, dict) and "field" in artifact_visibility:
+        raise Refusal(
+            f"labels {name!r}: a label set's text carries no access labels of its own, so it "
+            f"has no column to read them from. Give artifact_visibility the default label alone"
+        )
     block["artifact_visibility"] = _artifact_visibility(artifact_visibility)
     block["require_member_visibility"] = _requirement(require_member_visibility)
     block["content"] = {"require_member_visibility": content_requires}

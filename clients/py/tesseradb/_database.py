@@ -335,7 +335,9 @@ class Database:
         - `content_requires`: `"inherited"` (the default) shows a label wherever its annotation is
           shown. `"all"` shows it only to a reader who may see every item the text was written
           from; those items come from `insert(name, members=table, id=, key=)`.
-        - `require_member_visibility`, `artifact_visibility`, `title`: as for `declare_layer`.
+        - `require_member_visibility`, `title`: as for `declare_layer`.
+        - `artifact_visibility`: the access label of every label in the set. A label carries none
+          of its own, so no `field` is taken.
 
             db.declare_labels("topics", of="clusters")
             db.insert("topics", {"c0": "graph neural networks", "c1": "diffusion models"})

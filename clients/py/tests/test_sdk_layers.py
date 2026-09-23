@@ -194,6 +194,16 @@ def test_a_layer_reads_its_labels_from_one_column_whichever_call_names_it(db, ch
     assert checked(db).ok
 
 
+def test_a_label_set_takes_no_label_column(db):
+    """A label set's text insert carries no labels of its own, so a column for them is refused."""
+    db.declare_layer("clusters", kind="flat")
+    with pytest.raises(Refusal):
+        db.declare_labels(
+            "topics", of="clusters", artifact_visibility={"field": "team", "default": "inherited"}
+        )
+    db.declare_labels("topics", of="clusters", artifact_visibility={"default": "inherited"})
+
+
 # ---------------------------------------------------------------------------- vocabularies
 
 
