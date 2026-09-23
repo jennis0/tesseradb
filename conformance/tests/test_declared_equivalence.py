@@ -623,14 +623,6 @@ class Known:
 
 KNOWN = (
     Known(
-        "layer-version",
-        "layers",
-        ("restart", "fold", "fold-restart"),
-        ((r"meta", r"\.layers\[\d+\]\.version"),),
-        "a restart moves the version `/v1/meta` gives each layer registered live, though nothing "
-        "about who may see the layer changed",
-    ),
-    Known(
         "artifact-order",
         "layers",
         STAGES,
