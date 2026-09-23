@@ -225,6 +225,21 @@ decimal substring, never as a raw little-endian integer in the general case. Bot
 the binary scan in case anything ever writes raw bytes to the log, and the decimal scan as the one
 that actually matches how a text logger would leak an id.
 
+**`POST /v1/items` is swept whole.** It is the second viewer route that returns an external id,
+and it returns rows by the thousand, so a read is taken in both orders with every declared field,
+the three system fields, two pages a response and the cursor carried across responses to the end.
+Every frame is swept. A records frame's `tessera_id` column is swept as the points batch's is, at
+its own 8-byte stride against the unfiltered target set, and its `tessera:x` and `tessera:y`
+columns at their own stride against the floor-filtered set, since a position at the extent origin
+is `0.0`, whose bits are entity id 0. The declared fields' columns are corpus values the fixture
+planted and are not swept, as the points batch's `fx_key` is not. Each row's `tessera:external_id`
+must be the external id of the item its `tessera_id` names, which is the one place an external id
+may appear on this route; `tessera:labels` and the head, page-end and trailer JSON get the decimal
+sweep. A cursor is opaque and encrypted under a fresh nonce, so its decoded bytes are uniform:
+every 8-byte window at every offset is swept against the unfiltered set and the identity key's
+halves, at the same `~1e-9` coincidence rate the `tessera_id` column's sweep argues. A 4-byte
+sweep of the cursor is not run, for the chance-collision reason the `tessera_id` column gets none.
+
 **The explicit negative control (brief step 1's closing instruction).** A scan that never finds
 anything proves nothing if it would never have found anything *anyway* — this test asserts that a
 genuine, known `tessera_id` (one actually decoded from a real viewport response) **is** present in
@@ -266,13 +281,17 @@ import base64
 import io
 import json
 import re
+import struct
 from pathlib import Path
+
+from typing import NamedTuple
 
 import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest
 
 from oracle import catalogue
+from oracle import identity as identity_mod
 from oracle import mask as mask_mod
 from oracle.catalogue import catalogue_points_path
 from oracle.harness import open_bundle_with_source, spawn_server, stop_server
@@ -294,6 +313,14 @@ UNDERLAY_OFFSET = 2
 # per-element-aligned entity-id scan of `tessera_id` needs no floor at all (see the same section).
 SAFE_ID_FLOOR = 100_000
 ITEM_SAMPLE_SIZE = 25  # tessera ids sampled for the /v1/items/{tessera_id} textual scan
+# `POST /v1/items`: every declared field, the three system fields, and pages small enough that a
+# read spans several responses carried by the cursor.
+ITEMS_FIELDS = [
+    "fx_key", "department", "archive", "title", "shelf", "submitter", "abstract", "note", "pages",
+]
+ITEMS_SYSTEM_FIELDS = ["position", "external_id", "labels"]
+ITEMS_PAGE_ROWS = 4_999
+ITEMS_PAGES_PER_RESPONSE = 2
 EXTERNAL_ID_SAMPLE_SIZE = 5  # admitted entities sampled for the external-id sweep
 
 
@@ -465,6 +492,61 @@ def _subcell_value_buffer_windows(subcell_bytes: bytes) -> set[int]:
     return windows
 
 
+class RecordsScan(NamedTuple):
+    """What the sweep reads from one `POST /v1/items` records frame."""
+
+    #: 8-byte windows of the `tessera_id` column's value buffer, at its own stride.
+    tessera_windows: set[int]
+    #: 8-byte windows of the `tessera:x` and `tessera:y` value buffers, at their own stride.
+    position_windows: set[int]
+    tessera_ids: list[int]
+    #: Each row's `tessera:external_id`, positional to `tessera_ids`; empty without the column.
+    external_ids: list[bytes | None]
+    labels: list[str]
+
+
+def _value_buffer(column, width: int) -> bytes:
+    """A fixed-width column's value buffer, trimmed of Arrow's alignment padding, which would
+    otherwise read as windows of zero."""
+    buf = [b for b in column.buffers() if b is not None][-1]
+    return buf.to_pybytes()[: len(column) * width]
+
+
+def _records_scan(payload: bytes) -> RecordsScan:
+    """One records frame's swept columns, decoded from the Arrow stream rather than read from the
+    framed bytes, for the reason the points sweep gives."""
+    scan = RecordsScan(set(), set(), [], [], [])
+    with ipc.open_stream(io.BytesIO(payload)) as reader:
+        for batch in reader:
+            names = batch.schema.names
+            ids = batch.column("tessera_id")
+            scan.tessera_windows.update(_le_windows(_value_buffer(ids, 8), 8, stride=8))
+            scan.tessera_ids.extend(ids.to_pylist())
+            for name in ("tessera:x", "tessera:y"):
+                if name in names:
+                    scan.position_windows.update(
+                        _le_windows(_value_buffer(batch.column(name), 8), 8, stride=8)
+                    )
+            if "tessera:external_id" in names:
+                scan.external_ids.extend(batch.column("tessera:external_id").to_pylist())
+            if "tessera:labels" in names:
+                for row in batch.column("tessera:labels").to_pylist():
+                    scan.labels.extend(row)
+    return scan
+
+
+def _cursor_windows(cursor: str) -> set[int]:
+    """Every 8-byte little-endian window of a cursor's decoded bytes, at every offset: the cursor
+    is opaque, so no alignment can be assumed."""
+    return _le_windows(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)), 8)
+
+
+def _items_cursors(body: wire.ItemsBody) -> list[str]:
+    """Every cursor a response carries: each page end's and the trailer's."""
+    ends = [end["next"] for _, end in body.pages] + [body.trailer["next"]]
+    return [cursor for cursor in ends if cursor is not None]
+
+
 def _decode_tessera_ids(points_bytes: bytes) -> list[int]:
     with ipc.open_stream(io.BytesIO(points_bytes)) as reader:
         ids: list[int] = []
@@ -511,6 +593,15 @@ def _points_stream(tessera_ids: list[int], codes: list[int]) -> bytes:
     )
     sink = io.BytesIO()
     with ipc.new_stream(sink, schema) as writer:
+        writer.write_batch(batch)
+    return sink.getvalue()
+
+
+def _records_stream(columns: dict) -> bytes:
+    """A records batch of the named columns, built by the harness."""
+    batch = pa.record_batch(list(columns.values()), names=list(columns))
+    sink = io.BytesIO()
+    with ipc.new_stream(sink, batch.schema) as writer:
         writer.write_batch(batch)
     return sink.getvalue()
 
@@ -650,6 +741,44 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
         "the untrimmed body does not carry the axis at all, so the assertion above passes for the "
         "wrong reason"
     )
+
+    # 7. `POST /v1/items`: a records frame's identifier and position columns, a JSON frame, and a
+    #    cursor's decoded bytes. Each carries the plant in the encoding its sweep reads.
+    planted_bits = struct.unpack("<d", planted.to_bytes(8, "little"))[0]
+    records = _records_stream(
+        {
+            "tessera_id": pa.array([planted], type=pa.uint64()),
+            "tessera:x": pa.array([0.5], type=pa.float64()),
+            "tessera:y": pa.array([0.5], type=pa.float64()),
+        }
+    )
+    assert _records_scan(records).tessera_windows & targets, (
+        "the records sweep did not catch a raw entity id in the tessera_id column"
+    )
+    records = _records_stream(
+        {
+            "tessera_id": pa.array(clean_ids, type=pa.uint64()),
+            "tessera:x": pa.array([planted_bits, 0.0], type=pa.float64()),
+            "tessera:y": pa.array([0.5, 0.25], type=pa.float64()),
+        }
+    )
+    scan = _records_scan(records)
+    assert scan.position_windows & targets, (
+        "the records sweep did not catch an entity id's bits in a position column"
+    )
+    assert not (scan.tessera_windows & targets), "the records sweep flagged a clean identifier"
+    page_end = json.dumps({"next": None, "ended_by": "rows", "rows": planted}).encode()
+    assert _decimal_windows(page_end, SAFE_ID_FLOOR) & targets, (
+        "the JSON-frame sweep did not catch an entity id in a page end"
+    )
+    cursor = base64.urlsafe_b64encode(
+        bytes(range(1, 20)) + planted.to_bytes(8, "little") + bytes(range(40, 60))
+    ).decode().rstrip("=")
+    assert _cursor_windows(cursor) & targets, (
+        "the cursor sweep did not catch an entity id in a cursor's bytes"
+    )
+    clean_cursor = base64.urlsafe_b64encode(bytes(range(200, 256))).decode().rstrip("=")
+    assert not (_cursor_windows(clean_cursor) & targets), "the cursor sweep flagged a clean cursor"
 
     clean_log = b"2026-08-01T00:00:00Z INFO tessera_server: served zoom=4 k=20 status=200\n"
     assert not (_decimal_windows(clean_log, SAFE_ID_FLOOR) & targets), (
@@ -923,6 +1052,95 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
                 f"external id for entity {entity_id} found in a /v1/items response for a "
                 f"different tessera_id ({tid})"
             )
+
+    # --- POST /v1/items: a whole read in each order, every frame swept ---------------------------
+    visible = sum(tile[1] for tile in decode_viewport_with_subcells(all_raw_responses[0])[0])
+
+    def external_of(entity: int) -> bytes | None:
+        try:
+            return oracle_bundle.external_id_of(entity)
+        except KeyError:
+            return None
+
+    items_tessera_windows: set[int] = set()
+    items_position_windows: set[int] = set()
+    items_cursor_windows: set[int] = set()
+    items_json = b""
+    items_labels: list[str] = []
+    external_ids_checked = 0
+    read_sets = []
+    for order in ("map", "stored"):
+        body = {
+            "view": VIEW,
+            "fields": ITEMS_FIELDS,
+            "system_fields": ITEMS_SYSTEM_FIELDS,
+            "order": order,
+            "page_rows": ITEMS_PAGE_ROWS,
+            "pages": ITEMS_PAGES_PER_RESPONSE,
+        }
+        rows: list[int] = []
+        responses = 0
+        while True:
+            resp = server.items(token, **body)
+            assert resp.status_code == 200, resp.text
+            assert resp.headers["x-tessera-identity-key"] != identity_key_hex
+            raw = resp.content
+            assert identity_key_raw not in raw, "identity key's raw 16 bytes found in an items body"
+            responses += 1
+            decoded = wire.split_items_frames(raw)
+            items_json += b"\n".join(decoded.json_payloads) + b"\n"
+            for cursor in _items_cursors(decoded):
+                items_cursor_windows |= _cursor_windows(cursor)
+            for records, _end in decoded.pages:
+                scan = _records_scan(records)
+                items_tessera_windows |= scan.tessera_windows
+                items_position_windows |= scan.position_windows
+                items_labels.extend(scan.labels)
+                assert len(scan.external_ids) == len(scan.tessera_ids)
+                # The one place an external id may appear on this route: its own row.
+                for tessera_id, external_id in zip(scan.tessera_ids, scan.external_ids):
+                    _shard, entity = identity_mod.invert(identity_key, tessera_id)
+                    assert external_id == external_of(entity), (
+                        f"the row for tessera_id {tessera_id} carries an external id that is not "
+                        "its item's"
+                    )
+                    external_ids_checked += 1
+                rows.extend(scan.tessera_ids)
+            next_cursor = decoded.trailer["next"]
+            if next_cursor is None:
+                break
+            body["cursor"] = next_cursor
+        assert responses > 1, "the read must be carried across responses by its cursor"
+        assert len(rows) == len(set(rows)), f"a row returned twice in {order} order"
+        assert len(rows) == visible, (
+            f"the {order}-order read returned {len(rows)} rows where the viewport counts {visible}"
+        )
+        read_sets.append(set(rows))
+    assert read_sets[0] == read_sets[1], "the two orders returned different rows"
+    assert external_ids_checked > 0
+
+    # The scan finds a real identifier where one was sent, or its silence proves nothing.
+    assert next(iter(read_sets[0])) in items_tessera_windows
+    leaked = items_tessera_windows & target_ids
+    assert not leaked, f"entity id(s) in an items tessera_id column: {sorted(leaked)[:20]}"
+    leaked = items_position_windows & target_ids_high
+    assert not leaked, f"entity id(s) in an items position column: {sorted(leaked)[:20]}"
+    leaked = items_cursor_windows & target_ids
+    assert not leaked, f"entity id(s) in the bytes of an items cursor: {sorted(leaked)[:20]}"
+    for half in (identity_key.k0, identity_key.k1):
+        assert half not in items_tessera_windows | items_position_windows | items_cursor_windows, (
+            "an identity key half found in an items body"
+        )
+    items_text = items_json + "\n".join(items_labels).encode()
+    leaked = _decimal_windows(items_text, SAFE_ID_FLOOR) & target_ids_high
+    assert not leaked, f"entity id(s) as decimal text in an items JSON frame or label: {sorted(leaked)[:20]}"
+    items_text_str = items_text.decode("utf-8", errors="replace")
+    assert identity_key_hex not in items_text_str
+    assert str(identity_key.k0) not in items_text_str and str(identity_key.k1) not in items_text_str
+    for entity_id in ext_sample:
+        assert oracle_bundle.external_id_of(entity_id) not in items_json, (
+            f"external id for entity {entity_id} found in an items JSON frame"
+        )
 
     # --- server log: text, so scan for decimal substrings, not just raw LE bytes -----------------
     log_bytes = log_path.read_bytes()

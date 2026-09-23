@@ -1902,3 +1902,55 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
     assert!(!decoded.points.is_empty());
 }
+
+/// **The viewport's whole-stream deadline runs from its first flush**: at a deadline of nothing,
+/// the body is cut before its trailer, and the same request under the shipped deadline arrives
+/// whole.
+#[tokio::test]
+async fn the_whole_stream_deadline_cuts_a_viewport_after_its_first_flush() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let body = serde_json::json!({
+        "view": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+    });
+    let mut bodies = Vec::new();
+    for deadline_ms in [0, tessera_config::defaults::DEFAULT_STREAM_DEADLINE_MS] {
+        let dir = tmp.path().join(format!("serve-{deadline_ms}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = spawn_server_with_bulk_reads(
+            &bundle_root,
+            &dir.join("cache"),
+            &dir.join("wal.log"),
+            generous_test_gate(),
+            generous_bulk_gate(),
+            |limits| limits.stream_deadline_ms = deadline_ms,
+        )
+        .await;
+        let auth = authorise(&server, &["0"]).await;
+        // A cut body can reach hyper before the headers are written, so the cut shows either as a
+        // failed request or as a body that ends in an error; both are a response without its
+        // trailer.
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(auth["token"].as_str().unwrap())
+            .json(&body)
+            .send()
+            .await;
+        let body = match resp {
+            Ok(resp) => {
+                assert_eq!(resp.status(), 200, "a 200 or a cut, never a refusal");
+                resp.bytes().await.ok()
+            }
+            Err(_) => None,
+        };
+        bodies.push(body);
+        server.shutdown().await;
+    }
+    assert!(
+        bodies[0].is_none(),
+        "a deadline of nothing cuts the body after the counts"
+    );
+    let whole = bodies[1].as_ref().expect("the shipped deadline serves the whole body");
+    assert!(decode_viewport_frames(whole).trailer.is_object());
+}

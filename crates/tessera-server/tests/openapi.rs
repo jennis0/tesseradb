@@ -14,7 +14,8 @@
 //! [`common::decode_viewport_frames`] and by the two worked decodes under `clients/ts/wire-example`
 //! and `reference/examples`. It asserts the route's headers and its framing outcomes (a `k = 0`
 //! request yields no points frame; `layers: []` yields no artifacts frame) and validates the
-//! request body only.
+//! request body only. `POST /v1/items` is framed the same way, and its three JSON frames are
+//! validated against their schemas.
 
 mod common;
 
@@ -310,6 +311,7 @@ fn the_description_names_every_route_on_the_two_planes_and_no_other() {
             "/v1/artifacts/{tessera_id}",
             "/v1/categories/{column}",
             "/v1/categories/{column}/suggest",
+            "/v1/items",
             "/v1/items/{tessera_id}",
             "/v1/meta",
             "/v1/viewport",
@@ -335,6 +337,10 @@ fn every_closed_dto_is_declared_closed() {
         "CategoriesResponse",
         "Pin",
         "ViewportRequest",
+        "ItemsRequest",
+        "ItemsHead",
+        "ItemsPageEnd",
+        "ItemsTrailer",
         "ItemRequest",
         "ItemResponse",
         "ArtifactRequest",
@@ -463,6 +469,28 @@ async fn authorise_and_revoke_match_the_description() {
         .await
         .unwrap();
     assert_refusal(&doc, resp, 422, "contract").await;
+    // auth_data the plugin refuses is the caller's to correct, and the plugin's reason reaches
+    // them: a 422 whose detail is not the fail-closed text every internal failure gets.
+    let resp = f
+        .server
+        .client
+        .post(f.server.session_url("/session/authorise"))
+        .bearer_auth(SESSION_CREDENTIAL)
+        .json(&json!({ "auth_data": base64::engine::general_purpose::STANDARD.encode("not json") }))
+        .send()
+        .await
+        .unwrap();
+    let body = assert_refusal(&doc, resp, 422, "contract").await;
+    let internal = tessera_server::error::map_engine_error(tessera_engine::EngineError::Malformed(
+        String::new(),
+    ));
+    let internal: Value = serde_json::from_slice(
+        &axum::body::to_bytes(axum::response::IntoResponse::into_response(internal).into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_ne!(body["detail"], internal["detail"]);
 
     // Revoke: 204 with no body, and the token is then a 401 — the session ending, exactly as a
     // 403 would be (the obligations list's rule).
@@ -930,6 +958,115 @@ async fn items_match_the_description_with_every_refusal() {
     assert_invalid(&doc, "ItemRequest", &json!({ "external_id": "x" }));
 }
 
+/// `POST /v1/items`: the request shape, the described headers, the three JSON frames against
+/// their schemas, and the refusals.
+#[tokio::test]
+async fn the_items_read_matches_the_description_with_its_refusals() {
+    let doc = description();
+    let f = fixture().await;
+    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let post = |body: Value, tok: &str| {
+        f.server
+            .client
+            .post(f.server.viewer_url("/v1/items"))
+            .bearer_auth(tok)
+            .json(&body)
+            .send()
+    };
+
+    let body = json!({
+        "view": "s0",
+        "fields": ["archive", "score"],
+        "system_fields": ["position", "external_id", "labels"],
+        "filters": { "score": { "range": { "gte": 5 } } },
+        "keep_unmatched": true,
+        "count": true,
+        "order": "map",
+        "page_rows": 10,
+        "pages": 3,
+        "compression": "zstd",
+        "idset": FIXTURE_IDSET,
+    });
+    assert_valid(&doc, "ItemsRequest", &body);
+    let resp = post(body, token).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.headers()["content-type"].to_str().unwrap(),
+        "application/octet-stream"
+    );
+    let headers = doc["paths"]["/v1/items"]["post"]["responses"]["200"]["headers"]
+        .as_object()
+        .unwrap();
+    for (name, spec) in headers {
+        if spec["required"].as_bool() == Some(true) {
+            assert!(resp.headers().contains_key(name.as_str()), "{name}");
+        }
+    }
+    // The optional headers: the identity coordinate is present whenever a page was walked, and
+    // the region verdict only with a region leaf, which this request has not.
+    assert!(resp.headers().contains_key("x-tessera-identity-key"));
+    assert!(!resp.headers().contains_key("x-tessera-region"));
+    let decoded = decode_items(&resp.bytes().await.unwrap());
+    assert_valid(&doc, "ItemsHead", &decoded.head);
+    assert!(decoded.head["visible"].is_u64() && decoded.head["matched"].is_u64());
+    assert_eq!(decoded.pages.len(), 3);
+    for (_, end) in &decoded.pages {
+        assert_valid(&doc, "ItemsPageEnd", end);
+    }
+    assert_valid(&doc, "ItemsTrailer", &decoded.trailer);
+    let cursor = decoded.trailer["next"].as_str().unwrap().to_string();
+
+    // The rest of the read, from the cursor, to its end.
+    let resp = post(json!({ "view": "s0", "fields": [], "cursor": cursor }), token)
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let decoded = decode_items(&resp.bytes().await.unwrap());
+    assert_valid(&doc, "ItemsHead", &decoded.head);
+    assert_valid(&doc, "ItemsTrailer", &decoded.trailer);
+    assert!(decoded.trailer["next"].is_null());
+    assert_eq!(decoded.trailer["ended_by"], "end");
+
+    // Refusals.
+    for body in [
+        json!({ "view": "s0", "fields": [], "page_rows": 0 }),
+        json!({ "view": "s0", "fields": [], "unknown": 1 }),
+        json!({ "view": "s0", "fields": ["no_such_field"] }),
+        json!({ "view": "s0", "fields": [], "cursor": "not-a-cursor" }),
+    ] {
+        let resp = post(body, token).await.unwrap();
+        assert_refusal(&doc, resp, 422, "contract").await;
+    }
+    let resp = post(json!({ "view": "no-such-view", "fields": [] }), token)
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 404, "unknown").await;
+    let resp = post(
+        json!({ "view": "s0", "fields": [], "idset": FIXTURE_IDSET + 1 }),
+        token,
+    )
+    .await
+    .unwrap();
+    assert_refusal(&doc, resp, 409, "conflict").await;
+    let resp = post(json!({ "view": "s0", "fields": [] }), "not-a-token")
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 401, "bad-credential").await;
+
+    // The request schema refuses what the server refuses.
+    for body in [
+        json!({ "view": "s0", "fields": [], "unknown": 1 }),
+        json!({ "view": "s0" }),
+        json!({ "view": "s0", "fields": [], "page_rows": 0 }),
+        json!({ "view": "s0", "fields": [], "order": "random" }),
+        json!({ "view": "s0", "fields": [], "compression": "gzip" }),
+        json!({ "view": "s0", "fields": [], "system_fields": ["entity_id"] }),
+    ] {
+        assert_invalid(&doc, "ItemsRequest", &body);
+    }
+}
+
 #[tokio::test]
 async fn artifacts_match_the_description_with_one_refusal_shape() {
     let doc = description();
@@ -1102,10 +1239,10 @@ async fn every_viewer_route_requires_a_session_token() {
     // Non-vacuity, both halves: the loop must have found the seven gated routes and the two
     // probes, or it enumerated nothing and proved nothing.
     assert_eq!(
-        gated, 7,
-        "the viewer plane's gated routes are meta, categories, suggest, viewport, items, \
-         artifacts and artifacts/browse; a change to that set belongs in this test's reasoning, \
-         not silently in its count"
+        gated, 8,
+        "the viewer plane's gated routes are meta, categories, suggest, viewport, the items read, \
+         items, artifacts and artifacts/browse; a change to that set belongs in this test's \
+         reasoning, not silently in its count"
     );
     assert_eq!(
         probes, 2,
@@ -1264,6 +1401,7 @@ async fn both_session_routes_require_the_credential_before_the_body() {
 fn viewer_body(path: &str) -> Value {
     match path {
         "/v1/viewport" => viewport_body(json!({})),
+        "/v1/items" => json!({ "view": "s0", "fields": [] }),
         "/v1/items/{tessera_id}" => json!({}),
         "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
         "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),

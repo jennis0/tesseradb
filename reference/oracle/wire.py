@@ -414,3 +414,66 @@ def decode_viewport_artifacts(data: bytes):
     """
     _tiles, _points, _sub_cells, artifacts, _trailer = decode_frames(data)
     return artifacts if artifacts is not None else []
+
+
+# `POST /v1/items` is framed the viewport's way with kinds of its own:
+#
+#     kind 6  head       JSON {order, page_rows, visible?, matched?}   exactly one, first
+#     kind 7  records    one Arrow stream of one batch                  zero or more
+#     kind 8  page end   JSON {next, ended_by}                          one after each records frame
+#     kind 4  trailer    JSON {pages, rows, next, ended_by, stream_us}  exactly one, last
+#
+# The viewport's decoder above does not accept these kinds, and this one accepts only these.
+FRAME_ITEMS_HEAD = 6
+FRAME_RECORDS = 7
+FRAME_PAGE_END = 8
+
+_ITEMS_KINDS = {FRAME_ITEMS_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER}
+ITEMS_TRAILER_KEYS = frozenset({"pages", "rows", "next", "ended_by", "stream_us"})
+
+
+class ItemsBody(NamedTuple):
+    """One `POST /v1/items` body, split and checked but not decoded past its JSON."""
+
+    head: dict
+    #: Each records frame's payload with the page end that follows it, parsed.
+    pages: list[tuple[bytes, dict]]
+    trailer: dict
+    #: The head's, the page ends' and the trailer's payloads as sent.
+    json_payloads: list[bytes]
+
+
+def split_items_frames(data: bytes) -> ItemsBody:
+    """An items body split strictly: truncation, a kind outside the four, a head not first, a
+    trailer not last, a records frame without its page end or a page end without its records
+    frame all raise, so a truncated body never reads as a shorter response."""
+    frames: list[tuple[int, bytes]] = []
+    at = 0
+    while at < len(data):
+        if len(data) - at < 5:
+            raise ValueError(f"truncated frame header at byte {at}")
+        kind = data[at]
+        if kind not in _ITEMS_KINDS:
+            raise ValueError(f"unknown frame kind {kind} at byte {at} in an items body")
+        (length,) = struct.unpack_from("<I", data, at + 1)
+        start = at + 5
+        end = start + length
+        if end > len(data):
+            raise ValueError(f"frame at byte {at} claims a payload past the end of the body")
+        frames.append((kind, data[start:end]))
+        at = end
+    if len(frames) < 2 or frames[0][0] != FRAME_ITEMS_HEAD or frames[-1][0] != FRAME_TRAILER:
+        raise ValueError("an items body is a head first and a trailer last")
+    middle = frames[1:-1]
+    if len(middle) % 2:
+        raise ValueError("a records frame without its page end")
+    pages = []
+    for (records_kind, records), (end_kind, end) in zip(middle[::2], middle[1::2]):
+        if records_kind != FRAME_RECORDS or end_kind != FRAME_PAGE_END:
+            raise ValueError("an items body pairs each records frame with the page end after it")
+        pages.append((records, json.loads(end)))
+    trailer = json.loads(frames[-1][1])
+    if set(trailer) != ITEMS_TRAILER_KEYS:
+        raise ValueError(f"the items trailer's keys are {sorted(trailer)}")
+    json_payloads = [frames[0][1], *(end for (_, end) in middle[1::2]), frames[-1][1]]
+    return ItemsBody(json.loads(frames[0][1]), pages, trailer, json_payloads)

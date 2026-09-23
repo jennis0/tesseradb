@@ -449,6 +449,8 @@ pub async fn spawn_server_with_stream_flush(
         stream_write_stall_ms,
         Arc::new(FaultSwitchboard::new()),
         DEFAULT_VISIBLE_WAIT_MAX_SECS,
+        generous_bulk_gate(),
+        |_| {},
     )
     .await
 }
@@ -565,6 +567,44 @@ impl Served {
 /// [`ComputeGate`] to exercise shedding.
 pub fn generous_test_gate() -> ComputeGate {
     ComputeGate::new(64, 64, 250)
+}
+
+/// The bulk-read lane every mount but the lane's own tests takes, generous for the same reason.
+pub fn generous_bulk_gate() -> ComputeGate {
+    ComputeGate::for_bulk_reads(16)
+}
+
+/// A server whose two admission gates and `[serve]` limits the caller chooses: the bulk-read tests
+/// set the lane, the page ceilings, the response budgets and the stream budgets through `tune`.
+pub async fn spawn_server_with_bulk_reads(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    compute_gate: ComputeGate,
+    bulk_gate: ComputeGate,
+    tune: impl FnOnce(&mut ServeLimits),
+) -> TestServer {
+    let config = default_engine_config();
+    let max_k = config.max_k;
+    let mut engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+        .expect("engine should open against a freshly built bundle");
+    engine
+        .start_write_executor(1024)
+        .expect("the write executor starts once per engine");
+    mount_server_with_flush(
+        engine,
+        max_k,
+        compute_gate,
+        generous_ingest_limits(),
+        CorsOrigins::none(),
+        1 << 20,
+        10_000,
+        Arc::new(FaultSwitchboard::new()),
+        DEFAULT_VISIBLE_WAIT_MAX_SECS,
+        bulk_gate,
+        tune,
+    )
+    .await
 }
 
 /// [`spawn_server`] under `config`.
@@ -746,6 +786,8 @@ pub async fn spawn_server_with_visible_wait(
         10_000,
         Arc::new(FaultSwitchboard::new()),
         visible_wait_max_secs,
+        generous_bulk_gate(),
+        |_| {},
     )
     .await
 }
@@ -789,6 +831,8 @@ async fn mount_server_with(
         10_000,
         Arc::new(FaultSwitchboard::new()),
         DEFAULT_VISIBLE_WAIT_MAX_SECS,
+        generous_bulk_gate(),
+        |_| {},
     )
     .await
 }
@@ -812,11 +856,13 @@ pub async fn mount_server_with_faults(
         10_000,
         faults,
         DEFAULT_VISIBLE_WAIT_MAX_SECS,
+        generous_bulk_gate(),
+        |_| {},
     )
     .await
 }
 
-/// [`mount_server_with`], with every setting given.
+/// [`mount_server_with`], with every setting given and `tune` applied last over the limits.
 #[allow(clippy::too_many_arguments)]
 async fn mount_server_with_flush(
     engine: Engine,
@@ -828,42 +874,47 @@ async fn mount_server_with_flush(
     stream_write_stall_ms: u64,
     faults: Arc<FaultSwitchboard>,
     visible_wait_max_secs: u64,
+    bulk_gate: ComputeGate,
+    tune: impl FnOnce(&mut ServeLimits),
 ) -> TestServer {
+    let mut limits = ServeLimits {
+        max_k,
+        // Small, so the fixtures' vocabularies arrive in pages.
+        max_category_values: 4,
+        // Small, so suggestions page and spend their walk budget on ordinary requests.
+        max_suggestions: 4,
+        max_suggestion_walk: 1_000,
+        // Every test principal sees more than one entity, so suggestions always take the probe
+        // route and no background sweep can race a test that reads `more`.
+        max_suggest_set_entities: 1,
+        ingest_max_batch_rows: ingest_limits.max_batch_rows,
+        ingest_buffer_max_items: ingest_limits.buffer_max_items,
+        ingest_max_batch_bytes: ingest_limits.max_batch_bytes,
+        publish_max_body_bytes: ingest_limits.publish_max_body_bytes,
+        max_artifacts_per_request: ingest_limits.max_artifacts_per_request,
+        max_members_per_request: ingest_limits.max_members_per_request,
+        max_excluded_per_request: ingest_limits.max_excluded_per_request,
+        // On; the `bench-timing` feature still decides whether anything is sent.
+        stage_timing: true,
+        // At the 1 MiB default every fixture's points arrive in one frame; the tests of several
+        // frames mount a smaller threshold.
+        stream_flush_bytes,
+        stream_write_stall_ms,
+        dev_cors_origins: cors.dev,
+        cors_origins: cors.production,
+        cors_loopback: cors.loopback,
+        visible_wait_max_secs,
+        ..Default::default()
+    };
+    tune(&mut limits);
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         heap: tessera_server::memory::HeapWatch::default(),
-        limits: ServeLimits {
-            max_k,
-            // Small, so the fixtures' vocabularies arrive in pages.
-            max_category_values: 4,
-            // Small, so suggestions page and spend their walk budget on ordinary requests.
-            max_suggestions: 4,
-            max_suggestion_walk: 1_000,
-            // Every test principal sees more than one entity, so suggestions always take the
-            // probe route and no background sweep can race a test that reads `more`.
-            max_suggest_set_entities: 1,
-            ingest_max_batch_rows: ingest_limits.max_batch_rows,
-            ingest_buffer_max_items: ingest_limits.buffer_max_items,
-            ingest_max_batch_bytes: ingest_limits.max_batch_bytes,
-            publish_max_body_bytes: ingest_limits.publish_max_body_bytes,
-            max_artifacts_per_request: ingest_limits.max_artifacts_per_request,
-            max_members_per_request: ingest_limits.max_members_per_request,
-            max_excluded_per_request: ingest_limits.max_excluded_per_request,
-            // On; the `bench-timing` feature still decides whether anything is sent.
-            stage_timing: true,
-            // At the 1 MiB default every fixture's points arrive in one frame; the tests of
-            // several frames mount a smaller threshold.
-            stream_flush_bytes,
-            stream_write_stall_ms,
-            dev_cors_origins: cors.dev,
-            cors_origins: cors.production,
-            cors_loopback: cors.loopback,
-            visible_wait_max_secs,
-            ..Default::default()
-        },
+        limits,
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
         compute_gate,
+        bulk_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
@@ -1735,4 +1786,71 @@ pub fn build_ingest_batch_optional(rows: &[(Option<&[u8]>, f32, f32, &str)]) -> 
     let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
     writer.write(&batch).unwrap();
     writer.into_inner().unwrap()
+}
+
+/// One decoded `POST /v1/items` body.
+pub struct DecodedItems {
+    /// The kind-6 head.
+    pub head: serde_json::Value,
+    /// Each kind-7 records frame's batch, with the kind-8 page end that follows it.
+    pub pages: Vec<(RecordBatch, serde_json::Value)>,
+    /// The kind-4 trailer.
+    pub trailer: serde_json::Value,
+    /// Each records frame's payload as sent, for a test about its encoding.
+    pub records_payloads: Vec<Vec<u8>>,
+}
+
+impl DecodedItems {
+    /// Every page's `tessera_id` column, in order.
+    pub fn tessera_ids(&self) -> Vec<u64> {
+        self.pages
+            .iter()
+            .flat_map(|(batch, _)| {
+                batch
+                    .column_by_name("tessera_id")
+                    .expect("every page leads with tessera_id")
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .expect("tessera_id is uint64")
+                    .values()
+                    .to_vec()
+            })
+            .collect()
+    }
+}
+
+/// Decodes an items body strictly: one head first, a page end after every records frame and
+/// nowhere else, one trailer last, and one batch in every records frame.
+pub fn decode_items(bytes: &[u8]) -> DecodedItems {
+    use tessera_wire::{FRAME_ITEMS_HEAD, FRAME_PAGE_END, FRAME_RECORDS, FRAME_TRAILER};
+    let frames = tessera_wire::split_frames(bytes).expect("an items body splits into frames");
+    assert!(frames.len() >= 2, "a head and a trailer at least");
+    let json = |payload: &[u8]| -> serde_json::Value {
+        serde_json::from_slice(payload).expect("a JSON frame parses")
+    };
+    let (first_kind, first) = frames[0];
+    assert_eq!(first_kind, FRAME_ITEMS_HEAD, "the head is first");
+    let (last_kind, last) = frames[frames.len() - 1];
+    assert_eq!(last_kind, FRAME_TRAILER, "the trailer is last");
+    let mut pages = Vec::new();
+    let mut records_payloads = Vec::new();
+    let middle = &frames[1..frames.len() - 1];
+    assert!(middle.len().is_multiple_of(2), "every records frame has its page end");
+    for pair in middle.chunks(2) {
+        assert_eq!(pair[0].0, FRAME_RECORDS, "a records frame, then its page end");
+        assert_eq!(pair[1].0, FRAME_PAGE_END, "a records frame, then its page end");
+        let mut batches: Vec<RecordBatch> = StreamReader::try_new(Cursor::new(pair[0].1), None)
+            .expect("a records frame is an Arrow stream")
+            .map(|batch| batch.expect("a records batch decodes"))
+            .collect();
+        assert_eq!(batches.len(), 1, "one batch per records frame");
+        pages.push((batches.remove(0), json(pair[1].1)));
+        records_payloads.push(pair[0].1.to_vec());
+    }
+    DecodedItems {
+        head: json(first),
+        pages,
+        trailer: json(last),
+        records_payloads,
+    }
 }
