@@ -1,6 +1,6 @@
 """The viewer plane's verbs from Python, against a served database.
 
-What is asked for through the HTTP API is asked for here: the artifacts a viewport serves, the
+What is asked for through the HTTP API is asked for here: the artifacts a sample serves, the
 drill-down on one of them, the highlight that lights a served set without moving it, and the
 control-plane verbs that undo a declaration or end a deletion.
 """
@@ -15,7 +15,7 @@ from tesseradb import Refusal, authorise, connect
 
 pytest.importorskip("pyarrow")
 
-from test_sdk_identity import FRAME, string_ids  # noqa: E402
+from test_sdk_identity import string_ids  # noqa: E402
 
 
 @pytest.fixture
@@ -30,9 +30,9 @@ def counts(table) -> dict:
 # ---------------------------------------------------------------------------- the artifacts frame
 
 
-def test_a_viewport_serves_the_artifacts_of_the_layers_it_was_asked_for(db):
+def test_a_sample_serves_the_artifacts_of_the_layers_it_was_asked_for(db):
     """A layer published from Python is read back from Python: the frame beside the points."""
-    served = db.viewport(FRAME, view="map", layers="all")
+    served = db.view("map").sample(layers="all")
     assert served.artifacts is not None
     assert served.artifacts.num_rows == 1
     rows = served.artifacts.to_pylist()
@@ -40,14 +40,14 @@ def test_a_viewport_serves_the_artifacts_of_the_layers_it_was_asked_for(db):
     assert rows[0]["masked_count"] == 20
 
 
-def test_a_viewport_asked_for_no_layer_carries_no_artifacts_frame(db):
+def test_a_sample_asked_for_no_layer_carries_no_artifacts_frame(db):
     """Absent, never empty: a response that served no artifact sends no frame of that kind."""
-    assert db.viewport(FRAME, view="map", layers=[]).artifacts is None
+    assert db.view("map").sample(layers=[]).artifacts is None
 
 
-def test_a_viewport_reads_as_the_points_table_it_always_did(db):
-    """The common case is unchanged: the points, their columns and the counts in the metadata."""
-    served = db.viewport(FRAME, view="map", k=8, layers="all")
+def test_a_sample_reads_as_its_points_table(db):
+    """The points, their columns and the counts in the metadata."""
+    served = db.view("map").sample(k=8, layers="all")
     assert "tessera_id" in served.column_names
     assert served.num_rows == len(served) == served.points.num_rows
     assert counts(served)["visible"] == 20
@@ -56,11 +56,9 @@ def test_a_viewport_reads_as_the_points_table_it_always_did(db):
 def test_a_highlight_lights_the_served_set_without_moving_it(db):
     """One request, two expressions: the served set is identical and the counts gain one."""
     one = db.viewer().browse_artifacts("map", "clusters")["artifacts"][0]["tessera_id"]
-    plain = db.viewport(FRAME, view="map", k=512)
-    dark = db.viewport(FRAME, view="map", k=512, highlight={"any_of": []})
-    lit = db.viewport(
-        FRAME,
-        view="map",
+    plain = db.view("map").sample(k=512)
+    dark = db.view("map").sample(k=512, highlight={"any_of": []})
+    lit = db.view("map").sample(
         k=512,
         highlight={"member_of": {"layer": "clusters", "artifact": one}},
     )
@@ -73,18 +71,16 @@ def test_a_highlight_lights_the_served_set_without_moving_it(db):
     assert all(lit.column("highlighted").to_pylist())
 
 
-def test_a_viewport_over_tiles_answers_for_those_tiles(db):
-    """`tiles` in place of `bbox`, and the two together is refused before anything is sent."""
-    assert db.viewport(view="map", zoom=0, tiles=[0]).num_rows > 0
-    with pytest.raises(Refusal):
-        db.viewport(FRAME, view="map", tiles=[0])
+def test_a_sample_over_tiles_answers_for_those_tiles(db):
+    """`tiles` in place of the box: the tiles named, at the zoom named."""
+    assert db.view("map").sample(zoom=0, tiles=[0]).num_rows > 0
 
 
 def test_an_underlay_offset_serves_the_sub_cells_frame(db):
     """The frame a non-zero offset asks for reaches the caller rather than being dropped."""
-    served = db.viewport(FRAME, view="map", zoom=0, underlay_offset=2)
+    served = db.view("map").sample(zoom=0, underlay_offset=2)
     assert served.sub_cells is not None and served.sub_cells.num_rows > 0
-    assert db.viewport(FRAME, view="map", zoom=0).sub_cells is None
+    assert db.view("map").sample(zoom=0).sub_cells is None
 
 
 # ---------------------------------------------------------------------------- the artifact verbs
@@ -132,7 +128,7 @@ def test_compact_is_accepted(db):
 def test_a_layer_is_dropped_and_its_name_is_not_freed(db):
     """Declare has an inverse, and the name it tombstones is refused to a later declaration."""
     db.drop_layer("clusters")
-    assert db.viewport(FRAME, view="map", layers="all").artifacts is None
+    assert db.view("map").sample(layers="all").artifacts is None
     assert "clusters" not in [layer["name"] for layer in db.meta()["layers"]]
 
 

@@ -187,8 +187,8 @@ def _(simple_map):
 
 @app.cell
 def _(counts, simple):
-    # The same numbers without a browser: `viewport()` goes through the viewer plane with a token.
-    simple_counts = counts(simple.viewport())
+    # The same numbers without a browser: `sample()` goes through the viewer plane with a token.
+    simple_counts = counts(simple.view("map").sample())
     simple_counts
     return (simple_counts,)
 
@@ -346,9 +346,9 @@ def _(db, mo):
 @app.cell
 def _(counts, db):
     # What each of the three was served, as numbers: the union, one term, two terms.
-    whole_counts = counts(db.viewport())
-    one_term_counts = counts(db.viewer(["astro-ph"]).viewport())
-    two_term_counts = counts(db.viewer(["cs.LG", "stat.ML"]).viewport())
+    whole_counts = counts(db.view("s0").sample())
+    one_term_counts = counts(db.viewer(["astro-ph"]).view("s0").sample())
+    two_term_counts = counts(db.viewer(["cs.LG", "stat.ML"]).view("s0").sample())
     (whole_counts["visible"], one_term_counts["visible"], two_term_counts["visible"])
     return one_term_counts, two_term_counts, whole_counts
 
@@ -381,7 +381,7 @@ def _(mo):
 
 @app.cell
 def _(counts, db, pa):
-    before_delta = counts(db.viewport())["visible"]
+    before_delta = counts(db.view("s0").sample())["visible"]
 
     _quantisation = db.meta()["views"][0]["quantisation"]
     _x = (_quantisation["x_min"] + _quantisation["x_max"]) / 2.0
@@ -461,7 +461,7 @@ def _(db):
 @app.cell
 def _(counts, db):
     # The commit waited for the publication its flush armed, so this needs no wait of its own.
-    after_delta = counts(db.viewport())["visible"]
+    after_delta = counts(db.view("s0").sample())["visible"]
     after_delta
     return (after_delta,)
 
@@ -608,8 +608,8 @@ def _(mo, turned):
 @app.cell
 def _(counts, turned):
     # One layer across both views: the artifacts are laid out per view, over the same members.
-    knn_counts = counts(turned.viewport(view="knn"))
-    rotated_counts = counts(turned.viewport(view="rotated"))
+    knn_counts = counts(turned.view("knn").sample())
+    rotated_counts = counts(turned.view("rotated").sample())
     (knn_counts["visible"], rotated_counts["visible"])
     return knn_counts, rotated_counts
 
@@ -648,7 +648,7 @@ def _(counts, db, os, pathlib, td):
         print(f"saved to {saved_at}")
 
     reopened = td.open(saved_at)
-    reopened_counts = counts(reopened.viewport())
+    reopened_counts = counts(reopened.view("s0").sample())
     reopened_counts
     return reopened, reopened_counts, saved_at
 

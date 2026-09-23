@@ -1,9 +1,6 @@
-"""What the SDK's verbs hand back.
+"""The reports that `check()`, `commit()`, `declare_columns()` and the change methods return.
 
-`check()` and `commit()` return an object that prints as a table: what the declaration check read
-from each file and what it refuses. Beside it the SDK states what it decided for the user: what
-each insert read and ignored, the frame each view got, and the render columns the first commit
-froze. `declare_columns` prints the table it declared.
+Each prints as plain text, so a notebook cell that returns one shows it.
 """
 
 from __future__ import annotations
@@ -15,7 +12,7 @@ from ._columns import DeclaredColumn
 
 
 class Printed:
-    """What a verb hands back and a cell prints: one `lines()`, and the text is those lines."""
+    """A report that prints as the lines `lines()` returns."""
 
     def lines(self) -> list[str]:
         raise NotImplementedError
@@ -28,7 +25,12 @@ class Printed:
 
 @dataclass
 class Declared(Printed):
-    """The table `declare_columns` prints."""
+    """What `declare_columns` declared: one row per column, and the vocabularies it added.
+
+    - `columns`: each column's name, data type, what it was declared as, its `render` and
+      `index` flags, and why.
+    - `vocabularies`: the vocabularies declared for category columns.
+    """
 
     columns: list[DeclaredColumn] = field(default_factory=list)
     vocabularies: list[str] = field(default_factory=list)
@@ -48,15 +50,23 @@ class Declared(Printed):
             out.append(
                 "  vocabularies declared open and public: "
                 + ", ".join(self.vocabularies)
-                + ". Every principal is told their value names, and on a local database the user "
-                "is the authority that choice asks for"
+                + ". Every reader may list their values"
             )
         return out
 
 
 @dataclass
 class Report(Printed):
-    """The common shape: the SDK's own decisions, then the check's page."""
+    """What `check()` or a first `commit()` found, and what the package decided on the way.
+
+    - `what`: `"check"` or `"commit"`.
+    - `ok`: `True` if nothing was refused.
+    - `frames`: each view's name and the extent it gets.
+    - `render_columns`: the columns sent with every point drawn.
+    - `notes`: what each insert read and ignored, and each declared column no insert fills.
+    - `findings`: problems found before anything was built.
+    - `output`: the page the declaration check and the build printed.
+    """
 
     what: str
     ok: bool
@@ -89,12 +99,16 @@ class Report(Printed):
 
 @dataclass
 class CommitReport(Report):
-    """The first commit's report: the build's own output, and where the instance is listening."""
+    """What the first `commit()` did: a `Report`, and where the new server listens.
+
+    - `viewer`, `session`, `control`: the addresses readers read from, tokens are made at, and
+      the operator writes to.
+    - `identity`: how the rows are named, by their id column or by `tessera_id`.
+    """
 
     viewer: str | None = None
     session: str | None = None
     control: str | None = None
-    #: How this database names a row: its id column, or the tessera_id.
     identity: str = ""
 
     def lines(self) -> list[str]:
@@ -103,8 +117,8 @@ class CommitReport(Report):
             out.insert(1, f"  {self.identity}")
         out.insert(
             1,
-            "  the allocation is signature-sorted over the whole inserted corpus, which affects "
-            "posting compression and latency and never what is served",
+            "  the items' order on disk was chosen from the whole inserted corpus, which affects "
+            "speed and never answers",
         )
         if self.viewer:
             out.append("")
@@ -116,11 +130,27 @@ class CommitReport(Report):
 
 @dataclass
 class PagedReport(Printed):
-    """What a later `check()` and `commit()` hand back.
+    """What a `check()` or `commit()` after the first one planned or did.
 
-    `check()` returns it with `sent` false: the plan and the pre-flight, with nothing sent. The two
-    are one object because they come from one planner, so what a check prints is what a commit
-    does.
+    `check()` returns it with `sent` false: the requests a commit would send, in order, and any
+    problem found before sending. `commit()` returns the same plan with what happened:
+
+    - `rows_accepted`: rows added, by view. `rows` is their total.
+    - `artifacts_minted`, `memberships_joined`: annotations added and memberships joined.
+    - `values_filled`: attribute values set on items already held.
+    - `values_bound`, `titles_set`: vocabulary values added and titles replaced.
+    - `already_present`: parts the database already held, which changed nothing.
+    - `without_content`: annotations added without the content they declare.
+    - `clipped`: rows moved onto the edge of a view's extent by its projection.
+    - `refusals`: each refused request, with its status and the server's answer.
+    - `tessera_ids`: the id given to each added row.
+    - `artifact_ids`: the id given to each added annotation, by layer and then by
+      `(level, view, key)`.
+    - `replayed`: requests the server had already carried out, which added nothing.
+    - `publication`, `flush_wait`, `flush_reached`: the point at which the changes can be read,
+      how long the commit waited for it in seconds, and whether it was reached in time.
+
+    `ok` is `True` when nothing was refused and nothing was found before sending.
     """
 
     sent: bool = False
@@ -131,32 +161,21 @@ class PagedReport(Printed):
     #: Memberships the pages added, to artifacts this commit minted and to artifacts already held.
     memberships_joined: int = 0
     values_filled: int = 0
-    #: Vocabulary values this commit's declarations and value pages drew a code for.
     values_bound: int = 0
-    #: Held values whose title one of those pages replaced.
     titles_set: int = 0
-    #: Parts a page supplied that the database already held: the fill rule's no-effect arm.
     already_present: int = 0
     without_content: int = 0
     clipped: int = 0
     refusals: list = field(default_factory=list)
-    #: The identities the ingest route answered with, one per accepted row.
     tessera_ids: list = field(default_factory=list)
-    #: The pages the server answered as a replay of one it had already applied.
     replayed: list = field(default_factory=list)
-    #: The publication this commit's work is visible at, from the closing flush's answer.
     publication: int | None = None
-    #: The `tessera_id` each published artifact was given, by layer and then by the artifact's
-    #: `(level, view, key)`, the view being `None` on a layer not scoped to a group. An
-    #: artifact's `tessera_id` is the only address by which it can later be addressed.
     artifact_ids: dict = field(default_factory=dict)
     flush_wait: float | None = None
     flush_reached: bool = True
 
     @property
     def ok(self) -> bool:
-        # A finding refuses the commit: the pre-flight sends nothing while one stands, and
-        # a commit that sent pages is ok only where every one of them was accepted.
         return not self.refusals and not self.findings
 
     @property
@@ -207,7 +226,13 @@ class PagedReport(Printed):
 
 @dataclass
 class ChangeReport(Printed):
-    """What `remove`, `suppress` and `unsuppress` hand back."""
+    """What `remove`, `suppress`, `unsuppress` or `leave` did.
+
+    - `op`: which of them it was.
+    - `requested`: how many ids were given.
+    - `refusals`: each refused request, with its status and the server's answer. `ok` is `True`
+      when there were none.
+    """
 
     op: str
     requested: int = 0
