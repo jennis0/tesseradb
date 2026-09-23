@@ -31,7 +31,7 @@ use crate::filter::FilterExpr;
 use crate::region::RegionVerdict;
 use crate::session::Session;
 use crate::timing::Probe;
-use crate::viewport::{meta_of, SinkClosed, SinkResult};
+use crate::viewport::{filter_refusal, meta_of, SinkClosed, SinkResult};
 use crate::Generation;
 
 pub(crate) use cursor::CursorKey;
@@ -360,17 +360,10 @@ impl Engine {
             req.system_fields,
         )?;
         if let Some(expr) = &req.filter {
-            // Routed once under no candidate, so a malformed filter is refused whatever rows the
-            // view holds or the viewer may see.
-            let open =
-                self.open_view(session, &generation, req.view, &req.cancel, &mut Probe::new())?;
-            self.route_filters_under(
-                &open.served,
-                &open.mask,
-                &croaring::Bitmap::new(),
-                &req.cancel,
-                |route| route(expr, true).map(|_| ()),
-            )?;
+            generation
+                .filter_columns
+                .admit(expr, true, &|layer| self.reaches_layer(session, &generation, layer))
+                .map_err(filter_refusal)?;
         }
         let order = resumed
             .map(|cursor| cursor.position.order)

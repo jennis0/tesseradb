@@ -1035,25 +1035,35 @@ impl Engine {
             |leaf: &crate::filter::RegionLeaf| self.resolve_region(leaf, served, mask, cancel);
         let members =
             |leaf: &crate::filter::MemberOfLeaf| self.resolve_member_of(leaf, served, mask);
+        let layers = |layer: &str| self.reaches_layer(served.session, served.generation, layer);
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
             members: &members,
+            layers: &layers,
         };
         body(&|expr: &crate::filter::FilterExpr, prefer_row: bool| {
             served
                 .generation
                 .filter_columns
                 .evaluate_routed(expr, candidate, prefer_row, &resolvers)
-                .map_err(|e| {
-                    // Caller's fault or the deployment's — `FilterError` decides, at the variants.
-                    let detail = e.to_string();
-                    if e.is_callers_fault() {
-                        EngineError::FilterMalformed(detail)
-                    } else {
-                        EngineError::FilterRefused(detail)
-                    }
-                })
+                .map_err(filter_refusal)
         })
+    }
+
+    /// Whether `session` reaches `layer`: whether a `member_of` may name it.
+    pub(crate) fn reaches_layer(
+        &self,
+        session: &Session,
+        generation: &Generation,
+        layer: &str,
+    ) -> bool {
+        self.write
+            .live()
+            .resolve_layers(
+                |term| session.satisfied().contains(&term),
+                |label| generation.dict.lookup(label.as_bytes()),
+            )
+            .contains(layer)
     }
 
     /// Answer one region leaf for one request. A drawn shape: its decomposition from the
@@ -1132,10 +1142,9 @@ impl Engine {
         }
     }
 
-    /// Answer one `member_of` leaf for one request. The gate, then the membership, never the
-    /// other order: the layer must be one this principal reaches, or
-    /// [`FilterError::UnknownLayer`], and then the artifact must pass its own existence criterion
-    /// through the same [`Engine::gated_artifact`] the drill-down calls. An artifact that does
+    /// Answer one `member_of` leaf for one request, whose layer the filter's admission has already
+    /// found this principal reaches. The artifact must pass its own existence criterion through
+    /// the same [`Engine::gated_artifact`] the drill-down calls. An artifact that does
     /// not pass — names nothing, is of another layer, is suppressed, is below the criterion — is
     /// the empty operand, one answer for every reason: refusing instead would make the leaf an
     /// existence oracle over what the criterion withholds. The membership is read two ways,
@@ -1149,13 +1158,6 @@ impl Engine {
         mask: &EffectiveMask,
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
         use crate::filter::FilterError;
-        let reachable = self.write.live().resolve_layers(
-            |term| served.session.satisfied().contains(&term),
-            |label| served.generation.dict.lookup(label.as_bytes()),
-        );
-        if !reachable.contains(&leaf.layer) {
-            return Err(FilterError::UnknownLayer(leaf.layer.clone()));
-        }
         let gated = self
             .gated_artifact(served, mask, leaf.artifact)
             .map_err(|e| FilterError::MemberOfUnavailable(e.to_string()))?;
@@ -1169,6 +1171,19 @@ impl Engine {
             self.counters.member_of_column_walks.fetch_add(1, Ordering::Relaxed);
         }
         Ok(gated.rows.visible_rows(gated.ordinal, mask))
+    }
+}
+
+/// A filter's refusal as the engine's: the caller's fault or the deployment's, as [`FilterError`]
+/// decides at its variants.
+///
+/// [`FilterError`]: crate::filter::FilterError
+pub(crate) fn filter_refusal(e: crate::filter::FilterError) -> EngineError {
+    let detail = e.to_string();
+    if e.is_callers_fault() {
+        EngineError::FilterMalformed(detail)
+    } else {
+        EngineError::FilterRefused(detail)
     }
 }
 
@@ -1695,3 +1710,4 @@ mod tests {
         );
     }
 }
+

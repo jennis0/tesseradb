@@ -85,7 +85,7 @@ pub(crate) use item::{
 };
 pub(crate) use meta::{meta_of, owning_key_of, Resolution};
 pub(crate) use row_filter::{
-    crossing_domain, predicate_source, predicate_vocabulary, RoutedRows,
+    crossing_domain, filter_refusal, predicate_source, predicate_vocabulary, RoutedRows,
 };
 pub(crate) use served::ServedView;
 pub(crate) use sweep::{scoped_render_families, segment_holding, segment_row_of};

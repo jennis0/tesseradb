@@ -2461,21 +2461,61 @@ fn a_row_cut_by_the_ceiling_adds_no_key_to_the_dictionary() {
 }
 
 /// **A malformed filter is refused before the head whatever rows remain**, for a viewer who sees
-/// everything and for one who sees nothing, in both orders.
+/// everything and for one who sees nothing, in both orders, marked or not, and by the viewport
+/// whatever rows it covers.
 #[test]
 fn a_malformed_filter_is_refused_whatever_rows_remain() {
     let fx = Fx::new();
     let fields: Vec<String> = Vec::new();
+    // A negation of a text column behind a conjunct that matches no row, and behind one that
+    // matches some: refused alike, though the first leaves nothing for the negation to narrow.
+    let negated_text = |lo: i64, hi: i64| {
+        FilterExpr::AllOf(vec![
+            leaf("when", range(lo, hi)),
+            FilterExpr::NoneOf(vec![leaf(
+                "prose",
+                FilterOperand::Match {
+                    query: "x".into(),
+                    minimum: None,
+                },
+            )]),
+        ])
+    };
+    let base = 1_700_000_000_000_000;
+    let filters = [
+        leaf("nothing", FilterOperand::Equals(AttrLocalId::new(1))),
+        negated_text(base + 7000, base + 7099),
+        negated_text(base, base + 1000),
+    ];
     for credential in [full_coverage_credential(), zero_credential()] {
         let session = fx.engine.authorise(&credential).unwrap();
-        for order in [RecordsOrder::Map, RecordsOrder::Stored] {
-            let mut req = request("s0", &fields);
-            req.order = Some(order);
-            req.filter = Some(leaf("nothing", FilterOperand::Equals(AttrLocalId::new(1))));
-            assert!(matches!(
-                respond(&fx.engine, &session, req).map(|_| ()),
-                Err(EngineError::FilterMalformed(_))
-            ));
+        for filter in &filters {
+            for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+                for keep_unmatched in [false, true] {
+                    let mut req = request("s0", &fields);
+                    req.order = Some(order);
+                    req.keep_unmatched = keep_unmatched;
+                    req.filter = Some(filter.clone());
+                    assert!(
+                        matches!(
+                            respond(&fx.engine, &session, req).map(|_| ()),
+                            Err(EngineError::FilterMalformed(_))
+                        ),
+                        "{order:?}, keep_unmatched {keep_unmatched}: {filter:?}"
+                    );
+                }
+            }
+            // The whole map, and a corner no row falls in.
+            for (zoom, bbox) in [(0, WHOLE_MAP), (8, [0.0, 0.0, 0.1, 0.1])] {
+                let viewport = ViewportRequest::new("s0", zoom, bbox, 10).filter(filter.clone());
+                assert!(
+                    matches!(
+                        fx.engine.viewport(&session, viewport).map(|_| ()),
+                        Err(EngineError::FilterMalformed(_))
+                    ),
+                    "the viewport over {bbox:?}: {filter:?}"
+                );
+            }
         }
     }
 }
