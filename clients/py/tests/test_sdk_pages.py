@@ -1202,6 +1202,10 @@ def test_a_memberless_attached_record_omits_members_and_an_unattached_one_sends_
 def labelled_teams(db) -> None:
     """Two teams over the clustering's twenty points, one labelled `red` and one unlabelled."""
     db.declare_layer("teams", kind="flat")
+    insert_teams(db)
+
+
+def insert_teams(db) -> None:
     db.insert(
         "teams",
         artifacts=pa.table(
@@ -1245,6 +1249,32 @@ def test_an_artifacts_own_label_withholds_it_from_a_viewer_without_it_at_either_
             assert db.commit().ok
         assert teams_seen(db, ["public"]) == ["open-team"]
         assert teams_seen(db, ["public", "red"]) == ["open-team", "red-team"]
+
+
+def test_a_layer_declared_with_its_label_column_takes_labels_after_an_empty_commit(
+    served, corpus
+):
+    """A layer whose label column is declared can be committed empty and given labelled
+    artifacts later. An insert naming another column is refused before anything is sent."""
+    def declare(db):
+        clustering(db)
+        db.declare_layer(
+            "teams", kind="flat", artifact_visibility={"field": "team", "default": "inherited"}
+        )
+
+    db = served(declare)
+    assert "teams" not in [row[0] for row in artifact_rows_of(db)]
+    insert_teams(db)
+    assert db.commit().ok
+    assert teams_seen(db, ["public"]) == ["open-team"]
+    assert teams_seen(db, ["public", "red"]) == ["open-team", "red-team"]
+
+    squad = pa.table(
+        {"key": pa.array(["blue-team"], pa.string()), "squad": pa.array([["blue"]], pa.list_(pa.string()))}
+    )
+    with pytest.raises(Refusal):
+        db.insert("teams", artifacts=squad, key="key", access="squad")
+    assert db.check().ok
 
 
 def test_a_growth_page_names_the_view_of_a_group_scoped_artifact():

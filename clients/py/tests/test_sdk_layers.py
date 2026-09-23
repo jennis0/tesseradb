@@ -173,15 +173,25 @@ def test_the_serving_layout_and_the_artifact_gate_reach_the_declaration(db, chec
     assert checked(db).ok
 
 
-def test_the_label_column_is_named_on_the_insert_and_not_on_the_layer(db):
+def test_a_layer_reads_its_labels_from_one_column_whichever_call_names_it(db, checked):
+    """The label column is declared on the layer or named by its first labelled insert, and an
+    insert naming another is refused."""
+    import tomllib
+
+    team = pd.DataFrame({"key": ["a"], "team": ["x"]})
+    squad = pd.DataFrame({"key": ["b"], "squad": ["x"]})
+    db.declare_layer("d", kind="flat", artifact_visibility={"field": "team", "default": "inherited"})
     with pytest.raises(Refusal):
-        db.declare_layer("d", kind="flat", artifact_visibility={"field": "team", "default": "inherited"})
+        db.insert("d", artifacts=squad, key="key", access="squad")
+    db.insert("d", artifacts=team, key="key", access="team")
     db.declare_layer("e", kind="flat")
-    db.insert("e", artifacts=pd.DataFrame({"key": ["a"], "team": ["x"]}), key="key", access="team")
+    db.insert("e", artifacts=team, key="key", access="team")
     with pytest.raises(Refusal):
-        db.insert(
-            "e", artifacts=pd.DataFrame({"key": ["b"], "squad": ["x"]}), key="key", access="squad"
-        )
+        db.insert("e", artifacts=squad, key="key", access="squad")
+    layers = {one["name"]: one for one in tomllib.loads(db.declaration)["layer"]}
+    assert layers["d"]["artifact_visibility"] == {"default": "inherited", "field": "team"}
+    assert layers["e"]["artifact_visibility"] == {"default": "inherited", "field": "team"}
+    assert checked(db).ok
 
 
 # ---------------------------------------------------------------------------- vocabularies
