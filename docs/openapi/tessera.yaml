@@ -7,9 +7,11 @@
 # `additionalProperties: false`. The contract itself is `docs/design/contracts.md` §3 (the API)
 # and §5 (the framing); where the two disagree, contracts wins and this file is wrong.
 #
-# What this file cannot say: the framed-Arrow body of `POST /v1/viewport`. It is not JSON, so it
-# is declared as `application/octet-stream` and described in prose; the frame layout is contracts
-# §5, and `docs/openapi/README.md` carries a worked decode in Python and in JavaScript.
+# What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport` and `POST /v1/items`.
+# They are not JSON, so each is declared as `application/octet-stream` and described in prose; the
+# frame layout is contracts §5, and `docs/openapi/README.md` carries worked decodes in Python and
+# in JavaScript. The JSON frames of `POST /v1/items` have schemas below (`ItemsHead`,
+# `ItemsPageEnd`, `ItemsTrailer`).
 openapi: 3.1.0
 info:
   title: Tessera viewer and session planes
@@ -511,6 +513,146 @@ paths:
         "503":
           $ref: "#/components/responses/NotReady"
 
+  /v1/items:
+    post:
+      tags: [viewer]
+      operationId: items
+      summary: Every item this principal may see in one view that matches a filter, page by page, with the fields the caller names.
+      description: |
+        The response is **not JSON**. It is the viewport's framing: a sequence of frames, each
+        `u8 kind`, `u32` little-endian payload length, payload. Kinds:
+
+        - `6` head: JSON `ItemsHead`, exactly one, first.
+        - `7` records: one Arrow IPC stream holding one batch of up to `page_rows` rows. Zero or
+          more, each followed by a page end.
+        - `8` page end: JSON `ItemsPageEnd`, carrying the cursor to resume after that page.
+        - `4` trailer: JSON `ItemsTrailer`, exactly one, last.
+
+        A body without a trailer is incomplete. A client whose connection drops resumes from the
+        last page end it received and discards a records frame that no page end follows. A
+        response with no rows is a head and a trailer. An unknown kind is a decoder error.
+        `docs/openapi/README.md` walks a decode in Python and JavaScript.
+
+        **Reading a whole result.** Each response carries at most `pages` pages and runs within
+        the deployment's byte and time budgets. The trailer's `next` is the cursor to pass back
+        as `cursor`, unchanged, until it is null. The server keeps nothing between requests: every
+        page is built from the latest data, with the visible set composed again, so a deletion or
+        suppression accepted during a read applies from the next page. A read returns each row at
+        most once. A row inserted behind the cursor during a read is not returned; one inserted
+        ahead of it is. `fields`, `system_fields`, `filters`, `keep_unmatched` and `page_rows` may
+        change between the requests of one read, and the page schema changes with them.
+
+        **Columns.** `tessera_id` (`uint64`) is first, then the named fields in the order named,
+        then the system fields in the order named, then `tessera:matched` (`bool`) under
+        `keep_unmatched`. Every named field is present whether or not an item carries a value. A
+        number or bool arrives as its declared type, `timestamp_us` as `timestamp[us, UTC]`, a
+        keyword or text field as `utf8`, and a category as `dictionary<int32, utf8>` holding its
+        value keys, each frame's dictionary holding only the keys its rows carry. An absent value
+        is null. `position` is two `float64` columns, `tessera:x` and `tessera:y`: the stored
+        position converted back through the view's projection and frame, so degrees for a
+        geographic view, exact to one step of the view's 32-bit grid. `external_id` is `binary`
+        as `tessera:external_id`, null where the item has none. `labels` is `list<utf8>` as
+        `tessera:labels`: the item's labels this principal holds, sorted. A rendered field is read
+        from `view`; the item card reads the first view the principal can reach, so the two can
+        differ. An item joined into `view` before its own ingest is flushed has null record
+        fields until that flush.
+
+        **Group-scoped fields** resolve as a filter leaf on them does: read in `view` under a view
+        of the field's group, or of a group sharing its views, and otherwise pinned as
+        `<field>@<key>`.
+
+        **Order.** `map` returns rows by map cell in `view`, then by `tessera_id`. `stored`
+        returns them in the order the record store holds items, which groups items by their full
+        set of access labels. The two orders return the same rows. With neither `order` nor
+        `cursor`, the server takes `stored` when any named field's `homes` in `/v1/meta` is
+        `["record"]`, and `map` otherwise; that choice may change. A field read only from the
+        record store is 1.3 to 1.8 times slower to read in map order at 100,000-row pages, and 8
+        to 17 times slower at 1,000-row pages (measured).
+
+        **Pages.** A page ends at `page_rows` rows, or before the row that would take its Arrow
+        bytes past `selection.max_page_bytes`; a single larger row is sent alone. A page holds at
+        least one row whenever one remains. When the response's time budget runs out, or the
+        stream deadline cancels it, a page holding rows is sent short and the trailer follows.
+        Every response moves the cursor on, including one that found no row under a sparse
+        filter, and a response can run past its time budget by one evaluation of the filter over
+        a stretch and one chunk of a page's scan.
+
+        **Cursor.** Opaque, encrypted and authenticated under a key derived from the identity
+        key, and bound to the route, the view and its incarnation, the order and the credential
+        that received it. A cursor that fails any of these is one `422` with one detail. A
+        cursor issued under another idset is the `409` below. A cursor survives flushes, merges,
+        compactions and restarts, and stops opening when the identity key is rotated.
+
+        On the bulk-read admission gate (`serve.bulk_admission`), whose queue is shed as `429`
+        like the viewport's, so a long read never holds a slot the viewport and item routes use.
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ItemsRequest"
+      responses:
+        "200":
+          description: The framed body. The headers are the viewport's, without its cache coordinates.
+          headers:
+            x-tessera-identity-key:
+              description: The viewport's identity coordinate for this principal and view, equal to the one a viewport over the same view returns.
+              required: true
+              schema:
+                type: string
+            x-tessera-region:
+              description: "Present exactly when the request's `filters` carried a `region` leaf, with the viewport's values: the coarsest verdict the head's count and the first page reached."
+              required: false
+              schema:
+                type: string
+                pattern: "^(exact|cover; depth=[0-9]+)$"
+            x-tessera-server-us:
+              description: Server time from admission to the head, microseconds. The whole response's is the trailer's `stream_us`.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+            x-tessera-admission-us:
+              description: Time spent in the bulk-read admission gate, microseconds.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: A head, records frames each followed by a page end, and a trailer, per contracts §5.
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: "Unknown `view`, or a pin naming no view of its field's group that this principal can reach."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "`idset` was supplied and differs from the deployment's, or the cursor was issued under another idset. Re-resolve by external id."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "The viewport's filter refusals; a body with an unknown key, a missing `view` or `fields`, or an `order` or `compression` outside its values; an unknown or repeated field; an unpinned group-scoped field outside its group, a pin on a field that is not group-scoped, or a group-scoped `text` field; an unknown system field; `page_rows` or `pages` of 0; `count` with a `cursor`; a cursor that does not open for this request, or whose order differs from `order`. `page_rows` above `selection.max_page_rows` is capped, not refused."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
   /v1/items/{tessera_id}:
     post:
       tags: [viewer]
@@ -986,7 +1128,7 @@ components:
     DeclaredScalar:
       type: object
       additionalProperties: false
-      required: [name, arrow_type, category, analyser, render, index]
+      required: [name, arrow_type, category, analyser, render, index, homes]
       properties:
         name:
           type: string
@@ -1021,6 +1163,14 @@ components:
         index:
           type: boolean
           description: The column has an entity-space search structure. Neither flag set means blob-resident — returned at drill-down, never an operand.
+        homes:
+          type: array
+          uniqueItems: true
+          minItems: 1
+          items:
+            type: string
+            enum: [rendered, value_column, record]
+          description: "Where `POST /v1/items` reads the field's value from: `rendered`, the view's own columns; `value_column`, a per-item column in stored order; `record`, the record store. A field whose `homes` is `[\"record\"]` is read from the record store alone, which is fastest in `stored` order."
 
     ScopedScalar:
       type: object
@@ -1077,7 +1227,7 @@ components:
       type: object
       additionalProperties: false
       description: Design §7.2's clause parameters and the request-shape ceilings. All deployment constants, identical for every principal; a client cannot read a mark count as a density without them.
-      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_suggest_set_entities, max_browse_rows]
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells, max_suggestions, max_suggestion_walk, max_suggest_set_entities, max_browse_rows, max_page_rows, max_page_bytes]
       properties:
         k_min:
           type: integer
@@ -1116,6 +1266,14 @@ components:
           type: integer
           minimum: 1
           description: The most rows `POST /v1/artifacts/browse` returns in one page, and the default page size when a caller names none (`highlight-and-hierarchy.md` §4). `limit` clamps to it; `limit = 0` is a `422`. A response bound and not a disclosure control — what a principal may be told is the artifact's own existence criterion, settled before paging starts.
+        max_page_rows:
+          type: integer
+          minimum: 1
+          description: The most rows a `POST /v1/items` page holds. A request's `page_rows` is capped to it.
+        max_page_bytes:
+          type: integer
+          minimum: 1
+          description: The most Arrow bytes a `POST /v1/items` page holds before compression. A single row larger than this is sent alone.
         max_region_cells:
           type: integer
           minimum: 0
@@ -1734,6 +1892,117 @@ components:
         phrase:
           type: string
       additionalProperties: false
+
+    ItemsRequest:
+      type: object
+      additionalProperties: false
+      required: [view, fields]
+      properties:
+        view:
+          type: string
+          description: The view whose items are read, from `/v1/meta`. An item with no position in it is not returned.
+        fields:
+          type: array
+          items: { type: string }
+          description: Declared fields to return, by name, each once. A group-scoped field may be pinned as `<field>@<key>`. Empty returns `tessera_id` alone.
+        system_fields:
+          type: array
+          items:
+            type: string
+            enum: [position, external_id, labels]
+          description: System columns to return, in this order. Absent is none.
+        filters:
+          $ref: "#/components/schemas/FilterExpr"
+        keep_unmatched:
+          type: boolean
+          description: Return every visible item with a `tessera:matched` column, in place of the matching ones only. Without `filters` every row is marked matched.
+        count:
+          type: boolean
+          description: Put the numbers of visible and matching items in the head. Only on a request with no `cursor`; it costs one evaluation of the whole filter.
+        order:
+          type: string
+          enum: [map, stored]
+          description: Absent takes the cursor's order, or with no cursor the server's choice. A value differing from the cursor's is `422`.
+        page_rows:
+          type: integer
+          minimum: 1
+          description: Rows per page, capped by `selection.max_page_rows`. Absent is the cap.
+        pages:
+          type: integer
+          minimum: 1
+          description: The most pages this response may carry. Absent is as many as the response's budgets allow.
+        cursor:
+          type: string
+          description: A previous response's `next`, unchanged. Absent starts from the beginning.
+        compression:
+          type: string
+          enum: [zstd]
+          description: Compress every records frame's Arrow buffers with zstd. Absent is uncompressed.
+        idset:
+          type: integer
+          minimum: 0
+          description: As on `POST /v1/items/{tessera_id}`; a mismatch is `409`.
+
+    ItemsHead:
+      type: object
+      additionalProperties: false
+      required: [order, page_rows]
+      description: The kind-6 frame. `visible` and `matched` are present exactly when the request asked for `count`.
+      properties:
+        order:
+          type: string
+          enum: [map, stored]
+          description: The order this response's rows are in.
+        page_rows:
+          type: integer
+          minimum: 1
+          description: The page size used, after the cap.
+        visible:
+          type: integer
+          minimum: 0
+          description: Visible items in the view at the start of the response, the count the viewport serves.
+        matched:
+          type: integer
+          minimum: 0
+          description: Of those, the ones matching `filters`; `visible` without one.
+
+    ItemsPageEnd:
+      type: object
+      additionalProperties: false
+      required: [next, ended_by]
+      description: The kind-8 frame, after each records frame.
+      properties:
+        next:
+          type: [string, "null"]
+          description: The cursor to resume after this page; null where no row remains.
+        ended_by:
+          type: string
+          enum: [rows, bytes, time, end]
+          description: "`rows`: the page holds `page_rows`. `bytes`: the next row would have taken it past `max_page_bytes`. `time`: the response's time ran out, or the stream deadline cancelled it, and the response ends after this page. `end`: no row remains."
+
+    ItemsTrailer:
+      type: object
+      additionalProperties: false
+      required: [pages, rows, next, ended_by, stream_us]
+      description: The kind-4 frame of a `POST /v1/items` body.
+      properties:
+        pages:
+          type: integer
+          minimum: 0
+        rows:
+          type: integer
+          minimum: 0
+        next:
+          type: [string, "null"]
+          description: The cursor to resume from, null where no row remains. It can be past the last page end, where the scan went on without finding a row.
+        ended_by:
+          type: string
+          enum: [end, pages, budget_bytes, budget_time, deadline]
+          description: "`end`: no row remains. `pages`: the response carried `pages` pages. `budget_bytes` and `budget_time`: the response's byte or time budget ran out. `deadline`: the stream deadline cancelled it."
+        stream_us:
+          type: integer
+          minimum: 0
+          description: The whole response's wall time in microseconds, including waits on the client.
 
     ItemRequest:
       type: object

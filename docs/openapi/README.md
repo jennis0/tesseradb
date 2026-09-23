@@ -5,7 +5,7 @@ Three things a power user who installs nothing needs, and where each is:
 | | where | kept true by |
 |---|---|---|
 | The API | [`tessera.yaml`](tessera.yaml) — OpenAPI 3.1 for the viewer and session planes | `crates/tessera-server/tests/openapi.rs`, which starts the server, exercises every route with a success and a refusal, and validates every JSON body against the description's schemas |
-| The framing, to the byte | [`../design/contracts.md`](../design/contracts.md) §5, and the two worked decodes below | the decodes' tests, over the golden fixtures in `clients/ts/core/test/fixtures/` |
+| The framing, to the byte | [`../design/contracts.md`](../design/contracts.md) §5, and the worked decodes below | the viewport decodes' tests, over the golden fixtures in `clients/ts/core/test/fixtures/`; the items decodes have none |
 | What the server cannot enforce | [`../design/client-obligations.md`](../design/client-obligations.md) | reading it |
 
 The contract is `contracts.md` §3 and §5. Where this directory disagrees with it, this directory
@@ -105,3 +105,116 @@ a JS `number` has already lost bits on this fixture's first id. Its test is
 
 Both decoders are strict on purpose — a truncated body, a missing trailer and an unknown kind
 each raise — and both tests prove it on the fixtures.
+
+## The items read
+
+A `POST /v1/items` body uses the same framing with four kinds:
+
+```
+kind 6  head      exactly one, first          JSON {order, page_rows, visible?, matched?}
+kind 7  records   zero or more                one Arrow IPC stream holding one batch
+kind 8  page end  one after each records frame JSON {next, ended_by}
+kind 4  trailer   exactly one, last           JSON {pages, rows, next, ended_by, stream_us}
+```
+
+A reader keeps three rules. A body without a trailer is incomplete, and the read resumes from the
+cursor in the last page end received. A records frame that no page end follows is discarded. A
+whole read passes the trailer's `next` back as `cursor` until it is null. With
+`compression: "zstd"` the batch's buffers are zstd-compressed inside the Arrow stream, and the
+reader needs a zstd codec for them; the framing, the schema and the JSON frames are never
+compressed. A category column is a dictionary whose values differ from page to page, since each
+page's dictionary holds only the keys its rows carry.
+
+**Python, with `pyarrow`**, which reads zstd-compressed buffers with the codec it ships:
+
+```python
+import json
+import struct
+
+import pyarrow as pa
+import pyarrow.ipc as ipc
+
+HEAD, RECORDS, PAGE_END, TRAILER = 6, 7, 8, 4
+
+
+def frames(body: bytes):
+    at = 0
+    while at < len(body):
+        kind, length = struct.unpack_from("<BI", body, at)
+        payload = body[at + 5 : at + 5 + length]
+        if len(payload) != length:
+            raise ValueError("truncated body")
+        yield kind, payload
+        at += 5 + length
+
+
+def decode_items(body: bytes):
+    head, trailer, batches, pending, cursor = None, None, [], None, None
+    for kind, payload in frames(body):
+        if kind == HEAD:
+            head = json.loads(payload)
+        elif kind == RECORDS:
+            pending = ipc.open_stream(payload).read_next_batch()
+        elif kind == PAGE_END:
+            batches.append(pending)
+            cursor = json.loads(payload)["next"]
+        elif kind == TRAILER:
+            trailer = json.loads(payload)
+        else:
+            raise ValueError(f"unknown frame kind {kind}")
+    if trailer is None:
+        raise ValueError(f"no trailer; resume from {cursor!r}")
+    return head, batches, trailer
+
+
+head, batches, trailer = decode_items(body)
+table = pa.Table.from_batches(batches)
+```
+
+**JavaScript, with `apache-arrow`**, which reads compressed buffers once a codec is registered for
+them. `fzstd` is one such decoder:
+
+```js
+import { tableFromIPC, compressionRegistry, CompressionType } from "apache-arrow";
+import { decompress } from "fzstd";
+
+compressionRegistry.set(CompressionType.ZSTD, { decode: (data) => decompress(data) });
+
+const HEAD = 6, RECORDS = 7, PAGE_END = 8, TRAILER = 4;
+const text = new TextDecoder();
+
+function* frames(body) {
+  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+  for (let at = 0; at < body.length; ) {
+    const kind = body[at];
+    const length = view.getUint32(at + 1, true);
+    const payload = body.subarray(at + 5, at + 5 + length);
+    if (payload.length !== length) throw new Error("truncated body");
+    yield [kind, payload];
+    at += 5 + length;
+  }
+}
+
+function decodeItems(body) {
+  let head, trailer, pending, cursor = null;
+  const tables = [];
+  for (const [kind, payload] of frames(body)) {
+    if (kind === HEAD) head = JSON.parse(text.decode(payload));
+    else if (kind === RECORDS) pending = tableFromIPC(payload);
+    else if (kind === PAGE_END) {
+      tables.push(pending);
+      cursor = JSON.parse(text.decode(payload)).next;
+    } else if (kind === TRAILER) trailer = JSON.parse(text.decode(payload));
+    else throw new Error(`unknown frame kind ${kind}`);
+  }
+  if (!trailer) throw new Error(`no trailer; resume from ${cursor}`);
+  return { head, tables, trailer };
+}
+
+const { head, tables, trailer } = decodeItems(new Uint8Array(await response.arrayBuffer()));
+```
+
+`tessera_id` arrives as a `uint64`, which Arrow JS reads as a `BigInt`; narrowing it to a `number`
+loses bits. Both decoders were run against zstd-compressed and uncompressed bodies from a release
+server, and without the registered codec Arrow JS refuses the compressed one. Neither has a test of
+its own, as the viewport decodes do.

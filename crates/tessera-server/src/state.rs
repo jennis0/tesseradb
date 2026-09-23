@@ -183,11 +183,14 @@ impl Drop for GatePermits {
 
 /// Admission for the CPU-bound viewer and session routes, never the control plane. `slots`
 /// bounds admitted requests and sheds at once when full; `compute` bounds running requests and
-/// sheds a caller that waits longer than `admission_timeout_ms`.
+/// sheds a caller that waits longer than `admission_timeout_ms`. Bulk reads have a gate of their
+/// own, [`ComputeGate::for_bulk_reads`], so a long read never holds a slot the viewport needs.
 pub struct ComputeGate {
     pub compute_admission: usize,
     pub compute_queue: usize,
     pub admission_timeout_ms: u64,
+    /// What a shed from this gate says it was.
+    cause: crate::error::ShedCause,
     slots: Arc<Semaphore>,
     compute: Arc<Semaphore>,
     /// 429s from this gate's two shed paths, with no per-principal label. Single-flight sheds come
@@ -212,10 +215,35 @@ pub struct ComputeGateStatus {
 
 impl ComputeGate {
     pub fn new(compute_admission: usize, compute_queue: usize, admission_timeout_ms: u64) -> Self {
+        Self::with_cause(
+            compute_admission,
+            compute_queue,
+            admission_timeout_ms,
+            crate::error::ShedCause::ComputeGate,
+        )
+    }
+
+    /// The bulk-read lane: `admission` reads at once and `queue` waiting, shed as this gate's own.
+    pub fn for_bulk_reads(admission: usize, queue: usize, admission_timeout_ms: u64) -> Self {
+        Self::with_cause(
+            admission,
+            queue,
+            admission_timeout_ms,
+            crate::error::ShedCause::BulkGate,
+        )
+    }
+
+    fn with_cause(
+        compute_admission: usize,
+        compute_queue: usize,
+        admission_timeout_ms: u64,
+        cause: crate::error::ShedCause,
+    ) -> Self {
         ComputeGate {
             compute_admission,
             compute_queue,
             admission_timeout_ms,
+            cause,
             slots: Arc::new(Semaphore::new(compute_admission + compute_queue)),
             compute: Arc::new(Semaphore::new(compute_admission)),
             shed_total: AtomicU64::new(0),
@@ -235,7 +263,7 @@ impl ComputeGate {
                 self.shed_total.fetch_add(1, Ordering::Relaxed);
                 return Err(crate::error::ApiError::Backpressure {
                     retry_after_s: crate::error::RETRY_AFTER_SECS,
-                    cause: crate::error::ShedCause::ComputeGate,
+                    cause: self.cause,
                 });
             }
         };
@@ -254,7 +282,7 @@ impl ComputeGate {
                 self.shed_total.fetch_add(1, Ordering::Relaxed);
                 return Err(crate::error::ApiError::Backpressure {
                     retry_after_s: crate::error::RETRY_AFTER_SECS,
-                    cause: crate::error::ShedCause::ComputeGate,
+                    cause: self.cause,
                 });
             }
         };
@@ -433,6 +461,14 @@ pub struct ServeLimits {
     pub stream_write_stall_ms: u64,
     /// The whole emit phase's wall budget. See `Config::stream_deadline_ms`.
     pub stream_deadline_ms: u64,
+    /// A bulk read's rows per page. See `Config::max_page_rows`.
+    pub max_page_rows: u32,
+    /// A bulk read's Arrow bytes per page. See `Config::max_page_bytes`.
+    pub max_page_bytes: usize,
+    /// Bytes one bulk-read response may carry. See `Config::bulk_response_bytes`.
+    pub bulk_response_bytes: usize,
+    /// Time one bulk-read response may run. See `Config::bulk_response_ms`.
+    pub bulk_response_ms: u64,
     /// `serve.dev_cors_origins`; empty means no CORS layer. See [`crate::cors`].
     pub dev_cors_origins: Vec<String>,
     /// `serve.cors_origins`, read by the viewer router only.
@@ -467,6 +503,10 @@ impl ServeLimits {
             stream_flush_bytes: config.stream_flush_bytes,
             stream_write_stall_ms: config.stream_write_stall_ms,
             stream_deadline_ms: config.stream_deadline_ms,
+            max_page_rows: config.max_page_rows,
+            max_page_bytes: config.max_page_bytes,
+            bulk_response_bytes: config.bulk_response_bytes,
+            bulk_response_ms: config.bulk_response_ms,
             dev_cors_origins: config.dev_cors_origins.clone(),
             cors_origins: config.cors_origins.clone(),
             cors_loopback: config.cors_loopback,
@@ -499,6 +539,10 @@ impl Default for ServeLimits {
             stream_flush_bytes: c::DEFAULT_STREAM_FLUSH_BYTES,
             stream_write_stall_ms: c::DEFAULT_STREAM_WRITE_STALL_MS,
             stream_deadline_ms: c::DEFAULT_STREAM_DEADLINE_MS,
+            max_page_rows: c::DEFAULT_MAX_PAGE_ROWS,
+            max_page_bytes: c::DEFAULT_MAX_PAGE_BYTES,
+            bulk_response_bytes: c::DEFAULT_BULK_RESPONSE_BYTES,
+            bulk_response_ms: c::DEFAULT_BULK_RESPONSE_MS,
             dev_cors_origins: Vec::new(),
             cors_origins: Vec::new(),
             cors_loopback: false,
@@ -519,6 +563,9 @@ pub struct AppState {
     pub suggest_admission: SuggestAdmission,
     /// The viewer/session admission gate. Never touched by the control plane.
     pub compute_gate: ComputeGate,
+    /// The bulk-read lane: `POST /v1/items` only, so a long read holds no slot of the gate
+    /// above. The compute threads and the memory cap are shared.
+    pub bulk_gate: ComputeGate,
     /// The control plane's own bound, so ingest is never throttled by what viewports consume.
     pub ingest_admission: IngestAdmission,
     pub session_credential: String,
