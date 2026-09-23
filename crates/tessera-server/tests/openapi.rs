@@ -1263,10 +1263,7 @@ async fn every_viewer_route_requires_a_session_token() {
                 if kind != Malformed::No {
                     let resp =
                         send_viewer_probe(&f.server, &method, path, kind, Some(token)).await;
-                    if matches!(
-                        kind,
-                        Malformed::Shape | Malformed::UnknownField | Malformed::UnknownPinField
-                    ) {
+                    if with_token == 422 {
                         assert_refusal(&doc, resp, with_token, "contract").await;
                     } else {
                         assert_eq!(
@@ -1320,16 +1317,11 @@ enum Malformed {
 }
 
 /// The ways `method path` can be malformed, each with the status a caller holding a valid token
-/// gets for it. `/v1/meta` reads no query string, so its malformed query is served; `suggest`
-/// refuses its own query string with 422.
+/// gets for it. `/v1/meta` reads no query string, so its malformed query is served.
 fn malformed_viewer_requests(method: &reqwest::Method, path: &str) -> Vec<(Malformed, u16)> {
     let mut kinds = Vec::new();
     if *method == reqwest::Method::GET {
-        let status = match path {
-            "/v1/meta" => 200,
-            "/v1/categories/{column}/suggest" => 422,
-            _ => 400,
-        };
+        let status = if path == "/v1/meta" { 200 } else { 422 };
         kinds.push((Malformed::Query, status));
     } else {
         kinds.extend([
