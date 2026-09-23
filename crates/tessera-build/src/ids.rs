@@ -39,7 +39,7 @@
 
 use std::path::Path;
 
-use arrow::array::Array;
+use arrow::array::{Array, Int32Array, Int64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::DataType;
 
 use crate::config::ENTITY_ID;
@@ -450,9 +450,7 @@ enum IdKind {
 impl IdKind {
     fn of(ty: &DataType) -> Option<IdKind> {
         match ty {
-            DataType::UInt64 | DataType::UInt32 | DataType::Int64 | DataType::Int32 => {
-                Some(IdKind::Integer)
-            }
+            ty if is_integer_id(ty) => Some(IdKind::Integer),
             DataType::Utf8
             | DataType::LargeUtf8
             | DataType::Utf8View
@@ -464,18 +462,52 @@ impl IdKind {
     }
 }
 
+/// Whether an identity column at `ty` holds integers.
+pub fn is_integer_id(ty: &DataType) -> bool {
+    matches!(
+        ty,
+        DataType::UInt64 | DataType::UInt32 | DataType::Int64 | DataType::Int32
+    )
+}
+
+/// An integer identity column as its ids, a null staying null, or `None` where the column is not
+/// one [`is_integer_id`] takes.
+///
+/// **An integer id is its value's eight little-endian bytes, so a negative id and its
+/// two's-complement unsigned value are the same id.** A signed value is sign-extended to 64 bits
+/// and its bits read as unsigned, which is what the running service and the clients store.
+pub fn integer_ids(column: &dyn Array) -> Option<UInt64Array> {
+    let any = column.as_any();
+    if let Some(ids) = any.downcast_ref::<UInt64Array>() {
+        return Some(ids.clone());
+    }
+    if let Some(ids) = any.downcast_ref::<UInt32Array>() {
+        return Some(ids.unary(u64::from));
+    }
+    if let Some(ids) = any.downcast_ref::<Int64Array>() {
+        return Some(ids.unary(|id| id as u64));
+    }
+    if let Some(ids) = any.downcast_ref::<Int32Array>() {
+        return Some(ids.unary(|id| i64::from(id) as u64));
+    }
+    None
+}
+
 /// One row's key from an identity column of any accepted type, or `None` where the row is null.
 ///
-/// **An integer is read as its eight little-endian bytes**, which is what the integer route writes
-/// as an external id, so a corpus that spells its ids one way in the points file and the other way
+/// **An integer is read as its id's eight little-endian bytes** ([`integer_ids`]), which is what the
+/// integer route writes as an external id, so a corpus that spells its ids one way in the points file and the other way
 /// in a members file joins on the same bytes.
 pub fn key_at(column: &dyn Array, row: usize) -> Option<Vec<u8>> {
     use arrow::array::{
-        BinaryArray, BinaryViewArray, Int32Array, Int64Array, LargeBinaryArray, LargeStringArray,
-        StringArray, StringViewArray, UInt32Array, UInt64Array,
+        BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, StringArray,
+        StringViewArray,
     };
     if column.is_null(row) {
         return None;
+    }
+    if let Some(id) = integer_ids(&column.slice(row, 1)) {
+        return Some(id.value(0).to_le_bytes().to_vec());
     }
     let any = column.as_any();
     macro_rules! bytes {
@@ -492,30 +524,18 @@ pub fn key_at(column: &dyn Array, row: usize) -> Option<Vec<u8>> {
             }
         };
     }
-    macro_rules! integer {
-        ($ty:ty) => {
-            if let Some(values) = any.downcast_ref::<$ty>() {
-                return Some((values.value(row) as u64).to_le_bytes().to_vec());
-            }
-        };
-    }
     bytes!(StringArray);
     bytes!(LargeStringArray);
     bytes!(StringViewArray);
     raw!(BinaryArray);
     raw!(LargeBinaryArray);
     raw!(BinaryViewArray);
-    integer!(UInt64Array);
-    integer!(UInt32Array);
-    integer!(Int64Array);
-    integer!(Int32Array);
     None
 }
 
 /// One row's identity as a refusal should print it: an integer as its number, supplied bytes as
 /// their text, and a row the column cannot be read at as its position in the file.
 pub fn display_at(column: &dyn Array, row: usize) -> String {
-    use arrow::array::{Int32Array, Int64Array, UInt32Array, UInt64Array};
     let any = column.as_any();
     macro_rules! integer {
         ($ty:ty) => {

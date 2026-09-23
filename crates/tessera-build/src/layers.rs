@@ -3552,7 +3552,7 @@ fn member_entities(
         }
         return Ok(MemberEntities::Supplied(rows));
     }
-    Ok(MemberEntities::Integer(crate::input::u64_values(
+    Ok(MemberEntities::Integer(crate::input::id_values(
         path,
         column.as_ref(),
         fields.of("entity"),
@@ -3619,7 +3619,7 @@ fn optional_u64_list<'a>(
     };
     let items = match ids.supplied() {
         Some(keys) => ListItems::Keys(keys),
-        None => ListItems::Integers(crate::input::u64_values(path, lists, fields.of(canonical))?),
+        None => ListItems::Integers(crate::input::id_values(path, lists, fields.of(canonical))?),
     };
     Ok(Some(MembershipLists { lists, items }))
 }

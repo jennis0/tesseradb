@@ -1340,7 +1340,7 @@ fn write_curated_ids_at(
     artifacts: &[(&str, Vec<i64>)],
 ) {
     let ids = |values: Vec<i64>| -> ArrayRef {
-        arrow::compute::cast(&Int64Array::from(values), ty).expect("the ids fit the type")
+        id_column_at(ty, &values.iter().map(|&id| id as u64).collect::<Vec<_>>())
     };
     let keys: ArrayRef = Arc::new(StringArray::from(
         artifacts.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
@@ -1430,30 +1430,108 @@ fn a_member_id_at_any_integer_type_builds_the_same_bundle_as_at_uint64() {
     }
 }
 
-/// **A negative member id is refused**, as a negative id in a points file is, rather than read as
-/// some other entity.
-#[test]
-fn a_negative_member_id_is_refused() {
-    for member_table in [false, true] {
-        for ty in [DataType::Int64, DataType::Int32] {
-            let inputs = inputs();
-            std::fs::write(
-                &inputs.config,
-                format!("{VIEW_TOML}{}", curated_from(member_table)),
-            )
+/// An id column at `ty` holding `ids`, each id's low bits read at that width: `u64::MAX - 4` is
+/// `-5` at `int64` and at `int32`.
+fn id_column_at(ty: &DataType, ids: &[u64]) -> ArrayRef {
+    match ty {
+        DataType::UInt64 => Arc::new(UInt64Array::from(ids.to_vec())),
+        DataType::UInt32 => Arc::new(UInt32Array::from_iter_values(
+            ids.iter().map(|&id| id as u32),
+        )),
+        DataType::Int64 => Arc::new(Int64Array::from_iter_values(
+            ids.iter().map(|&id| id as i64),
+        )),
+        DataType::Int32 => Arc::new(arrow::array::Int32Array::from_iter_values(
+            ids.iter().map(|&id| id as i32),
+        )),
+        other => panic!("no id column at {other:?} here"),
+    }
+}
+
+/// Rewrite the `uint64` column `name` of the Parquet file at `path` at `ty`, by [`id_column_at`].
+fn retype_ids(path: &Path, name: &str, ty: &DataType) {
+    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        File::open(path).unwrap(),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let batches: Vec<RecordBatch> = reader.map(Result::unwrap).collect();
+    let schema = batches[0].schema();
+    let at = schema.index_of(name).unwrap();
+    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+    fields[at] = Field::new(name, ty.clone(), fields[at].is_nullable());
+    let retyped = Arc::new(Schema::new(fields));
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), retyped.clone(), None).unwrap();
+    for batch in batches {
+        let mut columns = batch.columns().to_vec();
+        let ids = columns[at].as_any().downcast_ref::<UInt64Array>().unwrap();
+        columns[at] = id_column_at(ty, ids.values());
+        w.write(&RecordBatch::try_new(retyped.clone(), columns).unwrap())
             .unwrap();
-            write_curated_ids_at(
-                &inputs,
-                member_table,
-                &ty,
-                &[("c-0", vec![0, -1]), ("c-1", vec![3])],
-            );
-            let out = inputs.dir.join("bundle");
-            assert!(
-                run(&inputs, &out).is_err(),
-                "a negative {ty:?} id, member table {member_table}, built"
-            );
+    }
+    w.close().unwrap();
+}
+
+/// The fixture's items under ids from `-5`, written as their two's-complement `uint64` values.
+/// The first cluster's members include the five negative ones.
+fn twos_complement_ids() -> Vec<u64> {
+    (0..N_ITEMS as i64).map(|o| (o - 5) as u64).collect()
+}
+
+/// **A negative point id is its two's-complement unsigned id.** A points file writing its ids at
+/// `int64` or `int32`, some of them negative, builds the same bundle as the same ids at `uint64`,
+/// with the pairs and the member tables naming them at `uint64`.
+#[test]
+fn a_negative_point_id_is_its_twos_complement_unsigned_id() {
+    let ids = twos_complement_ids();
+    let unsigned = inputs_over(&ids);
+    let unsigned_out = unsigned.dir.join("bundle");
+    run(&unsigned, &unsigned_out).expect("a build over uint64 ids succeeds");
+    for ty in [DataType::Int64, DataType::Int32] {
+        let signed = inputs_over(&ids);
+        retype_ids(&signed.points, "entity_id", &ty);
+        let signed_out = signed.dir.join("bundle");
+        run(&signed, &signed_out).expect("a build over negative point ids succeeds");
+        assert_bundles_identical(&unsigned_out, &signed_out, &format!("{ty:?} points"));
+    }
+}
+
+/// **A negative member id is its two's-complement unsigned id**, in a member table and in a list
+/// on the artifact row alike.
+#[test]
+fn a_negative_member_id_is_its_twos_complement_unsigned_id() {
+    let ids = twos_complement_ids();
+    let unsigned = inputs_over(&ids);
+    let unsigned_out = unsigned.dir.join("bundle");
+    run(&unsigned, &unsigned_out).expect("a build over uint64 ids succeeds");
+    for ty in [DataType::Int64, DataType::Int32] {
+        let signed = inputs_over(&ids);
+        for table in ["clusters_members.parquet", "topics_members.parquet"] {
+            retype_ids(&signed.at(table), "entity", &ty);
         }
+        let signed_out = signed.dir.join("bundle");
+        run(&signed, &signed_out).expect("a build over negative member ids succeeds");
+        assert_bundles_identical(&unsigned_out, &signed_out, &format!("{ty:?} member tables"));
+    }
+
+    let lists = |ty: DataType| {
+        let inputs = inputs_over(&ids);
+        std::fs::write(
+            &inputs.config,
+            format!("{VIEW_TOML}{}", curated_from(false)),
+        )
+        .unwrap();
+        let signed: Vec<(&str, Vec<i64>)> = vec![("c-0", vec![-5, -4, 0]), ("c-1", vec![3, -1])];
+        write_curated_ids_at(&inputs, false, &ty, &signed);
+        let out = inputs.dir.join("bundle");
+        run(&inputs, &out).expect("a build over negative member ids succeeds");
+        (out, inputs)
+    };
+    let (unsigned_lists, _a) = lists(DataType::UInt64);
+    for ty in [DataType::Int64, DataType::Int32] {
+        let (signed_lists, _b) = lists(ty.clone());
+        assert_bundles_identical(&unsigned_lists, &signed_lists, &format!("{ty:?} lists"));
     }
 }
 
