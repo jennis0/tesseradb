@@ -44,6 +44,7 @@ section's frame is built with, and the front end you are running, `marimo` or `j
 second.
 
 `notebook.ipynb` is generated from the marimo file with `marimo export ipynb`.
+The Jupyter copy needs marimo installed, and its year slider does not drive the map there.
 `tests/test_sdk_examples.py` executes the marimo notebook's cells with no browser at the sample
 scale, asserts the counts each section prints and that every map it draws is served the layers it
 draws and colours by, and checks that `notebook.ipynb` is what a fresh export makes. A notebook

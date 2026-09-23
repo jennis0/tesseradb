@@ -4,6 +4,8 @@
 #
 #     marimo export ipynb clients/py/examples/notebook_marimo.py -o clients/py/examples/notebook.ipynb
 #
+# The Jupyter copy needs marimo installed, and its year slider does not drive the map there.
+#
 # Marimo re-runs a cell that reads a map widget's `.value` whenever the map settles, so the cells
 # that draw maps are kept apart from the cells that build.
 import marimo
@@ -272,7 +274,8 @@ def _(DATA, datetime, pa, pc, pq):
     )
 
     years = sorted(set(points["year"].to_pylist()))
-    (points.num_rows, week.num_rows, f"{years[0]}-{years[-1]}")
+    {"papers built": points.num_rows, "papers held back": week.num_rows,
+     "years": f"{years[0]}-{years[-1]}"}
     return members, points, named_topics, week, week_members, years
 
 
@@ -336,7 +339,7 @@ def _(SCALE, td):
                      require_member_visibility={"count": 1}, computed=("centroid", "box"),
                      title="arXiv classification")
     db.declare_layer("kmeans", kind="flat", views=["papers"],
-                     require_member_visibility={"count": 50}, title="k-means clusters")
+                     require_member_visibility={"count": 50}, title="k-means clusters");
     return (db,)
 
 
@@ -381,7 +384,7 @@ def _(DATA, db, members, pa, points, named_topics, years):
                   rank="rank")
     db.insert("topic_names", named_topics, **_columns)
     db.insert("topic_names", members=members["topics-toponymy"], id="entity", key="key",
-              level="level", rank="rank")
+              level="level", rank="rank");
     return
 
 
