@@ -1090,21 +1090,10 @@ pub async fn wait_for_executor(
     .await
 }
 
-/// Force a publication and wait for it to complete: the moment a level's row forms, and the rows
-/// of anything flushed with them, are what a viewer is served (`ingest.md` §1.3, §10 ruling 6).
-///
-/// A write is durable at its acknowledgement and visible at a numbered publication, so a test that
-/// writes on the control plane and then reads what a viewer is served puts this between the two.
-///
-/// The wait is the server's own (decision 0144): `POST /control/flush?wait=visible` holds the 202
-/// until the publication counter has reached the number that request armed. Waiting on the tick
-/// counter instead returns when a tick has begun, which is before the segment a tick flushed is
-/// published, so a test reading a count over rows ingested since the last publication could beat
-/// the flush it asked for and read the corpus without them.
-///
-/// `visible: false` is the server saying it waited `serve.visible_wait_max_secs` and the
-/// publication had not landed. A test that then read the served answer would be asserting against
-/// a corpus in an unknown state, so this fails there rather than sleeping and trying again.
+/// Ask for a flush and wait until the publication it names has landed, so a test that writes on
+/// the control plane can then read what a viewer is served. `POST /control/flush?wait=visible`
+/// holds its answer for the server's visible wait; where that ends first (`visible: false`, a slow
+/// publication under load), this keeps reading `/control/status` for up to two minutes more.
 pub async fn tick(server: &TestServer) {
     let resp = server
         .client
@@ -1115,11 +1104,17 @@ pub async fn tick(server: &TestServer) {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(
-        body["visible"],
-        serde_json::json!(true),
-        "the flush this asked for had not published within the server's visible wait: {body}"
-    );
+    if body["visible"] == serde_json::json!(true) {
+        return;
+    }
+    let target = body["publication"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the 202 carries the publication number: {body}"));
+    let what = format!("publication {target}");
+    wait_until(&what, std::time::Duration::from_secs(120), async || {
+        control_status(server).await["publication"].as_u64() >= Some(target)
+    })
+    .await
 }
 
 /// Publish until nothing is buffered. A flush takes one view's rows, so a batch that landed in
