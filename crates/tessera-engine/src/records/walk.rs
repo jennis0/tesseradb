@@ -44,10 +44,12 @@ use crate::Generation;
 /// the page size.
 const STRETCH_MIN: u32 = 4096;
 const STRETCH_GROWTH: u32 = 4;
-/// The most a stretch holds per row it spans: a stored stretch keeps each candidate item with its
-/// row, two `u32`s, and a map stretch one `u32` item per visible row while it is evaluated. The
-/// bitmaps beside them hold at most as much again.
-const STRETCH_BYTES_PER_ROW: usize = 8;
+/// The most a stretch holds per row it spans. A stored stretch keeps each candidate item with its
+/// row, two `u32`s, beside the candidate bitmap narrowed to it and the filter's rows, up to four
+/// bytes each; a map stretch keeps its items, one `u32` per row while it is evaluated, their
+/// bitmap, and the filter's rows. Sixteen bytes a row bounds either, so a stretch holds no more
+/// than the page ceiling it is derived from.
+const STRETCH_BYTES_PER_ROW: usize = 16;
 
 /// What one page is walked in: the engine, the view resolved and its mask composed for the page,
 /// and the generation that resolution came from.
@@ -155,8 +157,8 @@ struct Stretch {
     mask: MaskIdentity,
     /// The scan position it was opened after.
     from: Option<Key>,
-    /// Every row whose key's first half is below this; `2^32` past the last.
-    until: u64,
+    /// The first key past the stretch; `None` where the stretch runs to the end.
+    until: Option<Key>,
     /// The rows the filter admits, over the stretch's rows, where there is a filter.
     filter: Option<FilterRows>,
     /// In stored order, the candidate items of the stretch that hold a row in the view,
@@ -211,9 +213,13 @@ fn first_after(segment: &SegmentData, after: Option<Key>) -> u32 {
     lo as u32
 }
 
-/// The first local row of `segment` whose cell is `until` or past it.
-fn first_at_cell(segment: &SegmentData, until: u64) -> u32 {
-    tessera_store::read::first_code_at_or_past(segment, until, 0..segment.row_count)
+/// The first local row of `segment` whose key is `until` or past it, or the segment's end where
+/// `until` is `None`.
+fn first_at(segment: &SegmentData, until: Option<Key>) -> u32 {
+    match until {
+        None => segment.row_count,
+        Some(until) => first_after(segment, before(until)),
+    }
 }
 
 /// A filter's rows over `domain`, routed under `candidate`, or under the session's whole
@@ -331,11 +337,11 @@ impl Walk {
             let until = stretch.until;
             self.stretch = None;
             self.target = self.target.saturating_mul(STRETCH_GROWTH).min(self.ceiling);
-            if until > u64::from(u32::MAX) {
+            let Some(until) = until else {
                 scan = Some((u32::MAX, u64::MAX));
                 break Walked::End;
-            }
-            scan = Some(((until - 1) as u32, u64::MAX));
+            };
+            scan = scan.max(before(until));
         };
         let last = rows
             .last()
@@ -358,9 +364,9 @@ impl Walk {
         }
     }
 
-    /// The map stretch past `scan`: every row of every segment whose cell is below the nearest
-    /// cell a segment reaches its share of `target` rows ahead, and at least the nearest cell any
-    /// segment holds, so a stretch always covers a row. `None` where no segment holds a row past
+    /// The map stretch past `scan`: every row of every segment whose key is below the nearest key
+    /// a segment reaches its share of `target` rows ahead. The segment reaching it holds a row
+    /// before it, so a stretch always covers a row. `None` where no segment holds a row past
     /// `scan`.
     fn open_map_stretch(
         &mut self,
@@ -379,22 +385,23 @@ impl Walk {
             .filter(|&(&(segment, _), &start)| start < segment.row_count)
             .count();
         let share = (self.target as usize / ahead.max(1)).max(1);
-        let mut until: u64 = 1 << 32;
-        let mut nearest: Option<u32> = None;
-        for (&(segment, _), &start) in segments.iter().zip(&starts) {
-            let cells = segment.morton.u32();
-            let Some(&cell) = cells.get(start as usize) else {
-                continue;
-            };
-            nearest = Some(nearest.map_or(cell, |n| n.min(cell)));
-            if let Some(&reach) = cells.get(start as usize + share) {
-                until = until.min(u64::from(reach));
-            }
-        }
-        let Some(nearest) = nearest else {
+        if ahead == 0 {
             return Ok(None);
-        };
-        let until = until.max(u64::from(nearest) + 1);
+        }
+        let until: Option<Key> = segments
+            .iter()
+            .zip(&starts)
+            .filter(|&(&(segment, _), &start)| start < segment.row_count)
+            .filter_map(|(&(segment, _), &start)| {
+                let reach = start as usize + share;
+                (reach < segment.row_count as usize).then(|| {
+                    (
+                        segment.morton.u32()[reach],
+                        segment.columns.tessera_id()[reach],
+                    )
+                })
+            })
+            .min();
         let filter = match &self.filter {
             None => None,
             Some(expr) => {
@@ -403,7 +410,7 @@ impl Walk {
                     .zip(&starts)
                     .enumerate()
                     .filter_map(|(s, (&(segment, _), &start))| {
-                        let end = first_at_cell(segment, until);
+                        let end = first_at(segment, until);
                         (start < end).then_some((s, start..end))
                     })
                     .collect();
@@ -465,12 +472,14 @@ impl Walk {
         if before >= candidate.cardinality() {
             return Ok(None);
         }
-        let until: u64 = u32::try_from(before + u64::from(self.target))
+        let until: Option<u32> = u32::try_from(before + u64::from(self.target))
             .ok()
-            .and_then(|rank| candidate.select(rank))
-            .map_or(1 << 32, u64::from);
+            .and_then(|rank| candidate.select(rank));
         let mut range = Bitmap::new();
-        range.add_range(from as u32..=(until - 1) as u32);
+        match until {
+            Some(until) => range.add_range(from as u32..until),
+            None => range.add_range(from as u32..=u32::MAX),
+        }
         range.and_inplace(&candidate);
         let row_space = &cx.open.served.data.row_space;
         let items: Vec<(u32, u32)> = range
@@ -498,7 +507,7 @@ impl Walk {
             under: Arc::clone(cx.generation),
             mask: cx.open.served.mask_identity,
             from: scan,
-            until,
+            until: until.map(|entity| (entity, 0)),
             filter,
             items,
         }))
@@ -631,7 +640,7 @@ impl Take<'_> {
                 segment,
                 base,
                 next: first_after(segment, scan),
-                end: first_at_cell(segment, self.stretch.until),
+                end: first_at(segment, self.stretch.until),
                 chunk: u32::try_from(need - rows.len())
                     .unwrap_or(u32::MAX)
                     .max(CHUNK_MIN),

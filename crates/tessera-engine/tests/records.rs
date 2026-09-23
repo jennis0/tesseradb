@@ -2449,3 +2449,50 @@ fn a_malformed_filter_is_refused_whatever_rows_remain() {
         }
     }
 }
+
+/// **A cell holding more rows than a stretch may span is read whole**, every row once, in both
+/// orders: a stretch's end can fall inside a cell.
+#[test]
+fn a_cell_larger_than_a_stretch_is_read_whole() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        1000,
+    );
+    let engine = engine_at(tmp.path(), &root, 3600);
+    engine.set_background_refresh_for_test(false);
+    let rows: Vec<UnallocatedRow> = (0..10_000u64)
+        .map(|i| UnallocatedRow {
+            external_id: Some(format!("crowd-{i}").into_bytes()),
+            view: "s0".to_string(),
+            join: None,
+            x: 5.0,
+            y: 5.0,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            descriptors: vec![b"0".to_vec()],
+            scoped: Vec::new(),
+        })
+        .collect();
+    engine
+        .accept_ingest(rows, "crowd".to_string(), [0u8; 32])
+        .expect("the ingest is accepted");
+    flush(&engine);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let (visible, _) = viewport_counts(&engine, &session, "s0", None);
+    assert_eq!(visible, 11_000);
+    let fields: Vec<String> = Vec::new();
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let mut req = request("s0", &fields);
+        req.order = Some(order);
+        req.page_rows = Some(1000);
+        // A stretch's ceiling at its floor of 4,096 rows, under the 10,000 in the one cell.
+        req.limits.max_page_bytes = 16 * 4096;
+        let ids = read_all(&engine, &session, &req).ids();
+        assert_each_once(&ids);
+        assert_eq!(ids.len() as u64, visible, "{order:?}");
+    }
+}
