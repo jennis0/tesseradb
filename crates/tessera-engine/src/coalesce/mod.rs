@@ -42,6 +42,11 @@ pub(crate) struct CoalescePolicy {
     pub(crate) floor_bytes: u64,
     /// Input bytes one axis may take in one pass, which bounds the memory held while merging.
     pub(crate) max_input_bytes: u64,
+    /// `width` and `floor_bytes` for the external-id runs and their locator extents. Every ingest
+    /// duplicate check and item lookup walks the run list, so it is kept shorter than the others:
+    /// below the floor every run joins one, and above it runs tier as the other axes do.
+    pub(crate) run_width: usize,
+    pub(crate) run_floor_bytes: u64,
 }
 
 impl Default for CoalescePolicy {
@@ -50,6 +55,8 @@ impl Default for CoalescePolicy {
             width: 8,
             floor_bytes: 1 << 20,
             max_input_bytes: 256 << 20,
+            run_width: 4,
+            run_floor_bytes: 16 << 20,
         }
     }
 }

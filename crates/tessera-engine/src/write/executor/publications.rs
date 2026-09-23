@@ -176,8 +176,7 @@ impl Executor {
         // [`Executor::fold_outstanding`] for why that later boundary is the one that matters. A
         // coalesce publishing under a fold would be orphaned by the flip and would be discarded at
         // its rebase check, so running it here is wasted work, not a hazard.
-        if self.deps.coalesce_policy.width < 2
-            || !self.deps.switches.coalesce_enabled.load(Ordering::SeqCst)
+        if !self.deps.switches.coalesce_enabled.load(Ordering::SeqCst)
             || self.coalesce_outstanding()
             || self.fold_outstanding()
             || !self.may_publish()

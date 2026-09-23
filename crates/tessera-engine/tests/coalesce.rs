@@ -22,8 +22,31 @@ use tessera_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(30);
 
-/// The coalesce policy's width. Every axis needs this many entries before anything is selected.
+/// The coalesce policy's width. Every axis but the runs needs this many entries before anything
+/// is selected.
 const WIDTH: usize = 8;
+
+/// The width of the external-id run and locator axis.
+const RUN_WIDTH: usize = 4;
+
+/// Drive ticks until the tiers are one and the runs are fewer than a run window, which is where
+/// every axis a coalesce takes has come to rest.
+fn settle_coalesce(engine: &Engine) {
+    wait_until("the coalesce to settle", WAIT, || {
+        engine.request_flush();
+        let generation = engine.generation();
+        let manifest = &generation.bundle.partitions["default"].manifest;
+        generation.delta_postings.len() == 1 && manifest.locator_extents.len() < RUN_WIDTH
+    });
+}
+
+/// The runs after a coalesce: the base run first and unchanged, one run per locator extent, and
+/// fewer extents than a run window.
+fn assert_runs_coalesced(after: &tessera_store::manifest::SegmentsManifest, base_run: &str) {
+    assert_eq!(after.external_id_runs[0], base_run);
+    assert_eq!(after.external_id_runs.len(), after.locator_extents.len() + 1);
+    assert!(after.locator_extents.len() < RUN_WIDTH);
+}
 
 fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
     let mut engine = Engine::open(
@@ -114,18 +137,9 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
 
     let before = manifest_of(&root);
     assert_eq!(before.deltas.len(), WIDTH, "one tier per flush");
-    assert_eq!(
-        before.locator_extents.len(),
-        WIDTH,
-        "one locator extent per flush"
-    );
     let geometry_before = engine.generation().segments_version;
 
-    // The coalesce is selected on the tick, and the tick is what a requested flush drives.
-    engine.request_flush();
-    wait_until("the coalesce to publish", WAIT, || {
-        engine.write_executor_stats().coalesces >= 1
-    });
+    settle_coalesce(&engine);
 
     let after = manifest_of(&root);
     assert_eq!(
@@ -134,17 +148,7 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
         "{WIDTH} tiers became one: {:?}",
         after.deltas
     );
-    assert_eq!(after.locator_extents.len(), 1);
-    assert_eq!(
-        after.external_id_runs.len(),
-        2,
-        "the build's run plus the coalesced one: {:?}",
-        after.external_id_runs
-    );
-    assert_eq!(
-        after.external_id_runs[0], before.external_id_runs[0],
-        "the build's run stays listed first — the base locator's ordinals resolve inside it"
-    );
+    assert_runs_coalesced(&after, &before.external_id_runs[0]);
     assert_eq!(
         after.dict_extents.len(),
         2,
@@ -200,12 +204,8 @@ fn a_merge_publishes_over_segments_whose_runs_a_coalesce_took() {
             ingested.push((entity, format!("ext-{i}").into_bytes()));
             flush(&engine);
         }
-        engine.request_flush();
-        wait_until("the coalesce to publish", WAIT, || {
-            engine.write_executor_stats().coalesces >= 1
-        });
+        settle_coalesce(&engine);
         let coalesced = manifest_of(&root);
-        assert_eq!(coalesced.locator_extents.len(), 1);
         let segments = coalesced.segments.len();
 
         engine.set_merge_for_test(true);
@@ -216,7 +216,7 @@ fn a_merge_publishes_over_segments_whose_runs_a_coalesce_took() {
         let merged = manifest_of(&root);
         assert!(merged.segments.len() < segments);
         assert_eq!(merged.external_id_runs, coalesced.external_id_runs);
-        assert_eq!(merged.locator_extents.len(), 1);
+        assert_eq!(merged.locator_extents.len(), coalesced.locator_extents.len());
         for (entity, external_id) in &ingested {
             assert_eq!(engine.resolve_external_id(external_id).unwrap(), Some(*entity));
             assert_eq!(
@@ -263,10 +263,7 @@ fn a_coalesced_manifest_reopens_with_every_item_and_binding_intact() {
                 engine.write_executor_stats().flushes > flushes
             });
         }
-        engine.request_flush();
-        wait_until("the coalesce to publish", WAIT, || {
-            engine.write_executor_stats().coalesces >= 1
-        });
+        settle_coalesce(&engine);
         ingested
     };
 
@@ -447,10 +444,7 @@ fn a_coalesce_merges_the_entity_term_extents_and_every_entity_answers_the_same()
         "each entity's own novel descriptor is satisfied, so each drill-down names it"
     );
 
-    engine.request_flush();
-    wait_until("the coalesce to publish", WAIT, || {
-        engine.write_executor_stats().coalesces >= 1
-    });
+    settle_coalesce(&engine);
 
     let after = manifest_of(&root);
     assert_eq!(
@@ -525,10 +519,7 @@ fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
         .accept_change(doomed, tessera_lifecycle::wal::ChangeOp::Delete)
         .expect("the delete is accepted");
 
-    engine.request_flush();
-    wait_until("the coalesce to publish", WAIT, || {
-        engine.write_executor_stats().coalesces >= 1
-    });
+    settle_coalesce(&engine);
     assert_eq!(manifest_of(&root).entity_terms_extents.len(), 1);
 
     assert_eq!(
@@ -767,19 +758,10 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     }
 
     engine.set_coalesce_for_test(true);
-    engine.request_flush();
-    wait_until("the coalesce to publish", WAIT, || {
-        engine.write_executor_stats().coalesces >= 1
-    });
+    settle_coalesce(&engine);
     let coalesced = manifest_of(&root);
     assert_eq!(coalesced.deltas.len(), 1, "the carried tiers became one");
-    assert_eq!(coalesced.locator_extents.len(), 1, "the carried locator extents became one");
-    assert_eq!(
-        coalesced.external_id_runs.len(),
-        2,
-        "the fold's base run, untouched, and the coalesced run"
-    );
-    assert_eq!(coalesced.external_id_runs[0], folded.external_id_runs[0]);
+    assert_runs_coalesced(&coalesced, &folded.external_id_runs[0]);
     assert_same(&answers(&engine, &bindings), &expected, "coalesce");
 
     drop(engine);
