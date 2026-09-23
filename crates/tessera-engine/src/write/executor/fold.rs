@@ -713,9 +713,20 @@ impl Executor {
                         }
                         health.fold_holding.store(false, Ordering::SeqCst);
                         completed.finished = std::time::Instant::now();
+                        // Before the in-flight flag clears, so a tick that observes the fold
+                        // finished also observes when. See `fold_floor_from`.
+                        health
+                            .fold_ended_unix
+                            .store(unix_now().unwrap_or(0), Ordering::SeqCst);
                         unit.complete(completed);
                     }
                     Err(e) => {
+                        health
+                            .fold_ended_unix
+                            .store(unix_now().unwrap_or(0), Ordering::SeqCst);
+                        // Counted after the flag clears, so a request made on seeing the count
+                        // is not refused as arriving while this fold runs.
+                        drop(unit);
                         health.fold_failures.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!(
                             error = %e,
@@ -725,12 +736,6 @@ impl Executor {
                         );
                     }
                 }
-                // Written before the in-flight flag clears, so a tick that observes the fold
-                // finished also observes when. See `fold_floor_from`.
-                health
-                    .fold_ended_unix
-                    .store(unix_now().unwrap_or(0), Ordering::SeqCst);
-                drop(unit);
             });
         if spawned.is_ok() {
             self.last_fold_start_unix = unix_now();

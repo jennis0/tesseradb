@@ -2963,18 +2963,12 @@ fn a_fold_lands_while_the_feed_runs(key: fn(u64, &str, u64) -> String) {
         for _ in 0..ATTEMPTS {
             let asked = engine.write_executor_stats();
             engine.request_fold();
-            // A refusal at the plan answers a request as a discard does. A request that arrives
-            // while the previous fold's thread is still winding down is consumed and counted
-            // nowhere, so one no longer pending with nothing counted is made again.
+            // A refusal at the plan answers a request as a discard does.
             wait_for("the fold to publish or be discarded", || {
                 let now = engine.write_executor_stats();
-                let answered = now.folds > asked.folds
+                now.folds > asked.folds
                     || now.fold_failures > asked.fold_failures
-                    || now.fold_refusals > asked.fold_refusals;
-                if !answered && !now.fold_requested {
-                    engine.request_fold();
-                }
-                answered
+                    || now.fold_refusals > asked.fold_refusals
             });
             if engine.write_executor_stats().folds > asked.folds {
                 landed = true;

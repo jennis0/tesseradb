@@ -95,9 +95,12 @@ pub(super) struct InFlight<C> {
 }
 
 impl<C> InFlight<C> {
-    /// Hands the finished unit to the executor and wakes it. The pending flag is set before this.
+    /// Hands the finished unit to the executor and wakes it. The unit stops being in flight here,
+    /// after the pending flag is set, so it is outstanding throughout and no longer running once
+    /// the executor can publish it.
     pub(super) fn complete(&self, unit: C) {
         self.completed_pending.store(true, Ordering::SeqCst);
+        self.in_flight.store(false, Ordering::SeqCst);
         let _ = self.submit.send(unit);
         let _ = self.bell.try_send(());
     }
@@ -107,5 +110,28 @@ impl<C> Drop for InFlight<C> {
     fn drop(&mut self) {
         self.in_flight.store(false, Ordering::SeqCst);
         let _ = self.bell.try_send(());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unit that has handed back its result is no longer running, though it stays outstanding
+    /// until the executor takes it, so a request arriving after its publication is not refused
+    /// as if it were still running.
+    #[test]
+    fn a_completed_unit_is_outstanding_but_not_in_flight() {
+        let (bell, _rung) = std::sync::mpsc::sync_channel(1);
+        let background: Background<u32> = Background::new(bell);
+        let unit = background.start();
+        assert!(background.in_flight());
+        unit.complete(7);
+        assert!(!background.in_flight(), "the unit's work is done");
+        assert!(background.outstanding(), "its result is not yet taken");
+        assert_eq!(background.next_completed(), Some(7));
+        background.drained();
+        assert!(!background.outstanding());
+        drop(unit);
     }
 }

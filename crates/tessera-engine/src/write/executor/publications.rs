@@ -320,7 +320,7 @@ impl Executor {
     /// Nothing waits on the rebuild: a value in the side map is suggested exactly as one in the
     /// base is, so a rebuild that never finishes costs residency, not a missing answer.
     pub(super) fn dispatch_suggest_rebuild(&mut self) {
-        if self.suggest.in_flight() {
+        if self.suggest.outstanding() {
             return;
         }
         let generation = self.generation.load_full();
