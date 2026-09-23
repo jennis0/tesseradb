@@ -207,7 +207,7 @@ view's, under `ingest_by_view` (below, under "Beyond the schema").
 | `bodies_split` | count | bodies over the cap, halved and re-encoded until each half fits; eight-way counts 7 |
 | `largest_body_bytes` | bytes | the largest body sent |
 | `bodies_over_cap` | count | single-row bodies over the cap, sent as they are and refused 422 |
-| `flush_s` | seconds | `POST /control/flush` to the buffer holding no row: every view's flush landed |
+| `flush_s` | seconds | `POST /control/flush` to `/control/status`'s `publication` reaching the number the flush answered: the cycle carrying every buffered row has published |
 | `visibility_s` | seconds | the same request to a zoom-0 viewport reaching the expected count, not `flush_s` |
 | `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once, and the wait ends when a fold lands or the server counts one discarded |
 | `fold_peak_rss` | bytes | the server's own `compaction.last_rss_bytes` |

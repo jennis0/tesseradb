@@ -796,15 +796,18 @@ class Cycle:
         }
 
     def flush_and_wait(self, control) -> tuple[int, bool, float]:
-        """`POST /control/flush`, and the wait for it to land: `(status, landed, seconds)`. Every
-        view flushes on its own, and a flush the server discards stays buffered until it is
-        planned again, so the flush has landed when the buffer holds nothing."""
-        code = control.flush().status_code
+        """`POST /control/flush`, and the wait for it to land: `(status, landed, seconds)`. The
+        flush answers the publication number of the cycle that carries the buffered work, and it
+        has landed once `/control/status`'s `publication` reaches that number."""
+        r = control.flush()
+        if r.status_code != 202:
+            return r.status_code, False, 0.0
+        publication = int(r.json()["publication"])
         landed, wall = wait_for(
-            lambda: control.status()["write_executor"]["flush"]["buffered_items"] == 0,
+            lambda: control.status()["publication"] >= publication,
             timeout=self.args.flush_timeout,
         )
-        return code, landed, wall
+        return r.status_code, landed, wall
 
     def do_fold(self, control) -> dict:
         """`POST /control/compact`, and the compaction block once a fold has landed."""
@@ -1323,6 +1326,8 @@ class Cycle:
             if isinstance(phase, dict) and phase.get("failed"):
                 out.append(f"the {name} phase failed: {phase['failed']}")
         flush = result.get("flush") or {}
+        if isinstance(flush, dict) and flush.get("published") is False:
+            out.append(f"the flush did not reach its publication (status {flush.get('status')})")
         if isinstance(flush, dict) and flush.get("visibility_reached") is False:
             out.append(
                 f"the flush never reached the expected visible count: {flush.get('visible')} of "
@@ -1380,6 +1385,8 @@ class Cycle:
                     f"the write cycle's re-ingest answered {reingest['items_with_several_ids']} "
                     f"item(s) with a different tessera_id in different views"
                 )
+            if cycle.get("flushed") is False:
+                out.append("the write cycle's flush did not reach its publication")
             for name, counts in (cycle.get("by_view") or {}).items():
                 if counts.get("after") != counts.get("expected"):
                     out.append(
@@ -1393,6 +1400,8 @@ class Cycle:
                 out.append(f"dropping view {where} answered {recreate['drop']['status']}")
             if recreate["create"]["status"] != 201:
                 out.append(f"creating view {where} again answered {recreate['create']['status']}")
+            if recreate.get("flushed") is False:
+                out.append(f"the flush after recreating view {where} did not reach its publication")
             out += [
                 f"view {name} answered {status} after it was dropped, not 404"
                 for name, status in recreate["answers_after_drop"].items()
