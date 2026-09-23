@@ -2414,6 +2414,7 @@ mod dispatch_rules_tests {
             fills: Vec::new(),
             consumed_fills: Vec::new(),
             consumed_scoped_fills: Vec::new(),
+            recorded_joins: Vec::new(),
         }
     }
 

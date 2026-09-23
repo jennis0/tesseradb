@@ -332,6 +332,8 @@ pub(crate) struct FlushPlan {
     pub(crate) consumed_fills: Vec<EntityId>,
     /// The same for the group-scoped fills, by the `(entity, owner view)` cell they address.
     pub(crate) consumed_scoped_fills: Vec<(EntityId, String)>,
+    /// The joins whose key a published run already records, ascending: they write no binding.
+    pub(crate) recorded_joins: Vec<EntityId>,
 }
 
 impl FlushPlan {
@@ -462,11 +464,29 @@ pub(crate) fn plan_flush(
     items.sort_unstable_by_key(|(entity, _)| entity.raw());
     fills.sort_by_key(|(entity, _)| entity.raw());
 
+    // The first flush to give an entity a row writes its binding, whether that row is the
+    // entity's own or a join: a dropped view can take the own row with it before it flushes. So
+    // a join whose entity already has a row in some view finds its key recorded.
+    let rowed = |entity: EntityId| {
+        generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .values()
+                .any(|data| data.row_space.row_of(entity).is_some())
+        })
+    };
+    let recorded_joins = items
+        .iter()
+        .filter(|(entity, item)| item.join && rowed(*entity))
+        .map(|(entity, _)| *entity)
+        .collect();
+
     Ok(FlushPlan {
         items,
         fills,
         consumed_fills,
         consumed_scoped_fills,
+        recorded_joins,
     })
 }
 
@@ -717,13 +737,6 @@ fn execute_flush_stages(
         });
     }
     *mark = laps.lap(FlushStage::Rows, *mark);
-    // A join's external id is bound by its entity's own row, so it writes no binding.
-    let joins: Vec<EntityId> = plan
-        .items
-        .iter()
-        .filter(|(_, item)| item.join)
-        .map(|(entity, _)| *entity)
-        .collect();
     let out = if rows.is_empty() {
         None
     } else {
@@ -742,7 +755,7 @@ fn execute_flush_stages(
                     scalar_schema: &ctx.scalar_schema,
                     row_base: ctx.row_base,
                 },
-                &joins,
+                &plan.recorded_joins,
             )
             .map_err(|e| MaintenanceFailed(format!("segment: {e}")))?,
         )
