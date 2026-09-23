@@ -3088,3 +3088,65 @@ fn a_flush_of_joins_binds_nothing_and_the_joined_key_resolves_both_ways() {
     let engine = reopen(engine);
     resolves_both_ways(&engine, "after a fold and a restart");
 }
+
+/// **New items for two views in one commit window each keep their external id, both ways, once
+/// the answers come from the sidecar.** One batch allocates interleaved ids to `s0` and `s1`, so
+/// the two flushes' locator extents overlap; a restart past the log's rotation leaves the live map
+/// empty.
+#[test]
+#[ignore = "fails: the two views' locator extents overlap, and the first one listed answers no external id for the other view's entities inside its span"]
+fn interleaved_new_items_in_two_views_resolve_both_ways_from_the_sidecar() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    create_view(&engine, "s1");
+
+    let keys: Vec<Vec<u8>> = (0..6).map(|i| format!("mixed-{i}").into_bytes()).collect();
+    let rows: Vec<UnallocatedRow> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| UnallocatedRow {
+            external_id: Some(key.clone()),
+            view: if i % 2 == 0 { "s0" } else { "s1" }.to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x: 5.0,
+            y: 5.0,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        })
+        .collect();
+    let entities = engine
+        .accept_ingest(rows, "mixed".to_string(), [0u8; 32])
+        .expect("the batch is accepted");
+    wait_ticking(&engine, "both views to flush", || {
+        engine.request_flush();
+        engine.generation().buffer.is_empty()
+    });
+
+    drop(engine);
+    let engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        config_uncapped(),
+    )
+    .expect("the bundle reopens");
+    assert!(
+        engine.accepted_batch("mixed").is_none(),
+        "the log rotated past the batch, so no live map answers for it"
+    );
+    let mut wrong = Vec::new();
+    for (key, entity) in keys.iter().zip(&entities) {
+        let name = String::from_utf8_lossy(key).into_owned();
+        if engine.resolve_external_id(key).unwrap() != Some(*entity) {
+            wrong.push(format!("{name}: key to entity"));
+        }
+        if engine.external_id_of(*entity).unwrap() != Some(key.clone()) {
+            wrong.push(format!("{name}: entity to key"));
+        }
+    }
+    assert!(wrong.is_empty(), "answered wrong from the sidecar: {wrong:?}");
+}
