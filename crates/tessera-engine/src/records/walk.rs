@@ -154,8 +154,8 @@ pub(super) struct Walk {
 /// The part of the view ahead of a scan position that one filter evaluation covers.
 struct Stretch {
     under: Arc<Generation>,
-    /// The composed mask the filter was evaluated under, whose region and `member_of` leaves
-    /// answer through it.
+    /// The composed mask the filter was evaluated under: a map stretch's candidate is the items
+    /// of its rows the mask admits, and region and `member_of` leaves answer through it.
     mask: MaskIdentity,
     /// The scan position it was opened after.
     from: Option<Key>,

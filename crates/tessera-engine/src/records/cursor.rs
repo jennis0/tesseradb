@@ -117,8 +117,9 @@ impl CursorKey {
 }
 
 /// A row's place in its order: `(cell, tessera_id)` in map order, and `(item number, 0)` in
-/// stored order, where a scan position past a whole stretch is `(last item number, u64::MAX)`.
-/// Item numbers are held only inside the seal.
+/// stored order, where a scan position past a whole stretch is `(n, u64::MAX)` for `n` the number
+/// just before the next stretch's first item, which need not be an item. Item numbers are held
+/// only inside the seal.
 pub(super) type Key = (u32, u64);
 
 /// How far a read has gone: `scan` is the position every row at or before which has been
