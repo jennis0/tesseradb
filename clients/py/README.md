@@ -279,7 +279,7 @@ cs = papers.filter({"archive": {"eq": "cs"}})
 ml = cs.filter({"primary_category": {"in": ["cs.LG", "stat.ML"]}})
 corner = ml.within((0.0, 0.0, 5000.0, 5000.0))              # (min_x, min_y, max_x, max_y)
 
-corner.count()                                # how many items, exactly
+corner.count()                                # how many items
 corner.map(colour_by="primary_category")      # the map, on this view, filtered, framed on the box
 corner.sample(zoom=3, k=256)                  # the points a map draws at zoom 3, as a table
 
@@ -293,11 +293,10 @@ coordinates, the ones the rows were inserted with, and an item on its edge is in
 view group is named `"<group>:<key>"`, and a name the reader cannot see is refused with the list
 of names it can.
 
-`count()` is the exact number of items the reader may see in the view that match every filter
-and lie inside the box. It returns a `Count`, which is an `int`. One case is not exact: where a
-box's outline is longer than the server's `max_region_cells` setting allows it to trace, the
-server counts the grid cells covering the box instead, and the `Count` has `exact` set to
-`False`, gives the cells' depth as `cover_depth`, and prints as "at most".
+`count()` is the number of items the reader may see in the view that match every filter
+and lie inside the box. A box whose outline is longer than the server's `max_region_cells`
+setting allows is counted over the grid cells covering it, so the number can include items just
+outside the box. Two boxes that do not overlap select nothing.
 
 `map(colour_by=None, layers=None, height=480)` opens the widget on the selection's view with its
 filters applied and its camera on the box. The map draws everything in frame, including items
@@ -343,12 +342,14 @@ v.artifact(tessera_id, "s0")                  # one annotation's record: its cou
 
 Each of these exists on `db` and on any reader, and answers as that reader.
 
-`categories(column, prefix=None, view=None)` lists a category column's values that the reader
+`categories(column, prefix=None, view=None, codes=None)` lists a category column's values that the reader
 may see, one row each, with `key`, `code` and `title`. Without a prefix it is every value. With
 one it is the values whose key or title, or a word in either, starts with it, ignoring case, and
 each row adds `count`, the number of items the reader may see that carry the value; the server
 returns at most its `max_suggestions` setting of these, and `frame.attrs["more"]` says whether
-more matched. A column declared for a view group holds different values in each view, so it
+more matched. With `codes`, such as the codes in a sample's category column, it is the values of
+those codes, and a code with no value the reader may see is left out; `codes` and `prefix` cannot
+be combined. A column declared for a view group holds different values in each view, so it
 takes `view=`.
 
 `item()` returns `fields` by column name, `labels` (the item's labels that the reader also

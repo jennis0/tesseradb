@@ -107,41 +107,6 @@ def _all_of(expressions: Sequence[dict]) -> Optional[dict]:
     return parts[0] if len(parts) == 1 else {"all_of": parts}
 
 
-class Count(int):
-    """A number of items, which says whether it is exact.
-
-    A count is exact unless the selection has a box whose outline was too long for the server to
-    trace cell by cell. The server then counts every item in a set of grid cells that covers the
-    box, and the number may include items just outside it. `exact` is `False` for such a count,
-    `cover_depth` is the depth of the grid cells used, and the count prints with that said
-    beside it. The server's `max_region_cells` setting decides how long an outline may be.
-
-    A `Count` is an `int` everywhere one is expected.
-    """
-
-    cover_depth: Optional[int]
-
-    def __new__(cls, value: int, cover_depth: Optional[int] = None) -> "Count":
-        count = super().__new__(cls, value)
-        count.cover_depth = cover_depth
-        return count
-
-    @property
-    def exact(self) -> bool:
-        """`True` when this is the exact number, `False` when it may include items outside a box."""
-        return self.cover_depth is None
-
-    def __repr__(self) -> str:
-        if self.exact:
-            return int.__repr__(self)
-        return (
-            f"{int(self)} (at most: the box was counted as the grid cells at depth "
-            f"{self.cover_depth} that cover it)"
-        )
-
-    __str__ = __repr__
-
-
 class Sample:
     """The points a map draws at one zoom, with the annotations drawn beside them.
 
@@ -231,7 +196,7 @@ class Selection:
         """The box this selection is limited to, as `(min_x, min_y, max_x, max_y)`, or `None`.
 
         After two calls to `within` it is the overlap of the two boxes. If they do not overlap,
-        the selection holds nothing and this is the later box.
+        it is `None` and the selection holds nothing.
         """
         if not self._boxes:
             return None
@@ -242,7 +207,7 @@ class Selection:
             min(box[3] for box in self._boxes),
         )
         if overlap[0] > overlap[2] or overlap[1] > overlap[3]:
-            return self._boxes[-1]
+            return None
         return overlap
 
     def filter(self, expression: dict) -> "Selection":
@@ -281,16 +246,16 @@ class Selection:
             )
         return Selection(self._reader, self._view, self._filters, self._boxes + (edges,))
 
-    def count(self) -> Count:
+    def count(self) -> int:
         """How many items this reader may see in this selection.
 
-        The number is exact: every item in the view that the reader may see, that matches every
-        filter, and that lies inside the box. With no filter and no box it is everything the
+        It counts every item in the view that the reader may see, that matches every filter,
+        and that lies inside the box. With no filter and no box it is everything the
         reader may see in the view.
 
-        One case is not exact. When a box's outline is too long for the server to trace, it
-        counts the grid cells that cover the box, and the returned `Count` has `exact` set to
-        `False` and says so when printed.
+        A box whose outline is longer than the server's `max_region_cells` setting allows is
+        counted over the grid cells covering it, so the number can include items just outside
+        the box.
 
             db.view("papers").count()
             db.viewer(["cs.LG"]).view("papers").filter({"year": {"eq": 2023}}).count()
@@ -299,13 +264,8 @@ class Selection:
         expression = self._expression()
         if expression is not None:
             request["filters"] = expression
-        body, headers = self._reader()._exchange("POST", "/v1/viewport", request)
-        counts = _tile_counts(split_frames(body))
-        region = headers.get("x-tessera-region") or ""
-        depth = None
-        if region.startswith("cover"):
-            depth = int(region.rsplit("=", 1)[1])
-        return Count(counts.get("matched", 0), depth)
+        body = self._reader()._request("POST", "/v1/viewport", request)
+        return _tile_counts(split_frames(body)).get("matched", 0)
 
     def sample(
         self,
@@ -374,7 +334,7 @@ class Selection:
         ):
             if value is not None:
                 request[name] = int(value) if name in _VIEWPORT_INTEGERS else value
-        body, _ = reader._exchange("POST", "/v1/viewport", request)
+        body = reader._request("POST", "/v1/viewport", request)
         frames = split_frames(body)
         artifacts = _tables([p for kind, p in frames if kind == FRAME_ARTIFACTS])
         sub_cells = _tables([p for kind, p in frames if kind == FRAME_SUB_CELLS])
@@ -567,7 +527,11 @@ class Viewer:
         return record
 
     def categories(
-        self, column: str, prefix: Optional[str] = None, view: Optional[str] = None
+        self,
+        column: str,
+        prefix: Optional[str] = None,
+        view: Optional[str] = None,
+        codes: Optional[Sequence[int]] = None,
     ):
         """The values of a category column that this reader may see, as a pandas DataFrame.
 
@@ -583,14 +547,36 @@ class Viewer:
           more matched than were returned.
         - `view`: the view to read the column in. A column declared for a view group holds
           different values in each of the group's views, so it needs this.
+        - `codes`: list only these codes, such as the codes in a sample's category column. A
+          code with no value this reader may see is left out. It cannot be combined with
+          `prefix`.
+
+        Without a prefix the rows are in key order; with one, in the order of the matched text.
 
             v.categories("venue")
             v.categories("venue", prefix="neur")
+            v.categories("venue", codes=sample.column("venue").unique().to_pylist())
         """
         import pandas as pd
 
+        if codes is not None and prefix is not None:
+            raise Refusal(
+                "categories: codes= lists the values of codes you hold and prefix= searches the "
+                "values by text. Give one of them"
+            )
         path = f"/v1/categories/{urllib.parse.quote(column, safe='')}"
         query: dict = {} if view is None else {"view": view}
+        if codes is not None:
+            wanted = [str(int(code)) for code in codes]
+            # An empty `codes=` on the wire lists the whole vocabulary, so ask nothing.
+            values = []
+            if wanted:
+                query["codes"] = ",".join(wanted)
+                values = json.loads(self._request("GET", path + _query(query), None))["values"]
+            return pd.DataFrame(
+                [(one["key"], one["code"], one.get("title")) for one in values],
+                columns=["key", "code", "title"],
+            )
         if prefix is not None:
             query.update(q=prefix, counts="true")
             page = json.loads(self._request("GET", path + "/suggest" + _query(query), None))
@@ -706,8 +692,8 @@ class Viewer:
                 return [q["x_min"], q["y_min"], q["x_max"], q["y_max"]]
         raise Refusal(f"there is no view named {view!r} that this reader can see")
 
-    def _exchange(self, method: str, path: str, body: Optional[dict]) -> tuple[bytes, Any]:
-        """One request: the answer's body and headers, or a refusal with what the server said."""
+    def _request(self, method: str, path: str, body: Optional[dict]) -> bytes:
+        """One request: the answer's body, or a refusal with what the server said."""
         request = urllib.request.Request(
             self.url + path,
             data=None if body is None else json.dumps(body).encode(),
@@ -719,13 +705,10 @@ class Viewer:
         )
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
-                return response.read(), response.headers
+                return response.read()
         except urllib.error.HTTPError as refused:
             detail = refused.read().decode(errors="replace")[:1000]
             raise Refusal(f"{method} {path} refused ({refused.code}): {detail}") from None
-
-    def _request(self, method: str, path: str, body: Optional[dict]) -> bytes:
-        return self._exchange(method, path, body)[0]
 
     def __repr__(self) -> str:
         terms = "" if self.terms is None else f", terms={self.terms!r}"

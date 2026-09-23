@@ -1132,18 +1132,26 @@ class Database:
         self.viewer()._require_view(name)
         return Selection(self.viewer, name)
 
-    def categories(self, column: str, prefix: str | None = None, view: str | None = None):
+    def categories(
+        self,
+        column: str,
+        prefix: str | None = None,
+        view: str | None = None,
+        codes: Sequence[int] | None = None,
+    ):
         """The values of a category column, as a pandas DataFrame.
 
         This is `Viewer.categories` as this database's own reader, which sees every value.
-        `prefix` lists only the values starting with it, with a count of items for each, and
-        `view` names the view to read a column declared for a view group in.
+        `prefix` lists only the values starting with it, with a count of items for each; `view`
+        names the view to read a column declared for a view group in; `codes` lists only the
+        values of those codes.
 
             db.categories("venue")
             db.categories("venue", prefix="neur")
+            db.categories("venue", codes=[1, 3])
         """
         self._refuse_before_the_first_commit("categories")
-        return self.viewer().categories(column, prefix, view)
+        return self.viewer().categories(column, prefix, view, codes)
 
     def _id_arguments(self) -> list[str]:
         """The build's `--mint-external-ids` flag, where the id column is an integer.

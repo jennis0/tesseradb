@@ -79,9 +79,7 @@ def inside(points, box) -> "pd.DataFrame":
 
 
 def test_a_views_count_is_every_row_inserted_into_it(db, points):
-    count = db.view("s0").count()
-    assert count == len(points)
-    assert count.exact
+    assert db.view("s0").count() == len(points)
 
 
 def test_a_filtered_count_is_the_rows_the_filter_matches(db, points):
@@ -105,9 +103,7 @@ def test_within_counts_exactly_the_rows_inside_the_box(db, points):
     box = box_of(points, 0.3, 0.6)
     expected = len(inside(points, box))
     assert 0 < expected < len(points)
-    count = db.view("s0").within(box).count()
-    assert count == expected
-    assert count.exact
+    assert db.view("s0").within(box).count() == expected
 
 
 def test_a_filter_and_a_box_compose(db, points):
@@ -144,6 +140,12 @@ def test_two_readers_of_one_selection_get_different_counts(db, points):
     assert narrow == len(seen_by(points, ["cs.LG"]))
     assert broad == len(seen_by(points, ["cs.LG", "math.DS"]))
     assert narrow < broad < db.view("s0").count()
+
+
+def test_two_boxes_that_do_not_overlap_select_nothing(db, points):
+    apart = db.view("s0").within(box_of(points, 0.1, 0.3)).within(box_of(points, 0.6, 0.9))
+    assert apart.box is None
+    assert apart.count() == 0
 
 
 def test_a_selection_is_unchanged_by_the_selections_made_from_it(db):
@@ -189,6 +191,17 @@ def test_categories_lists_every_value_of_a_vocabulary(db):
     )
 
 
+def test_categories_resolves_the_codes_it_is_given(db):
+    listed = db.categories("primary_category")
+    held = listed.iloc[[7, 0, 3]]
+    found = db.categories("primary_category", codes=list(held["code"]) + [65000])
+    assert list(found.columns) == ["key", "code", "title"]
+    assert found.to_dict("records") == held.sort_values("key").to_dict("records")
+    assert db.categories("primary_category", codes=[]).empty
+    with pytest.raises(Refusal):
+        db.categories("primary_category", codes=[1], prefix="cs")
+
+
 def test_categories_with_a_prefix_counts_the_items_carrying_each_value(db, points):
     found = db.categories("archive", prefix="ma")
     assert list(found.columns) == ["key", "code", "title", "count"]
@@ -218,8 +231,8 @@ def test_a_map_opens_on_the_selections_view_filters_and_box(db, points, stub_bun
     assert m.colour_by == "primary_category" and m.layers == [] and m.height == 320
 
 
-def test_a_box_counted_over_a_cover_says_it_is_not_exact(served, corpus, points):
-    """A server whose outline budget is one cell counts any box over the cells covering it."""
+def test_a_box_counted_over_a_cover_counts_at_least_the_items_inside(served, corpus, points):
+    """A server whose outline budget is one cell counts a box over the cells covering it."""
     from tesseradb import open as reopen
 
     db = served(lambda one: declare_notebook(one, corpus))
@@ -234,7 +247,6 @@ def test_a_box_counted_over_a_cover_says_it_is_not_exact(served, corpus, points)
     again = reopen(path)
     try:
         count = again.view("s0").within(box).count()
-        assert not count.exact and count.cover_depth is not None
-        assert count >= exact
+        assert type(count) is int and count >= exact
     finally:
         again.close()
