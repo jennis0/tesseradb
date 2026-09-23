@@ -1,5 +1,9 @@
 # TesseraDB's Python client, as a marimo notebook: `marimo edit clients/py/examples/notebook_marimo.py`.
 #
+# `notebook.ipynb` beside it is generated from this file, and is not edited by hand:
+#
+#     marimo export ipynb clients/py/examples/notebook_marimo.py -o clients/py/examples/notebook.ipynb
+#
 # Marimo re-runs a cell that reads a map widget's `.value` whenever the map settles, so the cells
 # that draw maps are kept apart from the cells that build.
 import marimo
@@ -11,7 +15,6 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import datetime
-    import json
     import os
     import pathlib
     import tempfile
@@ -25,11 +28,7 @@ def _():
 
     import tesseradb as td
 
-    def counts(table):
-        """A served table's `visible`, `matched`, `highlighted` and `served` counts."""
-        return json.loads(table.schema.metadata[b"tessera.counts"])
-
-    return KMeans, counts, datetime, mo, os, pa, pathlib, pc, pd, pq, td, tempfile
+    return KMeans, datetime, mo, os, pa, pathlib, pc, pd, pq, td, tempfile
 
 
 @app.cell
@@ -198,18 +197,20 @@ def _(mo, simple):
 @app.cell
 def _(mo):
     mo.md("""
-    `viewport()` asks the same server from Python. It returns the points the map would draw at
-    one zoom level, which is a sample for display, together with exact counts: `visible` is
-    how many papers this reader may see, `matched` how many of those pass the filter, and
-    `served` how many points came back.
+    `view()` asks the same server from Python. `view("map")` is the whole of the view as this
+    reader sees it, and later sections narrow it with filters. `count()` is the number of
+    papers in it. `sample()` is the points a map draws at one zoom level, which is a sample
+    for display, so it holds fewer rows than there are papers.
     """)
     return
 
 
 @app.cell
-def _(counts, simple):
-    counts(simple.viewport())
-    return
+def _(simple):
+    on_map = simple.view("map")
+    first_count = on_map.count()
+    {"papers": first_count, "points drawn at zoom 0": on_map.sample().num_rows}
+    return (first_count,)
 
 
 @app.cell
@@ -458,13 +459,14 @@ def _(mo):
 
 
 @app.cell
-def _(astro, counts, db, learning, pd):
-    pd.DataFrame({
-        "database": counts(db.viewport(view="papers")),
-        "astro-ph.*": counts(astro.viewport(view="papers")),
-        "cs.LG + stat.ML": counts(learning.viewport(view="papers")),
-    })
-    return
+def _(astro, db, learning):
+    reader_counts = {
+        "database": db.view("papers").count(),
+        "astro-ph.*": astro.view("papers").count(),
+        "cs.LG + stat.ML": learning.view("papers").count(),
+    }
+    reader_counts
+    return (reader_counts,)
 
 
 @app.cell
@@ -476,6 +478,10 @@ def _(mo):
     a category, `range` for a number or a date, `match` or `phrase` for text. `all_of`,
     `any_of` and `none_of` combine conditions. A highlight takes the same form and lights up
     the points that match it without hiding the others.
+
+    `filter()` narrows a view to the papers that match, and filters added one after another
+    must all match. A highlight changes only how a map draws its points, so the last count
+    below uses both conditions as filters.
     """)
     return
 
@@ -496,30 +502,31 @@ def _(pd):
 
 
 @app.cell
-def _(black_holes, counts, db, pd, recent_cs, transformers):
-    pd.DataFrame({
-        "cs since 2020": counts(db.viewport(view="papers", filters=recent_cs)),
-        "'black hole' in the abstract": counts(db.viewport(view="papers", filters=black_holes)),
-        "cs since 2020, 'transformer' lit": counts(
-            db.viewport(view="papers", filters=recent_cs, highlight=transformers)
-        ),
-    })
-    return
+def _(black_holes, db, recent_cs, transformers):
+    papers = db.view("papers")
+    filter_counts = {
+        "cs since 2020": papers.filter(recent_cs).count(),
+        "'black hole' in the abstract": papers.filter(black_holes).count(),
+        "cs since 2020, 'transformer' in the title":
+            papers.filter(recent_cs).filter(transformers).count(),
+    }
+    filter_counts
+    return filter_counts, papers
 
 
 @app.cell
 def _(mo):
     mo.md("""
-    A map takes the same filter. Change it from Python by setting the map's `filters`, or use
-    the filter panel on the map.
+    `map()` on a filtered view draws it with the filter applied. Change the filter from Python
+    by setting the map's `filters`, or use the filter panel on the map.
     """)
     return
 
 
 @app.cell
-def _(db, mo, recent_cs):
-    mo.ui.anywidget(db.map(view="papers", filters=recent_cs,
-                           colour_by="cluster:topics", layers=["topics"], height=440))
+def _(mo, papers, recent_cs):
+    mo.ui.anywidget(papers.filter(recent_cs).map(colour_by="cluster:topics", layers=["topics"],
+                                                 height=440))
     return
 
 
@@ -527,15 +534,16 @@ def _(db, mo, recent_cs):
 def _(mo):
     mo.md("""
     `item()` returns one paper's record: its fields, the labels this reader holds, and the
-    views it is in.
+    views it is in. The cell below uses `sample()` to take one paper with "black hole" in its
+    abstract from the points the map would draw.
     """)
     return
 
 
 @app.cell
-def _(black_holes, db):
-    _served = db.viewport(view="papers", filters=black_holes, k=16)
-    db.item(_served["tessera_id"][0].as_py())
+def _(black_holes, db, papers):
+    _drawn = papers.filter(black_holes).sample(k=16)
+    db.item(_drawn["tessera_id"][0].as_py())
     return
 
 
@@ -551,7 +559,7 @@ def _(mo):
     the notebook's operator. The server gives a reader a topic's name only where they can see
     every paper it was written from.
 
-    Not built yet: a request that returns every matching paper as a table. `viewport()`
+    Not built yet: a request that returns every matching paper as a table. `sample()`
     returns a sample for drawing, so analysis here uses the counts.
     """)
     return
@@ -669,10 +677,9 @@ def _(mo):
 
 
 @app.cell
-def _(counts, db, years):
+def _(db, years):
     def visible(reader):
-        return {view: counts(reader.viewport(view=view))["visible"]
-                for view in ("papers", f"years:{years[-1]}")}
+        return {view: reader.view(view).count() for view in ("papers", f"years:{years[-1]}")}
 
     before_week = visible(db)
     return before_week, visible
@@ -685,8 +692,9 @@ def _(before_week, db, pd, visible, week, week_members):
               id="entity_id", x="x", y="y", access="categories", view="year")
     db.insert("kmeans", week_members["clusters-kmeans"], id="entity", key="key")
     print(db.commit())
-    pd.DataFrame({"before": before_week, "after": visible(db)})
-    return
+    after_week = visible(db)
+    pd.DataFrame({"before": before_week, "after": after_week})
+    return (after_week,)
 
 
 @app.cell
@@ -712,8 +720,11 @@ def _(db, learning, pd, visible, week):
     print(db.suppress(hidden))
     _suppressed = both()
     print(db.unsuppress(hidden))
-    pd.DataFrame({"before": _before, "suppressed": _suppressed, "unsuppressed": both()})
-    return
+    suppression = pd.DataFrame(
+        {"before": _before, "suppressed": _suppressed, "unsuppressed": both()}
+    )
+    suppression
+    return hidden, suppression
 
 
 @app.cell
@@ -730,12 +741,12 @@ def _(mo):
 
 
 @app.cell
-def _(counts, db, td, tempfile):
+def _(db, td, tempfile):
     saved_at = db.save(tempfile.mkdtemp(prefix="tessera-arxiv-"))
     reopened = td.open(saved_at)
     print(saved_at)
-    counts(reopened.viewport(view="papers"))
-    return
+    reopened.view("papers").count()
+    return reopened, saved_at
 
 
 @app.cell

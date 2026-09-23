@@ -43,9 +43,11 @@ section's frame is built with, and the front end you are running, `marimo` or `j
 `pip install pandas marimo` for the first notebook, `pip install pandas jupyterlab` for the
 second.
 
-`tests/test_sdk_examples.py` executes the marimo notebook's cells with no browser, asserts the
-counts each section prints and that every map it draws is served the layer it colours by, and
-compares the Jupyter twin cell for cell. A notebook that drifts from the package fails the gate.
+`notebook.ipynb` is generated from the marimo file with `marimo export ipynb`.
+`tests/test_sdk_examples.py` executes the marimo notebook's cells with no browser at the sample
+scale, asserts the counts each section prints and that every map it draws is served the layers it
+draws and colours by, and checks that `notebook.ipynb` is what a fresh export makes. A notebook
+that drifts from the package fails the gate.
 
 ## A database in a directory
 

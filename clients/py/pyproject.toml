@@ -29,9 +29,10 @@ dependencies = [
 # installing the wheel needs no Node; a developer installing from this checkout does.
 widget = ["anywidget>=0.9"]
 # The tests. pandas is here because the tests compute expected answers with it; the package
-# never needs it. `tomli` reads TOML on Pythons below 3.11, which have no `tomllib`.
+# never needs it. marimo and scikit-learn run the demo notebook and export its Jupyter copy.
+# `tomli` reads TOML on Pythons below 3.11, which have no `tomllib`.
 dev = [
-  "anywidget>=0.9", "pandas", "pytest", "ruff",
+  "anywidget>=0.9", "marimo", "pandas", "pytest", "ruff", "scikit-learn",
   "tomli>=2; python_version < '3.11'",
 ]
 
