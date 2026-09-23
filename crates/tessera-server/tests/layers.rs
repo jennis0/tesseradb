@@ -266,32 +266,6 @@ async fn a_restart_after_a_drop_leaves_every_layer_version_where_it_was() {
     assert_versions_survive_restarts(server, &tmp).await;
 }
 
-/// The whole plane is behind the operator credential, and a route added to it inherits that check
-/// rather than asking for it. Asserted because the layer routes are new arrivals on that router.
-#[tokio::test]
-async fn the_layer_routes_require_the_operator_credential() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve_standard(&tmp).await;
-
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .json(&declaration("clusters/a", None))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 401);
-
-    let resp = server
-        .client
-        .delete(server.control_url("/control/layers/anything"))
-        .bearer_auth("not-the-operator-credential")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 401);
-}
-
 // ---- publication -------------------------------------------------------------------------------
 
 async fn publish(

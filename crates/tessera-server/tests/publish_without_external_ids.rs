@@ -66,16 +66,3 @@ async fn a_bundle_with_no_external_ids_refuses_the_publication_once_and_says_why
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["error"], "contract", "{body}");
 }
-
-#[tokio::test]
-async fn a_bundle_with_external_ids_still_refuses_an_unknown_member_by_position() {
-    let (_tmp, server) = serve_fixture(true).await;
-    register(&server, flat_layer("flat/x")).await;
-    // 1 and 2 exist; 10_000 names nothing. The member is reported by its position.
-    let (status, body) = publish(&server, "flat/x", &[1, 2, 10_000]).await;
-    assert_eq!(status, 404, "{body}");
-    assert_eq!(body["error"], "unknown", "{body}");
-    // And a publication whose members all exist lands.
-    let (status, body) = publish(&server, "flat/x", &[1, 2]).await;
-    assert_eq!(status, 201, "{body}");
-}

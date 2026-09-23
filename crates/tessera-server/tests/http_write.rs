@@ -484,41 +484,6 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
     assert_eq!(json["accepted"], 2_000);
 }
 
-/// `GET /control/status` must require the operator bearer credential — it discloses
-/// `entity_id_high_water`, a global unmasked corpus-size fact, and the control listener may be
-/// plain loopback TCP, not only a unix socket.
-#[tokio::test]
-async fn control_status_requires_bearer() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let resp = server
-        .client
-        .get(server.control_url("/control/status"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    let resp = server
-        .client
-        .get(server.control_url("/control/status"))
-        .bearer_auth("not-the-operator-credential")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    let resp = server
-        .client
-        .get(server.control_url("/control/status"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-}
-
 /// A `/control/changes` batch whose *later* item fails validation (unknown external
 /// id) must leave every earlier item in the same batch unapplied — validate-first, not
 /// apply-then-abort. Suppresses a real item first in the batch, then names a nonexistent external

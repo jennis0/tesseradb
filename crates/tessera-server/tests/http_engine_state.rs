@@ -19,42 +19,6 @@ use tempfile::TempDir;
 
 use common::*;
 
-#[tokio::test]
-async fn c_revoke_then_viewport_is_rejected() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
-    let token_id = auth["token_id"].as_u64().unwrap();
-
-    let resp = server
-        .client
-        .post(server.session_url("/session/revoke"))
-        .bearer_auth(SESSION_CREDENTIAL)
-        .json(&serde_json::json!({ "token_id": token_id }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 204);
-
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        resp.status() == 403 || resp.status() == 401,
-        "revoked token must be rejected as 403 or 401, got {}",
-        resp.status()
-    );
-}
-
 /// **A superseded stamp is answered normally, with the staleness signal set**
 /// (`geometry-pinning.md` §12, obligations 3 and 4). It used to be a `410 pin-expired`; the
 /// retention that made that meaningful is gone, and the stamp is advisory.

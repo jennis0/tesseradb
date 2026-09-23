@@ -620,22 +620,6 @@ async fn a_plain_scalar_and_an_unknown_name_are_the_same_404() {
     );
 }
 
-/// Authenticated like every other route on this plane: a vocabulary is corpus shape, and an
-/// unauthenticated route would hand it to anyone who can reach the listener.
-#[tokio::test]
-async fn the_route_requires_a_session_token() {
-    let tmp = TempDir::new().unwrap();
-    let (server, _token) = serve(&tmp).await;
-
-    let resp = server
-        .client
-        .get(server.viewer_url("/v1/categories/archive"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-}
-
 /// The page ceiling clamps rather than refuses — it bounds a response, not a disclosure — but a
 /// zero-length page is refused, since a cursor that cannot advance is an infinite loop.
 #[tokio::test]

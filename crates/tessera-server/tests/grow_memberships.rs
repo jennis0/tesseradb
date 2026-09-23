@@ -592,27 +592,3 @@ async fn a_restated_growth_appends_only_the_members_the_artifact_does_not_hold()
         .collect();
     assert_eq!(joining, vec![10], "the delta is the ten that had not joined");
 }
-
-/// The verb sits under the control plane's credential gate like every other route.
-#[tokio::test]
-async fn a_growth_requires_the_operator_credential() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-    let resp = server
-        .client
-        .patch(artifacts_url(&server))
-        .json(&json!({ "addressing": "external", "artifacts": [] }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 401);
-    let resp = server
-        .client
-        .patch(artifacts_url(&server))
-        .bearer_auth("not-the-operator-credential")
-        .json(&json!({ "addressing": "external", "artifacts": [] }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 401);
-}

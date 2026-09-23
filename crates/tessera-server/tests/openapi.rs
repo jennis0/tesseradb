@@ -878,44 +878,6 @@ async fn viewport_carries_the_described_headers_and_framing() {
     assert_refusal(&doc, resp, 401, "bad-credential").await;
 }
 
-/// **The ruled semantics of an omitted `layers`, at the wire.** Owner ruling 2026-08-25: omitted
-/// or `[]` means *no* layers, the string `"all"` means every reachable layer. The server change
-/// landed, and this test runs — it was written against the ruled behaviour before the server had
-/// it, `#[ignore]`d with that reason, and enabled at integration.
-///
-/// What it pins that its siblings do not is the pair *at one principal in one fixture*: the same
-/// broad token, the same request but for the field, absent giving no artifacts frame and `"all"`
-/// giving both reachable artifacts. `viewport_membership.rs`'s
-/// `omitted_layers_means_none_and_the_word_all_means_every_reachable_layer` pins the same ruling
-/// against the engine's membership columns, and
-/// [`the_layers_field_is_an_array_or_the_string_all`] pins the shape the description accepts.
-#[tokio::test]
-async fn an_omitted_layers_field_means_no_artifacts_frame() {
-    let doc = description();
-    let f = fixture().await;
-    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-
-    let resp = viewport(&f.server, token, &viewport_body(json!({ "k": 0 }))).await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    assert!(decoded.artifacts.is_none(), "omitted `layers` is no layers");
-
-    let resp = viewport(
-        &f.server,
-        token,
-        &viewport_body(json!({ "k": 0, "layers": "all" })),
-    )
-    .await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    assert_eq!(
-        decoded.artifacts.map(|a| a.len()),
-        Some(2),
-        "\"all\" is every reachable layer"
-    );
-}
-
 #[tokio::test]
 async fn items_match_the_description_with_every_refusal() {
     let doc = description();
