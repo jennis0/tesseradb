@@ -396,6 +396,38 @@ async fn the_values_route_fills_restates_and_refuses() {
     );
 }
 
+/// The keys a viewer route that lists a column's values answers, on one page.
+async fn listed_keys(served: &Served, path: &str) -> Vec<String> {
+    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = served
+        .server
+        .client
+        .get(served.server.viewer_url(path))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    body["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["key"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// `grade`'s value list and its suggestions both carry `key`.
+async fn assert_minted_key_is_listed(served: &Served, key: &str) {
+    for path in ["/v1/categories/grade", "/v1/categories/grade/suggest?q=g"] {
+        let keys = listed_keys(served, path).await;
+        assert!(keys.iter().any(|k| k == key), "{path} lists {keys:?}");
+    }
+}
+
 /// A key of an open vocabulary that no ingest has used is minted by the values batch that names
 /// it, and the cell is served after a flush and after a restart. A closed vocabulary's unknown key
 /// is refused with nothing written, and the next flush still publishes.
@@ -430,10 +462,14 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
     assert_eq!(status, 422, "a closed vocabulary's unknown key is refused: {answer}");
 
     flush(&served).await;
-    assert_eq!(item_fields(&served, id).await["grade"], json!("g0"));
+    let fields = item_fields(&served, id).await;
+    assert_eq!(fields["grade"], json!("g0"), "{fields}");
+    assert!(fields["dept"].is_null(), "the refused batch wrote nothing: {fields}");
+    assert_minted_key_is_listed(&served, "g0").await;
 
     let served = restart(served).await;
     assert_eq!(item_fields(&served, id).await["grade"], json!("g0"));
+    assert_minted_key_is_listed(&served, "g0").await;
     let second = ingest_point(&served, "points-2", "second").await;
     flush(&served).await;
     assert!(
