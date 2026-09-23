@@ -6,9 +6,9 @@ use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{AttrExtent, DeclaredScalar, ScopedScalar};
 use tessera_types::view::ViewIncarnation;
 
-use crate::flush::MaintenanceFailed;
+use crate::flush::{failed, remove_spool_on_error, MaintenanceFailed};
 
-use super::execute::{failed, remove_spool_on_error, FoldContext, FoldOutput};
+use super::execute::{FoldContext, FoldOutput};
 use super::plan::FoldPlan;
 
 /// An entity-scoped column, or one view of a group-scoped family.
@@ -97,7 +97,7 @@ pub(super) fn fold_text_columns(
         let column_rel = job.rel.clone();
         let from_dir = ctx.from_prefix_dir.join(&column_rel);
         let to_dir = ctx.to_prefix_dir.join(&column_rel);
-        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (text)", &e))?;
+        std::fs::create_dir_all(&to_dir).map_err(failed("pass 4a (text)"))?;
 
         // Dictionaries are read sequentially; postings are not, since the merge interleaves layers.
         let mut layers = Vec::new();
@@ -107,9 +107,9 @@ pub(super) fn fold_text_columns(
                     &from_dir,
                     tessera_filter::Access::MappedSequential,
                 )
-                .map_err(|e| failed("pass 4a (text: the base dictionary)", &e))?,
+                .map_err(failed("pass 4a (text: the base dictionary)"))?,
                 tessera_filter::ColumnPostings::open(&from_dir.join("postings.arrow"), true)
-                    .map_err(|e| failed("pass 4a (text: the base postings)", &e))?,
+                    .map_err(failed("pass 4a (text: the base postings)"))?,
             ));
             out.read(&from_dir, [tessera_filter::DICT_FILE, "postings.arrow"]);
         }
@@ -123,12 +123,12 @@ pub(super) fn fold_text_columns(
                     &ctx.from_prefix_dir.join(&extent.dict),
                     tessera_filter::Access::MappedSequential,
                 )
-                .map_err(|e| failed("pass 4a (text: an extent's dictionary)", &e))?,
+                .map_err(failed("pass 4a (text: an extent's dictionary)"))?,
                 tessera_filter::ColumnPostings::open(
                     &ctx.from_prefix_dir.join(&extent.postings),
                     true,
                 )
-                .map_err(|e| failed("pass 4a (text: an extent's postings)", &e))?,
+                .map_err(failed("pass 4a (text: an extent's postings)"))?,
             ));
             out.read(&ctx.from_prefix_dir, extent.files());
         }
@@ -156,7 +156,7 @@ pub(super) fn fold_text_columns(
             ),
             &spool_path,
         )
-        .map_err(|e| failed(&format!("pass 4a (text: column '{}')", job.name), &e))?;
+        .map_err(failed(format!("pass 4a (text: column '{}')", job.name)))?;
 
         out.wrote(dict_rel, dict_path);
         out.wrote(postings_rel, postings_path);
@@ -201,7 +201,7 @@ fn fold_value_column(
     let column_rel = job.rel.clone();
     let from_dir = ctx.from_prefix_dir.join(&column_rel);
     let to_dir = ctx.to_prefix_dir.join(&column_rel);
-    std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (attributes)", &e))?;
+    std::fs::create_dir_all(&to_dir).map_err(failed("pass 4a (attributes)"))?;
 
     let mut opened = Vec::new();
     if job.has_base {
@@ -210,7 +210,7 @@ fn fold_value_column(
                 &from_dir,
                 tessera_filter::Access::MappedSequential,
             )
-            .map_err(|e| failed("pass 4a (attributes: the base column)", &e))?,
+            .map_err(failed("pass 4a (attributes: the base column)"))?,
         );
         out.read(
             &from_dir,
@@ -224,7 +224,7 @@ fn fold_value_column(
                 &ctx.from_prefix_dir.join(&extent.presence),
                 tessera_filter::Access::MappedSequential,
             )
-            .map_err(|e| failed("pass 4a (attributes: an extent)", &e))?,
+            .map_err(failed("pass 4a (attributes: an extent)"))?,
         );
         out.read(&ctx.from_prefix_dir, [&extent.values, &extent.presence]);
     }
@@ -238,7 +238,7 @@ fn fold_value_column(
                     &from_dir,
                     tessera_filter::Access::MappedSequential,
                 )
-                .map_err(|e| failed("pass 4a (attributes: the base dictionary)", &e))?,
+                .map_err(failed("pass 4a (attributes: the base dictionary)"))?,
             );
         }
         for extent in &extents {
@@ -254,7 +254,7 @@ fn fold_value_column(
                     &ctx.from_prefix_dir.join(dict_rel),
                     tessera_filter::Access::MappedSequential,
                 )
-                .map_err(|e| failed("pass 4a (attributes: an extent dictionary)", &e))?,
+                .map_err(failed("pass 4a (attributes: an extent dictionary)"))?,
             );
         }
     }
@@ -276,10 +276,10 @@ fn fold_value_column(
             &presence_path,
             column_kind_of(job.arrow_type, job.postings),
         )
-        .map_err(|e| failed("pass 4a (attributes: an empty base)", &e))?;
+        .map_err(failed("pass 4a (attributes: an empty base)"))?;
         if job.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
             write_empty_dictionary(&dict_path)
-                .map_err(|e| failed("pass 4a (attributes: an empty dictionary)", &e))?;
+                .map_err(failed("pass 4a (attributes: an empty dictionary)"))?;
             out.wrote(dict_rel, dict_path.clone());
         }
         true
@@ -291,7 +291,7 @@ fn fold_value_column(
             &values_path,
             &presence_path,
         )
-        .map_err(|e| failed("pass 4a (attributes: the merge)", &e))?
+        .map_err(failed("pass 4a (attributes: the merge)"))?
     } else {
         let keyword_layers: Vec<tessera_filter_write::KeywordLayer<'_>> = layers
             .iter()
@@ -306,7 +306,7 @@ fn fold_value_column(
             &presence_path,
             &dict_path,
         )
-        .map_err(|e| failed("pass 4a (attributes: the keyword merge)", &e))?;
+        .map_err(failed("pass 4a (attributes: the keyword merge)"))?;
         out.wrote(dict_rel, dict_path.clone());
         partial
     };
@@ -324,7 +324,7 @@ fn fold_value_column(
         partial.then_some(presence_path.as_path()),
         tessera_filter::Access::Mapped,
     )
-    .map_err(|e| failed("pass 4a (attributes: reopening the folded column)", &e))?;
+    .map_err(failed("pass 4a (attributes: reopening the folded column)"))?;
     let postings_rel = format!("{column_rel}/postings.arrow");
     let postings_path = ctx.to_prefix_dir.join(&postings_rel);
     tessera_filter_write::write_category_postings(
@@ -333,7 +333,7 @@ fn fold_value_column(
         &folded,
         tessera_filter_write::POSTINGS_BAND_ROWS,
     )
-    .map_err(|e| failed("pass 4a (attributes: the postings rebuild)", &e))?;
+    .map_err(failed("pass 4a (attributes: the postings rebuild)"))?;
     out.wrote(postings_rel, postings_path);
 
     Ok(())
@@ -359,7 +359,7 @@ pub(super) fn fold_record_blob(
     if !blob_resident && !plan.record_extents.is_empty() {
         return Err(MaintenanceFailed(
             "pass 4a (record blob): the manifest names record extents but the schema declares no \
-             blob-resident column; folding would drop their bytes silently, so it is refused"
+             blob-resident column, so folding would discard their bytes"
                 .to_string(),
         ));
     }
@@ -367,7 +367,7 @@ pub(super) fn fold_record_blob(
         let record_rel = format!("partitions/{}/attrs/record", plan.partition);
         let from_dir = ctx.from_prefix_dir.join(&record_rel);
         let to_dir = ctx.to_prefix_dir.join(&record_rel);
-        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (record blob)", &e))?;
+        std::fs::create_dir_all(&to_dir).map_err(failed("pass 4a (record blob)"))?;
 
         let mut opened = Vec::with_capacity(plan.record_extents.len() + 1);
         if based_blob_resident {
@@ -376,7 +376,7 @@ pub(super) fn fold_record_blob(
                     &from_dir,
                     tessera_filter::Access::MappedSequential,
                 )
-                .map_err(|e| failed("pass 4a (record blob: the base)", &e))?,
+                .map_err(failed("pass 4a (record blob: the base)"))?,
             );
             out.read(
                 &from_dir,
@@ -395,7 +395,7 @@ pub(super) fn fold_record_blob(
                     &ctx.from_prefix_dir.join(&extent.directory),
                     tessera_filter::Access::MappedSequential,
                 )
-                .map_err(|e| failed("pass 4a (record blob: an extent)", &e))?,
+                .map_err(failed("pass 4a (record blob: an extent)"))?,
             );
             out.read(&ctx.from_prefix_dir, extent.files());
         }
@@ -416,7 +416,7 @@ pub(super) fn fold_record_blob(
                 tessera_filter::RECORD_BLOCK_TARGET,
             )
             .and_then(|writer| writer.finish())
-            .map_err(|e| failed("pass 4a (record blob: an empty base)", &e))?;
+            .map_err(failed("pass 4a (record blob: an empty base)"))?;
         } else {
             tessera_filter_write::fold_record_blob(
                 &layers,
@@ -426,7 +426,7 @@ pub(super) fn fold_record_blob(
                 &directory_path,
                 tessera_filter::RECORD_BLOCK_TARGET,
             )
-            .map_err(|e| failed("pass 4a (record blob: the rewrite)", &e))?;
+            .map_err(failed("pass 4a (record blob: the rewrite)"))?;
         }
         for (rel, path) in [
             (blocks_rel, blocks_path),
@@ -455,7 +455,7 @@ pub(super) fn fold_entity_terms(
     );
     let from_dir = ctx.from_prefix_dir.join(&terms_rel);
     let to_dir = ctx.to_prefix_dir.join(&terms_rel);
-    std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4c (entity terms)", &e))?;
+    std::fs::create_dir_all(&to_dir).map_err(failed("pass 4c (entity terms)"))?;
 
     let mut extent_paths = Vec::with_capacity(plan.entity_terms_extents.len());
     for extent in &plan.entity_terms_extents {
@@ -477,9 +477,9 @@ pub(super) fn fold_entity_terms(
         ],
     );
     let layers = tessera_store::EntityTermsStack::open(Some(&from_dir), &extent_paths)
-        .map_err(|e| failed("pass 4c (entity terms: the layers)", &e))?;
+        .map_err(failed("pass 4c (entity terms: the layers)"))?;
     let mut writer = tessera_store::EntityTermsWriter::create(&to_dir)
-        .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
+        .map_err(failed("pass 4c (entity terms: the rewrite)"))?;
     // Ascending, the order the writer requires.
     let live = layers.entity_set();
     for entity in live.iter() {
@@ -488,17 +488,17 @@ pub(super) fn fold_entity_terms(
         }
         let Some(terms) = layers
             .terms_of(entity)
-            .map_err(|e| failed("pass 4c (entity terms: a layer)", &e))?
+            .map_err(failed("pass 4c (entity terms: a layer)"))?
         else {
             continue;
         };
         writer
             .push(entity, &terms)
-            .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
+            .map_err(failed("pass 4c (entity terms: the rewrite)"))?;
     }
     for path in writer
         .finish()
-        .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?
+        .map_err(failed("pass 4c (entity terms: the rewrite)"))?
     {
         let rel = format!(
             "{terms_rel}/{}",

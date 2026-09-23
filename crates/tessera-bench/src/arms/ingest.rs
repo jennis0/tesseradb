@@ -104,9 +104,8 @@
 //!   grows linearly, one per ~4M rows ingested** (measured: 2 → 17 segments over 200 flushes at a
 //!   250M base, while merges kept firing throughout). Design §16's "how many live segments before
 //!   per-tile fan-out is noticeable" is **still open**, and now has a rate attached to it rather
-//!   than only a question. The cap is raisable — write-path §7 only requires it strictly below the
-//!   base segment's size — but merge peak memory is a measured 4.4–4.9× the inputs' file bytes, so
-//!   raising it buys segment count with pool transient.
+//!   than only a question. The cap is raisable, but merge peak memory is a measured 4.4–4.9× the
+//!   inputs' file bytes, so raising it buys segment count with pool transient.
 //! * **`accept_change` — the *other* write path, and not this module's.** It lives in
 //!   `arms::changes`: `changes` measures ack, tail and the visibility arithmetic against *overlay*
 //!   depth, and `arms::changes::run_deny_ack` measures the deny-ack floor's own drivers — buffered

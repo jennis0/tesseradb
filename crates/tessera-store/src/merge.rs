@@ -65,7 +65,7 @@ pub struct MergePolicy {
     /// simply never triggered.
     pub segment_floor_bytes: u64,
     /// The largest total a single merge may produce. Bounds the pool time and the write
-    /// amplification of one merge, and is what keeps the base segment out of selection.
+    /// amplification of one merge.
     pub max_merged_segment_bytes: u64,
 }
 
@@ -84,7 +84,7 @@ impl MergePolicy {
     ///    entirely on a deployment that deletes.
     /// 2. **The same size tier**, by power-of-two class over `max(size, segment_floor_bytes)`.
     /// 3. **Total within `max_merged_segment_bytes`.** This is where a large neighbour blocks a
-    ///    merge, and where the base segment excludes itself.
+    ///    merge.
     ///
     /// The **first** qualifying window in list order is taken rather than the best one. Merging is
     /// idempotent work on a cadence — whatever this leaves, the next tick reconsiders — so a

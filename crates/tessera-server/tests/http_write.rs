@@ -3560,9 +3560,9 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
 ///
 /// **What this does NOT show, and is not claimed:** an *authenticated* caller still buffers up to
 /// `ingest_max_batch_bytes`, and the number of connections doing so is unbounded — `axum::serve`
-/// applies no connection cap. What one such connection may cost is bounded at startup by
-/// `config::INGEST_MAX_BATCH_BYTES_CEILING`; how many there may be is a deployment property (SA §8),
-/// and that constant's doc says why the two in-process alternatives were declined.
+/// applies no connection cap. What one such connection may cost is `ingest_max_batch_bytes`; how
+/// many there may be is a deployment property, and `control::ingest`'s doc says why the two
+/// in-process alternatives were declined.
 ///
 /// The timeout is in the **failing** path only; on a healthy build the 401 arrives in microseconds.
 #[tokio::test]
@@ -4625,10 +4625,9 @@ fn build_scalar_tail_ingest_batch() -> Vec<u8> {
 /// (`filter-index.md` §5), so the value that answers has crossed the whole seam: Arrow decode to
 /// `WalScalar`, WAL, buffer, and the flush extent the filter scans.
 ///
-/// This is the regression test for the missing-arm defect (`control.rs`'s `scalar_at` doc): six of
-/// these twelve types were declarable and buildable but refused at ingest with a 422, so the 200
-/// asserted first is half the test. Enumerating [`SCALAR_TAIL_TYPES`] rather than naming the six
-/// keeps the assertion complete against the next type the set grows by.
+/// The 200 asserted first is half the test: a type the build reads and the ingest refuses is one
+/// this catches. Enumerating [`SCALAR_TAIL_TYPES`] keeps the assertion complete against the next
+/// type the set grows by.
 #[tokio::test]
 async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
     let tmp = TempDir::new().unwrap();

@@ -735,7 +735,8 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
     assert_same(&answers(&engine, &bindings), &expected, "restart");
 
     // A second fold retires the deletions the first could not, including one whose run the
-    // coalesce merged. Every retired key can then be ingested again, as a new entity.
+    // coalesce merged. Every deleted key, the one the first fold retired among them, then resolves
+    // to nothing and can be ingested again as a new entity.
     fold(&engine);
     let retired = [
         (deleted_before, source_id_key(4)),

@@ -178,8 +178,7 @@ fn the_size_ladder_saturates_at_the_cap_and_segment_count_then_tracks_the_corpus
     );
 }
 
-/// **This is what keeps the base segment out**, and it is a size bound rather than a rule: a merge
-/// that swallowed the base would pay compaction's whole cost and bank none of its benefit.
+/// **A segment too large for the cap is left out of a window, and its neighbours still merge.**
 #[test]
 fn a_base_sized_segment_excludes_itself_by_size() {
     let policy = MergePolicy {
