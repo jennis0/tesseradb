@@ -54,23 +54,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::NoDeploymentConfig { from } => write!(
                 f,
                 "no tessera.toml found searching upward from {}; create one beside the corpus \
-                 declaration, or name one with --deployment <path>, for example:\n\n\
-                 \x20   [bundle]\n\
-                 \x20   path  = \"bundles/corpus\"\n\
-                 \x20   cache = \".tessera/cache\"\n\
-                 \x20   wal   = \".tessera/wal.log\"\n\n\
-                 \x20   [build]\n\
-                 \x20   schema = \"schema.toml\"\n\n\
-                 \x20   [identity]\n\
-                 \x20   env = \"TESSERA_IDENTITY_KEY\"\n\n\
-                 \x20   [plugin]\n\
-                 \x20   module = \"builtin:passthrough\"\n\n\
-                 \x20   [disclosure]\n\
-                 \x20   token_max_lifetime = 3600\n\n\
-                 \x20   [serve]\n\
-                 \x20   viewer  = \"127.0.0.1:37585\"\n\
-                 \x20   session = \"127.0.0.1:49303\"\n\
-                 \x20   control = \"127.0.0.1:45721\"",
+                 declaration, or name one with --deployment <path>",
                 from.display()
             ),
             ConfigError::IdentityKeyInline => write!(
