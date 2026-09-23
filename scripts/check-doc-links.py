@@ -194,6 +194,10 @@ def main():
     ap.add_argument("--check-sections", action="store_true", help="also warn on §N anchors with no matching heading")
     ap.add_argument("paths", nargs="*", help="check only these files and directories, relative to the repository root")
     args = ap.parse_args()
+    missing = [p for p in args.paths if not (ROOT / p).exists()]
+    if missing:
+        print(f"check-doc-links: no such path: {', '.join(missing)}; give paths relative to the repository root", file=sys.stderr)
+        return 1
 
     idx = basename_index()
     tracked = [x for v in idx.values() for x in v]
