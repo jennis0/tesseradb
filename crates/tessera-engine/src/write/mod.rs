@@ -571,7 +571,10 @@ impl WritePath {
             #[cfg(feature = "fault-injection")]
             self.faults.clone(),
         );
-        self.handle()?.enqueue(command(reply))?;
+        let command = command(reply);
+        // A reply built here counts its job completed, which is right only for the work lane.
+        debug_assert!(!command.is_never_shed());
+        self.handle()?.enqueue(command)?;
         pending.accept()
     }
 
