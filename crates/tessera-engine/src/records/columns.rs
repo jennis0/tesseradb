@@ -5,8 +5,10 @@
 //! store once per run over its items. A page reads its rows in runs and appends each row to typed
 //! Arrow builders while the row fits the page's byte ceiling, counted from the builders' own
 //! buffers. The first run is short, and each after it is sized from the bytes a row has come to
-//! so far, so the rows read past the ceiling are about one row's worth.
+//! so far. However skewed the rows' sizes, a run keeps the record store's values only for the
+//! leading rows that fit what the page has left, so it holds at most one row past it.
 
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -47,6 +49,8 @@ enum SystemValues {
 struct Run {
     named: Vec<Vec<Option<RV>>>,
     system: Vec<SystemValues>,
+    /// The leading rows whose fields were all kept: never fewer than one.
+    complete: usize,
 }
 
 /// One named field's value for one row, converted and waiting to be appended.
@@ -120,7 +124,8 @@ pub(super) fn read_page(
             taken => max_bytes.saturating_sub(page.bytes) / (page.bytes / taken).max(1) + 1,
         };
         let end = rows.len().min(start + length.clamp(1, most));
-        let run = read_run(cx, plan, &rows[start..end])?;
+        let run = read_run(cx, plan, &rows[start..end], max_bytes.saturating_sub(page.bytes))?;
+        let end = start + run.complete;
         if !page.take(run, &rows[start..end], plan, cx.generation, max_bytes)? {
             break;
         }
@@ -130,8 +135,11 @@ pub(super) fn read_page(
     Ok((page.into_batch()?, kept, bytes))
 }
 
-/// Every field `plan` names for `rows`, as the fields' homes hold them.
-fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken]) -> Result<Run> {
+/// Every field `plan` names for `rows`, as the fields' homes hold them. The record store's values
+/// are kept for the earliest rows, in run order, that come to no more than `budget` bytes, and
+/// for the first row it holds whatever that comes to: a value read past them is dropped as it is
+/// read, so the run holds at most one row past the budget however the rows' sizes are skewed.
+fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) -> Result<Run> {
     let (engine, generation, open) = (cx.engine, cx.generation, cx.open);
     let segments = &open.served.segments;
     let mut named: Vec<Vec<Option<RV>>> = Vec::with_capacity(plan.named.len());
@@ -149,6 +157,7 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken]) -> Result<Run> {
             }
         });
     }
+    let mut complete = rows.len();
     if !record_slot.is_empty() {
         let mut at: FxHashMap<u32, usize> = FxHashMap::default();
         let mut entities: Vec<u32> = Vec::with_capacity(rows.len());
@@ -157,6 +166,9 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken]) -> Result<Run> {
             entities.push(row.entity);
         }
         entities.sort_unstable();
+        // The rows whose values are held, by run position, with their bytes.
+        let mut kept: BinaryHeap<(usize, usize)> = BinaryHeap::new();
+        let mut held = 0usize;
         generation
             .filter_columns
             .records()
@@ -164,16 +176,30 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken]) -> Result<Run> {
                 let Some(&i) = at.get(&entity) else {
                     return Ok(());
                 };
+                let mut bytes = 0;
                 for field in fields {
                     if let Some(&slot) = record_slot.get(&field.tag) {
+                        bytes += value_bytes(&field.value);
                         named[slot][i] = Some(field.value);
                     }
+                }
+                kept.push((i, bytes));
+                held += bytes;
+                while held > budget && kept.len() > 1 {
+                    let (last, bytes) = kept.pop().expect("more than one row is held");
+                    held -= bytes;
+                    for &slot in record_slot.values() {
+                        named[slot][last] = None;
+                    }
+                    complete = complete.min(last);
                 }
                 Ok(())
             })
             .map_err(|e| EngineError::Malformed(e.to_string()))?;
     }
 
+    // The system fields are read only for the rows the page can take.
+    let rows = &rows[..complete];
     let mut system = Vec::with_capacity(plan.system.len());
     for field in &plan.system {
         system.push(match field {
@@ -196,7 +222,21 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken]) -> Result<Run> {
             ),
         });
     }
-    Ok(Run { named, system })
+    Ok(Run {
+        named,
+        system,
+        complete,
+    })
+}
+
+/// The bytes one record value holds.
+fn value_bytes(value: &RV) -> usize {
+    std::mem::size_of::<RV>()
+        + match value {
+            RV::Utf8(s) => s.len(),
+            RV::List(values) => values.iter().map(value_bytes).sum(),
+            _ => 0,
+        }
 }
 
 /// A rendered field's values: the slot in the row tail, where the segment holds the column and

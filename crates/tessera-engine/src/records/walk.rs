@@ -44,12 +44,13 @@ use crate::Generation;
 /// the page size.
 const STRETCH_MIN: u32 = 4096;
 const STRETCH_GROWTH: u32 = 4;
-/// The most a stretch holds per row it spans. A stored stretch keeps each candidate item with its
-/// row, two `u32`s, beside the candidate bitmap narrowed to it and the filter's rows, up to four
-/// bytes each; a map stretch keeps its items, one `u32` per row while it is evaluated, their
-/// bitmap, and the filter's rows. Sixteen bytes a row bounds either, so a stretch holds no more
-/// than the page ceiling it is derived from.
-const STRETCH_BYTES_PER_ROW: usize = 16;
+/// The most a stretch holds per row it spans, as `tests/records_memory.rs` measures it. A stored
+/// stretch keeps each candidate item with its row, two `u32`s, and while the filter is evaluated
+/// the stretch's rows, their ranges and the filter's rows beside them: about 16.3 bytes a row at
+/// its peak. A map stretch keeps its items, one `u32` a row while it is evaluated, and their
+/// bitmap: about 4.2. Seventeen bytes a row bounds either, so a stretch holds no more than the
+/// page ceiling it is derived from.
+const STRETCH_BYTES_PER_ROW: usize = 17;
 
 /// What one page is walked in: the engine, the view resolved and its mask composed for the page,
 /// and the generation that resolution came from.
@@ -469,21 +470,22 @@ impl Walk {
         let until: Option<u32> = u32::try_from(before + u64::from(self.target))
             .ok()
             .and_then(|rank| candidate.select(rank));
+        // Bounded by the candidate's last item, not the entity space: a range to `u32::MAX` is a
+        // container for every 65,536 entities, some 3 MB, before the intersection empties it.
+        let last = candidate.maximum().expect("the candidate holds an item past `from`");
         let mut range = Bitmap::new();
         match until {
             Some(until) => range.add_range(from as u32..until),
-            None => range.add_range(from as u32..=u32::MAX),
+            None => range.add_range(from as u32..=last),
         }
         range.and_inplace(&candidate);
         let row_space = &cx.open.served.data.row_space;
-        let items: Vec<(u32, u32)> = range
-            .iter()
-            .filter_map(|entity| {
-                row_space
-                    .row_of(EntityId::new(u64::from(entity)))
-                    .map(|row| (entity, row.raw()))
-            })
-            .collect();
+        let mut items: Vec<(u32, u32)> = Vec::with_capacity(range.cardinality() as usize);
+        items.extend(range.iter().filter_map(|entity| {
+            row_space
+                .row_of(EntityId::new(u64::from(entity)))
+                .map(|row| (entity, row.raw()))
+        }));
         let filter = match &self.filter {
             None => None,
             Some(expr) => {
