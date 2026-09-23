@@ -407,7 +407,7 @@ pub(super) fn coalesce_entity_terms(
     )
     .map_err(failed("entity-terms coalesce"))?;
     // Fewer than the inputs hold means an input listed an entity with no offsets; publishing that
-    // would silently lose those entities' label sets.
+    // would lose those entities' label sets with no symptom.
     if written != expected {
         return Err(MaintenanceFailed(format!(
             "the coalesced entity-terms extent holds {written} entities where its inputs hold \

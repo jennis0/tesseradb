@@ -359,7 +359,8 @@ pub(super) fn fold_record_blob(
     if !blob_resident && !plan.record_extents.is_empty() {
         return Err(MaintenanceFailed(
             "pass 4a (record blob): the manifest names record extents but the schema declares no \
-             blob-resident column; folding would drop their bytes silently, so it is refused"
+             blob-resident column, so folding would discard their bytes; declare the \
+             blob-resident column they hold before folding"
                 .to_string(),
         ));
     }
