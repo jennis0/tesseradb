@@ -45,7 +45,8 @@ enum Command {
         /// directories is a server serving whatever was there before.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space).
+        /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space), which drops
+        /// every negative id, its bytes reading as at least 2^63.
         #[arg(long)]
         limit: Option<u64>,
         /// The corpus declaration, overriding `tessera.toml`'s `build.schema`: one TOML document

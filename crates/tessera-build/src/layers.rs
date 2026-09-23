@@ -1114,8 +1114,8 @@ fn plan_inline(
             view_key: None,
             membership: match (&row.members, &row.excluding) {
                 // Both is refused at parse, where the declaration can name the artifact.
-                (Some(members), _) => PlannedMembership::Included(members.clone()),
-                (_, Some(excluding)) => PlannedMembership::Excluded(excluding.clone()),
+                (Some(members), _) => PlannedMembership::Included(inline_ids(members)),
+                (_, Some(excluding)) => PlannedMembership::Excluded(inline_ids(excluding)),
                 (None, None) => PlannedMembership::default(),
             },
             contents: row
@@ -3648,6 +3648,14 @@ fn number_at(column: &UInt32Array, row: usize) -> u32 {
 
 fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
     (!column.is_null(row)).then(|| column.value(row))
+}
+
+/// An inline membership's ids, read by the rule every integer id column is.
+fn inline_ids(ids: &[i64]) -> Vec<u64> {
+    crate::ids::integer_ids(&arrow::array::Int64Array::from(ids.to_vec()))
+        .expect("int64 is an integer id type")
+        .values()
+        .to_vec()
 }
 
 /// One row's membership, as source entity ids.

@@ -11,8 +11,8 @@ An item is one record in the corpus. It carries an access label, a string the op
 per item and resolves to the [terms that decide who may see it](access-control.md#terms-and-access-labels);
 an external id, the identifier the operator supplied and uses to address the item again; and a
 value, present or absent, for every field the corpus declares. An external id is bytes: a
-string's UTF-8, or an integer's eight little-endian bytes, so a negative integer id and its
-two's-complement unsigned value are the same id.
+string's UTF-8, binary as it stands, or an integer's eight little-endian bytes, so a negative
+integer id and its two's-complement unsigned value are the same id.
 
 ## Views and view groups
 

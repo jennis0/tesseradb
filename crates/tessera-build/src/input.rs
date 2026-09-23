@@ -1558,9 +1558,9 @@ pub fn survey_points(
         // open. The refusals name the row whatever the column holds (`crate::ids::display_at`).
         let ids: Option<Vec<u64>> = match (limit, id_idx) {
             (None, _) => None,
-            (Some(_), Some(idx)) => Some(
-                read_integer_ids(path, &batch, idx, fields.of(ENTITY_ID)).map_err(|_| {
-                    BuildError::Schema {
+            (Some(_), Some(idx)) => {
+                if !crate::ids::is_integer_id(batch.column(idx).data_type()) {
+                    return Err(BuildError::Schema {
                         path: path.to_path_buf(),
                         detail: format!(
                             "`--limit` keeps the rows whose identity is below it, and the \
@@ -1569,9 +1569,10 @@ pub fn survey_points(
                             fields.of(ENTITY_ID),
                             batch.column(idx).data_type()
                         ),
-                    }
-                })?,
-            ),
+                    });
+                }
+                Some(read_integer_ids(path, &batch, idx, fields.of(ENTITY_ID))?)
+            }
             (Some(_), None) => {
                 return Err(BuildError::Schema {
                     path: path.to_path_buf(),

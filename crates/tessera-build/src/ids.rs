@@ -495,9 +495,8 @@ pub fn integer_ids(column: &dyn Array) -> Option<UInt64Array> {
 
 /// One row's key from an identity column of any accepted type, or `None` where the row is null.
 ///
-/// **An integer is read as its id's eight little-endian bytes** ([`integer_ids`]), which is what the
-/// integer route writes as an external id, so a corpus that spells its ids one way in the points file and the other way
-/// in a members file joins on the same bytes.
+/// **An integer is read as its id's eight little-endian bytes** ([`integer_ids`]), which is what
+/// the integer route writes as an external id.
 pub fn key_at(column: &dyn Array, row: usize) -> Option<Vec<u8>> {
     use arrow::array::{
         BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, StringArray,
@@ -506,7 +505,8 @@ pub fn key_at(column: &dyn Array, row: usize) -> Option<Vec<u8>> {
     if column.is_null(row) {
         return None;
     }
-    if let Some(id) = integer_ids(&column.slice(row, 1)) {
+    if is_integer_id(column.data_type()) {
+        let id = integer_ids(&column.slice(row, 1))?;
         return Some(id.value(0).to_le_bytes().to_vec());
     }
     let any = column.as_any();

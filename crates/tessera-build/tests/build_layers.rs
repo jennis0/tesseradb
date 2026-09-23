@@ -1535,6 +1535,38 @@ fn a_negative_member_id_is_its_twos_complement_unsigned_id() {
     }
 }
 
+/// **A negative inline member id is its two's-complement unsigned id**, as it is in a file.
+#[test]
+fn a_negative_inline_member_id_is_its_twos_complement_unsigned_id() {
+    let ids = twos_complement_ids();
+    let signed: Vec<(&str, Vec<i64>)> = vec![("c-0", vec![-5, -4, 0]), ("c-1", vec![3, -1])];
+    let build_with = |layer: String, write_sources: &dyn Fn(&Inputs)| {
+        let inputs = inputs_over(&ids);
+        std::fs::write(&inputs.config, format!("{VIEW_TOML}{layer}")).unwrap();
+        write_sources(&inputs);
+        let out = inputs.dir.join("bundle");
+        run(&inputs, &out).expect("a build over negative member ids succeeds");
+        (out, inputs)
+    };
+    let (from_file, _a) = build_with(curated_from(false), &|inputs| {
+        write_curated_ids_at(inputs, false, &DataType::UInt64, &signed)
+    });
+    let inline = format!(
+        "{CURATED_LAYER}artifacts = [{}]\n",
+        signed
+            .iter()
+            .map(|(key, members)| format!("{{ key = \"{key}\", members = {members:?} }}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let (from_declaration, _b) = build_with(inline, &|_| {});
+    assert_bundles_identical(
+        &from_file,
+        &from_declaration,
+        "negative inline against a file",
+    );
+}
+
 /// **An excluded id this build did not assign refuses the build**, where an unknown *member*
 /// refuses it for the mirror-image reason: an exclusion that resolves to nothing silently widens
 /// the membership by the item it was written to keep out.
