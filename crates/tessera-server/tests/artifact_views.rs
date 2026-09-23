@@ -10,6 +10,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -1061,56 +1062,9 @@ async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_re
     let untouched = served(&server, "quarter:q1", SHAPES).await;
     assert!(!untouched.is_empty(), "the control view draws its shape");
 
-    let dropped = server
-        .client
-        .delete(server.control_url("/control/views/quarter/q2?delete_dangling=false"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(dropped.status().as_u16(), 200);
-    let created = server
-        .client
-        .put(server.control_url("/control/views/quarter/q2"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(created.status().as_u16(), 201);
-
-    // As many rows as the dropped view held, every one right of the shape.
-    let ids: Vec<Vec<u8>> = (0..IN_VIEW[1]).map(|i| external_id_of(20_000 + i)).collect();
-    let rows: Vec<(Option<&[u8]>, f32, f32, &str)> = ids
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (Some(&id[..]), 600.0 + (i % 300) as f32, (i * 3 % 1000) as f32, "0"))
-        .collect();
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "recreated-q2")
-        .header("x-tessera-view", "quarter:q2")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&rows))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().await.unwrap());
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_until(&server, "the flush published", move |now| {
-        now.flushes > before.flushes
-    })
-    .await;
+    recreate(&server, "q2").await;
+    ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    flush(&server).await;
 
     let recreated = served(&server, "quarter:q2", SHAPES).await;
     assert!(
@@ -1127,4 +1081,159 @@ async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_re
         "the recreated view answers as it did before the restart"
     );
     assert_eq!(served(&server, "quarter:q1", SHAPES).await, untouched);
+}
+
+/// Drop a view of the group and create it again under the same key.
+async fn recreate(server: &TestServer, key: &str) {
+    let dropped = server
+        .client
+        .delete(server.control_url(&format!(
+            "/control/views/quarter/{key}?delete_dangling=false"
+        )))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dropped.status().as_u16(), 200);
+    let created = server
+        .client
+        .put(server.control_url(&format!("/control/views/quarter/{key}")))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status().as_u16(), 201);
+}
+
+/// As many new items as q2 was built with, every one right of the shapes these tests publish,
+/// returning their `tessera_id`s.
+async fn ingest_right_of_the_shape(server: &TestServer, view: &str, batch_id: &str) -> BTreeSet<u64> {
+    let ids: Vec<Vec<u8>> = (0..IN_VIEW[1]).map(|i| external_id_of(20_000 + i)).collect();
+    let rows: Vec<(Option<&[u8]>, f32, f32, &str)> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (Some(&id[..]), 600.0 + (i % 300) as f32, (i * 3 % 1000) as f32, "0"))
+        .collect();
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(build_ingest_batch_optional(&rows))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["tessera_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect()
+}
+
+async fn flush(server: &TestServer) {
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_until(server, "the flush published", move |now| {
+        now.flushes > before.flushes
+    })
+    .await;
+}
+
+/// Request a fold and wait until it has either published or been discarded, returning whether
+/// it published.
+async fn fold_settled(server: &TestServer) -> bool {
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_until(server, "the fold settled", move |now| {
+        now.folds > before.folds || now.fold_failures > before.fold_failures
+    })
+    .await;
+    server.state.engine.write_executor_stats().folds > before.folds
+}
+
+/// The `tessera_id`s one view serves over the whole extent, to a principal holding every term.
+async fn points_of(server: &TestServer, view: &str) -> BTreeSet<u64> {
+    let auth = authorise(server, &["0", "1"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .json(&json!({"view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1000}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    points.into_iter().map(|(id, _)| id).collect()
+}
+
+/// A view dropped and created again while a fold is in flight serves none of its predecessor's
+/// rows once that fold settles, and exactly its own items after a restart and a later fold.
+#[tokio::test]
+async fn a_view_recreated_during_a_fold_takes_none_of_its_predecessors_rows() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    // Something for the fold to fold.
+    ingest_right_of_the_shape(&server, "quarter:q1", "into-q1").await;
+    flush(&server).await;
+
+    server.state.engine.set_fold_paused_for_test(true);
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !server.state.engine.fold_is_holding_for_test() {
+        assert!(std::time::Instant::now() < deadline, "the fold never reached its hold");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    recreate(&server, "q2").await;
+    assert!(points_of(&server, "quarter:q2").await.is_empty());
+
+    server.state.engine.set_fold_paused_for_test(false);
+    wait_until(&server, "the fold settled", move |now| {
+        now.folds > before.folds || now.fold_failures > before.fold_failures
+    })
+    .await;
+    assert!(
+        points_of(&server, "quarter:q2").await.is_empty(),
+        "the fold that was in flight gives the recreated view none of its predecessor's rows"
+    );
+
+    let own = ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    flush(&server).await;
+    assert_eq!(points_of(&server, "quarter:q2").await, own);
+
+    server.shutdown().await;
+    let server = open(&tmp).await;
+    assert_eq!(points_of(&server, "quarter:q2").await, own, "after a restart");
+
+    assert!(fold_settled(&server).await, "a later fold lands");
+    assert_eq!(points_of(&server, "quarter:q2").await, own, "after a later fold");
 }
