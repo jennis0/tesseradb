@@ -737,8 +737,8 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
     // **The operator plane says why**, which is what stops a stalled counter reading as a hung
     // server. The node recovered its WAL in process, so the posture is back to `running`; what
     // survives the recovery is the incident counter, and the overlay it left behind is what still
-    // refuses the plan (write-path §7.2). Read after the refused tick, so the counter below has
-    // had its chance to move.
+    // refuses the plan. Read after the refused tick, so the counter below has had its chance to
+    // move.
     assert_eq!(
         executor.flushes, 0,
         "and nothing was published, which is why the number was not reached"
