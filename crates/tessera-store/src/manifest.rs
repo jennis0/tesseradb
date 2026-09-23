@@ -4,7 +4,7 @@
 //! without breaking it. What that tolerance must *not* extend to is a field naming state the
 //! reader would have to act on; [`HONOURED_STATE`] is where that line is drawn.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -1200,6 +1200,7 @@ impl Manifest {
 
     pub fn with_scoped_columns(&self, columns: &[(String, String, ViewIncarnation)]) -> Manifest {
         let mut manifest = self.clone();
+        let mut grown: BTreeSet<(usize, usize)> = BTreeSet::new();
         for (column, view, incarnation) in columns {
             if !manifest.is_live_incarnation(view, *incarnation) {
                 continue;
@@ -1207,25 +1208,35 @@ impl Manifest {
             let Some((group_name, key)) = view.split_once(crate::GROUP_SEPARATOR) else {
                 continue;
             };
-            let Some(group) = manifest.groups.iter_mut().find(|g| g.name == group_name) else {
+            let Some(g) = manifest.groups.iter().position(|g| g.name == group_name) else {
                 continue;
             };
+            let group = &mut manifest.groups[g];
             if !group.views.iter().any(|v| v.key == key) {
                 continue;
             }
-            if let Some(family) = group.scoped_scalars.iter_mut().find(|f| f.name == *column) {
+            if let Some(f) = group.scoped_scalars.iter().position(|f| f.name == *column) {
+                let family = &mut group.scoped_scalars[f];
                 if !family.views.contains(view) {
                     family.views.push(view.clone());
-                    // Roster order, as a build lists them, whichever view a flush reached first.
-                    let roster = &group.views;
-                    family.views.sort_by_key(|id| {
-                        let key = id
-                            .strip_prefix(group_name)
-                            .and_then(|rest| rest.strip_prefix(crate::GROUP_SEPARATOR));
-                        roster.iter().position(|v| Some(v.key.as_str()) == key)
-                    });
+                    grown.insert((g, f));
                 }
             }
+        }
+        // Roster order, as a build lists them, whichever view a flush reached first.
+        let mut position: Option<(usize, HashMap<String, usize>)> = None;
+        for (g, f) in grown {
+            let group = &mut manifest.groups[g];
+            if position.as_ref().is_none_or(|(held, _)| *held != g) {
+                let ids = group.views.iter().enumerate().map(|(i, v)| {
+                    (format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, v.key), i)
+                });
+                position = Some((g, ids.collect()));
+            }
+            let (_, of) = position.as_ref().expect("set above");
+            group.scoped_scalars[f]
+                .views
+                .sort_by_key(|id| of.get(id).copied());
         }
         manifest
     }
