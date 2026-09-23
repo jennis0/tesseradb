@@ -71,10 +71,17 @@ fn assert_invalid(doc: &Value, schema: &str, instance: &Value) {
     );
 }
 
-/// The error envelope on a refusal: the status the description declares, one closed code, and
-/// — on a 429 — `Retry-After` agreeing with the body. Returns the body for further asserts.
+/// The error envelope on a refusal: a status the description declares for the route, one closed
+/// code, and — on a 429 — `Retry-After` agreeing with the body. Returns the body for further
+/// asserts.
 async fn assert_refusal(doc: &Value, resp: reqwest::Response, status: u16, code: &str) -> Value {
     assert_eq!(resp.status().as_u16(), status);
+    let path = resp.url().path().to_string();
+    let responses = described_responses(doc, &path);
+    assert!(
+        responses.get(status.to_string()).is_some(),
+        "{path} answered {status}, which the description does not declare for it"
+    );
     let retry_after = resp
         .headers()
         .get("retry-after")
@@ -98,6 +105,36 @@ async fn assert_refusal(doc: &Value, resp: reqwest::Response, status: u16, code:
         assert!(body.get("retry_after_s").is_none());
     }
     body
+}
+
+/// The `responses` the description declares for the route `path` was sent to. A literal segment
+/// outranks a parameter, so `/v1/artifacts/browse` is not read as `/v1/artifacts/{tessera_id}`;
+/// every described path has one operation.
+fn described_responses<'a>(doc: &'a Value, path: &str) -> &'a Value {
+    let sent: Vec<&str> = path.split('/').collect();
+    let (_, item) = doc["paths"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter_map(|(template, item)| {
+            let described: Vec<&str> = template.split('/').collect();
+            if described.len() != sent.len() {
+                return None;
+            }
+            let mut literal = 0;
+            for (d, s) in described.iter().zip(&sent) {
+                if d == s {
+                    literal += 1;
+                } else if !d.starts_with('{') {
+                    return None;
+                }
+            }
+            Some((literal, item))
+        })
+        .max_by_key(|(literal, _)| *literal)
+        .unwrap_or_else(|| panic!("{path} is not a described route"));
+    let (_, operation) = item.as_object().unwrap().iter().next().unwrap();
+    &operation["responses"]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1225,11 +1262,15 @@ async fn every_viewer_route_requires_a_session_token() {
                 if kind != Malformed::No {
                     let resp =
                         send_viewer_probe(&f.server, &method, path, kind, Some(token)).await;
-                    assert_eq!(
-                        resp.status().as_u16(),
-                        with_token,
-                        "{method} {path} ({kind:?}) with a valid token"
-                    );
+                    if kind == Malformed::Shape {
+                        assert_refusal(&doc, resp, with_token, "contract").await;
+                    } else {
+                        assert_eq!(
+                            resp.status().as_u16(),
+                            with_token,
+                            "{method} {path} ({kind:?}) with a valid token"
+                        );
+                    }
                 }
             }
         }
@@ -1386,11 +1427,15 @@ async fn both_session_routes_require_the_credential_before_the_body() {
         for (kind, status) in malformed {
             let req = f.server.client.post(url.clone()).bearer_auth(SESSION_CREDENTIAL);
             let resp = with_body(req, kind, body).send().await.unwrap();
-            assert_eq!(
-                resp.status().as_u16(),
-                status,
-                "POST {path} ({kind:?}) with the session credential"
-            );
+            if kind == Malformed::Shape {
+                assert_refusal(&doc, resp, status, "contract").await;
+            } else {
+                assert_eq!(
+                    resp.status().as_u16(),
+                    status,
+                    "POST {path} ({kind:?}) with the session credential"
+                );
+            }
         }
     }
 }
@@ -1408,51 +1453,6 @@ fn viewer_body(path: &str) -> Value {
             "{other} is a described POST route and this test has no request body for it; add \
              one rather than letting a new viewer route go unchecked"
         ),
-    }
-}
-
-/// **A JSON body of the wrong shape is refused with the error envelope and `contract` on every
-/// viewer and session route that takes one.** The item route's fields are all optional, so it is
-/// sent a wrong type rather than an unknown field.
-#[tokio::test]
-async fn a_body_of_the_wrong_shape_is_a_contract_refusal_on_every_json_route() {
-    let doc = description();
-    let f = fixture().await;
-    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-    let unknown = json!({ "unexpected": 1 });
-
-    let viewer = [
-        ("/v1/viewport", unknown.clone()),
-        ("/v1/items", unknown.clone()),
-        ("/v1/items/1", json!({ "idset": "one" })),
-        ("/v1/artifacts/1", unknown.clone()),
-        ("/v1/artifacts/browse", unknown.clone()),
-    ];
-    for (path, body) in viewer {
-        let resp = f
-            .server
-            .client
-            .post(f.server.viewer_url(path))
-            .bearer_auth(token)
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_refusal(&doc, resp, 422, "contract").await;
-    }
-
-    for path in ["/session/authorise", "/session/revoke"] {
-        let resp = f
-            .server
-            .client
-            .post(f.server.session_url(path))
-            .bearer_auth(SESSION_CREDENTIAL)
-            .json(&unknown)
-            .send()
-            .await
-            .unwrap();
-        assert_refusal(&doc, resp, 422, "contract").await;
     }
 }
 

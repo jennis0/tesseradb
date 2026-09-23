@@ -2991,25 +2991,22 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
 
 /// **`/control/changes` answers 422, not axum's 413, and never before the bearer check.**
 ///
-/// A bare `post(changes)` with a `Json(items)` extractor rejects inside the extractor and answers a
-/// plain **413** — a status outside contracts §3.1's closed code list — with axum's own body. An
-/// operator submitting tens of thousands of suppressions (a couple of MiB of JSON) meets it, on the
-/// never-shed lane, which is where an out-of-list status is least defensible. The remedy is the one
-/// `/control/ingest` uses: `Result<Json<..>, JsonRejection>`, mapped rather than escaping.
+/// The handler takes `Result<ApiJson<..>, ApiJsonRejection>` and maps a body axum could not read,
+/// including one over the byte cap, to a 422 `contract` naming the cap, rather than axum's plain 413.
 ///
 /// Three legs, because the rejection has two shapes and the ordering rule is a third property:
 /// oversize, malformed JSON, and the same oversize body without a credential.
 ///
 /// **Leg 3's refuser is the router layer, and the leg is kept for what it shows.** The 401 comes
 /// from `control::require_operator_credential`, a layer over the whole control router,
-/// rather than from this handler's first statement — so leg 3 no longer discriminates
-/// `Result<Json<..>, _>` from `Json(items)` (the layer answers first either way). It still asserts
+/// rather than from this handler's first statement, so leg 3 does not tell the handler's body
+/// extractor apart from any other (the layer answers first either way). It still asserts
 /// the property that matters on the wire: an unauthenticated caller cannot learn this endpoint's
 /// body cap by bisection. The layer's own coverage is
-/// `every_control_route_not_exempt_requires_the_operator_credential`.
+/// `every_path_on_the_control_listener_needs_the_credential`.
 ///
-/// **Mutations this kills:** taking `Json(items)` instead of `Result<Json<..>, _>` (leg 1 becomes
-/// 413); collapsing the two rejection shapes onto one detail (leg 2's assertion that it is *not*
+/// **Mutations this kills:** taking `ApiJson(items)` instead of the `Result` (leg 1 becomes 413);
+/// collapsing the two rejection shapes onto one detail (leg 2's assertion that it is *not*
 /// reported as an oversize batch goes red); deleting the credential layer (leg 3 becomes 422).
 #[tokio::test]
 async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {

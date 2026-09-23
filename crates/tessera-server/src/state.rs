@@ -617,8 +617,8 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for SessionCredential {
     }
 }
 
-/// A JSON request body. Handlers take it after their credential extractor, so the body is read
-/// only for an authenticated caller.
+/// A JSON request body. It is read only after the credential is checked, by the handler's
+/// credential extractor on the viewer and session planes or by the control plane's middleware.
 pub struct ApiJson<T>(pub T);
 
 /// Why [`ApiJson`] refused a body.
