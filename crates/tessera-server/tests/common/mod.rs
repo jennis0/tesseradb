@@ -991,6 +991,24 @@ pub async fn token_for(server: &TestServer, terms: &[&str]) -> String {
         .to_string()
 }
 
+/// The runs of digits in `text`, in order: where a refusal names the caller's coordinates, these
+/// are the coordinates and nothing else.
+pub fn numbers_in(text: &str) -> Vec<&str> {
+    text.split(|c: char| !c.is_ascii_digit())
+        .filter(|run| !run.is_empty())
+        .collect()
+}
+
+/// Whether `text` holds `token` with no letter or digit against either end, so `row 1` is not
+/// found in `row 12`.
+pub fn mentions(text: &str, token: &str) -> bool {
+    text.match_indices(token).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + token.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
 /// `bytes` in standard base64, the way the wire carries an external id.
 pub fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)

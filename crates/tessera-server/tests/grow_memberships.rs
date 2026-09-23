@@ -247,11 +247,7 @@ async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
     let detail = body["detail"].as_str().expect("the envelope's detail");
     // The body carries a count and the key, never an entity id (I10): the only number in it is
     // the one deleted member.
-    let numbers: Vec<&str> = detail
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|run| !run.is_empty())
-        .collect();
-    assert_eq!(numbers, vec!["1"], "{detail}");
+    assert_eq!(numbers_in(detail), vec!["1"], "{detail}");
     assert_eq!(count(&server, &["0"]).await, 10, "nothing joined");
 
     // 16 is suppressed: it joins, and is not counted until the suppression is lifted.
@@ -538,6 +534,8 @@ async fn a_growth_body_carries_keys_members_and_the_fixed_parts_and_nothing_else
     .await;
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["error"], "unknown", "{body}");
+    // Member 2 of artifact 0, and no other number.
+    assert_eq!(numbers_in(body["detail"].as_str().unwrap()), vec!["2", "0"], "{body}");
     assert_eq!(count(&server, &["0"]).await, 10);
 }
 

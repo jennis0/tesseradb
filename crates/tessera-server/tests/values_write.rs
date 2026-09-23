@@ -495,7 +495,7 @@ async fn a_row_addressed_by_tessera_id_carries_its_idset() {
 /// nothing declares and takes the undeclared-column refusal — which is the same refusal a scoped
 /// column takes on a viewless batch, the families a batch may name being empty without a header.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_undeclared_column_is_refused_and_names_the_view() {
+async fn an_undeclared_column_is_refused_naming_the_column() {
     let served = serve().await;
     ingest_point(&served, "points-1", "subject").await;
     tick(&served.server).await;

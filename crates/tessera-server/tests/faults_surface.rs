@@ -143,7 +143,7 @@ async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
 /// no route can opt out of) and refuses an unknown site with the contract's 422 rather than
 /// arming nothing silently.
 #[tokio::test]
-async fn the_arming_surface_is_gated_and_names_its_sites() {
+async fn the_arming_surface_is_gated_and_refuses_an_unknown_site() {
     let tmp = tempfile::TempDir::new().unwrap();
     let server = serve(&tmp).await;
 

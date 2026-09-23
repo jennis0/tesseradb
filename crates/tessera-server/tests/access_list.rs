@@ -206,9 +206,9 @@ async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
 }
 
 /// A scalar `utf8` column is the shape a separator grammar lived in, and it is refused at the
-/// schema — whole batch, no effect — naming the column and the shape it takes.
+/// schema, whole batch and no effect, naming the column.
 #[tokio::test]
-async fn a_scalar_utf8_access_column_is_refused_naming_the_column_and_the_shape() {
+async fn a_scalar_utf8_access_column_is_refused_naming_the_column() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
@@ -289,6 +289,8 @@ async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared(
     assert_eq!(resp.status(), 422);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "contract", "{body}");
+    let detail = body["detail"].as_str().unwrap();
+    assert!(mentions(detail, "2") && mentions(detail, "s0"), "the count and the view: {detail}");
 
     // A labelled batch on the same view is unaffected: the refusal is about the rows.
     let body = body_with_access(1, Arc::new(access_lists(&[&["0"]])));
@@ -339,6 +341,11 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     assert_eq!(resp.status(), 422);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "contract", "{body}");
+    let detail = body["detail"].as_str().unwrap();
+    assert!(
+        mentions(detail, "2"),
+        "the refusal counts the null cell with the empty list: {detail}"
+    );
 
     let mut empty_element = ListBuilder::new(StringBuilder::new());
     empty_element.values().append_value("");
@@ -402,6 +409,7 @@ async fn a_null_element_is_refused_naming_the_row() {
     assert_eq!(resp.status(), 422);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "contract", "{body}");
+    assert!(mentions(body["detail"].as_str().unwrap(), "row 0"), "{body}");
 
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],

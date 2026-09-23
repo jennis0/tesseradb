@@ -141,10 +141,9 @@ async fn a_published_layer_carries_its_declaration_and_never_its_cardinality() {
     );
 }
 
-/// A declaration the model forbids is refused with a message the caller can act on, and nothing is
-/// left behind.
+/// A declaration the model forbids is refused, and nothing is left behind.
 #[tokio::test]
-async fn an_incoherent_declaration_is_refused_with_a_reason() {
+async fn an_incoherent_declaration_is_refused() {
     let tmp = TempDir::new().unwrap();
     let server = serve_standard(&tmp).await;
 
@@ -368,6 +367,8 @@ async fn an_unresolvable_member_refuses_the_whole_batch() {
     .await;
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["error"], "unknown", "{body}");
+    // Member 1 of artifact 1, the coordinate the caller's pipeline holds, and no other number.
+    assert_eq!(numbers_in(body["detail"].as_str().unwrap()), vec!["1", "1"], "{body}");
     assert_eq!(
         server.state.engine.published_artifacts(),
         0,
@@ -375,9 +376,9 @@ async fn an_unresolvable_member_refuses_the_whole_batch() {
     );
 }
 
-/// A refusal the caller can act on: their own declaration measured against the deployment's rules.
+/// A layer whose declaration takes no artifacts refuses a publication.
 #[tokio::test]
-async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says_why() {
+async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422() {
     let tmp = TempDir::new().unwrap();
     let server = serve_standard(&tmp).await;
 
@@ -970,7 +971,7 @@ async fn an_empty_computed_list_is_counts_and_no_geometry() {
 /// absent. The vocabulary is deployment schema — fixed, identical for every principal, published
 /// in `/v1/meta` — so refusing discloses nothing; a layer name is viewer data and does.
 #[tokio::test]
-async fn an_unknown_computed_name_is_refused_and_says_the_vocabulary() {
+async fn an_unknown_computed_name_is_refused() {
     let tmp = TempDir::new().unwrap();
     let server = serve_standard(&tmp).await;
     one_cluster(&server).await;

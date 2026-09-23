@@ -59,7 +59,7 @@ async fn publish(server: &TestServer, layer: &str, members: &[u64]) -> (u16, ser
 }
 
 #[tokio::test]
-async fn a_bundle_with_no_external_ids_refuses_the_publication_once_and_says_why() {
+async fn a_bundle_with_no_external_ids_refuses_the_publication_once() {
     let (_tmp, server) = serve_fixture(false).await;
     register(&server, flat_layer("flat/x")).await;
     let (status, body) = publish(&server, "flat/x", &[1, 2, 3]).await;

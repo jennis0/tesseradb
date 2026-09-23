@@ -158,10 +158,9 @@ async fn an_exclusion_serves_what_the_inclusion_spelling_serves_and_replays() {
 }
 
 /// **The bound is on the list** (`ingest.md` §2.3, ruling 4): at the published value the
-/// publication lands, and one over it is a `422` naming the limit and the remedy — the inclusion
-/// spelling, which pages.
+/// publication lands, and one over it is a `422` naming the limit.
 #[tokio::test]
-async fn a_list_over_the_bound_is_refused_naming_the_inclusion_spelling() {
+async fn a_list_over_the_bound_is_refused_naming_the_limit() {
     let tmp = TempDir::new().unwrap();
     let bundle = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = tessera_engine::Engine::open(
