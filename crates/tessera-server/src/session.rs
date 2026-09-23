@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{map_engine_error, ApiError};
 use crate::health::{healthz, readyz};
-use crate::state::{AppState, SessionCredential};
+use crate::state::{ApiJson, AppState, SessionCredential};
 
 pub fn router(state: Arc<AppState>) -> Router {
     // The development CORS list covers this plane, since a browser on a laptop authorises here
@@ -52,7 +52,7 @@ struct AuthoriseResp {
 async fn authorise(
     State(state): State<Arc<AppState>>,
     _: SessionCredential,
-    Json(req): Json<AuthoriseReq>,
+    ApiJson(req): ApiJson<AuthoriseReq>,
 ) -> Result<Json<AuthoriseResp>, ApiError> {
     let auth_data = base64::engine::general_purpose::STANDARD
         .decode(&req.auth_data)
@@ -100,7 +100,7 @@ struct RevokeReq {
 async fn revoke(
     State(state): State<Arc<AppState>>,
     _: SessionCredential,
-    Json(req): Json<RevokeReq>,
+    ApiJson(req): ApiJson<RevokeReq>,
 ) -> Result<StatusCode, ApiError> {
     state.sessions.lock().revoke(req.token_id);
     // The registry removal above is what makes the session unusable; this prune is memory hygiene

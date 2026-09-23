@@ -296,9 +296,11 @@ class Database:
         - `require_member_visibility`: how much of an annotation's membership a reader must see
           for it to be shown: `"all"`, `"any"`, `"none"`, `{"fraction": 0.1}` or `{"count": 50}`.
         - `visibility`: who may see the layer at all: `"public"` or an access label.
-        - `artifact_visibility`: whether each annotation also carries an access label of its own.
-          Not built yet: nothing sets such a label, so a layer that declares one shows no
-          annotations to anyone.
+        - `artifact_visibility`: the access label of an annotation that carries none of its own,
+          or `{"field": column, "default": label}`. The field names the column each annotation's
+          own labels are read from; an artifacts insert names that column with `access=`, and an
+          insert naming another column is refused. Without a field, the first artifacts insert
+          naming `access=` sets it.
         - `computed`: which properties the server computes per reader: `"centroid"`, `"box"` and
           `"hull"`.
         - `supplied`: content you provide per annotation, such as text, as
@@ -333,7 +335,9 @@ class Database:
         - `content_requires`: `"inherited"` (the default) shows a label wherever its annotation is
           shown. `"all"` shows it only to a reader who may see every item the text was written
           from; those items come from `insert(name, members=table, id=, key=)`.
-        - `require_member_visibility`, `artifact_visibility`, `title`: as for `declare_layer`.
+        - `require_member_visibility`, `title`: as for `declare_layer`.
+        - `artifact_visibility`: the access label of every label in the set. A label carries none
+          of its own, so no `field` is taken.
 
             db.declare_labels("topics", of="clusters")
             db.insert("topics", {"c0": "graph neural networks", "c1": "diffusion models"})
@@ -430,6 +434,7 @@ class Database:
                 f"insert into {kind} {target!r}: a {kind} takes no {role} table"
             )
         self._refuse_an_insert_the_target_cannot_take(target, kind, role, block, named)
+        self._refuse_a_second_label_column(target, kind, role, block, named)
         projected = kind in ("view", "view_group") and block.get("projection", "none") != "none"
         metadata = D.metadata_names(block) if role == "roster" else ()
         if kind == "labels" and role == "text":
@@ -532,7 +537,7 @@ class Database:
     def _refuse_an_insert_the_target_cannot_take(
         self, target: str, kind: str, role: str, block: dict, named: dict
     ) -> None:
-        """What this target cannot be given: the scope's own column, and the rule not built yet."""
+        """Refuse rows for a scoped layer that do not name their view."""
         scope = block.get("scope")
         group = scope.get("group") if isinstance(scope, dict) else None
         if group is not None and role in ("artifacts", "members", "key") and "view" not in named:
@@ -541,6 +546,16 @@ class Database:
                 f"its artifacts per view, one key in two views being two artifacts, so every row "
                 f"carries the view it belongs to. Name the column that says which with view="
             )
+
+    def _refuse_a_second_label_column(
+        self, target: str, kind: str, role: str, block: dict, named: dict
+    ) -> None:
+        """Refuse an artifacts insert whose `access=` differs from the column the layer declares
+        or an earlier insert named."""
+        column = named.get("access")
+        if kind != "layer" or role != "artifacts" or not column:
+            return
+        D.carry_labels(target, {"artifact_visibility": block.get("artifact_visibility")}, column)
 
     def _refuse_a_second_view_without_its_labels(
         self, kind: str, role: str, target: str, insert: Insert
@@ -939,6 +954,7 @@ class Database:
         if build.returncode != 0:
             raise Refusal("commit: the build failed\n" + report.output, report)
         self.built = True
+        self._record_label_columns(document.get("layer", []))
         self._record_terms(document)
         self.serve()
         if self.listening is not None:
@@ -990,6 +1006,7 @@ class Database:
         if report.findings:
             raise Refusal(str(report), report)
         accepted = C.run(control, pages, report)
+        self._record_label_columns(page.body for page in accepted if page.kind == "layer")
         self._record_terms(self._document())
         self.pending.clear()
         self._save_state()
@@ -1200,6 +1217,15 @@ class Database:
             f"rows are named by '{insert.id_column}' on the insert into "
             f"{insert.target!r}, read as {kind}"
         )
+
+    def _record_label_columns(self, layers: Iterable[dict]) -> None:
+        """Write onto the SDK's own layer blocks the label column each layer was committed with,
+        so a later insert naming another column is refused."""
+        for layer in layers:
+            field = dict(layer.get("artifact_visibility") or {}).get("field")
+            if field:
+                D.carry_labels(layer["name"], self.blocks.layer(layer["name"]), field)
+        self._save_state()
 
     def _record_terms(self, document: dict) -> None:
         """Remember every access label inserted so far: the terms `viewer()` holds by default."""

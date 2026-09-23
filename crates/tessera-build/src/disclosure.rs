@@ -207,12 +207,12 @@ impl Disclosure {
                 let vocabulary = &config.schema.vocabularies[name];
                 VocabularyDisclosure {
                     name: vocabulary.name.clone(),
-                    visibility: vocabulary.visibility.as_str(),
+                    visibility: vocabulary.visibility().as_str(),
                     value_set: match vocabulary.value_set {
                         ValueSet::Closed => "closed",
                         ValueSet::Open => "open",
                     },
-                    declared_values: vocabulary.codes.len(),
+                    declared_values: vocabulary.values.bindings().count(),
                     reserved: vocabulary.reserved.clone(),
                 }
             })

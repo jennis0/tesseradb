@@ -4,7 +4,7 @@
 //! without breaking it. What that tolerance must *not* extend to is a field naming state the
 //! reader would have to act on; [`HONOURED_STATE`] is where that line is drawn.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -587,7 +587,7 @@ pub struct ScopedScalar {
     /// after the build, [`Self::views`] naming those that have one — carries no slot at all, which
     /// a reader sees as the column's absence rather than as a row of placeholders.
     pub render: bool,
-    /// The view ids that have a column, in roster order — the joined `group:key`
+    /// The view ids that have a column, in roster order: the joined `group:key`
     /// form, which is what [`crate::view_path_components`] turns into the column's directory.
     ///
     /// **Named rather than derived from the roster**, because the two can differ: a view created
@@ -1205,6 +1205,7 @@ impl Manifest {
 
     pub fn with_scoped_columns(&self, columns: &[(String, String, ViewIncarnation)]) -> Manifest {
         let mut manifest = self.clone();
+        let mut grown: BTreeSet<(usize, usize)> = BTreeSet::new();
         for (column, view, incarnation) in columns {
             if !manifest.is_live_incarnation(view, *incarnation) {
                 continue;
@@ -1212,17 +1213,35 @@ impl Manifest {
             let Some((group_name, key)) = view.split_once(crate::GROUP_SEPARATOR) else {
                 continue;
             };
-            let Some(group) = manifest.groups.iter_mut().find(|g| g.name == group_name) else {
+            let Some(g) = manifest.groups.iter().position(|g| g.name == group_name) else {
                 continue;
             };
+            let group = &mut manifest.groups[g];
             if !group.views.iter().any(|v| v.key == key) {
                 continue;
             }
-            if let Some(family) = group.scoped_scalars.iter_mut().find(|f| f.name == *column) {
+            if let Some(f) = group.scoped_scalars.iter().position(|f| f.name == *column) {
+                let family = &mut group.scoped_scalars[f];
                 if !family.views.contains(view) {
                     family.views.push(view.clone());
+                    grown.insert((g, f));
                 }
             }
+        }
+        // Roster order, as a build lists them, whichever view a flush reached first.
+        let mut position: Option<(usize, HashMap<String, usize>)> = None;
+        for (g, f) in grown {
+            let group = &mut manifest.groups[g];
+            if position.as_ref().is_none_or(|(held, _)| *held != g) {
+                let ids = group.views.iter().enumerate().map(|(i, v)| {
+                    (format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, v.key), i)
+                });
+                position = Some((g, ids.collect()));
+            }
+            let (_, of) = position.as_ref().expect("set above");
+            group.scoped_scalars[f]
+                .views
+                .sort_by_key(|id| of.get(id).copied());
         }
         manifest
     }
@@ -2844,5 +2863,64 @@ mod tests {
         assert_eq!(dropped_again.incarnation_of(&view_id), None);
         assert!(!rostered(&dropped_again));
         assert!(!listed(&dropped_again));
+    }
+
+    /// A family lists its views in the group's roster order, whichever view's first column a
+    /// flush wrote first, as a build lists them.
+    #[test]
+    fn a_family_lists_its_views_in_roster_order() {
+        let group = GroupDescriptor {
+            name: "quarter".to_string(),
+            title: None,
+            members_of: None,
+            quantisation: Quantisation {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            projection: Projection::None,
+            metadata: Vec::new(),
+            visibility: None,
+            point_default: None,
+            views: Vec::new(),
+            scoped_scalars: Vec::new(),
+        };
+        let family = ScopedScalar {
+            name: "rank".to_string(),
+            group: "quarter".to_string(),
+            arrow_type: ScalarType::I32,
+            vocabulary: None,
+            analyser: None,
+            index: true,
+            render: false,
+            views: Vec::new(),
+        };
+        let keys = ["2026-Q1", "2026-Q2", "2026-Q3"];
+        let created: Vec<CreatedView> = keys
+            .iter()
+            .map(|key| CreatedView {
+                group: "quarter".to_string(),
+                key: key.to_string(),
+                incarnation: 1,
+                visibility: None,
+                metadata: BTreeMap::new(),
+            })
+            .collect();
+        let id = |key: &str| format!("quarter{}{key}", crate::GROUP_SEPARATOR);
+        let column = |key: &str| ("rank".to_string(), id(key), 1);
+
+        let first = bare_manifest().with_declarations(&Declarations {
+            groups: std::slice::from_ref(&group),
+            scoped_attributes: std::slice::from_ref(&family),
+            created_views: &created,
+            scoped_columns: &[column("2026-Q3")],
+            ..Declarations::default()
+        });
+        let later = first.with_scoped_columns(&[column("2026-Q2"), column("2026-Q1")]);
+        assert_eq!(
+            later.groups[0].scoped_scalars[0].views,
+            keys.iter().map(|k| id(k)).collect::<Vec<_>>()
+        );
     }
 }

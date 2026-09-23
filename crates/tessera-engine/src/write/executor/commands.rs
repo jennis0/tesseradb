@@ -1293,25 +1293,27 @@ impl Executor {
         };
         // The codes, drawn into a minter this thread owns and nothing has published. A draw that
         // exhausts the width refuses with nothing appended and no binding anywhere.
-        let mut minter = tessera_store::vocabulary::VocabularyMinter::new(
+        let mut minter = match tessera_store::vocabulary::VocabularyMinter::declared(
             compiled.name.clone(),
             compiled.kind,
             compiled.visibility,
             compiled.width,
-        );
-        for &code in &compiled.reserved {
-            minter.seed_reserved(code);
-        }
+            &compiled.reserved,
+            [],
+            request.values.iter().map(|v| v.key.as_str()),
+        ) {
+            Ok(minter) => minter,
+            Err(e) => {
+                reply.fail(ExecError::VocabularyRefused {
+                    detail: e.to_string(),
+                });
+                return;
+            }
+        };
         let mut codes = Vec::with_capacity(request.values.len());
         for value in &request.values {
-            match minter.mint(&value.key) {
-                Ok(minted) => codes.push((value.key.clone(), minted.code())),
-                Err(e) => {
-                    reply.fail(ExecError::VocabularyRefused {
-                        detail: e.to_string(),
-                    });
-                    return;
-                }
+            if let Some(code) = minter.code_of(&value.key) {
+                codes.push((value.key.clone(), code));
             }
             if let Some(title) = &value.title {
                 minter.set_title(&value.key, title.clone());
