@@ -1131,7 +1131,8 @@ pub async fn drain(server: &TestServer) {
     .await
 }
 
-/// Ask for a fold and wait until it publishes, failing the test if a fold is discarded instead.
+/// Ask for a fold and wait until it publishes, failing the test if any fold this server ran was
+/// discarded.
 pub async fn fold(server: &TestServer) {
     let before = server.state.engine.write_executor_stats();
     let resp = server
@@ -1148,8 +1149,8 @@ pub async fn fold(server: &TestServer) {
     );
     wait_for_executor(server, "the fold published", move |now| {
         assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
+            now.fold_failures, 0,
+            "a fold was discarded rather than published"
         );
         now.folds > before.folds
     })
