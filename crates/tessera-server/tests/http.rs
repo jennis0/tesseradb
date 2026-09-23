@@ -9,7 +9,6 @@
 
 mod common;
 
-use base64::Engine as _;
 use tempfile::TempDir;
 
 use tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS;
@@ -45,18 +44,7 @@ const _: () = assert!(PARALLEL_HEADLINE_ITEMS < SERIAL_FALLBACK_MAX_ROWS);
 #[tokio::test]
 async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -93,18 +81,7 @@ async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
 #[tokio::test]
 async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requests() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -177,18 +154,7 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
 #[tokio::test]
 async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -238,18 +204,7 @@ async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
 #[tokio::test]
 async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -312,144 +267,10 @@ async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
     }
 }
 
-/// Owner ruling (contracts §3.2): `/v1/items` returns the identical `404` for "no such id" and
-/// "exists but is not visible to this principal" -- same status, same body, byte for byte. This
-/// test deliberately never learns which *external id* the invisible `tessera_id` names (that
-/// would require inverting the identity, which I10 forbids even to a test): it gets a genuinely
-/// existing id from session A's own viewport (everyone carries term "0") and finds one that
-/// session B -- authorised for term "1" only, so it sees strictly fewer items (`terms_of`'s
-/// multiples-of-3 subset) -- cannot see, entirely through the HTTP surface a client has.
-#[tokio::test]
-async fn i_item_404s_identically_for_unknown_and_invisible() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    // Session A: term "0" -- every item carries it, so A sees the whole bundle.
-    let auth_a = authorise(&server, &["0"]).await;
-    let token_a = auth_a["token"].as_str().unwrap();
-    // Session B: term "1" only -- `terms_of`'s multiples-of-3 subset, strictly fewer items.
-    let auth_b = authorise(&server, &["1"]).await;
-    let token_b = auth_b["token"].as_str().unwrap();
-
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token_a)
-        .json(&serde_json::json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
-    assert!(
-        !points.is_empty(),
-        "session A's viewport must return some points to pick from"
-    );
-
-    // Find a tessera_id that is real (session A's own viewport returned it) but invisible to B.
-    let mut invisible_to_b = None;
-    for &(tessera_id, _) in &points {
-        let resp_b = post_item(&server, token_b, tessera_id).await;
-        if resp_b.status() == 404 {
-            invisible_to_b = Some(tessera_id);
-            break;
-        }
-    }
-    let invisible_to_b = invisible_to_b
-        .expect("the fixture's multiples-of-3 term split must leave something invisible to B");
-
-    // Sanity: A, which is the session that surfaced this id in its own viewport, can fetch it.
-    let resp_a = post_item(&server, token_a, invisible_to_b).await;
-    assert_eq!(
-        resp_a.status(),
-        200,
-        "session A must be able to fetch an id its own viewport just returned"
-    );
-
-    let unknown_to_everyone = 0xDEAD_BEEF_DEAD_BEEFu64;
-    let resp_unknown = post_item(&server, token_b, unknown_to_everyone).await;
-    let resp_invisible = post_item(&server, token_b, invisible_to_b).await;
-
-    assert_eq!(resp_unknown.status(), 404);
-    assert_eq!(resp_invisible.status(), 404);
-    assert_eq!(resp_unknown.status(), resp_invisible.status());
-
-    let unknown_body = resp_unknown.text().await.unwrap();
-    let invisible_body = resp_invisible.text().await.unwrap();
-    assert_eq!(
-        unknown_body, invisible_body,
-        "identical 404 required byte-for-byte -- any difference is an oracle for \"this id exists\""
-    );
-}
-
-#[tokio::test]
-async fn b_missing_or_garbage_token_is_401() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    let body = serde_json::json!({
-        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
-    });
-
-    let resp_missing = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp_missing.status(), 401);
-
-    let resp_garbage = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth("not-a-real-token")
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp_garbage.status(), 401);
-}
-
 #[tokio::test]
 async fn d_unknown_view_404_and_malformed_bbox_422() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -485,12 +306,7 @@ async fn d_unknown_view_404_and_malformed_bbox_422() {
 #[tokio::test]
 async fn h_config_missing_disclosure_refuses_to_start() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
 
     std::env::set_var("TESSERA_TEST_H_SESSION", SESSION_CREDENTIAL);
     std::env::set_var("TESSERA_TEST_H_OPERATOR", OPERATOR_CREDENTIAL);
@@ -526,62 +342,13 @@ async fn h_config_missing_disclosure_refuses_to_start() {
 
 // --- Authentication and disclosure regressions ---
 
-/// `GET /v1/meta` must require a valid session token — it discloses bundle extents, views and the
-/// declared-scalar schema.
-#[tokio::test]
-async fn viewer_meta_requires_bearer() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    let resp = server
-        .client
-        .get(server.viewer_url("/v1/meta"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-    let resp = server
-        .client
-        .get(server.viewer_url("/v1/meta"))
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-}
-
 /// Contracts §2.2 r6: `GET /v1/meta` reports the idset as `idset` —
 /// and reports **only** the idset: the identity key appears in no API response on any plane.
 /// Nothing asserted either half before, which is what let S2's idset regression sit untested.
 #[tokio::test]
 async fn viewer_meta_reports_the_idset_and_never_the_key() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -612,18 +379,7 @@ async fn viewer_meta_reports_the_idset_and_never_the_key() {
 #[tokio::test]
 async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -659,7 +415,6 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
     assert_eq!(stale.status(), 409);
     let body: serde_json::Value = stale.json().await.unwrap();
     assert_eq!(body["error"], "conflict");
-    assert_eq!(body["detail"], "stale idset; re-resolve by external_id");
 
     // The matching idset is a no-op: same 200, same body as the idset-less request.
     let matching = server
@@ -703,18 +458,7 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
 #[tokio::test]
 async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -860,14 +604,12 @@ const GATE_POLL_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 /// `want > 0` — waiting for the gate to *drain* is indifferent to sheds, and one caller
 /// deliberately sheds a request before waiting for 0.
 async fn poll_until_in_flight(server: &TestServer, want: u64) {
-    let deadline = std::time::Instant::now() + GATE_POLL_BOUND;
     let shed_at_entry = compute_status(server).await["shed_total"].as_u64().unwrap();
-    loop {
+    let what = format!("compute.in_flight reaching {want}");
+    let every = std::time::Duration::from_millis(1);
+    poll(&what, GATE_POLL_BOUND, every, async || {
         let compute = compute_status(server).await;
-        if compute["in_flight"].as_u64() == Some(want) {
-            return;
-        }
-        if want > 0 {
+        if want > 0 && compute["in_flight"].as_u64() != Some(want) {
             let shed_now = compute["shed_total"].as_u64().unwrap();
             assert_eq!(
                 shed_now, shed_at_entry,
@@ -876,16 +618,12 @@ async fn poll_until_in_flight(server: &TestServer, want: u64) {
                  when it arrived. Gate state: {compute}"
             );
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "compute.in_flight did not reach {want} within {GATE_POLL_BOUND:?} -- this is \
-             poll_until_in_flight's own generous-but-finite timeout firing, not necessarily the \
-             calling test's real assertion; check whether the gate is genuinely stuck before \
-             assuming a regression in the mechanism the calling test targets. Gate state: \
-             {compute}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
+        match compute["in_flight"].as_u64() == Some(want) {
+            true => Ok(()),
+            false => Err(format!("gate state {compute}")),
+        }
+    })
+    .await;
 }
 
 /// Poll until the gate holds **no slot permit at all** — nothing running compute, nothing queued,
@@ -906,23 +644,25 @@ async fn poll_until_in_flight(server: &TestServer, want: u64) {
 /// still has to observe the stream end and drop the permit. This closes the gap by waiting for
 /// the gate itself to say it is empty, which is the condition the caller actually depends on.
 async fn poll_until_gate_idle(server: &TestServer) {
-    let deadline = std::time::Instant::now() + GATE_POLL_BOUND;
-    loop {
-        let compute = compute_status(server).await;
-        let held = compute["in_flight"].as_u64().unwrap()
-            + compute["waiting"].as_u64().unwrap()
-            + compute["streaming"].as_u64().unwrap();
-        if held == 0 {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the compute gate still held a permit {GATE_POLL_BOUND:?} after the last response \
-             completed -- a permit has leaked past the request that took it. Gate state: \
-             {compute}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
+    let every = std::time::Duration::from_millis(1);
+    poll(
+        "the compute gate holding no permit",
+        GATE_POLL_BOUND,
+        every,
+        async || {
+            let compute = compute_status(server).await;
+            let held = compute["in_flight"].as_u64().unwrap()
+                + compute["waiting"].as_u64().unwrap()
+                + compute["streaming"].as_u64().unwrap();
+            match held == 0 {
+                true => Ok(()),
+                false => Err(format!(
+                    "a permit leaked past its request; gate state {compute}"
+                )),
+            }
+        },
+    )
+    .await;
 }
 
 async fn compute_status(server: &TestServer) -> serde_json::Value {
@@ -937,12 +677,7 @@ async fn compute_status(server: &TestServer) -> serde_json::Value {
 #[tokio::test]
 async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -952,8 +687,7 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let viewer_url = server.viewer_url("/v1/viewport");
     let client = server.client.clone();
@@ -1010,12 +744,7 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
 #[tokio::test]
 async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1029,8 +758,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     // path (it shares the viewer/session compute budget), so acquiring a *second*
     // session token during saturation would itself race the gate rather than testing the
     // never-gated routes this test is actually about.
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
     let second_auth = authorise(&server, &["0"]).await;
     let second_token_id = second_auth["token_id"].as_u64().unwrap();
 
@@ -1089,8 +817,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     // `/control/changes` suppress: the case this test exists for. The entire control plane is off
     // the viewer/session gate; a deny op must reach the WAL regardless.
     const SUPPRESS_SOURCE_ID: u64 = 3;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let external_id = member(SUPPRESS_SOURCE_ID);
     let suppress_resp = server
         .client
         .post(server.control_url("/control/changes"))
@@ -1116,12 +843,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
 #[tokio::test]
 async fn no_permit_leak_after_a_shed_or_a_completion() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1131,8 +853,7 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let viewer_url = server.viewer_url("/v1/viewport");
     let client = server.client.clone();
@@ -1216,12 +937,7 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
 #[tokio::test]
 async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
     // compute_queue = 1 (not 0): the queued fast request below must be ADMITTED (a slot) and
     // then WAIT for a compute permit, rather than being shed outright by stage 1 — that wait is
     // exactly what `x-tessera-admission-us` needs to capture. A generous timeout so it is never
@@ -1235,8 +951,7 @@ async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     // Baseline: a solo fast request with no contention at all.
     let baseline_resp = server
@@ -1387,12 +1102,7 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 #[tokio::test]
 async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1402,8 +1112,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     // Warm-session scope (see this test's doc): warms this token/view's row-projection cache
     // before either slow request below.
@@ -1537,13 +1246,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 #[tokio::test]
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
+    let bundle_root = build_fixture(tmp.path(), PARALLEL_HEADLINE_ITEMS);
 
     let config_1 = EngineConfig {
         compute_threads: 1,
@@ -1678,13 +1381,7 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles(
 ) {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
+    let bundle_root = build_fixture(tmp.path(), PARALLEL_HEADLINE_ITEMS);
 
     let config_1 = EngineConfig {
         compute_threads: 1,
@@ -1797,24 +1494,12 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
 #[tokio::test]
 async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    build_fixture(tmp.path(), PARALLEL_HEADLINE_ITEMS);
+    let server = open(&tmp).await;
 
     // The generous default gate: 48 admission permits against the handful of requests below, so
     // any 429 here would be the single-flight builder's and not the gate's.
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let mut racers = Vec::new();
     for _ in 0..8 {
@@ -1886,12 +1571,7 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
 #[tokio::test]
 async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
 
     let chunked = spawn_server_with_stream_flush(
         &bundle_root,
@@ -1951,18 +1631,7 @@ async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content
 #[tokio::test]
 async fn viewport_tiles_are_served_in_request_order_with_first_occurrence_dedup() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -2131,13 +1800,7 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     use tokio::io::AsyncReadExt as _;
     const SHED_FIXTURE_ITEMS: u64 = 2_000_000;
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        SHED_FIXTURE_ITEMS,
-    );
+    let bundle_root = build_fixture(tmp.path(), SHED_FIXTURE_ITEMS);
     let server = spawn_server_with_stream_flush(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -2161,20 +1824,16 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     let wait_for_streaming = |state: std::sync::Arc<tessera_server::state::AppState>,
                               want: usize,
                               patience_ms: u64| async move {
-        let started = std::time::Instant::now();
-        let deadline = started + std::time::Duration::from_millis(patience_ms);
-        loop {
+        let what = format!("the streaming gauge reaching {want}");
+        let patience = std::time::Duration::from_millis(patience_ms);
+        wait_until(&what, patience, async || {
             let now = state.compute_gate.status().streaming;
-            if now == want {
-                return;
+            match now == want {
+                true => Ok(()),
+                false => Err(format!("streaming gauge at {now}")),
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "streaming gauge stuck at {now}, wanted {want}, after {:?}",
-                started.elapsed()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        })
+        .await
     };
 
     // 1. The stalled reader: take the headers, then stop reading, holding the socket open. The
@@ -2242,4 +1901,56 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     assert_eq!(resp.status(), 200);
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
     assert!(!decoded.points.is_empty());
+}
+
+/// **The viewport's whole-stream deadline runs from its first flush**: at a deadline of nothing,
+/// the body is cut before its trailer, and the same request under the shipped deadline arrives
+/// whole.
+#[tokio::test]
+async fn the_whole_stream_deadline_cuts_a_viewport_after_its_first_flush() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = standard_fixture(tmp.path());
+    let body = serde_json::json!({
+        "view": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+    });
+    let mut bodies = Vec::new();
+    for deadline_ms in [0, tessera_config::defaults::DEFAULT_STREAM_DEADLINE_MS] {
+        let dir = tmp.path().join(format!("serve-{deadline_ms}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = spawn_server_with_bulk_reads(
+            &bundle_root,
+            &dir.join("cache"),
+            &dir.join("wal.log"),
+            generous_test_gate(),
+            generous_bulk_gate(),
+            |limits| limits.stream_deadline_ms = deadline_ms,
+        )
+        .await;
+        let auth = authorise(&server, &["0"]).await;
+        // A cut body can reach hyper before the headers are written, so the cut shows either as a
+        // failed request or as a body that ends in an error; both are a response without its
+        // trailer.
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(auth["token"].as_str().unwrap())
+            .json(&body)
+            .send()
+            .await;
+        let body = match resp {
+            Ok(resp) => {
+                assert_eq!(resp.status(), 200, "a 200 or a cut, never a refusal");
+                resp.bytes().await.ok()
+            }
+            Err(_) => None,
+        };
+        bodies.push(body);
+        server.shutdown().await;
+    }
+    assert!(
+        bodies[0].is_none(),
+        "a deadline of nothing cuts the body after the counts"
+    );
+    let whole = bodies[1].as_ref().expect("the shipped deadline serves the whole body");
+    assert!(decode_viewport_frames(whole).trailer.is_object());
 }

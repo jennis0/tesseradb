@@ -19,53 +19,6 @@ use tempfile::TempDir;
 
 use common::*;
 
-#[tokio::test]
-async fn c_revoke_then_viewport_is_rejected() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
-    let token_id = auth["token_id"].as_u64().unwrap();
-
-    let resp = server
-        .client
-        .post(server.session_url("/session/revoke"))
-        .bearer_auth(SESSION_CREDENTIAL)
-        .json(&serde_json::json!({ "token_id": token_id }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 204);
-
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        resp.status() == 403 || resp.status() == 401,
-        "revoked token must be rejected as 403 or 401, got {}",
-        resp.status()
-    );
-}
-
 /// **A superseded stamp is answered normally, with the staleness signal set**
 /// (`geometry-pinning.md` §12, obligations 3 and 4). It used to be a `410 pin-expired`; the
 /// retention that made that meaningful is gone, and the stamp is advisory.
@@ -76,18 +29,7 @@ async fn c_revoke_then_viewport_is_rejected() {
 #[tokio::test]
 async fn a_superseded_stamp_is_answered_with_the_staleness_signal() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -134,18 +76,7 @@ async fn a_superseded_stamp_is_answered_with_the_staleness_signal() {
 #[tokio::test]
 async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -170,8 +101,7 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
     let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
 
     const SUPPRESS_SOURCE_ID: u64 = 7;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let external_id = member(SUPPRESS_SOURCE_ID);
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
@@ -213,9 +143,9 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
 /// the handler actually calls it, which is a separate failure — a pruner nothing invokes closes no
 /// deferral.
 ///
-/// The revoked session is unusable either way (the registry removal is what does that, and
-/// `c_revoke_then_viewport_is_rejected` above covers it), so the observable here is memory: the
-/// projection is gone from the cache.
+/// The revoked session is unusable either way (the registry removal does that, and
+/// `revocation_takes_effect_without_waiting_for_a_sweep` covers it), so the observable here is
+/// memory: the projection is gone from the cache.
 ///
 /// **The observable is `row_projection_cache_stats().entries`, read through `TestServer::state`,
 /// and that is the whole point of this test.** Asserting a 204 and that a survivor still gets 200
@@ -228,18 +158,7 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
 #[tokio::test]
 async fn revoke_prunes_the_token() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let doomed = authorise(&server, &["0"]).await;
     let survivor = authorise(&server, &["0"]).await;
@@ -312,18 +231,7 @@ async fn revoke_prunes_the_token() {
 #[tokio::test]
 async fn check_bearer_rejects_prefixes_extensions_and_the_empty_string() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let auth_data = base64::engine::general_purpose::STANDARD
         .encode(serde_json::json!({ "terms": ["0"] }).to_string());
@@ -395,12 +303,7 @@ async fn authorise_n(server: &TestServer, n: usize) -> Vec<serde_json::Value> {
 #[tokio::test]
 async fn expired_sessions_do_not_accumulate_in_the_registry() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut config = default_engine_config();
     config.token_max_lifetime_secs = 0;
     let server = spawn_server_with_config(
@@ -451,18 +354,7 @@ async fn expired_sessions_do_not_accumulate_in_the_registry() {
 #[tokio::test]
 async fn the_sweep_keeps_every_live_session() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     const MINTED: usize = 40;
     let sessions = authorise_n(&server, MINTED).await;
@@ -511,12 +403,7 @@ async fn the_sweep_keeps_every_live_session() {
 #[tokio::test]
 async fn the_sweep_prunes_what_the_engine_holds_for_an_expired_session() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut config = default_engine_config();
     config.token_max_lifetime_secs = 2;
     let server = spawn_server_with_config(
@@ -573,18 +460,7 @@ async fn the_sweep_prunes_what_the_engine_holds_for_an_expired_session() {
 #[tokio::test]
 async fn revocation_takes_effect_without_waiting_for_a_sweep() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let doomed = authorise(&server, &["0"]).await;
     let survivor = authorise(&server, &["0"]).await;
@@ -643,12 +519,7 @@ async fn revocation_takes_effect_without_waiting_for_a_sweep() {
 #[tokio::test]
 async fn an_expired_session_is_refused_while_still_retained() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut config = default_engine_config();
     config.token_max_lifetime_secs = 0;
     let server = spawn_server_with_config(

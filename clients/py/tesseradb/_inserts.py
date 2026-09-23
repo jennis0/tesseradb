@@ -120,7 +120,7 @@ CONTRACTS: dict[tuple[str, str], Contract] = {
         required=("key",),
         optional=(
             "level", "parent", "contents", "attached_layer", "attached_level", "attached_key",
-            "members", "excluding", "space", "view",
+            "members", "excluding", "space", "view", "access",
         ),
         canonical=_artifact_columns(),
         canonical_only=ARTIFACT_CANONICAL_ONLY,
@@ -245,6 +245,32 @@ def as_table(data: Any) -> pa.Table:
     return pa.table(data)
 
 
+def decoded(table: pa.Table) -> pa.Table:
+    """The table with each dictionary column, or list of dictionary values, as its plain values.
+
+    A pandas `Categorical` arrives as an Arrow dictionary column. Decoding it here means every
+    target that reads a string column reads a categorical one the same way, at the build and at
+    a running server.
+    """
+    for at, column in enumerate(table.schema):
+        plain = _plain_type(column.type)
+        if plain != column.type:
+            table = table.set_column(
+                at, pa.field(column.name, plain, column.nullable), table.column(at).cast(plain)
+            )
+    return table
+
+
+def _plain_type(dtype: pa.DataType) -> pa.DataType:
+    if pa.types.is_dictionary(dtype):
+        return dtype.value_type
+    if pa.types.is_list(dtype) and pa.types.is_dictionary(dtype.value_type):
+        return pa.list_(dtype.value_type.value_type)
+    if pa.types.is_large_list(dtype) and pa.types.is_dictionary(dtype.value_type):
+        return pa.large_list(dtype.value_type.value_type)
+    return dtype
+
+
 def schema_of(data: Any) -> dict:
     """One frame's or file's columns and their types, without reading a row where it is a file."""
     if is_path(data):
@@ -291,7 +317,7 @@ def build(
             schema=schema,
         )
     else:
-        table = as_table(data)
+        table = decoded(as_table(data))
         path = directory / folder / f"{source}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, path)

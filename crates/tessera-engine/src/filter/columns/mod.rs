@@ -466,29 +466,23 @@ impl FilterColumns {
     /// drill-down's entity-space home. Every column with a value column answers, filterable or
     /// not: a `derived` category with neither flag still stores its codes here.
     pub(crate) fn stored_value(&self, column: &str, entity: u32) -> Option<RecordValue> {
-        let column = self.columns.get(column)?;
-        for layer in column.value_layers() {
-            let values = &layer.values;
-            // The layers are disjoint in entity space, so the first layer holding the entity is
-            // the only one.
-            let read = match values.record_value_of(entity) {
-                Some(read) => read,
-                None => continue,
-            };
-            // A keyword's ordinal never crosses the trust boundary: drill-down is served the key
-            // it names, decoded against this layer's dictionary, the only one that numbers it. A
-            // dictionary that refuses leaves the field with no value, which narrows.
-            if let Some(dict) = &layer.dict {
-                let ordinal = values.value_of(entity)?.raw();
-                let mut scratch = Vec::new();
-                return dict
-                    .key_of(ordinal, &mut scratch)
-                    .ok()
-                    .map(|key| RecordValue::Utf8(key.to_string()));
-            }
-            return Some(read);
-        }
-        None
+        stored_in(self.columns.get(column)?, entity, &mut Vec::new())
+    }
+
+    /// [`Self::stored_value`] for each of `entities`, in order: the column found once, and one
+    /// buffer reused across a keyword's decodes.
+    pub(crate) fn stored_values(
+        &self,
+        column: &str,
+        entities: impl ExactSizeIterator<Item = u32>,
+    ) -> Vec<Option<RecordValue>> {
+        let Some(column) = self.columns.get(column) else {
+            return entities.map(|_| None).collect();
+        };
+        let mut scratch = Vec::new();
+        entities
+            .map(|entity| stored_in(column, entity, &mut scratch))
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -514,6 +508,30 @@ impl FilterColumns {
             layers: column.value_layers(),
         })
     }
+}
+
+/// The value `column` stores for `entity`, from the one layer that holds it. A keyword's ordinal
+/// never crosses the trust boundary: it is served as the key it names, decoded against that
+/// layer's dictionary, the only one that numbers it, into `scratch`. A dictionary that refuses
+/// leaves the field with no value, which narrows.
+fn stored_in(column: &Column, entity: u32, scratch: &mut Vec<u8>) -> Option<RecordValue> {
+    // The layers are disjoint in entity space, so the first layer holding the entity is the only
+    // one.
+    for layer in column.value_layers() {
+        let values = &layer.values;
+        let Some(read) = values.record_value_of(entity) else {
+            continue;
+        };
+        if let Some(dict) = &layer.dict {
+            let ordinal = values.value_of(entity)?.raw();
+            return dict
+                .key_of(ordinal, scratch)
+                .ok()
+                .map(|key| RecordValue::Utf8(key.to_string()));
+        }
+        return Some(read);
+    }
+    None
 }
 
 #[cfg(test)]

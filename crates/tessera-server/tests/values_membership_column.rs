@@ -21,14 +21,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, Float32Array, Float64Array, LargeStringArray, ListArray,
-    StringArray, StringViewArray, UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, Float32Array, LargeStringArray, ListArray, StringArray,
+    StringViewArray,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -132,65 +131,16 @@ fn text_keys(keys: Vec<Option<String>>, as_type: &DataType) -> ArrayRef {
 /// The points file, its key column at `key_type`. `keyed` is which of its rows carry a key at all:
 /// the rest hold a null, which is the file's own spelling of *this point is in no artifact yet*.
 fn write_points_as(path: &Path, rows: &[u64], keyed: &dyn Fn(u64) -> bool, key_type: &DataType) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
+    let keys = rows.iter().map(|e| keyed(*e).then(|| key_of(*e))).collect();
+    let cluster = (
         Field::new("cluster", key_type.clone(), true),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(rows.to_vec())) as ArrayRef,
-            Arc::new(Float64Array::from(
-                rows.iter().map(|e| x_of(*e)).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                rows.iter().map(|e| y_of(*e)).collect::<Vec<_>>(),
-            )),
-            text_keys(
-                rows.iter()
-                    .map(|e| keyed(*e).then(|| key_of(*e)))
-                    .collect::<Vec<_>>(),
-                key_type,
-            ),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn write_pairs(path: &Path, rows: &[u64]) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities = Vec::new();
-    let mut terms = Vec::new();
-    for e in rows {
-        for t in terms_of(*e) {
-            entities.push(*e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+        text_keys(keys, key_type),
+    );
+    write_points(path, rows, |e| (x_of(e), y_of(e)), vec![cluster]);
 }
 
 struct Built {
     _tmp: TempDir,
-    root: PathBuf,
     dir: PathBuf,
 }
 
@@ -216,69 +166,32 @@ fn build_side_as(
 
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture declaration parses");
-    let root = dir.join("bundle");
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),
-        out: root.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.clone(),
+            &config.schema,
+        ),
         layers: config.layers,
         layer_inputs: config.layer_sources,
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(
+            &dir.join("bundle"),
+            vec![view_args("s0", &points, AccessInput::relation(pairs))],
+        )
     })
     .expect("the fixture build succeeds");
-    Built {
-        _tmp: tmp,
-        root,
-        dir,
-    }
-}
-
-async fn serve(built: &Built) -> TestServer {
-    spawn_server(
-        &built.root,
-        &built.dir.join("cache"),
-        &built.dir.join("wal"),
-    )
-    .await
+    Built { _tmp: tmp, dir }
 }
 
 // ---------------------------------------------------------------------------------------------
 // The wire
 // ---------------------------------------------------------------------------------------------
 
-fn base64_external_id(e: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(e))
-}
-
 /// One `POST /control/values` batch in JSON: an id column and a column named for the layer.
 fn values_body(rows: &[u64], column: &str, key_of: &dyn Fn(u64) -> Value) -> Value {
     Value::Array(
         rows.iter()
-            .map(|e| json!({ "external_id": base64_external_id(*e), column: key_of(*e) }))
+            .map(|e| json!({ "external_id": member(*e), column: key_of(*e) }))
             .collect(),
     )
 }
@@ -500,34 +413,10 @@ async fn browse_rows(
 /// value set binding members with no artifact source of its own, and a layer whose artifacts carry
 /// supplied content.
 async fn register_layer(server: &TestServer, name: &str, value_set: &str, supplied: Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
-            "name": name,
-            "title": name,
-            "views": ["s0"],
-            "membership": "enumerated",
-            "value_set": value_set,
-            "visibility": null,
-            "artifact_visibility": { "field": null, "default": "inherited" },
-            "require_member_visibility": null,
-            "hierarchy": { "kind": "flat", "prune_children": false },
-            "content": { "computed": [], "supplied": supplied },
-            "depends_on": [],
-            "levels": []
-        }))
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    assert_eq!(
-        status,
-        201,
-        "the fixture layer registers: {}",
-        resp.text().await.unwrap()
-    );
+    let mut layer = flat_layer(name);
+    layer["value_set"] = json!(value_set);
+    layer["content"]["supplied"] = supplied;
+    register(server, layer).await;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -545,7 +434,7 @@ async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
         &|e| e < BUILT,
         &layer_toml("flat"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
 
     // Four of the eight keys came out of the file, so the page below is the mixed case: half its
     // rows join an artifact that exists and half name one that does not.
@@ -634,8 +523,8 @@ async fn a_restated_values_page_appends_no_growth_record() {
         &|e| e < BUILT,
         &layer_toml("flat"),
     );
-    let wal_dir = built.dir.join("wal");
-    let server = serve(&built).await;
+    let wal_dir = built.dir.join("wal.log");
+    let server = open(&built.dir).await;
 
     let rows: Vec<u64> = (0..N).collect();
     let (status, body) = post_values(
@@ -696,8 +585,8 @@ async fn a_partly_restated_values_page_appends_only_the_new_members() {
         &|e| e < BUILT,
         &layer_toml("flat"),
     );
-    let wal_dir = built.dir.join("wal");
-    let server = serve(&built).await;
+    let wal_dir = built.dir.join("wal.log");
+    let server = open(&built.dir).await;
 
     // The first half of the corpus: three rows of each of the eight keys, of which the four keys
     // the build minted already hold one member each.
@@ -775,7 +664,7 @@ async fn a_closed_layer_refuses_a_key_no_artifact_holds() {
         &|e| e < BUILT,
         &layer_toml("flat"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
     register_layer(&server, "roster/c", "closed", json!([])).await;
 
     let (status, body) = post_values(
@@ -785,7 +674,8 @@ async fn a_closed_layer_refuses_a_key_no_artifact_holds() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    let detail = body.to_string();
+    assert_eq!(body["error"], "contract", "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
         detail.contains("nobody-published-this"),
         "the refusal names the key: {detail}"
@@ -803,7 +693,7 @@ async fn a_layer_with_supplied_content_refuses_the_column() {
         &|e| e < BUILT,
         &layer_toml("flat"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
     register_layer(
         &server,
         "labels/x",
@@ -819,10 +709,11 @@ async fn a_layer_with_supplied_content_refuses_the_column() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    let detail = body.to_string();
+    assert_eq!(body["error"], "contract", "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("nobody-declared-this") && detail.contains("supplied content"),
-        "the refusal names the key and why the layer cannot hold it: {detail}"
+        detail.contains("nobody-declared-this"),
+        "the refusal names the key: {detail}"
     );
 }
 
@@ -836,7 +727,7 @@ async fn a_tiered_list_column_mints_the_chain_it_declares() {
     );
     // Nothing in the file, so every artifact of every level is this batch's to create.
     let built = build_side(&(0..N).collect::<Vec<_>>(), &|_| false, &layer);
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
 
     let rows: Vec<u64> = (0..N).collect();
     let (status, body) = post_values_arrow(
@@ -918,11 +809,11 @@ async fn the_same_membership_by_build_ingest_and_values_is_the_same_database() {
 
     // The build door: every point and every key in the file.
     let built_a = build_side(&all, &|_| true, &layer);
-    let by_build = serve(&built_a).await;
+    let by_build = open(&built_a.dir).await;
 
     // The ingest door: the seed built, the rest arriving as points carrying their keys.
     let built_b = build_side(&seed, &|_| true, &layer);
-    let by_ingest = serve(&built_b).await;
+    let by_ingest = open(&built_b.dir).await;
     let (status, body) = post_ingest(&by_ingest, "tail", ingest_batch(&tail, LAYER)).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -934,7 +825,7 @@ async fn the_same_membership_by_build_ingest_and_values_is_the_same_database() {
     // The values door: every point built, and only the seed's rows keyed in the file — the rest of
     // the clustering arrives afterwards, over entities that already exist.
     let built_c = build_side(&all, &|e| e < BUILT, &layer);
-    let by_values = serve(&built_c).await;
+    let by_values = open(&built_c.dir).await;
     let (status, body) = post_values(
         &by_values,
         "tail",
@@ -986,9 +877,9 @@ async fn the_same_membership_by_build_ingest_and_values_is_the_same_database() {
 async fn a_values_page_records_an_edge_the_artifact_does_not_hold() {
     // No row carries the column, so the layer is registered and empty.
     let built = build_side(&(0..N).collect::<Vec<_>>(), &|_| false, &layer_toml("nested"));
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
 
-    let members: Vec<String> = (0..N).map(base64_external_id).collect();
+    let members: Vec<String> = members(0..N);
     let resp = server
         .client
         .put(server.control_url("/control/layers/clusters%2Fa/artifacts"))
@@ -1060,7 +951,7 @@ async fn a_key_column_at_any_string_type_stores_what_utf8_stores() {
     let tail: Vec<u64> = (BUILT..N).collect();
     for key_type in [DataType::LargeUtf8, DataType::Utf8View] {
         let built = build_side_as(&all, &|_| true, &layer_toml("flat"), &key_type);
-        let by_build = serve(&built).await;
+        let by_build = open(&built.dir).await;
         tick(&by_build).await;
         assert_eq!(
             browse_counts(&by_build, &["0", "1"], LAYER, None).await,
@@ -1069,7 +960,7 @@ async fn a_key_column_at_any_string_type_stores_what_utf8_stores() {
         );
 
         let built = build_side(&all, &|e| e < BUILT, &layer_toml("flat"));
-        let by_values = serve(&built).await;
+        let by_values = open(&built.dir).await;
         let keys = text_keys(tail.iter().map(|e| Some(key_of(*e))).collect(), &key_type);
         let (status, body) =
             post_values_arrow(&by_values, "typed", values_arrow(&tail, LAYER, keys)).await;
@@ -1088,7 +979,7 @@ async fn a_key_column_at_any_string_type_stores_what_utf8_stores() {
     );
     for element in [DataType::LargeUtf8, DataType::Utf8View] {
         let built = build_side(&all, &|_| false, &layer);
-        let server = serve(&built).await;
+        let server = open(&built.dir).await;
         let (status, body) = post_values_arrow(
             &server,
             "chain",

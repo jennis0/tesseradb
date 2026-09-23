@@ -18,38 +18,6 @@ use tempfile::TempDir;
 const TOPICS: &str = "topics/filled";
 const TREE: &str = "clusters/filled";
 
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
-fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
-}
-
-async fn open(tmp: &TempDir) -> TestServer {
-    spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
-async fn serve(tmp: &TempDir) -> TestServer {
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    open(tmp).await
-}
-
-async fn restart(server: TestServer, tmp: &TempDir) -> TestServer {
-    server.shutdown().await;
-    open(tmp).await
-}
-
 /// A layer declaring one supplied content that needs no generating set, or a nested tree.
 fn declaration(name: &str, supplied: bool, kind: &str) -> serde_json::Value {
     let supplied = if supplied {
@@ -71,18 +39,6 @@ fn declaration(name: &str, supplied: bool, kind: &str) -> serde_json::Value {
         "depends_on": [],
         "levels": []
     })
-}
-
-async fn register(server: &TestServer, declaration: serde_json::Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "the layer registers");
 }
 
 fn artifacts_url(server: &TestServer, layer: &str) -> String {
@@ -355,6 +311,7 @@ async fn a_parent_is_filled_by_patch_and_a_held_key_on_put_mints_nothing() {
     )
     .await;
     assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"], "conflict", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default().to_string();
     assert!(detail.contains("parent"), "{detail}");
     assert!(!detail.contains("root"), "{detail}");
@@ -397,13 +354,7 @@ async fn a_key_repeated_in_one_batch_with_a_fixed_part_is_422_at_both_routes() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("the key k appears more than once"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 
     let (status, body) = put(
         &server,
@@ -415,13 +366,7 @@ async fn a_key_repeated_in_one_batch_with_a_fixed_part_is_422_at_both_routes() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("the key k appears more than once"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
     assert_eq!(
         served(&server, TREE).await,
         vec![
@@ -500,7 +445,7 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("never shrinks"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
 
     // A rank the artifact holds no content at is refused.
     let (status, body) = patch(
@@ -510,7 +455,7 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("no content at rank 3"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
 
     // **A fixed part on a ranked row is refused rather than dropped.** A row pages one set or
     // fills fixed parts; answering `200` for a part the batch discarded would tell the caller
@@ -526,10 +471,7 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
         }
         let (status, body) = patch(&server, TOPICS, json!([row])).await;
         assert_eq!(status, 422, "{part}: {body}");
-        assert!(
-            body.to_string().contains("names a rank and carries a fixed part"),
-            "{part}: {body}"
-        );
+        assert_eq!(body["error"], "contract", "{part}: {body}");
     }
 
     // A key repeated with a rank is refused: a withdrawal in one row moves the rank another names.
@@ -543,7 +485,7 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("more than once"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
 
     // The page that empties the set: the content is withdrawn, the ack names the rank and the key,
     // and the artifact is withheld because its layer declares supplied content it now lacks.

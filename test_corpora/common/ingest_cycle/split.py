@@ -445,6 +445,8 @@ def declared_layers(rung: Path) -> list[dict]:
                 if isinstance(scope, dict)
                 else None,
                 "inline": bool(layer.get("artifacts")),
+                # The roster column each artifact's own access label is read from, if any.
+                "access_column": (layer.get("artifact_visibility") or {}).get("field"),
             }
         )
     return out

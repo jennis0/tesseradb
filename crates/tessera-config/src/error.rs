@@ -38,6 +38,19 @@ pub enum ConfigError {
     AdmissionTooLarge {
         key: &'static str,
     },
+    /// A bound that must admit at least one of what it counts.
+    Zero {
+        key: &'static str,
+    },
+    /// A page is one frame, whose length is 32 bits.
+    PageBytesTooLarge {
+        value: usize,
+    },
+    /// No page could start inside the response's byte budget.
+    ResponseBelowPage {
+        response_bytes: usize,
+        page_bytes: usize,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -142,6 +155,23 @@ impl std::fmt::Display for ConfigError {
                 "{key} is above {}, the most permits an admission gate can hold; write a smaller \
                  number",
                 Semaphore::MAX_PERMITS
+            ),
+            ConfigError::Zero { key } => {
+                write!(f, "{key} is 0; write a number of at least 1")
+            }
+            ConfigError::PageBytesTooLarge { value } => write!(
+                f,
+                "serve.max_page_bytes = {value} is above {}, the largest page one frame can \
+                 carry; write a smaller number",
+                crate::defaults::MAX_PAGE_BYTES_CEILING
+            ),
+            ConfigError::ResponseBelowPage {
+                response_bytes,
+                page_bytes,
+            } => write!(
+                f,
+                "serve.bulk_response_bytes = {response_bytes} is below serve.max_page_bytes = \
+                 {page_bytes}, so no page could start; write at least {page_bytes}"
             ),
         }
     }

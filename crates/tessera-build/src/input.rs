@@ -38,7 +38,7 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_spatial::{fixed32, Bounds, Projection};
-use tessera_store::scalar_column::{self, ScalarColumn};
+use tessera_store::scalar_column::ScalarColumn;
 use tessera_store::vocabulary::VocabularyMinter;
 
 use crate::config::{Fields, ViewSelector, ENTITY_ID};
@@ -1216,6 +1216,26 @@ impl<'a> AccessBatch<'a> {
     fn end_row(&mut self) {
         self.bounds.push(self.indices.len());
     }
+}
+
+/// Each row's access labels, read as a points file's access column is read: a string, a list of
+/// strings or a dictionary of either, trimmed, with a null, an empty string and an empty list all
+/// no label. An artifact source's label column takes this.
+pub(crate) fn access_labels(
+    path: &Path,
+    column: &arrow::array::ArrayRef,
+    name: &str,
+) -> Result<Vec<Vec<String>>> {
+    let batch = read_access_column(path, column, name)?;
+    Ok((0..column.len())
+        .map(|row| {
+            batch
+                .row(row)
+                .iter()
+                .map(|&i| batch.distinct[i as usize].to_string())
+                .collect()
+        })
+        .collect())
 }
 
 /// Decode one batch of the access column into [`AccessBatch`], applying the trim and the empty
@@ -2472,17 +2492,6 @@ impl BatchColumn {
             })
     }
 
-    /// Whether a source column of type `found` can carry an attribute declared as `attribute`:
-    /// the schema-only half of [`BatchColumn::decode_values`], which is what `tessera check` can
-    /// answer without reading a row. `column_carries_agrees_with_the_decoder` holds the two to one
-    /// answer.
-    fn carries(attribute: &crate::config::Attribute, found: &DataType) -> bool {
-        if attribute.vocabulary.is_some() {
-            return crate::utf8::is_utf8(found);
-        }
-        scalar_column::carries(attribute.ty, found)
-    }
-
     pub fn value(
         &self,
         row: usize,
@@ -2593,12 +2602,6 @@ fn mint_batch(
         .collect())
 }
 
-/// Whether an attribute source's column of type `found` can carry `attribute` — see
-/// [`BatchColumn::carries`], whose rule this is.
-pub fn column_carries(attribute: &crate::config::Attribute, found: &DataType) -> bool {
-    BatchColumn::carries(attribute, found)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2616,6 +2619,7 @@ mod tests {
         };
         use arrow::datatypes::TimeUnit;
         use std::sync::Arc;
+        use tessera_store::scalar_column;
 
         fn attribute(ty: ScalarType, vocabulary: Option<&str>) -> crate::config::Attribute {
             crate::config::Attribute {
@@ -2682,7 +2686,7 @@ mod tests {
                     let decoded =
                         BatchColumn::decode_values(path, column, &attribute, &mut minters).is_ok();
                     assert_eq!(
-                        column_carries(&attribute, column.data_type()),
+                        scalar_column::carries(ty, vocabulary.is_some(), column.data_type()),
                         decoded,
                         "declared {ty:?} (vocabulary {vocabulary:?}) against {:?}",
                         column.data_type()
@@ -2691,8 +2695,9 @@ mod tests {
             }
         }
         // And the unit that must not pass, stated outright rather than left to the loop.
-        assert!(!column_carries(
-            &attribute(ScalarType::TimestampUs, None),
+        assert!(!scalar_column::carries(
+            ScalarType::TimestampUs,
+            false,
             &DataType::Timestamp(TimeUnit::Millisecond, None)
         ));
     }

@@ -16,11 +16,15 @@ use common::*;
 use serde_json::Value;
 use tempfile::TempDir;
 
+/// The items of the built bundle, which carries one view, `s0`, and nothing the declaration names:
+/// every object below is one the running service created from a payload.
+const ITEMS: u64 = 64;
+
 /// The declaration these tests post: two plain views, a view group, two vocabularies (one with
 /// inline values), three attributes and one layer.
 ///
 /// **No `render` and no `auto`** — both are emitted as declared and both are refused at a running
-/// service, which [`the_route_refuses_render_and_says_why`] pins separately. Everything else here
+/// service, which [`the_route_refuses_render_naming_the_key`] pins separately. Everything else here
 /// is a key some block takes, so a body that arrives wrong arrives wrong in this test.
 const DECLARATION: &str = r#"
 [sources]
@@ -122,30 +126,6 @@ fn payloads(dir: &Path, declaration: &str) -> Value {
     tessera_build::config::control_payloads(&config)
 }
 
-struct Served {
-    server: TestServer,
-    _tmp: TempDir,
-}
-
-/// A built bundle carrying one view, `s0`, and nothing this declaration names: every object below
-/// is one the running service created from a payload.
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    let points = tmp.path().join("points.parquet");
-    let pairs = tmp.path().join("pairs.parquet");
-    write_points_n(&points, 64);
-    write_pairs_n(&pairs, 64);
-    let bundle = tmp.path().join("bundle");
-    build_fixture_n(&bundle, &points, &pairs, 64);
-    let server = spawn_server(
-        &bundle,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    Served { server, _tmp: tmp }
-}
-
 async fn put(served: &Served, path: &str, body: &Value) -> (u16, Value) {
     send(served, reqwest::Method::PUT, path, body).await
 }
@@ -179,7 +159,7 @@ fn accepted(status: u16, answer: &Value, what: &str) {
 /// before the layer drawn on it.
 #[tokio::test]
 async fn every_emitted_body_is_taken_by_its_route() {
-    let served = serve().await;
+    let served = Served::build(|dir| build_fixture(dir, ITEMS)).await;
     let dir = TempDir::new().unwrap();
     let payloads = payloads(dir.path(), DECLARATION);
 
@@ -251,11 +231,11 @@ async fn every_emitted_body_is_taken_by_its_route() {
 }
 
 /// **The emitter states the declaration and the route decides** (decision 0136's amendment):
-/// `render` reaches the body, and what comes back is the refusal that explains itself rather than
-/// a column quietly declared without it.
+/// `render` reaches the body, and what comes back is a refusal naming the key rather than a column
+/// quietly declared without it.
 #[tokio::test]
-async fn the_route_refuses_render_and_says_why() {
-    let served = serve().await;
+async fn the_route_refuses_render_naming_the_key() {
+    let served = Served::build(|dir| build_fixture(dir, ITEMS)).await;
     let dir = TempDir::new().unwrap();
     let payloads = payloads(
         dir.path(),
@@ -275,8 +255,9 @@ render = true
     assert_eq!(body["render"], true, "emitted as declared: {body}");
     let (status, answer) = put(&served, "/control/attributes", body).await;
     assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
     assert!(
-        answer.to_string().contains("render"),
+        answer["detail"].as_str().unwrap_or_default().contains("render"),
         "the refusal names the key: {answer}"
     );
     served.server.shutdown().await;

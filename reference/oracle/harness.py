@@ -62,7 +62,7 @@ DEFAULT_VIEW = "s0"
 # fixture is shared across checkouts at a fixed path, so one built by an engine at another number
 # has to be rebuilt rather than reused — `tessera serve` refuses it, and this suite reads `attrs/`
 # by hand and would decode the older bytes under the newer format's rules.
-BUNDLE_FORMAT = 17
+BUNDLE_FORMAT = 18
 
 
 def bundle_format_matches(prefix_dir: Path) -> bool:
@@ -604,6 +604,16 @@ class Server:
             headers={"Authorization": f"Bearer {token}"},
             json=body,
             timeout=30,
+        )
+
+    def items(self, token: str, **body) -> requests.Response:
+        """`POST /v1/items` with `body` as given: the raw response, since a refusal is as much an
+        answer here as a body."""
+        return requests.post(
+            f"{self.viewer_base}/v1/items",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=60,
         )
 
     def item(self, token: str, handle: int, pin: str | None = None) -> requests.Response:

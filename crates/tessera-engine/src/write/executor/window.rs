@@ -113,12 +113,26 @@ impl ClosingWindow {
     }
 }
 
-/// What a window's vocabulary pass drew.
+/// What a vocabulary pass drew, over a commit window's rows or a values batch's cells.
 pub(super) struct MintedCodes {
-    /// The bindings the window publishes if it survives, the live ones plus whatever it drew.
+    /// The bindings published if the write commits: the live ones plus whatever the pass drew.
     pub(super) vocabularies: Vocabularies,
     /// `(vocabulary, key, code)` per key bound, in the order the durable records are appended.
     pub(super) fresh: Vec<(String, String, u32)>,
+}
+
+impl MintedCodes {
+    /// One durable record per key bound, to be appended before any record carrying its code.
+    pub(super) fn records(&self) -> Vec<WalRecord> {
+        self.fresh
+            .iter()
+            .map(|(vocabulary, key, code)| WalRecord::VocabularyMint {
+                vocabulary: vocabulary.clone(),
+                key: key.clone(),
+                code: *code,
+            })
+            .collect()
+    }
 }
 
 /// Under `value_set = "open"` a typo creates a permanent object rather than a refusal, so the
@@ -190,6 +204,48 @@ fn mint_cells<'a>(
         cells[index] = code_at_declared_width(arrow_type, code);
     }
     Ok(())
+}
+
+/// Draw a code for every novel vocabulary key a values batch carries, by the ingest window's
+/// rule, and rewrite each cell to its code. `columns` is where each named column landed.
+pub(super) fn mint_values_codes(
+    generation: &Generation,
+    request: &mut tessera_lifecycle::ValuesRequest,
+    columns: &[ValuesColumn],
+) -> std::result::Result<MintedCodes, MintError> {
+    let manifest = &generation.bundle.manifest;
+    let families = request
+        .view
+        .as_deref()
+        .map(|view| scoped_families_of_view(manifest, view))
+        .unwrap_or_default();
+    let targets: Vec<(&str, Option<&str>, ScalarType)> = columns
+        .iter()
+        .map(|column| match column {
+            ValuesColumn::Entity(at) => {
+                let d = &manifest.declared_scalars[*at];
+                (d.name.as_str(), d.vocabulary.as_deref(), d.arrow_type)
+            }
+            ValuesColumn::Scoped(at) => {
+                let f = &families[*at];
+                (f.name.as_str(), f.vocabulary.as_deref(), f.arrow_type)
+            }
+        })
+        .collect();
+    let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
+    let mut fresh: Vec<(String, String, u32)> = Vec::new();
+    for row in &mut request.rows {
+        mint_cells(
+            &mut row.values,
+            targets.iter().copied(),
+            &mut vocabularies,
+            &mut fresh,
+        )?;
+    }
+    Ok(MintedCodes {
+        vocabularies,
+        fresh,
+    })
 }
 
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
@@ -518,10 +574,7 @@ impl Executor {
 
         mark = self.health.lap(WriteStage::Allocate, mark);
 
-        let MintedCodes {
-            vocabularies,
-            fresh: fresh_bindings,
-        } = match self.mint_window_codes(&mut closing) {
+        let minted = match self.mint_window_codes(&mut closing) {
             Ok(minted) => minted,
             Err(e) => {
                 let detail = e.to_string();
@@ -531,6 +584,11 @@ impl Executor {
                 return;
             }
         };
+        let vocabulary_records = minted.records();
+        let MintedCodes {
+            vocabularies,
+            fresh: fresh_bindings,
+        } = minted;
 
         mark = self.health.lap(WriteStage::VocabularyMint, mark);
 
@@ -544,7 +602,11 @@ impl Executor {
             }
         };
         // After the vocabulary mint above, since an artifact's key is a code only once drawn.
-        match self.derive_records(closing.entries(), &vocabularies) {
+        let rows = closing
+            .entries()
+            .iter()
+            .flat_map(|entry| entry.rows().iter().map(|row| row.scalars.as_slice()));
+        match self.derive_records(rows, &vocabularies) {
             Ok(records) => mint_records.extend(records),
             Err(detail) => {
                 closing.fail_all(&self.health, || ExecError::LayerRefused {
@@ -581,14 +643,6 @@ impl Executor {
 
         mark = self.health.lap(WriteStage::DeriveRecords, mark);
 
-        let vocabulary_records: Vec<WalRecord> = fresh_bindings
-            .iter()
-            .map(|(vocabulary, key, code)| WalRecord::VocabularyMint {
-                vocabulary: vocabulary.clone(),
-                key: key.clone(),
-                code: *code,
-            })
-            .collect();
         let entries_at = vocabulary_records.len();
         let artifacts_at = entries_at + closing.entries().len();
         let growth_at = artifacts_at + mint_records.len();

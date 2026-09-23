@@ -1,23 +1,16 @@
-//! The viewer plane: `/v1/meta`, `/v1/categories`, `/v1/viewport`, `/v1/items/{tessera_id}` and
-//! `/v1/artifacts`, plus `/healthz` and `/readyz`. Bearer auth is a session token minted by the
+//! The viewer plane: `/v1/meta`, `/v1/categories`, `/v1/viewport`, `/v1/items`,
+//! `/v1/items/{tessera_id}` and `/v1/artifacts`, plus `/healthz` and `/readyz`. Bearer auth is a session token minted by the
 //! session plane's `/session/authorise`.
 
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query as AxumQuery, State};
-use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
 
 use tessera_types::{GenerationStamp, TesseraId};
 use tessera_wire::{
@@ -28,13 +21,14 @@ use tessera_wire::{
 
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{
-    CancelToken, ComputedSelection, LayerSelection, LevelSelection, SinkClosed, SinkResult,
+    CancelToken, ComputedSelection, LayerSelection, LevelSelection, SinkResult,
     ViewportHead, ViewportSink,
 };
 
 use crate::error::{map_engine_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::{AppState, GatePermits, ViewerSession};
+use crate::stream::{CancelGuard, Producer};
 
 pub fn router(state: Arc<AppState>) -> Router {
     // With neither CORS list set there is no CORS layer at all.
@@ -44,6 +38,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/categories/{column}", get(categories))
         .route("/v1/categories/{column}/suggest", get(suggest))
         .route("/v1/viewport", post(viewport))
+        .route("/v1/items", post(crate::records::items))
         .route("/v1/items/{tessera_id}", post(item))
         .route("/v1/artifacts/{tessera_id}", post(artifact))
         .route("/v1/artifacts/browse", post(browse))
@@ -85,32 +80,6 @@ impl From<&GenerationStamp> for PinDto {
         PinDto {
             prefix: p.prefix.clone(),
             segments_version: p.segments_version,
-        }
-    }
-}
-
-/// Cancels a [`CancelToken`] on drop. Held by the viewport handler and then by the [`StreamBody`],
-/// so a client disconnect at any phase cancels the engine call, which holds only a clone. Disarmed
-/// when the stream completes, so only a request cut short is cancelled.
-struct CancelGuard {
-    token: CancelToken,
-    armed: bool,
-}
-
-impl CancelGuard {
-    fn new(token: CancelToken) -> Self {
-        CancelGuard { token, armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            self.token.cancel();
         }
     }
 }
@@ -209,7 +178,7 @@ async fn meta(
         // The whole column schema. The `category` block is what tells a `u16` category from a
         // `u16` integer, since the points batch carries only codes. Values are served by the
         // paged, per-principal `/v1/categories`, which keeps this document small.
-        "declared_scalars": meta.declared_scalars.iter().map(|s| {
+        "declared_scalars": meta.declared_scalars.iter().enumerate().map(|(index, s)| {
             serde_json::json!({
                 "name": s.name,
                 "arrow_type": s.arrow_type.arrow_type_name(),
@@ -222,6 +191,9 @@ async fn meta(
                 // structure; neither: stored and returned on drill-down, but not filterable.
                 "render": s.render,
                 "index": s.index,
+                // Where `POST /v1/items` reads the value from; a field whose only home is
+                // `record` reads fastest in stored order.
+                "homes": meta.homes[index].names(),
             })
         }).collect::<Vec<_>>(),
         // Group-scoped column families, in `declared_scalars`' shape plus `scope`: each family is
@@ -295,6 +267,9 @@ async fn meta(
             "max_region_cells": state.limits.max_region_cells,
             // `POST /v1/artifacts/browse`'s page ceiling and default.
             "max_browse_rows": state.limits.max_browse_rows,
+            // `POST /v1/items`' page ceilings: rows, and Arrow bytes before compression.
+            "max_page_rows": state.limits.max_page_rows,
+            "max_page_bytes": state.limits.max_page_bytes,
         },
         // The layers this principal may know exist, with what each declared. Never a layer's
         // artifact count, which counts objects the principal may not see, and never its gate
@@ -371,7 +346,7 @@ async fn categories(
     let limit = match query.limit {
         Some(0) => {
             return Err(ApiError::Contract(
-                "limit must be at least 1; a zero-length page cannot make progress".to_string(),
+                "limit must be at least 1".to_string(),
             ))
         }
         Some(n) => n.min(state.limits.max_category_values),
@@ -455,15 +430,13 @@ fn resolve_category_column(
         } => Ok(resolved),
         tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
             "'{column}' is scoped to view group '{group}' and this request names no view of \
-             it, so the name decides no value set. Pass `view=` a view of that group, or pin \
-             the one it means — '{column}@<key>'"
+             it; pass `view=` a view of that group, or pin the one it means as '{column}@<key>'"
         ))),
         tessera_engine::LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
             "unknown view '{pin}' of group '{group}'"
         ))),
         tessera_engine::LeafColumn::PinOnUnscoped { column } => Err(ApiError::Contract(format!(
-            "'{column}' is not scoped to a view group, so there is nothing for the pin to \
-             choose between: it is one value set for the corpus"
+            "'{column}' is not scoped to a view group; leave out the pin"
         ))),
         _ => Err(ApiError::Unknown("unknown category column".to_string())),
     }
@@ -500,7 +473,7 @@ async fn suggest(
     let AxumQuery(query) = query.map_err(|_| {
         ApiError::Contract(
             "the query string is malformed, or carries a parameter this route does not define; \
-             it accepts only `q`, `limit`, `counts` and `view`"
+             send only `q`, `limit`, `counts` and `view`"
                 .to_string(),
         )
     })?;
@@ -514,9 +487,7 @@ async fn suggest(
     let limit = match query.limit {
         Some(0) => {
             return Err(ApiError::Contract(
-                "limit must be at least 1; a zero-length suggestion page is a request for no \
-                 answer"
-                    .to_string(),
+                "limit must be at least 1".to_string(),
             ))
         }
         Some(n) => n.min(state.limits.max_suggestions),
@@ -714,18 +685,8 @@ impl<'de> Deserialize<'de> for AllLayers {
     }
 }
 
-/// The streamed viewport's channel capacity in frames: one in flight, one built ahead. This bounds
-/// what a stalled client holds beyond hyper's write buffer.
-const STREAM_CHANNEL_FRAMES: usize = 2;
-
-/// [`StreamBody`]'s three completion states, published by the producer *before* it drops the
-/// channel sender, so the body's end-of-channel read is never ambiguous.
-const STREAM_RUNNING: u8 = 0;
-const STREAM_COMPLETE: u8 = 1;
-const STREAM_ABORTED: u8 = 2;
-
 /// What the handler needs to build the `Response`, sent once when the engine's sweep completes.
-/// Errors before then travel the same oneshot, so they keep their status codes.
+/// Errors before then travel the same way, so they keep their status codes.
 struct FirstFlush {
     coordinates: tessera_engine::ViewCoordinates,
     stamp: GenerationStamp,
@@ -744,18 +705,11 @@ struct FirstFlush {
 /// none can reach these frames; scalar names come from the head, of the same generation.
 struct WireSink {
     head: Option<ViewportHead>,
-    first_tx: Option<oneshot::Sender<Result<FirstFlush, ApiError>>>,
-    tx: mpsc::Sender<Bytes>,
+    /// The stream; its whole-stream deadline starts at the first flush.
+    producer: Producer<FirstFlush>,
     permits: GatePermits,
     /// Taken after admission and before spawning, so blocking-pool wait counts in `server_us`.
     start: Instant,
-    stall: Duration,
-    deadline: Duration,
-    /// Set at the first flush; the whole-stream deadline is measured from it.
-    first_flush_at: Option<Instant>,
-    /// Why this sink refused a frame, when the server chose to. The engine reports any refusal as
-    /// cancellation, which is not logged, so without this a server-side shed would go unlogged.
-    shed: Option<Shed>,
     /// Which artifacts frame shape [`Self::artifacts`] writes; the engine computes the same rows
     /// either way.
     artifact_rows: tessera_engine::ArtifactRows,
@@ -766,66 +720,6 @@ struct WireSink {
     flushes: u64,
     /// Served artifacts whose shape hit its vertex budget, so a coarse drawing shows in the trace.
     shape_guard_fired: u64,
-}
-
-/// A sink refusal the server chose, as opposed to the client going away.
-#[derive(Debug, Clone, Copy)]
-enum Shed {
-    /// The whole-stream budget from first flush, `serve.stream_deadline_ms`.
-    Deadline,
-    /// The per-send stall budget, `serve.stream_write_stall_ms`: a reader that stopped reading.
-    Stall,
-}
-
-impl Shed {
-    fn detail(self) -> &'static str {
-        match self {
-            Shed::Deadline => {
-                "the whole-stream deadline fired: the response was committed and the work behind \
-                 its next frame outran serve.stream_deadline_ms. A cold request over a level whose \
-                 derived structures the prefix does not carry is the shape to check first — the \
-                 build's artifact pass writes them, and an open reporting no adoptions says they \
-                 were not taken"
-            }
-            Shed::Stall => {
-                "the per-send stall budget fired: the client stopped reading and \
-                 serve.stream_write_stall_ms elapsed with the body channel full"
-            }
-        }
-    }
-}
-
-impl WireSink {
-    /// Sends one frame, blocking, under a per-send stall budget (a reader that stopped) and a
-    /// whole-stream budget from first flush (a reader that drips). Refusal is [`SinkClosed`],
-    /// which the engine treats as cancellation.
-    fn send(&mut self, frame: Vec<u8>) -> SinkResult {
-        let send_started = Instant::now();
-        let mut item = Bytes::from(frame);
-        loop {
-            if self
-                .first_flush_at
-                .is_some_and(|t| t.elapsed() >= self.deadline)
-            {
-                self.shed = Some(Shed::Deadline);
-                return Err(SinkClosed);
-            }
-            match self.tx.try_send(item) {
-                Ok(()) => return Ok(()),
-                Err(mpsc::error::TrySendError::Full(back)) => {
-                    if send_started.elapsed() >= self.stall {
-                        self.shed = Some(Shed::Stall);
-                        return Err(SinkClosed);
-                    }
-                    item = back;
-                    // Poll with a short sleep: tokio's mpsc has no blocking send with a timeout,
-                    // and 5 ms is fine against a stall budget of seconds.
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => return Err(SinkClosed),
-            }
-        }
-    }
 }
 
 impl ViewportSink for WireSink {
@@ -858,7 +752,7 @@ impl ViewportSink for WireSink {
         // The sweep is done, so the compute permit goes back now; the slot permit is held until
         // the producer returns.
         self.permits.release_compute();
-        self.first_flush_at = Some(Instant::now());
+        self.producer.start_deadline();
 
         let head = self.head.as_ref().expect("head precedes counts");
         let first = FirstFlush {
@@ -869,12 +763,8 @@ impl ViewportSink for WireSink {
             first_frames: frames,
             server_us: self.start.elapsed().as_micros() as u64,
         };
-        // A dropped receiver means the client disconnected during the sweep: stop.
-        self.first_tx
-            .take()
-            .expect("counts is delivered exactly once")
-            .send(Ok(first))
-            .map_err(|_| SinkClosed)
+        // A refusal means the client disconnected during the sweep: stop.
+        self.producer.open(first)
     }
 
     /// Never called with an empty slice. Sent as a body frame after the first flush, so the
@@ -906,7 +796,7 @@ impl ViewportSink for WireSink {
             tessera_engine::ArtifactRows::Identity => artifacts_identity_frame(&rows),
         };
         self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
-        self.send(frame)
+        self.producer.send(frame)
     }
 
     fn points(&mut self, chunk: tessera_engine::PointColumns) -> SinkResult {
@@ -943,13 +833,13 @@ impl ViewportSink for WireSink {
         self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
         self.points_total += chunk.tessera_ids.len() as u64;
         self.flushes += 1;
-        self.send(frame)
+        self.producer.send(frame)
     }
 }
 
 /// What a request's filter expressions are parsed against: one `Engine::meta()` snapshot and the
 /// view the request names, whose frame and projection a `region` leaf is canonicalised in.
-struct FilterParser<'a> {
+pub(crate) struct FilterParser<'a> {
     meta: &'a tessera_engine::EngineMeta,
     view: &'a tessera_engine::MetaView,
     visible: &'a tessera_engine::gate::VisibleViews,
@@ -960,7 +850,7 @@ struct FilterParser<'a> {
 }
 
 impl<'a> FilterParser<'a> {
-    fn new(
+    pub(crate) fn new(
         meta: &'a tessera_engine::EngineMeta,
         view: &'a tessera_engine::MetaView,
         visible: &'a tessera_engine::gate::VisibleViews,
@@ -979,7 +869,10 @@ impl<'a> FilterParser<'a> {
         }
     }
 
-    fn parse(&self, value: &serde_json::Value) -> Result<tessera_engine::filter::FilterExpr, ApiError> {
+    pub(crate) fn parse(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<tessera_engine::filter::FilterExpr, ApiError> {
         let meta = self.meta;
         let vocab_of = self.vocab_of.get_or_init(|| {
             meta.declared_scalars
@@ -1010,15 +903,14 @@ impl<'a> FilterParser<'a> {
 }
 
 /// The producer: the engine call and frame serialisation, run on a blocking thread for the whole
-/// stream. It reports through the oneshot (errors before the first flush), the channel (frames)
-/// and `shared` (completion or abort); the permits release when `sink` drops at the end.
+/// stream. It answers the handler once (an error before the first flush, or the first flush) and
+/// then sends frames; the permits release when `sink` drops at the end.
 fn run_viewport_stream(
     state: &AppState,
     session: &tessera_engine::Session,
     req: ViewportReq,
     cancel: CancelToken,
     mut sink: WireSink,
-    shared: Arc<AtomicU8>,
 ) {
     let stamp = req.pin.map(GenerationStamp::from);
     // One `Engine::meta()` for the whole request, so the view and the filter parse read the same
@@ -1027,12 +919,8 @@ fn run_viewport_stream(
     // An unknown key, an undeclared name and a view the principal cannot reach all get the same
     // 404, at the same cost.
     let Some(view) = meta.resolve_visible_view(&req.view, session.visible_views()) else {
-        if let Some(tx) = sink.first_tx.take() {
-            let _ = tx.send(Err(ApiError::Unknown(format!(
-                "unknown view '{}'",
-                req.view
-            ))));
-        }
+        sink.producer
+            .refuse(ApiError::Unknown(format!("unknown view '{}'", req.view)));
         return;
     };
     let view_id = view.id.clone();
@@ -1062,12 +950,8 @@ fn run_viewport_stream(
         session.visible_views(),
         state.limits.max_region_vertices,
     );
-    // Refusals go down the oneshot the handler is still waiting on, so they keep their status.
-    let mut refuse = |e| {
-        if let Some(tx) = sink.first_tx.take() {
-            let _ = tx.send(Err(e));
-        }
-    };
+    // Refusals go to the handler, which is still waiting, so they keep their status.
+    let mut refuse = |e| sink.producer.refuse(e);
     let filter = match req.filters.as_ref().map(|v| parser.parse(v)) {
         None => None,
         Some(Ok(expr)) => Some(expr),
@@ -1180,94 +1064,42 @@ fn run_viewport_stream(
                     trailer["stage_ns"] = serde_json::Value::String(csv);
                 }
             }
-            let frame = trailer_frame(trailer.to_string().as_bytes());
-            let end_state = if sink.send(frame).is_ok() {
-                STREAM_COMPLETE
-            } else {
-                STREAM_ABORTED
-            };
-            shared.store(end_state, Ordering::SeqCst);
+            sink.producer
+                .finish(trailer_frame(trailer.to_string().as_bytes()));
         }
-        Err(e) => match sink.first_tx.take() {
-            // Before the first flush nothing is committed and the handler is waiting, so the
-            // error keeps its status; a cancellation here is a 500 nobody reads.
-            Some(tx) => {
-                let _ = tx.send(Err(map_engine_error(e)));
+        // Before the first flush nothing is committed and the handler is waiting, so the error
+        // keeps its status; a cancellation here is a 500 nobody reads.
+        Err(e) if !sink.producer.is_open() => sink.producer.refuse(map_engine_error(e)),
+        // Mid-body the 200 is committed: no trailer is sent and the body aborts the transport. A
+        // client disconnect logs nothing; anything else is logged.
+        Err(e) => {
+            // A server-chosen shed is logged apart from a client disconnect. The elapsed time is
+            // the diagnosis: just past the deadline is a reader that stopped, a multiple of it is
+            // work behind the next frame.
+            if let Some(shed) = sink.producer.shed() {
+                tracing::warn!(
+                    view = %named_view,
+                    zoom = named_zoom,
+                    layers = %named_layers,
+                    elapsed_ms = sink.start.elapsed().as_millis() as u64,
+                    since_first_flush_ms = sink
+                        .producer
+                        .deadline_from()
+                        .map(|t| t.elapsed().as_millis() as u64)
+                        .unwrap_or(0),
+                    deadline_ms = sink.producer.deadline().map_or(0, |d| d.as_millis() as u64),
+                    stall_ms = sink.producer.stall().as_millis() as u64,
+                    flushes = sink.flushes,
+                    "viewport stream SHED mid-body by the server — {}",
+                    shed.detail()
+                );
+            } else if !matches!(e, tessera_engine::EngineError::Cancelled) {
+                tracing::warn!(error = %e, "viewport stream aborted mid-body");
             }
-            // Mid-body the 200 is committed: no trailer is sent and the body wrapper aborts the
-            // transport. A client disconnect logs nothing; anything else is logged.
-            None => {
-                // A server-chosen shed is logged apart from a client disconnect. The elapsed time
-                // is the diagnosis: just past the deadline is a reader that stopped, a multiple of
-                // it is work behind the next frame.
-                if let Some(shed) = sink.shed {
-                    tracing::warn!(
-                        view = %named_view,
-                        zoom = named_zoom,
-                        layers = %named_layers,
-                        elapsed_ms = sink.start.elapsed().as_millis() as u64,
-                        since_first_flush_ms = sink
-                            .first_flush_at
-                            .map(|t| t.elapsed().as_millis() as u64)
-                            .unwrap_or(0),
-                        deadline_ms = sink.deadline.as_millis() as u64,
-                        stall_ms = sink.stall.as_millis() as u64,
-                        flushes = sink.flushes,
-                        "viewport stream SHED mid-body by the server — {}",
-                        shed.detail()
-                    );
-                } else if !matches!(e, tessera_engine::EngineError::Cancelled) {
-                    tracing::warn!(error = %e, "viewport stream aborted mid-body");
-                }
-                shared.store(STREAM_ABORTED, Ordering::SeqCst);
-            }
-        },
+            sink.producer.abort();
+        }
     }
     // `sink` drops here, after the state stores, releasing the channel sender and the slot permit.
-}
-
-/// The streamed response body: the first flush, the producer's frames, then a clean end only if
-/// the trailer went out. It owns the [`CancelGuard`], so a client disconnect drops this body,
-/// cancelling the token and closing the channel.
-struct StreamBody {
-    first: Option<Bytes>,
-    rx: mpsc::Receiver<Bytes>,
-    shared: Arc<AtomicU8>,
-    cancel_guard: CancelGuard,
-    /// Once the end is yielded, every later poll is `Ready(None)`, never a second error.
-    done: bool,
-}
-
-impl futures_core::Stream for StreamBody {
-    type Item = std::result::Result<Bytes, std::io::Error>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        if this.done {
-            return Poll::Ready(None);
-        }
-        if let Some(first) = this.first.take() {
-            return Poll::Ready(Some(Ok(first)));
-        }
-        match this.rx.poll_recv(cx) {
-            Poll::Ready(Some(frame)) => Poll::Ready(Some(Ok(frame))),
-            Poll::Ready(None) => {
-                this.done = true;
-                if this.shared.load(Ordering::SeqCst) == STREAM_COMPLETE {
-                    // Clean end: the trailer was the last frame, so disarm; see `CancelGuard`.
-                    this.cancel_guard.disarm();
-                    Poll::Ready(None)
-                } else {
-                    // Aborted by an engine error, a stall or the deadline. An error makes hyper
-                    // cut the connection instead of ending the chunked body cleanly.
-                    Poll::Ready(Some(Err(std::io::Error::other(
-                        "viewport stream aborted before its trailer",
-                    ))))
-                }
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
 }
 
 async fn viewport(
@@ -1343,21 +1175,18 @@ async fn viewport(
     let start = Instant::now();
 
     // The producer runs detached on the blocking pool for the whole stream. The handler awaits
-    // only the first flush; a producer panic shows as the oneshot closing (a 500) or, later, as a
-    // body abort. Only a clone of `cancel` moves in; the guard keeps the original.
-    let (first_tx, first_rx) = oneshot::channel();
-    let (tx, rx) = mpsc::channel::<Bytes>(STREAM_CHANNEL_FRAMES);
-    let shared = Arc::new(AtomicU8::new(STREAM_RUNNING));
+    // only the first flush; a producer panic shows as a 500 or, later, as a body abort. Only a
+    // clone of `cancel` moves in; the guard keeps the original.
+    let (producer, pending) = crate::stream::channel(
+        cancel_guard,
+        Duration::from_millis(state.limits.stream_write_stall_ms),
+        Some(Duration::from_millis(state.limits.stream_deadline_ms)),
+    );
     let sink = WireSink {
         head: None,
-        first_tx: Some(first_tx),
-        tx,
+        producer,
         permits: gate_permits,
         start,
-        stall: Duration::from_millis(state.limits.stream_write_stall_ms),
-        deadline: Duration::from_millis(state.limits.stream_deadline_ms),
-        first_flush_at: None,
-        shed: None,
         // Set from the request inside the producer.
         artifact_rows: tessera_engine::ArtifactRows::Full,
         point_rows: tessera_engine::PointRows::Full,
@@ -1368,81 +1197,36 @@ async fn viewport(
     };
     let closure_state = Arc::clone(&state);
     let closure_cancel = cancel.clone();
-    let closure_shared = Arc::clone(&shared);
     drop(tokio::task::spawn_blocking(move || {
-        run_viewport_stream(
-            &closure_state,
-            &session,
-            req,
-            closure_cancel,
-            sink,
-            closure_shared,
-        );
+        run_viewport_stream(&closure_state, &session, req, closure_cancel, sink);
     }));
 
-    let first = match first_rx.await {
-        Ok(Ok(first)) => first,
-        // Every failure before the first flush, with its status.
-        Ok(Err(e)) => return Err(e),
-        // The producer panicked before its first flush; the detail is fixed, not forwarded.
-        Err(_) => {
-            return Err(ApiError::FailClosed(
-                "the viewport producer terminated before its first flush".to_string(),
-            ))
-        }
-    };
+    // Every failure before the first flush arrives here with its status.
+    let (first, body) = pending.opened("viewport", "first flush").await?;
 
     let pin_header = serde_json::to_string(&PinDto::from(&first.stamp))
         .expect("PinDto serialisation cannot fail");
 
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/octet-stream")
-        // The content coordinate, as an entity tag compared exactly. `If-Match` is not read, so
-        // a mismatch never produces a 412.
-        .header(
-            "etag",
-            format!("\"{}\"", hex16(&first.coordinates.content_key)),
-        )
-        // The authorisation coordinate: whether a held band may be rendered at all, so it is the
-        // client's cache partition key. It moves separately from the entity tag.
-        .header(
-            "x-tessera-identity-key",
-            hex16(&first.coordinates.identity_key),
-        )
-        .header("x-tessera-pin", pin_header)
-        // Always present, so a client reading only counts sees staleness without decoding a batch.
-        .header("x-tessera-stale", if first.stale { "1" } else { "0" })
-        .header("x-tessera-server-us", first.server_us.to_string())
-        .header("x-tessera-admission-us", admission_us.to_string());
-    // Whether counts under a region leaf are exact, as a header for the same reason as
-    // `x-tessera-stale`. It depends on the shape and the grid, never on the rows.
-    let response = match first.region {
-        Some(verdict) => response.header("x-tessera-region", verdict.header_value()),
-        None => response,
-    };
+    let response = crate::stream::response_head(
+        Some(&first.coordinates.identity_key),
+        first.server_us,
+        admission_us,
+        first.region,
+    )
+    // The content coordinate, as an entity tag compared exactly. `If-Match` is not read, so a
+    // mismatch never produces a 412. It moves separately from the identity key.
+    .header(
+        "etag",
+        format!("\"{}\"", crate::stream::hex16(&first.coordinates.content_key)),
+    )
+    .header("x-tessera-pin", pin_header)
+    // Always present, so a client reading only counts sees staleness without decoding a batch.
+    .header("x-tessera-stale", if first.stale { "1" } else { "0" });
 
     // Stage timings ride the trailer frame, since a header cannot follow the body it describes.
     Ok(response
-        .body(Body::from_stream(StreamBody {
-            first: Some(Bytes::from(first.first_frames)),
-            rx,
-            shared,
-            cancel_guard,
-            done: false,
-        }))
+        .body(body.into_body(first.first_frames))
         .expect("response construction cannot fail"))
-}
-
-/// Lower-case hex of an opaque 16-byte coordinate. Not a checksum and not reversible by a client:
-/// the only operation defined on it is equality against one the server minted earlier.
-fn hex16(bytes: &[u8; 16]) -> String {
-    let mut out = String::with_capacity(32);
-    for b in bytes {
-        use std::fmt::Write;
-        let _ = write!(out, "{b:02x}");
-    }
-    out
 }
 
 /// The trailer's `stage_ns`: a fixed-order CSV of durations and counts, `None` without the
@@ -1765,8 +1549,8 @@ async fn browse(
     // `limit` clamps and `0` refuses, as on `/v1/categories`.
     if req.limit == Some(0) {
         return Err(ApiError::Contract(
-            "`limit` is 0, which asks for a page with no rows. Omit it for the deployment's \
-             default, or name a positive number up to `selection.max_browse_rows`"
+            "`limit` is 0; omit it for the deployment's default, or send a positive number up \
+             to `selection.max_browse_rows`"
                 .to_string(),
         ));
     }
@@ -1776,8 +1560,8 @@ async fn browse(
     // At most one of `parent` and `q`: roots, children or search.
     if req.parent.is_some() && req.q.is_some() {
         return Err(ApiError::Contract(
-            "`parent` and `q` are two different forms of this verb — the children form and the \
-             search form — so a request carries at most one of them"
+            "`parent` and `q` are two forms of this verb, children and search; send at most \
+             one of them"
                 .to_string(),
         ));
     }
@@ -1792,7 +1576,7 @@ async fn browse(
         None => None,
         Some(text) => Some(BrowseCursor::parse(text).ok_or_else(|| {
             ApiError::Contract(
-                "`cursor` is not one this endpoint issued — pass back a page's `next` unchanged"
+                "`cursor` is not one this endpoint issued; pass back a page's `next` unchanged"
                     .to_string(),
             )
         })?),

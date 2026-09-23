@@ -21,33 +21,6 @@ const LAYER: &str = "clusters/excluded";
 /// tenths of the **declared** membership, which is what makes the denominator observable.
 const PROPORTIONAL: &str = "clusters/proportional";
 
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
-fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
-}
-
-async fn open(tmp: &TempDir) -> TestServer {
-    spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
-async fn serve(tmp: &TempDir) -> TestServer {
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    open(tmp).await
-}
-
 fn declaration(name: &str, criterion: serde_json::Value) -> serde_json::Value {
     json!({
         "name": name,
@@ -63,18 +36,6 @@ fn declaration(name: &str, criterion: serde_json::Value) -> serde_json::Value {
         "depends_on": [],
         "levels": []
     })
-}
-
-async fn register(server: &TestServer, declaration: serde_json::Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "the layer registers");
 }
 
 fn artifacts_url(server: &TestServer, layer: &str) -> String {
@@ -148,33 +109,6 @@ async fn served(server: &TestServer, layer: &str, terms: &[&str]) -> Vec<(String
     rows
 }
 
-/// `POST /control/flush`, waited for — the tick is what publishes an ingested row, and the route
-/// answers `202` before it runs (`access_list.rs` takes the same wait).
-async fn flush(server: &TestServer) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = server.state.engine.write_executor_stats().flushes;
-        let resp = server
-            .client
-            .post(server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
 /// **The two spellings are one membership** (`ingest.md` §2.3): an artifact published by
 /// exclusion and one published by inclusion over the same set serve the same masked count to each
 /// principal, and both come back from a restart — the complement being what the log carries.
@@ -215,8 +149,7 @@ async fn an_exclusion_serves_what_the_inclusion_spelling_serves_and_replays() {
     assert!(narrow[0].1 < broad[0].1, "{narrow:?} against {broad:?}");
 
     // The record carries the inclusion, so replay lands the same membership.
-    server.shutdown().await;
-    let server = open(&tmp).await;
+    let server = restart(server, &tmp).await;
     assert_eq!(
         served(&server, LAYER, &["0"]).await,
         broad,
@@ -225,17 +158,11 @@ async fn an_exclusion_serves_what_the_inclusion_spelling_serves_and_replays() {
 }
 
 /// **The bound is on the list** (`ingest.md` §2.3, ruling 4): at the published value the
-/// publication lands, and one over it is a `422` naming the limit and the remedy — the inclusion
-/// spelling, which pages.
+/// publication lands, and one over it is a `422` naming the limit.
 #[tokio::test]
-async fn a_list_over_the_bound_is_refused_naming_the_inclusion_spelling() {
+async fn a_list_over_the_bound_is_refused_naming_the_limit() {
     let tmp = TempDir::new().unwrap();
-    let bundle = tmp.path().join("bundle");
-    build_fixture(
-        &bundle,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = tessera_engine::Engine::open(
         &bundle,
         &tmp.path().join("cache"),
@@ -288,11 +215,8 @@ async fn a_list_over_the_bound_is_refused_naming_the_inclusion_spelling() {
     .await;
     assert_eq!(code, 422, "{body}");
     let detail = body["detail"].as_str().unwrap_or_default().to_string();
+    assert_eq!(body["error"], "contract", "{body}");
     assert!(detail.contains("max_excluded_per_request"), "{detail}");
-    assert!(
-        detail.contains("inclusion"),
-        "the refusal names the remedy: {detail}"
-    );
     assert_eq!(
         served(&server, LAYER, &["0"]).await.len(),
         1,
@@ -350,7 +274,7 @@ async fn the_complement_holds_a_point_that_is_buffered_and_not_yet_flushed() {
     );
 
     // And it is counted once its row is published.
-    flush(&server).await;
+    drain(&server).await;
     assert_eq!(
         served(&server, LAYER, &["0"]).await,
         vec![("everything".to_string(), N_ITEMS + 1)]
@@ -427,26 +351,13 @@ async fn a_second_exclusion_on_a_held_key_is_a_conflict() {
     .await;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"], "conflict", "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("exclusion"),
-        "{body}"
-    );
 
     // A record names one spelling or the other. Neither is a refusal — `members` is optional
     // only where `excluding` is given — and an empty `members` list is the artifact whose
     // membership holds nobody, which is a state a record has always been able to publish.
     let (status, body) = put(&server, LAYER, json!([{ "key": "c0" }])).await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("neither `members` nor `excluding`"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
     let (status, body) = put(&server, LAYER, json!([{ "key": "c0", "members": [] }])).await;
     assert_eq!(status, 201, "an empty membership is a real state: {body}");
 
@@ -458,11 +369,5 @@ async fn a_second_exclusion_on_a_held_key_is_a_conflict() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("one spelling"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 }

@@ -15,44 +15,13 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow::array::{Float64Array, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::Value;
 use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
+use tessera_build::build;
 use tessera_spatial::frame::AlignedSquare;
 use tessera_spatial::{Bounds, Projection};
-
-/// A points file in **longitude and latitude**, which is the only spelling a projected view reads
-/// (`projections.md` §2). The coordinates are a coarse graticule over the whole world, so every
-/// frame below holds some of them and none of the builds refuses for want of data.
-fn write_lon_lat_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("lon", DataType::Float64, false),
-        Field::new("lat", DataType::Float64, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let lons: Vec<f64> = ids.iter().map(|e| -180.0 + (e % 360) as f64).collect();
-    let lats: Vec<f64> = ids.iter().map(|e| -80.0 + (e % 160) as f64).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(lons)),
-            Arc::new(Float64Array::from(lats)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
 
 /// A bundle built under `projection` against `frame`.
 ///
@@ -65,15 +34,18 @@ fn build_projected(out: &Path, tmp: &Path, projection: Projection, frame: Bounds
         out.display().to_string().len()
     ));
     let pairs = tmp.join(format!("pairs-{}.parquet", out.display().to_string().len()));
-    write_lon_lat_points(&points, N_ITEMS);
+    // A coarse graticule over the whole world, so every frame below holds some of it and no build
+    // refuses for want of data.
+    let places: Vec<(f64, f64)> = (0..N_ITEMS)
+        .map(|e| (-180.0 + (e % 360) as f64, -80.0 + (e % 160) as f64))
+        .collect();
+    write_lon_lat(&points, &places);
     write_pairs_n(&pairs, N_ITEMS);
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
+    let args = build_args(
+        out,
+        vec![tessera_build::ViewArgs {
             projection,
             extent: frame,
-            points: points.clone(),
             // `lon`/`lat` become the canonical `x`/`y` at the declaration, which is what
             // `compile_projected_fields` does for a `[[view]]` block; built outright here because
             // there is no document around this build.
@@ -81,29 +53,9 @@ fn build_projected(out: &Path, tmp: &Path, projection: Projection, frame: Bounds
                 "points",
                 [("x", "lon"), ("y", "lat")],
             ),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            ..view_args("s0", &points, AccessInput::relation(&pairs))
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
-    };
+    );
     build(&args).expect("a projected fixture build should succeed");
 }
 
@@ -253,12 +205,7 @@ async fn a_web_mercator_sub_square_publishes_the_tile_it_is() {
 #[tokio::test]
 async fn a_none_view_publishes_none_and_no_scheme() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let view = meta_view(&bundle_root, tmp.path(), "none").await;
 
     assert_eq!(view["projection"], "none");

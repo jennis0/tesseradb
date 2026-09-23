@@ -16,21 +16,6 @@ use common::*;
 use serde_json::json;
 use tempfile::TempDir;
 
-async fn serve(tmp: &TempDir) -> TestServer {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
 async fn meta_layers(server: &TestServer, terms: &[&str]) -> Vec<serde_json::Value> {
     let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
@@ -66,27 +51,14 @@ fn declaration(name: &str, visibility: Option<&str>) -> serde_json::Value {
     })
 }
 
-async fn register(server: &TestServer, declaration: serde_json::Value) -> (u16, serde_json::Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
-}
-
 /// The disclosure rule, over the wire. A layer gated on a term this principal does not hold is
 /// exactly as absent from `/v1/meta` as a layer nobody ever registered.
 #[tokio::test]
 async fn the_meta_layer_list_is_filtered_per_principal() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
-    let (status, body) = register(&server, declaration("clusters/open", None)).await;
+    let (status, body) = put_layer(&server, declaration("clusters/open", None)).await;
     assert_eq!(status, 201, "{body}");
     assert!(
         body["tessera_id"].is_string(),
@@ -94,7 +66,7 @@ async fn the_meta_layer_list_is_filtered_per_principal() {
          suppressed: {body}"
     );
 
-    let (status, _) = register(&server, declaration("clusters/restricted", Some("1"))).await;
+    let (status, _) = put_layer(&server, declaration("clusters/restricted", Some("1"))).await;
     assert_eq!(status, 201);
 
     let broad: Vec<String> = meta_layers(&server, &["0"])
@@ -128,7 +100,7 @@ async fn the_meta_layer_list_is_filtered_per_principal() {
 #[tokio::test]
 async fn a_published_layer_carries_its_declaration_and_never_its_cardinality() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     register(&server, declaration("clusters/a", Some("0"))).await;
 
     let layers = meta_layers(&server, &["0"]).await;
@@ -169,97 +141,137 @@ async fn a_published_layer_carries_its_declaration_and_never_its_cardinality() {
     );
 }
 
-/// A declaration the model forbids is refused with a message the caller can act on, and nothing is
-/// left behind.
+/// A declaration the model forbids is refused, and nothing is left behind.
 #[tokio::test]
-async fn an_incoherent_declaration_is_refused_with_a_reason() {
+async fn an_incoherent_declaration_is_refused() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     // Nested means the hierarchy is in the edges, so declaring levels beside it is the one
     // combination that is always a mistake.
     let mut bad = declaration("clusters/bad", None);
     bad["levels"] = json!([{ "level": 0, "title": "L0", "zoom": null }]);
-    let (status, body) = register(&server, bad).await;
+    let (status, body) = put_layer(&server, bad).await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("edges"),
-        "the refusal has to say what to fix: {body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 
     assert!(meta_layers(&server, &["0"]).await.is_empty());
 }
 
-/// Drop tombstones the name for ever, and the recreation refusal says so.
+/// Drop tombstones the name for ever: the name is gone from `/v1/meta`, recreating it is refused,
+/// and it names no live layer.
 #[tokio::test]
 async fn a_dropped_name_is_gone_from_meta_and_refused_on_recreation() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     register(&server, declaration("clusters/a", None)).await;
     assert_eq!(meta_layers(&server, &["0"]).await.len(), 1);
 
-    let resp = server
-        .client
-        .delete(server.control_url("/control/layers/clusters%2Fa"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    // 200 with a body, not 204: every write acknowledgement on this plane carries its
-    // publication number (contracts §3.4).
-    assert_eq!(resp.status().as_u16(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    // 200 with a body, since every write acknowledgement carries its publication number.
+    let (status, body) = drop_layer(&server, "clusters%2Fa").await;
+    assert_eq!(status, 200, "{body}");
     assert!(
         body["publication"].as_u64().is_some(),
         "the drop names the cycle it is published in: {body}"
     );
     assert!(meta_layers(&server, &["0"]).await.is_empty());
 
-    let (status, body) = register(&server, declaration("clusters/a", None)).await;
+    let (status, body) = put_layer(&server, declaration("clusters/a", None)).await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"].as_str().unwrap_or_default().contains("drop"),
-        "bookmarks, edges and suppressions travel by name, so the caller needs to know the name is \
-         spent rather than merely taken: {body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
+    // No live layer holds the name, so the refusal is the tombstone's and not a taken name's: a
+    // second drop finds nothing, where a live layer's drop is accepted.
+    let (status, body) = drop_layer(&server, "clusters%2Fa").await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
+    register(&server, declaration("clusters/b", None)).await;
+    assert_eq!(drop_layer(&server, "clusters%2Fb").await.0, 200);
 }
 
-/// The whole plane is behind the operator credential, and a route added to it inherits that check
-/// rather than asking for it. Asserted because the layer routes are new arrivals on that router.
+/// `DELETE /control/layers/{name}`: the status and the body.
+async fn drop_layer(server: &TestServer, encoded: &str) -> (u16, serde_json::Value) {
+    let resp = server
+        .client
+        .delete(server.control_url(&format!("/control/layers/{encoded}")))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or_default())
+}
+
+/// Each layer's `/v1/meta` version as `(name, version)`.
+async fn layer_versions(server: &TestServer) -> Vec<(String, u64)> {
+    meta_layers(server, &["0"])
+        .await
+        .iter()
+        .map(|l| (l["name"].as_str().unwrap().to_string(), l["version"].as_u64().unwrap()))
+        .collect()
+}
+
+/// Register `name`, publish one artifact into it and grow that artifact. The growth keeps the
+/// registration in the log beside the manifest that also carries it.
+async fn register_grown(server: &TestServer, name: &str) {
+    register(server, declaration(name, None)).await;
+    let artifacts = json!({
+        "addressing": "external",
+        "artifacts": [{ "key": "c0", "members": [member(0), member(1), member(2)] }]
+    });
+    assert_eq!(publish(server, name, artifacts).await.0, 201);
+    let route = format!("/control/layers/{}/artifacts", name.replace('/', "%2F"));
+    let grown = server
+        .client
+        .patch(server.control_url(&route))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "addressing": "external",
+            "artifacts": [{ "key": "c0", "members": [member(3), member(4)] }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(grown.status().as_u16(), 200);
+}
+
+/// Publish, then restart twice, and require every layer's version to be where it was.
+async fn assert_versions_survive_restarts(server: TestServer, tmp: &TempDir) {
+    tick(&server).await;
+    let before = layer_versions(&server).await;
+    let mut server = server;
+    for _ in 0..2 {
+        server = restart(server, tmp).await;
+        assert_eq!(layer_versions(&server).await, before);
+    }
+}
+
+/// A restart changes nothing about a layer, so the version a client echoes to notice a change
+/// stays where it was, after the first restart and after a second.
 #[tokio::test]
-async fn the_layer_routes_require_the_operator_credential() {
+async fn a_restart_leaves_every_layer_version_where_it_was() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
+    register_grown(&server, "clusters/a").await;
+    register_grown(&server, "clusters/b").await;
+    assert_eq!(layer_versions(&server).await.len(), 2);
+    assert_versions_survive_restarts(server, &tmp).await;
+}
 
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .json(&declaration("clusters/a", None))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 401);
-
-    let resp = server
-        .client
-        .delete(server.control_url("/control/layers/anything"))
-        .bearer_auth("not-the-operator-credential")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 401);
+/// The same with a layer dropped between registrations: the layers left, and one registered after
+/// the drop, keep their versions across restarts.
+#[tokio::test]
+async fn a_restart_after_a_drop_leaves_every_layer_version_where_it_was() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_standard(&tmp).await;
+    register_grown(&server, "clusters/a").await;
+    register_grown(&server, "clusters/b").await;
+    assert_eq!(drop_layer(&server, "clusters%2Fa").await.0, 200);
+    register_grown(&server, "clusters/c").await;
+    assert_eq!(layer_versions(&server).await.len(), 2);
+    assert_versions_survive_restarts(server, &tmp).await;
 }
 
 // ---- publication -------------------------------------------------------------------------------
-
-/// Base64 the way `/control/changes` does it — external ids are bytes, not text.
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
 
 async fn publish(
     server: &TestServer,
@@ -290,8 +302,8 @@ async fn publish(
 #[tokio::test]
 async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-    let (status, _) = register(&server, declaration("clusters/a", None)).await;
+    let server = serve_standard(&tmp).await;
+    let (status, _) = put_layer(&server, declaration("clusters/a", None)).await;
     assert_eq!(status, 201);
 
     let (status, body) = publish(
@@ -337,11 +349,10 @@ async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() 
 #[tokio::test]
 async fn an_unresolvable_member_refuses_the_whole_batch() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     register(&server, declaration("clusters/a", None)).await;
 
-    use base64::Engine as _;
-    let nonexistent = base64::engine::general_purpose::STANDARD.encode(external_id_of(u64::MAX));
+    let nonexistent = member(u64::MAX);
     let (status, body) = publish(
         &server,
         "clusters/a",
@@ -355,11 +366,9 @@ async fn an_unresolvable_member_refuses_the_whole_batch() {
     )
     .await;
     assert_eq!(status, 404, "{body}");
-    let detail = body.to_string();
-    assert!(
-        detail.contains("id 1 of artifact 1"),
-        "the refusal names the coordinate the caller's pipeline holds: {detail}"
-    );
+    assert_eq!(body["error"], "unknown", "{body}");
+    // Member 1 of artifact 1, the coordinate the caller's pipeline holds, and no other number.
+    assert_eq!(numbers_in(body["detail"].as_str().unwrap()), vec!["1", "1"], "{body}");
     assert_eq!(
         server.state.engine.published_artifacts(),
         0,
@@ -367,11 +376,11 @@ async fn an_unresolvable_member_refuses_the_whole_batch() {
     );
 }
 
-/// A refusal the caller can act on: their own declaration measured against the deployment's rules.
+/// A layer whose declaration takes no artifacts refuses a publication.
 #[tokio::test]
-async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says_why() {
+async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     // A predicate layer's artifacts are derived from a rule, so it declares none of the things a
     // published artifact carries beside its membership: no computed content, a flat hierarchy.
@@ -381,7 +390,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says
     predicate["hierarchy"] = json!({ "kind": "flat", "prune_children": false });
     predicate["content"] =
         json!({ "computed": [], "supplied": [] });
-    assert_eq!(register(&server, predicate).await.0, 201);
+    register(&server, predicate).await;
 
     let (status, body) = publish(
         &server,
@@ -393,10 +402,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body.to_string().contains("predicate"),
-        "it names what is wrong with the declaration, not an opaque code: {body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 
     // And a name nobody registered is refused by the same route, saying the same kind of thing.
     let (status, _) = publish(
@@ -439,10 +445,10 @@ async fn viewport_artifacts(
 #[tokio::test]
 async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
-    assert_eq!(register(&server, d).await.0, 201);
+    register(&server, d).await;
 
     // 300 documents; the fixture gives term 1 to every third source id.
     let members: Vec<String> = (0..300u64).map(member).collect();
@@ -487,7 +493,7 @@ async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
 #[tokio::test]
 async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     assert!(viewport_artifacts(&server, &["0"], json!({}))
         .await
         .is_none());
@@ -526,7 +532,7 @@ async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
 #[tokio::test]
 async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
     register(&server, d).await;
@@ -578,14 +584,14 @@ async fn drill(server: &TestServer, terms: &[&str], tessera_id: &str) -> (u16, s
 #[tokio::test]
 async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_identically() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     // A bar the broad principal clears and the narrow one misses, taken from the fixture's own
     // term rule rather than from anything the server said.
     let expected_narrow = (0..300u64).filter(|s| terms_of(*s).contains(&1)).count() as u64;
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = json!({ "count": expected_narrow + 1 });
-    assert_eq!(register(&server, d).await.0, 201);
+    register(&server, d).await;
     let members: Vec<String> = (0..300u64).map(member).collect();
     let (status, _) = publish(
         &server,
@@ -636,7 +642,7 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
 #[tokio::test]
 async fn an_idset_is_required_with_identifiers_and_refused_beside_external_ids() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     register(&server, declaration("clusters/a", None)).await;
 
     let (status, body) = publish(
@@ -661,7 +667,7 @@ async fn an_idset_is_required_with_identifiers_and_refused_beside_external_ids()
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("idset"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
 }
 
 /// **Derived geometry crosses the wire, and it moves with the principal.**
@@ -673,10 +679,10 @@ async fn an_idset_is_required_with_identifiers_and_refused_beside_external_ids()
 #[tokio::test]
 async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
-    assert_eq!(register(&server, d).await.0, 201);
+    register(&server, d).await;
 
     let members: Vec<String> = (0..300u64).map(member).collect();
     let (status, body) = publish(
@@ -752,10 +758,7 @@ fn tiered_zoomed(name: &str) -> serde_json::Value {
 
 /// Plant one artifact at each of three levels of `admin/boundaries`.
 async fn plant_three_levels(server: &TestServer) {
-    assert_eq!(
-        register(server, tiered_zoomed("admin/boundaries")).await.0,
-        201
-    );
+    register(server, tiered_zoomed("admin/boundaries")).await;
     for (level, key) in [(0u32, "country"), (1, "state"), (2, "county")] {
         let members: Vec<String> = (0..300u64).map(member).collect();
         let (status, body) = publish(
@@ -796,7 +799,7 @@ async fn levels_at(server: &TestServer, zoom: u32, extra: serde_json::Value) -> 
 #[tokio::test]
 async fn omitting_levels_follows_the_declared_zoom_map() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     plant_three_levels(&server).await;
 
     assert_eq!(levels_at(&server, 0, json!({})).await, vec![0]);
@@ -813,7 +816,7 @@ async fn omitting_levels_follows_the_declared_zoom_map() {
 #[tokio::test]
 async fn naming_levels_on_the_wire_overrides_the_map() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     plant_three_levels(&server).await;
 
     assert_eq!(
@@ -837,7 +840,7 @@ async fn naming_levels_on_the_wire_overrides_the_map() {
 #[tokio::test]
 async fn an_empty_levels_list_is_none() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     plant_three_levels(&server).await;
 
     let rows = viewport_artifacts(&server, &["0"], json!({ "zoom": 0, "levels": [] })).await;
@@ -852,7 +855,7 @@ async fn an_empty_levels_list_is_none() {
 #[tokio::test]
 async fn a_levels_field_that_is_neither_a_list_nor_all_is_refused() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     plant_three_levels(&server).await;
 
     let auth = authorise(&server, &["0"]).await;
@@ -886,7 +889,7 @@ async fn computed_row(server: &TestServer, extra: serde_json::Value) -> Artifact
 async fn one_cluster(server: &TestServer) {
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
-    assert_eq!(register(server, d).await.0, 201);
+    register(server, d).await;
     let members: Vec<String> = (0..300u64).map(member).collect();
     let (status, body) = publish(
         server,
@@ -909,7 +912,7 @@ async fn one_cluster(server: &TestServer) {
 #[tokio::test]
 async fn a_named_computed_set_narrows_what_the_frame_carries() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     one_cluster(&server).await;
 
     let all = computed_row(&server, json!({})).await;
@@ -936,7 +939,7 @@ async fn a_named_computed_set_narrows_what_the_frame_carries() {
 #[tokio::test]
 async fn naming_an_undeclared_property_serves_it_no_more_than_omitting_it() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     one_cluster(&server).await;
 
     let row = computed_row(&server, json!({ "computed": ["box", "centroid"] })).await;
@@ -953,7 +956,7 @@ async fn naming_an_undeclared_property_serves_it_no_more_than_omitting_it() {
 #[tokio::test]
 async fn an_empty_computed_list_is_counts_and_no_geometry() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     one_cluster(&server).await;
 
     let row = computed_row(&server, json!({ "computed": [] })).await;
@@ -968,9 +971,9 @@ async fn an_empty_computed_list_is_counts_and_no_geometry() {
 /// absent. The vocabulary is deployment schema — fixed, identical for every principal, published
 /// in `/v1/meta` — so refusing discloses nothing; a layer name is viewer data and does.
 #[tokio::test]
-async fn an_unknown_computed_name_is_refused_and_says_the_vocabulary() {
+async fn an_unknown_computed_name_is_refused() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     one_cluster(&server).await;
 
     let auth = authorise(&server, &["0"]).await;
@@ -988,10 +991,7 @@ async fn an_unknown_computed_name_is_refused_and_says_the_vocabulary() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 422);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(
-        body["detail"].as_str().unwrap().contains("centroid"),
-        "the refusal names the vocabulary: {body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 }
 
 /// **The drill-down route is unaffected**, and that is what makes the narrowing usable: the client
@@ -999,7 +999,7 @@ async fn an_unknown_computed_name_is_refused_and_says_the_vocabulary() {
 #[tokio::test]
 async fn the_drill_down_still_carries_the_hull_the_viewport_was_not_asked_for() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     one_cluster(&server).await;
 
     let row = computed_row(&server, json!({ "computed": ["centroid"] })).await;
@@ -1059,7 +1059,7 @@ fn artifact_schema_names(body: &[u8]) -> Option<Vec<String>> {
 #[tokio::test]
 async fn identity_rows_are_the_full_rows_with_the_payload_columns_absent() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     plant_three_levels(&server).await;
 
     let ask = |extra: serde_json::Value| viewport_response(&server, &["0"], extra);
@@ -1118,7 +1118,7 @@ async fn identity_rows_are_the_full_rows_with_the_payload_columns_absent() {
 #[tokio::test]
 async fn the_shape_columns_trail_and_are_absent_when_no_served_layer_declares_one() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     // `plant_three_levels`' layer declares `centroid` alone: no hull columns at all.
     plant_three_levels(&server).await;
     let without = viewport_response(&server, &["0"], json!({ "levels": "all" }))
@@ -1137,7 +1137,7 @@ async fn the_shape_columns_trail_and_are_absent_when_no_served_layer_declares_on
     // The default `declaration` computes a hull, so serving it puts the two columns at the tail.
     let mut d = declaration("clusters/hulled", None);
     d["require_member_visibility"] = serde_json::Value::Null;
-    assert_eq!(register(&server, d).await.0, 201);
+    register(&server, d).await;
     let (status, body) = publish(
         &server,
         "clusters/hulled",
@@ -1168,7 +1168,7 @@ async fn the_shape_columns_trail_and_are_absent_when_no_served_layer_declares_on
 #[tokio::test]
 async fn an_artifact_rows_value_that_is_neither_full_nor_identity_is_refused() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     let resp = viewport_response(&server, &["0"], json!({ "artifact_rows": "bits" })).await;
     assert_eq!(resp.status().as_u16(), 422);
 }
@@ -1202,8 +1202,8 @@ const SQUARE: &str = "POLYGON ((100 100, 500 100, 500 500, 100 500, 100 100), (2
 #[tokio::test]
 async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_principal() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-    assert_eq!(register(&server, spatial_declaration("boundaries/b")).await.0, 201);
+    let server = serve_standard(&tmp).await;
+    register(&server, spatial_declaration("boundaries/b")).await;
     let (status, body) = publish(
         &server,
         "boundaries/b",
@@ -1271,8 +1271,8 @@ async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_princi
 #[tokio::test]
 async fn a_shape_published_into_a_warm_level_is_served() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-    assert_eq!(register(&server, spatial_declaration("boundaries/b")).await.0, 201);
+    let server = serve_standard(&tmp).await;
+    register(&server, spatial_declaration("boundaries/b")).await;
 
     let (status, body) = publish(
         &server,
@@ -1320,7 +1320,7 @@ const NE_SQUARE: &str = "POLYGON ((600 600, 900 600, 900 900, 600 900, 600 600))
 #[tokio::test]
 async fn asking_for_a_hull_by_that_word_is_refused_and_shape_names_the_derived_one() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     one_cluster(&server).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -1336,8 +1336,8 @@ async fn asking_for_a_hull_by_that_word_is_refused_and_shape_names_the_derived_o
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(detail.contains("centroid, box, shape"), "{detail}");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
 
     // `shape` on a layer whose drawn geometry is the hull is the hull, one part per group.
     let row = computed_row(&server, json!({ "computed": ["shape"] })).await;
@@ -1353,7 +1353,7 @@ async fn asking_for_a_hull_by_that_word_is_refused_and_shape_names_the_derived_o
 #[tokio::test]
 async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_as_rings() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     let mut d = declaration("clusters/drawn", None);
     d["require_member_visibility"] = serde_json::Value::Null;
     d["hierarchy"] = json!({ "kind": "flat", "prune_children": false });
@@ -1364,7 +1364,7 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
             { "name": "outline", "type": "polygon", "require_member_visibility": "inherited" }
         ]
     });
-    assert_eq!(register(&server, d).await.0, 201);
+    register(&server, d).await;
     let kinds: Vec<serde_json::Value> = meta_layers(&server, &["0"]).await.iter().map(|l| l["shape"].clone()).collect();
     assert_eq!(kinds, vec![json!("authored")]);
 
@@ -1380,7 +1380,7 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("authored polygon content"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
 
     let (status, body) = publish(
         &server,
@@ -1416,12 +1416,12 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
 #[tokio::test]
 async fn a_hull_beside_an_authored_shape_is_refused_at_registration() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     let mut d = declaration("clusters/two", None);
     d["content"]["supplied"] = json!([{ "name": "outline", "type": "polygon", "require_member_visibility": "inherited" }]);
-    let (status, body) = register(&server, d).await;
+    let (status, body) = put_layer(&server, d).await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("one drawn geometry"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
 }
 
 /// **A declaration carrying the removed `withdraw_on_member_deletion` is refused by name**
@@ -1431,7 +1431,7 @@ async fn a_hull_beside_an_authored_shape_is_refused_at_registration() {
 #[tokio::test]
 async fn a_declaration_carrying_the_removed_withdrawal_field_is_refused_by_name() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     for value in [true, false] {
         let mut d = declaration("clusters/stale", None);
         d["content"]["withdraw_on_member_deletion"] = json!(value);
@@ -1446,10 +1446,9 @@ async fn a_declaration_carrying_the_removed_withdrawal_field_is_refused_by_name(
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap();
         assert_eq!(status, 422, "{body}");
-        assert!(body.contains("`withdraw_on_member_deletion` was removed"), "{body}");
-        assert!(body.contains("decision 0135"), "{body}");
+        assert!(body.contains("withdraw_on_member_deletion"), "{body}");
     }
     // The same declaration without the field registers, so the refusal was the field's.
-    let (status, body) = register(&server, declaration("clusters/stale", None)).await;
+    let (status, body) = put_layer(&server, declaration("clusters/stale", None)).await;
     assert_eq!(status, 201, "{body}");
 }

@@ -24,52 +24,21 @@ use tempfile::TempDir;
 
 const TREE: &str = "clusters/tree";
 
-async fn serve(tmp: &TempDir) -> TestServer {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
-fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
-}
-
 async fn register_and_plant(server: &TestServer) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
-            "name": TREE,
-            "title": "tree",
-            "views": ["s0"],
-            "membership": "enumerated",
-            "visibility": null,
-            "artifact_visibility": { "field": null, "default": "inherited" },
-            "require_member_visibility": null,
-            "hierarchy": { "kind": "flat", "prune_children": false },
-            "content": { "computed": ["centroid"], "supplied": [] },
-            "depends_on": [],
-            "levels": []
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 201);
+    let tree = json!({
+        "name": TREE,
+        "title": "tree",
+        "views": ["s0"],
+        "membership": "enumerated",
+        "visibility": null,
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": null,
+        "hierarchy": { "kind": "flat", "prune_children": false },
+        "content": { "computed": ["centroid"], "supplied": [] },
+        "depends_on": [],
+        "levels": []
+    });
+    register(server, tree).await;
     let resp = server
         .client
         .put(server.control_url(&format!(
@@ -308,8 +277,7 @@ async fn a_layer_cannot_be_registered_under_the_reserved_word() {
         .send()
         .await
         .unwrap();
-    let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap();
-    assert_eq!(status, 422, "{body}");
-    assert!(body.contains("reserved"), "{body}");
+    assert_eq!(resp.status().as_u16(), 422);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
 }

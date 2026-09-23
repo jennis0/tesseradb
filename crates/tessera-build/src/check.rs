@@ -30,12 +30,13 @@ use std::path::{Path, PathBuf};
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tessera_spatial::tiler::ScalarType;
+use tessera_store::scalar_column;
 
 use crate::config::{
     ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup, ENTITY_ID,
 };
 use crate::ids::Addressing;
-use crate::input::{column_carries, TERM_ID};
+use crate::input::TERM_ID;
 
 /// The declaration a finding or a source is about, in its parts.
 ///
@@ -365,7 +366,8 @@ fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut
                 );
                 continue;
             };
-            if !column_carries(attribute, field.data_type()) {
+            let category = attribute.vocabulary.is_some();
+            if !scalar_column::carries(attribute.ty, category, field.data_type()) {
                 report.note(
                     &object,
                     format!(
@@ -450,7 +452,10 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
                 );
                 continue;
             };
-            if column == attribute.column() && !column_carries(attribute, field.data_type()) {
+            let category = attribute.vocabulary.is_some();
+            if column == attribute.column()
+                && !scalar_column::carries(attribute.ty, category, field.data_type())
+            {
                 report.note(
                     &object,
                     format!(
@@ -744,37 +749,43 @@ fn check_group_labels(
     schema: &ArrowSchema,
     report: &mut CheckReport,
 ) {
-    let Some(field) = &point_visibility.field else {
-        return;
-    };
-    match schema.column_with_name(field) {
-        None => report.note(
-            object,
-            format!(
-                "`point_visibility.field = \"{field}\"` names a column this view's source does not \
-                 carry. Its columns are: {}",
-                columns(schema)
-            ),
-        ),
-        Some((_, found)) => {
-            let ok = match found.data_type() {
-                DataType::List(inner) | DataType::LargeList(inner) => {
-                    crate::utf8::is_utf8(inner.data_type())
-                }
-                other => crate::utf8::is_utf8(other),
-            };
-            if !ok {
-                report.note(
-                    object,
-                    format!(
-                        "the access column '{field}' holds {:?}. A point's access terms are \
-                         strings — one, or a list of them",
-                        found.data_type()
-                    ),
-                );
-            }
-        }
+    if let Some(field) = &point_visibility.field {
+        check_access_column(object, field, schema, report);
     }
+}
+
+/// A column named as where access labels are read from: present, and a string or a list of
+/// strings. A view's `point_visibility.field` and a layer's `artifact_visibility.field` both name
+/// one.
+fn check_access_column(object: &Object, field: &str, schema: &ArrowSchema, report: &mut CheckReport) {
+    if let Some(problem) = access_column_problem(field, schema) {
+        report.note(object, problem);
+    }
+}
+
+/// What is wrong with the column named as where access labels are read from, or `None`: it must be
+/// present, and a string, a list of strings or a dictionary of strings. The check and the build's
+/// reader of an artifact source both ask this.
+pub(crate) fn access_column_problem(field: &str, schema: &ArrowSchema) -> Option<String> {
+    let Some((_, found)) = schema.column_with_name(field) else {
+        return Some(format!(
+            "`{field}` is named as the access column, and this source does not carry it. Its \
+             columns are: {}",
+            columns(schema)
+        ));
+    };
+    let ok = match found.data_type() {
+        DataType::List(inner) | DataType::LargeList(inner) => crate::utf8::is_utf8(inner.data_type()),
+        DataType::Dictionary(_, values) => crate::utf8::is_utf8(values),
+        other => crate::utf8::is_utf8(other),
+    };
+    (!ok).then(|| {
+        format!(
+            "the access column '{field}' holds {:?}. Access labels are strings, one or a list of \
+             them",
+            found.data_type()
+        )
+    })
 }
 
 /// Where each point's access terms come from: a column of the view's own source, or an exploded
@@ -786,38 +797,8 @@ fn check_point_visibility(
     report: &mut CheckReport,
 ) {
     let object = Object::new("view", &view.name).part("`point_visibility`");
-    if let Some(field) = &view.point_visibility.field {
-        if let Some(schema) = view_schema {
-            match schema.column_with_name(field) {
-                None => report.note(
-                    &object,
-                    format!(
-                        "`field = \"{field}\"` names a column the view's source does not carry. \
-                         Its columns are: {}",
-                        columns(schema)
-                    ),
-                ),
-                Some((_, found)) => {
-                    let ok = match found.data_type() {
-                        DataType::List(inner) | DataType::LargeList(inner) => {
-                            crate::utf8::is_utf8(inner.data_type())
-                        }
-                        other => crate::utf8::is_utf8(other),
-                    };
-                    if !ok {
-                        report.note(
-                            &object,
-                            format!(
-                                "the access column '{field}' holds {:?}. A point's access terms \
-                                 are a `list<string>`, or a plain `string` where a point carries \
-                                 one term",
-                                found.data_type()
-                            ),
-                        );
-                    }
-                }
-            }
-        }
+    if let (Some(field), Some(schema)) = (&view.point_visibility.field, view_schema) {
+        check_access_column(&object, field, schema, report);
     }
     if let Some(path) = &view.point_visibility.source {
         let Some(schema) = open(report, &object, path) else {
@@ -860,6 +841,14 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
                     // `key` is the one field a build-published artifact cannot do without: it is
                     // the address that survives a rebuild and what an edge into the layer names.
                     require(report, &object, &schema, fields, "key");
+                    if let Some(field) = config
+                        .layers
+                        .iter()
+                        .find(|d| d.name == sources.name)
+                        .and_then(|d| d.artifact_visibility.field.as_deref())
+                    {
+                        check_access_column(&object, field, &schema, report);
+                    }
                     require_named(
                         report,
                         &object,

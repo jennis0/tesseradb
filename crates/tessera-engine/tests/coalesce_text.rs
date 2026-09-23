@@ -198,21 +198,14 @@ fn text_extents_for_column(root: &Path) -> usize {
 
 /// Flush `COALESCE_WIDTH` items and wait for the pass that collapses their layers.
 fn flush_a_window(engine: &Engine, root: &Path, from: usize) -> Vec<u32> {
-    let coalesces = engine.write_executor_stats().coalesces;
     let entities: Vec<u32> = (from..from + COALESCE_WIDTH)
         .map(|i| ingest_and_flush(engine, root, &format!("fresh-{i}"), flushed_prose(i)))
         .collect();
-    // The pass is selected on a tick, and a flush is what drives one.
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().coalesces <= coalesces {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the coalesce never published: {} text extents live",
-            text_extents_for_column(root)
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    tick_until(engine, "the text layers to coalesce", std::time::Duration::from_secs(60), || {
+        let generation = engine.generation();
+        let live = &generation.bundle.partitions["default"].manifest.text_extents;
+        live.iter().filter(|e| e.column == "prose").count() < COALESCE_WIDTH
+    });
     entities
 }
 

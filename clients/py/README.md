@@ -5,10 +5,14 @@ both. The widget and the SDK are here; the in-process instance joins them later.
 code with `reference/`, the test-only oracle.
 
 ```
-pip install tesseradb            # authorise, Token — the standard library and nothing else
+pip install tesseradb            # read, create, declare, insert, commit; with pyarrow and the binary
 pip install 'tesseradb[widget]'  # + anywidget and the notebook widget, Map
-pip install 'tesseradb[local]'   # + pyarrow and the SDK: create, declare, insert, commit
 ```
+
+Every table the package returns is a pyarrow table; `.to_pandas()` on it gives a DataFrame where
+pandas is installed. `pip install tesseradb --no-deps` installs neither pyarrow nor the
+`tesseradb-native` wheel that carries the `tessera` binary: install `pyarrow>=14` by hand, and
+put a `tessera` binary on `PATH` or name it with `TESSERA_BIN` to make or serve a database.
 
 From this checkout, `pip install -e 'clients/py[widget]'` — the wheel's build hook
 (`hatch_build.py`) runs `npm ci` (when the install is stale) and `npm run build -w
@@ -32,7 +36,7 @@ categories; a week of new papers into the database while it serves; a second clu
 it already holds; one set of points under two projections; and the database saved, reopened and
 handed to `tessera serve --deployment`.
 
-They need `pip install -e 'clients/py[widget,local]'`, a `tessera` binary on `PATH` or named by
+They need `pip install -e 'clients/py[widget]'`, a `tessera` binary on `PATH` or named by
 `TESSERA_BIN`, and the corpus at `data/notebook/`, which `TESSERA_NOTEBOOK_DATA` names elsewhere.
 Three things are in no extra, because the package needs none of them: `pandas`, which the first
 section's frame is built with, and the front end you are running, `marimo` or `jupyterlab`. So
@@ -129,9 +133,18 @@ NAME` does. On any other view's insert, attribute-named columns are ignored.
 `declare_columns(frame, skip=, render=, index=, keyword=, category=)` declares every column of a
 frame from its dtype, as details: stored in the record blob, shown at drill-down, neither rendered
 nor indexed. `render` and `index` apply their flags to the columns named, and `keyword` and
-`category` choose those families for string columns, which are `text` otherwise. It reads the
-frame's schema and never its values, and it never chooses `render`, which is fixed at the first
-commit.
+`category` choose those families for string columns, which are `text` otherwise. A categorical
+column (a pandas `Categorical` or an Arrow dictionary column of strings) is declared as a
+category unless `keyword=` names it. Every category it declares reads a new open vocabulary of
+the column's name, with codes of width `u16`, so at most 65,535 values; that width cannot be
+changed after the first commit, and `declare_vocabulary` with `declare_attribute` is how to
+choose another. It reads the frame's schema and never its values, and it never chooses `render`,
+which is fixed at the first commit.
+
+`insert` reads a categorical column as the values it holds, wherever it reads a column of those
+values: a category attribute's values, a layer's key, a view's access labels. A Parquet file
+read in place with a dictionary column is refused by the declaration check; decode it first, or
+insert it as a frame.
 
 ## How a row is named
 
@@ -249,81 +262,125 @@ loopback address on the viewer plane. A notebook page's origin is the front end'
 and not enumerable for a webview, so an origin list cannot state it; the three planes bind
 loopback, so what this admits are pages on this machine.
 
-## Reading it: the map, a principal, and the query verbs
+## Reading it: the map, a reader, and the queries
 
 ```python
-db.map(colour_by="cluster:clusters/kmeans")   # the explorer over this database, in this cell
-db.viewer(["cs.LG"]).map()                    # what one principal sees, not the operator filtered down
+db.map(colour_by="cluster:clusters/kmeans")   # the interactive map of everything, in this cell
+db.viewer(["cs.LG"]).map()                    # what someone holding only "cs.LG" sees
 ```
 
-`map(view=None, layers=None, colour_by=None, filters=None, height=480)` is the widget below,
-pointed at this database's own viewer plane with a token minted from the directory's session
-credential. The terms it grants are every access label the SDK inserted plus each view's default:
-that is Python asserting the local principal's authority, which is admissible on a
-single-operator database and nowhere else.
+A reader is who is asking. It holds a set of access terms, and it sees an item when it holds one
+of the item's labels. Every count, map, cluster and label a reader is given is computed over the
+items it may see, so two readers can get different answers from the same database.
 
-`viewer(terms)` mints for exactly the terms named, so the map of any principal is one call, and
-every count, density, cluster and label in it is computed inside that principal's mask rather
-than filtered out of the operator's. Which terms a session may hold is the session plane's to
-decide, so a term this database has inserted no label for is minted and reaches nothing: an empty
-map is what a principal who can see nothing is served.
+`db` reads as a reader holding every label its rows carry, plus each view's default label, so it
+sees everything. `db.viewer(terms)` is a reader holding exactly the terms named. A term no row
+carries is accepted and reaches nothing, and an empty list is refused.
 
-The query verbs are `Viewer`'s, one per operation the HTTP API publishes on the viewer plane,
-and are reached on a database through its all-terms viewer. Each goes through the viewer plane
-with the token, never by reading the bundle:
+`map(view=None, layers=None, colour_by=None, filters=None, height=480)` is the notebook widget
+described below, pointed at this database's server with a token made for the reader.
+
+### A selection
+
+A view is one layout of the items: a map with its own coordinates. `view(name)` returns a
+selection: one view, as one reader sees it. `filter` and `within` narrow it, and each returns a
+new selection, leaving the one it was called on unchanged.
 
 ```python
-db.meta()                                      # the views, layers and schema this principal reads
-db.viewport(bbox=None, view=None, filters=None, k=None, zoom=0)   # what is served, as a table
-db.item(tessera_id)                            # one record: fields, labels, views
+papers = db.view("s0")                                      # every item in the view
+cs = papers.filter({"archive": {"eq": "cs"}})
+ml = cs.filter({"primary_category": {"in": ["cs.LG", "stat.ML"]}})
+corner = ml.within((0.0, 0.0, 5000.0, 5000.0))              # (min_x, min_y, max_x, max_y)
+
+corner.count()                                # how many items
+corner.map(colour_by="primary_category")      # the map, on this view, filtered, framed on the box
+corner.sample(zoom=3, k=256)                  # the points a map draws at zoom 3, as a table
+
+db.viewer(["cs.LG"]).view("s0").count()       # the same view, as a narrower reader
+```
+
+A filter is a dictionary: a column name mapped to a test (`eq`, `in`, `range`, `prefix`,
+`match` and so on, by the column's type), or `all_of`, `any_of` or `none_of` over a list of
+filters. Filters added one after another must all match. A box is in the view's own
+coordinates, the ones the rows were inserted with, and an item on its edge is inside. A view in a
+view group is named `"<group>:<key>"`, and a name the reader cannot see is refused with the list
+of names it can.
+
+`count()` is the number of items the reader may see in the view that match every filter
+and lie inside the box. A box whose outline is longer than the server's `max_region_cells`
+setting allows is counted over the grid cells covering it, so the number can include items just
+outside the box. Two boxes that do not overlap select nothing.
+
+`map(colour_by=None, layers=None, height=480)` opens the widget on the selection's view with its
+filters applied and its camera on the box. The map draws everything in frame, including items
+just outside the box.
+
+`sample(zoom=0, k=None, ...)` is what a map draws at a zoom: a display sample, thinned by density,
+in which each map tile carries at most `k` points and the zoom sets how many tiles there are. It
+holds fewer rows than the selection has items; `count()` is the number, and the reader's
+`items(view, fields, ...)` reads the rows themselves, a response at a time: it returns the
+response's rows as a pyarrow table and the cursor to pass back as `cursor`, `None` once no row
+remains. Its other keywords are `POST /v1/items`' request fields, sent as given. The result reads as a pyarrow table of
+`tessera_id`, `code` (the point's position on the view's grid) and the columns declared with
+`render=True`. A category column holds each value's key, as a dictionary column, and null for a
+value the reader may not see; the keys are looked up once per reader and kept. Its schema metadata carries `tessera.counts` (`visible`, `matched`, `highlighted`
+and `served`, over the tiles the request touched), `tessera.request` and `tessera.trailer`.
+Beside the points it has `artifacts`, the annotations served with them, and `sub_cells`, finer
+counts that `underlay_offset` asks for; each is `None` when there were none. The other keywords
+are sent as given: `tiles`, `highlight` (a second filter that marks points without changing which
+are drawn), `layers`, `levels`, `computed`, `artifact_budget`, `artifact_rows`, `point_rows`,
+`underlay_offset` and `pin`.
+
+```python
+drawn = db.view("s0").sample(layers="all", highlight={"primary_category": {"eq": "cs.LG"}})
+drawn.num_rows                                # the points drawn
+drawn.artifacts.to_pylist()                   # the annotations drawn beside them
+```
+
+Not built yet: `count(by=column)`, a count per value of a column, which needs a new route on the
+server. Until then, `categories(column, prefix=...)` counts the items carrying each matching
+value, over the whole of what the reader may see.
+
+Not built yet: `items()`, the records of the items in a selection, which needs the server's
+records route. Until then, `item(tessera_id)` returns one record at a time.
+
+### The other queries
+
+```python
+db.meta()                                     # the views, layers and columns, as a dictionary
+db.item(tessera_id)                           # one item's record: fields, labels, views
+db.categories("primary_category")             # every value of a category column, as a table
+db.categories("primary_category", prefix="cs")   # the values starting "cs", with item counts
 
 v = db.viewer(["cs.LG"])
-v.categories("venue", limit=100)               # what a category column's codes stand for
-v.suggest_category_values("venue", "neur")     # the typeahead over its vocabulary
-v.browse_artifacts("s0", "clusters/kmeans")    # a layer's hierarchy, by lineage
-v.artifact(tessera_id, "s0")                   # one annotation: its count and its geometry
+v.browse_artifacts("s0", "clusters/kmeans")   # a page of a layer's annotations
+v.artifact(tessera_id, "s0")                  # one annotation's record: its count and outline
 ```
 
-`viewport()` returns a pyarrow table of `tessera_id`, `code` and the columns the schema declares
-as rendered. Those are points; a record is what `item()` returns. A served set is bounded by `k`,
-so the table's schema metadata carries what the response said about the set it came from:
-`tessera.counts` (`visible` is inside the mask and the tiles the box touches at the request's
-zoom, `matched` is that and the filter, `highlighted` that and the highlight, `served` is that
-and `k`), `tessera.trailer` and `tessera.request`. `bbox` defaults to the view's whole extent and
-`view` to the first this principal is served.
+Each of these exists on `db` and on any reader, and answers as that reader.
 
-Beside those five it takes the rest of the request body, each sent only where it was given:
-`tiles` in place of `bbox`, `highlight` (a second expression in `filters`' grammar, which lights
-the served set without moving it), `layers`, `levels`, `computed`, `artifact_budget`,
-`artifact_rows`, `point_rows`, `underlay_offset` and `pin`.
+`categories(column, prefix=None, view=None, codes=None)` returns a pyarrow table of a category
+column's values that the reader may see, one row each, with `key`, `code` and `title`. Without a prefix it is every value. With
+one it is the values whose key or title, or a word in either, starts with it, ignoring case, and
+each row adds `count`, the number of items the reader may see that carry the value; the server
+returns at most its `max_suggestions` setting of these, and the table's schema metadata
+`tessera.more` says whether more matched. With `codes`, such as the codes in a sample's category column, it is the values of
+those codes, and a code with no value the reader may see is left out; `codes` and `prefix` cannot
+be combined. A column declared for a view group holds different values in each view, so it
+takes `view=`.
 
-```python
-served = db.viewport(view="map", layers="all", highlight={"venue": {"eq": "neurips"}})
-served.num_rows                                # the points, as before
-served.artifacts.to_pylist()                   # the annotation artifacts the response served
-served.sub_cells                               # the exact counts an underlay_offset asked for
-```
+`item()` returns `fields` by column name, `labels` (the item's labels that the reader also
+holds), `views`, and `external_id` where the item was inserted with one: on a `Database` it comes
+back as the type its id column had, and from `connect()` as bytes.
 
-The result reads as the points table wherever one is expected — `num_rows`, `column()`,
-`schema.metadata`, `to_pandas()` — and `points` names it outright. `artifacts` and `sub_cells`
-are `None` where the response carried no frame of that kind, which the wire makes an absence
-rather than an empty table.
+An annotation, or artifact, is one member of a layer: a cluster, a region, a node in a taxonomy.
+`browse_artifacts()` returns one page of a layer's annotations with `next` for the page after,
+and `artifact()` one annotation's record; each takes a view. Every count on them is the reader's:
+`masked_count` is how many of an annotation's items the reader may see.
 
-`categories()` and `browse_artifacts()` hand back the page the route served, `next` included, so
-paging is the caller's: hand `next` back as `after` and as `cursor`. Every count on those pages
-is this principal's — `masked_count` is how many of an artifact's members they can see, never how
-many it has.
-
-`item()` returns `fields` by declared column name, `labels` (the item's labels this principal
-also holds), `views`, and `external_id` where the database has one: on a `Database` it comes back
-as the type its id column carried, and on a `connect()` viewer as the bytes the wire carries.
-`artifact()` is the same drill-down for an annotation and takes a `view`, a masked count being an
-intersection in row space and row space being per view.
-
-`db.close()` stops the server. It invalidates nothing: a token this database minted stays good
-until its lifetime runs out (`[disclosure] token_max_lifetime`, an hour). `db.revoke(token)` is
-what ends one, by the `token_id` the `Token` carries — the capability never transits a second
-time, and a handle naming no live session is accepted in silence.
+`db.close()` stops the server. A token the database made stays valid until it expires, within
+the hour. `db.revoke(token)` ends one sooner; only the token's id is sent, and an id that names
+no live token is accepted without comment.
 
 ## The operator's verbs
 
@@ -346,13 +403,12 @@ deletions, and the answer's `deleted` says how many.
 ```python
 v = tesseradb.connect("https://tessera.example/viewer", token=my_token)
 v.map(colour_by="cluster:clusters/kmeans")
-v.viewport(k=64)
+v.view("s0").count()
 ```
 
-`token` is a string, a `Token` or a callable returning either, as `Map` takes one. A `Viewer` from
-`connect` has `map()` and the read verbs and nothing else: no `viewer(terms)`, minting another
-principal needing the session credential, and no write verb, the control plane having one
-operator credential and no per-principal authority.
+`token` is a string, a `Token` or a function returning either, as `Map` takes one. A reader from
+`connect` has `view()`, `map()` and the other queries. It cannot write, and it cannot read as
+anyone else, since both need credentials only the operator holds.
 
 ## The widget, and the entry point being a token
 

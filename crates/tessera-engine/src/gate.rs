@@ -7,10 +7,9 @@
 //! group's and can never widen it — the relation decision 0089 gives an artifact to its layer,
 //! and the I12 direction.
 //!
-//! **Satisfaction is the item-visibility predicate verbatim** (§6.1): the gate's labels resolve
-//! through the plugin to a set of descriptors, one per label (decision 0132), those resolve
-//! through the dictionary to terms, and the gate is satisfied iff that set **intersects** the
-//! principal's satisfied set. It is deliberately *not* the conservative label join's required-set
+//! **Satisfaction is intersection** (§6.1): the gate's labels resolve through the plugin to a set
+//! of descriptors, one per label (decision 0132), and the gate is satisfied iff that set
+//! **intersects** the descriptors the principal's credential resolved to. It is deliberately *not* the conservative label join's required-set
 //! reading: under that reading a disjunctive gate (`["finance", "legal"]`) yields an empty
 //! required set and every principal passes, which is a fail-open on exactly what the gate
 //! protects. Intersection gives a disjunctive gate its intended meaning.
@@ -33,10 +32,8 @@
 use std::collections::HashMap;
 
 use rustc_hash::FxHashSet;
-use tessera_authz::Dict;
 use tessera_plugin::Plugin;
 use tessera_store::manifest::Manifest;
-use tessera_types::TermId;
 
 /// The views and the groups one session may reach (`views.md` §6) — resolved at authorise and
 /// never re-evaluated within the session.
@@ -84,7 +81,7 @@ impl VisibleViews {
     }
 }
 
-/// Evaluate every view of every group against a principal's satisfied term set (`views.md` §6).
+/// Evaluate every view of every group against a principal's credential descriptors (`views.md` §6).
 ///
 /// **Every view is evaluated whatever the outcome**, which is what makes the answer a set rather
 /// than a decision procedure: the cost is paid once, at authorise, in exchange for a request path
@@ -97,8 +94,7 @@ impl VisibleViews {
 /// where refusing the credential would deny a corpus its principal is otherwise entitled to.
 pub(crate) fn resolve(
     manifest: &Manifest,
-    dict: &Dict,
-    satisfied: &FxHashSet<TermId>,
+    credentials: &FxHashSet<Vec<u8>>,
     plugin: &dyn Plugin,
 ) -> VisibleViews {
     // One plugin call per **distinct gate**, not per view: a group of forty quarters under one
@@ -115,8 +111,7 @@ pub(crate) fn resolve(
         if passes(
             &mut memo,
             group.visibility.as_deref(),
-            dict,
-            satisfied,
+            credentials,
             plugin,
         ) {
             groups.insert(group.name.clone());
@@ -142,8 +137,7 @@ pub(crate) fn resolve(
         if !passes(
             &mut memo,
             view.visibility.as_deref(),
-            dict,
-            satisfied,
+            credentials,
             plugin,
         ) {
             continue;
@@ -165,13 +159,12 @@ pub(crate) fn resolve(
 ///
 /// Each label is one element of the plugin's list call, taken verbatim (decision 0132): a gate
 /// declared as `"finance,legal"` is one term with a comma in it, and a gate wanting both is the
-/// two-element list. A descriptor the dictionary does not carry is simply unsatisfiable, which is
-/// the same fail-closed reading `Engine::authorise` gives a credential's unknown descriptor.
+/// two-element list. The descriptors are compared with the credential's own, as a layer's and an
+/// artifact's are, so a label no item carries is still one a credential can hold.
 fn passes<'a>(
     memo: &mut HashMap<&'a [String], bool>,
     labels: Option<&'a [String]>,
-    dict: &Dict,
-    satisfied: &FxHashSet<TermId>,
+    credentials: &FxHashSet<Vec<u8>>,
     plugin: &dyn Plugin,
 ) -> bool {
     let Some(labels) = labels else { return true };
@@ -182,10 +175,7 @@ fn passes<'a>(
     let verdict = match plugin.terms_of_labels(&descriptors) {
         // **Intersection, not the required set** — see this module's own doc for why the
         // conservative label join is fail-open on a disjunctive gate.
-        Ok(descriptors) => descriptors.iter().any(|descriptor| {
-            dict.lookup(descriptor)
-                .is_some_and(|term| satisfied.contains(&term))
-        }),
+        Ok(descriptors) => descriptors.iter().any(|d| credentials.contains(d)),
         Err(_) => false,
     };
     memo.insert(labels, verdict);

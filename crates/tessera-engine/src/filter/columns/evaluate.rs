@@ -135,13 +135,50 @@ impl FilterColumns {
         prefer_row: bool,
         resolvers: &RowLeafResolvers<'_>,
     ) -> Result<RoutedFilter, FilterError> {
-        expr.check()?;
-        if self.space_of(expr, prefer_row)? == Space::Entity {
+        if self.admitted_space(expr, prefer_row, resolvers.layers)? == Space::Entity {
             return Ok(RoutedFilter::Entity(self.eval(expr, candidate)?));
         }
         Ok(RoutedFilter::Row(
             self.route(expr, candidate, prefer_row, resolvers)?,
         ))
+    }
+
+    /// Refuse every filter that no candidate could make answerable, from the declarations alone:
+    /// its depth and negations, every column it names, the presence each `none_of` subtracts
+    /// from, and every layer a `member_of` names, which `reaches_layer` says this principal
+    /// reaches. [`Self::evaluate_routed`] refuses exactly these before it reads a row, and the
+    /// evaluation after it refuses only an artefact that will not read.
+    pub fn admit(
+        &self,
+        expr: &FilterExpr,
+        prefer_row: bool,
+        reaches_layer: &dyn Fn(&str) -> bool,
+    ) -> Result<(), FilterError> {
+        self.admitted_space(expr, prefer_row, reaches_layer)
+            .map(|_| ())
+    }
+
+    fn admitted_space(
+        &self,
+        expr: &FilterExpr,
+        prefer_row: bool,
+        reaches_layer: &dyn Fn(&str) -> bool,
+    ) -> Result<Space, FilterError> {
+        fn layers(expr: &FilterExpr, reaches: &dyn Fn(&str) -> bool) -> Result<(), FilterError> {
+            match expr {
+                FilterExpr::MemberOf(leaf) if !reaches(&leaf.layer) => {
+                    Err(FilterError::UnknownLayer(leaf.layer.clone()))
+                }
+                FilterExpr::AllOf(kids) | FilterExpr::AnyOf(kids) | FilterExpr::NoneOf(kids) => {
+                    kids.iter().try_for_each(|kid| layers(kid, reaches))
+                }
+                _ => Ok(()),
+            }
+        }
+        expr.check()?;
+        let space = self.space_of(expr, prefer_row)?;
+        layers(expr, reaches_layer)?;
+        Ok(space)
     }
 
     /// One column's routed space, the single transcription of the leaf-routing rule.
@@ -170,7 +207,8 @@ impl FilterColumns {
 
     /// Which space `expr` evaluates in. `Entity` means the whole sub-tree can be answered by the
     /// existing entity-space evaluation. A `none_of` takes its single column's space whole, since
-    /// its presence half and its matched half must be computed in the same space.
+    /// its presence half and its matched half must be computed in the same space, and one in
+    /// entity space is refused here where its column has no presence to subtract from.
     fn space_of(&self, expr: &FilterExpr, prefer_row: bool) -> Result<Space, FilterError> {
         match expr {
             FilterExpr::Leaf { column, .. } => self.leaf_space(column, prefer_row),
@@ -190,7 +228,11 @@ impl FilterColumns {
             }
             FilterExpr::NoneOf(kids) => {
                 let column = FilterExpr::negated_column(kids);
-                self.leaf_space(column, prefer_row)
+                let space = self.leaf_space(column, prefer_row)?;
+                if space == Space::Entity {
+                    self.presence_layers(column)?;
+                }
+                Ok(space)
             }
         }
     }
@@ -303,14 +345,22 @@ impl FilterColumns {
     /// value column answers this in one intersection per layer, where the postings answer only
     /// for the base, since no flush writes postings.
     fn present_in(&self, column: &str, candidate: &Bitmap) -> Result<Bitmap, FilterError> {
+        let mut out = Bitmap::new();
+        for layer in self.presence_layers(column)? {
+            out |= layer.values.present_in(candidate);
+        }
+        Ok(out)
+    }
+
+    /// The layers a negation of `column` takes its presence from, refused where there are none:
+    /// a `text` column has no value layers at all, and a running-service column has none until
+    /// its first flush. Answering the empty set would under-report every negation silently.
+    fn presence_layers(&self, column: &str) -> Result<&[super::Layer], FilterError> {
         let held = self
             .columns
             .get(column)
             .filter(|held| held.filterable)
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
-        // A column with no value column has no presence set: a `text` column has no value layers
-        // at all, and a running-service column has none until its first flush. Answering the
-        // empty set would under-report every negation silently, so it is refused instead.
         let layers = held.value_layers();
         if layers.is_empty() {
             return Err(FilterError::NegationWithoutPresence {
@@ -318,11 +368,7 @@ impl FilterColumns {
                 family: held.family.as_str().to_string(),
             });
         }
-        let mut out = Bitmap::new();
-        for layer in layers {
-            out |= layer.values.present_in(candidate);
-        }
-        Ok(out)
+        Ok(layers)
     }
 
     fn eval(&self, expr: &FilterExpr, candidate: &Bitmap) -> Result<Bitmap, FilterError> {

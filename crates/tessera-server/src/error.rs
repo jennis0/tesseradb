@@ -47,8 +47,11 @@ pub enum ApiError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShedCause {
     /// The compute-admission gate had no slot, or no permit within `admission_timeout_ms`.
-    /// `Retry-After` is [`RETRY_AFTER_SECS`]. The only cause the gate's `shed_total` counts.
+    /// `Retry-After` is [`RETRY_AFTER_SECS`]. Counted in that gate's `shed_total`.
     ComputeGate,
+    /// `serve.bulk_admission` bulk reads were already running. `Retry-After` is
+    /// [`RETRY_AFTER_SECS`].
+    BulkGate,
     /// The ingest work queue or the ingest buffer is full; `retry_after_s` is estimated from the
     /// drain rate. `/control/changes` never answers 429: [`map_change_batch_error`] has no route to
     /// it.
@@ -70,21 +73,17 @@ impl ShedCause {
             ShedCause::ComputeGate => {
                 "the server is at its compute-admission bound; retry shortly".to_string()
             }
+            ShedCause::BulkGate => {
+                "the server is at its bulk-read admission bound; retry shortly".to_string()
+            }
             ShedCause::WriteQueue => format!(
-                "the write queue is full; retry after {retry_after_s}s. Deny-disposition \
-                 changes are never shed for load and are unaffected"
+                "the write queue is full; retry after {retry_after_s}s"
             ),
             ShedCause::IngestAdmission => format!(
-                "the server is at its ingest-admission bound; retry after {retry_after_s}s. \
-                 Nothing in this request was decoded, queued or appended — the body was, \
-                 however, buffered in full before this refusal, since the extractor runs ahead \
-                 of every check in the handler. Deny-disposition changes are never shed for \
-                 load and are unaffected"
+                "the server is at its ingest-admission bound; retry after {retry_after_s}s"
             ),
             ShedCause::SingleFlight => "a concurrent request is already building this session's \
-                 row projection or mask fragment; retry shortly. This is not compute admission — \
-                 that gate admitted this request, and its shed counters do not move for this \
-                 refusal"
+                 row projection or mask fragment; retry shortly"
                 .to_string(),
             ShedCause::SuggestInFlight => "a suggestion request for this session is already in \
                  flight; retry shortly"
@@ -210,6 +209,10 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         EngineError::FilterMalformed(detail) => ApiError::Contract(detail),
         // Each refusal names a layer, a level or a page bound from `/v1/meta`, never an artifact.
         browse @ EngineError::BrowseRefused(_) => ApiError::Contract(browse.to_string()),
+        // Each names only a field, a system field or a paging argument the caller sent.
+        records @ EngineError::RecordsRefused(_) => ApiError::Contract(records.to_string()),
+        // One fixed detail for every reason a cursor did not open.
+        cursor @ EngineError::CursorRefused => ApiError::Contract(cursor.to_string()),
         // The detail names only the caller's numbers and the configured limit.
         too_many @ EngineError::TooManyTiles { .. } => ApiError::Contract(too_many.to_string()),
         // Their text names filesystem paths, so they go through the store sanitiser.
@@ -228,20 +231,30 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // Unreachable in practice, since cancellation fires only when the handler future is
         // dropped. A 500 with a fixed detail in case it ever arrives on a live connection.
         EngineError::Cancelled => ApiError::FailClosed(
-            "request cancelled before completion; the request was refused rather than answered \
-             partially"
-                .to_string(),
+            "the request was cancelled before it completed".to_string(),
         ),
         // A 500, not an empty 200: an empty value set is a real answer for a principal who may see
-        // none of the values, and must stay distinct from one that could not be read.
-        unavailable @ EngineError::VocabularyVisibilityUnavailable { .. } => {
-            ApiError::FailClosed(unavailable.to_string())
+        // none of the values, and must stay distinct from one that could not be read. The detail
+        // can carry a store failure's text, so only the column is sent.
+        EngineError::VocabularyVisibilityUnavailable { column, detail } => {
+            tracing::error!(%column, %detail, "a derived column's value visibility could not be read");
+            ApiError::FailClosed(format!(
+                "column '{column}''s per-viewer value visibility could not be derived, so its \
+                 values are refused"
+            ))
         }
         // A 500 for the same reason: an empty page is a real answer.
-        unavailable @ EngineError::SuggestionUnavailable { .. } => {
-            ApiError::FailClosed(unavailable.to_string())
+        EngineError::SuggestionUnavailable { column, detail } => {
+            tracing::error!(%column, %detail, "a column's suggestion index could not be read");
+            ApiError::FailClosed(format!("column '{column}' cannot be suggested over"))
         }
-        other => ApiError::FailClosed(other.to_string()),
+        // Everything else is the deployment's fault, and its text can name a path, a segment, a
+        // bundle file or what the plugin said (`Malformed`, `Plugin`, `Wal`, an unreadable filter
+        // artefact in `FilterRefused`), so it is logged and never sent.
+        other => {
+            tracing::error!(detail = %other, "an engine failure; answering fail-closed");
+            ApiError::FailClosed("the server could not complete this request".to_string())
+        }
     }
 }
 
@@ -251,9 +264,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
 pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
     tracing::error!(detail = %e, "bundle/sidecar read failed; answering fail-closed");
     ApiError::FailClosed(
-        "could not read this bundle's stored data; the request was refused rather than answered \
-         partially"
-            .to_string(),
+        "could not read this bundle's stored data".to_string(),
     )
 }
 
@@ -262,8 +273,7 @@ pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
 pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
     tracing::error!(detail = %e, "wal append/fsync failed; answering fail-closed");
     ApiError::FailClosed(
-        "a durability write failed; the request was refused rather than answered partially"
-            .to_string(),
+        "a durability write failed".to_string(),
     )
 }
 
@@ -408,15 +418,12 @@ pub fn map_change_batch_error(
         // "May be": an applied item is durable, and a lost receipt may have completed in full; only
         // a deny applied after a failed WAL write is in force without being durable.
         detail.push_str(
-            "; a change in it may be in force — a deny-disposition change whose durability failed \
-             is applied anyway (lifecycle §4), and a command whose receipt was lost may have \
-             completed in full — so do not treat this as a no-op",
+            "; a change in it may be in force, so do not treat this as a no-op",
         );
     }
     if some_not_applied {
         detail.push_str(
-            ". At least one item was NOT applied — re-submit the whole request, and do not assume \
-             its deny-disposition changes took hold",
+            "; at least one item was not applied, so re-submit the whole request",
         );
     }
     Some(ApiError::FailClosed(detail))
@@ -514,9 +521,7 @@ fn exec_failure_may_be_in_force(
 pub fn map_join_error(e: tokio::task::JoinError) -> ApiError {
     tracing::error!(detail = %e, "spawn_blocking closure panicked; answering fail-closed");
     ApiError::FailClosed(
-        "an internal error occurred while handling this request; the request was refused rather \
-         than answered partially"
-            .to_string(),
+        "an internal error occurred while handling this request".to_string(),
     )
 }
 
@@ -916,6 +921,51 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("1")
         );
+    }
+
+    /// An engine failure whose text is the deployment's answers a 500 whose body carries none of
+    /// that text: a bundle file, a plugin, a filter artefact and a derived column's postings.
+    #[test]
+    fn engine_failures_send_none_of_their_internal_text() {
+        let secret = "/srv/bundles/p0/seg-0007/records.blob entity 144999";
+        for e in [
+            EngineError::Malformed(secret.to_string()),
+            EngineError::Plugin(tessera_plugin::PluginError::Malformed(secret.to_string())),
+            EngineError::FilterRefused(secret.to_string()),
+            EngineError::Io(std::io::Error::other(secret)),
+            EngineError::SegmentWithoutRowBase {
+                view: "s0".to_string(),
+                seg_id: secret.to_string(),
+            },
+            EngineError::VocabularyVisibilityUnavailable {
+                column: "archive".to_string(),
+                detail: secret.to_string(),
+            },
+            EngineError::SuggestionUnavailable {
+                column: "archive".to_string(),
+                detail: secret.to_string(),
+            },
+        ] {
+            let (status, code, detail) = map_engine_error(e).parts();
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(code, "fail-closed");
+            for fragment in ["/srv", "seg-0007", "records.blob", "144999"] {
+                assert!(!detail.contains(fragment), "{detail:?} carries {fragment:?}");
+            }
+        }
+    }
+
+    /// A records refusal and a refused cursor are the caller's to correct: 422s.
+    #[test]
+    fn records_and_cursor_refusals_are_contract_refusals() {
+        for e in [
+            EngineError::RecordsRefused(tessera_engine::RecordsRefused::ZeroPageRows),
+            EngineError::CursorRefused,
+        ] {
+            let (status, code, _) = map_engine_error(e).parts();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(code, "contract");
+        }
     }
 
     /// Every other error body omits `retry_after_s`.

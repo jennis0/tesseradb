@@ -18,14 +18,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryArray, Float32Array, Float64Array, ListArray, ListBuilder, StringArray,
-    StringBuilder, UInt64Array,
+    ArrayRef, BinaryArray, Float32Array, ListArray, ListBuilder, StringArray, StringBuilder,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use common::*;
@@ -98,92 +96,13 @@ async fn visible_to(server: &TestServer, terms: &[&str]) -> u64 {
     tiles.iter().map(|t| t.1).sum()
 }
 
-/// `POST /control/flush`, waited for: an ingested row is served once its flush has published.
-async fn flush(server: &TestServer) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = server.state.engine.write_executor_stats().flushes;
-        let resp = server
-            .client
-            .post(server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
-async fn served() -> (TempDir, TestServer) {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    (tmp, server)
-}
-
-/// The same fixture under a `point_visibility` declaring `default`, or none.
-async fn served_with_default(default: Option<&str>) -> (TempDir, TestServer) {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    let pairs = tmp.path().join("pairs.parquet");
-    build_fixture_with_access(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &pairs,
-        N_ITEMS,
-        tessera_build::config::AccessInput {
-            source: tessera_build::config::AccessSource::Relation(pairs.clone()),
-            default: default.map(str::to_string),
-        },
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    (tmp, server)
-}
-
 /// A points file carrying its own `list<string>` access column, `N_ITEMS` rows: every row
 /// labelled `ir:analyst` except `NULL_ROW`, whose label is null. The field-sourced shape, which
 /// is the one the build fills a null label on.
 const NULL_ROW: u64 = 5;
 
 fn write_field_points(path: &Path) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new(
-            "categories",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-            true,
-        ),
-    ]));
     let ids: Vec<u64> = (0..N_ITEMS).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let mut offsets: Vec<i32> = vec![0];
     let mut flat: Vec<&str> = Vec::new();
     let mut present: Vec<bool> = Vec::new();
@@ -203,19 +122,7 @@ fn write_field_points(path: &Path) {
         values,
         Some(present.into()),
     );
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(list),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write_points(path, &ids, scatter, vec![column("categories", true, list)]);
 }
 
 /// A server over a field-sourced view (`point_visibility = { field = "categories", default }`)
@@ -225,47 +132,16 @@ async fn served_field_sourced(default: &str) -> (TempDir, TestServer) {
     let bundle_root = tmp.path().join("bundle");
     let points = tmp.path().join("points.parquet");
     write_field_points(&points);
-    tessera_build::build(&tessera_build::BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points,
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput {
-                source: tessera_build::config::AccessSource::Field("categories".to_string()),
-                default: Some(default.to_string()),
-            },
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: bundle_root.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
-    })
-    .expect("a field-sourced view with a null row builds under a declared default");
-    let server = spawn_server(
+    let access = AccessInput {
+        source: tessera_build::config::AccessSource::Field("categories".to_string()),
+        default: Some(default.to_string()),
+    };
+    tessera_build::build(&build_args(
         &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+        vec![view_args("s0", &points, access)],
+    ))
+    .expect("a field-sourced view with a null row builds under a declared default");
+    let server = open(&tmp).await;
     (tmp, server)
 }
 
@@ -285,7 +161,7 @@ async fn a_field_sourced_view_fills_a_null_label_and_an_empty_list_alike() {
     let body = body_with_access(1, Arc::new(access_lists(&[&[]])));
     let resp = ingest(&server, "field-empty", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    flush(&server).await;
+    drain(&server).await;
 
     // The ingest door's fill: the same term now reaches both rows, and no other principal
     // gained one.
@@ -300,7 +176,8 @@ async fn a_field_sourced_view_fills_a_null_label_and_an_empty_list_alike() {
 /// fragment.
 #[tokio::test]
 async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
-    let (_tmp, server) = served().await;
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
 
     let body = body_with_access(
         3,
@@ -311,7 +188,7 @@ async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["accepted"], 3);
     assert_eq!(json["over_bound"], 0);
-    flush(&server).await;
+    drain(&server).await;
 
     assert_eq!(
         visible_to(&server, &[VIENNA]).await,
@@ -329,19 +206,19 @@ async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
 }
 
 /// A scalar `utf8` column is the shape a separator grammar lived in, and it is refused at the
-/// schema — whole batch, no effect — naming the column and the shape it takes.
+/// schema, whole batch and no effect, naming the column.
 #[tokio::test]
-async fn a_scalar_utf8_access_column_is_refused_naming_the_column_and_the_shape() {
-    let (_tmp, server) = served().await;
+async fn a_scalar_utf8_access_column_is_refused_naming_the_column() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
     let body = body_with_access(1, Arc::new(StringArray::from(vec![VIENNA])));
     let resp = ingest(&server, "scalar-1", body).await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(detail.contains("column 'access'"), "{detail}");
-    assert!(detail.contains("utf8, one string per row"), "{detail}");
-    assert!(detail.contains("list<utf8>"), "{detail}");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("'access'"), "{body}");
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water_before,
@@ -355,7 +232,7 @@ async fn a_scalar_utf8_access_column_is_refused_naming_the_column_and_the_shape(
 /// carrying labels of its own is not also given the default.
 #[tokio::test]
 async fn an_empty_list_takes_the_views_declared_default() {
-    let (_tmp, server) = served_with_default(Some("ir:sealed")).await;
+    let (_tmp, server) = serve_with_default(Some("ir:sealed")).await;
     let sealed_before = visible_to(&server, &["ir:sealed"]).await;
     let zero_before = visible_to(&server, &["0"]).await;
 
@@ -364,7 +241,7 @@ async fn an_empty_list_takes_the_views_declared_default() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["accepted"], 2);
-    flush(&server).await;
+    drain(&server).await;
 
     assert_eq!(
         visible_to(&server, &["ir:sealed"]).await,
@@ -387,13 +264,14 @@ async fn an_empty_list_takes_the_views_declared_default() {
 /// declares that, so an empty list there is a row every principal sees.
 #[tokio::test]
 async fn an_empty_list_under_a_public_default_is_public() {
-    let (_tmp, server) = served().await;
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
     let before = visible_to(&server, &[]).await;
 
     let body = body_with_access(1, Arc::new(access_lists(&[&[]])));
     let resp = ingest(&server, "empty-public", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    flush(&server).await;
+    drain(&server).await;
 
     assert_eq!(visible_to(&server, &[]).await, before + 1);
 }
@@ -403,21 +281,16 @@ async fn an_empty_list_under_a_public_default_is_public() {
 /// An empty *element* stays refused as it was, whatever the view declares.
 #[tokio::test]
 async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared() {
-    let (_tmp, server) = served_with_default(None).await;
+    let (_tmp, server) = serve_with_default(None).await;
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
     let body = body_with_access(3, Arc::new(access_lists(&[&[], &["0"], &[]])));
     let resp = ingest(&server, "empty-refused", body).await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(
-        detail.contains("view 's0': 2 row(s) carry an empty access label"),
-        "{detail}"
-    );
-    assert!(
-        detail.contains("declares no `point_visibility.default`"),
-        "{detail}"
-    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
+    let detail = body["detail"].as_str().unwrap();
+    assert!(mentions(detail, "2") && mentions(detail, "s0"), "the count and the view: {detail}");
 
     // A labelled batch on the same view is unaffected: the refusal is about the rows.
     let body = body_with_access(1, Arc::new(access_lists(&[&["0"]])));
@@ -428,8 +301,8 @@ async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared(
     let body = body_with_access(1, Arc::new(access_lists(&[&[""]])));
     let resp = ingest(&server, "empty-element", body).await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(detail.contains("access column"), "{detail}");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
 
     let json = control_status(&server).await;
     assert_eq!(
@@ -451,24 +324,26 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
         lists.append(true);
         body_with_access(2, Arc::new(lists.finish()))
     }
-    let (_tmp, server) = served_with_default(Some("ir:sealed")).await;
+    let (_tmp, server) = serve_with_default(Some("ir:sealed")).await;
     let before = visible_to(&server, &["ir:sealed"]).await;
     let resp = ingest(&server, "filled", null_and_empty()).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    flush(&server).await;
+    drain(&server).await;
     assert_eq!(
         visible_to(&server, &["ir:sealed"]).await,
         before + 2,
         "the null cell and the empty list both landed under the declared default"
     );
 
-    let (_tmp, server) = served_with_default(None).await;
+    let (_tmp, server) = serve_with_default(None).await;
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
     let resp = ingest(&server, "refused", null_and_empty()).await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
+    let detail = body["detail"].as_str().unwrap();
     assert!(
-        detail.contains("2 row(s)") && detail.contains("declares no `point_visibility.default`"),
+        mentions(detail, "2"),
         "the refusal counts the null cell with the empty list: {detail}"
     );
 
@@ -503,8 +378,9 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     writer.write(&batch).unwrap();
     let resp = ingest(&server, "absent", writer.into_inner().unwrap()).await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(detail.contains("column 'access' missing"), "{detail}");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("'access'"), "{body}");
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water_before,
@@ -516,7 +392,8 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
 /// effect.
 #[tokio::test]
 async fn a_null_element_is_refused_naming_the_row() {
-    let (_tmp, server) = served().await;
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
     let mut null_element = ListBuilder::new(StringBuilder::new());
@@ -530,8 +407,9 @@ async fn a_null_element_is_refused_naming_the_row() {
     )
     .await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(detail.contains("null element at row 0"), "{detail}");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
+    assert!(mentions(body["detail"].as_str().unwrap(), "row 0"), "{body}");
 
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],

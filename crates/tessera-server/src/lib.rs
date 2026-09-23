@@ -12,8 +12,10 @@ pub mod error;
 mod filter_dto;
 pub mod health;
 pub mod memory;
+mod records;
 pub mod session;
 pub mod state;
+mod stream;
 pub mod viewer;
 
 use std::path::Path;
@@ -50,19 +52,15 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
 
     // `[serve]` is optional because a build reads this file too, but a server needs all three
     // addresses and gets no default. Port 0 is allowed; the announce line reports the real port.
-    for (what, declared) in [
-        ("viewer", config.viewer_addr.is_some()),
-        ("session", config.session_addr.is_some()),
-        ("control", config.control_listen.is_some()),
+    for (what, declared, example) in [
+        ("viewer", config.viewer_addr.is_some(), "127.0.0.1:8080"),
+        ("session", config.session_addr.is_some(), "127.0.0.1:8081"),
+        ("control", config.control_listen.is_some(), "unix:/run/tessera/control.sock"),
     ] {
         if !declared {
             return Err(format!(
-                "this deployment declares no `{what}` address. `tessera serve` needs all three — \
-                 add them under `[serve]` in the deployment file:\n\n    [serve]\n    \
-                 viewer  = \"127.0.0.1:8080\"\n    session = \"127.0.0.1:8081\"\n    \
-                 control = \"unix:/run/tessera/control.sock\"\n\n`[serve]` is optional because \
-                 `tessera build` reads this same file and has nothing to listen on; it is required \
-                 to serve, and there is no default because a default port is a socket nobody chose"
+                "this deployment declares no `{what}` address; add one under `[serve]`, such as \
+                 `{what} = \"{example}\"`"
             )
             .into());
         }
@@ -144,6 +142,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
             config.compute_queue,
             config.admission_timeout_ms,
         ),
+        // `POST /v1/items` only.
+        bulk_gate: ComputeGate::for_bulk_reads(config.bulk_admission),
         // The viewer gate never covers the control plane, so writes have a limiter of their own.
         ingest_admission: state::IngestAdmission::new(config.ingest_admission),
         session_credential,
@@ -151,6 +151,17 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         #[cfg(feature = "fault-injection")]
         faults,
     });
+
+    // The server knows no memory cap to hold bulk reads against, so their figure is logged for
+    // the operator to compare with the cap the deployment runs under: each read builds a page in
+    // about four page sizes and holds three encoded pages, two queued for the body and one being
+    // written.
+    tracing::info!(
+        bulk_admission = config.bulk_admission,
+        max_page_bytes = config.max_page_bytes,
+        bulk_read_memory_bytes = tessera_config::bulk_read_memory_bytes(&config),
+        "bulk reads may hold this much memory at once, within the process's memory cap"
+    );
 
     // At `warn`, because this lets a page from another origin present the session credential.
     // `serve.cors_origins` names pages that may present tokens and gets no warning.

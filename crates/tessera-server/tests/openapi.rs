@@ -14,22 +14,19 @@
 //! [`common::decode_viewport_frames`] and by the two worked decodes under `clients/ts/wire-example`
 //! and `reference/examples`. It asserts the route's headers and its framing outcomes (a `k = 0`
 //! request yields no points frame; `layers: []` yields no artifacts frame) and validates the
-//! request body only.
+//! request body only. `POST /v1/items` is framed the same way, and its three JSON frames are
+//! validated against their schemas.
 
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::OnceLock;
 
-use arrow::array::{Float32Array, Float64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::array::{Float32Array, StringArray};
 use base64::Engine as _;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 use tessera_server::state::ComputeGate;
 
 // ---------------------------------------------------------------------------------------------
@@ -135,91 +132,32 @@ type     = "f32"
 render   = true
 "#;
 
-fn write_points(path: &Path) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("archive", DataType::Utf8, false),
-        Field::new("score", DataType::Float32, true),
-    ]));
+fn build_bundle(dir: &Path) {
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
     let ids: Vec<u64> = (0..N).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let archives: Vec<&str> = ids
-        .iter()
-        .map(|&e| ["astro", "cond", "hep"][(e % 3) as usize])
-        .collect();
-    let scores: Vec<Option<f32>> = ids.iter().map(|&e| Some((e % 97) as f32 * 0.5)).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(StringArray::from(archives)),
-            Arc::new(Float32Array::from(scores)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn build_fixture_with_schema(out: &Path, points: &Path, pairs: &Path) {
-    write_points(points);
-    write_pairs_n(pairs, N);
-    let schema_path = points.with_file_name("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.to_path_buf(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
-            points.to_path_buf(),
-            &schema,
-        ),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    };
-    build(&args).expect("fixture build should succeed");
-}
-
-fn build_bundle(tmp: &TempDir) -> std::path::PathBuf {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_with_schema(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
+    let archive = StringArray::from_iter_values(
+        ids.iter()
+            .map(|&e| ["astro", "cond", "hep"][(e % 3) as usize]),
     );
-    bundle_root
+    let score = Float32Array::from_iter(ids.iter().map(|&e| Some((e % 97) as f32 * 0.5)));
+    write_points(
+        &points,
+        &ids,
+        scatter,
+        vec![
+            column("archive", false, archive),
+            column("score", true, score),
+        ],
+    );
+    write_pairs_n(&pairs, N);
+    build_declared(&dir.join("bundle"), &points, &pairs, SCHEMA_TOML);
+}
+
+/// A copy of [`build_bundle`]'s bundle in `tmp`, built once for this binary.
+fn copy_bundle(tmp: &TempDir) -> std::path::PathBuf {
+    static BUILT: OnceLock<TempDir> = OnceLock::new();
+    copy_built(&BUILT, tmp.path(), build_bundle)
 }
 
 const LAYER: &str = "clusters/a";
@@ -257,9 +195,7 @@ async fn publish_layer(server: &TestServer) -> Vec<String> {
         resp.text().await.unwrap()
     );
 
-    let member = |source_id: u64| {
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-    };
+    let member = |source_id: u64| member(source_id);
     let members_all: Vec<String> = (0..12u64).map(member).collect();
     let members_broad: Vec<String> = (12..24u64).filter(|s| s % 3 != 0).map(member).collect();
     let resp = server
@@ -298,13 +234,8 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_bundle(&tmp);
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    copy_bundle(&tmp);
+    let server = open(&tmp).await;
     let artifacts = publish_layer(&server).await;
     Fixture {
         _tmp: tmp,
@@ -380,6 +311,7 @@ fn the_description_names_every_route_on_the_two_planes_and_no_other() {
             "/v1/artifacts/{tessera_id}",
             "/v1/categories/{column}",
             "/v1/categories/{column}/suggest",
+            "/v1/items",
             "/v1/items/{tessera_id}",
             "/v1/meta",
             "/v1/viewport",
@@ -405,6 +337,10 @@ fn every_closed_dto_is_declared_closed() {
         "CategoriesResponse",
         "Pin",
         "ViewportRequest",
+        "ItemsRequest",
+        "ItemsHead",
+        "ItemsPageEnd",
+        "ItemsTrailer",
         "ItemRequest",
         "ItemResponse",
         "ArtifactRequest",
@@ -450,9 +386,8 @@ fn every_429_in_the_description_requires_retry_after() {
     }
 }
 
-/// The ruled `layers` semantics are in the schema: an array, or the literal string `"all"`, and
-/// nothing else. The server in this tree does not yet accept the string — see
-/// [`an_omitted_layers_field_means_no_artifacts_frame`] — so this is the shape alone.
+/// The `layers` field is an array or the literal string `"all"` in the schema, and nothing else.
+/// What the server does with each is `viewport_membership.rs`' to assert.
 #[test]
 fn the_layers_field_is_an_array_or_the_string_all() {
     let doc = description();
@@ -533,6 +468,28 @@ async fn authorise_and_revoke_match_the_description() {
         .await
         .unwrap();
     assert_refusal(&doc, resp, 422, "contract").await;
+    // auth_data the plugin refuses is the caller's to correct, and the plugin's reason reaches
+    // them: a 422 whose detail is not the fail-closed text every internal failure gets.
+    let resp = f
+        .server
+        .client
+        .post(f.server.session_url("/session/authorise"))
+        .bearer_auth(SESSION_CREDENTIAL)
+        .json(&json!({ "auth_data": base64::engine::general_purpose::STANDARD.encode("not json") }))
+        .send()
+        .await
+        .unwrap();
+    let body = assert_refusal(&doc, resp, 422, "contract").await;
+    let internal = tessera_server::error::map_engine_error(tessera_engine::EngineError::Malformed(
+        String::new(),
+    ));
+    let internal: Value = serde_json::from_slice(
+        &axum::body::to_bytes(axum::response::IntoResponse::into_response(internal).into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_ne!(body["detail"], internal["detail"]);
 
     // Revoke: 204 with no body, and the token is then a 401 — the session ending, exactly as a
     // 403 would be (the obligations list's rule).
@@ -575,7 +532,7 @@ async fn authorise_and_revoke_match_the_description() {
 async fn a_saturated_gate_sheds_authorise_with_the_described_429() {
     let doc = description();
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_bundle(&tmp);
+    let bundle_root = copy_bundle(&tmp);
     // No slots at all: every admission is shed before any wait.
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
@@ -948,44 +905,6 @@ async fn viewport_carries_the_described_headers_and_framing() {
     assert_refusal(&doc, resp, 401, "bad-credential").await;
 }
 
-/// **The ruled semantics of an omitted `layers`, at the wire.** Owner ruling 2026-08-25: omitted
-/// or `[]` means *no* layers, the string `"all"` means every reachable layer. The server change
-/// landed, and this test runs — it was written against the ruled behaviour before the server had
-/// it, `#[ignore]`d with that reason, and enabled at integration.
-///
-/// What it pins that its siblings do not is the pair *at one principal in one fixture*: the same
-/// broad token, the same request but for the field, absent giving no artifacts frame and `"all"`
-/// giving both reachable artifacts. `viewport_membership.rs`'s
-/// `omitted_layers_means_none_and_the_word_all_means_every_reachable_layer` pins the same ruling
-/// against the engine's membership columns, and
-/// [`the_layers_field_is_an_array_or_the_string_all`] pins the shape the description accepts.
-#[tokio::test]
-async fn an_omitted_layers_field_means_no_artifacts_frame() {
-    let doc = description();
-    let f = fixture().await;
-    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-
-    let resp = viewport(&f.server, token, &viewport_body(json!({ "k": 0 }))).await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    assert!(decoded.artifacts.is_none(), "omitted `layers` is no layers");
-
-    let resp = viewport(
-        &f.server,
-        token,
-        &viewport_body(json!({ "k": 0, "layers": "all" })),
-    )
-    .await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    assert_eq!(
-        decoded.artifacts.map(|a| a.len()),
-        Some(2),
-        "\"all\" is every reachable layer"
-    );
-}
-
 #[tokio::test]
 async fn items_match_the_description_with_every_refusal() {
     let doc = description();
@@ -1036,6 +955,115 @@ async fn items_match_the_description_with_every_refusal() {
     assert_refusal(&doc, resp, 409, "conflict").await;
     // The request schema refuses what the server refuses: an unknown field.
     assert_invalid(&doc, "ItemRequest", &json!({ "external_id": "x" }));
+}
+
+/// `POST /v1/items`: the request shape, the described headers, the three JSON frames against
+/// their schemas, and the refusals.
+#[tokio::test]
+async fn the_items_read_matches_the_description_with_its_refusals() {
+    let doc = description();
+    let f = fixture().await;
+    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let post = |body: Value, tok: &str| {
+        f.server
+            .client
+            .post(f.server.viewer_url("/v1/items"))
+            .bearer_auth(tok)
+            .json(&body)
+            .send()
+    };
+
+    let body = json!({
+        "view": "s0",
+        "fields": ["archive", "score"],
+        "system_fields": ["position", "external_id", "labels"],
+        "filters": { "score": { "range": { "gte": 5 } } },
+        "keep_unmatched": true,
+        "count": true,
+        "order": "map",
+        "page_rows": 10,
+        "pages": 3,
+        "compression": "zstd",
+        "idset": FIXTURE_IDSET,
+    });
+    assert_valid(&doc, "ItemsRequest", &body);
+    let resp = post(body, token).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.headers()["content-type"].to_str().unwrap(),
+        "application/octet-stream"
+    );
+    let headers = doc["paths"]["/v1/items"]["post"]["responses"]["200"]["headers"]
+        .as_object()
+        .unwrap();
+    for (name, spec) in headers {
+        if spec["required"].as_bool() == Some(true) {
+            assert!(resp.headers().contains_key(name.as_str()), "{name}");
+        }
+    }
+    // The optional headers: the identity coordinate is present whenever a page was walked, and
+    // the region verdict only with a region leaf, which this request has not.
+    assert!(resp.headers().contains_key("x-tessera-identity-key"));
+    assert!(!resp.headers().contains_key("x-tessera-region"));
+    let decoded = decode_items(&resp.bytes().await.unwrap());
+    assert_valid(&doc, "ItemsHead", &decoded.head);
+    assert!(decoded.head["visible"].is_u64() && decoded.head["matched"].is_u64());
+    assert_eq!(decoded.pages.len(), 3);
+    for (_, end) in &decoded.pages {
+        assert_valid(&doc, "ItemsPageEnd", end);
+    }
+    assert_valid(&doc, "ItemsTrailer", &decoded.trailer);
+    let cursor = decoded.trailer["next"].as_str().unwrap().to_string();
+
+    // The rest of the read, from the cursor, to its end.
+    let resp = post(json!({ "view": "s0", "fields": [], "cursor": cursor }), token)
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let decoded = decode_items(&resp.bytes().await.unwrap());
+    assert_valid(&doc, "ItemsHead", &decoded.head);
+    assert_valid(&doc, "ItemsTrailer", &decoded.trailer);
+    assert!(decoded.trailer["next"].is_null());
+    assert_eq!(decoded.trailer["ended_by"], "end");
+
+    // Refusals.
+    for body in [
+        json!({ "view": "s0", "fields": [], "page_rows": 0 }),
+        json!({ "view": "s0", "fields": [], "unknown": 1 }),
+        json!({ "view": "s0", "fields": ["no_such_field"] }),
+        json!({ "view": "s0", "fields": [], "cursor": "not-a-cursor" }),
+    ] {
+        let resp = post(body, token).await.unwrap();
+        assert_refusal(&doc, resp, 422, "contract").await;
+    }
+    let resp = post(json!({ "view": "no-such-view", "fields": [] }), token)
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 404, "unknown").await;
+    let resp = post(
+        json!({ "view": "s0", "fields": [], "idset": FIXTURE_IDSET + 1 }),
+        token,
+    )
+    .await
+    .unwrap();
+    assert_refusal(&doc, resp, 409, "conflict").await;
+    let resp = post(json!({ "view": "s0", "fields": [] }), "not-a-token")
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 401, "bad-credential").await;
+
+    // The request schema refuses what the server refuses.
+    for body in [
+        json!({ "view": "s0", "fields": [], "unknown": 1 }),
+        json!({ "view": "s0" }),
+        json!({ "view": "s0", "fields": [], "page_rows": 0 }),
+        json!({ "view": "s0", "fields": [], "order": "random" }),
+        json!({ "view": "s0", "fields": [], "compression": "gzip" }),
+        json!({ "view": "s0", "fields": [], "system_fields": ["entity_id"] }),
+    ] {
+        assert_invalid(&doc, "ItemsRequest", &body);
+    }
 }
 
 #[tokio::test]
@@ -1210,10 +1238,10 @@ async fn every_viewer_route_requires_a_session_token() {
     // Non-vacuity, both halves: the loop must have found the seven gated routes and the two
     // probes, or it enumerated nothing and proved nothing.
     assert_eq!(
-        gated, 7,
-        "the viewer plane's gated routes are meta, categories, suggest, viewport, items, \
-         artifacts and artifacts/browse; a change to that set belongs in this test's reasoning, \
-         not silently in its count"
+        gated, 8,
+        "the viewer plane's gated routes are meta, categories, suggest, viewport, the items read, \
+         items, artifacts and artifacts/browse; a change to that set belongs in this test's \
+         reasoning, not silently in its count"
     );
     assert_eq!(
         probes, 2,
@@ -1372,6 +1400,7 @@ async fn both_session_routes_require_the_credential_before_the_body() {
 fn viewer_body(path: &str) -> Value {
     match path {
         "/v1/viewport" => viewport_body(json!({})),
+        "/v1/items" => json!({ "view": "s0", "fields": [] }),
         "/v1/items/{tessera_id}" => json!({}),
         "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
         "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),

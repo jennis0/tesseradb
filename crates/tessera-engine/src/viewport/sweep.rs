@@ -545,11 +545,16 @@ pub(crate) fn segment_row_of<'a>(
         return Ok(None);
     };
     let segments = segments_with_row_bases(view, view_data)?;
-    let Some(&(segment, row_base)) = segments.iter().rev().find(|(_, base)| row.raw() >= *base)
-    else {
-        return Ok(None);
-    };
-    Ok(Some((segment, (row.raw() - row_base) as usize)))
+    Ok(segment_holding(&segments, row.raw()).map(|(at, local)| (segments[at].0, local as usize)))
+}
+
+/// Which of `segments`, ascending by row base, holds view row `row`, and the row's index within
+/// it. `None` where no segment's base is at or below `row`.
+pub(crate) fn segment_holding(segments: &[(&SegmentData, u32)], row: u32) -> Option<(usize, u32)> {
+    let at = segments
+        .partition_point(|&(_, base)| base <= row)
+        .checked_sub(1)?;
+    Some((at, row - segments[at].1))
 }
 
 /// A view's segments paired with their `row_base` in view row space, ascending.

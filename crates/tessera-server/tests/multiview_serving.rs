@@ -25,18 +25,12 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow::array::{Float64Array, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
-use tempfile::TempDir;
 use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, Quantisation,
-    ViewArgs, ViewMetadataType, ViewMetadataValue,
+    build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewMetadataType,
+    ViewMetadataValue,
 };
 
 const ENTITIES: u64 = 30;
@@ -65,52 +59,9 @@ fn position(view: &str, e: u64) -> (f64, f64) {
     }
 }
 
-fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ]));
+fn write_view_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
     let ids: Vec<u64> = ids.collect();
-    let xs: Vec<f64> = ids.iter().map(|&e| position(view, e).0).collect();
-    let ys: Vec<f64> = ids.iter().map(|&e| position(view, e).1).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-/// [`extent`] in the manifest's own shape — one frame for a group, which is what its own copy
-/// records so a view created while the service runs has one to take.
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
-    }
-}
-
-fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
-    ViewArgs {
-        visibility: None,
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Default::default(),
-        select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-    }
+    write_points(path, &ids, |e| position(view, e), Vec::new());
 }
 
 /// One microsecond timestamp per quarter boundary — the roster metadata's `timestamp_us` values,
@@ -120,20 +71,26 @@ fn starts_us(slot: u32) -> i64 {
     1_767_225_600_000_000 + i64::from(slot) * 7_776_000_000_000
 }
 
+static MULTIVIEW: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+
 /// The nine-view bundle: one plain view, one group of four with metadata, and a second group over
 /// the same four keys with its own layout (`views.md` §3.1, §3.3).
 fn build_multiview(dir: &Path) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
-    write_points(&world_points, "world", WORLD);
-    let mut views = vec![view_args("world", &world_points, &pairs)];
+    write_view_points(&world_points, "world", WORLD);
+    let mut views = vec![view_args(
+        "world",
+        &world_points,
+        AccessInput::relation(&pairs),
+    )];
     for group in ["quarter", "quarter_alt"] {
         for (key, _, members) in QUARTERS {
             let id = format!("{group}:{key}");
             let points = dir.join(format!("{group}-{key}.parquet"));
-            write_points(&points, &id, members);
-            views.push(view_args(&id, &points, &pairs));
+            write_view_points(&points, &id, members);
+            views.push(view_args(&id, &points, AccessInput::relation(&pairs)));
         }
     }
     let roster = |with_metadata: bool| {
@@ -166,10 +123,6 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
     };
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        // `world` is the declared anchor: within a signature group, ids are ordered by the Morton
-        // code an item holds *there* (decision 0112).
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 // Declared on one group and not the other, so `/v1/meta` is asked both questions.
@@ -211,52 +164,12 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
                 views: roster(false),
             },
         ],
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        // `world`, first of `views`, is the anchor: within a signature group, ids are ordered by
+        // the Morton code an item holds there.
+        ..build_args(&out, views)
     })
     .expect("a nine-view build succeeds");
     out
-}
-
-struct Served {
-    server: TestServer,
-    token: String,
-    _tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    let bundle = build_multiview(tmp.path());
-    let server = spawn_server(
-        &bundle,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    // Both terms, so every entity is visible and what a view answers with is its population
-    // rather than this principal's slice of it.
-    let auth = authorise(&server, &["0", "1"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
-    Served {
-        server,
-        token,
-        _tmp: tmp,
-    }
 }
 
 async fn meta(served: &Served) -> Value {
@@ -316,7 +229,7 @@ fn meta_schema() -> jsonschema::Validator {
 /// walk without reading a key.
 #[tokio::test]
 async fn meta_publishes_every_view_and_its_roster_in_creation_order() {
-    let served = serve().await;
+    let served = Served::copy(&MULTIVIEW, build_multiview).await;
     let body = meta(&served).await;
     let errors: Vec<String> = meta_schema()
         .iter_errors(&body)
@@ -414,7 +327,7 @@ async fn meta_publishes_every_view_and_its_roster_in_creation_order() {
 /// The shared entity is the observable — one identity, two positions (`views.md` §1).
 #[tokio::test]
 async fn a_groups_view_answers_with_its_own_geometry() {
-    let served = serve().await;
+    let served = Served::copy(&MULTIVIEW, build_multiview).await;
     let world = points(&served, "world").await;
     let quarter = points(&served, "quarter:2026-Q2").await;
     assert_eq!(world.len(), (WORLD.end - WORLD.start) as usize);
@@ -448,7 +361,7 @@ async fn a_groups_view_answers_with_its_own_geometry() {
 /// entities `quarter:2026-Q2` does, drawn somewhere else.
 #[tokio::test]
 async fn a_sharing_group_serves_one_membership_in_two_geometries() {
-    let served = serve().await;
+    let served = Served::copy(&MULTIVIEW, build_multiview).await;
     let owner = points(&served, "quarter:2026-Q2").await;
     let sharing = points(&served, "quarter_alt:2026-Q2").await;
 
@@ -477,7 +390,7 @@ async fn a_sharing_group_serves_one_membership_in_two_geometries() {
 /// plane — a second resolution would eventually disagree about what a name means.
 #[tokio::test]
 async fn a_key_addresses_its_view_on_both_planes() {
-    let served = serve().await;
+    let served = Served::copy(&MULTIVIEW, build_multiview).await;
     assert!(
         !points(&served, "quarter:2026-Q2").await.is_empty(),
         "the group's second view answers by key"
@@ -514,16 +427,25 @@ async fn a_key_addresses_its_view_on_both_planes() {
 /// be an existence oracle over the roster.
 #[tokio::test]
 async fn an_unknown_view_and_an_absent_key_are_the_same_404() {
-    let served = serve().await;
+    let served = Served::copy(&MULTIVIEW, build_multiview).await;
     // A group is not a view either (`views.md` §3.1): naming one is the same 404 as naming
     // nothing, because it has no row space to answer from.
+    let mut shapes = std::collections::BTreeSet::new();
     for view in ["no_such_view", "quarter:2099-Q9", "quarter:#99", "quarter"] {
         let resp = viewport(&served, view).await;
         assert_eq!(resp.status().as_u16(), 404, "{view} is not a served view");
         let body: Value = resp.json().await.unwrap();
-        // One code and one detail shape, differing only in the caller's own words back — which is
-        // the same information the request carried, and so no oracle.
         assert_eq!(body["error"], "unknown", "{body}");
-        assert_eq!(body["detail"], format!("unknown view '{view}'"), "{body}");
+        // The detail differs only by the caller's own words back, which the request carried.
+        shapes.insert(body["detail"].as_str().unwrap().replace(view, ""));
+    }
+    assert_eq!(shapes.len(), 1, "one detail for every unknown name: {shapes:?}");
+    // And nothing the bundle holds: no view, group or key of its roster.
+    let shape = shapes.first().unwrap();
+    for name in ["world", "quarter"]
+        .into_iter()
+        .chain(QUARTERS.iter().map(|(key, _, _)| *key))
+    {
+        assert!(!shape.contains(name), "{name} in {shape}");
     }
 }

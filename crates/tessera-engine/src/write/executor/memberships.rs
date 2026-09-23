@@ -311,13 +311,14 @@ impl Executor {
         })
     }
 
-    /// The artifacts this window's values named and nothing holds: one per
+    /// The artifacts these rows' values named and nothing holds: one per
     /// `membership = { attribute = f }` layer whose column carried a value the level has no
-    /// artifact for. Runs after the vocabulary mint, since a novel category key is a string in
-    /// the row until that pass draws it a code.
-    pub(super) fn derive_records(
+    /// artifact for. Each row is a cell list positional against the declared scalars. Runs after
+    /// the vocabulary mint, since a novel category key is a string in the row until that pass
+    /// draws it a code.
+    pub(super) fn derive_records<'a>(
         &mut self,
-        closed: &[tessera_lifecycle::ClosedEntry<Reply<Ingested>>],
+        rows: impl Iterator<Item = &'a [WalScalar]> + Clone,
         vocabularies: &Vocabularies,
     ) -> Result<Vec<WalRecord>, String> {
         use tessera_types::layer::attribute_value_key;
@@ -341,21 +342,19 @@ impl Executor {
                 .as_deref()
                 .and_then(|name| vocabularies.get(name));
             let mut wanted: std::collections::BTreeSet<String> = Default::default();
-            for entry in closed {
-                for row in entry.rows() {
-                    let Some(code) = row.scalars.get(index).and_then(scalar_code) else {
-                        continue;
-                    };
-                    // Code 0 is category code space's reserved absent sentinel, unlike a plain
-                    // integer column.
-                    if vocabulary.is_some() && code == tessera_store::vocabulary::ABSENT_CODE {
-                        continue;
-                    }
-                    wanted.insert(attribute_value_key(
-                        code,
-                        minter.and_then(|minter| minter.key_of(code)),
-                    ));
+            for row in rows.clone() {
+                let Some(code) = row.get(index).and_then(scalar_code) else {
+                    continue;
+                };
+                // Code 0 is category code space's reserved absent sentinel, unlike a plain
+                // integer column.
+                if vocabulary.is_some() && code == tessera_store::vocabulary::ABSENT_CODE {
+                    continue;
                 }
+                wanted.insert(attribute_value_key(
+                    code,
+                    minter.and_then(|minter| minter.key_of(code)),
+                ));
             }
             if wanted.is_empty() {
                 continue;
@@ -457,6 +456,8 @@ impl Executor {
                             .map(|parent| vec![(*parent).to_string()])
                             .unwrap_or_default(),
                         shape: None,
+                        // A key column names no label, so a minted artifact takes the default.
+                        access: Vec::new(),
                     })
                     .collect();
                 let pending = |key: &str| {

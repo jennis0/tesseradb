@@ -6,9 +6,13 @@
 //! A row id inside the merged span names a different entity afterwards. Anything cached in row
 //! space must therefore be keyed on `segments_version`. A merge keeps every row; removing
 //! deleted rows is the fold's work. It takes extents only and leaves the base segment alone.
+//!
+//! A merge touches row space only. The consumed segments' external-id runs and locator extents
+//! stay listed, and only the entity-space coalesce merges them, so the two passes never want the
+//! same manifest entries.
 
 use tessera_store::manifest::SegmentDescriptor;
-use tessera_store::merge::{execute_merge, MergeInput, MergePolicy, MergeSpec};
+use tessera_store::merge::{execute_merge, MergeInput, MergeOutput, MergePolicy, MergeSpec};
 use tessera_store::read::SegmentData;
 use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_types::IdentityKey;
@@ -99,7 +103,9 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
     None
 }
 
-/// One segment's on-disk bytes, from the manifest's own digests.
+/// One segment's row-space bytes, from the manifest's own digests. A flush segment's run and
+/// locator sit in its directory until a coalesce takes them, and are not counted, so a segment's
+/// size does not depend on when the coalesce ran.
 fn segment_bytes(
     manifest: &tessera_store::manifest::SegmentsManifest,
     partition: &str,
@@ -113,7 +119,11 @@ fn segment_bytes(
     manifest
         .files
         .iter()
-        .filter(|(path, _)| path.starts_with(&dir))
+        .filter(|(path, _)| {
+            path.starts_with(&dir)
+                && !path.ends_with("/external-ids.arrow")
+                && !path.ends_with("/ext-locator.u32")
+        })
         .map(|(_, digest)| digest.size)
         .sum()
 }
@@ -131,26 +141,17 @@ pub(crate) struct MergeContext {
     /// the entity-scoped columns declared at a running service and not yet folded. Any other
     /// missing column is a torn segment and fails the merge.
     pub(crate) absent_ok: Vec<String>,
-    /// The live partition watermark and allocator high-water, passed through untouched. These are
-    /// plan-time snapshots; [`rebase_into`] writes the live manifest's own values instead, which
-    /// may have advanced past these if a flush published during the merge.
-    pub(crate) watermark: u64,
-    pub(crate) entity_id_high_water: u64,
 }
 
 /// A merge whose files are durable, awaiting the manifest edit and the swap on the executor.
 pub(crate) struct CompletedMerge {
     pub(crate) plan: MergePlan,
     pub(crate) prefix: String,
-    pub(crate) output: tessera_store::FlushOutput,
+    pub(crate) output: MergeOutput,
     pub(crate) segment: SegmentData,
 }
 
 /// Turn a plan into durable files. Runs on the background pool, over immutable inputs.
-///
-/// `execute_merge` streams row and column data through the segment writer. It still materialises
-/// every consumed external-id run's `(key, entity)` pairs before sorting them, which dominates a
-/// merge's peak memory.
 pub(crate) fn execute(
     plan: MergePlan,
     ctx: MergeContext,
@@ -168,8 +169,6 @@ pub(crate) fn execute(
             scalar_schema: &ctx.scalar_schema,
             absent_ok: &ctx.absent_ok,
             row_base: plan.row_base,
-            watermark: ctx.watermark,
-            entity_id_high_water: ctx.entity_id_high_water,
         },
     )
     .map_err(|e| MaintenanceFailed(format!("merge: {e}")))?;
@@ -191,50 +190,30 @@ pub(crate) fn execute(
     })
 }
 
-/// Apply `completed` to `manifest` in place, or `false` if it no longer rebases.
+/// Apply `completed` to `manifest` in place, or `false` if a consumed segment is no longer listed.
 ///
-/// Three lists move and one does not.
-///
-/// - `segments`: the consumed descriptors out, the merged one in at the first's position.
-/// - `external_id_runs` and `locator_extents`: the consumed entries go and the merged run takes
-///   the first's position, because resolution reads these lists newest-first by position. They
-///   must stay contiguous, or a merged run at the wrong position answers a stale binding.
-/// - `deltas` is unchanged: a tier's postings are `(term, entity)` pairs and name no row, and
-///   the consumed segments' entities still have rows in the merged segment.
+/// The consumed descriptors leave `segments` and the merged one takes the first's position, and
+/// their row-space files leave `files`. Every other list is unchanged: delta tiers, external-id
+/// runs and locator extents address entities, and the consumed segments' entities still have rows
+/// in the merged segment. The runs and locators stay in `files` with their entries.
 pub(crate) fn rebase_into(
     manifest: &mut tessera_store::manifest::SegmentsManifest,
     completed: &CompletedMerge,
 ) -> bool {
     let plan = &completed.plan;
     let consumed: Vec<&str> = plan.inputs.iter().map(|i| i.seg_id.as_str()).collect();
-
-    let seg_at = |seg_id: &str| {
+    let listed = |seg_id: &str| {
         manifest
             .segments
             .iter()
             .position(|s| s.seg_id == seg_id && s.view == plan.view)
     };
-    let Some(first_segment) = seg_at(consumed[0]) else {
+    let Some(first_segment) = listed(consumed[0]) else {
         return false;
     };
-    if consumed.iter().any(|id| seg_at(id).is_none()) {
+    if consumed.iter().any(|id| listed(id).is_none()) {
         return false;
     }
-
-    let run_paths: Vec<String> = consumed
-        .iter()
-        .map(|seg_id| run_path(&plan.partition, &plan.view, seg_id))
-        .collect();
-    let Some(runs) = contiguous(&manifest.external_id_runs, &run_paths, |rel| rel) else {
-        return false;
-    };
-    let locator_paths: Vec<String> = consumed
-        .iter()
-        .map(|seg_id| locator_path(&plan.partition, &plan.view, seg_id))
-        .collect();
-    let Some(locators) = contiguous(&manifest.locator_extents, &locator_paths, |e| &e.path) else {
-        return false;
-    };
 
     manifest
         .segments
@@ -243,29 +222,15 @@ pub(crate) fn rebase_into(
         .segments
         .insert(first_segment, completed.output.segment.clone());
 
-    manifest
-        .external_id_runs
-        .splice(runs, [completed.output.external_id_run.clone()]);
-    manifest
-        .locator_extents
-        .splice(locators, [completed.output.locator_extent.clone()]);
-
-    // Remove the row-space files and any presence bitmaps the merged segment replaces; the
-    // merged segment carries its own, permuted. Bitmaps are removed by prefix because a column
-    // with no absence in a given segment has no bitmap file there.
+    // Presence bitmaps are removed by prefix because a column with no absence in a given segment
+    // has no bitmap file there; the merged segment carries its own, permuted.
     for seg_id in &consumed {
         let seg_rel = format!(
             "partitions/{}/{}/segments/{seg_id}",
             plan.partition,
             tessera_store::view_rel(&plan.view)
         );
-        for name in [
-            "morton.u32",
-            tessera_store::read::CutIndex::FILE,
-            "columns.arrow",
-            "external-ids.arrow",
-            "ext-locator.u32",
-        ] {
+        for name in ["morton.u32", tessera_store::read::CutIndex::FILE, "columns.arrow"] {
             manifest.files.remove(&format!("{seg_rel}/{name}"));
         }
         let presence_prefix = format!("{seg_rel}/{RENDER_PRESENCE_DIR}/");
@@ -280,41 +245,5 @@ pub(crate) fn rebase_into(
             .iter()
             .map(|(rel, digest)| (rel.clone(), digest.clone())),
     );
-    // `watermark` and `entity_id_high_water` stay as the live manifest has them. A merge moves no
-    // entity, and the plan's copies may be one flush old.
     true
-}
-
-fn run_path(partition: &str, view: &str, seg_id: &str) -> String {
-    format!(
-        "partitions/{partition}/{}/segments/{seg_id}/external-ids.arrow",
-        tessera_store::view_rel(view)
-    )
-}
-
-fn locator_path(partition: &str, view: &str, seg_id: &str) -> String {
-    format!(
-        "partitions/{partition}/{}/segments/{seg_id}/ext-locator.u32",
-        tessera_store::view_rel(view)
-    )
-}
-
-/// Where `needle` sits in `haystack` as a contiguous run of equal keys, in order, or `None` if
-/// it does not or is empty.
-pub(crate) fn contiguous<'a, T, K: PartialEq + 'a>(
-    haystack: &'a [T],
-    needle: &[K],
-    key: impl Fn(&'a T) -> &'a K,
-) -> Option<std::ops::Range<usize>> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    (0..=haystack.len() - needle.len())
-        .find(|&start| {
-            haystack[start..start + needle.len()]
-                .iter()
-                .map(&key)
-                .eq(needle.iter())
-        })
-        .map(|start| start..start + needle.len())
 }
