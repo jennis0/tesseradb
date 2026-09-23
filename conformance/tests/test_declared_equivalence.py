@@ -630,15 +630,6 @@ KNOWN = (
         "a build serves a level's artifacts in key order and a live layer in publication order, "
         "before and after a fold; the artifacts frame's order is meant to be deterministic",
     ),
-    Known(
-        "scoped-views-order",
-        "group-scoped",
-        STAGES,
-        ((r"meta", r"\.scoped_scalars\[\d+\]\.views\[\d+\]"),),
-        "a family scoped to a live group lists its views in the order their first flushes ran "
-        "(the view holding the lowest entity id first), where a build lists them in the group's "
-        "declared order",
-    ),
 )
 
 
