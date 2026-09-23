@@ -34,6 +34,8 @@ exclude_docs: |
   /roadmap.md
   /ingest-campaign.md
   /guides/views.md
+  /pytest.ini
+  /tests/
 
 validation:
   omitted_files: warn
@@ -49,6 +51,8 @@ markdown_extensions:
   - toc:
       permalink: true
   - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
