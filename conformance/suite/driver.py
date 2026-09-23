@@ -1355,6 +1355,7 @@ class Killed(Stage):
         return {
             "flushes": executor["flush"]["flushes"],
             "merges": executor["merges"],
+            "coalesces": executor["coalesces"],
             "segments_version": status["partitions"][0]["segments_version"],
             "folds": status["compaction"]["folds"],
             "fold_failures": status["compaction"]["fold_failures"],
@@ -1367,7 +1368,7 @@ class Killed(Stage):
         now = self._published_counters(h)
         watched = {
             "before_manifest_publish": ("flushes",),
-            "before_merge_publish": ("merges", "segments_version", "flushes"),
+            "before_merge_publish": ("merges", "coalesces", "segments_version", "flushes"),
             "before_current_flip": ("folds", "fold_failures", "flushes"),
         }[self.kill_at]
         for key in watched:
