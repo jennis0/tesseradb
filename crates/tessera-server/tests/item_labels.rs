@@ -31,7 +31,7 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     // A principal holding both labels sees every item, and the `"1"`-only principal's viewport is
     // exactly the multiples of three — so an id in both is a two-label item and an id in the first

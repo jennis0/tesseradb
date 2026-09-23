@@ -350,6 +350,7 @@ async fn a_projected_view_refuses_the_cartesian_spelling() {
     let rows = vec![(ingested_id(0), 0.0, 0.0, "0")];
     let (status, body) = post_ingest(&server, "wrong", ingest_batch(("x", "y"), &rows)).await;
     assert_eq!(status, 422, "the wrong spelling is a contract refusal");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
         detail.contains("'lon'") && detail.contains("'lat'"),
@@ -377,6 +378,7 @@ async fn a_view_with_no_projection_refuses_the_geographic_spelling() {
     let rows = vec![(ingested_id(0), 10.0, 10.0, "0")];
     let (status, body) = post_ingest(&server, "wrong", ingest_batch(("lon", "lat"), &rows)).await;
     assert_eq!(status, 422, "the wrong spelling is a contract refusal");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
         detail.contains("'x'") && detail.contains("'y'"),

@@ -1020,9 +1020,8 @@ async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
     )
     .await;
     assert_eq!(status, 422, "an undeclared column is a malformed request");
-    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(body["error"], "contract", "{body}");
-    assert!(body["detail"].as_str().unwrap().contains("'heat'"), "{body}");
+    assert_eq!(error_code(&body), "contract", "{body}");
+    assert!(body.contains("'heat'"), "{body}");
 }
 
 /// **A join row carries that view's scoped value, and it is the one thing it carries beyond
@@ -1571,10 +1570,11 @@ async fn a_render_only_familys_leaf_takes_the_same_refusals_an_indexed_ones_does
     let served = Served::build(build_with_families).await;
     let (status, body) = filtered_bytes(&served, &served.token, "world", range("heat")).await;
     assert_eq!(status, 422, "a bare leaf on a plain view decides nothing");
-    let detail = String::from_utf8_lossy(&body).to_string();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
     assert!(
-        detail.contains("quarter"),
-        "the refusal names the group: {detail}"
+        body["detail"].as_str().unwrap().contains("quarter"),
+        "the refusal names the group: {body}"
     );
     let (status, _) = filtered_bytes(&served, &served.token, "world", range("heat@2029-Q9")).await;
     assert_eq!(
@@ -1742,8 +1742,9 @@ async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_diff
     )
     .await;
     assert_eq!(status, 409, "one cell holds one value: {body}");
+    assert_eq!(error_code(&body), "conflict", "{body}");
     assert!(
-        body.contains("group-scoped column 'heat'") && body.contains("key '2026-Q1'"),
+        body.contains("'heat'") && body.contains("2026-Q1"),
         "the refusal names the column and the key: {body}"
     );
     assert!(
@@ -1938,8 +1939,9 @@ async fn a_flushed_text_cell_refuses_a_second_value_equal_or_not() {
     )
     .await;
     assert_eq!(status, 409, "a differing string is refused: {body}");
+    assert_eq!(error_code(&body), "conflict", "{body}");
     assert!(
-        body.contains("group-scoped column 'note'") && body.contains("key '2026-Q1'"),
+        body.contains("'note'") && body.contains("2026-Q1"),
         "the refusal names the column and the key: {body}"
     );
 
@@ -2036,8 +2038,9 @@ async fn a_same_window_text_cell_still_dedupes_and_refuses_exactly() {
     )
     .await;
     assert_eq!(status, 409, "and a differing one is the 409: {body}");
+    assert_eq!(error_code(&body), "conflict", "{body}");
     assert!(
-        body.contains("group-scoped column 'note'") && body.contains("key '2026-Q2'"),
+        body.contains("'note'") && body.contains("2026-Q2"),
         "naming the column and the key: {body}"
     );
 }

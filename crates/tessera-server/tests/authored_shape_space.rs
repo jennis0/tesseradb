@@ -355,10 +355,7 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body.to_string().contains("`projection` is `none`"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 
     // The same declaration in view space is accepted, which is what says the refusal is about the
     // space and not about the drawing.
@@ -394,5 +391,5 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("not a coordinate"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
 }

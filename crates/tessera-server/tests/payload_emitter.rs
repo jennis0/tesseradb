@@ -24,7 +24,7 @@ const ITEMS: u64 = 64;
 /// inline values), three attributes and one layer.
 ///
 /// **No `render` and no `auto`** — both are emitted as declared and both are refused at a running
-/// service, which [`the_route_refuses_render_and_says_why`] pins separately. Everything else here
+/// service, which [`the_route_refuses_render_naming_the_key`] pins separately. Everything else here
 /// is a key some block takes, so a body that arrives wrong arrives wrong in this test.
 const DECLARATION: &str = r#"
 [sources]
@@ -231,10 +231,10 @@ async fn every_emitted_body_is_taken_by_its_route() {
 }
 
 /// **The emitter states the declaration and the route decides** (decision 0136's amendment):
-/// `render` reaches the body, and what comes back is the refusal that explains itself rather than
-/// a column quietly declared without it.
+/// `render` reaches the body, and what comes back is a refusal naming the key rather than a column
+/// quietly declared without it.
 #[tokio::test]
-async fn the_route_refuses_render_and_says_why() {
+async fn the_route_refuses_render_naming_the_key() {
     let served = Served::build(|dir| build_fixture(dir, ITEMS)).await;
     let dir = TempDir::new().unwrap();
     let payloads = payloads(
@@ -255,8 +255,9 @@ render = true
     assert_eq!(body["render"], true, "emitted as declared: {body}");
     let (status, answer) = put(&served, "/control/attributes", body).await;
     assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
     assert!(
-        answer.to_string().contains("render"),
+        answer["detail"].as_str().unwrap_or_default().contains("render"),
         "the refusal names the key: {answer}"
     );
     served.server.shutdown().await;

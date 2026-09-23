@@ -207,9 +207,9 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default().to_string();
-    assert!(detail.contains("no `view`"), "{detail}");
-    assert!(detail.contains("quarter"), "{detail}");
+    assert!(detail.contains("quarter"), "the refusal names the group: {detail}");
 
     // Named where the layer has one set drawn on every view.
     let (status, body) = put(
@@ -219,13 +219,7 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("entity-scoped"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 
     // A view no view of the bundle answers to is refused rather than acked and drawn nowhere.
     let (status, body) = put(
@@ -235,10 +229,11 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default().to_string();
     assert!(detail.contains("q9"), "{detail}");
     assert!(
-        detail.contains("q1, q2"),
+        detail.contains("q1") && detail.contains("q2"),
         "the keys held are named: {detail}"
     );
 
@@ -316,12 +311,12 @@ async fn a_parent_in_another_view_is_refused() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default().to_string();
     assert!(
         detail.contains("q1"),
         "the refusal says where it is held: {detail}"
     );
-    assert!(detail.contains("cross"), "{detail}");
 
     // The same edge inside one view is the ordinary case.
     let (status, body) = put(

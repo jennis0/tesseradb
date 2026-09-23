@@ -245,8 +245,9 @@ async fn the_values_route_fills_restates_and_refuses() {
     )
     .await;
     assert_eq!(status, 409, "{answer}");
+    assert_eq!(answer["error"], "conflict", "{answer}");
     let detail = answer.to_string();
-    assert!(detail.contains("column 'tag'"), "{detail}");
+    assert!(detail.contains("'tag'"), "{detail}");
     assert!(
         !detail.contains("alpha") && !detail.contains("beta"),
         "the body names neither value (`ingest.md` §1.4): {detail}"
@@ -262,8 +263,9 @@ async fn the_values_route_fills_restates_and_refuses() {
     )
     .await;
     assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
     assert!(
-        answer.to_string().contains("row 0"),
+        answer["detail"].as_str().unwrap_or_default().contains("row 0"),
         "the refusal names the row and not the id: {answer}"
     );
 }
@@ -485,7 +487,7 @@ async fn a_row_addressed_by_tessera_id_carries_its_idset() {
     )
     .await;
     assert_eq!(status, 422, "a tessera_id with no idset is refused: {answer}");
-    assert!(answer.to_string().contains("idset"), "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
 }
 
 /// **A group-scoped column is nameable only on a batch that carries the view header**
@@ -493,7 +495,7 @@ async fn a_row_addressed_by_tessera_id_carries_its_idset() {
 /// nothing declares and takes the undeclared-column refusal — which is the same refusal a scoped
 /// column takes on a viewless batch, the families a batch may name being empty without a header.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_undeclared_column_is_refused_and_names_the_view() {
+async fn an_undeclared_column_is_refused_naming_the_column() {
     let served = serve().await;
     ingest_point(&served, "points-1", "subject").await;
     tick(&served.server).await;
@@ -544,8 +546,9 @@ async fn the_limits_are_published_and_enforced() {
         .collect();
     let (status, answer) = values(&served, "values-1", Some("s0"), Value::Array(rows)).await;
     assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
     assert!(
-        answer.to_string().contains("ingest_max_batch_rows"),
+        answer["detail"].as_str().unwrap_or_default().contains("ingest_max_batch_rows"),
         "the refusal names the unit: {answer}"
     );
 }

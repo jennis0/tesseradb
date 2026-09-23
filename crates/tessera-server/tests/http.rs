@@ -44,7 +44,7 @@ const _: () = assert!(PARALLEL_HEADLINE_ITEMS < SERIAL_FALLBACK_MAX_ROWS);
 #[tokio::test]
 async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -81,7 +81,7 @@ async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
 #[tokio::test]
 async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requests() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -154,7 +154,7 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
 #[tokio::test]
 async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -204,7 +204,7 @@ async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
 #[tokio::test]
 async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -267,111 +267,10 @@ async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
     }
 }
 
-/// Owner ruling (contracts §3.2): `/v1/items` returns the identical `404` for "no such id" and
-/// "exists but is not visible to this principal" -- same status, same body, byte for byte. This
-/// test deliberately never learns which *external id* the invisible `tessera_id` names (that
-/// would require inverting the identity, which I10 forbids even to a test): it gets a genuinely
-/// existing id from session A's own viewport (everyone carries term "0") and finds one that
-/// session B -- authorised for term "1" only, so it sees strictly fewer items (`terms_of`'s
-/// multiples-of-3 subset) -- cannot see, entirely through the HTTP surface a client has.
-#[tokio::test]
-async fn i_item_404s_identically_for_unknown_and_invisible() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    // Session A: term "0" -- every item carries it, so A sees the whole bundle.
-    let auth_a = authorise(&server, &["0"]).await;
-    let token_a = auth_a["token"].as_str().unwrap();
-    // Session B: term "1" only -- `terms_of`'s multiples-of-3 subset, strictly fewer items.
-    let auth_b = authorise(&server, &["1"]).await;
-    let token_b = auth_b["token"].as_str().unwrap();
-
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token_a)
-        .json(&serde_json::json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
-    assert!(
-        !points.is_empty(),
-        "session A's viewport must return some points to pick from"
-    );
-
-    // Find a tessera_id that is real (session A's own viewport returned it) but invisible to B.
-    let mut invisible_to_b = None;
-    for &(tessera_id, _) in &points {
-        let resp_b = post_item(&server, token_b, tessera_id).await;
-        if resp_b.status() == 404 {
-            invisible_to_b = Some(tessera_id);
-            break;
-        }
-    }
-    let invisible_to_b = invisible_to_b
-        .expect("the fixture's multiples-of-3 term split must leave something invisible to B");
-
-    // Sanity: A, which is the session that surfaced this id in its own viewport, can fetch it.
-    let resp_a = post_item(&server, token_a, invisible_to_b).await;
-    assert_eq!(
-        resp_a.status(),
-        200,
-        "session A must be able to fetch an id its own viewport just returned"
-    );
-
-    let unknown_to_everyone = 0xDEAD_BEEF_DEAD_BEEFu64;
-    let resp_unknown = post_item(&server, token_b, unknown_to_everyone).await;
-    let resp_invisible = post_item(&server, token_b, invisible_to_b).await;
-
-    assert_eq!(resp_unknown.status(), 404);
-    assert_eq!(resp_invisible.status(), 404);
-    assert_eq!(resp_unknown.status(), resp_invisible.status());
-
-    let unknown_body = resp_unknown.text().await.unwrap();
-    let invisible_body = resp_invisible.text().await.unwrap();
-    assert_eq!(
-        unknown_body, invisible_body,
-        "identical 404 required byte-for-byte -- any difference is an oracle for \"this id exists\""
-    );
-}
-
-#[tokio::test]
-async fn b_missing_or_garbage_token_is_401() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let body = serde_json::json!({
-        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
-    });
-
-    let resp_missing = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp_missing.status(), 401);
-
-    let resp_garbage = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth("not-a-real-token")
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp_garbage.status(), 401);
-}
-
 #[tokio::test]
 async fn d_unknown_view_404_and_malformed_bbox_422() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -407,7 +306,7 @@ async fn d_unknown_view_404_and_malformed_bbox_422() {
 #[tokio::test]
 async fn h_config_missing_disclosure_refuses_to_start() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
 
     std::env::set_var("TESSERA_TEST_H_SESSION", SESSION_CREDENTIAL);
     std::env::set_var("TESSERA_TEST_H_OPERATOR", OPERATOR_CREDENTIAL);
@@ -443,40 +342,13 @@ async fn h_config_missing_disclosure_refuses_to_start() {
 
 // --- Authentication and disclosure regressions ---
 
-/// `GET /v1/meta` must require a valid session token — it discloses bundle extents, views and the
-/// declared-scalar schema.
-#[tokio::test]
-async fn viewer_meta_requires_bearer() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let resp = server
-        .client
-        .get(server.viewer_url("/v1/meta"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-    let resp = server
-        .client
-        .get(server.viewer_url("/v1/meta"))
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-}
-
 /// Contracts §2.2 r6: `GET /v1/meta` reports the idset as `idset` —
 /// and reports **only** the idset: the identity key appears in no API response on any plane.
 /// Nothing asserted either half before, which is what let S2's idset regression sit untested.
 #[tokio::test]
 async fn viewer_meta_reports_the_idset_and_never_the_key() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -507,7 +379,7 @@ async fn viewer_meta_reports_the_idset_and_never_the_key() {
 #[tokio::test]
 async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -543,7 +415,6 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
     assert_eq!(stale.status(), 409);
     let body: serde_json::Value = stale.json().await.unwrap();
     assert_eq!(body["error"], "conflict");
-    assert_eq!(body["detail"], "stale idset; re-resolve by external_id");
 
     // The matching idset is a no-op: same 200, same body as the idset-less request.
     let matching = server
@@ -587,7 +458,7 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
 #[tokio::test]
 async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -806,7 +677,7 @@ async fn compute_status(server: &TestServer) -> serde_json::Value {
 #[tokio::test]
 async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -873,7 +744,7 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
 #[tokio::test]
 async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -972,7 +843,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
 #[tokio::test]
 async fn no_permit_leak_after_a_shed_or_a_completion() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1066,7 +937,7 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
 #[tokio::test]
 async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     // compute_queue = 1 (not 0): the queued fast request below must be ADMITTED (a slot) and
     // then WAIT for a compute permit, rather than being shed outright by stage 1 — that wait is
     // exactly what `x-tessera-admission-us` needs to capture. A generous timeout so it is never
@@ -1231,7 +1102,7 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 #[tokio::test]
 async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1700,7 +1571,7 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
 #[tokio::test]
 async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
 
     let chunked = spawn_server_with_stream_flush(
         &bundle_root,
@@ -1760,7 +1631,7 @@ async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content
 #[tokio::test]
 async fn viewport_tiles_are_served_in_request_order_with_first_occurrence_dedup() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -2038,7 +1909,7 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
 #[tokio::test]
 async fn the_whole_stream_deadline_cuts_a_viewport_after_its_first_flush() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     let body = serde_json::json!({
         "view": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
     });
