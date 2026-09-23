@@ -90,11 +90,11 @@ def test_a_column_already_declared_is_left_as_it_was(db):
     assert 'type = "i32"' in db.declaration
 
 
-def test_the_helper_reads_the_schema_and_prints_the_table_it_declared(db, capsys):
-    db.declare_columns(frame(), skip=["paper", "x", "y", "terms"])
-    printed = capsys.readouterr().out
-    assert "declare_columns" in printed
-    assert "declared as" in printed and "timestamp_us" in printed
+def test_the_helper_reads_the_schema_and_returns_what_it_declared(db):
+    report = db.declare_columns(frame(), skip=["paper", "x", "y", "terms"])
+    assert {row.name for row in report.columns} == {
+        "year", "open", "submitted", "title", "archive", "arxiv_id"
+    }
 
 
 def test_the_columns_a_frame_fills_are_matched_on_the_allocation_views_insert(db):

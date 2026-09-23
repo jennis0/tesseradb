@@ -39,13 +39,11 @@ def test_a_frame_is_written_as_it_was_given_and_the_declaration_names_the_column
     assert 'entity_id = "id"' in db.declaration
 
 
-def test_every_insert_prints_the_columns_it_read_and_the_columns_it_ignored(tmp_path, capsys):
+def test_every_insert_returns_the_columns_it_read_and_the_columns_it_ignored(tmp_path):
     db = mapped(tmp_path)
     insert = db.insert("map", frame(id=["p", "q", "r"], note=["a", "b", "c"]), x="x", y="y")
     assert insert.read == ["x", "y"]
     assert insert.ignored == ["id", "note"]
-    printed = capsys.readouterr().out
-    assert "read:    x, y" in printed and "ignored: id, note" in printed
 
 
 def test_a_column_the_target_does_not_read_is_refused_at_the_verb(tmp_path):
@@ -368,7 +366,7 @@ def test_a_committed_database_reopens_and_takes_the_next_commit(tmp_path):
     db.insert("map", frame(id=[1, 2, 3], access=["public"] * 3),
               id="id", x="x", y="y", access="access")
     first = db.commit()
-    assert first.ok, first.output
+    assert first.ok, first.log
     db.close()
 
     again = open_database(tmp_path / "db")

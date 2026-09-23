@@ -200,14 +200,14 @@ def test_the_check_refuses_a_declaration_the_verbs_wrote_and_names_the_layer(db,
     db.declare_layer("clusters", kind="nested", levels=[(0, "Top", None)])
     report = checked(db)
     assert not report.ok
-    assert "clusters" in report.output
+    assert "clusters" in report.log
 
 
 def test_a_shape_on_an_artifact_row_of_a_layer_that_evaluates_none_is_refused(db, checked):
     db.declare_layer("cases", kind="flat", artifacts=[{"key": "ring", "wkt": "POLYGON EMPTY"}])
     report = checked(db)
     assert not report.ok
-    assert "cases" in report.output and "ring" in report.output
+    assert "cases" in report.log and "ring" in report.log
 
 
 def test_one_row_carries_one_shape(db, checked):
@@ -215,7 +215,7 @@ def test_one_row_carries_one_shape(db, checked):
                      artifacts=[{"key": "both", "bbox": [0, 0, 1, 1], "circle": [0, 0, 1]}])
     report = checked(db)
     assert not report.ok
-    assert "regions" in report.output and "both" in report.output
+    assert "regions" in report.log and "both" in report.log
 
 
 def test_a_rows_shape_is_its_layers_kind_and_no_other(db, checked):
@@ -223,7 +223,7 @@ def test_a_rows_shape_is_its_layers_kind_and_no_other(db, checked):
                      artifacts=[{"key": "round", "circle": [0, 0, 1]}])
     report = checked(db)
     assert not report.ok
-    assert "regions" in report.output and "round" in report.output
+    assert "regions" in report.log and "round" in report.log
 
 
 def test_an_inline_roster_with_no_row_is_refused(db):

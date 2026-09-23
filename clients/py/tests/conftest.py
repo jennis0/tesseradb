@@ -85,7 +85,7 @@ def served(tmp_path, corpus):
         started.append(db)
         declare(db)
         report = db.commit()
-        assert report.ok, report.output
+        assert report.ok, report.log
         return db
 
     yield build
