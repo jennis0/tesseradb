@@ -63,11 +63,17 @@ index = true
 const N: u64 = 20;
 
 fn write_points(path: &Path) {
+    let score = Int64Array::from_iter_values((0..N).map(|e| -(e as i64)));
+    write_points_scored(path, Arc::new(score));
+}
+
+/// The fixture's points file with `score`, declared `i64`, carried by `score` as written.
+fn write_points_scored(path: &Path, score: arrow::array::ArrayRef) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
-        Field::new("score", DataType::Int64, true),
+        Field::new("score", score.data_type().clone(), true),
         Field::new("weight", DataType::Float32, true),
         Field::new("big", DataType::UInt64, true),
         Field::new(
@@ -88,9 +94,7 @@ fn write_points(path: &Path) {
             Arc::new(Float64Array::from_iter_values(
                 ids.iter().map(|e| ((e * 53) % 1000) as f64),
             )),
-            Arc::new(Int64Array::from_iter_values(
-                ids.iter().map(|e| -(*e as i64)),
-            )),
+            score,
             Arc::new(Float32Array::from_iter_values(
                 ids.iter().map(|e| *e as f32 / 4.0),
             )),
@@ -111,8 +115,16 @@ fn write_points(path: &Path) {
 
 fn build_bundle(dir: &Path) -> std::path::PathBuf {
     let points = dir.join("points.parquet");
-    let pairs = dir.join("pairs.parquet");
     write_points(&points);
+    build_over(dir, points).expect("the build succeeds")
+}
+
+/// Build the fixture's declaration over `points`.
+fn build_over(
+    dir: &Path,
+    points: std::path::PathBuf,
+) -> Result<std::path::PathBuf, tessera_build::BuildError> {
+    let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, N);
     let schema_path = dir.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA).unwrap();
@@ -152,9 +164,8 @@ fn build_bundle(dir: &Path) -> std::path::PathBuf {
         memory_budget: None,
         band_rows: None,
         schema: config.schema,
-    })
-    .expect("the build succeeds");
-    out
+    })?;
+    Ok(out)
 }
 
 /// A server over the declared-tail bundle, at the harness's generous limits.
@@ -1484,4 +1495,65 @@ async fn an_arrow_values_column_at_another_width_is_read_as_a_build_reads_it() {
     assert_eq!(status, 200, "{answer}");
     flush(&server).await;
     assert_eq!(fields_of(&server, tessera_id).await["level"], json!(42));
+}
+
+/// A `uint64` past `i64::MAX`, which an `i64` cannot hold.
+const PAST_I64: u64 = 1 << 63;
+
+/// **A `uint64` past `i64::MAX` is out of range for `i64`, at both paths**, and is never wrapped
+/// to a negative number: the service refuses the batch naming the row and the value as sent, and
+/// allocates nothing; the build refuses the same column in a points file.
+#[tokio::test]
+async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
+    let (_tmp, server) = served_declared().await;
+    let high_water = control_status(&server).await["entity_id_high_water"].clone();
+    let ids = [900u64, 901];
+    let access = access_column(ids.iter().map(|_| "0"));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        access_field(&access),
+        Field::new("score", DataType::UInt64, true),
+    ]));
+    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(
+                external.iter().map(|v| v.as_slice()),
+            )),
+            Arc::new(Float32Array::from(vec![10.0, 11.0])),
+            Arc::new(Float32Array::from(vec![20.0, 21.0])),
+            Arc::new(access),
+            Arc::new(UInt64Array::from(vec![7, PAST_I64])),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    let body = writer.into_inner().unwrap();
+    let (status, answer) = ingest(&server, "past-i64", Some(ARROW), body).await;
+    assert_eq!(status, 422, "{answer}");
+    let detail = answer["detail"].as_str().unwrap();
+    assert!(detail.contains("row 1, column 'score'"), "{detail}");
+    assert!(detail.contains(&PAST_I64.to_string()), "the value as sent: {detail}");
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water,
+        "the refused batch allocated no entity"
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let points = tmp.path().join("points.parquet");
+    write_points_scored(
+        &points,
+        Arc::new(UInt64Array::from_iter_values(
+            (0..N).map(|e| if e == 3 { PAST_I64 } else { e }),
+        )),
+    );
+    assert!(
+        build_over(tmp.path(), points).is_err(),
+        "the build refuses the same column"
+    );
 }

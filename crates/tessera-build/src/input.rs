@@ -2700,6 +2700,52 @@ mod tests {
         ));
     }
 
+    /// A roster integer is held as an `i64`, so a `uint64` past `i64::MAX` is refused rather
+    /// than wrapped to a negative number.
+    #[test]
+    fn a_roster_uint64_past_i64_max_is_refused() {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::datatypes::{Field, Schema as ArrowSchema};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roster.parquet");
+        let read = |rank: u64| {
+            let schema = Arc::new(ArrowSchema::new(vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("rank", DataType::UInt64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["a"])),
+                    Arc::new(UInt64Array::from(vec![rank])),
+                ],
+            )
+            .unwrap();
+            let mut writer =
+                parquet::arrow::ArrowWriter::try_new(File::create(&path).unwrap(), schema, None)
+                    .unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            read_roster_table(
+                &path,
+                &crate::config::Fields::canonical("roster"),
+                &[crate::config::ViewMetadata {
+                    name: "rank".to_string(),
+                    ty: ScalarType::U64,
+                    vocabulary: None,
+                }],
+            )
+        };
+        let rows = read(7).expect("a rank an i64 holds is read");
+        assert!(matches!(
+            rows[0].metadata["rank"],
+            crate::config::MetadataValue::Int(7)
+        ));
+        assert!(read(1 << 63).is_err(), "a rank past i64::MAX is refused");
+    }
+
     #[test]
     fn deinterleave_inverts_the_worked_example() {
         // R2's worked example: x_cell = 6, y_cell = 3 -> code 30.
@@ -2975,30 +3021,43 @@ pub fn read_roster_table(
                             .collect::<Result<_>>()?
                     }
                     ty => {
-                        let widened = scalar_column::integers(column.as_ref())
-                            .ok_or_else(|| BuildError::Schema {
+                        // Every integer width is held as an `i64`, so it is read as one.
+                        let held_as = match ty {
+                            ScalarType::TimestampUs => ScalarType::TimestampUs,
+                            _ => ScalarType::I64,
+                        };
+                        let read = ScalarColumn::new(column, held_as).ok_or_else(|| {
+                            BuildError::Schema {
                                 path: path.to_path_buf(),
                                 detail: format!(
                                     "the roster column '{name}' has type {:?}, and this group \
-                                         declares it '{}'. A `timestamp_us` reads a microsecond \
-                                         timestamp or an `i64`, and nothing else — a millisecond \
-                                         column read here would be a date a thousandfold wrong",
+                                     declares it '{}'. A `timestamp_us` reads a microsecond \
+                                     timestamp or an `i64`, and nothing else — a millisecond \
+                                     column read here would be a date a thousandfold wrong",
                                     column.data_type(),
                                     ty.arrow_type_name()
                                 ),
-                            })?;
-                        let nulls = column.nulls().cloned();
-                        widened
-                            .into_iter()
-                            .enumerate()
-                            .map(|(row, value)| {
-                                if nulls.as_ref().is_some_and(|n| n.is_null(row)) {
-                                    return Err(missing(row));
+                            }
+                        })?;
+                        (0..column.len())
+                            .map(|row| match read.value(row) {
+                                Ok(ScalarValue::Null) => Err(missing(row)),
+                                Ok(ScalarValue::TimestampUs(value)) => {
+                                    Ok(MetadataValue::TimestampUs(value))
                                 }
-                                Ok(match ty {
-                                    ScalarType::TimestampUs => MetadataValue::TimestampUs(value),
-                                    _ => MetadataValue::Int(value),
-                                })
+                                Ok(ScalarValue::I64(value)) => Ok(MetadataValue::Int(value)),
+                                Ok(other) => {
+                                    unreachable!("read as an i64 or a timestamp: {other:?}")
+                                }
+                                Err(e) => Err(BuildError::Schema {
+                                    path: path.to_path_buf(),
+                                    detail: format!(
+                                        "the roster column '{name}' carries {} at row {row}, \
+                                         which does not fit an i64 ({}..={}); write a value in \
+                                         that range",
+                                        e.value, e.min, e.max
+                                    ),
+                                }),
                             })
                             .collect::<Result<_>>()?
                     }

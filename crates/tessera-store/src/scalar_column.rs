@@ -65,22 +65,23 @@ pub struct ScalarColumn {
 
 enum Values {
     Bool(BooleanArray),
-    /// Every integer column widened to `i64`, and narrowed back to the declared width per row.
+    /// Every integer column but a `u64` one, widened to `i64` and narrowed to the declared type
+    /// per row.
     Ints(Vec<i64>),
-    /// A `u64` column under a `u64` declaration, kept unwidened: widening a `u64` above
-    /// `i64::MAX` would make it negative, and the range check would then refuse it.
+    /// A `u64` column, kept unwidened: a value above `i64::MAX` has no `i64` spelling.
     U64(Vec<u64>),
     F32(Vec<f32>),
     F64(Vec<f64>),
     Text(Utf8Values),
 }
 
-/// A row whose integer does not fit its declared type, which accepts `min..=max`.
+/// A row whose integer does not fit its declared type, which accepts `min..=max`. The value is
+/// the one the column holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutOfRange {
-    pub value: i64,
-    pub min: i64,
-    pub max: i64,
+    pub value: i128,
+    pub min: i128,
+    pub max: i128,
 }
 
 impl ScalarColumn {
@@ -104,12 +105,6 @@ impl ScalarColumn {
             ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
                 Values::Text(Utf8Values::new(column)?)
             }
-            ScalarType::U64 if any.is::<UInt64Array>() => Values::U64(
-                any.downcast_ref::<UInt64Array>()
-                    .expect("checked by is::<>")
-                    .values()
-                    .to_vec(),
-            ),
             ScalarType::U8
             | ScalarType::U16
             | ScalarType::U32
@@ -118,7 +113,10 @@ impl ScalarColumn {
             | ScalarType::I16
             | ScalarType::I32
             | ScalarType::I64
-            | ScalarType::TimestampUs => Values::Ints(integers(column.as_ref())?),
+            | ScalarType::TimestampUs => match any.downcast_ref::<UInt64Array>() {
+                Some(a) => Values::U64(a.values().to_vec()),
+                None => Values::Ints(integers(column.as_ref())?),
+            },
         };
         Some(ScalarColumn {
             ty,
@@ -136,50 +134,55 @@ impl ScalarColumn {
         }
         Ok(match &self.values {
             Values::Bool(values) => ScalarValue::Bool(values.value(row)),
-            Values::U64(values) => ScalarValue::U64(values[row]),
             Values::F32(values) => ScalarValue::F32(values[row]),
             Values::F64(values) => ScalarValue::F64(values[row]),
             Values::Text(values) => ScalarValue::Utf8(values.value(row).to_string()),
-            Values::Ints(values) => {
-                let value = values[row];
-                let fit = |min: i64, max: i64| {
-                    if (min..=max).contains(&value) {
-                        Ok(value)
-                    } else {
-                        Err(OutOfRange { value, min, max })
-                    }
-                };
-                match self.ty {
-                    ScalarType::U8 => ScalarValue::U8(fit(0, u8::MAX.into())? as u8),
-                    ScalarType::U16 => ScalarValue::U16(fit(0, u16::MAX.into())? as u16),
-                    ScalarType::U32 => ScalarValue::U32(fit(0, u32::MAX.into())? as u32),
-                    ScalarType::U64 => ScalarValue::U64(fit(0, i64::MAX)? as u64),
-                    ScalarType::I8 => ScalarValue::I8(fit(i8::MIN.into(), i8::MAX.into())? as i8),
-                    ScalarType::I16 => {
-                        ScalarValue::I16(fit(i16::MIN.into(), i16::MAX.into())? as i16)
-                    }
-                    ScalarType::I32 => {
-                        ScalarValue::I32(fit(i32::MIN.into(), i32::MAX.into())? as i32)
-                    }
-                    ScalarType::I64 => ScalarValue::I64(value),
-                    ScalarType::TimestampUs => ScalarValue::TimestampUs(value),
-                    ScalarType::Bool
-                    | ScalarType::F32
-                    | ScalarType::F64
-                    | ScalarType::Utf8
-                    | ScalarType::Keyword
-                    | ScalarType::Text => {
-                        unreachable!("`new` reads only an integer declaration as integers")
-                    }
-                }
+            Values::Ints(values) => self.integer(values[row].into())?,
+            Values::U64(values) => self.integer(values[row].into())?,
+        })
+    }
+
+    /// An integer at the declared type, or [`OutOfRange`] where the type cannot hold it.
+    fn integer(&self, value: i128) -> Result<ScalarValue, OutOfRange> {
+        let (min, max) = match self.ty {
+            ScalarType::U8 => (0, u8::MAX.into()),
+            ScalarType::U16 => (0, u16::MAX.into()),
+            ScalarType::U32 => (0, u32::MAX.into()),
+            ScalarType::U64 => (0, u64::MAX.into()),
+            ScalarType::I8 => (i8::MIN.into(), i8::MAX.into()),
+            ScalarType::I16 => (i16::MIN.into(), i16::MAX.into()),
+            ScalarType::I32 => (i32::MIN.into(), i32::MAX.into()),
+            ScalarType::I64 | ScalarType::TimestampUs => (i64::MIN.into(), i64::MAX.into()),
+            ScalarType::Bool
+            | ScalarType::F32
+            | ScalarType::F64
+            | ScalarType::Utf8
+            | ScalarType::Keyword
+            | ScalarType::Text => {
+                unreachable!("`new` reads only an integer declaration as integers")
             }
+        };
+        if !(min..=max).contains(&value) {
+            return Err(OutOfRange { value, min, max });
+        }
+        // In range, so every narrowing below is exact.
+        Ok(match self.ty {
+            ScalarType::U8 => ScalarValue::U8(value as u8),
+            ScalarType::U16 => ScalarValue::U16(value as u16),
+            ScalarType::U32 => ScalarValue::U32(value as u32),
+            ScalarType::U64 => ScalarValue::U64(value as u64),
+            ScalarType::I8 => ScalarValue::I8(value as i8),
+            ScalarType::I16 => ScalarValue::I16(value as i16),
+            ScalarType::I32 => ScalarValue::I32(value as i32),
+            ScalarType::I64 => ScalarValue::I64(value as i64),
+            _ => ScalarValue::TimestampUs(value as i64),
         })
     }
 }
 
-/// Any integer column, or a microsecond timestamp, as `i64`: one conversion per batch. A `u64`
-/// above `i64::MAX` wraps to a negative number. `None` for any other type.
-pub fn integers(column: &dyn Array) -> Option<Vec<i64>> {
+/// Any integer column but a `u64` one, or a microsecond timestamp, as `i64`: one conversion per
+/// batch, and lossless. `None` for any other type.
+fn integers(column: &dyn Array) -> Option<Vec<i64>> {
     let any = column.as_any();
     macro_rules! widen {
         ($($dt:pat => $arr:ident),* $(,)?) => {
@@ -201,7 +204,6 @@ pub fn integers(column: &dyn Array) -> Option<Vec<i64>> {
         DataType::UInt8 => UInt8Array,
         DataType::UInt16 => UInt16Array,
         DataType::UInt32 => UInt32Array,
-        DataType::UInt64 => UInt64Array,
         DataType::Int8 => Int8Array,
         DataType::Int16 => Int16Array,
         DataType::Int32 => Int32Array,
@@ -285,6 +287,25 @@ mod tests {
         let column: ArrayRef = Arc::new(UInt64Array::from(vec![u64::MAX]));
         let read = ScalarColumn::new(&column, ScalarType::U64).unwrap();
         assert_eq!(read.value(0), Ok(ScalarValue::U64(u64::MAX)));
+    }
+
+    #[test]
+    fn a_u64_past_i64_max_is_out_of_range_for_every_other_integer_declaration() {
+        let column: ArrayRef = Arc::new(UInt64Array::from(vec![7, 1 << 63]));
+        for ty in [
+            ScalarType::U8,
+            ScalarType::U32,
+            ScalarType::I64,
+            ScalarType::TimestampUs,
+        ] {
+            let read = ScalarColumn::new(&column, ty).unwrap();
+            assert!(read.value(0).is_ok(), "{ty:?}");
+            assert_eq!(
+                read.value(1).map_err(|e| e.value),
+                Err(1i128 << 63),
+                "{ty:?} refuses the value as the column holds it"
+            );
+        }
     }
 
     #[test]
