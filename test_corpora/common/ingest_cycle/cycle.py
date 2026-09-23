@@ -6,6 +6,7 @@ except ModuleNotFoundError:  # 3.10 on this box
     import tomli as tomllib
 import base64
 import concurrent.futures
+import datetime
 import json
 import random
 import shutil
@@ -14,7 +15,9 @@ import time
 import uuid
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import requests
 
@@ -27,6 +30,7 @@ from .census import (
     census_zooms,
     compare_census,
     coverage_failures,
+    filter_probes,
     incomplete_sentences,
 )
 from .control import Control, wait_for
@@ -34,8 +38,11 @@ from .holdout import HoldOut
 from .publication import Publication
 from .split import (
     build_bundle,
+    declared_entities,
     declared_layers,
-    ranks_file,
+    declared_views,
+    ranks_for,
+    read_view_rows,
     split_entities,
     state_extent,
     write_base_inputs,
@@ -47,6 +54,8 @@ from .split import (
 
 #: Candidate boxes ranked per census box asked for, so the deciles have something to rank.
 CENSUS_CANDIDATES = 6
+
+EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
 def executor_laps(before: dict, after: dict, rows: int) -> dict:
@@ -139,6 +148,9 @@ class Cycle:
         #: `/v1/meta` publishes, which carries each one's declared levels and their zoom ranges.
         self.census_boxes: dict[str, list[tuple[int, list[float]]]] = {}
         self.meta_layers: list[dict] = []
+        #: The filters and category lists each view's census asks, and the all-in census.
+        self.probes: dict[str, list[dict]] = {}
+        self.reference: dict = {}
         #: The served deployment, its session credential and the 100% principal's terms.
         self.served: Deployment | None = None
         self.session_cred = ""
@@ -169,7 +181,9 @@ class Cycle:
     def build_base(self) -> Path:
         base_dir = self.work / f"base-{self.args.fraction:g}"
         bundle = base_dir / "bundle"
-        base_ids, held = split_entities(self.rung / "points.parquet", self.args.fraction, self.args.seed)
+        base_ids, held = split_entities(
+            declared_entities(self.rung), self.args.fraction, self.args.seed
+        )
         self.result["base_rows"] = int(len(base_ids))
         self.result["holdout_rows"] = int(len(held))
         self.held = held
@@ -177,13 +191,13 @@ class Cycle:
             self.log(f"reusing {bundle}")
             self.result["build"] = {"reused": True}
             return base_dir
-        # `--reuse-base` also reuses prepared inputs whose build failed: the points file holds
-        # the row count this fraction and seed give.
-        prepared = base_dir / "points.parquet"
+        # `--reuse-base` also reuses prepared inputs whose build failed, where they hold the
+        # entity count this fraction and seed give.
+        prepared = base_dir / "base-inputs.json"
         reuse_inputs = (
             self.args.reuse_base
             and prepared.exists()
-            and pq.ParquetFile(prepared).metadata.num_rows == len(base_ids)
+            and json.loads(prepared.read_text()).get("entities") == len(base_ids)
         )
         if reuse_inputs:
             self.log(f"reusing the prepared base inputs at {base_dir}")
@@ -231,10 +245,13 @@ class Cycle:
                 int(limits[route][key])
         return limits
 
-    def run_ingest(self, control: Control, source, label: str) -> dict:
+    def run_ingest(
+        self, control: Control, source, label: str, tessera_ids: dict | None = None
+    ) -> dict:
         """Put `source`'s batches through `/control/ingest` at `C` concurrent callers. `source`
         yields `(first row index, body, rows)` as a generator, fed through a bounded window so
-        a fast producer cannot outrun a slower server.
+        a fast producer cannot outrun a slower server. `tessera_ids`, where given, collects the
+        id answered for each row, by row index.
         """
         run_id = uuid.uuid4().hex[:8]
         acks: list[float] = []
@@ -256,7 +273,7 @@ class Cycle:
                     time.sleep(min(float(r.headers.get("retry-after", "1")), 5.0))
                     continue
                 break
-            return r, dt, rows
+            return r, dt, rows, start
 
         t0 = time.perf_counter()
         window = max(2 * self.args.concurrency, 4)
@@ -268,8 +285,8 @@ class Cycle:
                     done, pending = concurrent.futures.wait(
                         pending, return_when=concurrent.futures.FIRST_COMPLETED
                     )
-                    self._collect(done, acks, totals)
-            self._collect(pending, acks, totals)
+                    self._collect(done, acks, totals, tessera_ids)
+            self._collect(pending, acks, totals, tessera_ids)
         wall = time.perf_counter() - t0
         return {
             "batches": totals["batches"],
@@ -282,9 +299,9 @@ class Cycle:
             "statuses": statuses,
         }
 
-    def _collect(self, futures, acks: list, totals: dict) -> None:
+    def _collect(self, futures, acks: list, totals: dict, tessera_ids: dict | None) -> None:
         for future in futures:
-            r, dt, rows = future.result()
+            r, dt, rows, start = future.result()
             acks.append(dt * 1000.0)
             totals["batches"] += 1
             totals["offered"] += rows
@@ -292,6 +309,8 @@ class Cycle:
                 body = r.json()
                 totals["accepted"] += body["accepted"]
                 totals["minted"] += body.get("minted", 0)
+                if tessera_ids is not None:
+                    tessera_ids.update(enumerate(body.get("tessera_ids") or [], start))
             elif "first_refusal" not in self.result:
                 self.result["first_refusal"] = {"status": r.status_code, "body": r.text[:1500]}
             if totals["batches"] % 100 == 0:
@@ -347,23 +366,9 @@ class Cycle:
         return served
 
     def read_views(self) -> None:
-        """Every declared view, the anchor first, with the points file each one's pass sends: a
-        row in a second view joins an entity that must already exist."""
-        declared = tomllib.loads((self.rung / "corpus.toml").read_text())
-        named = declared.get("sources", {})
-        default_source = declared.get("defaults", {}).get("source", "points")
-        self.views = [
-            {
-                "name": view["name"],
-                "points": self.rung
-                / named.get(
-                    view.get("source", default_source), view.get("source", default_source)
-                ),
-            }
-            for view in declared.get("view", [])
-        ]
-        anchor = declared.get("allocation_view") or self.views[0]["name"]
-        self.views.sort(key=lambda view: view["name"] != anchor)
+        """Every declared view, the anchor first, each group's views among them, with the file
+        each one's pass reads: a row in a second view joins an entity that must already exist."""
+        self.views = [{**view, "name": view["id"]} for view in declared_views(self.rung)]
         self.result["views"] = self.view_names
 
     def open_session(self, served: Deployment, ranks: list[dict]) -> None:
@@ -399,7 +404,7 @@ class Cycle:
                 batch_rows,
                 head_rows=head if first else 0,
                 log=self.log,
-                points=entry["points"],
+                view=entry,
                 members=first,
             )
             self.log(
@@ -449,7 +454,11 @@ class Cycle:
             return
         try:
             self.read_views()
-            ranks = json.loads(ranks_file(self.rung).read_text())
+            if self.args.ranks:
+                ranks_path = Path(self.args.ranks)
+            else:
+                ranks_path, self.result["ranks"] = ranks_for(self.rung, self.work)
+            ranks = json.loads(ranks_path.read_text())
             self.open_session(served, ranks)
 
             control = self.control_for(served, self.anchor)
@@ -483,6 +492,7 @@ class Cycle:
             self.phase("fold", lambda: self.do_fold(control))
             self.phase("equivalence", lambda: self.do_equivalence(ranks))
             if args.write_cycle:
+                self.phase("view_recreate", lambda: self.do_view_recreate(control))
                 self.phase("write_cycle", lambda: self.do_write_cycle(control, hold))
                 self.phase("restart", lambda: self.do_restart(ranks))
         finally:
@@ -575,6 +585,12 @@ class Cycle:
                 f"has no roster and no member table, and an ingested row joins it through the "
                 f"attribute its batch carries",
             }
+        if layer["roster"] is None and layer["inline"]:
+            self.log(f"  {name}: nothing to publish, its artifacts are written in the declaration")
+            return "declined", {
+                "reason": "artifacts written in the declaration: the base build carries them, "
+                "and their members are computed at request time or named there",
+            }
         if layer["roster"] is None:
             members = layer["members"]
             if layer["supplied"]:
@@ -612,6 +628,7 @@ class Cycle:
             self.args.publish_max_bytes,
             self.args.publish_bucket_rows,
             self.limits,
+            view_column=layer.get("view_column"),
         )
         try:
             sent = self.send_publication(control, name, publication)
@@ -759,17 +776,10 @@ class Cycle:
     # -- flush, fold, equivalence, write cycle ---------------------------------------------
 
     def do_flush(self, control) -> dict:
-        before = control.status()["write_executor"]["flush"]["flushes"]
         expected = (self.result["base_visible"] or 0) + self.result["ingest"]["accepted"]
         t0 = time.perf_counter()
-        code = control.flush().status_code
-        request_s = time.perf_counter() - t0
-        # Or nothing left to flush: the buffer can already be empty under the row trigger.
-        def flush_landed() -> bool:
-            flush = control.status()["write_executor"]["flush"]
-            return flush["flushes"] > before or flush["buffered_items"] == 0
-
-        published, publish_s = wait_for(flush_landed, timeout=self.args.flush_timeout)
+        code, published, publish_s = self.flush_and_wait(control)
+        request_s = time.perf_counter() - t0 - publish_s
         reached, visibility_s = wait_for(
             lambda: self.visible() >= expected, timeout=self.args.flush_timeout, interval=0.25
         )
@@ -784,16 +794,30 @@ class Cycle:
             "visibility_s": round(visibility_s, 3),
         }
 
+    def flush_and_wait(self, control) -> tuple[int, bool, float]:
+        """`POST /control/flush`, and the wait for it to land: `(status, landed, seconds)`. Every
+        view flushes on its own, and a flush the server discards stays buffered until it is
+        planned again, so the flush has landed when the buffer holds nothing."""
+        code = control.flush().status_code
+        landed, wall = wait_for(
+            lambda: control.status()["write_executor"]["flush"]["buffered_items"] == 0,
+            timeout=self.args.flush_timeout,
+        )
+        return code, landed, wall
+
     def do_fold(self, control) -> dict:
         """`POST /control/compact`, and the compaction block once a fold has landed."""
-        before = control.status()["compaction"]["folds"]
+        before = control.status()["compaction"]
         code = control.compact().status_code
-        done, wall = wait_for(
-            lambda: control.status()["compaction"]["folds"] > before,
-            timeout=self.args.fold_timeout,
-            interval=1.0,
-        )
+
+        # A fold the server discarded counts a failure and never lands, so either ends the wait.
+        def settled() -> bool:
+            now = control.status()["compaction"]
+            return now["folds"] > before["folds"] or now["fold_failures"] > before["fold_failures"]
+
+        settled_in_time, wall = wait_for(settled, timeout=self.args.fold_timeout, interval=1.0)
         compaction = control.status()["compaction"]
+        done = settled_in_time and compaction["folds"] > before["folds"]
         return {
             "status": code,
             "completed": done,
@@ -801,7 +825,7 @@ class Cycle:
             "fold_s": compaction.get("last_secs"),
             "fold_peak_rss_bytes": compaction.get("last_rss_bytes"),
             "folds": compaction.get("folds"),
-            "fold_failures": compaction.get("fold_failures"),
+            "fold_failures": compaction.get("fold_failures", 0) - before.get("fold_failures", 0),
             "live_rows": compaction.get("live_rows"),
         }
 
@@ -873,20 +897,21 @@ class Cycle:
                 self.frames[name],
                 ladder,
                 self.census_boxes.get(name) or [],
+                self.probes.get(name) or [],
             )
             for name in self.view_names
         }
 
-    def visible(self) -> int:
-        """The anchor view's masked count at zoom 0, under every term. `layers=None`, since a
-        layered request rebuilds the level's row form after a growth and a poll needs only the
-        count."""
+    def visible(self, view: str | None = None) -> int:
+        """One view's masked count at zoom 0, the anchor's by default, under every term.
+        `layers=None`, since a layered request rebuilds the level's row form after a growth and a
+        poll needs only the count."""
+        view = view or self.anchor
         token, _ = serve_battery.authorise(
             self.served.session, self.session_cred, self.all_terms
         )
         return serve_battery.viewport(
-            self.served.viewer, token, self.anchor, 0, full_box(self.frames[self.anchor]), k=1,
-            layers=None,
+            self.served.viewer, token, view, 0, full_box(self.frames[view]), k=1, layers=None
         )["counts"]["visible"]
 
     def do_equivalence(self, ranks) -> dict:
@@ -920,7 +945,12 @@ class Cycle:
             all_in_frames = {v["id"]: v["quantisation"] for v in all_in_meta["views"]}
             self.meta_layers = all_in_meta.get("layers") or []
             self.choose_boxes(allin.viewer, reference_token)
+            self.probes = {
+                view["name"]: filter_probes(self.rung, self.views, view, all_in_meta)
+                for view in self.views
+            }
             reference = self.census_views(allin, allin.credential("session"), ladder)
+            self.reference = reference
         finally:
             allin.stop()
         folded = self.census_views(self.served, self.session_cred, ladder)
@@ -949,10 +979,19 @@ class Cycle:
         # The views together, so a reader asking whether the two deployments agree has one answer.
         out["differences_by_surface"] = by_surface
         out["differences"] = differences
-        for surface in ("zoom0", "boxes", "layers", "parents"):
+        for surface in ("zoom0", "boxes", "layers", "parents", "filters"):
             out[f"{surface}_equal"] = by_surface.get(surface, 0) == 0
         out["equal"] = all(v["equal"] for v in out["views"].values())
         out["frames_equal"] = all(v["frames_equal"] for v in out["views"].values())
+        # A view the all-in build serves and this census did not reach, or reached and saw nothing
+        # in under the broadest principal, proves nothing.
+        reached = {
+            name
+            for name, compared in out["views"].items()
+            if compared["census_coverage"].get("visible")
+        }
+        served = {view["id"] for view in all_in_meta["views"]}
+        out["views_compared_nowhere"] = sorted((served | set(self.view_names)) - reached)
         out["incomplete"] = incomplete_sentences(folded) + incomplete_sentences(reference)
         return out
 
@@ -1016,18 +1055,26 @@ class Cycle:
         }
 
     def do_write_cycle(self, control, hold) -> dict:
-        """1,000 deletes, 1,000 suppressions, 1,000 re-ingests, a fold, and the census again,
-        addressed by `external_id` since a deleted holder never blocks a re-ingest of it."""
+        """1,000 deletes, 1,000 suppressions, 1,000 re-ingests, a fold, and the count again in
+        every view, addressed by `external_id` since a deleted holder never blocks a re-ingest of
+        it. A re-ingest sends the item's rows in every view it was in, the anchor's first, and
+        each view must end at its count less the suppressed items it holds."""
         if hold.head is None or hold.head.num_rows < 2:
             return {"skipped": "hold-out too small for a write cycle"}
-        ids = [
-            base64.b64encode(int(e).to_bytes(8, "little")).decode()
-            for e in hold.head.column("entity_id").to_pylist()
-        ]
+        entities = hold.head.column("entity_id").to_numpy()
+        ids = [base64.b64encode(int(e).to_bytes(8, "little")).decode() for e in entities]
         n = min(self.args.write_cycle_n, len(ids) // 3)
         if n == 0:
             return {"skipped": "hold-out too small for a write cycle"}
-        start_visible = self.visible()
+        deleted, suppressed = np.sort(entities[:n]), np.sort(entities[n : 2 * n])
+        by_view = {
+            view["name"]: {
+                "before": self.visible(view["name"]),
+                "suppressed": read_view_rows(view, ["entity_id"], suppressed).num_rows,
+            }
+            for view in self.views
+        }
+        start_visible = by_view[self.anchor]["before"]
         # Deleted rows come back and suppressed ones do not.
         out: dict = {"n": n, "visible_before": start_visible, "expected_after_cycle": start_visible - n}
 
@@ -1035,28 +1082,159 @@ class Cycle:
             out[op] = self.change_and_wait(control, op, batch, start_visible)
             start_visible = out[op]["visible_after"]
 
-        # Re-ingest the deleted rows, the head's first `n`, under fresh batch ids: a deleted
-        # holder never blocks a re-ingest, so these must be accepted rather than 409'd.
-        reingest_bodies = hold.new_body_stats()
-
-        def head_slice():
-            for start in range(0, n, hold.batch_rows):
-                chunk = hold.head.slice(start, min(hold.batch_rows, n - start))
-                yield from hold.bodies(chunk, start, reingest_bodies)
-
-        out["reingest"] = self.run_ingest(control, head_slice(), "recycle")
-        out["reingest"]["bodies_split"] = reingest_bodies["bodies_split"]
-        out["reingest"]["largest_body_bytes"] = reingest_bodies["largest_body_bytes"]
-        out["reingest"]["bodies_over_cap"] = reingest_bodies["over_cap"]
-        control.flush()
+        # Re-ingest the deleted items under fresh batch ids, in every view, the anchor first: a
+        # deleted holder never blocks a re-ingest, so each must be accepted rather than 409'd,
+        # and each later view must join the entity the anchor's pass allocated.
+        out["reingest_by_view"], answered = self.ingest_views(
+            self.views, deleted, hold.max_body_bytes, hold.batch_rows, "recycle"
+        )
+        passes = out["reingest_by_view"].values()
+        out["reingest"] = {
+            key: sum(figures[key] for figures in passes)
+            for key in ("batches", "rows_offered", "accepted", "bodies_split", "bodies_over_cap")
+        }
+        out["reingest"]["statuses"] = {}
+        for figures in passes:
+            for status, count in figures["statuses"].items():
+                out["reingest"]["statuses"][status] = out["reingest"]["statuses"].get(status, 0) + count
+        # One external id is one entity: every view's pass answers it with one tessera_id.
+        out["reingest"]["items_with_several_ids"] = sum(1 for tids in answered.values() if len(tids) > 1)
+        _, out["flushed"], _ = self.flush_and_wait(control)
         folded = self.do_fold(control)
         out["fold"] = {
             key: folded[key]
             for key in ("completed", "observed_s", "fold_s", "fold_peak_rss_bytes", "fold_failures")
         }
-        out["visible_after_cycle"] = self.visible()
+        for name, counts in by_view.items():
+            counts["expected"] = counts["before"] - counts["suppressed"]
+            counts["after"] = self.visible(name)
+        out["by_view"] = by_view
+        out["visible_after_cycle"] = by_view[self.anchor]["after"]
         out["overlay"] = control.status()["overlay"]
         return out
+
+    def ingest_views(
+        self, views, entities, cap: int, batch_rows: int, label: str
+    ) -> tuple[dict, dict]:
+        """`entities`' rows in each of `views`, one pass per view in order, and each entity's
+        answered tessera_ids across the passes."""
+        figures: dict = {}
+        answered: dict[int, set] = {}
+        for view in views:
+            name = view["name"]
+            source = HoldOut(
+                self.rung,
+                entities,
+                cap,
+                batch_rows,
+                log=self.log,
+                view=view,
+                members=name == self.anchor,
+                record_order=True,
+            )
+            tessera_ids: dict[int, int] = {}
+            figures[name] = self.run_ingest(
+                self.control_for(self.served, name), source.batches(), f"{label}-{name}", tessera_ids
+            )
+            for key in ("bodies_split", "largest_body_bytes"):
+                figures[name][key] = source.body_stats[key]
+            figures[name]["bodies_over_cap"] = source.body_stats["over_cap"]
+            for row, tid in tessera_ids.items():
+                answered.setdefault(source.order[row], set()).add(tid)
+        return figures, answered
+
+    def do_view_recreate(self, control) -> dict:
+        """Drop the last key of a group that owns its views, which drops that key's view in every
+        group sharing it, create it again from its roster record, and send it every row and every
+        group-scoped layer artifact of that key: each view must then match the all-in build's
+        census, which declared the view fresh."""
+        target = next(
+            (view for view in reversed(self.views) if view["group"] and view["group"] == view["owner"]),
+            None,
+        )
+        if target is None:
+            return {"skipped": "the rung declares no view group"}
+        group, key = target["owner"], target["key"]
+        views = [view for view in self.views if (view["owner"], view["key"]) == (group, key)]
+        names = [view["name"] for view in views]
+        out: dict = {"group": group, "key": key, "views": names}
+        dropped = control.drop_view(group, key)
+        out["drop"] = {"status": dropped.status_code, "body": dropped.text[:600]}
+        out["answers_after_drop"] = {name: self.viewport_status(name) for name in names}
+        created = control.create_view(group, key, self.roster_record(target))
+        out["create"] = {"status": created.status_code, "body": created.text[:600]}
+        assert self.limits is not None, "the limits block is read before a view is recreated"
+        out["ingest_by_view"], answered = self.ingest_views(
+            views,
+            np.sort(declared_entities(self.rung)),
+            int(self.limits["ingest"]["max_batch_bytes"]),
+            int(self.limits["ingest"]["max_batch_rows"]),
+            "recreate",
+        )
+        out["items_with_several_ids"] = sum(1 for tids in answered.values() if len(tids) > 1)
+        out["publish"] = self.publish_key(control, key)
+        _, out["flushed"], _ = self.flush_and_wait(control)
+        after = {
+            name: census(
+                self.served.viewer,
+                self.served.session,
+                self.session_cred,
+                name,
+                self.frames[name],
+                self.ladder,
+                self.census_boxes.get(name) or [],
+                self.probes.get(name) or [],
+            )
+            for name in names
+        }
+        out["census"] = {name: compare_census(after[name], self.reference[name]) for name in names}
+        out["equal"] = all(compared["equal"] for compared in out["census"].values())
+        out["incomplete"] = incomplete_sentences(after)
+        return out
+
+    def roster_record(self, view: dict) -> dict:
+        """A group view's roster record as `PUT /control/views/{group}/{key}` takes it: each
+        metadata name its group declares, a timestamp as microseconds since the epoch, and the
+        view's own visibility where it declares one."""
+        declared = tomllib.loads((self.rung / "corpus.toml").read_text())
+        owner = next(g for g in declared.get("view_group", []) if g["name"] == view["owner"])
+        metadata = {}
+        for name in owner.get("metadata") or {}:
+            value = view["record"][name]
+            if isinstance(value, datetime.datetime):
+                value = (value - EPOCH) // datetime.timedelta(microseconds=1)
+            metadata[name] = value
+        record: dict = {"metadata": metadata}
+        if "visibility" in view["record"]:
+            record["visibility"] = view["record"]["visibility"]
+        return record
+
+    def publish_key(self, control, key: str) -> dict:
+        """Every group-scoped layer's artifacts of one view key, published again."""
+        out: dict = {}
+        for layer in declared_layers(self.rung):
+            if layer["view_column"] is None or layer["roster"] is None:
+                continue
+            work = self.work / f"recreate-{layer['name'].replace('/', '__')}"
+            work.mkdir(parents=True, exist_ok=True)
+            roster = pq.read_table(layer["roster"])
+            kept = roster.filter(pc.equal(roster.column(layer["view_column"]), key))
+            pq.write_table(kept, work / layer["roster"].name)
+            out[layer["name"]] = self.publish_layer(
+                control, layer["name"], {**layer, "roster": work / layer["roster"].name}, work / "publish"
+            )
+        return out
+
+    def viewport_status(self, view: str) -> int:
+        """The status a fresh session's zoom-0 viewport on `view` answers."""
+        token, _ = serve_battery.authorise(self.served.session, self.session_cred, self.all_terms)
+        r = requests.post(
+            f"{self.served.viewer}/v1/viewport",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"view": view, "zoom": 0, "bbox": full_box(self.frames[view]), "k": 0},
+            timeout=60,
+        )
+        return r.status_code
 
     # -- what did not hold -----------------------------------------------------------------
 
@@ -1102,7 +1280,15 @@ class Cycle:
                             f"{layer}: {entry['refusals']} publication request(s) were refused "
                             f"{entry.get('first_refusal', {}).get('status')}"
                         )
-        for name in ("flush", "layers_after_ingest", "fold", "equivalence", "write_cycle", "restart"):
+        for name in (
+            "flush",
+            "layers_after_ingest",
+            "fold",
+            "equivalence",
+            "view_recreate",
+            "write_cycle",
+            "restart",
+        ):
             phase = result.get(name)
             if isinstance(phase, dict) and phase.get("failed"):
                 out.append(f"the {name} phase failed: {phase['failed']}")
@@ -1130,6 +1316,10 @@ class Cycle:
                 f"the census on {name} proved nothing about a declared level: {sentence}"
                 for sentence in coverage_failures(compared.get("census_coverage") or {})
             ]
+        out += [
+            f"the census compared nothing on view {name}"
+            for name in equivalence.get("views_compared_nowhere") or []
+        ]
         for name in ("equivalence", "restart"):
             phase = result.get(name)
             if isinstance(phase, dict):
@@ -1151,11 +1341,50 @@ class Cycle:
                     f"the write cycle's re-ingest accepted {reingest.get('accepted')} of "
                     f"{reingest.get('rows_offered')} rows offered"
                 )
-            if cycle.get("visible_after_cycle") != cycle.get("expected_after_cycle"):
+            if reingest.get("items_with_several_ids"):
                 out.append(
-                    f"the write cycle ended at {cycle.get('visible_after_cycle')} visible, "
-                    f"expecting {cycle.get('expected_after_cycle')}"
+                    f"the write cycle's re-ingest answered {reingest['items_with_several_ids']} "
+                    f"item(s) with a different tessera_id in different views"
                 )
+            for name, counts in (cycle.get("by_view") or {}).items():
+                if counts.get("after") != counts.get("expected"):
+                    out.append(
+                        f"the write cycle ended at {counts.get('after')} visible on {name}, "
+                        f"expecting {counts.get('expected')}"
+                    )
+        recreate = result.get("view_recreate") or {}
+        if isinstance(recreate, dict) and recreate.get("views") and not recreate.get("failed"):
+            where = f"{recreate['group']}/{recreate['key']}"
+            if recreate["drop"]["status"] != 200:
+                out.append(f"dropping view {where} answered {recreate['drop']['status']}")
+            if recreate["create"]["status"] != 201:
+                out.append(f"creating view {where} again answered {recreate['create']['status']}")
+            out += [
+                f"view {name} answered {status} after it was dropped, not 404"
+                for name, status in recreate["answers_after_drop"].items()
+                if status != 404
+            ]
+            for name, figures in recreate["ingest_by_view"].items():
+                if figures.get("accepted") != figures.get("rows_offered"):
+                    out.append(
+                        f"the recreated view {name} accepted {figures.get('accepted')} of "
+                        f"{figures.get('rows_offered')} rows offered"
+                    )
+            if recreate.get("items_with_several_ids"):
+                out.append(
+                    f"the recreated views answered {recreate['items_with_several_ids']} item(s) "
+                    f"with a different tessera_id in each"
+                )
+            for layer, entry in (recreate.get("publish") or {}).items():
+                if entry.get("refusals"):
+                    out.append(f"republishing {layer} for {where} was refused {entry['refusals']} time(s)")
+            out += [
+                f"the census on the recreated view {name} is not the all-in build's: "
+                f"{compared['differences_by_surface']}"
+                for name, compared in (recreate.get("census") or {}).items()
+                if not compared["equal"]
+            ]
+            out += list(recreate.get("incomplete") or [])
         restart = result.get("restart") or {}
         if isinstance(restart, dict) and restart and not restart.get("failed"):
             if restart.get("visible") != restart.get("visible_before"):

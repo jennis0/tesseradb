@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import re
+from collections import Counter
+from pathlib import Path
 from typing import Sequence
 
+import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 import requests
 from pyarrow import ipc
 
 from .. import serve_battery
+from .holdout import wire_columns
+
+#: Rows read from the head of a file to draw a probe's values from.
+PROBE_SAMPLE_ROWS = 200_000
 
 # ---------------------------------------------------------------------------------------------
 # The census, and what equivalence means
@@ -20,14 +31,20 @@ def census(
     quant: dict,
     ladder: Sequence[dict],
     boxes: Sequence[tuple[int, list[float]]],
+    probes: Sequence[dict] = (),
 ) -> dict:
     """Masked counts per principal and per layer: zoom 0 over the whole extent, then each box.
 
     Every request carries `layers: "all"`, so each box compares the artifacts and the parent links
     at the levels that box's zoom serves — a tiered layer answers only the levels whose declared
     zoom range covers the request's zoom, and zoom 0 reaches its coarsest level alone.
+
+    `probes` are asked under the broadest and the narrowest principal: a filter's matched count
+    over the whole extent, or a category column's value list in this view.
     """
     full = serve_battery.full_box(quant)
+    targets = [rung["target"] for rung in ladder]
+    probed = {max(targets), min(targets)} if targets else set()
     out: dict = {}
     for rung in ladder:
         token, _ = serve_battery.authorise(session_base, cred, rung["terms"])
@@ -52,8 +69,125 @@ def census(
                     "parents": artifact_frame_parents(s["body"]),
                 }
             )
+        if rung["target"] in probed:
+            row["filters"], row["categories"] = ask_probes(viewer, token, view, full, probes, incomplete)
         out[f"{rung['target']:.4f}"] = row
     return out
+
+
+def ask_probes(
+    viewer: str, token: str, view: str, full: list[float], probes: Sequence[dict], incomplete: list[str]
+) -> tuple[dict, dict]:
+    """Each probe's answer: a filter's matched count at zoom 0, or a category column's value keys
+    as `/v1/categories` lists them for this view."""
+    filters: dict = {}
+    categories: dict = {}
+    for probe in probes:
+        where = f"probe {probe['name']}"
+        if "filters" in probe:
+            try:
+                s = serve_battery.viewport(
+                    viewer, token, view, 0, full, k=0, filters=probe["filters"], layers=None
+                )
+            except requests.exceptions.RequestException as e:
+                incomplete.append(f"the census request at {where} was not answered: {e}")
+                continue
+            filters[probe["name"]] = (s["counts"] or {}).get("matched")
+        else:
+            r = requests.get(
+                f"{viewer}/v1/categories/{probe['categories']}",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"view": view},
+                timeout=60,
+            )
+            if r.status_code != 200:
+                incomplete.append(f"the census request at {where} answered {r.status_code}: {r.text[:200]}")
+                continue
+            categories[probe["categories"]] = sorted(value["key"] for value in r.json()["values"])
+    return filters, categories
+
+
+def filter_probes(rung: Path, views: Sequence[dict], view: dict, meta: dict) -> list[dict]:
+    """What a view's census asks beyond counts and layers: for each filter operand `/v1/meta`
+    offers on the view, a filter or two whose values are drawn from the column where the view's
+    batches take it, and a category column's value list. A group-scoped column is read from a
+    view holding the same key and an entity-scoped one from any view carrying it."""
+    scoped = {family["name"]: set(family["views"]) for family in meta.get("scoped_scalars") or []}
+    probes: list[dict] = []
+    for operand in meta.get("filter_operands") or []:
+        column = operand["column"]
+        if operand.get("scope"):
+            if view["id"] not in scoped.get(column, ()):
+                continue
+            candidates = [v for v in views if (v["owner"], v["key"]) == (view["owner"], view["key"])]
+        else:
+            candidates = list(views)
+        candidates.sort(key=lambda v: v["id"] != view["id"])
+        values = column_sample(rung, candidates, column)
+        if values is not None:
+            probes += family_probes(column, operand["family"], operand["operands"], values)
+    return probes
+
+
+def column_sample(rung: Path, candidates: Sequence[dict], column: str) -> pa.Array | None:
+    """The first rows' non-null values of `column`, from the first of `candidates` whose batches
+    carry it: its points file, or the file the column is joined from."""
+    for view in candidates:
+        _, attributes, joined = wire_columns(rung, view)
+        if column not in attributes:
+            continue
+        source = next(
+            ({"points": j["file"], "select": j["select"]} for j in joined if column in j["columns"]),
+            view,
+        )
+        select = source["select"]
+        wanted = [column] + ([select[0]] if select else [])
+        head = next(
+            pq.ParquetFile(source["points"]).iter_batches(PROBE_SAMPLE_ROWS, columns=wanted), None
+        )
+        if head is None:
+            return None
+        if select is not None:
+            head = head.filter(pc.equal(head.column(select[0]), select[1]))
+        return head.column(column).drop_null()
+    return None
+
+
+def family_probes(column: str, family: str, operators: Sequence[str], values: pa.Array) -> list[dict]:
+    """A numeric column's presence and upper half, a category or keyword column's three commonest
+    values and a category's value list, and a text column's two commonest words."""
+    if len(values) == 0:
+        return []
+    if family == "numeric" and "range" in operators:
+        if pa.types.is_timestamp(values.type):
+            values = values.cast(pa.timestamp("us")).cast(pa.int64())
+        numbers = np.sort(values.to_numpy(zero_copy_only=False))
+        return [
+            {"name": f"{column} >= {bound}", "filters": {column: {"range": {"gte": bound.item()}}}}
+            for bound in (numbers[0], numbers[len(numbers) // 2])
+        ]
+    if family in ("category", "keyword") and "eq" in operators:
+        counted = sorted(
+            pc.value_counts(values).to_pylist(), key=lambda entry: (-entry["counts"], str(entry["values"]))
+        )
+        probes = [
+            {"name": f"{column} = {entry['values']}", "filters": {column: {"eq": entry["values"]}}}
+            for entry in counted[:3]
+        ]
+        if family == "category":
+            probes.append({"name": f"{column} values", "categories": column})
+        return probes
+    if family == "text" and "match" in operators:
+        words = Counter(
+            word
+            for text in values.slice(0, 2000).to_pylist()
+            for word in re.findall(r"[^\W\d_]{4,}", str(text).lower())
+        )
+        return [
+            {"name": f"{column} matches {word}", "filters": {column: {"match": word}}}
+            for word, _ in sorted(words.items(), key=lambda item: (-item[1], item[0]))[:2]
+        ]
+    return []
 
 
 def layered(
@@ -227,10 +361,23 @@ def compare_census(folded: dict, all_in: dict) -> dict:
             a.get("parents") or {}, b.get("parents") or {}
         ):
             differences.append({"principal": key, **d})
+        for kind in ("filters", "categories"):
+            mine, theirs = a.get(kind) or {}, b.get(kind) or {}
+            for name in sorted(set(mine) | set(theirs)):
+                if mine.get(name) != theirs.get(name):
+                    differences.append(
+                        {
+                            "principal": key,
+                            "where": "filters",
+                            "probe": name,
+                            "folded": mine.get(name),
+                            "all_in": theirs.get(name),
+                        }
+                    )
     by_surface: dict[str, int] = {}
     for d in differences:
         where = d.get("where", "missing")
-        surface = where if where in ("zoom0", "layers", "parents") else "boxes"
+        surface = where if where in ("zoom0", "layers", "parents", "filters") else "boxes"
         by_surface[surface] = by_surface.get(surface, 0) + 1
     return {
         "equal": not differences,
@@ -238,6 +385,7 @@ def compare_census(folded: dict, all_in: dict) -> dict:
         "boxes_equal": by_surface.get("boxes", 0) == 0,
         "layers_equal": by_surface.get("layers", 0) == 0,
         "parents_equal": by_surface.get("parents", 0) == 0,
+        "filters_equal": by_surface.get("filters", 0) == 0,
         "differences_by_surface": by_surface,
         "differences": differences,
     }
@@ -291,7 +439,18 @@ def census_coverage(one_view: dict, declared: dict) -> dict:
         entry["levels_missing"] = [
             level for level in entry["declared_levels"] if level not in compared
         ]
-    return {"principal": principal, "zooms": zooms, "layers": layers}
+    filters = row.get("filters") or {}
+    return {
+        "principal": principal,
+        "zooms": zooms,
+        "layers": layers,
+        "visible": row["zoom0_visible"],
+        "filters": {
+            "compared": len(filters),
+            "matching": sum(1 for matched in filters.values() if matched),
+            "category_columns": len(row.get("categories") or {}),
+        },
+    }
 
 
 def coverage_failures(coverage: dict) -> list[str]:

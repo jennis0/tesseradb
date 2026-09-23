@@ -5,6 +5,10 @@ import urllib.parse
 
 import requests
 
+
+def quote(segment: str) -> str:
+    return urllib.parse.quote(segment, safe="")
+
 # ---------------------------------------------------------------------------------------------
 # The control plane
 # ---------------------------------------------------------------------------------------------
@@ -46,6 +50,23 @@ class Control:
 
     def compact(self):
         return requests.post(f"{self.base}/control/compact", headers=self.headers, timeout=60)
+
+    def drop_view(self, group: str, key: str):
+        """`DELETE /control/views/{group}/{key}`: the key's view in every group sharing it."""
+        return requests.delete(
+            f"{self.base}/control/views/{quote(group)}/{quote(key)}",
+            headers=self.headers,
+            timeout=120,
+        )
+
+    def create_view(self, group: str, key: str, record: dict):
+        """`PUT /control/views/{group}/{key}`: the roster record, which creates the view empty."""
+        return requests.put(
+            f"{self.base}/control/views/{quote(group)}/{quote(key)}",
+            headers=self.headers,
+            json=record,
+            timeout=120,
+        )
 
     def register_layer(self, declaration: dict):
         return requests.put(
