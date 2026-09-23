@@ -1304,3 +1304,184 @@ async fn a_null_coordinate_in_an_arrow_batch_is_refused() {
         "no refused batch allocated an entity"
     );
 }
+
+async fn declare(server: &TestServer, body: Value) {
+    let resp = server
+        .client
+        .put(server.control_url("/control/attributes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let answer: Value = resp.json().await.unwrap_or(Value::Null);
+    assert!(status == 200 || status == 201, "the declaration is accepted: {answer}");
+}
+
+/// Three attributes declared live whose Arrow columns below arrive at another width.
+async fn declare_widths(server: &TestServer) {
+    declare(server, json!({ "name": "level", "type": "u8", "index": true })).await;
+    declare(server, json!({ "name": "precise", "type": "f64", "index": true })).await;
+    declare(server, json!({ "name": "label", "type": "keyword", "index": true })).await;
+}
+
+/// An ingest batch whose declared columns are each at a width other than the declaration's:
+/// `level` (`u8`) as `int64`, `weight` (`f32`) as `float64`, `precise` (`f64`) as `float32` and
+/// `label` (`keyword`, a string on the wire) as `large_utf8`.
+fn widths_body(ids: &[u64], levels: &[Option<i64>]) -> Vec<u8> {
+    let access = access_column(ids.iter().map(|_| "0"));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        access_field(&access),
+        Field::new("level", DataType::Int64, true),
+        Field::new("weight", DataType::Float64, true),
+        Field::new("precise", DataType::Float32, true),
+        Field::new("label", DataType::LargeUtf8, true),
+    ]));
+    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(
+                external.iter().map(|v| v.as_slice()),
+            )),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 10.0))),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 20.0))),
+            Arc::new(access),
+            Arc::new(Int64Array::from(levels.to_vec())),
+            Arc::new(Float64Array::from_iter_values(ids.iter().map(|_| 0.5))),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 2.5))),
+            Arc::new(arrow::array::LargeStringArray::from_iter_values(
+                ids.iter().map(|id| format!("wide-{id}")),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// One item's drill-down fields.
+async fn fields_of(server: &TestServer, tessera_id: u64) -> Value {
+    let auth = authorise(server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let resp = post_item(server, token, tessera_id).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    body["fields"].clone()
+}
+
+fn tessera_id_at(answer: &Value, row: usize) -> u64 {
+    let id = &answer["tessera_ids"][row];
+    id.as_u64()
+        .or_else(|| id.as_str().and_then(|s| s.parse().ok()))
+        .expect("the ingest answers each row's tessera_id")
+}
+
+/// **An Arrow column is read by the rule a build reads a points file by**: any integer type
+/// carries an integer declaration whose range holds its values, either float width carries
+/// either float declaration, and a string at either offset width carries a string one. Each
+/// value is served at its declared type.
+#[tokio::test]
+async fn an_arrow_column_at_another_width_is_read_as_a_build_reads_it() {
+    let (_tmp, server) = served_declared().await;
+    declare_widths(&server).await;
+    let body = widths_body(&[600, 601], &[Some(7), Some(255)]);
+    let (status, answer) = ingest(&server, "widths", Some(ARROW), body).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["accepted"], 2);
+    flush(&server).await;
+
+    let (matched, _) = viewport(&server, &["0"], Some(json!({ "level": { "eq": 255 } }))).await;
+    assert_eq!(matched.len(), 1, "the u8 is filterable at its value");
+    let fields = fields_of(&server, tessera_id_at(&answer, 0)).await;
+    assert_eq!(fields["level"], json!(7));
+    assert_eq!(fields["weight"], json!(0.5));
+    assert_eq!(fields["precise"], json!(2.5));
+    assert_eq!(fields["label"], json!("wide-600"));
+}
+
+/// An integer that does not fit its declaration is refused naming its row, and the batch has
+/// no effect.
+#[tokio::test]
+async fn an_arrow_integer_outside_its_declaration_is_refused_naming_the_row() {
+    let (_tmp, server) = served_declared().await;
+    declare_widths(&server).await;
+    let high_water = control_status(&server).await["entity_id_high_water"].clone();
+    let (status, answer) = ingest(
+        &server,
+        "too-wide",
+        Some(ARROW),
+        widths_body(&[700, 701, 702], &[Some(7), Some(256), Some(9)]),
+    )
+    .await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract");
+    let detail = answer["detail"].as_str().unwrap();
+    assert!(detail.contains("row 1, column 'level'"), "{detail}");
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water,
+        "the refused batch allocated no entity"
+    );
+}
+
+/// A values batch over an existing entity, as Arrow, filling `level` from an `int64` column.
+fn level_values_body(external_id: u64, level: i64) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("level", DataType::Int64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values([external_id_of(external_id)])),
+            Arc::new(Int64Array::from(vec![level])),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+async fn post_values(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, Value) {
+    let resp = server
+        .client
+        .post(server.control_url("/control/values"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("content-type", ARROW)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// `/control/values` reads its Arrow columns by the same rule: an `int64` column fills a `u8`
+/// attribute where the value fits and is refused where it does not.
+#[tokio::test]
+async fn an_arrow_values_column_at_another_width_is_read_as_a_build_reads_it() {
+    let (_tmp, server) = served_declared().await;
+    declare_widths(&server).await;
+    let (status, answer) = ingest(&server, "rows", Some(ARROW), widths_body(&[800], &[None])).await;
+    assert_eq!(status, 200, "{answer}");
+    let tessera_id = tessera_id_at(&answer, 0);
+    flush(&server).await;
+
+    let (status, answer) = post_values(&server, "too-wide", level_values_body(800, 300)).await;
+    assert_eq!(status, 422, "{answer}");
+    let detail = answer["detail"].as_str().unwrap();
+    assert!(detail.contains("row 0, column 'level'"), "{detail}");
+
+    let (status, answer) = post_values(&server, "fits", level_values_body(800, 42)).await;
+    assert_eq!(status, 200, "{answer}");
+    flush(&server).await;
+    assert_eq!(fields_of(&server, tessera_id).await["level"], json!(42));
+}
