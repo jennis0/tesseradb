@@ -150,9 +150,9 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             return ArtifactVerdict::Absent(Withheld::OwnLabel);
         }
 
-        // Run before the artifact's own terms and criterion, so a withheld dependency makes this
-        // absent without its own membership being touched — for every route, since search, a held
-        // identifier and a filter reach a label directly rather than by traversing the edge.
+        // Before the criterion, so a withheld dependency makes this absent without its own
+        // membership being touched, on every route: search, a held identifier and a filter reach
+        // an attached artifact directly rather than by traversing the edge.
         if let Some(attachment) = self.rows.attachment(ordinal) {
             if !(self.dependency_served)(attachment) {
                 return ArtifactVerdict::Absent(Withheld::Attachment);
