@@ -25,17 +25,22 @@ def declared_entities(rung: Path) -> np.ndarray:
     """Every entity id the rung's views hold: the anchor view's in file order, then each other
     view's ids the ones before it did not hold."""
     parts: list[np.ndarray] = []
-    seen = np.zeros(0, np.int64)
+    seen: np.ndarray | None = None
     files: dict[Path, str] = {}
     for view in declared_views(rung):
         files.setdefault(view["points"], view["fields"]["entity_id"])
     for path, column in files.items():
         ids = pq.read_table(path, columns=[column]).column(column).to_numpy()
-        fresh = ids[~in_sorted(ids, seen)] if len(seen) else ids
+        # Every file's ids in the first file's integer type: mixing int64 and uint64 in numpy
+        # promotes to float64, which cannot hold an id above 2**53.
+        if seen is None:
+            seen = np.zeros(0, ids.dtype)
+        ids = ids.astype(seen.dtype, copy=False)
+        fresh = ids[~in_sorted(ids, seen)]
         fresh = fresh[np.sort(np.unique(fresh, return_index=True)[1])]
         parts.append(fresh)
         seen = np.sort(np.concatenate([seen, fresh]))
-    return np.concatenate(parts) if parts else seen
+    return np.concatenate(parts) if parts else np.zeros(0, np.uint64)
 
 
 def split_entities(ids: np.ndarray, fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
