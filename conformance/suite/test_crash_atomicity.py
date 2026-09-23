@@ -78,7 +78,9 @@ from .entitlement import Nothing, Rows, diff
 from .test_stage_invariance import BBOX, FILTER_DEPARTMENT, GRANTS, K, _write_stage
 
 
-def _harness(private_catalogue_bundle, tmp_path_factory, label: str) -> SuiteHarness:
+def _harness(
+    private_catalogue_bundle, tmp_path_factory, label: str, merge_tier_width: int | None = None
+) -> SuiteHarness:
     return SuiteHarness(
         bundle_root=private_catalogue_bundle(label),
         run_dir=tmp_path_factory.mktemp(f"{label}-run"),
@@ -87,6 +89,7 @@ def _harness(private_catalogue_bundle, tmp_path_factory, label: str) -> SuiteHar
         bbox=BBOX,
         k=K,
         filters={"department": {"eq": FILTER_DEPARTMENT}},
+        merge_tier_width=merge_tier_width,
     )
 
 
@@ -221,19 +224,23 @@ def test_the_manifest_discard_found_the_unpublished_files(manifest_seam):
 
 @pytest.fixture(scope="module")
 def merge_seam(tmp_path_factory, private_catalogue_bundle):
-    """Four writes make a merge eligible (§12.3's ladder arithmetic, as `test_stage_invariance`
-    counts it); the dispatching tick's merge executes on the pool and is killed while parked at
-    the top of its publication — output segment on disc, inputs untouched, nothing committed.
-    The orphan output is discarded and a recovery tick merges the untouched inputs."""
-    fx = cat.ingest_fx_keys(8)
-    h = _harness(private_catalogue_bundle, tmp_path_factory, "crash-merge")
+    """Three writes make a merge eligible at a merge width of three; the dispatching tick's
+    merge executes on the pool and is killed while parked at the top of its publication, with the
+    output segment on disc, the inputs untouched and nothing committed. The orphan output is discarded and a
+    recovery tick merges the untouched inputs.
+
+    The width is three because the coalesce takes external-id runs four at a time, one per
+    flush: at the default merge width of four both come due on the same tick, and the coalesce
+    publishes while the merge is parked. At three the merge is alone on its tick and on the
+    recovery tick."""
+    fx = cat.ingest_fx_keys(6)
+    h = _harness(private_catalogue_bundle, tmp_path_factory, "crash-merge", merge_tier_width=3)
     kill = Killed(Merge("merge"), kill_at="before_merge_publish")
     plan = [
         Build(),
         _write_stage(0, fx[0:2]),
         _write_stage(1, fx[2:4]),
         _write_stage(2, fx[4:6]),
-        _write_stage(3, fx[6:8]),
         kill,
         Merge("merge-recovery"),
     ]
@@ -258,7 +265,7 @@ def test_the_merge_discard_took_its_orphan_output(merge_seam):
 
 
 def test_the_untouched_inputs_still_merge(merge_seam):
-    """Recovery: with the orphan output gone, the same four segments are still eligible and the
+    """Recovery: with the orphan output gone, the same three segments are still eligible and the
     re-run merge publishes — counter up, version bumped, refresh landed (Merge's own barrier) —
     while changing nothing served."""
     check(merge_seam["merge-recovery"])
