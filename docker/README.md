@@ -66,7 +66,9 @@ Any other `tessera` verb runs the same way, with the same mounts: `check` to tes
 
 ## Health, logs and stopping
 
-`/healthz` and `/readyz` answer on the viewer and session ports with no credential. The image declares no `HEALTHCHECK`, because it has no program to make the request. An orchestrator probes the routes over HTTP directly.
+`/healthz` and `/readyz` answer on the viewer and session ports with no credential. The image's `HEALTHCHECK` runs `tessera health`, which asks the viewer port's `/readyz` and exits 0 on a 200, so `docker ps` shows the container as healthy once it is ready to serve. An orchestrator can probe the routes over HTTP directly instead.
+
+An unhealthy container is one to stop routing requests to, not one to restart. A server whose write-ahead log has failed reports not ready and keeps applying the suppressions and deletions it has already accepted; a restart replays only what reached the log, so it can bring a hidden item back into view. Docker does not restart an unhealthy container itself.
 
 Logs go to stderr as plain text. The first line on stdout is a JSON object naming the three bound addresses.
 

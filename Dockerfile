@@ -28,5 +28,8 @@ WORKDIR /etc/tessera
 VOLUME ["/var/lib/tessera"]
 EXPOSE 8080 8081 8082
 USER 65532:65532
+# A large bundle can take minutes to open; failures in the start period are not counted.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10m --start-interval=2s \
+    CMD ["/usr/local/bin/tessera", "health"]
 ENTRYPOINT ["/usr/local/bin/tessera"]
 CMD ["serve"]

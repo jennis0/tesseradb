@@ -250,6 +250,19 @@ enum Command {
         #[command(subcommand)]
         command: CorpusCommand,
     },
+    /// Ask the server this deployment describes whether it is ready: exit 0 when its viewer
+    /// plane answers `/readyz` with 200, and 1 otherwise.
+    ///
+    /// For a container's health check, run beside the server. An unspecified bind address
+    /// (`0.0.0.0` or `[::]`) is reached on loopback.
+    Health {
+        /// This deployment's `tessera.toml`, instead of the one found by walking up.
+        #[arg(long, value_name = "PATH")]
+        deployment: Option<PathBuf>,
+        /// Seconds to wait for the connection and for the answer.
+        #[arg(long, default_value_t = 3)]
+        timeout: u64,
+    },
     /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
     ///
     /// Takes no required flag: the same `tessera.toml` `tessera build` wrote into names the
@@ -382,6 +395,44 @@ enum ArtifactCensusLayer {
     Partition,
     Boundary,
     Treed,
+}
+
+/// `GET /readyz` on the viewer plane, over one plain HTTP/1.1 connection.
+fn readyz(mut addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<(), String> {
+    use std::io::{Read, Write};
+    if addr.ip().is_unspecified() {
+        addr.set_ip(match addr {
+            std::net::SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+        });
+    }
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout)
+        .map_err(|e| format!("no server answering at {addr}: {e}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .and_then(|()| {
+            stream.write_all(
+                format!("GET /readyz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+        })
+        .map_err(|e| format!("{addr}: {e}"))?;
+    let mut head = [0u8; 16];
+    let mut read = 0;
+    while read < head.len() {
+        match stream.read(&mut head[read..]) {
+            Ok(0) => break,
+            Ok(n) => read += n,
+            Err(e) => return Err(format!("{addr}: {e}")),
+        }
+    }
+    let status_line = String::from_utf8_lossy(&head[..read]);
+    match status_line.split(' ').nth(1) {
+        Some("200") => Ok(()),
+        Some(code) => Err(format!("{addr} answered /readyz with {code}: not ready")),
+        None => Err(format!("{addr} did not answer /readyz with HTTP")),
+    }
 }
 
 /// The first of SIGTERM and SIGINT to arrive, by name.
@@ -1925,6 +1976,33 @@ fn main() -> ExitCode {
                 }
             }
             ExitCode::SUCCESS
+        }
+        Command::Health {
+            deployment,
+            timeout,
+        } => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let config = match tessera_config::open(deployment.as_deref(), &cwd) {
+                Ok((_, config)) => config,
+                Err(e) => {
+                    eprintln!("tessera health: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(viewer) = config.viewer_addr else {
+                eprintln!(
+                    "tessera health: this deployment declares no viewer address; add one under \
+                     `[serve]`, such as `viewer = \"127.0.0.1:8080\"`"
+                );
+                return ExitCode::FAILURE;
+            };
+            match readyz(viewer, std::time::Duration::from_secs(timeout)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("tessera health: {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Command::Serve { deployment } => {
             // Diagnostics on stderr, because stdout carries one thing: the JSON line naming the
