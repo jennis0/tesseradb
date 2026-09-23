@@ -1558,9 +1558,9 @@ pub fn survey_points(
         // open. The refusals name the row whatever the column holds (`crate::ids::display_at`).
         let ids: Option<Vec<u64>> = match (limit, id_idx) {
             (None, _) => None,
-            (Some(_), Some(idx)) => Some(
-                read_u64_column(path, &batch, idx, fields.of(ENTITY_ID)).map_err(|_| {
-                    BuildError::Schema {
+            (Some(_), Some(idx)) => {
+                if !crate::ids::is_integer_id(batch.column(idx).data_type()) {
+                    return Err(BuildError::Schema {
                         path: path.to_path_buf(),
                         detail: format!(
                             "`--limit` keeps the rows whose identity is below it, and the \
@@ -1569,9 +1569,10 @@ pub fn survey_points(
                             fields.of(ENTITY_ID),
                             batch.column(idx).data_type()
                         ),
-                    }
-                })?,
-            ),
+                    });
+                }
+                Some(read_integer_ids(path, &batch, idx, fields.of(ENTITY_ID))?)
+            }
             (Some(_), None) => {
                 return Err(BuildError::Schema {
                     path: path.to_path_buf(),
@@ -1804,7 +1805,7 @@ fn prunable_row_groups(meta: &ParquetMetaData, id_idx: usize, limit: Option<u64>
 
 fn statistic_min(stats: &Statistics) -> Option<u64> {
     match stats {
-        Statistics::Int32(s) => s.min_opt().map(|v| *v as u64),
+        Statistics::Int32(s) => s.min_opt().and_then(|v| u64::try_from(*v).ok()),
         Statistics::Int64(s) => s.min_opt().and_then(|v| u64::try_from(*v).ok()),
         _ => None,
     }
@@ -1812,7 +1813,7 @@ fn statistic_min(stats: &Statistics) -> Option<u64> {
 
 fn statistic_max(stats: &Statistics) -> Option<u64> {
     match stats {
-        Statistics::Int32(s) => s.max_opt().map(|v| *v as u64),
+        Statistics::Int32(s) => s.max_opt().and_then(|v| u64::try_from(*v).ok()),
         Statistics::Int64(s) => s.max_opt().and_then(|v| u64::try_from(*v).ok()),
         _ => None,
     }
@@ -1826,8 +1827,9 @@ fn statistic_max(stats: &Statistics) -> Option<u64> {
 /// caller sizing a structure over it must take the true extrema from the rows it reads.
 ///
 /// `None` where a row group carries no statistics, where the id column is a type the statistics
-/// cannot express, or where an unsigned value above 2^63 is stored as a negative `INT64` and
-/// `u64::try_from` refuses it. A caller gets no range rather than a wrong one.
+/// cannot express, or where a statistic is negative, being a signed id or an unsigned one stored in
+/// a signed physical type, and `u64::try_from` refuses it. A caller gets no range rather than a
+/// wrong one.
 pub fn id_bounds(path: &Path, fields: &Fields) -> Result<Option<(u64, u64)>> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
@@ -2004,8 +2006,8 @@ pub(crate) fn scan_id_keys<F: FnMut(&[u8])>(
 
 /// Read the column a row's identity is read from as the source ids the build joins on.
 ///
-/// On the integer route this is [`read_u64_column`] unchanged. On the supplied route each row's
-/// bytes are resolved to their rank, and a key no points file carries reads as
+/// On the integer route this is [`read_integer_ids`]. On the supplied route each row's bytes are
+/// resolved to their rank, and a key no points file carries reads as
 /// [`crate::ids::NO_SOURCE_ID`], an id in no view, which every consumer already answers for.
 pub(crate) fn read_id_column(
     path: &Path,
@@ -2015,7 +2017,7 @@ pub(crate) fn read_id_column(
     ids: &crate::ids::IdSpace,
 ) -> Result<Vec<u64>> {
     let Some(keys) = ids.supplied() else {
-        return read_u64_column(path, batch, idx, name);
+        return read_integer_ids(path, batch, idx, name);
     };
     let column = batch.column(idx);
     let mut out = Vec::with_capacity(column.len());
@@ -2027,7 +2029,35 @@ pub(crate) fn read_id_column(
     Ok(out)
 }
 
-/// Read an integer column as `u64`, accepting the widths a Parquet writer may have chosen.
+/// An integer identity column's ids, refusing a null.
+fn read_integer_ids(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> Result<Vec<u64>> {
+    let column = batch.column(idx);
+    if column.null_count() > 0 {
+        return Err(crate::ids::null_id(path, name));
+    }
+    Ok(id_values(path, column.as_ref(), name)?.values().to_vec())
+}
+
+/// An integer identity column, or a list column of them, as its ids by
+/// [`crate::ids::integer_ids`], a null staying null. For a list column this is its items, every
+/// row's together.
+pub(crate) fn id_values(path: &Path, column: &dyn Array, name: &str) -> Result<UInt64Array> {
+    let list = column.as_any().downcast_ref::<arrow::array::ListArray>();
+    let values = list.map_or(column, |list| list.values().as_ref());
+    crate::ids::integer_ids(values).ok_or_else(|| {
+        let shape = if list.is_some() { "a list of " } else { "" };
+        BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "column '{name}' is {}; write it as {shape}uint64, uint32, int64 or int32",
+                column.data_type()
+            ),
+        }
+    })
+}
+
+/// Read an integer column that is not an identity as `u64`, accepting the widths a Parquet writer
+/// may have chosen and refusing a negative value.
 fn read_u64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> Result<Vec<u64>> {
     let column = batch.column(idx);
     if column.null_count() > 0 {
@@ -2055,9 +2085,9 @@ fn read_u64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
             let cast = arrow::compute::cast(column, &DataType::UInt64)
                 .map_err(|e| BuildError::arrow(path, e))?;
             // Arrow's default cast is *safe*: a negative value becomes a null, and reading
-            // `.values()` underneath a null yields an arbitrary id silently. Nulls were checked
-            // on the source column above; check again after the cast so a negative id is a
-            // schema error, never a wrong id.
+            // `.values()` underneath a null yields an arbitrary value silently. Nulls were checked
+            // on the source column above; check again after the cast so a negative value is a
+            // schema error, never a wrong one.
             if cast.null_count() > 0 {
                 return Err(BuildError::Schema {
                     path: path.to_path_buf(),

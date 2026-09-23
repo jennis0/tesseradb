@@ -382,6 +382,7 @@ fn every_closed_dto_is_declared_closed() {
         "ItemResponse",
         "ArtifactRequest",
         "ArtifactResponse",
+        "BrowseRequest",
     ] {
         let schema = &doc["components"]["schemas"][name];
         assert!(schema.is_object(), "schema {name} is missing");
@@ -1262,7 +1263,10 @@ async fn every_viewer_route_requires_a_session_token() {
                 if kind != Malformed::No {
                     let resp =
                         send_viewer_probe(&f.server, &method, path, kind, Some(token)).await;
-                    if kind == Malformed::Shape {
+                    if matches!(
+                        kind,
+                        Malformed::Shape | Malformed::UnknownField | Malformed::UnknownPinField
+                    ) {
                         assert_refusal(&doc, resp, with_token, "contract").await;
                     } else {
                         assert_eq!(
@@ -1307,6 +1311,10 @@ enum Malformed {
     ContentType,
     /// JSON that is not the request object.
     Shape,
+    /// A request the route accepts, plus one field the description does not name.
+    UnknownField,
+    /// A request the route accepts, with a `pin` that carries one field `Pin` does not name.
+    UnknownPinField,
     /// `{tessera_id}` that is not a number.
     Identifier,
 }
@@ -1328,7 +1336,11 @@ fn malformed_viewer_requests(method: &reqwest::Method, path: &str) -> Vec<(Malfo
             (Malformed::Syntax, 400),
             (Malformed::ContentType, 415),
             (Malformed::Shape, 422),
+            (Malformed::UnknownField, 422),
         ]);
+        if matches!(path, "/v1/viewport" | "/v1/items/{tessera_id}") {
+            kinds.push((Malformed::UnknownPinField, 422));
+        }
     }
     if path.contains("{tessera_id}") {
         kinds.push((Malformed::Identifier, 400));
@@ -1383,6 +1395,16 @@ fn with_body(
             .header(reqwest::header::CONTENT_TYPE, "text/plain")
             .body(body.to_string()),
         Malformed::Shape => req.json(&json!("not a request object")),
+        Malformed::UnknownField => {
+            let mut body = body.clone();
+            body["unknown_field"] = json!(1);
+            req.json(&body)
+        }
+        Malformed::UnknownPinField => {
+            let mut body = body.clone();
+            body["pin"] = json!({ "prefix": "p", "segments_version": 0, "unknown_field": 1 });
+            req.json(&body)
+        }
         _ => req.json(body),
     }
 }
@@ -1405,6 +1427,7 @@ async fn both_session_routes_require_the_credential_before_the_body() {
         (Malformed::Syntax, 400),
         (Malformed::ContentType, 415),
         (Malformed::Shape, 422),
+        (Malformed::UnknownField, 422),
     ];
     for (path, body) in &routes {
         let url = f.server.session_url(path);
@@ -1427,7 +1450,7 @@ async fn both_session_routes_require_the_credential_before_the_body() {
         for (kind, status) in malformed {
             let req = f.server.client.post(url.clone()).bearer_auth(SESSION_CREDENTIAL);
             let resp = with_body(req, kind, body).send().await.unwrap();
-            if kind == Malformed::Shape {
+            if matches!(kind, Malformed::Shape | Malformed::UnknownField) {
                 assert_refusal(&doc, resp, status, "contract").await;
             } else {
                 assert_eq!(

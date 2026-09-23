@@ -809,6 +809,72 @@ fn limit_filters_the_source_entity_id_prefix() {
     assert_eq!(bundle.manifest.entity_id_high_water, 100);
 }
 
+/// **A row group whose signed ids run from negative to small positive keeps every row `--limit`
+/// selects.** A negative id's bytes read as at least 2^63, so the group's `int32` minimum says
+/// nothing about its smallest id, and pruning on it would drop the whole group.
+#[test]
+fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("points.parquet");
+    let pairs = tmp.path().join("pairs.parquet");
+    let out = tmp.path().join("bundle");
+    write_pairs(&pairs);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::Int32, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let ids: Vec<i32> = (-5..N_ITEMS as i32 - 5).collect();
+    let xs: Vec<f64> = (0..N_ITEMS).map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = (0..N_ITEMS).map(|e| ((e * 53) % 1000) as f64).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(arrow::array::Int32Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(&points).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+
+    let report = build(&BuildArgs {
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: Vec::new(),
+        out: out.clone(),
+        limit: Some(100),
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .unwrap();
+    assert_eq!(report.items, 100, "ids 0 to 99 are below the limit");
+}
+
 /// `tessera verify` re-derives every row's `tessera_id` from `(identity.key, identity.shard_id,
 /// entity_id)` and fails if a single row disagrees (contracts §2.6 r6). A freshly built bundle
 /// must verify clean.
