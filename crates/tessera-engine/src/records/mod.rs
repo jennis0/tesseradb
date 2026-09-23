@@ -20,7 +20,6 @@ mod cursor;
 mod plan;
 mod walk;
 
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -29,16 +28,17 @@ use arrow::record_batch::RecordBatch;
 use crate::cancel::CancelToken;
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
-use crate::filter::{FilterExpr, RoutedFilter};
+use crate::filter::FilterExpr;
 use crate::region::RegionVerdict;
 use crate::session::Session;
 use crate::timing::Probe;
-use crate::viewport::{crossing_domain, meta_of, SinkClosed, SinkResult};
+use crate::viewport::{meta_of, SinkClosed, SinkResult};
 use crate::Generation;
 
-use cursor::{Binding, CursorKey, ItemsCursor, Position, Route};
+pub(crate) use cursor::CursorKey;
+use cursor::{Binding, ItemsCursor, Position, Route};
 use plan::FieldPlan;
-use walk::{Clock, Collected, Walk, Walked};
+use walk::{filter_rows, Clock, Collected, PageCx, Walk, Walked};
 
 /// The order a read returns its rows in. Both return the same rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,7 +306,7 @@ impl Engine {
             return Err(unknown_view());
         }
         let incarnation = manifest.incarnation_of(req.view).ok_or_else(unknown_view)?;
-        let key = CursorKey::of(&manifest.identity.key)?;
+        let key = self.cursor_key;
         let binding = Binding {
             route: Route::Items,
             view: req.view,
@@ -321,10 +321,7 @@ impl Engine {
             if cursor.idset != idset {
                 return Err(EngineError::StaleIdSet);
             }
-            if req
-                .order
-                .is_some_and(|order| order != cursor.position.order())
-            {
+            if req.order.is_some_and(|order| order != cursor.position.order) {
                 return Err(EngineError::CursorRefused);
             }
         }
@@ -336,7 +333,7 @@ impl Engine {
             req.system_fields,
         )?;
         let order = resumed
-            .map(|cursor| cursor.position.order())
+            .map(|cursor| cursor.position.order)
             .or(req.order)
             .unwrap_or_else(|| plan.preferred_order());
         let page_rows = req
@@ -450,11 +447,16 @@ impl Engine {
         clock: &mut Clock,
     ) -> Result<Paged> {
         let open = self.open_view(session, generation, req.view, &req.cancel, &mut Probe::new())?;
+        let cx = PageCx {
+            engine: self,
+            open: &open,
+            generation,
+        };
         let Collected {
             rows,
             walked,
             position,
-        } = walk.collect(self, &open, generation, need, clock)?;
+        } = walk.collect(&cx, need, clock)?;
         match walked {
             Walked::Stopped(reason) => {
                 if rows.is_empty() {
@@ -471,7 +473,7 @@ impl Engine {
         let values = self.read_page(session, generation, &open, plan, &rows, req.keep_unmatched)?;
         let (batch, kept, bytes) = values.into_batch(req.limits.max_page_bytes)?;
         let ended_by = if kept < rows.len() {
-            walk.position = walk.position_at(&open, &rows[kept - 1]);
+            walk.position = walk.position_at(&cx, &rows[kept - 1]);
             PageEndedBy::Bytes
         } else {
             walk.position = position;
@@ -506,40 +508,18 @@ impl Engine {
                 None,
             ));
         };
-        let served = &open.served;
-        let parts: Vec<(usize, Range<u32>)> = served
-            .segments
-            .iter()
-            .enumerate()
-            .filter(|(_, (segment, _))| segment.row_count > 0)
-            .map(|(s, (segment, _))| (s, 0..segment.row_count))
-            .collect();
-        let rows_in_ranges: u64 = parts.iter().map(|(_, r)| r.len() as u64).sum();
-        let ranges = [parts];
-        let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
-        let (rows, region) = self.route_filters(served, &open.mask, &req.cancel, |route| {
-            Ok(match route(expr, true)? {
-                RoutedFilter::Entity(matched) => (
-                    self.cross_filter_into_row_space(
-                        served,
-                        &matched,
-                        &ranges,
-                        rows_in_ranges,
-                        false,
-                    ),
-                    None,
-                ),
-                RoutedFilter::Row(tree) => {
-                    let domain = crossing_domain(&ranges, &row_bases);
-                    (
-                        self.evaluate_row_route(&tree, served, &domain, rows_in_ranges, false)?,
-                        tree.region_verdict(),
-                    )
-                }
-            })
-        })?;
-        let total = u32::try_from(rows_in_ranges).unwrap_or(u32::MAX);
-        let matched = open.mask.rows_in_range(0..total).and_cardinality(rows.rows());
-        Ok((ItemsCounts { visible, matched }, region))
+        let total = u32::try_from(open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
+        let cx = PageCx {
+            engine: self,
+            open: &open,
+            generation,
+        };
+        let whole_view = std::iter::once(0..total).collect::<Vec<_>>();
+        let routed = filter_rows(&cx, expr, None, &whole_view, false, &req.cancel)?;
+        let matched = open
+            .mask
+            .rows_in_range(0..total)
+            .and_cardinality(routed.rows.rows());
+        Ok((ItemsCounts { visible, matched }, routed.region))
     }
 }

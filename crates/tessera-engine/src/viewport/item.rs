@@ -520,7 +520,7 @@ pub(crate) fn slice_value(
 /// [`tessera_filter::RecordValue`] adapted through the declaration — a category code to its key,
 /// a `bool`'s `u8` storage back to `bool`, a `timestamp_us`'s `i64` back to its unit. Over the two
 /// facts rather than the declaration, since a group-scoped family has no [`DeclaredScalar`].
-fn stored_field_out(
+pub(crate) fn stored_field_out(
     value: tessera_filter::RecordValue,
     arrow_type: ScalarType,
     vocabulary: Option<&str>,
@@ -528,13 +528,7 @@ fn stored_field_out(
 ) -> Option<ScalarOut> {
     use tessera_filter::RecordValue as RV;
     if vocabulary.is_some() {
-        let code = match value {
-            RV::U8(c) => c as u32,
-            RV::U16(c) => c as u32,
-            RV::U32(c) => c,
-            _ => return None,
-        };
-        return category_key_out(code, vocabulary, vocabularies);
+        return category_key_out(category_code(&value)?, vocabulary, vocabularies);
     }
     Some(match (arrow_type, value) {
         (ScalarType::Bool, RV::U8(x)) => ScalarOut::Bool(x != 0),
@@ -653,17 +647,32 @@ fn scoped_values_of(
     out
 }
 
-/// A category code's drill-down value: its vocabulary key. Code 0 — the reserved absent
-/// sentinel — is absence, and a code no binding explains is omitted rather than served raw.
+/// A category code's drill-down value: its vocabulary key, as [`category_key`] finds it.
 fn category_key_out(
     code: u32,
     vocabulary: Option<&str>,
     vocabularies: &Vocabularies,
 ) -> Option<ScalarOut> {
-    if code == 0 {
-        return None;
+    category_key(code, vocabulary, vocabularies).map(|key| ScalarOut::Utf8(key.to_string()))
+}
+
+/// The key a category code is bound to. Code 0, the reserved absent sentinel, is absence, and a
+/// code no binding explains is omitted rather than served raw.
+pub(crate) fn category_key<'v>(
+    code: u32,
+    vocabulary: Option<&str>,
+    vocabularies: &'v Vocabularies,
+) -> Option<&'v str> {
+    vocabularies.get(vocabulary?)?.key_of(code)
+}
+
+/// A category's code, at whichever width its home stores it; `None` for a value of another kind.
+pub(crate) fn category_code(value: &tessera_filter::RecordValue) -> Option<u32> {
+    use tessera_filter::RecordValue as RV;
+    match *value {
+        RV::U8(code) => Some(u32::from(code)),
+        RV::U16(code) => Some(u32::from(code)),
+        RV::U32(code) => Some(code),
+        _ => None,
     }
-    let vocabulary = vocabularies.get(vocabulary?)?;
-    let (key, _) = vocabulary.bindings().find(|&(_, c)| c == code)?;
-    Some(ScalarOut::Utf8(key.to_string()))
 }

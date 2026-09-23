@@ -1,4 +1,4 @@
-//! The two walks a page takes its rows by, and the filter evaluated over the stretch ahead of them.
+//! The walk a page takes its rows by, and the filter evaluated over the stretch ahead of it.
 //!
 //! A stretch is the part of the view a walk has evaluated the filter over: a range of map cells
 //! in map order, a range of item numbers in stored order. It starts at the scan position and
@@ -18,17 +18,17 @@ use std::time::{Duration, Instant};
 
 use croaring::Bitmap;
 use tessera_store::read::SegmentData;
-use tessera_types::{EntityId, IdentityKey, TesseraId};
+use tessera_types::{EntityId, TesseraId};
 
-use super::cursor::{MapKey, Position};
-use super::ResponseEndedBy;
+use super::cursor::{Key, Position};
+use super::{RecordsOrder, ResponseEndedBy};
 use crate::cancel::CancelToken;
-use crate::compose::{EffectiveMask, FilterRows};
+use crate::compose::{for_each_run_in, FilterRows};
 use crate::engine::Engine;
 use crate::error::Result;
-use crate::filter::{FilterExpr, RoutedFilter};
+use crate::filter::FilterExpr;
 use crate::region::RegionVerdict;
-use crate::viewport::{crossing_domain, OpenView, ServedView};
+use crate::viewport::{crossing_domain, segment_holding, OpenView, RoutedRows};
 use crate::Generation;
 
 /// The first stretch spans at least this many rows per segment, or candidate items in stored
@@ -37,6 +37,25 @@ const STRETCH_MIN: u32 = 4096;
 /// A stretch never spans more than this: the bitmaps a stretch holds are bounded by it.
 const STRETCH_MAX: u32 = 1 << 24;
 const STRETCH_GROWTH: u32 = 4;
+
+/// What one page is walked in: the engine, the view resolved and its mask composed for the page,
+/// and the generation that resolution came from.
+pub(super) struct PageCx<'a> {
+    pub(super) engine: &'a Engine,
+    pub(super) open: &'a OpenView<'a>,
+    pub(super) generation: &'a Arc<Generation>,
+}
+
+impl PageCx<'_> {
+    fn segments(&self) -> &[(&SegmentData, u32)] {
+        &self.open.served.segments
+    }
+
+    fn entity_of(&self, tessera_id: u64) -> u32 {
+        let (_, entity) = self.engine.identity_key.invert(TesseraId::new(tessera_id));
+        u32::try_from(entity.raw()).expect("inversion yields a 32-bit entity")
+    }
+}
 
 /// One row a page takes, located in the generation the page was walked in.
 pub(super) struct Taken {
@@ -70,7 +89,7 @@ pub(super) struct Collected {
 pub(super) struct Clock {
     started: Instant,
     budget: Duration,
-    cancel: Option<CancelToken>,
+    pub(super) cancel: Option<CancelToken>,
     /// Stretches this response has scanned to their end. A response stops for time only after
     /// one, so every response moves the scan position on.
     scanned: u32,
@@ -94,11 +113,6 @@ impl Clock {
         self.started.elapsed() >= self.budget
     }
 
-    /// The token a region's decomposition waits on.
-    fn token(&self) -> &Option<CancelToken> {
-        &self.cancel
-    }
-
     fn stop_scan(&self, holding_rows: bool) -> Option<ResponseEndedBy> {
         if self.cancelled() {
             return Some(ResponseEndedBy::Deadline);
@@ -119,28 +133,18 @@ pub(super) struct Walk {
     pub(super) region: Option<RegionVerdict>,
 }
 
+/// The part of the view ahead of a scan position that one filter evaluation covers.
 struct Stretch {
     under: Arc<Generation>,
-    body: StretchBody,
-}
-
-enum StretchBody {
-    Map {
-        /// The scan position the stretch was opened after.
-        from: Option<MapKey>,
-        /// Every row whose cell is below this, `2^32` past the last cell.
-        until: u64,
-        filter: Option<FilterRows>,
-    },
-    Stored {
-        from: Option<u32>,
-        /// Every item numbered below this, `2^32` past the last.
-        until: u64,
-        /// The candidate items of the stretch that hold a row in the view, ascending, with it.
-        items: Vec<(u32, u32)>,
-        /// The items the filter admits, where there is a filter.
-        matched: Option<Bitmap>,
-    },
+    /// The scan position it was opened after.
+    from: Option<Key>,
+    /// Every row whose key's first half is below this; `2^32` past the last.
+    until: u64,
+    /// The rows the filter admits, over the stretch's rows, where there is a filter.
+    filter: Option<FilterRows>,
+    /// In stored order, the candidate items of the stretch that hold a row in the view,
+    /// ascending, with that row. Empty in map order, whose rows are the segments' own.
+    items: Vec<(u32, u32)>,
 }
 
 /// Whether two generations share the row positions and the deny state a stretch was evaluated
@@ -151,20 +155,20 @@ fn same_publication(a: &Generation, b: &Generation) -> bool {
         && Arc::ptr_eq(&a.overlay, &b.overlay)
 }
 
-fn entity_of(identity: &IdentityKey, tessera_id: u64) -> u32 {
-    let (_, entity) = identity.invert(TesseraId::new(tessera_id));
-    u32::try_from(entity.raw()).expect("inversion yields a 32-bit entity")
-}
-
-/// A taken row's map-order position.
-fn map_key(segments: &[(&SegmentData, u32)], row: &Taken) -> MapKey {
-    let (segment, _) = segments[row.seg];
-    (segment.morton.u32()[row.local as usize], row.tessera_id)
+/// A taken row's key in `order`.
+fn key_of(order: RecordsOrder, segments: &[(&SegmentData, u32)], row: &Taken) -> Key {
+    match order {
+        RecordsOrder::Map => {
+            let (segment, _) = segments[row.seg];
+            (segment.morton.u32()[row.local as usize], row.tessera_id)
+        }
+        RecordsOrder::Stored => (row.entity, 0),
+    }
 }
 
 /// The first local row of `segment` past `after` in `(cell, tessera_id)` order, the order every
 /// segment's rows are stored in.
-fn first_after(segment: &SegmentData, after: Option<MapKey>) -> u32 {
+fn first_after(segment: &SegmentData, after: Option<Key>) -> u32 {
     let Some(after) = after else {
         return 0;
     };
@@ -182,24 +186,33 @@ fn first_after(segment: &SegmentData, after: Option<MapKey>) -> u32 {
     lo as u32
 }
 
-/// The first local row of `segment` whose cell is at or past `until`.
+/// The first local row of `segment` whose cell is `until` or past it.
 fn first_at_cell(segment: &SegmentData, until: u64) -> u32 {
-    segment
-        .morton
-        .u32()
-        .partition_point(|&cell| u64::from(cell) < until) as u32
+    tessera_store::read::first_code_at_or_past(segment, until, 0..segment.row_count)
 }
 
-/// Sorted rows as maximal ascending runs.
-fn runs_of(rows: &[u32]) -> Vec<Range<u32>> {
-    let mut runs: Vec<Range<u32>> = Vec::new();
-    for &row in rows {
-        match runs.last_mut() {
-            Some(run) if run.end == row => run.end = row + 1,
-            _ => runs.push(row..row + 1),
+/// A filter's rows over `domain`, routed under `candidate`, or under the session's whole
+/// candidate where that is `None`: every leaf takes the row route where its column affords one.
+pub(super) fn filter_rows(
+    cx: &PageCx<'_>,
+    expr: &FilterExpr,
+    candidate: Option<&Bitmap>,
+    domain: &[Range<u32>],
+    per_tile_only: bool,
+    cancel: &Option<CancelToken>,
+) -> Result<RoutedRows> {
+    let engine = cx.engine;
+    let served = &cx.open.served;
+    let rows_in_ranges: u64 = domain.iter().map(|r| r.len() as u64).sum();
+    let body = |route: &dyn Fn(&FilterExpr, bool) -> Result<crate::filter::RoutedFilter>| {
+        engine.rows_of_routed(served, route(expr, true)?, domain, rows_in_ranges, per_tile_only)
+    };
+    match candidate {
+        Some(candidate) => {
+            engine.route_filters_under(served, &cx.open.mask, candidate, cancel, body)
         }
+        None => engine.route_filters(served, &cx.open.mask, cancel, body),
     }
-    runs
 }
 
 impl Walk {
@@ -219,139 +232,93 @@ impl Walk {
         }
     }
 
-    /// Take up to `need` rows past the position, in the walk's order, from the view `open`
-    /// resolved in `generation`. The position is left where it was; the caller commits the one
-    /// [`Collected`] carries, or one of its own after cutting the page.
+    /// Take up to `need` rows past the position, in the walk's order. The position is left where
+    /// it was; the caller commits the one [`Collected`] carries, or one of its own after cutting
+    /// the page.
     pub(super) fn collect(
         &mut self,
-        engine: &Engine,
-        open: &OpenView<'_>,
-        generation: &Arc<Generation>,
+        cx: &PageCx<'_>,
         need: usize,
         clock: &mut Clock,
     ) -> Result<Collected> {
-        match self.position {
-            Position::Map { last, scan } => {
-                self.collect_map(engine, open, generation, need, clock, last, scan)
-            }
-            Position::Stored { last, scan } => {
-                self.collect_stored(engine, open, generation, need, clock, last, scan)
-            }
-        }
-    }
-
-    /// The position just after one taken row, for a page cut before the rows that followed it.
-    pub(super) fn position_at(&self, open: &OpenView<'_>, row: &Taken) -> Position {
-        match self.position {
-            Position::Map { .. } => {
-                let key = map_key(&open.served.segments, row);
-                Position::Map {
-                    last: Some(key),
-                    scan: Some(key),
-                }
-            }
-            Position::Stored { .. } => Position::Stored {
-                last: Some(row.entity),
-                scan: Some(row.entity),
-            },
-        }
-    }
-
-    /// Forget a stretch evaluated under another publication, or opened past `scan`.
-    fn keep_stretch_if(
-        &mut self,
-        generation: &Generation,
-        opened_by: impl Fn(&StretchBody) -> bool,
-    ) {
-        if let Some(stretch) = &self.stretch {
-            if !same_publication(&stretch.under, generation) || !opened_by(&stretch.body) {
-                self.stretch = None;
-            }
-        }
-    }
-
-    fn grow(&mut self) {
-        self.target = self.target.saturating_mul(STRETCH_GROWTH).min(STRETCH_MAX);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn collect_map(
-        &mut self,
-        engine: &Engine,
-        open: &OpenView<'_>,
-        generation: &Arc<Generation>,
-        need: usize,
-        clock: &mut Clock,
-        last: Option<MapKey>,
-        mut scan: Option<MapKey>,
-    ) -> Result<Collected> {
-        let segments = &open.served.segments;
+        let Position {
+            order,
+            last,
+            mut scan,
+        } = self.position;
         let mut rows: Vec<Taken> = Vec::new();
         let walked = loop {
-            self.keep_stretch_if(generation, |body| {
-                matches!(body, StretchBody::Map { from, .. } if *from <= scan)
-            });
+            if self.stretch.as_ref().is_some_and(|stretch| {
+                !same_publication(&stretch.under, cx.generation) || stretch.from > scan
+            }) {
+                self.stretch = None;
+            }
             if self.stretch.is_none() {
                 if let Some(reason) = clock.stop_scan(!rows.is_empty()) {
                     break Walked::Stopped(reason);
                 }
-                match self.open_map_stretch(engine, open, generation, scan, clock.token())? {
+                let opened = match order {
+                    RecordsOrder::Map => self.open_map_stretch(cx, scan, &clock.cancel)?,
+                    RecordsOrder::Stored => self.open_stored_stretch(cx, scan, &clock.cancel)?,
+                };
+                match opened {
                     Some(stretch) => self.stretch = Some(stretch),
                     None => break Walked::End,
                 }
             }
-            let Some(Stretch {
-                body: StretchBody::Map { until, filter, .. },
-                ..
-            }) = &self.stretch
-            else {
-                unreachable!("a map walk opens map stretches");
-            };
-            let until = *until;
-            take_map(
-                segments,
-                &open.mask,
-                filter.as_ref(),
-                self.keep_unmatched,
-                scan,
-                until,
-                need,
-                &engine.identity_key,
-                &mut rows,
-            );
+            let stretch = self.stretch.as_ref().expect("a stretch is open");
+            match order {
+                RecordsOrder::Map => take_map(cx, stretch, self.keep_unmatched, scan, need, &mut rows),
+                RecordsOrder::Stored => {
+                    take_stored(cx, stretch, self.keep_unmatched, scan, need, &mut rows)
+                }
+            }
             if rows.len() == need {
-                scan = Some(map_key(segments, rows.last().expect("a filled page holds a row")));
+                let row = rows.last().expect("a filled page holds a row");
+                scan = Some(key_of(order, cx.segments(), row));
                 break Walked::Filled;
             }
             clock.scanned += 1;
+            let until = stretch.until;
             self.stretch = None;
-            self.grow();
+            self.target = self.target.saturating_mul(STRETCH_GROWTH).min(STRETCH_MAX);
             if until > u64::from(u32::MAX) {
                 scan = Some((u32::MAX, u64::MAX));
                 break Walked::End;
             }
             scan = Some(((until - 1) as u32, u64::MAX));
         };
-        let last = rows.last().map(|row| map_key(segments, row)).or(last);
+        let last = rows
+            .last()
+            .map(|row| key_of(order, cx.segments(), row))
+            .or(last);
         Ok(Collected {
             rows,
             walked,
-            position: Position::Map { last, scan },
+            position: Position { order, last, scan },
         })
     }
 
-    /// The stretch past `scan`: every row of every segment whose cell is below the nearest cell a
-    /// segment reaches `target` rows ahead, and at least the nearest cell any segment holds, so a
-    /// stretch always covers a row. `None` where no segment holds a row past `scan`.
+    /// The position just after one taken row, for a page cut before the rows that followed it.
+    pub(super) fn position_at(&self, cx: &PageCx<'_>, row: &Taken) -> Position {
+        let key = key_of(self.position.order, cx.segments(), row);
+        Position {
+            order: self.position.order,
+            last: Some(key),
+            scan: Some(key),
+        }
+    }
+
+    /// The map stretch past `scan`: every row of every segment whose cell is below the nearest
+    /// cell a segment reaches `target` rows ahead, and at least the nearest cell any segment
+    /// holds, so a stretch always covers a row. `None` where no segment holds a row past `scan`.
     fn open_map_stretch(
         &mut self,
-        engine: &Engine,
-        open: &OpenView<'_>,
-        generation: &Arc<Generation>,
-        scan: Option<MapKey>,
+        cx: &PageCx<'_>,
+        scan: Option<Key>,
         cancel: &Option<CancelToken>,
     ) -> Result<Option<Stretch>> {
-        let segments = &open.served.segments;
+        let segments = cx.segments();
         let starts: Vec<u32> = segments
             .iter()
             .map(|&(segment, _)| first_after(segment, scan))
@@ -372,7 +339,7 @@ impl Walk {
             return Ok(None);
         };
         let until = until.max(u64::from(nearest) + 1);
-        let filter = match self.filter.clone() {
+        let filter = match &self.filter {
             None => None,
             Some(expr) => {
                 let parts: Vec<(usize, Range<u32>)> = segments
@@ -384,153 +351,46 @@ impl Walk {
                         (start < end).then_some((s, start..end))
                     })
                     .collect();
-                Some(self.evaluate_map(engine, open, &expr, parts, cancel)?)
+                // The candidate is the stretch's visible items, so an entity-space scan costs the
+                // stretch and not the view.
+                let mut entities: Vec<u32> = Vec::new();
+                for (s, range) in &parts {
+                    let (segment, base) = segments[*s];
+                    let ids = segment.columns.tessera_id();
+                    let visible = cx.open.mask.rows_in_range(base + range.start..base + range.end);
+                    entities.extend(visible.iter().map(|row| cx.entity_of(ids[(row - base) as usize])));
+                }
+                entities.sort_unstable();
+                let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
+                let domain = crossing_domain(&[parts], &row_bases);
+                let routed =
+                    filter_rows(cx, expr, Some(&Bitmap::of(&entities)), &domain, true, cancel)?;
+                self.region = self.region.or(routed.region);
+                Some(routed.rows)
             }
         };
         Ok(Some(Stretch {
-            under: Arc::clone(generation),
-            body: StretchBody::Map {
-                from: scan,
-                until,
-                filter,
-            },
+            under: Arc::clone(cx.generation),
+            from: scan,
+            until,
+            filter,
+            items: Vec::new(),
         }))
     }
 
-    /// The filter over a map stretch's rows, as rows. The candidate is the stretch's visible
-    /// items, so every entity-space scan costs the stretch and not the view.
-    fn evaluate_map(
-        &mut self,
-        engine: &Engine,
-        open: &OpenView<'_>,
-        expr: &FilterExpr,
-        parts: Vec<(usize, Range<u32>)>,
-        cancel: &Option<CancelToken>,
-    ) -> Result<FilterRows> {
-        let served = &open.served;
-        let mask = &open.mask;
-        let rows_in_ranges: u64 = parts.iter().map(|(_, r)| r.len() as u64).sum();
-        let mut entities: Vec<u32> = Vec::new();
-        for (s, range) in &parts {
-            let (segment, base) = served.segments[*s];
-            let ids = segment.columns.tessera_id();
-            for row in mask.rows_in_range(base + range.start..base + range.end).iter() {
-                entities.push(entity_of(&engine.identity_key, ids[(row - base) as usize]));
-            }
-        }
-        entities.sort_unstable();
-        let candidate = Bitmap::of(&entities);
-        let ranges = [parts];
-        let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
-        let (rows, verdict) = engine.route_filters_under(served, mask, &candidate, cancel, |route| {
-            Ok(match route(expr, true)? {
-                RoutedFilter::Entity(matched) => (
-                    engine.cross_filter_into_row_space(
-                        served,
-                        &matched,
-                        &ranges,
-                        rows_in_ranges,
-                        true,
-                    ),
-                    None,
-                ),
-                RoutedFilter::Row(tree) => {
-                    let domain = crossing_domain(&ranges, &row_bases);
-                    (
-                        engine.evaluate_row_route(&tree, served, &domain, rows_in_ranges, true)?,
-                        tree.region_verdict(),
-                    )
-                }
-            })
-        })?;
-        self.region = self.region.or(verdict);
-        Ok(rows)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn collect_stored(
-        &mut self,
-        engine: &Engine,
-        open: &OpenView<'_>,
-        generation: &Arc<Generation>,
-        need: usize,
-        clock: &mut Clock,
-        last: Option<u32>,
-        mut scan: Option<u32>,
-    ) -> Result<Collected> {
-        let segments = &open.served.segments;
-        let mut rows: Vec<Taken> = Vec::new();
-        let walked = loop {
-            self.keep_stretch_if(generation, |body| {
-                matches!(body, StretchBody::Stored { from, .. } if *from <= scan)
-            });
-            if self.stretch.is_none() {
-                if let Some(reason) = clock.stop_scan(!rows.is_empty()) {
-                    break Walked::Stopped(reason);
-                }
-                match self.open_stored_stretch(engine, open, generation, scan, clock.token())? {
-                    Some(stretch) => self.stretch = Some(stretch),
-                    None => break Walked::End,
-                }
-            }
-            let Some(Stretch {
-                body:
-                    StretchBody::Stored {
-                        until,
-                        items,
-                        matched,
-                        ..
-                    },
-                ..
-            }) = &self.stretch
-            else {
-                unreachable!("a stored walk opens stored stretches");
-            };
-            let until = *until;
-            take_stored(
-                segments,
-                &open.mask,
-                items,
-                matched.as_ref(),
-                self.keep_unmatched,
-                scan,
-                need,
-                &mut rows,
-            );
-            if rows.len() == need {
-                scan = Some(rows.last().expect("a filled page holds a row").entity);
-                break Walked::Filled;
-            }
-            clock.scanned += 1;
-            self.stretch = None;
-            self.grow();
-            if until > u64::from(u32::MAX) {
-                scan = Some(u32::MAX);
-                break Walked::End;
-            }
-            scan = Some((until - 1) as u32);
-        };
-        let last = rows.last().map(|row| row.entity).or(last);
-        Ok(Collected {
-            rows,
-            walked,
-            position: Position::Stored { last, scan },
-        })
-    }
-
-    /// The stretch past `scan`: the next `target` items of the viewer's candidate set, and of
-    /// them the ones that hold a row in the view. `None` where the candidate holds nothing past
+    /// The stored stretch past `scan`: the next `target` items of the viewer's candidate set, and
+    /// of them the ones that hold a row in the view. `None` where the candidate holds nothing past
     /// `scan`.
     fn open_stored_stretch(
         &mut self,
-        engine: &Engine,
-        open: &OpenView<'_>,
-        generation: &Arc<Generation>,
-        scan: Option<u32>,
+        cx: &PageCx<'_>,
+        scan: Option<Key>,
         cancel: &Option<CancelToken>,
     ) -> Result<Option<Stretch>> {
-        let candidate = engine.filter_candidate(open.served.session, generation)?;
-        let from: u64 = scan.map_or(0, |e| u64::from(e) + 1);
+        let candidate = cx
+            .engine
+            .filter_candidate(cx.open.served.session, cx.generation)?;
+        let from: u64 = scan.map_or(0, |(entity, _)| u64::from(entity) + 1);
         if from > u64::from(u32::MAX) {
             return Ok(None);
         }
@@ -549,7 +409,7 @@ impl Walk {
         let mut range = Bitmap::new();
         range.add_range(from as u32..=(until - 1) as u32);
         range.and_inplace(&candidate);
-        let row_space = &open.served.data.row_space;
+        let row_space = &cx.open.served.data.row_space;
         let items: Vec<(u32, u32)> = range
             .iter()
             .filter_map(|entity| {
@@ -558,75 +418,38 @@ impl Walk {
                     .map(|row| (entity, row.raw()))
             })
             .collect();
-        let matched = match self.filter.clone() {
+        let filter = match &self.filter {
             None => None,
-            Some(expr) => Some(self.evaluate_stored(engine, open, &expr, &range, &items, cancel)?),
+            Some(expr) => {
+                // The stretch's own rows, which the view need not hold contiguously.
+                let rows = Bitmap::of(&items.iter().map(|&(_, row)| row).collect::<Vec<_>>());
+                let mut domain: Vec<Range<u32>> = Vec::new();
+                let total = u32::try_from(row_space.total_rows()).unwrap_or(u32::MAX);
+                for_each_run_in(&rows, 0..total, &mut |run| domain.push(run));
+                let routed = filter_rows(cx, expr, Some(&range), &domain, true, cancel)?;
+                self.region = self.region.or(routed.region);
+                Some(routed.rows)
+            }
         };
         Ok(Some(Stretch {
-            under: Arc::clone(generation),
-            body: StretchBody::Stored {
-                from: scan,
-                until,
-                items,
-                matched,
-            },
+            under: Arc::clone(cx.generation),
+            from: scan,
+            until,
+            filter,
+            items,
         }))
-    }
-
-    /// The filter over a stored stretch, as the items it admits. A row-space leaf is answered
-    /// over the stretch's own rows, which the view need not hold contiguously.
-    fn evaluate_stored(
-        &mut self,
-        engine: &Engine,
-        open: &OpenView<'_>,
-        expr: &FilterExpr,
-        candidate: &Bitmap,
-        items: &[(u32, u32)],
-        cancel: &Option<CancelToken>,
-    ) -> Result<Bitmap> {
-        let served: &ServedView<'_> = &open.served;
-        let (matched, verdict) =
-            engine.route_filters_under(served, &open.mask, candidate, cancel, |route| {
-                Ok(match route(expr, true)? {
-                    RoutedFilter::Entity(matched) => (matched, None),
-                    RoutedFilter::Row(tree) => {
-                        let mut rows: Vec<u32> = items.iter().map(|&(_, row)| row).collect();
-                        rows.sort_unstable();
-                        let domain = runs_of(&rows);
-                        let answered = engine.evaluate_row_route(
-                            &tree,
-                            served,
-                            &domain,
-                            rows.len() as u64,
-                            true,
-                        )?;
-                        let admitted: Vec<u32> = items
-                            .iter()
-                            .filter(|&&(_, row)| answered.rows().contains(row))
-                            .map(|&(entity, _)| entity)
-                            .collect();
-                        (Bitmap::of(&admitted), tree.region_verdict())
-                    }
-                })
-            })?;
-        self.region = self.region.or(verdict);
-        Ok(matched)
     }
 }
 
-/// Take map-order rows past `scan` and below `until` until `rows` holds `need`: each segment's
-/// rows in range that the page's mask admits, and the filter where rows must match, merged across
-/// segments by `(cell, tessera_id)`.
-#[allow(clippy::too_many_arguments)]
+/// Take map-order rows past `scan` and in the stretch until `rows` holds `need`: each segment's
+/// rows that the page's mask admits, and the filter where rows must match, merged across segments
+/// by `(cell, tessera_id)`.
 fn take_map(
-    segments: &[(&SegmentData, u32)],
-    mask: &EffectiveMask,
-    filter: Option<&FilterRows>,
+    cx: &PageCx<'_>,
+    stretch: &Stretch,
     keep_unmatched: bool,
-    scan: Option<MapKey>,
-    until: u64,
+    scan: Option<Key>,
     need: usize,
-    identity: &IdentityKey,
     rows: &mut Vec<Taken>,
 ) {
     struct Run<'a> {
@@ -639,14 +462,14 @@ fn take_map(
         matched: Option<Bitmap>,
     }
     let mut runs: Vec<Run<'_>> = Vec::new();
-    for (seg, &(segment, base)) in segments.iter().enumerate() {
+    for (seg, &(segment, base)) in cx.segments().iter().enumerate() {
         let start = first_after(segment, scan);
-        let end = first_at_cell(segment, until);
+        let end = first_at_cell(segment, stretch.until);
         if start >= end {
             continue;
         }
-        let visible = mask.rows_in_range(base + start..base + end);
-        let (served, matched) = match (filter, keep_unmatched) {
+        let visible = cx.open.mask.rows_in_range(base + start..base + end);
+        let (served, matched) = match (&stretch.filter, keep_unmatched) {
             (None, _) => (visible, None),
             (Some(filter), false) => (visible.and(filter.rows()), None),
             (Some(filter), true) => {
@@ -689,7 +512,7 @@ fn take_map(
             seg: run.seg,
             local,
             tessera_id,
-            entity: entity_of(identity, tessera_id),
+            entity: cx.entity_of(tessera_id),
             matched: run.matched.as_ref().is_none_or(|m| m.contains(row)),
         });
         run.at += 1;
@@ -698,41 +521,43 @@ fn take_map(
 
 /// Take stored-order rows past `scan` from a stretch's items until `rows` holds `need`: each item
 /// whose row the page's mask admits, and that matches where rows must match.
-#[allow(clippy::too_many_arguments)]
 fn take_stored(
-    segments: &[(&SegmentData, u32)],
-    mask: &EffectiveMask,
-    items: &[(u32, u32)],
-    matched: Option<&Bitmap>,
+    cx: &PageCx<'_>,
+    stretch: &Stretch,
     keep_unmatched: bool,
-    scan: Option<u32>,
+    scan: Option<Key>,
     need: usize,
     rows: &mut Vec<Taken>,
 ) {
     let start = match scan {
         None => 0,
-        Some(scan) => items.partition_point(|&(entity, _)| entity <= scan),
+        Some(scan) => stretch
+            .items
+            .partition_point(|&(entity, _)| (entity, 0) <= scan),
     };
-    for &(entity, row) in &items[start..] {
+    let segments = cx.segments();
+    for &(entity, row) in &stretch.items[start..] {
         if rows.len() == need {
             return;
         }
-        if !mask.contains_row(row) {
+        if !cx.open.mask.contains_row(row) {
             continue;
         }
-        let is_matched = matched.is_none_or(|m| m.contains(entity));
-        if !is_matched && !keep_unmatched {
+        let matched = stretch
+            .filter
+            .as_ref()
+            .is_none_or(|filter| filter.rows().contains(row));
+        if !matched && !keep_unmatched {
             continue;
         }
-        let seg = segments.partition_point(|&(_, base)| base <= row) - 1;
-        let (segment, base) = segments[seg];
-        let local = row - base;
+        let (seg, local) =
+            segment_holding(segments, row).expect("the first segment's rows begin at 0");
         rows.push(Taken {
             seg,
             local,
-            tessera_id: segment.columns.tessera_id()[local as usize],
+            tessera_id: segments[seg].0.columns.tessera_id()[local as usize],
             entity,
-            matched: is_matched,
+            matched,
         });
     }
 }

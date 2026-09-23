@@ -16,6 +16,7 @@ use arrow::record_batch::RecordBatch;
 use rustc_hash::FxHashMap;
 use tessera_filter::RecordValue as RV;
 use tessera_spatial::tiler::ScalarType;
+use tessera_spatial::unfixed32;
 use tessera_types::{EntityId, MortonCode};
 
 use super::plan::{FieldPlan, Home, Named, SystemField};
@@ -23,17 +24,16 @@ use super::walk::Taken;
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::session::Session;
-use crate::viewport::{slice_value, OpenView};
+use crate::viewport::{
+    category_code, category_key, slice_value, stored_field_out, OpenView, ScalarOut,
+};
 use crate::Generation;
-
-/// The grid's positions per axis: a stored position is a 32-bit fixed-point fraction of the frame.
-const GRID_SPAN: f64 = 4_294_967_296.0;
 
 /// One named field's values over a page, in page order.
 enum Values {
     Scalar {
         ty: ScalarType,
-        values: Vec<Option<RV>>,
+        values: Vec<Option<ScalarOut>>,
     },
     /// A category's keys, resolved from its codes. An absent code, or one no binding explains, is
     /// null.
@@ -172,28 +172,27 @@ fn rendered_values(
         .collect()
 }
 
-/// A field's stored values in the form its column carries: a category's codes resolved to keys.
+/// A field's stored values in the form its column carries, by the conversions the item card
+/// uses: a category's codes resolved to keys, every other family through `stored_field_out`.
 fn typed(field: &Named, values: Vec<Option<RV>>, generation: &Generation) -> Result<Values> {
+    let vocabularies = &generation.vocabularies;
     let Some(vocabulary) = &field.vocabulary else {
         return Ok(Values::Scalar {
             ty: field.ty,
-            values,
+            values: values
+                .into_iter()
+                .map(|value| value.and_then(|v| stored_field_out(v, field.ty, None, vocabularies)))
+                .collect(),
         });
     };
-    let bindings = generation.vocabularies.get(vocabulary);
     let keys = values
         .into_iter()
         .map(|value| {
-            let code = match value {
-                None => return Ok(None),
-                Some(RV::U8(code)) => u32::from(code),
-                Some(RV::U16(code)) => u32::from(code),
-                Some(RV::U32(code)) => code,
-                Some(_) => return Err(mismatch(&field.name, field.ty)),
+            let Some(value) = value else {
+                return Ok(None);
             };
-            Ok(bindings
-                .and_then(|b| b.key_of(code))
-                .map(str::to_string))
+            let code = category_code(&value).ok_or_else(|| mismatch(&field.name, field.ty))?;
+            Ok(category_key(code, Some(vocabulary), vocabularies).map(str::to_string))
         })
         .collect::<Result<_>>()?;
     Ok(Values::Category { keys })
@@ -233,9 +232,10 @@ fn positions(
                 MortonCode::new(segment.morton.u32()[local]),
                 segment.columns.residual()[local],
             );
-            let x = q.x_min + (f64::from(qx) + 0.5) / GRID_SPAN * (q.x_max - q.x_min);
-            let y = q.y_min + (f64::from(qy) + 0.5) / GRID_SPAN * (q.y_max - q.y_min);
-            descriptor.projection.inverse(x, y)
+            descriptor.projection.inverse(
+                unfixed32(qx, q.x_min, q.x_max),
+                unfixed32(qy, q.y_min, q.y_max),
+            )
         })
         .collect())
 }
@@ -278,7 +278,7 @@ impl PageValues {
                     Values::Scalar { ty, values } => {
                         width(*ty)
                             + match &values[i] {
-                                Some(RV::Utf8(s)) => s.len(),
+                                Some(ScalarOut::Utf8(s)) => s.len(),
                                 _ => 0,
                             }
                     }
@@ -394,15 +394,15 @@ fn category_array(keys: Vec<Option<String>>) -> Result<ArrayRef> {
     Ok(Arc::new(array))
 }
 
-/// A column of `ty`, each value in the storage form its home holds it in.
-fn scalar_array(name: &str, ty: ScalarType, values: Vec<Option<RV>>) -> Result<ArrayRef> {
-    macro_rules! number {
-        ($array:ty, $($variant:ident),+) => {{
+/// A column of `ty` from values in their served form.
+fn scalar_array(name: &str, ty: ScalarType, values: Vec<Option<ScalarOut>>) -> Result<ArrayRef> {
+    macro_rules! column {
+        ($array:ty, $variant:ident) => {{
             let mut out = Vec::with_capacity(values.len());
             for value in values {
                 out.push(match value {
                     None => None,
-                    $(Some(RV::$variant(x)) => Some(x),)+
+                    Some(ScalarOut::$variant(x)) => Some(x),
                     Some(_) => return Err(mismatch(name, ty)),
                 });
             }
@@ -410,41 +410,22 @@ fn scalar_array(name: &str, ty: ScalarType, values: Vec<Option<RV>>) -> Result<A
         }};
     }
     Ok(match ty {
-        ScalarType::Bool => {
-            let mut out = Vec::with_capacity(values.len());
-            for value in values {
-                out.push(match value {
-                    None => None,
-                    Some(RV::Bool(b)) => Some(b),
-                    Some(RV::U8(x)) => Some(x != 0),
-                    Some(_) => return Err(mismatch(name, ty)),
-                });
-            }
-            Arc::new(BooleanArray::from(out))
+        ScalarType::Bool => Arc::new(column!(BooleanArray, Bool)),
+        ScalarType::U8 => Arc::new(column!(UInt8Array, U8)),
+        ScalarType::U16 => Arc::new(column!(UInt16Array, U16)),
+        ScalarType::U32 => Arc::new(column!(UInt32Array, U32)),
+        ScalarType::U64 => Arc::new(column!(UInt64Array, U64)),
+        ScalarType::I8 => Arc::new(column!(Int8Array, I8)),
+        ScalarType::I16 => Arc::new(column!(Int16Array, I16)),
+        ScalarType::I32 => Arc::new(column!(Int32Array, I32)),
+        ScalarType::I64 => Arc::new(column!(Int64Array, I64)),
+        ScalarType::F32 => Arc::new(column!(Float32Array, F32)),
+        ScalarType::F64 => Arc::new(column!(Float64Array, F64)),
+        ScalarType::TimestampUs => {
+            Arc::new(column!(TimestampMicrosecondArray, TimestampUs).with_timezone("UTC"))
         }
-        ScalarType::U8 => Arc::new(number!(UInt8Array, U8)),
-        ScalarType::U16 => Arc::new(number!(UInt16Array, U16)),
-        ScalarType::U32 => Arc::new(number!(UInt32Array, U32)),
-        ScalarType::U64 => Arc::new(number!(UInt64Array, U64)),
-        ScalarType::I8 => Arc::new(number!(Int8Array, I8)),
-        ScalarType::I16 => Arc::new(number!(Int16Array, I16)),
-        ScalarType::I32 => Arc::new(number!(Int32Array, I32)),
-        ScalarType::I64 => Arc::new(number!(Int64Array, I64)),
-        ScalarType::F32 => Arc::new(number!(Float32Array, F32)),
-        ScalarType::F64 => Arc::new(number!(Float64Array, F64)),
-        ScalarType::TimestampUs => Arc::new(
-            number!(TimestampMicrosecondArray, TimestampUs, I64).with_timezone("UTC"),
-        ),
         ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-            let mut out: Vec<Option<String>> = Vec::with_capacity(values.len());
-            for value in values {
-                out.push(match value {
-                    None => None,
-                    Some(RV::Utf8(s)) => Some(s),
-                    Some(_) => return Err(mismatch(name, ty)),
-                });
-            }
-            Arc::new(StringArray::from(out))
+            Arc::new(column!(StringArray, Utf8))
         }
     })
 }

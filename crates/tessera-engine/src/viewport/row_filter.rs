@@ -10,11 +10,11 @@ impl Engine {
     /// exactly over every range the request can ask about. A view with no `row-entity.u32` gets
     /// the projecting route regardless — also `per_tile_only`'s fallback, the highlight's route,
     /// since its answers are all inside the request's own tiles.
-    pub(crate) fn cross_filter_into_row_space(
+    fn cross_filter_into_row_space(
         &self,
         served: &ServedView<'_>,
         entities: &croaring::Bitmap,
-        ranges: &[Vec<(usize, Range<u32>)>],
+        domain: &[Range<u32>],
         rows_in_ranges: u64,
         per_tile_only: bool,
     ) -> FilterRows {
@@ -22,24 +22,64 @@ impl Engine {
         let per_tile_looks_cheaper = per_tile_only
             || entities.cardinality() > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
         if per_tile_looks_cheaper && row_space.can_invert() {
-            let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
-            let domain = crossing_domain(ranges, &row_bases);
             // `None` is the row space declining to invert a row; falling through to the exact
             // route costs latency only, where trusting a partial answer would drop rows.
             if let Some(rows) = self
                 .pool
-                .install(|| per_tile_crossing(row_space, entities, &domain, rows_in_ranges))
+                .install(|| per_tile_crossing(row_space, entities, domain, rows_in_ranges))
             {
                 self.counters
                     .filter_crossings_per_tile
                     .fetch_add(1, Ordering::Relaxed);
-                return FilterRows::Viewport { rows, domain };
+                return FilterRows::Viewport {
+                    rows,
+                    domain: domain.to_vec(),
+                };
             }
         }
         self.counters
             .filter_crossings_projected
             .fetch_add(1, Ordering::Relaxed);
         FilterRows::Complete(row_space.project(entities))
+    }
+
+    /// A routed filter's answer as rows over `domain`, ascending, disjoint and merged view-space
+    /// ranges holding `rows_in_ranges` rows: an entity-space verdict crossed into row space, or a
+    /// tree with row-space leaves evaluated there. `per_tile_only` holds either to the domain
+    /// rather than letting a whole-view projection be chosen where it is cheaper.
+    pub(crate) fn rows_of_routed(
+        &self,
+        served: &ServedView<'_>,
+        routed: crate::filter::RoutedFilter,
+        domain: &[Range<u32>],
+        rows_in_ranges: u64,
+        per_tile_only: bool,
+    ) -> Result<RoutedRows> {
+        Ok(match routed {
+            crate::filter::RoutedFilter::Entity(entities) => RoutedRows {
+                unmasked: Some(entities.cardinality()),
+                rows: self.cross_filter_into_row_space(
+                    served,
+                    &entities,
+                    domain,
+                    rows_in_ranges,
+                    per_tile_only,
+                ),
+                region: None,
+            },
+            crate::filter::RoutedFilter::Row(tree) => {
+                let rows =
+                    self.evaluate_row_route(&tree, served, domain, rows_in_ranges, per_tile_only)?;
+                self.counters.filter_row_routed.fetch_add(1, Ordering::Relaxed);
+                RoutedRows {
+                    // A region's interior rows have not met the mask, so their count is a
+                    // pre-mask quantity about the region, and is not taken.
+                    unmasked: (!tree.has_region()).then(|| rows.rows().cardinality()),
+                    region: tree.region_verdict(),
+                    rows,
+                }
+            }
+        })
     }
 
     /// Evaluate a routed filter tree with row-space leaves over the request's own rows, exact
@@ -132,6 +172,16 @@ impl Engine {
             }
         })
     }
+}
+
+/// [`Engine::rows_of_routed`]'s answer.
+pub(crate) struct RoutedRows {
+    pub(crate) rows: FilterRows,
+    /// The coarsest verdict a region leaf reached.
+    pub(crate) region: Option<crate::region::RegionVerdict>,
+    /// How many rows or entities matched before the mask, where that is a quantity about the
+    /// filter alone: `None` for a tree holding a region.
+    pub(crate) unmasked: Option<u64>,
 }
 
 /// The rows a row-space evaluation answers over — see [`Engine::evaluate_row_route`].
@@ -707,7 +757,8 @@ fn scan_rows(
             let mut buf: Vec<u32> = Vec::with_capacity(1024);
             // The segment owning `chunk.start`, advanced as the walk crosses a boundary: a merged
             // range can span two adjacent segments even though no domain range spans one.
-            let mut seg = slices.partition_point(|s| s.row_base <= chunk.start) - 1;
+            let (mut seg, _) = segment_holding(segments, chunk.start)
+                .expect("the first segment's rows begin at 0");
             let mut row = chunk.start;
             while row < chunk.end {
                 while seg + 1 < slices.len() && slices[seg + 1].row_base <= row {
@@ -883,44 +934,18 @@ impl Engine {
                  -> Result<(FilterRows, Option<crate::region::RegionVerdict>)> {
                     let routed = route(expr, rows_in_ranges <= v_total)?;
                     probe.lap(|t| &mut t.filter_eval_ns);
-                    let out = match routed {
-                        crate::filter::RoutedFilter::Entity(entities) => {
-                            if count_matched {
-                                probe.count(|t| &mut t.filter_matched, entities.cardinality());
-                            }
-                            (
-                                self.cross_filter_into_row_space(
-                                    served,
-                                    &entities,
-                                    &tiling.ranges,
-                                    rows_in_ranges,
-                                    per_tile_only,
-                                ),
-                                None,
-                            )
-                        }
-                        crate::filter::RoutedFilter::Row(tree) => {
-                            let verdict = tree.region_verdict();
-                            let rows = self.evaluate_row_route(
-                                &tree,
-                                served,
-                                &domain,
-                                rows_in_ranges,
-                                per_tile_only,
-                            )?;
-                            self.counters.filter_row_routed.fetch_add(1, Ordering::Relaxed);
-                            // Not counted when a region is in the tree: its interior rows have
-                            // not met the mask yet, so the cardinality would be a pre-mask
-                            // quantity about the region — not computed, for a metric or anything
-                            // else.
-                            if count_matched && !tree.has_region() {
-                                probe.count(|t| &mut t.filter_matched, rows.rows().cardinality());
-                            }
-                            (rows, verdict)
-                        }
-                    };
+                    let out = self.rows_of_routed(
+                        served,
+                        routed,
+                        &domain,
+                        rows_in_ranges,
+                        per_tile_only,
+                    )?;
+                    if let (true, Some(matched)) = (count_matched, out.unmasked) {
+                        probe.count(|t| &mut t.filter_matched, matched);
+                    }
                     probe.lap(|t| &mut t.filter_cross_ns);
-                    Ok(out)
+                    Ok((out.rows, out.region))
                 };
                 let filter_rows = match &req.filter {
                     None => None,

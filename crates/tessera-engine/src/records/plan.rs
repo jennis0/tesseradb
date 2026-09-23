@@ -4,8 +4,8 @@ use tessera_spatial::tiler::ScalarType;
 
 use super::{RecordsOrder, RecordsRefused};
 use crate::error::{EngineError, Result};
-use crate::filter::{Family, FieldHomes, PIN};
-use crate::viewport::{EngineMeta, LeafColumn};
+use crate::filter::{scoped_column_name, Family, FieldHomes};
+use crate::viewport::{EngineMeta, Resolution};
 
 /// One named field, resolved.
 pub(super) struct Named {
@@ -101,62 +101,47 @@ fn resolve_field(
     spelling: &str,
 ) -> Result<Named> {
     let refused = |why| Err(EngineError::RecordsRefused(why));
-    let (name, pin) = match spelling.split_once(PIN) {
-        Some((name, pin)) => (name, Some(pin)),
-        None => (spelling, None),
-    };
-    if let Some(index) = meta.declared_scalars.iter().position(|d| d.name == name) {
-        if pin.is_some() {
-            return refused(RecordsRefused::PinOnUnscoped(name.to_string()));
-        }
-        let declared = &meta.declared_scalars[index];
-        let homes: FieldHomes = meta.homes[index];
-        let home = if homes.rendered {
-            Home::Rendered
-        } else if homes.value_column {
-            Home::ValueColumn(declared.name.clone())
-        } else {
-            Home::Record(u16::try_from(index).map_err(|_| {
-                EngineError::Malformed(format!(
-                    "field '{name}' is declared at position {index}, past what a record row can \
-                     tag"
-                ))
-            })?)
-        };
-        return Ok(Named {
-            name: spelling.to_string(),
-            ty: declared.arrow_type,
-            vocabulary: declared.vocabulary.clone(),
-            home,
-        });
-    }
-    match meta.resolve_scoped_column(name, pin, view, visible, |_| true) {
-        LeafColumn::Resolved {
-            family: Family::Text,
-            ..
-        } => refused(RecordsRefused::ScopedText(spelling.to_string())),
-        LeafColumn::Resolved { column, .. } => {
-            let family = meta
-                .scoped_scalars
-                .iter()
-                .find(|f| f.name == name)
-                .expect("a resolved scoped column names a declared family");
+    match meta.resolve_column(spelling, view, visible, |_| true, |_| true) {
+        Resolution::Declared(index) => {
+            let declared = &meta.declared_scalars[index];
+            let homes: FieldHomes = meta.homes[index];
+            let home = if homes.rendered {
+                Home::Rendered
+            } else if homes.value_column {
+                Home::ValueColumn(declared.name.clone())
+            } else {
+                Home::Record(u16::try_from(index).map_err(|_| {
+                    EngineError::Malformed(format!(
+                        "field '{spelling}' is declared at position {index}, past what a record \
+                         row can tag"
+                    ))
+                })?)
+            };
             Ok(Named {
                 name: spelling.to_string(),
-                ty: family.arrow_type,
-                vocabulary: family.vocabulary.clone(),
-                home: Home::ValueColumn(column),
+                ty: declared.arrow_type,
+                vocabulary: declared.vocabulary.clone(),
+                home,
             })
         }
-        LeafColumn::Unpinned { group } => refused(RecordsRefused::Unpinned {
-            field: name.to_string(),
+        Resolution::Scoped { family, .. } if Family::of_scoped(family) == Family::Text => {
+            refused(RecordsRefused::ScopedText(spelling.to_string()))
+        }
+        Resolution::Scoped { family, view } => Ok(Named {
+            name: spelling.to_string(),
+            ty: family.arrow_type,
+            vocabulary: family.vocabulary.clone(),
+            home: Home::ValueColumn(scoped_column_name(&family.name, &view)),
+        }),
+        Resolution::Unpinned { group } => refused(RecordsRefused::Unpinned {
+            field: spelling.to_string(),
             group,
         }),
-        LeafColumn::UnknownPin { group, pin } => Err(EngineError::UnknownView(format!(
+        Resolution::UnknownPin { group, pin } => Err(EngineError::UnknownView(format!(
             "{group}{}{pin}",
             tessera_store::GROUP_SEPARATOR
         ))),
-        LeafColumn::PinOnUnscoped { column } => refused(RecordsRefused::PinOnUnscoped(column)),
-        LeafColumn::Unknown => refused(RecordsRefused::UnknownField(spelling.to_string())),
+        Resolution::PinOnUnscoped { column } => refused(RecordsRefused::PinOnUnscoped(column)),
+        Resolution::Unknown => refused(RecordsRefused::UnknownField(spelling.to_string())),
     }
 }

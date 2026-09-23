@@ -74,6 +74,12 @@ pub fn fixed32(v: f64, min: f64, max: f64) -> u32 {
     }
 }
 
+/// The coordinate at the centre of a 32-bit fixed-point position's step: within half a step of
+/// every value [`fixed32`] maps to `q`, a step being `(max - min) / 2^32`.
+pub fn unfixed32(q: u32, min: f64, max: f64) -> f64 {
+    min + (f64::from(q) + 0.5) / FIXED_SPAN * (max - min)
+}
+
 /// Split a pair of 32-bit fixed-point axes into the stored `(cell code, sub-cell residual)`.
 ///
 /// The two words concatenate to the 64-bit interleave of the inputs: `(morton << 32) | residual`,
@@ -240,6 +246,16 @@ pub fn tiles_for_bbox_count(bbox: [f64; 4], depth: u8, e: &Bounds) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unfixed32_is_within_half_a_step_of_every_value_fixed32_maps_there() {
+        let (min, max) = (-180.0, 180.0);
+        let step = (max - min) / FIXED_SPAN;
+        for v in [-180.0, -179.999_999_9, -0.3, 0.0, 12.345_678_9, 179.999_999_9, 180.0] {
+            let back = unfixed32(fixed32(v, min, max), min, max);
+            assert!((back - v).abs() <= step / 2.0 + 1e-12, "{v} came back as {back}");
+        }
+    }
 
     #[test]
     fn worked_example_from_contracts_2_5() {

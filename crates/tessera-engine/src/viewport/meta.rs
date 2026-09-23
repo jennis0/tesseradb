@@ -130,6 +130,52 @@ pub enum LeafColumn {
     PinOnUnscoped { column: String },
 }
 
+/// What [`EngineMeta::resolve_column`] finds: [`LeafColumn`]'s outcomes, with the declaration a
+/// resolved column came from.
+pub(crate) enum Resolution<'a> {
+    /// An entity-scoped column, by its position in [`EngineMeta::declared_scalars`].
+    Declared(usize),
+    /// A group-scoped family's column for one view.
+    Scoped {
+        family: &'a tessera_store::manifest::ScopedScalar,
+        view: String,
+    },
+    Unknown,
+    Unpinned {
+        group: String,
+    },
+    UnknownPin {
+        group: String,
+        pin: String,
+    },
+    PinOnUnscoped {
+        column: String,
+    },
+}
+
+impl Resolution<'_> {
+    /// The outcome in the terms the filter surface and the value-list route answer in.
+    pub(crate) fn leaf_column(self, meta: &EngineMeta) -> LeafColumn {
+        match self {
+            Resolution::Declared(index) => {
+                let declared = &meta.declared_scalars[index];
+                LeafColumn::Resolved {
+                    column: declared.name.clone(),
+                    family: crate::filter::Family::of(declared),
+                }
+            }
+            Resolution::Scoped { family, view } => LeafColumn::Resolved {
+                column: crate::filter::scoped_column_name(&family.name, &view),
+                family: crate::filter::Family::of_scoped(family),
+            },
+            Resolution::Unknown => LeafColumn::Unknown,
+            Resolution::Unpinned { group } => LeafColumn::Unpinned { group },
+            Resolution::UnknownPin { group, pin } => LeafColumn::UnknownPin { group, pin },
+            Resolution::PinOnUnscoped { column } => LeafColumn::PinOnUnscoped { column },
+        }
+    }
+}
+
 impl EngineMeta {
     /// The view a request's id names — a plain view's name, or a group's `<group>:<key>` — or
     /// `None` for a view this bundle does not declare. One resolution for both planes: a viewer
@@ -175,115 +221,98 @@ impl EngineMeta {
         view: &str,
         visible: &crate::gate::VisibleViews,
     ) -> LeafColumn {
-        let (name, pin) = match leaf.split_once(crate::filter::PIN) {
-            Some((name, pin)) => (name, Some(pin)),
-            None => (leaf, None),
-        };
-        // Entity-scoped columns first: a name is one or the other, never both.
-        if let Some(declared) = self
-            .declared_scalars
-            .iter()
-            .find(|d| d.name == name && crate::filter::is_filterable(d))
-        {
-            return match pin {
-                None => LeafColumn::Resolved {
-                    column: name.to_string(),
-                    family: crate::filter::Family::of(declared),
-                },
-                Some(_) => LeafColumn::PinOnUnscoped {
-                    column: name.to_string(),
-                },
-            };
-        }
-        self.resolve_scoped_column(name, pin, view, visible, crate::filter::scoped_is_filterable)
-    }
-
-    /// The group-scoped half of [`Self::resolve_filter_column`], over the families `admits`
-    /// accepts: the filter surface admits the filterable ones, and a records read every family.
-    /// `name` and `pin` are the leaf's spelling split at [`crate::filter::PIN`].
-    pub(crate) fn resolve_scoped_column(
-        &self,
-        name: &str,
-        pin: Option<&str>,
-        view: &str,
-        visible: &crate::gate::VisibleViews,
-        admits: impl Fn(&tessera_store::manifest::ScopedScalar) -> bool,
-    ) -> LeafColumn {
-        let Some(family) = self
-            .scoped_scalars
-            .iter()
-            .find(|f| f.name == name && admits(f))
-        else {
-            return LeafColumn::Unknown;
-        };
-        // The group's gate, ahead of the pin/bare split, so neither spelling confirms the group.
-        if !visible.contains_group(&family.group) {
-            return LeafColumn::Unknown;
-        }
-        let resolved = |view_id: &str| LeafColumn::Resolved {
-            column: crate::filter::scoped_column_name(name, view_id),
-            family: crate::filter::Family::of_scoped(family),
-        };
-        match pin {
-            Some(pin) => {
-                let requested =
-                    format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, pin);
-                match self.resolve_visible_view(&requested, visible) {
-                    // A view with no column reads the same as a key nobody declared or a
-                    // gate-failed one: the pin names nothing to read either way.
-                    Some(view) if family.views.contains(&view.id) => resolved(&view.id),
-                    _ => LeafColumn::UnknownPin {
-                        group: family.group.clone(),
-                        pin: pin.to_string(),
-                    },
-                }
-            }
-            // The request's own view, where it is one of the family's own group or a sharing one.
-            None => match self.owning_key(view, &family.group) {
-                Some(key) => {
-                    let id = format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, key);
-                    match family.views.contains(&id) {
-                        true => resolved(&id),
-                        false => LeafColumn::Unpinned {
-                            group: family.group.clone(),
-                        },
-                    }
-                }
-                None => LeafColumn::Unpinned {
-                    group: family.group.clone(),
-                },
-            },
-        }
+        self.resolve_column(
+            leaf,
+            view,
+            visible,
+            crate::filter::is_filterable,
+            crate::filter::scoped_is_filterable,
+        )
+        .leaf_column(self)
     }
 
     /// Resolve a `/v1/categories` column spelling — [`Self::resolve_filter_column`]'s question
     /// asked by the value-list route, whose admission is not the filter surface's. A category has
-    /// a value list whether or not it is filterable, so an entity-scoped category declared with
-    /// neither `render` nor `index` is resolved here by declaration alone, ahead of that
-    /// admission. Everything else falls through to [`Self::resolve_filter_column`] unchanged, so
-    /// one site still decides what a principal may reach.
+    /// a value list whether or not it is filterable, so an entity-scoped column is resolved by
+    /// declaration alone; a group-scoped one is admitted as the filter surface admits it.
     pub fn resolve_category_column(
         &self,
         leaf: &str,
         view: &str,
         visible: &crate::gate::VisibleViews,
     ) -> LeafColumn {
+        self.resolve_column(
+            leaf,
+            view,
+            visible,
+            |_| true,
+            crate::filter::scoped_is_filterable,
+        )
+        .leaf_column(self)
+    }
+
+    /// Resolve a column spelling under `view`, over the entity-scoped columns `declared` admits
+    /// and the group-scoped families `scoped` admits: the one resolution the filter surface, the
+    /// value-list route and a records read share. See [`Self::resolve_filter_column`] for the
+    /// rules.
+    pub(crate) fn resolve_column(
+        &self,
+        leaf: &str,
+        view: &str,
+        visible: &crate::gate::VisibleViews,
+        declared: impl Fn(&DeclaredScalar) -> bool,
+        scoped: impl Fn(&tessera_store::manifest::ScopedScalar) -> bool,
+    ) -> Resolution<'_> {
         let (name, pin) = match leaf.split_once(crate::filter::PIN) {
             Some((name, pin)) => (name, Some(pin)),
             None => (leaf, None),
         };
-        if let Some(declared) = self.declared_scalars.iter().find(|d| d.name == name) {
+        // Entity-scoped columns first: a name is one or the other, never both.
+        if let Some(index) = self
+            .declared_scalars
+            .iter()
+            .position(|d| d.name == name && declared(d))
+        {
             return match pin {
-                None => LeafColumn::Resolved {
-                    column: name.to_string(),
-                    family: crate::filter::Family::of(declared),
-                },
-                Some(_) => LeafColumn::PinOnUnscoped {
+                None => Resolution::Declared(index),
+                Some(_) => Resolution::PinOnUnscoped {
                     column: name.to_string(),
                 },
             };
         }
-        self.resolve_filter_column(leaf, view, visible)
+        let Some(family) = self
+            .scoped_scalars
+            .iter()
+            .find(|f| f.name == name && scoped(f))
+        else {
+            return Resolution::Unknown;
+        };
+        // The group's gate, ahead of the pin/bare split, so neither spelling confirms the group.
+        if !visible.contains_group(&family.group) {
+            return Resolution::Unknown;
+        }
+        let group_view = |key: &str| format!("{}{}{key}", family.group, tessera_store::GROUP_SEPARATOR);
+        match pin {
+            Some(pin) => match self.resolve_visible_view(&group_view(pin), visible) {
+                // A view with no column reads the same as a key nobody declared or a gate-failed
+                // one: the pin names nothing to read either way.
+                Some(view) if family.views.contains(&view.id) => Resolution::Scoped {
+                    family,
+                    view: view.id.clone(),
+                },
+                _ => Resolution::UnknownPin {
+                    group: family.group.clone(),
+                    pin: pin.to_string(),
+                },
+            },
+            // The request's own view, where it is one of the family's own group or a sharing one.
+            None => match self.owning_key(view, &family.group).map(group_view) {
+                Some(id) if family.views.contains(&id) => Resolution::Scoped { family, view: id },
+                _ => Resolution::Unpinned {
+                    group: family.group.clone(),
+                },
+            },
+        }
     }
 
     /// The key `view` holds in `group`'s roster — its own if it is a view of that group, and the

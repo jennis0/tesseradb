@@ -51,22 +51,20 @@ impl Binding<'_> {
     }
 }
 
-/// The sealing key, derived from the identity key, so a rotation of that key stops every cursor
-/// opening.
-pub(super) struct CursorKey([u8; 32]);
+/// The sealing key, derived from the identity key when the engine opens, so a rotation of that
+/// key stops every cursor opening.
+#[derive(Clone, Copy)]
+pub(crate) struct CursorKey([u8; 32]);
 
 impl CursorKey {
-    /// The key for a deployment whose identity key is `identity_key_hex`, the manifest's spelling.
-    pub(super) fn of(identity_key_hex: &str) -> Result<CursorKey> {
-        let bytes = decode_hex(identity_key_hex).ok_or_else(|| {
-            EngineError::Malformed(
-                "the manifest's identity key is not 32 lowercase hex characters".to_string(),
-            )
-        })?;
+    /// The key for a deployment whose identity key the manifest spells `identity_key_hex`: 32
+    /// lowercase hex characters, which `IdentityKey::from_hex` has already held to that spelling,
+    /// so the spelling is one-to-one with the key's bytes and is hashed as it stands.
+    pub(crate) fn of(identity_key_hex: &str) -> CursorKey {
         let mut hasher = Sha256::new();
         hasher.update(KEY_DOMAIN);
-        hasher.update(bytes);
-        Ok(CursorKey(hasher.finalize().into()))
+        hasher.update(identity_key_hex.as_bytes());
+        CursorKey(hasher.finalize().into())
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {
@@ -118,61 +116,28 @@ impl CursorKey {
     }
 }
 
-fn decode_hex(hex: &str) -> Option<[u8; 16]> {
-    let digits = hex.as_bytes();
-    if digits.len() != 32 {
-        return None;
-    }
-    let nibble = |c: u8| match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        _ => None,
-    };
-    let mut out = [0u8; 16];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = (nibble(digits[2 * i])? << 4) | nibble(digits[2 * i + 1])?;
-    }
-    Some(out)
-}
-
-/// A map-order position: a row's cell and `tessera_id`.
-pub(super) type MapKey = (u32, u64);
+/// A row's place in its order: `(cell, tessera_id)` in map order, and `(item number, 0)` in
+/// stored order, where a scan position past a whole stretch is `(last item number, u64::MAX)`.
+/// Item numbers are held only inside the seal.
+pub(super) type Key = (u32, u64);
 
 /// How far a read has gone. `last` is the last row returned, and `scan` the position every row at
 /// or before which has been considered; a read resumes after `scan`, which is never before
 /// `last`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Position {
-    Map {
-        last: Option<MapKey>,
-        scan: Option<MapKey>,
-    },
-    /// Positions are entity ids, held only inside the seal.
-    Stored {
-        last: Option<u32>,
-        scan: Option<u32>,
-    },
+pub(super) struct Position {
+    pub(super) order: RecordsOrder,
+    pub(super) last: Option<Key>,
+    pub(super) scan: Option<Key>,
 }
 
 impl Position {
     /// The start of a read in `order`.
     pub(super) fn start(order: RecordsOrder) -> Position {
-        match order {
-            RecordsOrder::Map => Position::Map {
-                last: None,
-                scan: None,
-            },
-            RecordsOrder::Stored => Position::Stored {
-                last: None,
-                scan: None,
-            },
-        }
-    }
-
-    pub(super) fn order(&self) -> RecordsOrder {
-        match self {
-            Position::Map { .. } => RecordsOrder::Map,
-            Position::Stored { .. } => RecordsOrder::Stored,
+        Position {
+            order,
+            last: None,
+            scan: None,
         }
     }
 }
@@ -185,19 +150,17 @@ pub(super) struct ItemsCursor {
 }
 
 /// `idset, order, flags, last (u32, u64), scan (u32, u64)`, little-endian, where bit 0 of `flags`
-/// says `last` is present and bit 1 that `scan` is. A stored-order key fills the `u32` and leaves
-/// the `u64` zero.
+/// says `last` is present and bit 1 that `scan` is.
 const PAYLOAD_LEN: usize = 4 + 1 + 1 + 12 + 12;
 const HAS_LAST: u8 = 1;
 const HAS_SCAN: u8 = 2;
 
 impl ItemsCursor {
     pub(super) fn encode(&self) -> Vec<u8> {
-        let (order, last, scan) = match self.position {
-            Position::Map { last, scan } => (0u8, last, scan),
-            Position::Stored { last, scan } => {
-                (1u8, last.map(|e| (e, 0)), scan.map(|e| (e, 0)))
-            }
+        let Position { order, last, scan } = self.position;
+        let order = match order {
+            RecordsOrder::Map => 0u8,
+            RecordsOrder::Stored => 1u8,
         };
         let mut out = Vec::with_capacity(PAYLOAD_LEN);
         out.extend_from_slice(&self.idset.to_le_bytes());
@@ -224,15 +187,15 @@ impl ItemsCursor {
         let flags = payload[5];
         let last = (flags & HAS_LAST != 0).then(|| (u32_at(6), u64_at(10)));
         let scan = (flags & HAS_SCAN != 0).then(|| (u32_at(18), u64_at(22)));
-        let position = match payload[4] {
-            0 => Position::Map { last, scan },
-            1 => Position::Stored {
-                last: last.map(|(e, _)| e),
-                scan: scan.map(|(e, _)| e),
-            },
+        let order = match payload[4] {
+            0 => RecordsOrder::Map,
+            1 => RecordsOrder::Stored,
             _ => return Err(EngineError::CursorRefused),
         };
-        Ok(ItemsCursor { idset, position })
+        Ok(ItemsCursor {
+            idset,
+            position: Position { order, last, scan },
+        })
     }
 }
 
@@ -253,10 +216,11 @@ mod tests {
 
     #[test]
     fn a_cursor_opens_only_under_the_binding_it_was_sealed_with() {
-        let key = CursorKey::of(KEY).unwrap();
+        let key = CursorKey::of(KEY);
         let cursor = ItemsCursor {
             idset: 7,
-            position: Position::Map {
+            position: Position {
+                order: RecordsOrder::Map,
                 last: Some((3, 99)),
                 scan: Some((4, u64::MAX)),
             },
@@ -271,7 +235,7 @@ mod tests {
                 Err(EngineError::CursorRefused)
             ));
         }
-        let rotated = CursorKey::of("0f0e0d0c0b0a09080706050403020100").unwrap();
+        let rotated = CursorKey::of("0f0e0d0c0b0a09080706050403020100");
         assert!(matches!(
             rotated.open(&binding("s0", 0, 1), &token),
             Err(EngineError::CursorRefused)
@@ -280,12 +244,13 @@ mod tests {
 
     #[test]
     fn two_cursors_for_one_position_share_no_text() {
-        let key = CursorKey::of(KEY).unwrap();
+        let key = CursorKey::of(KEY);
         let payload = ItemsCursor {
             idset: 1,
-            position: Position::Stored {
+            position: Position {
+                order: RecordsOrder::Stored,
                 last: None,
-                scan: Some(12),
+                scan: Some((12, 0)),
             },
         }
         .encode();
