@@ -25,9 +25,20 @@ ALL = list(range(fx.N_ITEMS))
 BUILT = list(range(fx.N_BUILT))
 INGESTED = list(range(fx.N_BUILT, fx.N_ITEMS))
 
-#: Items opened in every case: some the live build holds, some it takes over ingest, and several
-#: in the compartment the `few` principal sees.
-ITEMS = (0, 1, 2, 7, 19, 39, 59, 700, fx.N_BUILT - 1, fx.N_BUILT, fx.N_BUILT + 19, fx.N_ITEMS - 1)
+
+
+def _first(label: str, ids, n: int = 2) -> list[int]:
+    return [i for i in ids if fx.access_of(i) == label][:n]
+
+
+#: Items opened in every case: some the live build holds and some it takes over ingest, with
+#: two of each label from each.
+ITEMS = tuple(
+    sorted(
+        {0, 1, 2, 700, fx.N_BUILT - 1, fx.N_BUILT, fx.N_ITEMS - 1}
+        | {i for label in ("pa", "pb", "pc") for i in _first(label, BUILT) + _first(label, INGESTED)}
+    )
+)
 
 
 def _world(ids, columns=()) -> dict:
@@ -480,7 +491,7 @@ class Layers(Case):
     published with half its members and grown by the other half."""
 
     name = "layers"
-    plan = Plan(layers=("topics", "strict"), items=ITEMS[:4])
+    plan = Plan(layers=("topics", "strict"), items=ITEMS)
 
     def built(self, work) -> Deployment:
         roster = pa.table(
@@ -638,6 +649,15 @@ KNOWN = (
         "closed vocabulary codes: dense at build, random live",
     ),
     Known(
+        "scoped-views-order",
+        "group-scoped",
+        STAGES,
+        ((r"meta", r"\.scoped_scalars\[\d+\]\.views\[\d+\]"),),
+        "a family scoped to a live group lists its views in the order their first flushes ran "
+        "(the view holding the lowest entity id first), where a build lists them in the group's "
+        "declared order",
+    ),
+    Known(
         "text-index",
         "text-attributes",
         ("restart",),
@@ -751,20 +771,27 @@ class Walk:
 
 
 def _assert_not_vacuous(case: Case, observed: dict) -> None:
-    """The built side must show the thing under test, or an equal comparison proves nothing."""
-    everyone = observed["everyone"]
-    for label, _, views in case.plan.filters:
-        for view in views or case.plan.views:
-            points = everyone[f"viewport {view} z2 filter {label}"]["points"]
-            assert points, f"{case.name}: filter {label} matches nothing on {view}"
-    for column in case.plan.categories:
-        assert any(p["values"] for p in everyone[f"categories {column}"]), column
-    for view in case.plan.views:
-        assert everyone[f"viewport {view} z0"]["points"], f"{case.name}: {view} is empty"
-    for layer in case.plan.layers:
-        assert any(a["layer"] == layer for a in everyone[f"viewport {fx.WORLD} z0"]["artifacts"])
-    opened = [everyone[f"item {i}"] for i in case.plan.items]
-    assert all(o != "not served" for o in opened), f"{case.name}: an item is not served"
+    """Every principal must see the thing under test on the built side, or an equal comparison
+    proves nothing for that principal."""
+    for principal, answers in observed.items():
+        where = f"{case.name} for {principal}"
+        for label, _, views in case.plan.filters:
+            for view in views or case.plan.views:
+                points = answers[f"viewport {view} z2 filter {label}"]["points"]
+                assert points, f"{where}: filter {label} matches nothing on {view}"
+        for column in case.plan.categories:
+            pages = answers[f"categories {column}"]
+            assert any(p["values"] for p in pages), f"{where}: {column} lists no value"
+        for view in case.plan.views:
+            assert answers[f"viewport {view} z0"]["points"], f"{where}: {view} is empty"
+        for layer in case.plan.layers:
+            served = answers[f"viewport {fx.WORLD} z0"]["artifacts"]
+            assert any(a["layer"] == layer for a in served), f"{where}: {layer} serves nothing"
+        opened = [answers[f"item {i}"] for i in case.plan.items]
+        if principal == "everyone":
+            assert all(o != "not served" for o in opened), f"{where}: an item is not served"
+        else:
+            assert any(o != "not served" for o in opened), f"{where}: no item is served"
 
 
 @pytest.fixture(scope="module")

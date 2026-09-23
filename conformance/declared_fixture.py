@@ -78,9 +78,14 @@ PRINCIPALS = {
 }
 
 
+def _hash(*parts: object) -> int:
+    return int(hashlib.sha256(":".join(map(str, parts)).encode()).hexdigest()[:16], 16)
+
+
 def access_of(i: int) -> str:
-    """One label per item: `pc` is one item in twenty, so the `few` principal sees little."""
-    r = i % 20
+    """One label per item, drawn from a hash so it does not line up with the modular choices the
+    columns and views make: `pc` is about one item in twenty, so the `few` principal sees little."""
+    r = _hash("access", i) % 20
     if r == 19:
         return "pc"
     return "pb" if r >= 10 else "pa"
@@ -90,10 +95,6 @@ def external_id(i: int) -> str:
     """The id `--mint-external-ids` gives an item built with entity id `i`, base64 as JSON carries
     it."""
     return base64.b64encode(i.to_bytes(8, "little")).decode()
-
-
-def _hash(*parts: object) -> int:
-    return int(hashlib.sha256(":".join(map(str, parts)).encode()).hexdigest()[:16], 16)
 
 
 def position(view_seed: int, i: int, extent=WORLD_EXTENT) -> tuple[float, float]:
