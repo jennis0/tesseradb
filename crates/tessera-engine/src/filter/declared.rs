@@ -275,6 +275,44 @@ pub(crate) fn blob_resident(
     !scalar.render && !owes_value_column(scalar, vocabularies)
 }
 
+/// Where a declared field's value is read from. A field may have more than one home: a rendered,
+/// indexed column is in the view's row tail and in its value column both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldHomes {
+    /// In the row tail of every view, read in the view a request names.
+    pub rendered: bool,
+    /// In a per-item column in stored order: [`owes_value_column`].
+    pub value_column: bool,
+    /// In the record store: [`blob_resident`].
+    pub record: bool,
+}
+
+impl FieldHomes {
+    /// One declared field's homes, by the rules the build writes them by.
+    pub fn of(
+        scalar: &tessera_store::manifest::DeclaredScalar,
+        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    ) -> FieldHomes {
+        FieldHomes {
+            rendered: scalar.render,
+            value_column: owes_value_column(scalar, vocabularies),
+            record: blob_resident(scalar, vocabularies),
+        }
+    }
+
+    /// The homes by name, in the order rendered, value column, record.
+    pub fn names(self) -> Vec<&'static str> {
+        [
+            (self.rendered, "rendered"),
+            (self.value_column, "value_column"),
+            (self.record, "record"),
+        ]
+        .into_iter()
+        .filter_map(|(held, name)| held.then_some(name))
+        .collect()
+    }
+}
+
 /// Does the build write derived postings for this column? Only a category earns them.
 pub(crate) fn owes_postings(
     scalar: &tessera_store::manifest::DeclaredScalar,
@@ -366,6 +404,41 @@ mod tests {
         );
     }
 
+
+    /// Where each shape of declaration is read from: a rendered, indexed category is in the row
+    /// tail and its value column, a render-only number in the row tail alone, a category over a
+    /// `derived` vocabulary with neither flag in its value column, and a field with neither flag
+    /// or a text field in the record store.
+    #[test]
+    fn a_declarations_homes_follow_its_flags_and_its_vocabulary() {
+        use tessera_store::manifest::{ManifestVocabulary, Visibility, VocabularyKind};
+        let vocabulary = |name: &str, visibility| ManifestVocabulary {
+            name: name.to_string(),
+            kind: VocabularyKind::Declared,
+            visibility,
+            width: tessera_spatial::tiler::ScalarType::U8,
+            values: Vec::new(),
+            reserved: Vec::new(),
+        };
+        let vocabularies = [
+            vocabulary("band", Visibility::Public),
+            vocabulary("kind", Visibility::Derived),
+        ];
+        let shaped = |spelling: &str, vocabulary: Option<&str>, index: bool, render: bool| {
+            let mut d = declared("field", spelling);
+            d.vocabulary = vocabulary.map(String::from);
+            d.index = index;
+            d.render = render;
+            FieldHomes::of(&d, &vocabularies).names()
+        };
+        assert_eq!(shaped("u8", Some("band"), true, true), ["rendered", "value_column"]);
+        assert_eq!(shaped("f32", None, false, true), ["rendered"]);
+        assert_eq!(shaped("u8", Some("kind"), false, false), ["value_column"]);
+        assert_eq!(shaped("u8", Some("band"), false, false), ["record"]);
+        assert_eq!(shaped("keyword", None, false, false), ["record"]);
+        assert_eq!(shaped("keyword", None, true, false), ["value_column"]);
+        assert_eq!(shaped("text", None, true, false), ["record"]);
+    }
 
     /// Catches the keyword operator list or published name drifting from what the engine routes.
     #[test]

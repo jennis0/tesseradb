@@ -75,6 +75,15 @@ impl RegionVerdict {
             }
         }
     }
+
+    /// [`Self::coarser`] over two answers that may carry no verdict, where no region leaf was
+    /// evaluated.
+    pub fn coarsest(a: Option<RegionVerdict>, b: Option<RegionVerdict>) -> Option<RegionVerdict> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.coarser(b)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 /// One region leaf's answer for one request: its rows over the whole view, and the verdict.
@@ -289,6 +298,17 @@ mod tests {
     use super::*;
     use tessera_spatial::shape::{ShapeF64, Space};
     use tessera_spatial::Bounds;
+
+    #[test]
+    fn the_coarsest_of_several_answers_is_the_shallowest_cover_any_reached() {
+        let cover = |depth| Some(RegionVerdict::Cover { depth });
+        let exact = Some(RegionVerdict::Exact);
+        assert_eq!(RegionVerdict::coarsest(None, None), None);
+        assert_eq!(RegionVerdict::coarsest(exact, None), exact);
+        assert_eq!(RegionVerdict::coarsest(None, cover(9)), cover(9));
+        assert_eq!(RegionVerdict::coarsest(exact, cover(9)), cover(9));
+        assert_eq!(RegionVerdict::coarsest(cover(4), cover(9)), cover(4));
+    }
 
     fn extent() -> Bounds {
         Bounds {

@@ -65,6 +65,8 @@ rand = { workspace = true }
 # overlay grows at runtime — so the log line has to be emitted from this crate. `tessera-store`
 # already carries the same workspace-pinned dependency for the same reason.
 tracing = { workspace = true }
+chacha20poly1305 = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 # Self dev-dependency: the only way this crate's integration tests can enable a feature of the

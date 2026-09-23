@@ -77,7 +77,7 @@ pub(crate) use declared::{
     scoped_visibility_of,
 };
 pub use declared::{
-    extent_column_name, is_filterable, scoped_column_name, scoped_has_value_column,
+    extent_column_name, is_filterable, scoped_column_name, scoped_has_value_column, FieldHomes,
     scoped_is_filterable, Family, Placement, PIN,
 };
 pub use error::{ComposeError, FilterError};

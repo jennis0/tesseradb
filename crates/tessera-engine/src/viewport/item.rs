@@ -101,7 +101,7 @@ impl Engine {
     /// one, reachable only while a prefix predates the transpose. Not built: plugin routing
     /// beyond the built-in one. `present_terms` is answered by
     /// `builtin:passthrough`, whose descriptors are the caller's own label strings.
-    fn labels_for(
+    pub(crate) fn labels_for(
         &self,
         generation: &Generation,
         session: &Session,
@@ -395,9 +395,8 @@ fn record_fields(
 }
 
 /// One render column's drill-down value, read from the row: a category's code resolved to its
-/// key — code 0, the absent sentinel — and every other family as stored. A rendered number's
-/// absence is still stored as the type's zero, so a numeric zero here may be real or absent; this
-/// reports the stored value rather than inventing a rule.
+/// key, code 0 being the absent sentinel, and every other family as stored. A number's absence is
+/// the presence bitmap beside the column, which the caller reads before this.
 fn row_field_out(
     view: &ScalarSlice<'_>,
     idx: usize,
@@ -441,8 +440,6 @@ pub(crate) fn flushed_row_scalar(
     entity: EntityId,
     declared_index: usize,
 ) -> Option<tessera_filter::RecordValue> {
-    use tessera_filter::RecordValue as RV;
-
     let manifest = &generation.bundle.manifest;
     // The slot in the render tail; a column that is not rendered has no hot-column home.
     let slot = manifest
@@ -481,26 +478,7 @@ pub(crate) fn flushed_row_scalar(
             let Some(Some(view_slice)) = resolved.get(slot) else {
                 continue;
             };
-            let read = match view_slice {
-                ScalarSlice::Bool(a) if local < arrow::array::Array::len(*a) => {
-                    Some(RV::Bool(a.value(local)))
-                }
-                ScalarSlice::Utf8(a) if local < arrow::array::Array::len(*a) => {
-                    Some(RV::Utf8(a.value(local).to_string()))
-                }
-                ScalarSlice::Bool(_) | ScalarSlice::Utf8(_) => None,
-                ScalarSlice::U8(s) => s.get(local).copied().map(RV::U8),
-                ScalarSlice::U16(s) => s.get(local).copied().map(RV::U16),
-                ScalarSlice::U32(s) => s.get(local).copied().map(RV::U32),
-                ScalarSlice::U64(s) => s.get(local).copied().map(RV::U64),
-                ScalarSlice::I8(s) => s.get(local).copied().map(RV::I8),
-                ScalarSlice::I16(s) => s.get(local).copied().map(RV::I16),
-                ScalarSlice::I32(s) => s.get(local).copied().map(RV::I32),
-                ScalarSlice::I64(s) => s.get(local).copied().map(RV::I64),
-                ScalarSlice::F32(s) => s.get(local).copied().map(RV::F32),
-                ScalarSlice::F64(s) => s.get(local).copied().map(RV::F64),
-                ScalarSlice::TimestampUs(s) => s.get(local).copied().map(RV::TimestampUs),
-            };
+            let read = slice_value(view_slice, local);
             if read.is_some() {
                 return read;
             }
@@ -509,11 +487,39 @@ pub(crate) fn flushed_row_scalar(
     None
 }
 
+/// One row of a rendered column as the storage-typed value the entity-space homes hold, or `None`
+/// where `local` is past the slice. Presence is the caller's: this reads the slot whatever it
+/// holds.
+pub(crate) fn slice_value(
+    slice: &ScalarSlice<'_>,
+    local: usize,
+) -> Option<tessera_filter::RecordValue> {
+    use tessera_filter::RecordValue as RV;
+    match slice {
+        ScalarSlice::Bool(a) if local < arrow::array::Array::len(*a) => Some(RV::Bool(a.value(local))),
+        ScalarSlice::Utf8(a) if local < arrow::array::Array::len(*a) => {
+            Some(RV::Utf8(a.value(local).to_string()))
+        }
+        ScalarSlice::Bool(_) | ScalarSlice::Utf8(_) => None,
+        ScalarSlice::U8(s) => s.get(local).copied().map(RV::U8),
+        ScalarSlice::U16(s) => s.get(local).copied().map(RV::U16),
+        ScalarSlice::U32(s) => s.get(local).copied().map(RV::U32),
+        ScalarSlice::U64(s) => s.get(local).copied().map(RV::U64),
+        ScalarSlice::I8(s) => s.get(local).copied().map(RV::I8),
+        ScalarSlice::I16(s) => s.get(local).copied().map(RV::I16),
+        ScalarSlice::I32(s) => s.get(local).copied().map(RV::I32),
+        ScalarSlice::I64(s) => s.get(local).copied().map(RV::I64),
+        ScalarSlice::F32(s) => s.get(local).copied().map(RV::F32),
+        ScalarSlice::F64(s) => s.get(local).copied().map(RV::F64),
+        ScalarSlice::TimestampUs(s) => s.get(local).copied().map(RV::TimestampUs),
+    }
+}
+
 /// One stored value's drill-down form, for the entity-space and blob homes: the storage-typed
 /// [`tessera_filter::RecordValue`] adapted through the declaration — a category code to its key,
 /// a `bool`'s `u8` storage back to `bool`, a `timestamp_us`'s `i64` back to its unit. Over the two
 /// facts rather than the declaration, since a group-scoped family has no [`DeclaredScalar`].
-fn stored_field_out(
+pub(crate) fn stored_field_out(
     value: tessera_filter::RecordValue,
     arrow_type: ScalarType,
     vocabulary: Option<&str>,
@@ -521,13 +527,7 @@ fn stored_field_out(
 ) -> Option<ScalarOut> {
     use tessera_filter::RecordValue as RV;
     if vocabulary.is_some() {
-        let code = match value {
-            RV::U8(c) => c as u32,
-            RV::U16(c) => c as u32,
-            RV::U32(c) => c,
-            _ => return None,
-        };
-        return category_key_out(code, vocabulary, vocabularies);
+        return category_key_out(category_code(&value)?, vocabulary, vocabularies);
     }
     Some(match (arrow_type, value) {
         (ScalarType::Bool, RV::U8(x)) => ScalarOut::Bool(x != 0),
@@ -646,17 +646,32 @@ fn scoped_values_of(
     out
 }
 
-/// A category code's drill-down value: its vocabulary key. Code 0 — the reserved absent
-/// sentinel — is absence, and a code no binding explains is omitted rather than served raw.
+/// A category code's drill-down value: its vocabulary key, as [`category_key`] finds it.
 fn category_key_out(
     code: u32,
     vocabulary: Option<&str>,
     vocabularies: &Vocabularies,
 ) -> Option<ScalarOut> {
-    if code == 0 {
-        return None;
+    category_key(code, vocabulary, vocabularies).map(|key| ScalarOut::Utf8(key.to_string()))
+}
+
+/// The key a category code is bound to. Code 0, the reserved absent sentinel, is absence, and a
+/// code no binding explains is omitted rather than served raw.
+pub(crate) fn category_key<'v>(
+    code: u32,
+    vocabulary: Option<&str>,
+    vocabularies: &'v Vocabularies,
+) -> Option<&'v str> {
+    vocabularies.get(vocabulary?)?.key_of(code)
+}
+
+/// A category's code, at whichever width its home stores it; `None` for a value of another kind.
+pub(crate) fn category_code(value: &tessera_filter::RecordValue) -> Option<u32> {
+    use tessera_filter::RecordValue as RV;
+    match *value {
+        RV::U8(code) => Some(u32::from(code)),
+        RV::U16(code) => Some(u32::from(code)),
+        RV::U32(code) => Some(code),
+        _ => None,
     }
-    let vocabulary = vocabularies.get(vocabulary?)?;
-    let (key, _) = vocabulary.bindings().find(|&(_, c)| c == code)?;
-    Some(ScalarOut::Utf8(key.to_string()))
 }

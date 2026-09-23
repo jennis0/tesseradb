@@ -456,7 +456,7 @@ const RUN_BUF_LEN: usize = 64;
 /// case too, since `r.end` is exclusive and so never reaches `u32::MAX`, matching
 /// [`Bitmap::from_range`]. No start-clamp is needed: `reset_at_or_after(r.start)` already begins
 /// the first run at the first set value ≥ `r.start`.
-fn for_each_run_in(bitmap: &Bitmap, r: Range<u32>, f: &mut impl FnMut(Range<u32>)) {
+pub(crate) fn for_each_run_in(bitmap: &Bitmap, r: Range<u32>, f: &mut impl FnMut(Range<u32>)) {
     if r.start >= r.end {
         return;
     }
