@@ -133,9 +133,18 @@ NAME` does. On any other view's insert, attribute-named columns are ignored.
 `declare_columns(frame, skip=, render=, index=, keyword=, category=)` declares every column of a
 frame from its dtype, as details: stored in the record blob, shown at drill-down, neither rendered
 nor indexed. `render` and `index` apply their flags to the columns named, and `keyword` and
-`category` choose those families for string columns, which are `text` otherwise. It reads the
-frame's schema and never its values, and it never chooses `render`, which is fixed at the first
-commit.
+`category` choose those families for string columns, which are `text` otherwise. A categorical
+column (a pandas `Categorical` or an Arrow dictionary column of strings) is declared as a
+category unless `keyword=` names it. Every category it declares reads a new open vocabulary of
+the column's name, with codes of width `u16`, so at most 65,535 values; that width cannot be
+changed after the first commit, and `declare_vocabulary` with `declare_attribute` is how to
+choose another. It reads the frame's schema and never its values, and it never chooses `render`,
+which is fixed at the first commit.
+
+`insert` reads a categorical column as the values it holds, wherever it reads a column of those
+values: a category attribute's values, a layer's key, a view's access labels. A Parquet file
+read in place with a dictionary column is refused by the declaration check; decode it first, or
+insert it as a frame.
 
 ## How a row is named
 
@@ -310,7 +319,8 @@ just outside the box.
 each map tile carries at most `k` points. It is for drawing, and it holds fewer rows than the
 selection has items; `count()` is the number. The result reads as a pyarrow table of
 `tessera_id`, `code` (the point's position on the view's grid) and the columns declared with
-`render=True`. Its schema metadata carries `tessera.counts` (`visible`, `matched`, `highlighted`
+`render=True`. A category column holds each value's key, as a dictionary column, and null for a
+value the reader may not see; the keys are looked up once per reader and kept. Its schema metadata carries `tessera.counts` (`visible`, `matched`, `highlighted`
 and `served`, over the tiles the request touched), `tessera.request` and `tessera.trailer`.
 Beside the points it has `artifacts`, the annotations served with them, and `sub_cells`, finer
 counts that `underlay_offset` asks for; each is `None` when there were none. The other keywords

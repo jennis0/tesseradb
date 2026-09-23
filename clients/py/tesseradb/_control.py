@@ -339,6 +339,14 @@ def arrow_body(table: Any) -> bytes:
     import pyarrow as pa
     import pyarrow.ipc as ipc
 
+    # The build reads large strings, which pandas 3 makes of every string column, and the row
+    # routes take `utf8` only.
+    for at, column in enumerate(table.schema):
+        small = _small_strings(column.type)
+        if small != column.type:
+            table = table.set_column(
+                at, pa.field(column.name, small, column.nullable), table.column(at).cast(small)
+            )
     batch = table.combine_chunks().to_batches()
     schema = table.schema
     sink = pa.BufferOutputStream()
@@ -346,3 +354,15 @@ def arrow_body(table: Any) -> bytes:
         for one in batch:
             writer.write_batch(one)
     return sink.getvalue().to_pybytes()
+
+
+def _small_strings(dtype: Any) -> Any:
+    import pyarrow as pa
+
+    if pa.types.is_large_string(dtype):
+        return pa.string()
+    if (pa.types.is_list(dtype) or pa.types.is_large_list(dtype)) and pa.types.is_large_string(
+        dtype.value_type
+    ):
+        return pa.list_(pa.string())
+    return dtype

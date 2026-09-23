@@ -90,6 +90,41 @@ def _tile_counts(frames: Sequence[tuple[int, bytes]]) -> dict:
     }
 
 
+def _category_columns(meta: dict, view: str) -> dict:
+    """Each category column a view's points can carry, with the view its codes are read in.
+
+    A column declared for a view group has codes per view, so it is looked up in `view`; any
+    other column has one set of codes, looked up with no view.
+    """
+    found = {one["name"]: None for one in meta.get("declared_scalars") or [] if one.get("category")}
+    for one in meta.get("scoped_scalars") or []:
+        if one.get("category"):
+            found[one["name"]] = view
+    return found
+
+
+def _as_keys(codes, keys: dict):
+    """A column of category codes as a dictionary column of keys, null where no key is known."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    codes = codes.combine_chunks() if isinstance(codes, pa.ChunkedArray) else codes
+    known = [code for code in pc.unique(codes).to_pylist() if code in keys]
+    indices = pc.index_in(codes, value_set=pa.array(known, codes.type))
+    return pa.DictionaryArray.from_arrays(
+        indices, pa.array([keys[code] for code in known], pa.string())
+    )
+
+
+def _extent(meta: dict, view: str) -> list[float]:
+    """A view's whole coordinate range, `[min_x, min_y, max_x, max_y]`."""
+    for block in meta.get("views") or []:
+        if block["id"] == view:
+            q = block["quantisation"]
+            return [q["x_min"], q["y_min"], q["x_max"], q["y_max"]]
+    raise Refusal(f"there is no view named {view!r} that this reader can see")
+
+
 def _query(params: dict) -> str:
     return "?" + urllib.parse.urlencode(params) if params else ""
 
@@ -117,6 +152,9 @@ class Sample:
     `artifacts` is the annotations served with the points, as a pyarrow table, and `sub_cells`
     the finer counts that `underlay_offset` asks for. Each is `None` when the answer carried
     none.
+
+    A category column holds the value's key, as a dictionary column, where the server sends a
+    code. A value this reader may not see is null.
 
     The points are a sample thinned for drawing. `k` caps how many each map tile carries, so
     the table is smaller than the set it was drawn from. The table's schema metadata says by how
@@ -314,11 +352,12 @@ class Selection:
             sample.to_pandas()  # needs pandas installed
         """
         reader = self._reader()
+        meta = reader.meta()
         request: dict = {"view": self._view, "zoom": int(zoom)}
         if tiles is not None:
             request["tiles"] = [int(tile) for tile in tiles]
         else:
-            request["bbox"] = list(self.box or reader._extent(self._view))
+            request["bbox"] = list(self.box or _extent(meta, self._view))
         for name, value in (
             ("k", k),
             ("filters", self._expression()),
@@ -342,6 +381,12 @@ class Selection:
         points = _tables([p for kind, p in frames if kind == FRAME_POINTS])
         if points is None:
             points = _no_points()
+        for column, view in _category_columns(meta, self._view).items():
+            if column not in points.column_names:
+                continue
+            at = points.column_names.index(column)
+            keyed = _as_keys(points.column(at), reader._keys_of(column, view, points.column(at)))
+            points = points.set_column(at, column, keyed)
         trailer = json.loads(next(p for kind, p in frames if kind == FRAME_TRAILER).decode())
         if points.num_rows != trailer.get("points", points.num_rows):
             raise Refusal(
@@ -430,6 +475,8 @@ class Viewer:
         self.url = url.rstrip("/")
         self._source: TokenSource = token
         self._token: Optional[Token] = None
+        #: Category keys already looked up, by `(column, view)` and then by code.
+        self._keys: dict = {}
         #: The access terms this reader's token was made for, or `None` when the token came from
         #: elsewhere and does not say.
         self.terms = None if terms is None else list(terms)
@@ -687,13 +734,20 @@ class Viewer:
                 f"{', '.join(names) or 'none'}"
             )
 
-    def _extent(self, view: str) -> list[float]:
-        """A view's whole coordinate range, `[min_x, min_y, max_x, max_y]`."""
-        for block in self._views():
-            if block["id"] == view:
-                q = block["quantisation"]
-                return [q["x_min"], q["y_min"], q["x_max"], q["y_max"]]
-        raise Refusal(f"there is no view named {view!r} that this reader can see")
+    def _keys_of(self, column: str, view: Optional[str], codes) -> dict:
+        """The keys of these codes of a category column, asking the server only for new codes.
+
+        The answers are kept for the life of this reader. A code the server does not resolve is
+        asked for again next time, since a later commit can make its value visible.
+        """
+        import pyarrow.compute as pc
+
+        held = self._keys.setdefault((column, view), {})
+        wanted = [code for code in pc.unique(codes).to_pylist() if code and code not in held]
+        if wanted:
+            found = self.categories(column, view=view, codes=wanted)
+            held.update(zip(found.column("code").to_pylist(), found.column("key").to_pylist()))
+        return held
 
     def _request(self, method: str, path: str, body: Optional[dict]) -> bytes:
         """One request: the answer's body, or a refusal with what the server said."""

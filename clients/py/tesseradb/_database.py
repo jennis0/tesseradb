@@ -104,6 +104,8 @@ class Database:
         self._child: subprocess.Popen | None = None
         self.listening: _instance.Listening | None = None
         self._loaded_text: str | None = None
+        #: Category keys looked up by `sample()`, per reader: by server address and terms.
+        self._keys: dict = {}
 
     # ------------------------------------------------------------------ declarations
 
@@ -237,6 +239,11 @@ class Database:
         - `keyword`, `category`: string columns to declare as keywords or as categories. Other
           string columns are declared as text.
 
+        A categorical column (a pandas `Categorical` or an Arrow dictionary column of strings) is
+        declared as a category, unless `keyword` names it. A category declared here reads a new
+        open vocabulary of the same name, which adds each value it meets, with codes of width
+        `u16`, so it holds at most 65,535 values. The width cannot be changed after the first
+        commit; for another width, call `declare_vocabulary` and `declare_attribute` instead.
         A column already declared is left as it is.
 
             db.declare_columns(frame, skip=["paper_id", "x", "y"], category=["venue"])
@@ -406,8 +413,9 @@ class Database:
         - the other keywords: which column of the table holds each thing the target needs, such as
           `id=`, `x=`, `y=` and `access=` for a view.
 
-        A column the call does not name is ignored, and the call prints what it read and what it
-        ignored. On the anchor view, a column named like a declared attribute fills that
+        A categorical column (a pandas `Categorical` or an Arrow dictionary column) is read as the
+        values it holds, wherever a column of those values is read. A column the call does not
+        name is ignored, and the call prints what it read and what it ignored. On the anchor view, a column named like a declared attribute fills that
         attribute. Several inserts into one target add up. Nothing is sent until `commit()`.
 
             db.insert("papers", frame, id="paper_id", x="x", y="y", access="labels")
@@ -704,7 +712,9 @@ class Database:
             attached_keys = list(keys)
             attached_layers = [of] * len(keys)
         elif "text" in named:
-            table = _inserts.as_table(data) if not _inserts.is_path(data) else pq.read_table(data)
+            table = _inserts.decoded(
+                _inserts.as_table(data) if not _inserts.is_path(data) else pq.read_table(data)
+            )
             missing = [
                 name for name, column in named.items() if column not in table.column_names
             ]
@@ -1047,7 +1057,11 @@ class Database:
             )
         chosen = list(terms) if terms is not None else list(self.terms)
         self.serve()
-        return Viewer(self.viewer_url, lambda: self.token(chosen), terms=chosen)
+        reader = Viewer(self.viewer_url, lambda: self.token(chosen), terms=chosen)
+        # A new token is made for each call, so a commit's new views are seen, while the category
+        # keys already looked up are kept for every reader holding the same terms.
+        reader._keys = self._keys.setdefault((self.viewer_url, frozenset(chosen)), {})
+        return reader
 
     def map(
         self,

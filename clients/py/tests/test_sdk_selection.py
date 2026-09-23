@@ -180,6 +180,38 @@ def test_a_sample_is_bounded_by_k_and_carries_the_counts_it_came_from(db, points
     assert sent["bbox"] == list(box) and sent["zoom"] == 2 and sent["k"] == 16
 
 
+def test_a_sample_carries_category_keys_for_the_items_it_drew(db, points):
+    sample = db.view("s0").sample(k=4)
+    assert pa.types.is_dictionary(sample.schema.field("primary_category").type)
+    drawn = sample.to_pylist()[:12]
+    by_id = points.set_index("entity_id")
+    for row in drawn:
+        source = by_id.loc[db.item(row["tessera_id"])["external_id"]]
+        assert row["primary_category"] == source["primary_category"]
+        assert row["archive"] == source["archive"]
+
+
+def test_a_second_sample_asks_for_no_key_it_already_has(db, monkeypatch):
+    from tesseradb import Viewer
+
+    asked = []
+    send = Viewer._request
+
+    def recorded(self, method, path, body):
+        asked.append(path)
+        return send(self, method, path, body)
+
+    monkeypatch.setattr(Viewer, "_request", recorded)
+    # A set of terms no other test reads with, so no key is held yet.
+    papers = db.viewer(["cs.LG", "hep-th"]).view("s0")
+    papers.sample(k=4)
+    first = [path for path in asked if path.startswith("/v1/categories/")]
+    assert len(first) == 2  # one request per category column
+    asked.clear()
+    papers.sample(k=4)
+    assert [path for path in asked if path.startswith("/v1/categories/")] == []
+
+
 def test_categories_lists_every_value_of_a_vocabulary(db):
     from conftest import notebook_corpus
 
