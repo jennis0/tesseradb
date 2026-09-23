@@ -70,6 +70,7 @@ from .driver import (
     Fold,
     Load,
     Merge,
+    MergeAndCoalesce,
     Rotate,
     StageInvarianceViolation,
     StageResult,
@@ -298,6 +299,41 @@ def test_the_stage_changed_exactly_what_it_was_entitled_to(plan_results, label):
     ingested rows for each write's flush.
     """
     check(plan_results[label])
+
+
+# -- the default widths -------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def default_width_results(tmp_path_factory, private_catalogue_bundle) -> dict[str, StageResult]:
+    """Four writes at the shipped widths, then the tick on which the merge and the run coalesce
+    both come due. The main plan keeps them apart; this keeps the pair a deployment meets
+    covered."""
+    fx = cat.ingest_fx_keys(8)
+    h = SuiteHarness(
+        bundle_root=private_catalogue_bundle("default-widths"),
+        run_dir=tmp_path_factory.mktemp("default-widths-run"),
+        grants=GRANTS,
+        view_id=cat.VIEW_ID,
+        bbox=BBOX,
+        k=K,
+        filters={"department": {"eq": FILTER_DEPARTMENT}},
+    )
+    plan = [
+        Build(),
+        *(_write_stage(i, fx[2 * i : 2 * i + 2]) for i in range(4)),
+        MergeAndCoalesce("merge-and-coalesce"),
+    ]
+    try:
+        yield {r.label: r for r in run_plan(h, plan)}
+    finally:
+        h.stop()
+
+
+def test_a_merge_and_coalesce_on_one_tick_change_nothing(default_width_results):
+    result = default_width_results["merge-and-coalesce"]
+    check(result)
+    assert result.delta == Nothing()
 
 
 # -- negative controls -------------------------------------------------------------------------

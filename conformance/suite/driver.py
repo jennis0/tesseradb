@@ -936,8 +936,8 @@ def _settled(executor: dict) -> bool:
     return executor["work_depth"] == 0 and not executor["flush"]["in_flight"]
 
 
-def _assert_isolated(h: SuiteHarness, label: str, before: dict, own: str | None) -> None:
-    """Fail as a broken plan if anything other than the stage's `own` publication moved. A plan
+def _assert_isolated(h: SuiteHarness, label: str, before: dict, own: tuple[str, ...]) -> None:
+    """Fail as a broken plan if anything other than the stage's `own` publications moved. A plan
     without isolated ticks is held to no stray flush only."""
     # A job the tick queued must land before the counters are read, or it rides unseen.
     poll(
@@ -949,7 +949,7 @@ def _assert_isolated(h: SuiteHarness, label: str, before: dict, own: str | None)
     moved = [
         f"{key} {before[key]} -> {now[key]}"
         for key in watched
-        if key != own and now[key] != before[key]
+        if key not in own and now[key] != before[key]
     ]
     if moved:
         raise RuntimeError(
@@ -1081,7 +1081,7 @@ class Write(Stage):
             f"{self.label}: the background refresh never replaced the resident projection — "
             f"a recording now would be short by exactly this batch (decision 0044 D1)",
         )
-        _assert_isolated(h, self.label, self._counts, own="flushes")
+        _assert_isolated(h, self.label, self._counts, own=("flushes",))
 
     def entitlement(self) -> Delta:
         return Rows(self._fx_keys)
@@ -1095,8 +1095,8 @@ class _TickStage(Stage):
     plan fails as a plan defect rather than shipping a composite delta under one stage's name.
     """
 
-    #: The `_publication_counts` key this stage moves.
-    own: str
+    #: The `_publication_counts` keys this stage moves.
+    own: tuple[str, ...]
 
     def __init__(self, label: str):
         self.label = label
@@ -1130,7 +1130,7 @@ class Merge(_TickStage):
     """The row-space merge: eligible once four same-tier segments exist, dispatched at the pulled
     tick, published with its own `segments_version` bump — and entitled to change nothing."""
 
-    own = "merges"
+    own = ("merges",)
 
     def barrier(self, h: SuiteHarness) -> None:
         poll(
@@ -1157,7 +1157,7 @@ class Coalesce(_TickStage):
     """The entity-space coalesce: moves no row and bumps no version by design (write-path §7),
     which is why its barrier must be the counter — and why the version is asserted still."""
 
-    own = "coalesces"
+    own = ("coalesces",)
 
     def barrier(self, h: SuiteHarness) -> None:
         poll(
@@ -1173,6 +1173,21 @@ class Coalesce(_TickStage):
                 f"never does"
             )
         self._assert_isolated(h)
+
+
+class MergeAndCoalesce(Merge):
+    """A merge and a coalesce published on one tick, as every deployment at the default widths
+    meets them: the segments and the external-id runs both come due every fourth flush. One
+    stage, entitled to change nothing."""
+
+    own = ("merges", "coalesces")
+
+    def barrier(self, h: SuiteHarness) -> None:
+        poll(
+            lambda: h.executor()["coalesces"] > self._snap["coalesces"],
+            f"{self.label}: no coalesce published beside the merge",
+        )
+        super().barrier(h)
 
 
 class Deny(Stage):
@@ -1252,7 +1267,7 @@ class Fold(Stage):
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             "the post-fold refresh never carried the resident session across the flip",
         )
-        _assert_isolated(h, self.label, self._counts, own="folds")
+        _assert_isolated(h, self.label, self._counts, own=("folds",))
 
 
 class Rotate(Stage):
@@ -1295,7 +1310,7 @@ class Rotate(Stage):
             "to see?",
             timeout=30.0,
         )
-        _assert_isolated(h, self.label, self._counts, own=None)
+        _assert_isolated(h, self.label, self._counts, own=())
 
 
 # -- the kill modifier (§10.1, §12.3) ----------------------------------------------------------
@@ -1506,6 +1521,7 @@ __all__ = [
     "Killed",
     "Load",
     "Merge",
+    "MergeAndCoalesce",
     "OutOfMemory",
     "Profile",
     "Rotate",
