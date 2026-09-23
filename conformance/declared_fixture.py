@@ -627,8 +627,17 @@ def normalise_viewport(
     return out
 
 
+class Unordered(Exception):
+    """A served page is not in the order the contract gives it."""
+
+
 def normalise_browse(answer: dict, artifact_of: dict[int, tuple[str, str]]) -> dict:
-    """A browse page with identifiers replaced by keys; rows of equal count sorted by key."""
+    """A browse page with identifiers replaced by keys.
+
+    The page is ordered by count, descending, and then by `tessera_id`, which the two deployments
+    number differently. So each side's counts are checked never to rise down the page, and rows
+    are re-sorted by key only within a run of equal counts.
+    """
     if answer["status"] != 200:
         return answer
     body = json.loads(json.dumps(answer["body"]))
@@ -638,13 +647,23 @@ def normalise_browse(answer: dict, artifact_of: dict[int, tuple[str, str]]) -> d
         return found[1] if found else f"unmapped:{tessera}"
 
     for group in ("artifacts", "parents"):
-        rows = []
-        for row in body.get(group, []):
+        rows = body.get(group, [])
+        counts = [row.get("matched_count", row["masked_count"]) for row in rows]
+        if any(later > earlier for earlier, later in zip(counts, counts[1:])):
+            raise Unordered(f"browse {group} counts rise down the page: {counts}")
+        for row in rows:
             artifact_of.setdefault(int(row["tessera_id"]), (None, row.get("key")))
             row["tessera_id"] = key(row["tessera_id"])
             row["parent_ids"] = sorted(key(p) for p in row["parent_ids"])
-            rows.append(row)
-        body[group] = sorted(rows, key=lambda r: (-r["masked_count"], r["tessera_id"]))
+        runs: list[list[dict]] = []
+        for row, count in zip(rows, counts):
+            if runs and count == runs[-1][0][1]:
+                runs[-1].append((row, count))
+            else:
+                runs.append([(row, count)])
+        body[group] = [
+            row for run in runs for row, _ in sorted(run, key=lambda rc: rc[0]["tessera_id"])
+        ]
     if "next" in body:
         body["next"] = "present"
     return {"status": 200, "body": body}
