@@ -2889,28 +2889,14 @@ fn dropping_the_engine_returns_while_a_fold_is_held_in_flight() {
 /// buffered, and they publish during the fold's flight. A fold discarded for that is asked for
 /// again; one of a bounded number of attempts must publish while the feed keeps running.
 #[test]
-#[ignore = "fails: most folds are discarded because a join flushed in their flight carries a locator extent below their base"]
+#[ignore = "fails now and then: a view's joins can flush before their entities' own rows, and a fold planned then is discarded when those rows flush in its flight"]
 fn a_fold_lands_while_ingest_continues_into_several_views() {
     const ATTEMPTS: u64 = 5;
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
     for name in ["s1", "s2"] {
-        engine
-            .create_plain_view(tessera_engine::PlainViewDeclaration {
-                name: name.to_string(),
-                title: None,
-                projection: "none".to_string(),
-                frame: tessera_engine::DeclaredFrame {
-                    x_min: 0.0,
-                    x_max: 1000.0,
-                    y_min: 0.0,
-                    y_max: 1000.0,
-                },
-                visibility: None,
-                point_default: None,
-            })
-            .expect("the view is created");
+        create_view(&engine, name);
     }
 
     let stop = std::sync::atomic::AtomicBool::new(false);
@@ -2964,12 +2950,18 @@ fn a_fold_lands_while_ingest_continues_into_several_views() {
         for _ in 0..ATTEMPTS {
             let asked = engine.write_executor_stats();
             engine.request_fold();
-            // A refusal at the plan answers a request as a discard does.
+            // A refusal at the plan answers a request as a discard does. A request that arrives
+            // while the previous fold's thread is still winding down is consumed and counted
+            // nowhere, so one no longer pending with nothing counted is made again.
             wait_for("the fold to publish or be discarded", || {
                 let now = engine.write_executor_stats();
-                now.folds > asked.folds
+                let answered = now.folds > asked.folds
                     || now.fold_failures > asked.fold_failures
-                    || now.fold_refusals > asked.fold_refusals
+                    || now.fold_refusals > asked.fold_refusals;
+                if !answered && !now.fold_requested {
+                    engine.request_fold();
+                }
+                answered
             });
             if engine.write_executor_stats().folds > asked.folds {
                 landed = true;
@@ -2987,4 +2979,112 @@ fn a_fold_lands_while_ingest_continues_into_several_views() {
         "no fold published in {ATTEMPTS} attempts; {discarded} were discarded over {rounds} \
          rounds of the feed"
     );
+}
+
+/// A plain view over a 1000 by 1000 frame.
+fn create_view(engine: &Engine, name: &str) {
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: name.to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the view is created");
+}
+
+/// **A flush of joins alone writes no external-id run and no locator extent, and the joined
+/// entity's external id still resolves both ways**: live, after a restart, and after a fold.
+#[test]
+fn a_flush_of_joins_binds_nothing_and_the_joined_key_resolves_both_ways() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    create_view(&engine, "s1");
+    let key = b"joined".to_vec();
+    let flush = |engine: &Engine| {
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_for("a flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+    };
+
+    let entity = ingest(&engine, key.clone(), "own").expect("the item is accepted");
+    flush(&engine);
+    let bindings = |engine: &Engine| {
+        let generation = engine.generation();
+        let manifest = &generation.bundle.partitions["default"].manifest;
+        (manifest.external_id_runs.len(), manifest.locator_extents.len())
+    };
+    let before = bindings(&engine);
+
+    let join = UnallocatedRow {
+        external_id: Some(key.clone()),
+        view: "s1".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let joined = engine
+        .accept_ingest(vec![join], "join".to_string(), [0u8; 32])
+        .expect("the join is accepted");
+    assert_eq!(joined, vec![entity], "a known external id joins its entity");
+    flush(&engine);
+    assert!(
+        !engine.generation().bundle.partitions["default"].views["s1"]
+            .segments
+            .is_empty(),
+        "the join has a row in s1"
+    );
+    assert_eq!(
+        bindings(&engine),
+        before,
+        "a flush of joins alone adds no run and no locator extent"
+    );
+
+    let resolves_both_ways = |engine: &Engine, when: &str| {
+        assert_eq!(
+            engine.resolve_external_id(&key).unwrap(),
+            Some(entity),
+            "the key names its entity {when}"
+        );
+        assert_eq!(
+            engine.external_id_of(entity).unwrap(),
+            Some(key.clone()),
+            "the entity names its key {when}"
+        );
+    };
+    let reopen = |engine: Engine| {
+        drop(engine);
+        let mut engine = Engine::open(
+            &root,
+            &tmp.path().join("cache"),
+            &tmp.path().join("wal.log"),
+            tessera_plugin::Passthrough::new(),
+            config_uncapped(),
+        )
+        .expect("the bundle reopens");
+        engine.start_write_executor(8).expect("the executor starts");
+        engine
+    };
+
+    resolves_both_ways(&engine, "live");
+    let engine = reopen(engine);
+    resolves_both_ways(&engine, "after a restart");
+    fold(&engine);
+    resolves_both_ways(&engine, "after a fold");
+    let engine = reopen(engine);
+    resolves_both_ways(&engine, "after a fold and a restart");
 }
