@@ -303,15 +303,13 @@ pub(crate) fn write_merged(
     let keeps: Vec<Bitmap> = order.iter().map(|(_, p)| p.andnot(tombstones)).collect();
     let mut runs: Vec<Runs<'_>> = keeps.iter().map(Runs::new).collect();
     let mut heads: Vec<Option<(u32, u32)>> = runs.iter_mut().map(Runs::next).collect();
-    loop {
-        // The window is a handful of layers, so a scan beats a heap.
-        let Some(at) = (0..heads.len())
-            .filter(|&i| heads[i].is_some())
-            .min_by_key(|&i| heads[i].map(|(start, _)| start))
-        else {
-            break;
-        };
-        let (start, last) = heads[at].expect("the chosen layer has a run");
+    // The window is a handful of layers, so a scan beats a heap.
+    while let Some((at, (start, last))) = heads
+        .iter()
+        .enumerate()
+        .filter_map(|(i, head)| head.map(|run| (i, run)))
+        .min_by_key(|(_, (start, _))| *start)
+    {
         let (layer, layer_present) = &order[at];
         let codes = layers[*layer].codes();
         let mut slot = (layer_present.rank(start) - 1) as usize;
