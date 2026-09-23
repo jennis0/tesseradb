@@ -183,6 +183,63 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
     }
 }
 
+/// A merge publishes over segments whose external-id runs and locator extents a coalesce has
+/// already taken, and every binding still answers, live and after a restart.
+#[test]
+fn a_merge_publishes_over_segments_whose_runs_a_coalesce_took() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let ingested: Vec<(EntityId, Vec<u8>)> = {
+        let engine = engine_at(tmp.path(), &root);
+        let mut ingested = Vec::new();
+        for i in 0..WIDTH {
+            let entity = ingest_novel(&engine, i);
+            ingested.push((entity, format!("ext-{i}").into_bytes()));
+            flush(&engine);
+        }
+        engine.request_flush();
+        wait_until("the coalesce to publish", WAIT, || {
+            engine.write_executor_stats().coalesces >= 1
+        });
+        let coalesced = manifest_of(&root);
+        assert_eq!(coalesced.locator_extents.len(), 1);
+        let segments = coalesced.segments.len();
+
+        engine.set_merge_for_test(true);
+        wait_until("a merge to publish", WAIT, || {
+            engine.request_flush();
+            engine.write_executor_stats().merges >= 1
+        });
+        let merged = manifest_of(&root);
+        assert!(merged.segments.len() < segments);
+        assert_eq!(merged.external_id_runs, coalesced.external_id_runs);
+        assert_eq!(merged.locator_extents.len(), 1);
+        for (entity, external_id) in &ingested {
+            assert_eq!(engine.resolve_external_id(external_id).unwrap(), Some(*entity));
+            assert_eq!(
+                engine.external_id_of(*entity).unwrap().as_deref(),
+                Some(external_id.as_slice())
+            );
+        }
+        ingested
+    };
+
+    let reopened = engine_at(tmp.path(), &root);
+    for (entity, external_id) in &ingested {
+        assert_eq!(reopened.resolve_external_id(external_id).unwrap(), Some(*entity));
+        assert_eq!(
+            reopened.external_id_of(*entity).unwrap().as_deref(),
+            Some(external_id.as_slice())
+        );
+    }
+}
+
 /// **A restart opens what the coalesce committed**, which is the other half of the claim: the
 /// manifest edit and the live swap must describe the same bundle, or a process that had coalesced
 /// would come back holding a different set of tiers than the one it was serving from.
