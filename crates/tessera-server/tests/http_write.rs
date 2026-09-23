@@ -4108,10 +4108,6 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
         detail.contains("priority_score"),
         "the offending COLUMN NAME must reach the caller, not just a refusal: {detail}"
     );
-    assert!(
-        detail.contains("declared_scalars"),
-        "and it must say what the column failed against: {detail}"
-    );
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water_before,

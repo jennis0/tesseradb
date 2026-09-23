@@ -80,10 +80,8 @@ fn category_code(
     let key = keys.value(row);
     if key.is_empty() {
         return Err(DecodeError(format!(
-            "{body_name}: column '{}' carries the empty string, which is not a value key. An \
-             item with no value for this column carries null, which is stored as *absent*; \
-             minting a code for the empty string would make a typo a category \
-             (per-point-attributes §3.4)",
+            "{body_name}: column '{}' carries the empty string, which is not a value key; send \
+             null for an item with no value",
             declared.name
         )));
     }
@@ -101,10 +99,8 @@ fn category_code(
         // A declared vocabulary is closed, so an unbound key is refused here, where the whole
         // batch can still be rejected without effect.
         VocabularyKind::Declared => Err(DecodeError(format!(
-            "{body_name}: column '{}' carries value '{key}', which vocabulary '{vocabulary}' \
-             does not list. Under `vocabulary = \"declared\"` there is no auto-mint: a category \
-             carries properties and, through its postings, a visibility consequence, so a typo \
-             must not create one (per-point-attributes §5)",
+            "{body_name}: column '{}' carries value '{key}', which declared vocabulary \
+             '{vocabulary}' does not list; send a key it lists",
             declared.name
         ))),
         // A novel key travels as a key; the executor mints its code when the commit window
@@ -172,10 +168,8 @@ fn check_columns<'b>(
         }
         let Some(declaration) = layer_of(name) else {
             return Err(DecodeError(format!(
-                "{body_name}: column '{name}' is neither in MANIFEST.declared_scalars nor the \
-                 name of a registered layer, nor a group-scoped family whose key set holds this \
-                 batch's view (contracts §2.2, `views.md` §5). An undeclared column is refused \
-                 rather than dropped"
+                "{body_name}: column '{name}' is not a declared scalar, a registered layer or a \
+                 group-scoped attribute of this batch's view; declare it or leave it out"
             )));
         };
         declarations.push((name, declaration));
@@ -199,8 +193,7 @@ fn check_columns<'b>(
         };
         if !wire_carries(d, col.data_type()) {
             return Err(DecodeError(format!(
-                "{body_name}: column '{}' is {:?}, but MANIFEST.declared_scalars declares it {} \
-                 (contracts §2.6); refused rather than dropped",
+                "{body_name}: column '{}' is {:?} but is declared {}; send it as that type",
                 d.name,
                 col.data_type(),
                 d.wire_type().arrow_type_name()
@@ -214,8 +207,8 @@ fn check_columns<'b>(
         };
         if !wire_carries(&scoped_as_declared(f), col.data_type()) {
             return Err(DecodeError(format!(
-                "{body_name}: column '{}' is {:?}, but it is a group-scoped attribute declared {} \
-                 (views §5); refused rather than dropped",
+                "{body_name}: column '{}' is {:?} but is a group-scoped attribute declared {}; \
+                 send it as that type",
                 f.name,
                 col.data_type(),
                 scoped_wire_type(f).arrow_type_name()
@@ -298,8 +291,8 @@ fn wal_scalar(value: ScalarValue) -> WalScalar {
 fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
     if external_id.len() > EXTERNAL_ID_MAX_LEN {
         return Err(DecodeError(format!(
-            "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte cap (contracts \
-             §1); refused rather than truncated",
+            "external id is {} bytes, over the {EXTERNAL_ID_MAX_LEN}-byte limit; send at most \
+             that many",
             external_id.len()
         )));
     }
@@ -366,11 +359,8 @@ pub(crate) fn parse_ingest_batch(
         for (wrong, right) in wrong_spellings(projection) {
             if batch.column_by_name(wrong).is_some() && batch.column_by_name(right).is_none() {
                 return Err(DecodeError(format!(
-                    "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}', \
-                     not '{wrong}' (projections.md §2, §3). The axes are named for what they hold \
-                     because a corpus written with longitude and latitude exchanged is mirrored \
-                     about the diagonal and malformed in no other way; rename '{wrong}' to \
-                     '{right}'",
+                    "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}'; \
+                     rename '{wrong}' to '{right}'",
                     match projection {
                         Projection::None =>
                             "this view declares no projection, so it has no longitude".to_string(),
@@ -516,8 +506,8 @@ pub(crate) fn parse_values_batch(
             columns = names;
         } else if columns != names {
             return Err(DecodeError(
-                "values body: two record batches of one stream carry different columns; a batch \
-                 is one column set, so every row's values are positional against one list"
+                "values body: two record batches of one stream carry different columns; send \
+                 the same columns in every batch"
                     .to_string(),
             ));
         }
@@ -533,8 +523,8 @@ pub(crate) fn parse_values_batch(
                     .downcast_ref::<arrow::array::StringArray>()
                     .ok_or_else(|| {
                         DecodeError(
-                            "values body: column 'tessera_id' is present but not utf8; a \
-                             tessera_id is decimal digits in a string"
+                            "values body: column 'tessera_id' is not utf8; send each \
+                             tessera_id as decimal digits in a string"
                                 .to_string(),
                         )
                     })?,
@@ -578,15 +568,15 @@ pub(crate) fn parse_values_batch(
             let address = match (external, named) {
                 (Some(_), Some(_)) => {
                     return Err(DecodeError(format!(
-                        "values body: row {} names both an external_id and a tessera_id; a row \
-                         names its entity exactly one way",
+                        "values body: row {} names both an external_id and a tessera_id; send \
+                         one of them",
                         rows.len()
                     )))
                 }
                 (None, None) => {
                     return Err(DecodeError(format!(
-                        "values body: row {} names no entity; a values row carries an \
-                         external_id, or a tessera_id with its idset (`ingest.md` §1.4)",
+                        "values body: row {} names no entity; send an external_id, or a \
+                         tessera_id with its idset",
                         rows.len()
                     )))
                 }
@@ -605,8 +595,8 @@ pub(crate) fn parse_values_batch(
                     // id names an entity only under the set it was minted in.
                     let Some(set) = idset.as_ref().filter(|arr| !arr.is_null(i)) else {
                         return Err(DecodeError(format!(
-                            "values body: row {} names a tessera_id with no idset; the \
-                             identifier set is required beside one, from `/v1/meta`",
+                            "values body: row {} names a tessera_id with no idset; send the \
+                             idset from `/v1/meta` beside it",
                             rows.len()
                         )));
                     };
@@ -654,10 +644,9 @@ fn project_columns(
     for (row, (lon, lat)) in x.iter_mut().zip(y.iter_mut()).enumerate() {
         if !lon.is_finite() || !lat.is_finite() || lon.abs() > 180.0 || lat.abs() > 90.0 {
             return Err(DecodeError(format!(
-                "ingest body: row {row} is at lon {lon}, lat {lat}, which is not a place. This \
-                 view is projected ({}), and the accepted input coordinate system is WGS84 \
-                 degrees — longitude within ±180, latitude within ±90 (projections.md §2). The \
-                 whole batch is refused, so nothing was queued or appended",
+                "ingest body: row {row} is at lon {lon}, lat {lat}, which is not a place; this \
+                 view is projected ({}), so send WGS84 degrees with longitude within ±180 and \
+                 latitude within ±90",
                 projection.name()
             )));
         }
@@ -768,8 +757,8 @@ impl LabelCells<'_> {
             .map(|index| {
                 if values.is_null(index) {
                     return Err(DecodeError(format!(
-                        "ingest body: column 'access' has a null element at row {row}; every \
-                         element of a row's list is one label, taken verbatim"
+                        "ingest body: column 'access' has a null element at row {row}; send \
+                         each label as a string and leave nulls out"
                     )));
                 }
                 Ok(values.value(index).as_bytes().to_vec())
@@ -786,10 +775,10 @@ fn labels_col<'a>(
     use arrow::datatypes::DataType;
 
     const SHAPE: &str = "list<utf8> or large_list<utf8>, one label per element, an empty list \
-                         for a row with no label (contracts §3.4)";
+                         for a row with no label";
     let Some(column) = batch.column_by_name(name) else {
         return Err(DecodeError(format!(
-            "ingest body: column '{name}' missing; it is {SHAPE}"
+            "ingest body: column '{name}' is missing; send it as {SHAPE}"
         )));
     };
     let cells = match column.data_type() {
@@ -807,14 +796,12 @@ fn labels_col<'a>(
         ),
         DataType::Utf8 | DataType::LargeUtf8 => {
             return Err(DecodeError(format!(
-                "ingest body: column '{name}' is utf8, one string per row; it is {SHAPE}. Each \
-                 element is one label, verbatim, so a label containing a comma is one term \
-                 (decision 0129)"
+                "ingest body: column '{name}' is utf8, one string per row; send it as {SHAPE}"
             )));
         }
         other => {
             return Err(DecodeError(format!(
-                "ingest body: column '{name}' is {other:?}; it is {SHAPE}"
+                "ingest body: column '{name}' is {other:?}; send it as {SHAPE}"
             )));
         }
     };
@@ -824,7 +811,7 @@ fn labels_col<'a>(
     };
     if element != DataType::Utf8 {
         return Err(DecodeError(format!(
-            "ingest body: column '{name}' is a list of {element:?}; it is {SHAPE}"
+            "ingest body: column '{name}' is a list of {element:?}; send it as {SHAPE}"
         )));
     }
     Ok(cells)
