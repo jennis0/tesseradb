@@ -596,32 +596,52 @@ GROUP_VIEW_RECREATED = (
 EXPECTED_FAILURES = {
     **{("rendered-attributes", stage): (RENDER_REFUSED, RuntimeError) for stage in STAGES},
     **{("open-category-values", stage): (VALUES_DO_NOT_MINT, RuntimeError) for stage in STAGES},
-    ("text-attributes", "restart"): (TEXT_LOST_AT_RESTART, AssertionError),
-    ("group-view-recreated", "fold-restart"): (GROUP_VIEW_RECREATED, AssertionError),
 }
 
 
 @dataclass(frozen=True)
 class Known:
     """A difference narrow enough to leave out of the comparison and pin on its own: the places
-    whose answer label and path fully match the two patterns."""
+    where some `(label, path)` pair of patterns fully matches the answer's label and the path
+    inside it."""
 
     name: str
     case: str
     stages: tuple[str, ...]
-    label: str
-    path: str
+    places: tuple[tuple[str, str], ...]
     reason: str
 
+
+ANY = r".*"
 
 KNOWN = (
     Known(
         "layer-version",
         "layers",
         ("restart", "fold", "fold-restart"),
-        r"meta",
-        r"\.layers\[\d+\]\.version",
+        ((r"meta", r"\.layers\[\d+\]\.version"),),
         "a restart moves the version of each layer registered live, with no gate edit",
+    ),
+    Known(
+        "text-index",
+        "text-attributes",
+        ("restart",),
+        ((r"viewport world z\d (filter|highlight) note", ANY),),
+        TEXT_LOST_AT_RESTART,
+    ),
+    Known(
+        "recreated-view-families",
+        "group-view-recreated",
+        ("fold-restart",),
+        (
+            (r"viewport quarter:Q2 z\d (filter|highlight) (feel|sentiment)", ANY),
+            (r"viewport world z\d (filter|highlight) pinned", ANY),
+            (r"categories feel@Q2", ANY),
+            (r"suggest feel@Q2 .*", ANY),
+            (r"meta", r"\.scoped_scalars\[\d+\]\.views.*"),
+            (r"item \d+", r"\.body\.scoped\.\w+(\.Q2)?"),
+        ),
+        GROUP_VIEW_RECREATED,
     ),
 )
 
@@ -735,11 +755,11 @@ def test_a_live_declaration_serves_what_a_build_serves(walks, case, stage, known
     covering = [k for k in KNOWN if k.case == case and stage in k.stages]
     if known is None:
         for k in covering:
-            found, _ = fx.split(found, k.label, k.path)
+            found, _ = fx.split(found, k.places)
         shown = "\n".join(map(str, found[:12]))
         assert not found, f"{case} at {stage}: {len(found)} answers differ\n{shown}"
     else:
         k = KNOWN[known]
-        _, matching = fx.split(found, k.label, k.path)
+        _, matching = fx.split(found, k.places)
         shown = "\n".join(map(str, matching[:6]))
         assert not matching, f"{k.reason}\n{shown}"

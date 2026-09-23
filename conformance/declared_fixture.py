@@ -650,13 +650,20 @@ def differences(built: dict, live: dict) -> list[Difference]:
     return out
 
 
-def split(found: list[Difference], label: str, path: str):
-    """`(the rest, the matching)`: the places whose label and path fully match the two patterns,
-    taken out of `found` into differences of their own."""
+def split(found: list[Difference], patterns: tuple[tuple[str, str], ...]):
+    """`(the rest, the matching)`: the places where some `(label, path)` pair of patterns fully
+    matches the answer's label and the path inside it, taken out of `found` into differences of
+    their own."""
+
+    def hit(d: Difference, place) -> bool:
+        return any(
+            re.fullmatch(label, d.label) and re.fullmatch(path, place[0])
+            for label, path in patterns
+        )
+
     rest, matching = [], []
     for d in found:
-        hit = re.fullmatch(label, d.label) is not None
-        mine = [p for p in d.places if hit and re.fullmatch(path, p[0])]
+        mine = [p for p in d.places if hit(d, p)]
         others = [p for p in d.places if p not in mine]
         if mine:
             matching.append(Difference(d.principal, d.label, mine))
