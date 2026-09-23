@@ -13,17 +13,17 @@
 //!
 //! # This merge changes the bytes, and that is a different correctness shape
 //!
-//! The shipped attribute coalesce ([`crate::coalesce_attr_extents`]) concatenates windows of
-//! extents with values **byte-preserved**: it pushes borrowed slices of each input through
-//! unchanged. That is precisely why its guards suffice. Union-cardinality-equals-sum over presence
-//! and the non-interleaving order check bound everything that can go wrong when the bytes do not
-//! change — which entity owns which slot, and nothing else.
+//! The shipped attribute coalesce ([`crate::coalesce_attr_extents`]) merges windows of extents
+//! with values **byte-preserved**: it pushes borrowed slices of each input through unchanged.
+//! That is why its guards suffice. Union-cardinality-equals-sum over presence and the merge in
+//! entity order bound everything that can go wrong when the bytes do not change: which entity
+//! owns which slot, and nothing else.
 //!
 //! A keyword coalesce **renumbers**. Each input's dictionary is merged into one, a remap
 //! (`old ordinal -> new ordinal`) is built per input, and every ordinal is rewritten through it.
 //! The inherited guards cannot see a wrong remap, because **recolouring every value changes no
-//! cardinality**: presence is untouched, the union still equals the sum, the layers still do not
-//! interleave, and the published extent answers confidently with another value's key. So this
+//! cardinality**: presence is untouched, the union still equals the sum, every entity keeps its
+//! slot, and the published extent answers confidently with another value's key. So this
 //! merge carries its own content guard, discharged in [`verify_remap`] before any ordinal is
 //! written:
 //!
@@ -112,8 +112,7 @@ pub struct KeywordLayer<'a> {
 
 /// One keyword column's extents merged into one, for the entity-space coalesce (index §5.2).
 ///
-/// `inputs` is a window of one column's own extents, in any order — the merge sorts them by their
-/// entity ranges and refuses an interleaving, exactly as every other axis does. What is written is
+/// `inputs` is a window of one column's own extents, in any order. What is written is
 /// the same `(entity, key)` relation the inputs carried between them: three files, the merged
 /// dictionary, the ordinals rewritten against it, and the presence bitmap an extent always carries.
 ///
@@ -666,8 +665,8 @@ mod tests {
 
     /// **The guard fires on a remap that is monotone, in range and wrong — and the inherited guards
     /// are silent on the same defect.** This is the whole reason this merge carries a guard of its
-    /// own: recolouring every value changes no cardinality, so union-equals-sum over presence and
-    /// the non-interleaving check pass over a window whose every key has moved.
+    /// own: recolouring every value changes no cardinality, so the overlap check over presence
+    /// passes a window whose every key has moved.
     ///
     /// **Fault injected**, three ways, all executed here rather than described: a remap shifted onto
     /// a neighbour's key, one whose entries swap, and one reaching past the merged dictionary. The
