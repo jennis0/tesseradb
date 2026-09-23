@@ -41,8 +41,7 @@ pub use entity_terms::{
 };
 pub use error::{Result, StoreError};
 pub use flush::{
-    digest_of, write_flush_segment, write_flush_segment_with_joins, FlushInput, FlushOutput,
-    FlushRow, JoinedFlushOutput,
+    digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow,
 };
 pub use fold::{fold_row_space, FoldRowSpaceOutput, FoldRowSpaceSpec, FoldSegmentInput};
 pub use manifest_write::{

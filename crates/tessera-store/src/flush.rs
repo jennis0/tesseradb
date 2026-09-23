@@ -1,9 +1,10 @@
-//! What a flush writes into an existing bundle (§3.1).
+//! What a flush writes into an existing bundle.
 //!
 //! Per segment: `morton.u32`, `columns.arrow`, and, where a row binds an entity rather than
 //! joining one, an `external-ids.arrow` run and an `ext-locator.u32` extent, plus the descriptor,
-//! the row-space extent and the digests the new `SEGMENTS-<n+1>.json` names them by. **Never `MANIFEST.json`, never `CURRENT`** — a flush
-//! publishes inside the current prefix, which is what separates it from a compaction.
+//! the row-space extent and the digests the new `SEGMENTS-<n+1>.json` names them by. A flush
+//! never writes `MANIFEST.json` or `CURRENT`: it publishes inside the current prefix, which is
+//! what separates it from a compaction.
 //!
 //! ## What is deliberately not here
 //!
@@ -91,23 +92,8 @@ pub struct FlushInput<'a> {
 pub struct FlushOutput {
     pub segment: SegmentDescriptor,
     pub extent: SegmentExtent,
-    /// Prefix-relative path of the forward (external_id → entity) extent.
-    pub external_id_run: String,
-    pub locator_extent: LocatorExtent,
-    /// Every file written, prefix-relative, for the manifest's `files` map.
-    pub files: BTreeMap<String, FileDigest>,
-    /// `entity_hi + 1` — see this module's doc.
-    pub watermark: u64,
-    pub entity_id_high_water: u64,
-}
-
-/// What [`write_flush_segment_with_joins`] produced: [`FlushOutput`], with no run and no locator
-/// extent where every row is a join.
-#[derive(Debug)]
-pub struct JoinedFlushOutput {
-    pub segment: SegmentDescriptor,
-    pub extent: SegmentExtent,
-    /// The locator extent over the rows that bind, naming the run it indexes.
+    /// The locator extent over the rows that bind, naming the run it indexes; `None` where every
+    /// row is a join.
     pub locator_extent: Option<LocatorExtent>,
     /// Every file written, prefix-relative, for the manifest's `files` map.
     pub files: BTreeMap<String, FileDigest>,
@@ -116,42 +102,19 @@ pub struct JoinedFlushOutput {
     pub entity_id_high_water: u64,
 }
 
-/// Write one flush segment under `prefix_dir`, for `(partition, view)`, in which every row binds
-/// its entity.
+/// Write one flush segment under `prefix_dir`, for `(partition, view)`. `joins` names the
+/// entities, ascending, whose rows join an entity an earlier row already bound: a join writes no
+/// external-id entry and no locator slot, and the locator extent spans the binding rows alone.
 ///
 /// Returns without fsyncing the directory: the caller's commit point is the side-manifest, and it
-/// is responsible for making every file here durable **before** writing it (§7.3).
+/// is responsible for making every file here durable before writing it.
 pub fn write_flush_segment(
     prefix_dir: &Path,
     partition: &str,
     view: &str,
     input: FlushInput<'_>,
-) -> Result<FlushOutput> {
-    let out = write_flush_segment_with_joins(prefix_dir, partition, view, input, &[])?;
-    let locator_extent = out
-        .locator_extent
-        .expect("a segment has at least one row, and with no joins every row binds");
-    Ok(FlushOutput {
-        segment: out.segment,
-        extent: out.extent,
-        external_id_run: locator_extent.external_id_run.clone(),
-        locator_extent,
-        files: out.files,
-        watermark: out.watermark,
-        entity_id_high_water: out.entity_id_high_water,
-    })
-}
-
-/// [`write_flush_segment`], where `joins` names the entities, ascending, whose rows join an entity
-/// an earlier row already bound. A join writes no external-id entry and no locator slot, and the
-/// locator extent spans the binding rows alone.
-pub fn write_flush_segment_with_joins(
-    prefix_dir: &Path,
-    partition: &str,
-    view: &str,
-    input: FlushInput<'_>,
     joins: &[EntityId],
-) -> Result<JoinedFlushOutput> {
+) -> Result<FlushOutput> {
     if input.rows.is_empty() {
         return Err(StoreError::MalformedBundle {
             detail: "write_flush_segment: a segment with no rows is not publishable".to_string(),
@@ -325,7 +288,7 @@ pub fn write_flush_segment_with_joins(
         files.insert(rel(&name), digest_of(&seg_dir.join(&name))?);
     }
 
-    Ok(JoinedFlushOutput {
+    Ok(FlushOutput {
         segment: SegmentDescriptor {
             view: view.to_string(),
             incarnation: input.incarnation,
@@ -526,7 +489,7 @@ mod tests {
                 shard_id: 0,
                 scalar_schema: &schema,
                 row_base: 0,
-            },
+            }, &[],
         )
         .expect("flush");
         (out, dir.join("partitions/p/views/s/segments/seg-1"))

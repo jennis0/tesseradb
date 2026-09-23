@@ -229,7 +229,7 @@ pub fn flush_segment(
             shard_id: 0,
             scalar_schema: &[],
             row_base,
-        },
+        }, &[],
     )
     .expect("write_flush_segment");
 

@@ -22,7 +22,7 @@ use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent};
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::SegmentData;
-use tessera_store::{write_flush_segment_with_joins, FlushInput, FlushRow};
+use tessera_store::{write_flush_segment, FlushInput, FlushRow};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::write::StageMark;
@@ -728,7 +728,7 @@ fn execute_flush_stages(
         None
     } else {
         Some(
-            write_flush_segment_with_joins(
+            write_flush_segment(
                 &ctx.prefix_dir,
                 &ctx.partition,
                 &ctx.view,

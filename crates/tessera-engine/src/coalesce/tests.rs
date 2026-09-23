@@ -149,7 +149,7 @@ impl Fixture {
             scalar_schema: &[],
             row_base,
         };
-        tessera_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input).unwrap()
+        tessera_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input, &[]).unwrap()
     }
 
     fn write_dict(&self, dir_rel: &str, descriptors: &[String]) -> String {
@@ -167,7 +167,8 @@ impl Fixture {
     fn write_build(&mut self) {
         let base = self.write_segment("base", &[0, 1, 2, 3], 0);
         self.build_files.extend(base.files);
-        self.manifest.external_id_runs.push(base.external_id_run);
+        let run = base.locator_extent.expect("the base binds").external_id_run;
+        self.manifest.external_id_runs.push(run);
         let path = self.write_dict("terms", &["base-0".into(), "base-1".into()]);
         self.build_files.insert(path.clone(), self.digest_of(&path));
         self.manifest.dict_extents.push(DictExtent { path, records: 2 });
@@ -215,9 +216,10 @@ impl Fixture {
         let seg = format!("flush-{flush}-1");
         let segment = self.write_segment(&seg, entities, 4 + 3 * flush);
         self.manifest.files.extend(segment.files);
-        self.manifest.external_id_runs.push(segment.external_id_run);
-        let seg_rel = segment.locator_extent.path.rsplit_once('/').unwrap().0.to_string();
-        self.manifest.locator_extents.push(segment.locator_extent);
+        let locator = segment.locator_extent.expect("the flush binds");
+        self.manifest.external_id_runs.push(locator.external_id_run.clone());
+        let seg_rel = locator.path.rsplit_once('/').unwrap().0.to_string();
+        self.manifest.locator_extents.push(locator);
         seg_rel
     }
 
