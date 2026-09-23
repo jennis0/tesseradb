@@ -52,7 +52,9 @@ a disagreement in this module is the first place a reader would look for it.
 
 from __future__ import annotations
 
+import shutil
 import time
+from pathlib import Path
 
 import pytest
 import requests
@@ -67,8 +69,22 @@ def suggest_bundle(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def suggest_server(tmp_path_factory, suggest_bundle):
-    server, proc = spawn_server(suggest_bundle, tmp_path_factory.mktemp("suggest-server"))
+def private_suggest_bundle(tmp_path_factory, suggest_bundle):
+    """A factory for private copies of the suggestion bundle, one per server, since a server
+    writes into its bundle root and locks it while it runs."""
+    def make(label: str) -> Path:
+        dest = tmp_path_factory.mktemp(f"bundle-{label}") / "bundle-suggest"
+        shutil.copytree(suggest_bundle, dest)
+        return dest
+
+    return make
+
+
+@pytest.fixture(scope="session")
+def suggest_server(tmp_path_factory, private_suggest_bundle):
+    server, proc = spawn_server(
+        private_suggest_bundle("suggest"), tmp_path_factory.mktemp("suggest-server")
+    )
     yield server
     stop_server(proc)
 
@@ -514,7 +530,7 @@ def test_the_page_is_identical_once_the_visible_value_set_is_warm(suggest_server
 
 
 @pytest.fixture(scope="session")
-def probe_route_server(tmp_path_factory):
+def probe_route_server(tmp_path_factory, private_suggest_bundle):
     """A second server that can never build a visible-value set.
 
     `max_suggest_set_entities = 1` is the schema's floor (`/v1/meta` publishes the constant with
@@ -523,11 +539,8 @@ def probe_route_server(tmp_path_factory):
     takes the probe route of §6.2 — which is the state C31 stays open in, and the one an operator
     who has not raised the constant is running.
     """
-    # Built separately, because a running server locks its bundle root and `suggest_server` holds
-    # the shared one. The oracle works in source ids, so the second build gives the same answers.
-    bundle = sf.build_suggest_bundle(tmp_path_factory.mktemp("suggest-probe-route-fixture"))
     server, proc = spawn_server(
-        bundle,
+        private_suggest_bundle("suggest-probe-route"),
         tmp_path_factory.mktemp("suggest-probe-route"),
         serve_extra="max_suggest_set_entities = 1\n",
     )

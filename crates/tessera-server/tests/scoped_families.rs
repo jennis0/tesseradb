@@ -1712,3 +1712,312 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     let served = restart(served, config()).await;
     assert_written_answers(&served, "after a restart", &[q1, q3[0]], minted).await;
 }
+
+/// What one view answers for each family, asked for the values [`IN_Q9`] and [`IN_Q3`] carry.
+async fn family_answers(served: &Served, view: &str) -> Vec<BTreeSet<u64>> {
+    let mut answers = Vec::new();
+    for written in [IN_Q9, IN_Q3] {
+        for filter in [
+            json!({"mood": {"eq": written.mood}}),
+            json!({"sector": {"eq": written.sector}}),
+            json!({"note": {"match": written.word}}),
+        ] {
+            answers.push(ids(served, view, Some(filter)).await);
+        }
+    }
+    answers.push(ids(served, view, Some(json!({"score": {"range": {"gte": THRESHOLD}}}))).await);
+    answers
+}
+
+/// The recreated view against what it was given, and the untouched view against what it held.
+async fn check_recreated(
+    served: &Served,
+    stage: &str,
+    expected: &[BTreeSet<u64>],
+    untouched: &[BTreeSet<u64>],
+) {
+    assert_eq!(
+        family_answers(served, "quarter:2026-Q4").await,
+        expected,
+        "{stage}: the recreated view answers from its own values"
+    );
+    assert_eq!(
+        family_answers(served, "quarter:2026-Q3").await,
+        untouched,
+        "{stage}: a view never dropped answers as it did"
+    );
+}
+
+/// A built view dropped and created again at a running service holds the scoped values ingested
+/// into it after the create, before a restart, after one, and after a fold and another; a view
+/// never dropped answers as it did throughout.
+#[tokio::test]
+async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
+    let mut served = serve().await;
+    let untouched = family_answers(&served, "quarter:2026-Q3").await;
+
+    let dropped = served
+        .server
+        .client
+        .delete(
+            served
+                .server
+                .control_url("/control/views/quarter/2026-Q4?delete_dangling=false"),
+        )
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dropped.status().as_u16(), 200);
+    let created = served
+        .server
+        .client
+        .put(served.server.control_url("/control/views/quarter/2026-Q4"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status().as_u16(), 201);
+
+    // Two of the build's Q4 entities joining the new view, and one new entity.
+    let rows = ingest_scoped(
+        &served,
+        "recreated-q4",
+        "quarter:2026-Q4",
+        &[
+            (8, 250.0, 250.0, IN_Q9),
+            (10, 260.0, 260.0, IN_Q3),
+            (9_301, 270.0, 270.0, IN_Q9),
+        ],
+    )
+    .await;
+    flush(&served).await;
+    served.token = token(&served, &["0", "1"]).await;
+
+    let q9 = BTreeSet::from([rows[0], rows[2]]);
+    let q3 = BTreeSet::from([rows[1]]);
+    let expected = vec![
+        q9.clone(),
+        q9.clone(),
+        q9.clone(),
+        q3.clone(),
+        q3.clone(),
+        q3,
+        q9,
+    ];
+    check_recreated(&served, "before a restart", &expected, &untouched).await;
+
+    // Any later change to the roster republishes it with the drop still on the list.
+    let other = served
+        .server
+        .client
+        .put(served.server.control_url("/control/views/quarter/2026-Q9"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other.status().as_u16(), 201);
+    served.token = token(&served, &["0", "1"]).await;
+    check_recreated(&served, "after another view is created", &expected, &untouched).await;
+
+    let served = restart(served, default_engine_config()).await;
+    check_recreated(&served, "after a restart", &expected, &untouched).await;
+
+    fold(&served).await;
+    let served = restart(served, default_engine_config()).await;
+    check_recreated(&served, "after a fold and a restart", &expected, &untouched).await;
+}
+
+/// An entity whose point lives in `2026-Q3` alone, for the fill below.
+const FILLED: u64 = 9_004;
+
+/// One `POST /control/values` JSON batch naming no view, addressed by external id.
+async fn values_without_view(
+    served: &Served,
+    batch_id: &str,
+    wait: bool,
+    cells: Value,
+) -> (u16, Value) {
+    use base64::Engine as _;
+    let mut row = json!({
+        "external_id": base64::engine::general_purpose::STANDARD.encode(external_id_of(FILLED)),
+    });
+    for (name, value) in cells.as_object().unwrap() {
+        row[name] = value.clone();
+    }
+    let path = if wait {
+        "/control/values?wait=visible"
+    } else {
+        "/control/values"
+    };
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url(path))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .json(&json!([row]))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// Whether `2026-Q3` serves `id` under an `eq` on `column`, and the item card's value for it.
+async fn filled_answer(served: &Served, id: u64, column: &str, value: &str) -> (bool, Value) {
+    let matched = ids(
+        served,
+        "quarter:2026-Q3",
+        Some(json!({ column: { "eq": value } })),
+    )
+    .await;
+    let resp = post_item(&served.server, &served.token, id).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let card: Value = resp.json().await.unwrap();
+    (matched.contains(&id), card["fields"][column].clone())
+}
+
+/// **An entity-scoped cell needs no view header.** Its value is the entity's whichever view's
+/// flush writes it, so a values batch naming no view fills it on a deployment of five views, and
+/// the value is served under the one view the entity's point lives in: at once, after a restart
+/// that replays an unflushed fill from the log, and after a fold. A group-scoped column still
+/// needs the header, which is what says whose cell it is.
+#[tokio::test]
+async fn an_entity_scoped_fill_needs_no_view_header() {
+    let served = serve().await;
+    for name in ["grade", "tier"] {
+        let resp = served
+            .server
+            .client
+            .put(served.server.control_url("/control/attributes"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&json!({ "name": name, "type": "keyword", "index": true }))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "{name} is declared");
+    }
+    let id = ingest_scoped(
+        &served,
+        "q3-only",
+        "quarter:2026-Q3",
+        &[(FILLED, 250.0, 250.0, IN_Q3)],
+    )
+    .await[0];
+    flush(&served).await;
+
+    let (status, answer) =
+        values_without_view(&served, "grade", true, json!({ "grade": "gold" })).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["visible"], json!(true), "{answer}");
+    assert_eq!(
+        filled_answer(&served, id, "grade", "gold").await,
+        (true, json!("gold"))
+    );
+
+    let (status, answer) =
+        values_without_view(&served, "mood", false, json!({ "mood": "calm" })).await;
+    assert_eq!(status, 422, "a group-scoped cell still needs a view: {answer}");
+
+    // Left unflushed, so the restart has to replay it from the log.
+    let (status, answer) =
+        values_without_view(&served, "tier", false, json!({ "tier": "upper" })).await;
+    assert_eq!(status, 200, "{answer}");
+    let served = restart(served, default_engine_config()).await;
+    flush(&served).await;
+    assert_eq!(
+        filled_answer(&served, id, "grade", "gold").await,
+        (true, json!("gold"))
+    );
+    assert_eq!(
+        filled_answer(&served, id, "tier", "upper").await,
+        (true, json!("upper"))
+    );
+
+    fold(&served).await;
+    assert_eq!(
+        filled_answer(&served, id, "grade", "gold").await,
+        (true, json!("gold"))
+    );
+    assert_eq!(
+        filled_answer(&served, id, "tier", "upper").await,
+        (true, json!("upper"))
+    );
+}
+
+/// **A group-scoped family's new key is minted by the values batch that names it**, on an open
+/// vocabulary no ingest has used, and the cell is served under its view after a flush and after a
+/// restart.
+#[tokio::test]
+async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
+    let served = serve().await;
+    let declarations = [
+        (
+            "/control/vocabularies/grade",
+            json!({ "value_set": "open", "visibility": "public", "width": "u16" }),
+        ),
+        (
+            "/control/attributes",
+            json!({
+                "name": "grade", "type": "category", "vocabulary": "grade", "index": true,
+                "scope": { "group": "quarter" }
+            }),
+        ),
+    ];
+    for (path, body) in declarations {
+        let resp = served
+            .server
+            .client
+            .put(served.server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 201, "{path}");
+    }
+    let id = ingest_scoped(
+        &served,
+        "q3-only",
+        "quarter:2026-Q3",
+        &[(FILLED, 250.0, 250.0, IN_Q3)],
+    )
+    .await[0];
+    flush(&served).await;
+
+    use base64::Engine as _;
+    let row = json!([{
+        "external_id": base64::engine::general_purpose::STANDARD.encode(external_id_of(FILLED)),
+        "grade": "g7",
+    }]);
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/values"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "scoped-grade")
+        .header("x-tessera-view", "quarter:2026-Q3")
+        .json(&row)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().await.unwrap_or_default());
+    flush(&served).await;
+    assert_eq!(scoped_grade(&served, id).await, (true, json!("g7")));
+
+    let served = restart(served, default_engine_config()).await;
+    assert_eq!(scoped_grade(&served, id).await, (true, json!("g7")));
+}
+
+/// Whether `2026-Q3` serves `id` under `grade = g7`, and the item card's `2026-Q3` grade.
+async fn scoped_grade(served: &Served, id: u64) -> (bool, Value) {
+    let filter = json!({ "grade": { "eq": "g7" } });
+    let matched = ids(served, "quarter:2026-Q3", Some(filter)).await;
+    let resp = post_item(&served.server, &served.token, id).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let card: Value = resp.json().await.unwrap();
+    (matched.contains(&id), card["scoped"]["grade"]["2026-Q3"].clone())
+}

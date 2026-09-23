@@ -712,31 +712,44 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
         "a deny whose append cannot be made durable is answered 500 (contracts §3.1)"
     );
 
+    let ticks = server.state.engine.write_executor_stats().ticks;
     let n = request_flush(&server).await;
 
-    // Three seconds is far longer than the retry floor and far shorter than the 90 s period, so
-    // reaching the number here could only be a cycle closing over unpublished work.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while std::time::Instant::now() < deadline {
+    // Until the node has recovered its WAL and a tick has planned over the request, which the
+    // refused gate turns into a held cycle. The counter must stay short of the number throughout.
+    let deadline = std::time::Instant::now() + DEADLINE;
+    let executor = loop {
         assert!(
             publication(&server).await < n,
             "the counter must not pass a cycle whose gate refused it"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+        let executor = server.state.engine.write_executor_stats();
+        if executor.wal_recoveries > 0 && executor.ticks > ticks {
+            break executor;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the node never recovered its WAL and ticked: {executor:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
 
     // **The operator plane says why**, which is what stops a stalled counter reading as a hung
     // server. The node recovered its WAL in process, so the posture is back to `running`; what
     // survives the recovery is the incident counter, and the overlay it left behind is what still
-    // refuses the plan (write-path §7.2).
-    let executor = server.state.engine.write_executor_stats();
-    assert!(
-        executor.wal_recoveries > 0,
-        "the durability incident behind the refusal is on the operator plane: {executor:?}"
-    );
+    // refuses the plan. Read after the refused tick, so the counter below has had its chance to
+    // move.
     assert_eq!(
         executor.flushes, 0,
         "and nothing was published, which is why the number was not reached"
+    );
+    assert!(
+        !executor.flush_in_flight && executor.flush_executions == 0,
+        "and no flush was dispatched past the refused gate: {executor:?}"
+    );
+    assert!(
+        publication(&server).await < n,
+        "the counter must not pass a cycle whose gate refused it"
     );
 }
 
@@ -954,6 +967,46 @@ async fn the_wait_is_bounded_and_says_so() {
 
     // The number stands, and the caller reaches it by reading status as it would have anyway.
     await_publication(&server, body["publication"].as_u64().unwrap()).await;
+}
+
+/// A ceiling too large to add to the clock is no ceiling: the write is answered once it is
+/// visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_largest_wait_ceiling_waits_for_the_publication() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_visible_wait(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        u64::MAX,
+    )
+    .await;
+
+    let ext = external_id_of(N_ITEMS + 1);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest?wait=visible"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "unbounded")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(build_ingest_batch_optional(&[(
+            Some(&ext[..]),
+            10.0,
+            10.0,
+            "0",
+        )]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["visible"], json!(true), "{body}");
 }
 
 /// An unrecognised `wait` value is refused rather than read as no wait at all: a caller who typed

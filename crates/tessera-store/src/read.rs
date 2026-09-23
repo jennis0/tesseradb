@@ -590,9 +590,16 @@ fn open_prefix(
         // checks even that one against the roster and blanks the view if it disagrees, which is
         // where the *fail-closed* half lives: this pass has the manifest and not yet the log.
         let mut newest: HashMap<&str, tessera_types::view::ViewIncarnation> = HashMap::new();
+        // The incarnation of each view's first listed segment, which is the one the view's
+        // `permutation.bin` addresses. A key created again after a drop keeps its predecessor's
+        // base listed first until a fold, and that base is not the new incarnation's.
+        let mut based: HashMap<&str, tessera_types::view::ViewIncarnation> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
             let seen = newest.entry(seg_desc.view.as_str()).or_default();
             *seen = (*seen).max(seg_desc.incarnation);
+            based
+                .entry(seg_desc.view.as_str())
+                .or_insert(seg_desc.incarnation);
         }
         let mut views: HashMap<String, ViewData> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
@@ -622,8 +629,9 @@ fn open_prefix(
             // manifest is what says which — a view whose permutation no manifest names has none,
             // and reading that as a missing file would refuse the bundle for a view that is
             // simply new.
-            let has_base = segments_manifest.files.contains_key(&perm_rel)
-                || manifest.files.contains_key(&perm_rel);
+            let has_base = based.get(seg_desc.view.as_str()) == Some(&seg_desc.incarnation)
+                && (segments_manifest.files.contains_key(&perm_rel)
+                    || manifest.files.contains_key(&perm_rel));
             let is_base_segment = is_new_view && has_base;
             let view_entry = match views.get_mut(&seg_desc.view) {
                 Some(entry) => entry,
@@ -653,8 +661,9 @@ fn open_prefix(
                         crate::view_rel(&seg_desc.view),
                         crate::row_entity::ROW_ENTITY_FILE
                     );
-                    let row_entity = if segments_manifest.files.contains_key(&row_entity_rel)
-                        || manifest.files.contains_key(&row_entity_rel)
+                    let row_entity = if has_base
+                        && (segments_manifest.files.contains_key(&row_entity_rel)
+                            || manifest.files.contains_key(&row_entity_rel))
                     {
                         let path = view_dir.join(crate::row_entity::ROW_ENTITY_FILE);
                         ensure_verified(
@@ -1578,12 +1587,6 @@ pub struct MortonSlice {
 }
 
 impl MortonSlice {
-    /// The mapped file's size in bytes — the operand of `tessera-server`'s merge-size relation
-    /// (§4's relation 2), which needs a segment's on-disk size and has no other way to ask for it.
-    pub fn byte_len(&self) -> u64 {
-        self.mmap.len() as u64
-    }
-
     /// `madvise(MADV_SEQUENTIAL)` on this mapping — compaction §6.1's mitigation, decision 0052.
     ///
     /// **Called by the streaming passes and never by the request path**, which is the whole of what
@@ -1787,13 +1790,6 @@ impl CutIndex {
         self.mmap.is_empty()
     }
 
-    /// This mapping's size in bytes — see [`MortonSlice::byte_len`], which this joins in the
-    /// merge-size relation's operand: the three files are mapped together and a segment's size is
-    /// all of them.
-    pub fn byte_len(&self) -> u64 {
-        self.mmap.len() as u64
-    }
-
     /// The row at which each occupied cell begins, ascending.
     pub fn starts(&self) -> &[u32] {
         // SAFETY: as [`MortonSlice::u32`] — a checked multiple of 4 from a page-aligned base.
@@ -1889,11 +1885,6 @@ const FIXED_COLUMNS: [(&str, DataType); 2] = [
 ];
 
 impl ColumnsRef {
-    /// This segment's `columns.arrow` size in bytes — see [`MortonSlice::byte_len`].
-    pub fn byte_len(&self) -> u64 {
-        self.batch.get_array_memory_size() as u64
-    }
-
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),

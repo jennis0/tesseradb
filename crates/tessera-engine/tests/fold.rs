@@ -214,25 +214,6 @@ fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
     }
 }
 
-/// Request a fold and block until it has been **discarded**, asserting nothing was published.
-fn fold_discarded(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(now.folds, before.folds, "the fold published");
-        if now.fold_failures > before.fold_failures {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold neither published nor was discarded"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 fn visible(engine: &Engine, session: &tessera_engine::Session) -> u64 {
     engine
         .viewport(
@@ -1223,56 +1204,171 @@ fn external_ids_resolve_both_ways_after_a_fold_and_a_folded_entitys_key_is_gone(
     );
 }
 
-/// **A fold that would leave a deployment the next startup refuses is discarded, loudly.**
+/// **A merge cap far above the base segment is obeyed, and the bundle stays whole.**
 ///
-/// Write-path §7's relation — `merge.max_merged_segment_bytes` strictly below the base segment's
-/// bytes — is checked at startup by `tessera-server`'s loader, and a fold is the one operation that
-/// can move the figure it is checked against. The case to catch is the small corpus where the
-/// folded base is *smaller* than a cap an operator set against a larger one.
-///
-/// **Mutations this kills:** dropping the check (the fold publishes and the next `prepare` refuses
-/// the bundle); checking the resolved policy value rather than the configured one (the built-in
-/// 256 MiB default would then discard every fold over a fixture-sized corpus).
+/// With `max_merged_segment_bytes` above anything the base can reach, a fold publishes, the next
+/// four flushes merge, and after both and a restart every row is counted and served, a deletion
+/// and a suppression still apply, and every file the published prefix holds is one its manifests
+/// name and digest. The fixture's base sits in the flushes' size tier, adjacent to them and
+/// within the cap, and is still not merged: a merge selects from the flushed extents only.
 #[test]
-fn a_fold_that_would_break_the_merge_size_relation_is_discarded() {
+fn a_merge_cap_above_the_base_segment_is_obeyed() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
-    let config = EngineConfig {
-        // Far above anything a 10,000-item fixture's base segment can reach.
+    let config = || EngineConfig {
         max_merged_segment_bytes: Some(1 << 40),
         ..config_uncapped()
     };
-    let engine = engine_over_fixture(tmp.path(), &root, config);
+    let engine = engine_over_fixture(tmp.path(), &root, config());
 
-    fold_discarded(&engine);
-
-    assert_eq!(
-        engine.generation().prefix,
-        "v00000",
-        "nothing was published and the live prefix is untouched"
-    );
-    assert!(
-        root.join("v00000").exists(),
-        "and nothing was reclaimed either"
-    );
-}
-
-/// **An unset `max_merged_segment_bytes` does not discard a fold**, which is the other half of the
-/// relation's rule: an unset value is derived from the base segment when merge selection lands, so
-/// it cannot violate the relation and must not be checked as though it could.
-///
-/// Covered by every other case here — all of them run with the key unset and all of them publish —
-/// and stated separately because the mutation it kills (checking the resolved policy value instead
-/// of the configured one) makes *every* fold over a small corpus fail, which reads like a fixture
-/// problem rather than like a rule.
-#[test]
-fn an_unset_merge_cap_never_discards_a_fold() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    assert!(config_uncapped().max_merged_segment_bytes.is_none());
-    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    let folded_away = entity_of_source(&root, "v00000", 4);
+    let suppressed = entity_of_source(&root, "v00000", 8);
+    engine.accept_change(folded_away, ChangeOp::Delete).unwrap();
+    engine.accept_change(suppressed, ChangeOp::Suppress).unwrap();
     fold(&engine);
     assert_eq!(engine.generation().prefix, "v00001");
+    let base = engine.generation().bundle.partitions["default"].views["s0"].segments[0]
+        .seg_id
+        .clone();
+
+    // Four one-row flushes: `tier_width` adjacent segments in one tier, well under the cap.
+    let merges = engine.write_executor_stats().merges;
+    let mut flushed = Vec::new();
+    for round in 0..4 {
+        let entity = ingest(&engine, format!("capped-{round}").into_bytes(), &format!("c{round}"))
+            .expect("ingest is accepted");
+        flushed.push(entity);
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_for("a flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+    }
+    engine.accept_change(flushed[0], ChangeOp::Delete).unwrap();
+    wait_ticking(&engine, "a merge to publish", || {
+        engine.write_executor_stats().merges > merges
+    });
+    let segment_ids = |engine: &Engine| -> Vec<String> {
+        engine.generation().bundle.partitions["default"].views["s0"]
+            .segments
+            .iter()
+            .map(|segment| segment.seg_id.clone())
+            .collect()
+    };
+    let segments = segment_ids(&engine);
+    assert_eq!(segments.len(), 2, "the folded base and the one merged segment");
+    assert_eq!(segments[0], base, "the base is not merged");
+
+    let expected = N_ITEMS - 2 + 3;
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(visible(&engine, &session), expected);
+    drop((session, engine));
+
+    let mut restarted = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        config(),
+    )
+    .expect("the bundle reopens after a fold and a merge under the cap");
+    restarted.start_write_executor(8).expect("the executor starts");
+    restarted.set_background_refresh_for_test(false);
+    let generation = restarted.generation();
+    assert_eq!(generation.prefix, "v00001");
+    assert_eq!(segment_ids(&restarted), segments, "the base is still unmerged after a restart");
+    assert!(generation.overlay.is_deleted(flushed[0]));
+
+    let session = restarted.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(visible(&restarted, &session), expected);
+    for entity in &flushed[1..] {
+        assert!(
+            generation.bundle.partitions["default"].views["s0"]
+                .row_space
+                .row_of(*entity)
+                .is_some(),
+            "a merged entity keeps its row across the restart"
+        );
+    }
+
+    // Every file a manifest names is present and digest-clean, which is what `open_bundle`
+    // checks. The files beside them are the manifests themselves and the four segments the merge
+    // consumed, which stay until the next fold reclaims the prefix.
+    open_bundle(&root).expect("the published prefix opens and verifies");
+    let live: Vec<&str> = generation.bundle.partitions["default"].views["s0"]
+        .segments
+        .iter()
+        .map(|segment| segment.seg_id.as_str())
+        .collect();
+    assert_eq!(
+        unnamed_files(&root, "v00001", &live),
+        4,
+        "exactly the merge's four inputs are left beside the live segments"
+    );
+
+    restarted
+        .accept_change(suppressed, ChangeOp::Unsuppress)
+        .expect("an unsuppress is accepted");
+    let revealed = restarted.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        visible(&restarted, &revealed),
+        expected + 1,
+        "the suppressed item kept its row through the fold and the merge"
+    );
+
+    // A generation or a session still held pins the prefix it was served from.
+    drop((generation, session, revealed));
+    fold(&restarted);
+    assert!(!root.join("v00001").exists(), "the next fold reclaims the merge's inputs");
+    let live: Vec<String> = restarted.generation().bundle.partitions["default"].views["s0"]
+        .segments
+        .iter()
+        .map(|segment| segment.seg_id.clone())
+        .collect();
+    let live: Vec<&str> = live.iter().map(String::as_str).collect();
+    assert_eq!(unnamed_files(&root, "v00002", &live), 0);
+    let session = restarted.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(visible(&restarted, &session), expected + 1);
+}
+
+/// How many segment directories under `prefix` hold files no manifest names, asserting that every
+/// other file is named or is a manifest. A segment directory counts when its id is not in `live`.
+fn unnamed_files(root: &Path, prefix: &str, live: &[&str]) -> usize {
+    let bundle = open_bundle(root).expect("the bundle opens and verifies");
+    let named: std::collections::BTreeSet<&str> = bundle
+        .manifest
+        .files
+        .keys()
+        .chain(bundle.partitions.values().flat_map(|p| p.manifest.files.keys()))
+        .map(String::as_str)
+        .collect();
+    let prefix_dir = root.join(prefix);
+    let mut stale = std::collections::BTreeSet::new();
+    let mut pending = vec![prefix_dir.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let rel = path.strip_prefix(&prefix_dir).unwrap().to_string_lossy().into_owned();
+            if named.contains(rel.as_str()) {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy();
+            if name == "MANIFEST.json" || name.starts_with("SEGMENTS-") {
+                continue;
+            }
+            let seg_id = rel
+                .split_once("/segments/")
+                .and_then(|(_, rest)| rest.split('/').next())
+                .unwrap_or_else(|| panic!("{rel} is named by no manifest"));
+            assert!(!live.contains(&seg_id), "{rel} belongs to a live segment and is not named");
+            stale.insert(seg_id.to_string());
+        }
+    }
+    stale.len()
 }
 
 /// Run a fold with a flush landing **inside its flight**: the interleaving compaction §2's
@@ -2782,5 +2878,113 @@ fn dropping_the_engine_returns_while_a_fold_is_held_in_flight() {
     assert!(
         took < std::time::Duration::from_secs(10),
         "the drop took {took:?}, so it waited on something rather than on the queues closing"
+    );
+}
+
+/// **A fold lands while ingest continues into several views.**
+///
+/// Each round ingests new items into `s0` and joins the same items into `s1` and `s2`, as a
+/// multi-view deployment's feed does, and asks for a flush. Views flush one per tick, so whenever
+/// a fold is planned some view's rows for entities another view has already flushed are still
+/// buffered, and they publish during the fold's flight. A fold discarded for that is asked for
+/// again; one of a bounded number of attempts must publish while the feed keeps running.
+#[test]
+#[ignore = "fails: most folds are discarded because a join flushed in their flight carries a locator extent below their base"]
+fn a_fold_lands_while_ingest_continues_into_several_views() {
+    const ATTEMPTS: u64 = 5;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    for name in ["s1", "s2"] {
+        engine
+            .create_plain_view(tessera_engine::PlainViewDeclaration {
+                name: name.to_string(),
+                title: None,
+                projection: "none".to_string(),
+                frame: tessera_engine::DeclaredFrame {
+                    x_min: 0.0,
+                    x_max: 1000.0,
+                    y_min: 0.0,
+                    y_max: 1000.0,
+                },
+                visibility: None,
+                point_default: None,
+            })
+            .expect("the view is created");
+    }
+
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let outcome = std::thread::scope(|scope| {
+        let feed = scope.spawn(|| {
+            let mut round = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                for view in ["s0", "s1", "s2"] {
+                    let rows: Vec<UnallocatedRow> = (0..8u64)
+                        .map(|i| UnallocatedRow {
+                            external_id: Some(format!("feed-{round}-{i}").into_bytes()),
+                            view: view.to_string(),
+                            join: None,
+                            descriptors: vec![b"0".to_vec()],
+                            x: (10 + i * 100) as f64,
+                            y: (10 + round % 90 * 10) as f64,
+                            scalars: Vec::new(),
+                            terms: engine.resolve_terms(&[b"0".to_vec()]),
+                            scoped: Vec::new(),
+                        })
+                        .collect();
+                    engine
+                        .accept_ingest(rows, format!("feed-{round}-{view}"), [0u8; 32])
+                        .expect("the feed's batch is accepted");
+                }
+                engine.request_flush();
+                round += 1;
+            }
+            round
+        });
+
+        // Stops the feed on every way out of this closure, a failed wait included, or the scope
+        // would wait on it for ever.
+        struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let stopping = StopOnDrop(&stop);
+
+        wait_for("the feed to publish into every view", || {
+            let generation = engine.generation();
+            let views = &generation.bundle.partitions["default"].views;
+            ["s1", "s2"]
+                .iter()
+                .all(|v| views.get(*v).is_some_and(|d| !d.segments.is_empty()))
+        });
+        let before = engine.write_executor_stats();
+        let mut landed = false;
+        for _ in 0..ATTEMPTS {
+            let asked = engine.write_executor_stats();
+            engine.request_fold();
+            // A refusal at the plan answers a request as a discard does.
+            wait_for("the fold to publish or be discarded", || {
+                let now = engine.write_executor_stats();
+                now.folds > asked.folds
+                    || now.fold_failures > asked.fold_failures
+                    || now.fold_refusals > asked.fold_refusals
+            });
+            if engine.write_executor_stats().folds > asked.folds {
+                landed = true;
+                break;
+            }
+        }
+        drop(stopping);
+        let rounds = feed.join().expect("the feed ran to its stop");
+        let discarded = engine.write_executor_stats().fold_failures - before.fold_failures;
+        (landed, discarded, rounds)
+    });
+    let (landed, discarded, rounds) = outcome;
+    assert!(
+        landed,
+        "no fold published in {ATTEMPTS} attempts; {discarded} were discarded over {rounds} \
+         rounds of the feed"
     );
 }

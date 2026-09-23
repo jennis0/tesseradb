@@ -10,6 +10,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -1031,4 +1032,322 @@ async fn a_warm_q1_form_takes_no_growth_of_q2() {
 #[tokio::test]
 async fn a_warm_q2_form_takes_no_growth_of_q1() {
     a_warm_form_takes_no_delta_of_another_view(1, Second::Grown).await;
+}
+
+/// A group view dropped and created again at a running service, fed as many rows as its
+/// predecessor held and none of them inside the level's shape, answers the same after a restart
+/// as before it; the untouched view answers the same throughout.
+///
+/// The level takes no publication after the fold, so its version is still the one the fold
+/// stamped the predecessor's row-major column with, and only the incarnation tells the two
+/// views' row spaces apart.
+#[tokio::test]
+async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut declaration = spatial_declaration(SHAPES);
+    declaration["layout"] = json!("row_major_label");
+    register(&server, declaration).await;
+    let (status, body) = put(
+        &server,
+        SHAPES,
+        json!([
+            { "key": "left", "view": "q1", "members": [], "bbox": [0.0, 0.0, 500.0, 1000.0] },
+            { "key": "left", "view": "q2", "members": [], "bbox": [0.0, 0.0, 500.0, 1000.0] },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    flush_and_fold(&server).await;
+    let untouched = served(&server, "quarter:q1", SHAPES).await;
+    assert!(!untouched.is_empty(), "the control view draws its shape");
+
+    recreate(&server, "q2").await;
+    ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    flush(&server).await;
+
+    let recreated = served(&server, "quarter:q2", SHAPES).await;
+    assert!(
+        recreated.iter().all(|(_, count)| *count == 0),
+        "no row of the recreated view is inside the shape: {recreated:?}"
+    );
+    assert_eq!(served(&server, "quarter:q1", SHAPES).await, untouched);
+
+    server.shutdown().await;
+    let server = open(&tmp).await;
+    assert_eq!(
+        served(&server, "quarter:q2", SHAPES).await,
+        recreated,
+        "the recreated view answers as it did before the restart"
+    );
+    assert_eq!(served(&server, "quarter:q1", SHAPES).await, untouched);
+}
+
+/// Drop a view of the group and create it again under the same key.
+async fn recreate(server: &TestServer, key: &str) {
+    drop_key(server, key).await;
+    create_key(server, key).await;
+}
+
+/// Drop a view of the group, leaving its items undeleted.
+async fn drop_key(server: &TestServer, key: &str) {
+    let dropped = server
+        .client
+        .delete(server.control_url(&format!(
+            "/control/views/quarter/{key}?delete_dangling=false"
+        )))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dropped.status().as_u16(), 200);
+}
+
+/// Create a view of the group under `key`.
+async fn create_key(server: &TestServer, key: &str) {
+    let created = server
+        .client
+        .put(server.control_url(&format!("/control/views/quarter/{key}")))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status().as_u16(), 201);
+}
+
+/// As many new items as q2 was built with, every one right of the shapes these tests publish,
+/// returning their `tessera_id`s.
+async fn ingest_right_of_the_shape(server: &TestServer, view: &str, batch_id: &str) -> BTreeSet<u64> {
+    let ids: Vec<Vec<u8>> = (0..IN_VIEW[1]).map(|i| external_id_of(20_000 + i)).collect();
+    let rows: Vec<(Option<&[u8]>, f32, f32, &str)> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (Some(&id[..]), 600.0 + (i % 300) as f32, (i * 3 % 1000) as f32, "0"))
+        .collect();
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(build_ingest_batch_optional(&rows))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["tessera_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect()
+}
+
+async fn flush(server: &TestServer) {
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_until(server, "the flush published", move |now| {
+        now.flushes > before.flushes
+    })
+    .await;
+}
+
+/// Request a fold and wait until it has either published or been discarded, returning whether
+/// it published.
+async fn fold_settled(server: &TestServer) -> bool {
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_until(server, "the fold settled", move |now| {
+        now.folds > before.folds || now.fold_failures > before.fold_failures
+    })
+    .await;
+    server.state.engine.write_executor_stats().folds > before.folds
+}
+
+/// The `tessera_id`s one view serves over the whole extent, to a principal holding every term.
+async fn points_of(server: &TestServer, view: &str) -> BTreeSet<u64> {
+    points_as(server, &["0", "1"], view).await
+}
+
+/// The same, to a principal holding `terms`.
+async fn points_as(server: &TestServer, terms: &[&str], view: &str) -> BTreeSet<u64> {
+    let auth = authorise(server, terms).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .json(&json!({"view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1000}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    points.into_iter().map(|(id, _)| id).collect()
+}
+
+/// A view dropped and created again while a fold is in flight serves none of its predecessor's
+/// rows once that fold settles, and exactly its own items after a restart and a later fold.
+#[tokio::test]
+async fn a_view_recreated_during_a_fold_takes_none_of_its_predecessors_rows() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    // Something for the fold to fold.
+    ingest_right_of_the_shape(&server, "quarter:q1", "into-q1").await;
+    flush(&server).await;
+
+    server.state.engine.set_fold_paused_for_test(true);
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !server.state.engine.fold_is_holding_for_test() {
+        assert!(std::time::Instant::now() < deadline, "the fold never reached its hold");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    recreate(&server, "q2").await;
+    assert!(points_of(&server, "quarter:q2").await.is_empty());
+
+    server.state.engine.set_fold_paused_for_test(false);
+    wait_until(&server, "the fold settled", move |now| {
+        now.folds > before.folds || now.fold_failures > before.fold_failures
+    })
+    .await;
+    assert!(
+        points_of(&server, "quarter:q2").await.is_empty(),
+        "the fold that was in flight gives the recreated view none of its predecessor's rows"
+    );
+
+    let own = ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    flush(&server).await;
+    assert_eq!(points_of(&server, "quarter:q2").await, own);
+
+    server.shutdown().await;
+    let server = open(&tmp).await;
+    assert_eq!(points_of(&server, "quarter:q2").await, own, "after a restart");
+
+    assert!(fold_settled(&server).await, "a later fold lands");
+    assert_eq!(points_of(&server, "quarter:q2").await, own, "after a later fold");
+}
+
+/// A row-major spatial level's folded column covers the view's base alone: a flushed segment with
+/// as many rows as the base is resolved from its own geometry after a restart, not read off the
+/// column.
+#[tokio::test]
+async fn a_flushed_segment_the_size_of_the_base_is_not_read_off_the_base_column() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut declaration = spatial_declaration(SHAPES);
+    declaration["layout"] = json!("row_major_label");
+    register(&server, declaration).await;
+    let (status, body) = put(
+        &server,
+        SHAPES,
+        json!([{ "key": "left", "view": "q2", "members": [], "bbox": [0.0, 0.0, 500.0, 1000.0] }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    flush_and_fold(&server).await;
+
+    ingest_right_of_the_shape(&server, "quarter:q2", "outside").await;
+    flush(&server).await;
+    let before = served(&server, "quarter:q2", SHAPES).await;
+    assert_eq!(before.len(), 1, "the shape is drawn: {before:?}");
+
+    server.shutdown().await;
+    let server = open(&tmp).await;
+    assert_eq!(served(&server, "quarter:q2", SHAPES).await, before);
+}
+
+/// A view dropped and created again with as many rows as its predecessor held serves exactly its
+/// own items after a restart, to a principal who may see them and to one who may not.
+#[tokio::test]
+async fn a_recreated_view_the_size_of_its_predecessor_serves_its_own_items_after_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    recreate(&server, "q2").await;
+    let own = ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    flush(&server).await;
+    assert_eq!(points_of(&server, "quarter:q2").await, own);
+
+    // The new items carry `0` alone, so a principal holding `1` alone sees none of them. The
+    // dropped view's items divisible by three carry `1`.
+    assert!(points_as(&server, &["1"], "quarter:q2").await.is_empty());
+
+    server.shutdown().await;
+    let server = open(&tmp).await;
+    assert_eq!(points_of(&server, "quarter:q2").await, own);
+    assert!(
+        points_as(&server, &["1"], "quarter:q2").await.is_empty(),
+        "a restart masks the recreated view's rows by its own items"
+    );
+}
+
+/// A view dropped while its first flush is in flight takes none of that flush's rows, whether its
+/// key is created again during the flight or only after it, live and after a restart.
+#[tokio::test]
+async fn a_view_dropped_during_its_first_flush_takes_none_of_its_rows() {
+    for recreated_in_flight in [true, false] {
+        let tmp = TempDir::new().unwrap();
+        let server = serve(&tmp).await;
+        create_key(&server, "q3").await;
+        ingest_right_of_the_shape(&server, "quarter:q3", "into-q3").await;
+
+        server.state.engine.set_flush_paused_for_test(true);
+        ticked(&server).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !server.state.engine.flush_is_holding_for_test() {
+            assert!(std::time::Instant::now() < deadline, "the flush never reached its hold");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        if recreated_in_flight {
+            recreate(&server, "q3").await;
+        } else {
+            drop_key(&server, "q3").await;
+        }
+        server.state.engine.set_flush_paused_for_test(false);
+        wait_until(&server, "the held flush left the pool", |now| !now.flush_in_flight).await;
+        // Two ticks: the first drains the handed-back flush, the second follows its publication.
+        ticked(&server).await;
+        ticked(&server).await;
+        if !recreated_in_flight {
+            create_key(&server, "q3").await;
+        }
+        assert!(
+            points_of(&server, "quarter:q3").await.is_empty(),
+            "the view created again holds none of its predecessor's in-flight rows \
+             (recreated in flight: {recreated_in_flight})"
+        );
+
+        server.shutdown().await;
+        let server = open(&tmp).await;
+        assert!(
+            points_of(&server, "quarter:q3").await.is_empty(),
+            "nor after a restart (recreated in flight: {recreated_in_flight})"
+        );
+        server.shutdown().await;
+    }
 }

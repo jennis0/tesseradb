@@ -12,7 +12,7 @@ import {composeFilters, emptyDraft, type ClauseVerb, type FilterDraft} from './f
 import {withMember, withMembers, withoutMember, type MemberClause} from './members.js';
 import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
 import {insideBox, insidePolygon, regionOperand, withRegion, type WorldPolygon} from './region.js';
-import {isFilterLayer, layerClosure} from './layers.js';
+import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
 import {requestLevels} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
 import {artifactColours, positionalEntry, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
@@ -53,12 +53,12 @@ import type {
  * to `requestAnimationFrame`/`setTimeout`, so the whole store is testable in node against a fake
  * `fetch` (or a fake `TesseraClient`) with a fake scheduler.
  *
- * **The membership column** (D12, §5.10): the point path names the layers that are on with their
- * closure, so each band arrives with its ordinals named through the session table; the
- * `artifacts` projection carries the table, the served set's ordinals and each one's colour, and
- * the colour coverage over the bands in view — a band whose ordinals no longer resolve to
- * anything served, or that lacks a column for a layer now on, is colour-stale and is refetched
- * after novel ground by the replica's own path.
+ * **The membership column** (D12, §5.10): the point path names the layers drawn with their
+ * closure, and the layer the points are coloured by, so each band arrives with its ordinals named
+ * through the session table; the `artifacts` projection carries the table, the served set's
+ * ordinals and each one's colour, and the colour coverage over the bands in view — a band whose
+ * ordinals no longer resolve to anything served, or that lacks a column for a layer now asked
+ * for, is colour-stale and is refetched after novel ground by the replica's own path.
  */
 
 export type {Count, Masked} from './counts.js';
@@ -198,11 +198,17 @@ export type MarksProjection = {
 export type TilesProjection = {tiles: Composition['tiles']};
 
 export type ArtifactsProjection = {
-  /** The first layer on. */
+  /** The first layer drawn. */
   layer: string | null;
-  /** Every layer on — the closure the request names (decision 0096). */
+  /** Every layer drawn, with its closure (decision 0096). The colour layer is here only when it is drawn too. */
   layers: string[];
+  /** The served artifacts of the drawn layers — what the map, the lists and the labels draw. */
   served: Artifact[];
+  /**
+   * The served artifacts of the layer the points are coloured by (`colourBy = "cluster:<layer>"`),
+   * drawn or not; empty under a column colouring. The legend's swatches and levels read these.
+   */
+  colourServed: Artifact[];
   lineage: ServedLineage;
   status: ArtifactChannelState['status'];
   refusal: {code: string; detail: string} | null;
@@ -215,7 +221,7 @@ export type ArtifactsProjection = {
   held: number;
   /** The session artifact table, for a consumer resolving ordinals (§5.10). */
   table: SessionArtifactTable;
-  /** The served set's ordinals — what an opened artifact resolves through. */
+  /** The drawn served set's ordinals — what an opened or hovered artifact resolves through. */
   servedOrdinals: ReadonlySet<number>;
   /**
    * The shapes fetched by identifier, by `tesseraId` — what the map draws.
@@ -385,11 +391,13 @@ export interface Store {
    * forget: a control calls it on every keystroke it actually changes and reads the projection.
    */
   suggest(column: string, q: string): void;
-  /** Turn layers on — each with its closure (decision 0096); `[]` turns every layer off. */
+  /** Draw layers — each with its closure (decision 0096); `[]` draws none. */
   setLayers(names: string[]): void;
   /**
-   * Colour by a declared column, by `cluster:<layer>` for a layer that is on (a lookup-texture
-   * switch on the vis side, never a per-point pass), or `null` for uniform.
+   * Colour by a declared column, by `cluster:<layer>` for any layer {@link colourLayers} lists
+   * (a lookup-texture switch on the vis side, never a per-point pass), or `null` for uniform.
+   * Colouring by a layer does not draw it. A layer `meta` does not list as one that can colour
+   * is named in no request and traced as `colour-by`; the points then draw uniform.
    */
   setColourBy(column: string | null): void;
   setPalette(kind: PaletteKind): void;
@@ -560,7 +568,7 @@ export function createStore(options: StoreOptions): Store {
   let replica: Replica | null = null;
   let presenter: Presenter | null = null;
   let channel: ArtifactChannel | null = null;
-  /** The layers `setLayers` last named — held here so a call before meta survives to the channel. */
+  /** The layers drawn, as `setLayers` last named them — held here so a call before meta survives to the channel. */
   let layersOn: string[] = [];
   let lastView: {input: ViewInput} | null = null;
   let queuedView: ViewInput | null = null; // a setView before meta arrives
@@ -582,7 +590,7 @@ export function createStore(options: StoreOptions): Store {
     view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
@@ -720,13 +728,14 @@ export function createStore(options: StoreOptions): Store {
       async (req, signal, background, onPart) => {
         const tok = await ensureToken();
         tokenEverUsed = true;
-        // The point path names the layers that are on, with their closure, and pays their pass
-        // (§5.10): that is what puts the membership column on each band. `[]` until a layer is on
-        // — and `[]` on the replica's counts-only revalidation, which absorbs no points and would
-        // pay the artifact pass for a frame nobody reads.
+        // The point path names the layers asked for and pays their pass (§5.10): that is what puts
+        // the membership column on each band. `[]` until a layer is drawn or coloured by — and
+        // `[]` on the replica's counts-only revalidation, which absorbs no points and would pay the
+        // artifact pass for a frame nobody reads.
         // The point path carries the same budget as the channel, so a point's membership column
         // names the deepest artifact of the *same* cut the panels show.
         const zoom = ownPresenter?.view?.view.zoom ?? 0;
+        const layers = req.k === 0 ? [] : layersAsked();
         return client.viewport(
           tok,
           {
@@ -736,12 +745,12 @@ export function createStore(options: StoreOptions): Store {
             // Beside it and never instead of it: the draw is unchanged by a highlight, so this
             // costs the response three columns and nothing else (`highlight-and-hierarchy.md` §2).
             highlight: requestHighlight(),
-            layers: req.k === 0 ? [] : layersOn,
-            ...(req.k === 0 || layersOn.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
+            layers,
+            ...(layers.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
             // The levels from the camera zoom, so the membership column names the same cut the
             // channel asks for — and not the deepest level alone, which is what the server's
             // depth-keyed default answers a budget-deepened request with (`requestLevels`).
-            ...(req.k === 0 || layersOn.length === 0 || requestLevels(m.layers, layersOn, zoom) === undefined ? {} : {levels: requestLevels(m.layers, layersOn, zoom)})
+            ...(layers.length === 0 || requestLevels(m.layers, layers, zoom) === undefined ? {} : {levels: requestLevels(m.layers, layers, zoom)})
           },
           signal,
           background,
@@ -815,7 +824,7 @@ export function createStore(options: StoreOptions): Store {
     // A `setLayers` that arrived before meta is honoured now: the channel is what asks, and it
     // did not exist to be told. (Found by the artifacts smoke: the demo chooses its layer before
     // opening the session's store, and the choice was lost on every principal switch.)
-    viewChannel.setLayers(layersOn);
+    viewChannel.setLayers(layersAsked());
 
     const machinery: ViewMachinery = {id, replica: built, presenter: ownPresenter, channel: viewChannel};
     perView.set(id, machinery);
@@ -859,6 +868,7 @@ export function createStore(options: StoreOptions): Store {
     }
 
     layersOn = drawnOnly(layerClosure(meta.layers, layersOn));
+    traceUnknownColourLayer();
     bind(machineryFor(viewId));
 
     if (queuedView) {
@@ -1041,17 +1051,24 @@ export function createStore(options: StoreOptions): Store {
     // The served set's ordinals: the channel took its reference before it emitted, so every
     // served artifact is named. They are what an opened artifact resolves through; the colours
     // are built over the whole table, which is a superset of them.
+    // The channel is asked for the colour layer as well as the drawn ones. Its rows are in the
+    // table, so the colours cover them, and they reach `colourServed`; only the drawn layers'
+    // rows reach `served`, which is what every drawn surface reads.
+    const drawn = new Set(layersOn);
+    const served = state.artifacts.every((a) => drawn.has(a.layer)) ? state.artifacts : state.artifacts.filter((a) => drawn.has(a.layer));
+    const coloured = colourLayer();
     const servedOrdinals = new Set<number>();
-    for (const a of state.artifacts) {
+    for (const a of served) {
       const ordinal = table.ordinalOf(a.layer, a.tesseraId);
       if (ordinal !== 0) servedOrdinals.add(ordinal);
     }
     replaceProjection('artifacts', {
       ...projections.artifacts,
-      layer: state.layer,
-      layers: state.layers,
-      served: state.artifacts,
-      lineage: servedLineage(state.artifacts),
+      layer: layersOn[0] ?? null,
+      layers: layersOn,
+      served,
+      colourServed: coloured === null ? [] : state.artifacts.filter((a) => a.layer === coloured),
+      lineage: servedLineage(served),
       status: state.status,
       refusal: state.refusal,
       version: state.version,
@@ -1126,8 +1143,8 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * Colour coverage (§5.10): per band in view, over its distinct list — never its points — does
-   * every ordinal resolve to something colourable, for every layer on? A band that has one that
-   * does not, or that lacks the column for a layer on (fetched before the layer was), is
+   * every ordinal resolve to something colourable, for every layer asked for? A band that has one
+   * that does not, or that lacks the column for a layer asked for (fetched before it was), is
    * colour-stale: it keeps drawing what resolves, and its tile is asked for again after novel
    * ground, once per served set, through the replica's coverage retraction and the driver's
    * ordinary plan.
@@ -1143,7 +1160,8 @@ export function createStore(options: StoreOptions): Store {
    */
   function checkColourCoverage(): void {
     const a = projections.artifacts;
-    if (!replica || !presenter || a.status !== 'shown' || a.layers.length === 0) {
+    const asked = layersAsked();
+    if (!replica || !presenter || a.status !== 'shown' || asked.length === 0) {
       if (a.coverage.stale !== 0 || a.coverage.current !== 0) replaceProjection('artifacts', {...a, coverage: {current: 0, stale: 0}});
       return;
     }
@@ -1160,7 +1178,7 @@ export function createStore(options: StoreOptions): Store {
     for (const band of projections.marks.bands) {
       if (visible && (band.depth !== depth || !rectContainsTile(visible, band.x, band.y))) continue;
       let ok = true;
-      for (const layer of a.layers) {
+      for (const layer of asked) {
         const m = band.membership[layer];
         if (!m) {
           ok = false;
@@ -1345,7 +1363,7 @@ export function createStore(options: StoreOptions): Store {
     awaitingSwitchFrame = true;
     // Shared state reaches a view when it becomes current, rather than at every change: a change
     // pushed to a held view would have it *ask* (§3).
-    incoming.channel.setLayers(layersOn);
+    incoming.channel.setLayers(layersAsked());
     incoming.presenter.setBudget(budget);
     // The content key was the frame of another view's replica, and the colour refetch's record is
     // per band key with no view axis — both are about what was drawn, and what was drawn is gone.
@@ -1434,6 +1452,50 @@ export function createStore(options: StoreOptions): Store {
     if (!meta) return [...names];
     const filterLayers = new Set(meta.layers.filter(isFilterLayer).map((l) => l.name));
     return names.filter((n) => !filterLayers.has(n));
+  }
+
+  /** The layer `colourBy` colours by, where `meta` lists it as one that can colour; else null. */
+  function colourLayer(): string | null {
+    if (!meta || !colourBy?.startsWith(CLUSTER_PREFIX)) return null;
+    const name = colourBy.slice(CLUSTER_PREFIX.length);
+    return colourLayers(meta.layers).some((l) => l.name === name) ? name : null;
+  }
+
+  function traceUnknownColourLayer(): void {
+    if (meta && colourBy?.startsWith(CLUSTER_PREFIX) && colourLayer() === null) onTrace('colour-by', {refused: 1, layer: colourBy.slice(CLUSTER_PREFIX.length)});
+  }
+
+  /**
+   * The layers a viewport request names: the drawn layers with their closure, and the colour
+   * layer alone. The colour layer's dependents are not asked for, since nothing of it is drawn.
+   */
+  function layersAsked(): string[] {
+    const coloured = colourLayer();
+    return coloured === null || layersOn.includes(coloured) ? layersOn : [...layersOn, coloured];
+  }
+
+  /**
+   * Point the channel at the layers asked for, and publish the artifacts under the drawn layers and
+   * the colour layer as they now stand. A layer newly asked for is fetched at once: the channel
+   * asks for its artifacts, and every band in view that lacks its membership column is
+   * colour-stale and refetched centre-first as the coverage check finds it (§5.10). A layer no
+   * longer asked for costs nothing: held bands keep its column and the rows are filtered out here.
+   */
+  function askLayers(): void {
+    if (!channel) {
+      // Before meta: record the intent where a reader sees it; the channel adopts it at meta.
+      replaceProjection('artifacts', {...projections.artifacts, layer: layersOn[0] ?? null, layers: layersOn});
+      return;
+    }
+    const before = channel.current.layers;
+    const asked = layersAsked();
+    // The channel publishes when its layers move; when they do not, the drawn set may still have.
+    if (asked.length === before.length && asked.every((l, i) => l === before[i])) onArtifacts(channel.current);
+    else channel.setLayers(asked);
+    if (asked.some((l) => !before.includes(l)) && presenter?.view) {
+      const v = presenter.view;
+      channel.refresh(v.view, v.width, v.height);
+    }
   }
 
   function requestFilters(): FilterExpr | null {
@@ -1647,20 +1709,7 @@ export function createStore(options: StoreOptions): Store {
   function setLayers(names: string[]): void {
     // Usually one, with its closure (decision 0096) — the request names every layer in it.
     layersOn = meta ? drawnOnly(layerClosure(meta.layers, names)) : names;
-    if (!channel) {
-      // Before meta: record the intent where a reader sees it; the channel adopts it at meta.
-      replaceProjection('artifacts', {...projections.artifacts, layer: layersOn[0] ?? null, layers: layersOn});
-      return;
-    }
-    channel.setLayers(layersOn);
-    if (lastView && presenter?.view) {
-      const v = presenter.view;
-      channel?.refresh(v.view, v.width, v.height);
-    }
-    // A layer switched on: no held band carries its column, so every band in view is colour-stale
-    // at once and refetches centre-first as the coverage check finds them (§5.10). The hulls,
-    // names and counts come at once from the channel; the points take colour as bands land.
-    checkColourCoverage();
+    askLayers();
   }
 
   function recolour(): void {
@@ -1685,11 +1734,15 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function setColourBy(column: string | null): void {
+    const before = colourLayer();
     colourBy = column;
     replaceProjection('legend', {...projections.legend, colourBy: column});
-    // No refetch: every declared column is already in the held response, so this is an accumulator
-    // pass over what is drawn (§4). The vis side rebuilds its layers; the mark count cannot move.
-    // `cluster:<layer>` is a uniform switch on the vis side and accumulates nothing.
+    traceUnknownColourLayer();
+    // `cluster:<layer>` is a uniform switch on the vis side and accumulates nothing. Its layer is
+    // fetched only where it is not already asked for (`askLayers`).
+    if (colourLayer() !== before) askLayers();
+    // No refetch for a column: every declared column is already in the held response, so this is
+    // an accumulator pass over what is drawn (§4). The mark count cannot move.
     if (column && projections.view.composition) accumulateEncoding(projections.view.composition);
   }
 

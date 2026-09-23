@@ -64,7 +64,7 @@ from .verification import (
     underlay_counts,
     verify_census,
     verify_rows,
-    _streams_table,
+    streams_table,
 )
 
 SEED = 20260815
@@ -290,7 +290,7 @@ def test_negative_control_a_corrupted_expectation_is_rejected(run):
         if isinstance(q, Viewport) and q.zoom == 3 and q.filters is None
     )
     canon = run.recorded[query]
-    served_fx = _streams_table(canon.points).column("fx_key").to_pylist()
+    served_fx = streams_table(canon.points).column("fx_key").to_pylist()
     expected = expected_items(SEED, set(served_fx))
 
     live = [fx for fx in served_fx if fx not in run.denied_fx]
@@ -339,6 +339,6 @@ def test_the_points_tail_is_named_by_its_render_declaration(run):
         for q in run.recorded
         if isinstance(q, Viewport) and q.zoom == 3 and q.filters is None
     )
-    table = _streams_table(run.recorded[query].points)
+    table = streams_table(run.recorded[query].points)
     render_names = [c.name for c in run.declaration.render_columns()]
     assert table.schema.names == ["tessera_id", "code", *render_names]

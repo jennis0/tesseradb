@@ -6,9 +6,9 @@
 //! a Parquet file — so a reader that took one and refused the other would refuse a corpus for how
 //! its producer happened to lay it out.
 //!
-//! Every reader in this crate that wants a string column takes it through [`Utf8Column`], which
-//! holds a reference to whichever array the file carries and answers `value` from both. Nothing is
-//! converted: the array is read where it lies. [`Utf8Values`] is the same choice held by value,
+//! A reader that wants a string column takes it through [`Utf8Column`], which holds a reference to
+//! whichever array the file or batch carries and answers `value` from both. Nothing is converted:
+//! the array is read where it lies. [`Utf8Values`] is the same choice held by value,
 //! for a decoded batch column that outlives the borrow of its batch.
 //!
 //! The schema-only half of the same rule is [`is_utf8`], which is what `tessera check` asks of a

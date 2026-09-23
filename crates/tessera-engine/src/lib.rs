@@ -133,6 +133,12 @@ pub use tessera_spatial::Projection;
 pub use tessera_store::manifest::Quantisation;
 // A batch's layer column is read by the rule a build reads a member table's key column by.
 pub use tessera_store::member_key;
+// A batch's scalar column is read by the rule a build reads a points file's attribute column by,
+// and each row's value arrives as the build's value type.
+pub use tessera_spatial::tiler::ScalarValue;
+pub use tessera_store::scalar_column;
+// A batch's category column is read by the rule a build reads a points file's category keys by.
+pub use tessera_store::utf8;
 // The write path's **outcome** vocabulary, and nothing else.
 //
 // `LifecycleHandle`, `LifecycleQueues`, `Command` and `Reply` are deliberately **not** here, and

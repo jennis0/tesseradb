@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-try:  # 3.11+
-    import tomllib
-except ModuleNotFoundError:  # 3.10 on this box
-    import tomli as tomllib
 import base64
 import concurrent.futures
 import datetime
@@ -32,6 +28,7 @@ from .census import (
     coverage_failures,
     filter_probes,
     incomplete_sentences,
+    probe_failures,
 )
 from .control import Control, wait_for
 from .holdout import HoldOut
@@ -184,8 +181,8 @@ class Cycle:
         base_ids, held = split_entities(
             declared_entities(self.rung), self.args.fraction, self.args.seed
         )
-        self.result["base_rows"] = int(len(base_ids))
-        self.result["holdout_rows"] = int(len(held))
+        self.result["base_entities"] = int(len(base_ids))
+        self.result["holdout_entities"] = int(len(held))
         self.held = held
         if self.args.reuse_base and (bundle / "CURRENT").exists():
             self.log(f"reusing {bundle}")
@@ -204,7 +201,7 @@ class Cycle:
         else:
             if base_dir.exists():
                 shutil.rmtree(base_dir)
-            self.log(f"splitting: base {len(base_ids):,} rows, hold-out {len(held):,} rows")
+            self.log(f"splitting: base {len(base_ids):,} entities, hold-out {len(held):,} entities")
             write_base_inputs(self.rung, base_dir, base_ids)
             # Release what the split left in the pool: the build runs beside this process.
             pa.default_memory_pool().release_unused()
@@ -405,7 +402,7 @@ class Cycle:
                 head_rows=head if first else 0,
                 log=self.log,
                 view=entry,
-                members=first,
+                members=self.column_layers() if first else (),
             )
             self.log(
                 f"ingesting {len(self.held):,} rows into {name} from "
@@ -795,15 +792,18 @@ class Cycle:
         }
 
     def flush_and_wait(self, control) -> tuple[int, bool, float]:
-        """`POST /control/flush`, and the wait for it to land: `(status, landed, seconds)`. Every
-        view flushes on its own, and a flush the server discards stays buffered until it is
-        planned again, so the flush has landed when the buffer holds nothing."""
-        code = control.flush().status_code
+        """`POST /control/flush`, and the wait for it to land: `(status, landed, seconds)`. The
+        flush answers the publication number of the cycle that carries the buffered work, and it
+        has landed once `/control/status`'s `publication` reaches that number."""
+        r = control.flush()
+        if r.status_code != 202:
+            return r.status_code, False, 0.0
+        publication = int(r.json()["publication"])
         landed, wall = wait_for(
-            lambda: control.status()["write_executor"]["flush"]["buffered_items"] == 0,
+            lambda: control.status()["publication"] >= publication,
             timeout=self.args.flush_timeout,
         )
-        return code, landed, wall
+        return r.status_code, landed, wall
 
     def do_fold(self, control) -> dict:
         """`POST /control/compact`, and the compaction block once a fold has landed."""
@@ -945,10 +945,11 @@ class Cycle:
             all_in_frames = {v["id"]: v["quantisation"] for v in all_in_meta["views"]}
             self.meta_layers = all_in_meta.get("layers") or []
             self.choose_boxes(allin.viewer, reference_token)
-            self.probes = {
-                view["name"]: filter_probes(self.rung, self.views, view, all_in_meta)
-                for view in self.views
-            }
+            offered: dict[str, dict[str, int]] = {}
+            for view in self.views:
+                self.probes[view["name"]], offered[view["name"]] = filter_probes(
+                    self.rung, self.views, view, all_in_meta, self.binary
+                )
             reference = self.census_views(allin, allin.credential("session"), ladder)
             self.reference = reference
         finally:
@@ -970,7 +971,7 @@ class Cycle:
             compared["frames_equal"] = self.frames[name] == all_in_frames.get(name)
             # What the folded deployment's census reached: the zooms, and each layer's levels.
             compared["census_coverage"] = census_coverage(
-                folded[name], self.declared_levels(name)
+                folded[name], self.declared_levels(name), offered[name], reference[name]
             )
             out["views"][name] = compared
             for surface, count in compared["differences_by_surface"].items():
@@ -1086,7 +1087,12 @@ class Cycle:
         # deleted holder never blocks a re-ingest, so each must be accepted rather than 409'd,
         # and each later view must join the entity the anchor's pass allocated.
         out["reingest_by_view"], answered = self.ingest_views(
-            self.views, deleted, hold.max_body_bytes, hold.batch_rows, "recycle"
+            self.views,
+            deleted,
+            hold.max_body_bytes,
+            hold.batch_rows,
+            "recycle",
+            lambda view: self.column_layers() if view["name"] == self.anchor else (),
         )
         passes = out["reingest_by_view"].values()
         out["reingest"] = {
@@ -1113,11 +1119,22 @@ class Cycle:
         out["overlay"] = control.status()["overlay"]
         return out
 
+    def column_layers(self, view: dict | None = None) -> list[str]:
+        """The column-route layers a pass carries member columns for: every one on the pass that
+        allocates the entities, or those drawn on `view`, by name or by its group."""
+        return [
+            layer["name"]
+            for layer in declared_layers(self.rung)
+            if layer["route"] == "column"
+            and (view is None or {view["id"], view["group"]} & set(layer["views"]))
+        ]
+
     def ingest_views(
-        self, views, entities, cap: int, batch_rows: int, label: str
+        self, views, entities, cap: int, batch_rows: int, label: str, members
     ) -> tuple[dict, dict]:
         """`entities`' rows in each of `views`, one pass per view in order, and each entity's
-        answered tessera_ids across the passes."""
+        answered tessera_ids across the passes. `members(view)` names the column-route layers
+        whose member columns that view's pass carries."""
         figures: dict = {}
         answered: dict[int, set] = {}
         for view in views:
@@ -1129,7 +1146,7 @@ class Cycle:
                 batch_rows,
                 log=self.log,
                 view=view,
-                members=name == self.anchor,
+                members=members(view),
                 record_order=True,
             )
             tessera_ids: dict[int, int] = {}
@@ -1146,8 +1163,9 @@ class Cycle:
     def do_view_recreate(self, control) -> dict:
         """Drop the last key of a group that owns its views, which drops that key's view in every
         group sharing it, create it again from its roster record, and send it every row and every
-        group-scoped layer artifact of that key: each view must then match the all-in build's
-        census, which declared the view fresh."""
+        artifact of that key of each layer scoped to one of those groups: each view must then
+        match the all-in build's census, which declared the view fresh. A column-route layer's
+        roster goes first and its members travel on the batches, as on the first ingest."""
         target = next(
             (view for view in reversed(self.views) if view["group"] and view["group"] == view["owner"]),
             None,
@@ -1157,6 +1175,8 @@ class Cycle:
         group, key = target["owner"], target["key"]
         views = [view for view in self.views if (view["owner"], view["key"]) == (group, key)]
         names = [view["name"] for view in views]
+        groups = {view["group"] for view in views}
+        scoped = [layer for layer in declared_layers(self.rung) if layer["scope_group"] in groups]
         out: dict = {"group": group, "key": key, "views": names}
         dropped = control.drop_view(group, key)
         out["drop"] = {"status": dropped.status_code, "body": dropped.text[:600]}
@@ -1164,15 +1184,24 @@ class Cycle:
         created = control.create_view(group, key, self.roster_record(target))
         out["create"] = {"status": created.status_code, "body": created.text[:600]}
         assert self.limits is not None, "the limits block is read before a view is recreated"
+        out["publish_rosters"] = self.publish_key(
+            control,
+            key,
+            [layer for layer in scoped if layer["route"] == "column" and layer["roster"] is not None],
+            members=False,
+        )
         out["ingest_by_view"], answered = self.ingest_views(
             views,
             np.sort(declared_entities(self.rung)),
             int(self.limits["ingest"]["max_batch_bytes"]),
             int(self.limits["ingest"]["max_batch_rows"]),
             "recreate",
+            self.column_layers,
         )
         out["items_with_several_ids"] = sum(1 for tids in answered.values() if len(tids) > 1)
-        out["publish"] = self.publish_key(control, key)
+        out["publish"] = self.publish_key(
+            control, key, [layer for layer in scoped if self.routed_elsewhere(layer) is None]
+        )
         _, out["flushed"], _ = self.flush_and_wait(control)
         after = {
             name: census(
@@ -1194,46 +1223,49 @@ class Cycle:
 
     def roster_record(self, view: dict) -> dict:
         """A group view's roster record as `PUT /control/views/{group}/{key}` takes it: each
-        metadata name its group declares, a timestamp as microseconds since the epoch, and the
-        view's own visibility where it declares one."""
-        declared = tomllib.loads((self.rung / "corpus.toml").read_text())
-        owner = next(g for g in declared.get("view_group", []) if g["name"] == view["owner"])
+        metadata name its group declares and the record carries, a date or time as microseconds
+        since the epoch, and the view's own visibility where it declares one."""
         metadata = {}
-        for name in owner.get("metadata") or {}:
-            value = view["record"][name]
+        for name in view["metadata"]:
+            value = view["record"].get(name)
+            if value is None:
+                continue
+            if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+                value = datetime.datetime.combine(value, datetime.time())
             if isinstance(value, datetime.datetime):
+                # A time with no offset is read as UTC, as a timestamp column's raw value is.
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=datetime.timezone.utc)
                 value = (value - EPOCH) // datetime.timedelta(microseconds=1)
             metadata[name] = value
         record: dict = {"metadata": metadata}
-        if "visibility" in view["record"]:
+        if view["record"].get("visibility") is not None:
             record["visibility"] = view["record"]["visibility"]
         return record
 
-    def publish_key(self, control, key: str) -> dict:
-        """Every group-scoped layer's artifacts of one view key, published again."""
+    def publish_key(self, control, key: str, layers: list[dict], members: bool = True) -> dict:
+        """Each of `layers`' artifacts of one view key, picked out of its roster by the layer's
+        view column, published again; without their members where `members` is false."""
         out: dict = {}
-        for layer in declared_layers(self.rung):
-            if layer["view_column"] is None or layer["roster"] is None:
-                continue
+        for layer in layers:
             work = self.work / f"recreate-{layer['name'].replace('/', '__')}"
             work.mkdir(parents=True, exist_ok=True)
             roster = pq.read_table(layer["roster"])
             kept = roster.filter(pc.equal(roster.column(layer["view_column"]), key))
             pq.write_table(kept, work / layer["roster"].name)
-            out[layer["name"]] = self.publish_layer(
-                control, layer["name"], {**layer, "roster": work / layer["roster"].name}, work / "publish"
-            )
+            record = {**layer, "roster": work / layer["roster"].name}
+            if not members:
+                record["members"] = None
+            out[layer["name"]] = self.publish_layer(control, layer["name"], record, work / "publish")
         return out
 
     def viewport_status(self, view: str) -> int:
         """The status a fresh session's zoom-0 viewport on `view` answers."""
         token, _ = serve_battery.authorise(self.served.session, self.session_cred, self.all_terms)
-        r = requests.post(
-            f"{self.served.viewer}/v1/viewport",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"view": view, "zoom": 0, "bbox": full_box(self.frames[view]), "k": 0},
-            timeout=60,
+        r = serve_battery.viewport_request(
+            self.served.viewer, token, view, 0, full_box(self.frames[view]), 0, layers=None, timeout=60
         )
+        r.close()
         return r.status_code
 
     # -- what did not hold -----------------------------------------------------------------
@@ -1293,6 +1325,8 @@ class Cycle:
             if isinstance(phase, dict) and phase.get("failed"):
                 out.append(f"the {name} phase failed: {phase['failed']}")
         flush = result.get("flush") or {}
+        if isinstance(flush, dict) and flush.get("published") is False:
+            out.append(f"the flush did not reach its publication (status {flush.get('status')})")
         if isinstance(flush, dict) and flush.get("visibility_reached") is False:
             out.append(
                 f"the flush never reached the expected visible count: {flush.get('visible')} of "
@@ -1315,6 +1349,10 @@ class Cycle:
             out += [
                 f"the census on {name} proved nothing about a declared level: {sentence}"
                 for sentence in coverage_failures(compared.get("census_coverage") or {})
+            ]
+            out += [
+                f"the census on {name} {sentence}"
+                for sentence in probe_failures(compared.get("census_coverage") or {})
             ]
         out += [
             f"the census compared nothing on view {name}"
@@ -1346,45 +1384,15 @@ class Cycle:
                     f"the write cycle's re-ingest answered {reingest['items_with_several_ids']} "
                     f"item(s) with a different tessera_id in different views"
                 )
+            if cycle.get("flushed") is False:
+                out.append("the write cycle's flush did not reach its publication")
             for name, counts in (cycle.get("by_view") or {}).items():
                 if counts.get("after") != counts.get("expected"):
                     out.append(
                         f"the write cycle ended at {counts.get('after')} visible on {name}, "
                         f"expecting {counts.get('expected')}"
                     )
-        recreate = result.get("view_recreate") or {}
-        if isinstance(recreate, dict) and recreate.get("views") and not recreate.get("failed"):
-            where = f"{recreate['group']}/{recreate['key']}"
-            if recreate["drop"]["status"] != 200:
-                out.append(f"dropping view {where} answered {recreate['drop']['status']}")
-            if recreate["create"]["status"] != 201:
-                out.append(f"creating view {where} again answered {recreate['create']['status']}")
-            out += [
-                f"view {name} answered {status} after it was dropped, not 404"
-                for name, status in recreate["answers_after_drop"].items()
-                if status != 404
-            ]
-            for name, figures in recreate["ingest_by_view"].items():
-                if figures.get("accepted") != figures.get("rows_offered"):
-                    out.append(
-                        f"the recreated view {name} accepted {figures.get('accepted')} of "
-                        f"{figures.get('rows_offered')} rows offered"
-                    )
-            if recreate.get("items_with_several_ids"):
-                out.append(
-                    f"the recreated views answered {recreate['items_with_several_ids']} item(s) "
-                    f"with a different tessera_id in each"
-                )
-            for layer, entry in (recreate.get("publish") or {}).items():
-                if entry.get("refusals"):
-                    out.append(f"republishing {layer} for {where} was refused {entry['refusals']} time(s)")
-            out += [
-                f"the census on the recreated view {name} is not the all-in build's: "
-                f"{compared['differences_by_surface']}"
-                for name, compared in (recreate.get("census") or {}).items()
-                if not compared["equal"]
-            ]
-            out += list(recreate.get("incomplete") or [])
+        out += recreate_failures(result.get("view_recreate") or {})
         restart = result.get("restart") or {}
         if isinstance(restart, dict) and restart and not restart.get("failed"):
             if restart.get("visible") != restart.get("visible_before"):
@@ -1395,6 +1403,50 @@ class Cycle:
             if not restart.get("census_equal"):
                 out.append("the census after the restart is not the census before it")
         return out
+
+
+def recreate_failures(recreate: dict) -> list[str]:
+    """A sentence per way the dropped and recreated view did not hold."""
+    if not isinstance(recreate, dict) or not recreate.get("views") or recreate.get("failed"):
+        return []
+    out: list[str] = []
+    where = f"{recreate['group']}/{recreate['key']}"
+    if recreate["drop"]["status"] != 200:
+        out.append(f"dropping view {where} answered {recreate['drop']['status']}")
+    if recreate["create"]["status"] != 201:
+        out.append(f"creating view {where} again answered {recreate['create']['status']}")
+    if recreate.get("flushed") is False:
+        out.append(f"the flush after recreating view {where} did not reach its publication")
+    out += [
+        f"view {name} answered {status} after it was dropped, not 404"
+        for name, status in recreate["answers_after_drop"].items()
+        if status != 404
+    ]
+    for name, figures in recreate["ingest_by_view"].items():
+        if figures.get("accepted") != figures.get("rows_offered"):
+            out.append(
+                f"the recreated view {name} accepted {figures.get('accepted')} of "
+                f"{figures.get('rows_offered')} rows offered"
+            )
+    if recreate.get("items_with_several_ids"):
+        out.append(
+            f"the recreated views answered {recreate['items_with_several_ids']} item(s) "
+            f"with a different tessera_id in each"
+        )
+    for step in ("publish_rosters", "publish"):
+        for layer, entry in (recreate.get(step) or {}).items():
+            if entry.get("refusals"):
+                out.append(
+                    f"republishing {layer} for {where} was refused {entry['refusals']} time(s)"
+                )
+    out += [
+        f"the census on the recreated view {name} is not the all-in build's: "
+        f"{compared['differences_by_surface']}"
+        for name, compared in (recreate.get("census") or {}).items()
+        if not compared["equal"]
+    ]
+    out += list(recreate.get("incomplete") or [])
+    return out
 
 
 def driver_rss() -> dict:

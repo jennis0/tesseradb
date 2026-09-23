@@ -266,7 +266,8 @@ pub struct PreparedPut {
     pub created: u64,
     /// How many created artifacts carry no content on a layer that declares some (R5).
     pub without_content: u64,
-    /// How many members joined held artifacts that did not already hold them.
+    /// How many memberships the batch adds: every member of a created artifact, and every member
+    /// a held artifact did not already hold ([`crate::membership::members_added`]).
     pub joined: u64,
 }
 
@@ -1074,7 +1075,6 @@ impl LayerRegistry {
         // The delta and never the whole list, so a re-`PUT` whose members are all held appends
         // no growth: a set part already in the state the record asks for is a no-op.
         let mut joins: Vec<(u32, croaring::Bitmap)> = Vec::new();
-        let mut joined = 0u64;
         for ((artifact, ordinal), view) in incoming.iter().zip(&held).zip(&views) {
             let Some(ordinal) = *ordinal else { continue };
             let key = artifact.key.as_deref().expect("a held key is a key");
@@ -1154,7 +1154,6 @@ impl LayerRegistry {
             }));
             let delta = artifact.members.andnot(&record.members);
             if !delta.is_empty() {
-                joined += delta.cardinality();
                 joins.push((ordinal, delta));
             }
         }
@@ -1200,6 +1199,11 @@ impl LayerRegistry {
             })
             .collect();
 
+        let joined = publish
+            .iter()
+            .chain(&growth)
+            .map(|record| crate::membership::members_added(record, store))
+            .sum();
         Ok(PreparedPut {
             publish,
             fills,
@@ -2667,6 +2671,15 @@ impl LayerRegistry {
                 layer_entity,
                 runs,
             } => {
+                // Replay over a seed that already holds this registration keeps its version:
+                // nothing about the layer changed.
+                let version = match self.layers.get(&declaration.name) {
+                    Some(held) if held.entity == *layer_entity => held.version,
+                    _ => {
+                        self.version += 1;
+                        self.version
+                    }
+                };
                 self.layers.insert(
                     declaration.name.clone(),
                     RegisteredLayer {
@@ -2687,10 +2700,9 @@ impl LayerRegistry {
                         declaration: (**declaration).clone(),
                         entity: *layer_entity,
                         runs: runs.clone(),
-                        version: self.version + 1,
+                        version,
                     },
                 );
-                self.version += 1;
             }
             WalRecord::LayerDrop { name } => {
                 self.layers.remove(name);

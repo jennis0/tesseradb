@@ -1,20 +1,9 @@
-//! `/control/ingest`'s JSON encoding (ingest §1.2): an array of objects or newline-delimited
-//! objects, one object per row, coerced against the declared column types into one Arrow
-//! `RecordBatch`.
+//! The JSON encoding of a record-bearing body: an array of objects or one object per line,
+//! coerced against the declared column types into one Arrow `RecordBatch`, which the Arrow decode
+//! then reads. This module owns only the coercion of one JSON value into one cell.
 //!
-//! **The batch is then decoded by the Arrow path and by nothing else.** Every rule the Arrow decode
-//! applies per column (the scalar tail against the manifest, the label list, the membership
-//! column's arity, the projection) runs on what this module built, so a batch sent as JSON and the
-//! same batch sent as Arrow reach the executor as one row form. What this module owns is the
-//! coercion of one JSON value into one Arrow cell, and its refusals name the row and the column.
-//!
-//! An integer is parsed exactly from its digits, as a JSON number or as a string of digits, never
-//! through a double: a 64-bit identifier or value survives the door. A timestamp is microseconds
-//! since the epoch as an integer, the spelling the view roster's `timestamp_us` already takes. A
-//! float column takes any JSON number and narrows to the declared width. An external id is base64,
-//! as every external id on this plane is. A null is absence for every column that has one; a null
-//! or absent `access` is a row with no label, which the view's declared default fills or refuses
-//! (decision 0133), and a null element of it is refused.
+//! An integer is parsed exactly from its digits (a JSON number or a string), never through a
+//! double. A null or absent `access` is a row with no label, which the view's default decides.
 
 use std::sync::Arc;
 
@@ -27,13 +16,12 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use serde_json::{Map, Value};
-use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar};
+use tessera_engine::{scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
 use tessera_types::layer::LayerDeclaration;
 
 use super::{DecodeError, Fixed};
 
-/// What the batch's columns may be, resolved once per batch from the manifest and the layer
-/// registry by the caller, in the same order the Arrow decode resolves them.
+/// What the batch's columns may be, resolved by the caller in the order the Arrow decode uses.
 pub(crate) struct JsonColumns<'a> {
     /// The route's own columns, in the order the batch carries them.
     pub fixed: &'a [Fixed<'a>],
@@ -44,10 +32,9 @@ pub(crate) struct JsonColumns<'a> {
     pub layer_of: &'a dyn Fn(&str) -> Option<LayerDeclaration>,
 }
 
-/// One JSON body as one record batch. The route's fixed columns come first, in the order it lists
-/// them: a coordinate and `access` always, the others where any row carries them. Then the
-/// declared scalars in declared order, the scoped families any row names, and the layer columns
-/// in first-appearance order.
+/// One JSON body as one record batch: the route's fixed columns in its order (a coordinate and
+/// `access` always, the others where any row carries them), then declared scalars, the scoped
+/// families any row names, and layer columns in first-appearance order.
 pub(crate) fn record_batch(
     body_name: &str,
     body: &[u8],
@@ -70,12 +57,9 @@ pub(crate) fn record_batch(
         arrays.push(column);
     }
 
-    // **A declared column no row names is omitted from the batch**, which the Arrow decode reads
-    // as the column padded with its absence in every row and reports on the receipt
-    // (`ingest.md` §7.1). A column some rows name is carried by every row of the batch, null
-    // where a row has no value, and a row omitting it is a `422` naming the row and the column
-    // (contracts §3.4). The two doors then agree about what a batch that stopped carrying a
-    // column looks like, and about what a half-carried column is.
+    // A declared column no row names is left out, which the Arrow decode reads as absent on
+    // every row. One some rows name is carried on every row, null where a row has no value; with
+    // `declared_on_every_row`, a row omitting it is refused.
     for declared in columns.declared {
         if !has(&declared.name) {
             continue;
@@ -114,10 +98,9 @@ pub(crate) fn record_batch(
             }
             if (columns.layer_of)(name).is_none() {
                 return Err(DecodeError(format!(
-                    "{body_name}: row {row}, column '{name}' is neither in \
-                     MANIFEST.declared_scalars nor the name of a registered layer, nor a \
-                     group-scoped family whose key set holds this batch's view (contracts §2.2, \
-                     `views.md` §5). An undeclared column is refused rather than dropped"
+                    "{body_name}: row {row}, column '{name}' is not a declared scalar, a \
+                     registered layer or a group-scoped attribute of this batch's view; declare \
+                     it or leave it out"
                 )));
             }
             layers.push(name.clone());
@@ -153,7 +136,7 @@ fn fixed_column(
                                     body_name,
                                     row,
                                     "external_id",
-                                    "is not base64; an external id is bytes",
+                                    "is not base64; send the external id's bytes as base64",
                                 )
                             })?;
                         builder.append_value(bytes);
@@ -163,7 +146,7 @@ fn fixed_column(
                             body_name,
                             row,
                             "external_id",
-                            "is not a string; an external id is base64",
+                            "is not a string; send the external id as a base64 string",
                         ))
                     }
                 }
@@ -184,7 +167,7 @@ fn fixed_column(
                             body_name,
                             row,
                             name,
-                            "is missing or null; a coordinate is required",
+                            "is missing or null; send a number on every row",
                         ))
                     }
                     Some(_) => return Err(refusal(body_name, row, name, "is not a number")),
@@ -196,8 +179,7 @@ fn fixed_column(
             let mut builder = ListBuilder::new(StringBuilder::new());
             for (row, record) in rows.iter().enumerate() {
                 match record.get("access") {
-                    // A row with no label (ingest §1.2, decision 0133): the view's declaration
-                    // decides.
+                    // A row with no label; the view's declaration decides.
                     None | Some(Value::Null) => builder.append(true),
                     Some(Value::Array(labels)) => {
                         for label in labels {
@@ -208,8 +190,8 @@ fn fixed_column(
                                         body_name,
                                         row,
                                         "access",
-                                        "has an element that is not a string; every element is \
-                                         one label, taken verbatim",
+                                        "has an element that is not a string; send each label \
+                                         as a string",
                                     ))
                                 }
                             }
@@ -221,7 +203,7 @@ fn fixed_column(
                             body_name,
                             row,
                             "access",
-                            "is not a list of labels, one label per element (contracts §3.4)",
+                            "is not a list of labels; send a list with one label per element",
                         ))
                     }
                 }
@@ -239,8 +221,7 @@ fn fixed_column(
             }
             Arc::new(builder.finish())
         }
-        // **String-encoded, as it is on `/control/changes`**: a bare JSON number loses a `u64` past
-        // 2⁵³ in every JavaScript client, and a mis-parsed identifier fills the wrong entity.
+        // A string, as on `/control/changes`: a JSON number loses a `u64` past 2^53 in JavaScript.
         Fixed::TesseraId => {
             let mut builder = StringBuilder::new();
             for (row, record) in rows.iter().enumerate() {
@@ -252,8 +233,7 @@ fn fixed_column(
                             body_name,
                             row,
                             "tessera_id",
-                            "is not a string; a tessera_id is decimal digits in a string, so \
-                             that a 64-bit identifier survives a JavaScript client",
+                            "is not a string; send the tessera_id as decimal digits in a string",
                         ))
                     }
                 }
@@ -301,8 +281,8 @@ fn records(body_name: &str, body: &[u8]) -> Result<Vec<Map<String, Value>>, Deco
             .map(|(row, value)| match value {
                 Value::Object(record) => Ok(record),
                 _ => Err(DecodeError(format!(
-                    "{body_name}: row {row} is not an object; each record is one object whose \
-                     names are the column names"
+                    "{body_name}: row {row} is not an object; send each record as one object \
+                     keyed by column name"
                 ))),
             })
             .collect();
@@ -317,14 +297,14 @@ fn records(body_name: &str, body: &[u8]) -> Result<Vec<Map<String, Value>>, Deco
             Ok(Value::Object(record)) => rows.push(record),
             Ok(_) => {
                 return Err(DecodeError(format!(
-                    "{body_name}: row {row} is not an object; each line is one object whose \
-                     names are the column names"
+                    "{body_name}: row {row} is not an object; send one object per line, keyed by \
+                     column name"
                 )))
             }
             Err(e) => {
                 return Err(DecodeError(format!(
-                    "{body_name}: row {row} is not JSON: {e}. The body is an array of objects \
-                     or one object per line"
+                    "{body_name}: row {row} is not JSON ({e}); send an array of objects or one \
+                     object per line"
                 )))
             }
         }
@@ -336,11 +316,7 @@ fn refusal(body_name: &str, row: usize, column: &str, what: &str) -> DecodeError
     DecodeError(format!("{body_name}: row {row}, column '{column}' {what}"))
 }
 
-/// One scalar column at its wire type. A declared scalar is `required`: a batch that carries the
-/// name at all carries it on every row, null for absence, as every Arrow batch carries the
-/// column on every row (contracts §3.4). A batch no row names it in does not reach here, the
-/// caller having omitted the column (`ingest.md` §7.1). A scoped family's column is absent on the
-/// rows that omit it.
+/// One scalar column at its wire type. Where `required`, a row omitting the name is refused.
 fn scalar_column(
     body_name: &str,
     rows: &[Map<String, Value>],
@@ -355,8 +331,7 @@ fn scalar_column(
                 body_name,
                 row,
                 name,
-                "is missing; a declared column a batch carries is on every row of it, null where \
-                 the row has no value (contracts §3.4)",
+                "is missing; send it on every row, null where the row has no value",
             )),
             None => Ok(&Value::Null),
         }
@@ -417,20 +392,19 @@ fn scalar_column(
             for row in 0..rows.len() {
                 match float(body_name, cell(row)?, row, name)? {
                     None => builder.append_null(),
-                    // Narrowed to the declared width, and refused where the narrowing would
-                    // store an infinity for a finite number.
-                    Some(value) => {
-                        let narrowed = value as f32;
-                        if !narrowed.is_finite() {
-                            return Err(refusal(
+                    Some(value) => builder.append_value(
+                        scalar_column::narrow_to_f32(value).ok_or_else(|| {
+                            refusal(
                                 body_name,
                                 row,
                                 name,
-                                "is outside f32's finite range",
-                            ));
-                        }
-                        builder.append_value(narrowed);
-                    }
+                                &format!(
+                                    "carries {value:?}, past f32's finite range; send a smaller \
+                                     value or declare the column f64"
+                                ),
+                            )
+                        })?,
+                    ),
                 }
             }
             Arc::new(builder.finish())
@@ -459,8 +433,7 @@ fn scalar_column(
     })
 }
 
-/// An integer, exactly: a JSON integer or a string of digits; a number with a fraction or
-/// exponent is refused rather than rounded.
+/// An integer, exactly: a number with a fraction or exponent is refused rather than rounded.
 fn integer(
     body_name: &str,
     value: &Value,
@@ -479,7 +452,7 @@ fn integer(
                     body_name,
                     row,
                     name,
-                    "has a fraction or an exponent; an integer is parsed exactly from its digits",
+                    "has a fraction or an exponent; send the integer as plain digits",
                 ))
             }
         }
@@ -488,8 +461,7 @@ fn integer(
                 body_name,
                 row,
                 name,
-                "is a string that is not an integer; an integer is a JSON integer or a string of \
-                 digits",
+                "is a string that is not an integer; send a JSON integer or a string of digits",
             )
         }),
         _ => Err(refusal(body_name, row, name, "is not an integer")),
@@ -512,13 +484,9 @@ fn float(
     }
 }
 
-/// A column named for a layer: a key, or a list of keys, per row, at the values a member table
-/// carries (contracts §3.4). An integer key is its decimal spelling and `-1` names no artifact,
-/// through the same `integer_key` the Arrow decode and the build read by, so the cell reaches the
-/// decoder as the key it names. The column is one shape: every row a key or null, or every row
-/// a list or null; a row of the other shape is refused, since a scalar names the artifact at
-/// level 0 and a list's positions mean what the layer's hierarchy says, and guessing which the
-/// caller meant would store a membership they did not write.
+/// A column named for a layer: a key or a list of keys per row. An integer key is its decimal
+/// spelling, as at the build, and `-1` names no artifact. Every row is a key or null, or every
+/// row a list or null; a row of the other shape is refused rather than guessed.
 fn membership_column(
     body_name: &str,
     rows: &[Map<String, Value>],
@@ -539,8 +507,8 @@ fn membership_column(
                 body_name,
                 row,
                 name,
-                "is not a member key; a key is text or an integer, and `null` or `-1` is a point \
-                 in no artifact of that layer",
+                "is not a member key; send text or an integer, or `null` or `-1` for no artifact \
+                 of that layer",
             )),
         }
     };
@@ -563,8 +531,8 @@ fn membership_column(
                         body_name,
                         row,
                         name,
-                        "is a single key where other rows of this column carry a list; a column \
-                         is one shape",
+                        "is a single key where other rows of this column carry a list; send a \
+                         list on every row",
                     ))
                 }
             }

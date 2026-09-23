@@ -436,22 +436,26 @@ impl WritePath {
                         seeded_content_extents,
                         growth_unpublished,
                     ),
-                    coalesce: executor::Background::new(worker_bell.clone()),
+                    coalesce: executor::Background::sharing(
+                        worker_bell.clone(),
+                        Arc::clone(&health.coalesce_in_flight),
+                        Arc::clone(&health.coalesce_completed_pending),
+                    ),
                     merge: executor::Background::sharing(
                         worker_bell.clone(),
-                        Default::default(),
+                        Arc::clone(&health.merge_in_flight),
                         Arc::clone(&health.merge_completed_pending),
                     ),
                     fold: executor::Background::sharing(
                         worker_bell.clone(),
-                        Default::default(),
+                        Arc::clone(&health.fold_in_flight),
                         Arc::clone(&health.fold_completed_pending),
                     ),
                     suggest: executor::Background::new(worker_bell.clone()),
                     flush: executor::Background::sharing(
                         worker_bell,
                         Arc::clone(&health.flush_in_flight),
-                        Default::default(),
+                        Arc::clone(&health.flush_completed_pending),
                     ),
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
@@ -567,10 +571,14 @@ impl WritePath {
     /// command's reply is typed to carry.
     fn submit<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, AcceptError> {
         let (reply, pending) = Reply::channel(
+            Some(Arc::clone(&self.health)),
             #[cfg(feature = "fault-injection")]
             self.faults.clone(),
         );
-        self.handle()?.enqueue(command(reply))?;
+        let command = command(reply);
+        // A reply built here counts its job completed, which is right only for the work lane.
+        debug_assert!(!command.is_never_shed());
+        self.handle()?.enqueue(command)?;
         pending.accept()
     }
 
@@ -782,6 +790,7 @@ impl WritePath {
         op: ChangeOp,
     ) -> Result<PendingChange, AcceptError> {
         let (reply, pending) = Reply::channel(
+            None,
             #[cfg(feature = "fault-injection")]
             self.faults.clone(),
         );
@@ -1194,15 +1203,6 @@ pub(crate) struct MaintenanceDeps {
     /// by which a caller grows the dictionary, and so the one declared bound that is enforced
     /// rather than trusted. See `flush::promote`.
     pub(crate) max_distinct_terms: u64,
-    /// `EngineConfig::max_merged_segment_bytes` as configured, `None` where the deployment set
-    /// nothing; not the resolved policy value, which always has one.
-    ///
-    /// The fold re-checks the base-segment relation against its own output, because a fold that
-    /// shrank the base below an operator's configured merge cap would publish a deployment the
-    /// next startup refuses to open. `tessera-server`'s loader checks only an explicitly set value
-    /// (an unset one is derived from the base and cannot violate the relation), so the fold must
-    /// tell the two apart, which the policy alone cannot.
-    pub(crate) configured_merge_bytes: Option<u64>,
     /// Whether the coalesce and the merge run at all (`coalesce_enabled`, `merge_enabled`);
     /// whether a fold holds between its last pass and its submission (`fold_paused`), which lets a
     /// test land a flush inside a fold's flight; and whether a completed fold or merge is left

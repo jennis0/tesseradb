@@ -407,8 +407,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     result["binary"] = str(binary)
     print(f"{binary} at {result['commit'][:12]}{' (dirty tree)' if result['dirty'] else ''}")
 
-    ranks, result["ranks"] = ranks_for(rung_dir, work)
-    if result["ranks"]["derived"]:
+    # The battery and the cycle both need the principal ladder; without one neither runs.
+    ranks = None
+    try:
+        ranks, result["ranks"] = ranks_for(rung_dir, work)
+    except Exception as e:  # noqa: BLE001 — a rung with no ladder is a failure, not a stop
+        failures.append(f"no principal ladder for {args.rung}, so nothing was served: {e}")
+    if ranks is not None and result["ranks"]["derived"]:
         print(f"{args.rung} has no ranks file; derived {ranks} from {result['ranks']['fields']}")
 
     with steps.step("check"):
@@ -435,6 +440,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if result["verify"]["returncode"] != 0:
             failures.append(f"tessera verify --deep refused the bundle: {result['verify']['stderr_tail'][-300:]}")
 
+    if result["build"]["returncode"] == 0 and ranks is not None:
         with steps.step("serve"):
             try:
                 serve_battery.main(battery_argv(args, rung_dir, bundle, work, binary, ranks))

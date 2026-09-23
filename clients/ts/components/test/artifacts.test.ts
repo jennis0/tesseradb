@@ -60,6 +60,7 @@ function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']
     layer: layers[0] ?? null,
     layers,
     served,
+    colourServed: [],
     lineage: servedLineage(served),
     status: 'shown',
     refusal: null,
@@ -213,25 +214,28 @@ describe('<tessera-artifact-card>', () => {
 });
 
 describe('<tessera-legend selectable>', () => {
-  it('offers cluster colour only for a layer that is on, and sends cluster:<layer>', async () => {
+  it('offers the clusters of every layer that can colour, drawn or not, and choosing one draws nothing', async () => {
     const host = await mount('<tessera-legend selectable readout></tessera-legend>');
     const store = fakeStore({meta: META, status: status({})});
     (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
     await settle(host);
     const colourOptions = () => deepAll(host, '[part="select"] option').map((o) => o.getAttribute('value'));
-    expect(colourOptions()).toEqual(['', 'archive']);
-    store.set('artifacts', artifactsProjection([artifact(1n, 100n)], ['clusters']));
-    await settle(host);
-    expect(colourOptions()).toEqual(['', 'cluster:clusters', 'archive']);
-    // The Layers select beside it: one of three on, and each root offered.
-    expect(deepAll(host, '[part="layers-select"] option').map((o) => o.textContent)).toEqual(['1 of 2 on', 'clusters', 'districts']);
+    // No layer is drawn. A labels layer has no clusters of its own, so it is not offered.
+    expect(colourOptions()).toEqual(['', 'cluster:clusters', 'cluster:districts', 'archive']);
+    expect(deepAll(host, '[part="layers-select"] option').map((o) => o.textContent)).toEqual(['0 of 2 on', 'clusters', 'districts']);
     const select = deep(host, '[part="select"]') as HTMLSelectElement;
     select.value = 'cluster:clusters';
     select.dispatchEvent(new Event('change'));
     expect(store.calls.find((c) => c.name === 'setColourBy')?.args[0]).toBe('cluster:clusters');
+    expect(store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
+    // The store answers with the colour layer's rows and still draws nothing: the swatches are
+    // the colour layer's served artifacts, and the choice shows in the select.
     store.set('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: 'cluster:clusters'});
+    store.set('artifacts', {...artifactsProjection([], []), colourServed: [artifact(1n, 100n)]});
     await settle(host);
     expect(deepAll(host, '[part="swatch"]').length).toBe(2); // the served artifact and the neutral
+    expect((deep(host, '[part="select"]') as HTMLSelectElement).value).toBe('cluster:clusters');
+    expect(deepAll(host, '[part="layers-select"] option')[0]!.textContent).toBe('0 of 2 on');
   });
 
   it('is a readout without selectable', async () => {

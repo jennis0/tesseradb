@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tesseradb import Viewer
+from tesseradb import Selection, Viewer
 
 CONTRACT = Path(__file__).resolve().parents[3] / "docs" / "openapi" / "tessera.yaml"
 
@@ -32,9 +32,19 @@ def viewer_operations(contract: Path) -> set[str]:
     return operations
 
 
-def method_of(operation: str) -> str:
-    """The Python spelling of an `operationId`: `suggestCategoryValues` is `suggest_category_values`."""
-    return re.sub(r"(?<!^)([A-Z])", r"_\1", operation).lower()
+#: The operations Python reaches under another name: a selection's count and sample are the
+#: viewport route, and a category listing given a prefix is the suggestion route.
+REACHED_AS = {
+    "viewport": [(Selection, "count"), (Selection, "sample")],
+    "suggestCategoryValues": [(Viewer, "categories")],
+}
+
+
+def methods_of(operation: str) -> list[tuple[type, str]]:
+    """Where Python reaches an `operationId`: by `REACHED_AS`, or as its snake-case `Viewer` method."""
+    return REACHED_AS.get(
+        operation, [(Viewer, re.sub(r"(?<!^)([A-Z])", r"_\1", operation).lower())]
+    )
 
 
 def test_the_contract_is_where_this_reads_it():
@@ -44,16 +54,16 @@ def test_the_contract_is_where_this_reads_it():
     assert "viewport" in viewer_operations(CONTRACT)
 
 
-def test_every_viewer_plane_operation_is_a_method_on_viewer():
+def test_every_viewer_plane_operation_is_reached_from_python():
     """Four surfaces, one set of core capabilities: what the contract serves, Python asks for."""
     if not CONTRACT.exists():
         pytest.skip(f"{CONTRACT} is not in this checkout")
     missing = sorted(
-        operation
+        f"{operation} ({owner.__name__}.{name})"
         for operation in viewer_operations(CONTRACT)
-        if not callable(getattr(Viewer, method_of(operation), None))
+        for owner, name in methods_of(operation)
+        if not callable(getattr(owner, name, None))
     )
-    assert not missing, (
-        "the viewer plane serves these and tesseradb.Viewer has no method for them: "
-        + ", ".join(f"{one} ({method_of(one)})" for one in missing)
+    assert not missing, "the viewer plane serves these and Python has no method for them: " + (
+        ", ".join(missing)
     )

@@ -1700,6 +1700,109 @@ fn a_duplicate_external_id_across_one_window_is_still_refused() {
     assert_eq!(stats.work_depth, 0);
 }
 
+/// A job is counted completed before its caller is answered, so a caller that reads the stats
+/// straight after its reply sees its own job. Each job is parked one step before its answer, on
+/// each way a job is answered: a commit window, an ingest replay answered outside a window, and a
+/// command that is not an ingest.
+#[test]
+fn a_job_is_counted_completed_before_its_caller_is_answered() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+    let engine = Arc::new(engine);
+
+    type Job = Box<dyn FnOnce(&Engine) + Send>;
+    let jobs: Vec<(&str, Job)> = vec![
+        (
+            "an ingest",
+            Box::new(|e| {
+                e.accept_ingest(vec![row("counted")], "counted".to_string(), [5; 32])
+                    .expect("the ingest is accepted");
+            }),
+        ),
+        (
+            "a replay",
+            Box::new(|e| {
+                e.accept_ingest(vec![row("counted")], "counted".to_string(), [5; 32])
+                    .expect("the replay is answered");
+            }),
+        ),
+        (
+            "an attribute declaration",
+            Box::new(|e| {
+                e.declare_attribute(tessera_engine::AttributeRequest {
+                    name: "tally".to_string(),
+                    title: None,
+                    ty: "u32".to_string(),
+                    vocabulary: None,
+                    analyser: None,
+                    index: false,
+                    render: false,
+                    scope: tessera_types::layer::LayerScope::Entity,
+                })
+                .expect("the attribute is declared");
+            }),
+        ),
+    ];
+    for (done, (what, job)) in jobs.into_iter().enumerate() {
+        faults.arm_pause(PauseSite::BeforeAck, PauseAction::Stall);
+        let e = Arc::clone(&engine);
+        let caller = std::thread::spawn(move || job(&e));
+        faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
+
+        // Only the completed count: the caller bumps `work_submitted` after its enqueue, so the
+        // executor can park here before that lands.
+        let stats = engine.write_executor_stats();
+        assert_eq!(
+            stats.work_completed,
+            done as u64 + 1,
+            "{what} must be counted completed before it is answered: {stats:?}"
+        );
+
+        faults.release_site(PauseSite::BeforeAck);
+        caller.join().unwrap();
+    }
+}
+
+/// A geometry publication is not counted as submitted work, so it is not counted completed
+/// either. Counted on one side only, it would hold `work_depth` one below the queue for every
+/// publication since the executor started.
+#[test]
+fn a_geometry_publication_leaves_the_work_counts_alone() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+    let engine = Arc::new(engine);
+
+    let live = engine.generation();
+    engine
+        .publish_geometry(tessera_engine::GeometryPublication::within_prefix(
+            live.prefix.clone(),
+            live.segments_version + 1,
+            live.watermark,
+            Arc::clone(&live.bundle),
+            Arc::clone(&live.dict),
+            Vec::new(),
+        ))
+        .expect("the publication is accepted");
+
+    // Parked after its fsync, the ingest is in flight and not yet answered, so it is the queue.
+    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
+    let e = Arc::clone(&engine);
+    let caller = std::thread::spawn(move || {
+        e.accept_ingest(vec![row("queued")], "queued".to_string(), [6; 32])
+    });
+    faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
+
+    // Only the completed count: the caller bumps `work_submitted` after its enqueue.
+    let stats = engine.write_executor_stats();
+    assert_eq!(
+        stats.work_completed, 0,
+        "one job is in flight and the publication is no job: {stats:?}"
+    );
+
+    faults.release_site(PauseSite::AfterFsync);
+    caller.join().unwrap().expect("the ingest is accepted");
+}
+
 /// A refused command that is not an ingest is counted completed once, as an accepted one is.
 #[test]
 fn a_refused_view_create_is_counted_completed_once() {
@@ -1714,14 +1817,6 @@ fn a_refused_view_create_is_counted_completed_once() {
     );
     assert!(refused.is_err());
 
-    // The executor counts the job after it has answered, so wait for the count and then give a
-    // second one time to land.
-    let deadline = std::time::Instant::now() + WAIT;
-    while engine.write_executor_stats().work_completed == 0 {
-        assert!(std::time::Instant::now() < deadline, "the job was never counted");
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    std::thread::sleep(std::time::Duration::from_millis(50));
     let stats = engine.write_executor_stats();
     assert_eq!((stats.work_submitted, stats.work_completed), (1, 1));
 }

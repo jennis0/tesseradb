@@ -93,6 +93,17 @@ def served(tmp_path, corpus):
         db.close()
 
 
+@pytest.fixture
+def stub_bundle(monkeypatch, tmp_path):
+    """The components' bundle, stubbed: no browser here, and nothing reads its text."""
+    import tesseradb.widget as widget
+
+    stub = tmp_path / "tessera-components.js"
+    stub.write_text("export function render() {}")
+    monkeypatch.setattr(widget, "bundle_path", lambda: stub)
+    return stub
+
+
 # ---------------------------------------------------------------------------- the viewer plane
 
 
@@ -168,7 +179,3 @@ def browse(db, view: str, layer: str, terms=None, **extra) -> dict:
     """`Viewer.browse_artifacts` as the principal holding `terms`, or as the database's own."""
     return db.viewer(terms).browse_artifacts(view, layer, **extra)
 
-
-def categories(db, column: str, terms=None, **query) -> dict:
-    """`Viewer.categories` as the principal holding `terms`, or as the database's own."""
-    return db.viewer(terms).categories(column, **query)

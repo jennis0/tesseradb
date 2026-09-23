@@ -675,7 +675,7 @@ pub struct GrownMembership {
 }
 
 /// What [`Engine::put_artifacts`] answers: the identifiers in the caller's order and the batch's
-/// counts, each bounded by the caller's own request.
+/// counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedArtifacts {
     /// One per artifact in the caller's order: a held artifact's own, or the new one's.
@@ -686,7 +686,8 @@ pub struct PublishedArtifacts {
     pub without_content: u64,
     /// How many fixed parts were filled on held artifacts.
     pub filled: u64,
-    /// How many members joined held artifacts that did not already hold them.
+    /// How many memberships the batch added: every member of a created artifact, and every member
+    /// a held artifact did not already hold.
     pub joined: u64,
 }
 
