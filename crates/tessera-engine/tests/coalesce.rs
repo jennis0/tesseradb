@@ -32,8 +32,7 @@ const RUN_WIDTH: usize = 4;
 /// Drive ticks until the tiers are one and the runs are fewer than a run window, which is where
 /// every axis a coalesce takes has come to rest.
 fn settle_coalesce(engine: &Engine) {
-    wait_until("the coalesce to settle", WAIT, || {
-        engine.request_flush();
+    tick_until(engine, "the coalesce to settle", WAIT, || {
         let generation = engine.generation();
         let manifest = &generation.bundle.partitions["default"].manifest;
         generation.delta_postings.len() == 1 && manifest.locator_extents.len() < RUN_WIDTH
