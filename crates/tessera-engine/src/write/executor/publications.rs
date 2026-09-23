@@ -1863,11 +1863,6 @@ impl Executor {
         // dictionary it planned against; `Dict::load` reproduces them only if its extent lands
         // where the flush assumed. Scoped to flushes that wrote an extent, since one that
         // promoted nothing carries only ordinals append-only extension preserves.
-        //
-        // The window is narrow and real: `flush_in_flight` clears only after the pool's sends,
-        // and the executor drains completed flushes before it ticks, so a send landing between
-        // the drain and the in-flight check leaves a tick planning against a generation whose
-        // completed flush is not yet published.
         if dictionary_moved_under(completed.promoted_from_dict_len, live.dict.len()) {
             tracing::warn!(
                 planned = completed.promoted_from_dict_len,
