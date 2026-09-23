@@ -51,8 +51,7 @@
 //! # Two producers of one merge: the fold, and the coalesce
 //!
 //! [`fold_value_column`] and [`coalesce_attr_extents`] are the same merge under two different
-//! obligations, so they share it rather than each stating the checks above (§5.2's
-//! "attribute extents are the same shape as delta tiers, and take the same safety argument").
+//! obligations, so they share it rather than each stating the checks above.
 //! [`fold_keyword_column`] and [`coalesce_keyword_extents`] are the same two producers again, over
 //! a family whose values are ordinals into a per-layer dictionary; they reach the merge through the
 //! same order and the same guards, and add a remap of their own that the `keyword` module argues
@@ -173,10 +172,10 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 /// One column's layers merged into one base, with `tombstones` blanked.
 ///
-/// `layers` is the base column followed by every extent the fold consumes, in any order. `bound` is one past the
-/// highest entity the fold's snapshot covers: the presence bitmap is **omitted** only when every
-/// entity from 0 to that bound is present, which is the reader's dense-from-zero convention ("the
-/// entity id is the array index", §2.1) and nothing looser.
+/// `layers` is the base column followed by every extent the fold consumes, in any order. `bound`
+/// is one past the highest entity the fold's snapshot covers: the presence bitmap is **omitted**
+/// only when every entity from 0 to that bound is present, which is the reader's dense-from-zero
+/// convention ("the entity id is the array index") and nothing looser.
 ///
 /// Returns whether a presence bitmap was written, so the caller can name exactly the files that
 /// exist in the manifest.

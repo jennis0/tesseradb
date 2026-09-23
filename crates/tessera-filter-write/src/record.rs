@@ -10,9 +10,8 @@
 //!
 //! [`coalesce_record_extents`] and [`fold_record_blob`] are the value-column pair's counterparts
 //! (`coalesce_attr_extents`, `fold_value_column`): a merge by entity over layers whose entities
-//! may interleave, streaming rows through [`RecordBlobWriter`] — which is what repacks
-//! small blocks toward the 256 KiB target as a side effect of re-blocking, rather than as a pass
-//! of its own. Each input layer streams through [`tessera_filter::RecordBlob::for_each_row`],
+//! may interleave, streaming rows through [`RecordBlobWriter`], which repacks small blocks toward
+//! the 256 KiB target as a side effect of re-blocking rather than as a pass of its own. Each input layer streams through [`tessera_filter::RecordBlob::for_each_row`],
 //! whose walk *is* the addressing self-check, so a defective input refuses the pass instead of
 //! being laundered into a clean-looking output.
 //!
