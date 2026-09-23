@@ -1885,11 +1885,6 @@ const FIXED_COLUMNS: [(&str, DataType); 2] = [
 ];
 
 impl ColumnsRef {
-    /// This segment's `columns.arrow` batch size in memory, in bytes.
-    pub fn byte_len(&self) -> u64 {
-        self.batch.get_array_memory_size() as u64
-    }
-
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
