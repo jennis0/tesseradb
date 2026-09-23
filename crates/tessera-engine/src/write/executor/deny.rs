@@ -125,7 +125,7 @@ impl Executor {
             let mut blame = Blame::new(index, error);
             for (i, entry) in entries.into_iter().enumerate() {
                 let e = blame.at(i);
-                if let Some(reply) = &entry.reply {
+                if let Some(reply) = entry.reply {
                     reply.fail(ExecError::Wal(e));
                 }
             }
@@ -146,7 +146,7 @@ impl Executor {
 
         // A death partway leaves some waiters unacked; each gets a 500, not a 503, since durable.
         for entry in entries {
-            if let Some(reply) = &entry.reply {
+            if let Some(reply) = entry.reply {
                 reply.ack(());
             }
         }
