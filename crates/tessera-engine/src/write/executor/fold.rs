@@ -862,6 +862,17 @@ impl Executor {
             .iter()
             .map(|v| (v.id.as_str(), v.incarnation))
             .collect();
+        // A view dropped during the flight, or dropped and created again, would have its dead
+        // incarnation's base published as the live view's rows. The next fold plans the live one.
+        if plan
+            .views
+            .iter()
+            .any(|view| live_incarnations.get(view.view.as_str()) != Some(&view.incarnation))
+        {
+            return Err("a view it folded was dropped during its flight; the next fold plans over \
+                     the views as they now stand"
+                .to_string());
+        }
         let forward = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
 
         // Every carried-forward extent must begin at or above the fold's own base, per view, or
