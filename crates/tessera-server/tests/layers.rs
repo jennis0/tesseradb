@@ -227,6 +227,89 @@ async fn a_dropped_name_is_gone_from_meta_and_refused_on_recreation() {
     );
 }
 
+/// Each layer's `/v1/meta` version as `(name, version)`.
+async fn layer_versions(server: &TestServer) -> Vec<(String, u64)> {
+    meta_layers(server, &["0"])
+        .await
+        .iter()
+        .map(|l| (l["name"].as_str().unwrap().to_string(), l["version"].as_u64().unwrap()))
+        .collect()
+}
+
+/// Register `name`, publish one artifact into it and grow that artifact. The growth keeps the
+/// registration in the log beside the manifest that also carries it.
+async fn register_grown(server: &TestServer, name: &str) {
+    register(server, declaration(name, None)).await;
+    let artifacts = json!({
+        "addressing": "external",
+        "artifacts": [{ "key": "c0", "members": [member(0), member(1), member(2)] }]
+    });
+    assert_eq!(publish(server, name, artifacts).await.0, 201);
+    let route = format!("/control/layers/{}/artifacts", name.replace('/', "%2F"));
+    let grown = server
+        .client
+        .patch(server.control_url(&route))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "addressing": "external",
+            "artifacts": [{ "key": "c0", "members": [member(3), member(4)] }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(grown.status().as_u16(), 200);
+}
+
+/// Publish, then restart twice, and require every layer's version to be where it was.
+async fn assert_versions_survive_restarts(server: TestServer, tmp: &TempDir) {
+    tick(&server).await;
+    let before = layer_versions(&server).await;
+    let mut server = server;
+    for _ in 0..2 {
+        server.shutdown().await;
+        server = spawn_server(
+            &tmp.path().join("bundle"),
+            &tmp.path().join("cache"),
+            &tmp.path().join("wal.log"),
+        )
+        .await;
+        assert_eq!(layer_versions(&server).await, before);
+    }
+}
+
+/// A restart changes nothing about a layer, so the version a client echoes to notice a change
+/// stays where it was, after the first restart and after a second.
+#[tokio::test]
+async fn a_restart_leaves_every_layer_version_where_it_was() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register_grown(&server, "clusters/a").await;
+    register_grown(&server, "clusters/b").await;
+    assert_eq!(layer_versions(&server).await.len(), 2);
+    assert_versions_survive_restarts(server, &tmp).await;
+}
+
+/// The same with a layer dropped between registrations: the layers left, and one registered after
+/// the drop, keep their versions across restarts.
+#[tokio::test]
+async fn a_restart_after_a_drop_leaves_every_layer_version_where_it_was() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register_grown(&server, "clusters/a").await;
+    register_grown(&server, "clusters/b").await;
+    let resp = server
+        .client
+        .delete(server.control_url("/control/layers/clusters%2Fa"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    register_grown(&server, "clusters/c").await;
+    assert_eq!(layer_versions(&server).await.len(), 2);
+    assert_versions_survive_restarts(server, &tmp).await;
+}
+
 /// The whole plane is behind the operator credential, and a route added to it inherits that check
 /// rather than asking for it. Asserted because the layer routes are new arrivals on that router.
 #[tokio::test]

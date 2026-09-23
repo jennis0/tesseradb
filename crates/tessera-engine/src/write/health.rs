@@ -90,6 +90,13 @@ pub struct ExecutorHealth {
     /// publication.
     pub(crate) fold_completed_pending: Arc<AtomicBool>,
     pub(crate) merge_completed_pending: Arc<AtomicBool>,
+    /// A merge, coalesce or fold is running, or a flush or a coalesce has been handed back and
+    /// not yet published. Shared as above, so a test can wait for maintenance to go idle.
+    pub(crate) fold_in_flight: Arc<AtomicBool>,
+    pub(crate) merge_in_flight: Arc<AtomicBool>,
+    pub(crate) coalesce_in_flight: Arc<AtomicBool>,
+    pub(crate) coalesce_completed_pending: Arc<AtomicBool>,
+    pub(crate) flush_completed_pending: Arc<AtomicBool>,
     /// The overlay holds dispositions the durable WAL does not, after [`Executor::recover_wal`]
     /// discarded an undurable region. Latches until restart: the node publishes no manifest and
     /// rotates no WAL, because either would make a never-acked deny permanent.
@@ -551,6 +558,11 @@ impl ExecutorHealth {
             flush_in_flight: Arc::new(AtomicBool::new(false)),
             fold_completed_pending: Arc::new(AtomicBool::new(false)),
             merge_completed_pending: Arc::new(AtomicBool::new(false)),
+            fold_in_flight: Arc::new(AtomicBool::new(false)),
+            merge_in_flight: Arc::new(AtomicBool::new(false)),
+            coalesce_in_flight: Arc::new(AtomicBool::new(false)),
+            coalesce_completed_pending: Arc::new(AtomicBool::new(false)),
+            flush_completed_pending: Arc::new(AtomicBool::new(false)),
             overlay_diverged: AtomicBool::new(false),
             prefix_diverged: AtomicBool::new(false),
             overlay_publications: AtomicU64::new(0),

@@ -23,8 +23,8 @@ use tessera_build::{build, BuildArgs};
 
 const N: u64 = 40;
 
-/// One rendered, indexed `f32` at the build, and a `public` vocabulary no build column names, so
-/// a runtime category over it fixes the width at the declaration.
+/// One rendered, indexed `f32` at the build, and two `public` vocabularies no build column names,
+/// one closed and one open, so a runtime category over either fixes the width at the declaration.
 const SCHEMA_TOML: &str = r#"
 [[vocabulary]]
 name       = "dept"
@@ -34,6 +34,12 @@ visibility = "public"
   [vocabulary.values]
   eng = 5
   ops = 6
+
+[[vocabulary]]
+name       = "grade"
+width      = "u16"
+value_set  = "open"
+visibility = "public"
 
 [[attribute]]
 name   = "score"
@@ -142,6 +148,19 @@ async fn serve() -> Served {
     served
 }
 
+/// Stop the server and open the same bundle and log again.
+async fn restart(served: Served) -> Served {
+    let Served { server, tmp } = served;
+    server.shutdown().await;
+    let server = spawn_server(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+    Served { server, tmp }
+}
+
 async fn declare(served: &Served, body: Value) {
     let resp = served
         .server
@@ -162,13 +181,27 @@ async fn declare(served: &Served, body: Value) {
 
 /// Ingest one point and answer its `tessera_id`.
 async fn ingest_point(served: &Served, batch_id: &str, external_id: &str) -> u64 {
-    let body = json!([{
+    ingest_point_with(served, batch_id, external_id, json!({})).await
+}
+
+/// [`ingest_point`], with `columns` added to the row.
+async fn ingest_point_with(
+    served: &Served,
+    batch_id: &str,
+    external_id: &str,
+    columns: Value,
+) -> u64 {
+    let mut row = json!({
         "external_id": base64_of(external_id),
         "x": 500.0,
         "y": 500.0,
         "access": ["0"],
         "score": 1.0,
-    }]);
+    });
+    for (name, value) in columns.as_object().unwrap() {
+        row[name] = value.clone();
+    }
+    let body = json!([row]);
     let resp = served
         .server
         .client
@@ -361,6 +394,169 @@ async fn the_values_route_fills_restates_and_refuses() {
         answer.to_string().contains("row 0"),
         "the refusal names the row and not the id: {answer}"
     );
+}
+
+/// The keys a viewer route that lists a column's values answers, on one page.
+async fn listed_keys(served: &Served, path: &str) -> Vec<String> {
+    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = served
+        .server
+        .client
+        .get(served.server.viewer_url(path))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    body["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["key"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// `grade`'s value list and its suggestions both carry `key`.
+async fn assert_minted_key_is_listed(served: &Served, key: &str) {
+    for path in ["/v1/categories/grade", "/v1/categories/grade/suggest?q=g"] {
+        let keys = listed_keys(served, path).await;
+        assert!(keys.iter().any(|k| k == key), "{path} lists {keys:?}");
+    }
+}
+
+/// A key of an open vocabulary that no ingest has used is minted by the values batch that names
+/// it, and the cell is served after a flush and after a restart. A closed vocabulary's unknown key
+/// is refused with nothing written, and the next flush still publishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
+    let served = serve().await;
+    declare(
+        &served,
+        json!({"name": "grade", "type": "category", "vocabulary": "grade", "index": true}),
+    )
+    .await;
+    let id = ingest_point(&served, "points-1", "subject").await;
+    flush(&served).await;
+
+    let (status, answer) = values(
+        &served,
+        "values-1",
+        Some("s0"),
+        json!([{"external_id": base64_of("subject"), "grade": "g0"}]),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["filled"], 1, "{answer}");
+
+    let (status, answer) = values(
+        &served,
+        "values-2",
+        Some("s0"),
+        json!([{"external_id": base64_of("subject"), "dept": "legal"}]),
+    )
+    .await;
+    assert_eq!(status, 422, "a closed vocabulary's unknown key is refused: {answer}");
+
+    flush(&served).await;
+    let fields = item_fields(&served, id).await;
+    assert_eq!(fields["grade"], json!("g0"), "{fields}");
+    assert!(fields["dept"].is_null(), "the refused batch wrote nothing: {fields}");
+    assert_minted_key_is_listed(&served, "g0").await;
+
+    let served = restart(served).await;
+    assert_eq!(item_fields(&served, id).await["grade"], json!("g0"));
+    assert_minted_key_is_listed(&served, "g0").await;
+    let second = ingest_point(&served, "points-2", "second").await;
+    flush(&served).await;
+    assert!(
+        item_fields(&served, second).await["grade"].is_null(),
+        "a flush after the restart publishes"
+    );
+}
+
+/// The keys of the artifacts a viewport over the whole frame serves from `layer`.
+async fn served_keys(served: &Served, layer: &str) -> Vec<String> {
+    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+            "layers": "all"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let mut keys: Vec<String> = decode_viewport_frames(&resp.bytes().await.unwrap())
+        .artifacts
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.layer == layer)
+        .filter_map(|a| a.key)
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// A layer whose artifacts are the values of a column gets an artifact for a new value whether
+/// the value arrives by ingest or by a values batch, and both survive a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_value_filled_by_a_values_batch_derives_its_artifact_as_ingest_does() {
+    let served = serve().await;
+    declare(
+        &served,
+        json!({"name": "grade", "type": "category", "vocabulary": "grade", "index": true}),
+    )
+    .await;
+    let resp = served
+        .server
+        .client
+        .put(served.server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "name": "grades",
+            "title": "Grades",
+            "views": ["s0"],
+            "membership": { "attribute": "grade" },
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+            "content": { "computed": [], "supplied": [] },
+            "depends_on": [],
+            "levels": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap_or_default());
+
+    ingest_point_with(&served, "points-1", "by-ingest", json!({"grade": "g1"})).await;
+    ingest_point(&served, "points-2", "by-values").await;
+    flush(&served).await;
+    let (status, answer) = values(
+        &served,
+        "values-1",
+        Some("s0"),
+        json!([{"external_id": base64_of("by-values"), "grade": "g2"}]),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    flush(&served).await;
+    assert_eq!(served_keys(&served, "grades").await, ["g1", "g2"]);
+
+    let served = restart(served).await;
+    assert_eq!(served_keys(&served, "grades").await, ["g1", "g2"]);
 }
 
 /// **The same batch as JSON and as Arrow lands identical values** (`ingest.md` §1.2). Nothing
