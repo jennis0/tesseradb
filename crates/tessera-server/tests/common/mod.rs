@@ -240,7 +240,7 @@ fn fixtures_dir() -> std::path::PathBuf {
     dir.clone()
 }
 
-fn copy_dir(from: &Path, to: &Path) {
+pub fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
@@ -265,6 +265,30 @@ pub fn standard_fixture(dir: &Path) -> std::path::PathBuf {
 pub async fn serve_standard(dir: impl AsRef<Path>) -> TestServer {
     standard_fixture(dir.as_ref());
     open(dir).await
+}
+
+/// [`serve_standard`] with a write executor that takes a fault switchboard, so a test can park
+/// the executor at a pause site.
+pub async fn serve_with_faults(dir: impl AsRef<Path>) -> (TestServer, Arc<FaultSwitchboard>) {
+    let dir = dir.as_ref();
+    let bundle_root = standard_fixture(dir);
+    let config = default_engine_config();
+    let max_k = config.max_k;
+    let mut engine = Engine::open(
+        &bundle_root,
+        &dir.join("cache"),
+        &dir.join("wal.log"),
+        Passthrough::new(),
+        config,
+    )
+    .expect("engine should open against a freshly built bundle");
+    let faults = Arc::new(FaultSwitchboard::new());
+    engine
+        .start_write_executor_with_faults(1024, Arc::clone(&faults))
+        .expect("the write executor starts once per engine");
+    let server =
+        mount_server_with_faults(engine, max_k, generous_test_gate(), Arc::clone(&faults)).await;
+    (server, faults)
 }
 
 /// A build of `views` into `out` under the test identity key, minting external ids and writing no
