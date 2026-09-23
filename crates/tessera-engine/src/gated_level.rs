@@ -81,7 +81,8 @@ impl Engine {
                 RoutedFilter::Entity(entities) => (served.data.row_space.project(&entities), None),
                 RoutedFilter::Row(tree) => {
                     let region = tree.region_verdict();
-                    let whole = [0u32..u32::try_from(total_rows).unwrap_or(u32::MAX)];
+                    let whole = std::iter::once(0..u32::try_from(total_rows).unwrap_or(u32::MAX))
+                        .collect::<Vec<_>>();
                     let rows = self
                         .evaluate_row_route(&tree, served, &whole, total_rows, false)?
                         .rows()

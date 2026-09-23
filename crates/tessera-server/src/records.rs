@@ -174,16 +174,19 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// A body that is not the request object is a `422` saying what serde found; a body that is not
-/// JSON, or not sent as JSON, keeps axum's own refusal, returned as `Err(Ok(response))`.
-fn request_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, Result<Response, ApiError>> {
+/// The request object, or the answer to a body that is not one: a `422` saying what serde found,
+/// or for a body that is not JSON, or not sent as JSON, axum's own refusal.
+fn request_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, Box<Response>> {
     match body {
         Ok(Json(req)) => Ok(req),
-        Err(JsonRejection::JsonDataError(e)) => Err(Err(ApiError::Contract(format!(
-            "{}; send the fields this route defines, with the values its schema allows",
-            e.body_text()
-        )))),
-        Err(other) => Err(Ok(other.into_response())),
+        Err(JsonRejection::JsonDataError(e)) => Err(Box::new(
+            ApiError::Contract(format!(
+                "{}; send the fields this route defines, with the values its schema allows",
+                e.body_text()
+            ))
+            .into_response(),
+        )),
+        Err(other) => Err(Box::new(other.into_response())),
     }
 }
 
@@ -195,7 +198,7 @@ pub(crate) async fn items(
 ) -> Result<Response, ApiError> {
     let req = match request_body(body) {
         Ok(req) => req,
-        Err(answer) => return answer,
+        Err(answer) => return Ok(*answer),
     };
     let compression = req.compression;
     bulk_read(state, session, "items", "visible", compression, move |state, session, cancel, sink| {
@@ -212,7 +215,7 @@ pub(crate) async fn artifacts(
 ) -> Result<Response, ApiError> {
     let req = match request_body(body) {
         Ok(req) => req,
-        Err(answer) => return answer,
+        Err(answer) => return Ok(*answer),
     };
     let compression = req.compression;
     bulk_read(state, session, "artifacts", "served", compression, move |state, session, cancel, sink| {
