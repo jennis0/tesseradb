@@ -1346,3 +1346,55 @@ fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
     rows.dedup();
     assert_eq!(rows.len(), late.len(), "each late item at its own row");
 }
+
+/// **A layer registered after the last flush survives a merge and a restart, at its version.** The
+/// registration's own side-manifest names it, a cycle with nothing buffered rotates the log past
+/// its record, and the merge then writes the newest manifest; a merge that assembled that manifest
+/// from the partition's state at the last flush would leave the layer nowhere.
+#[test]
+fn a_layer_registered_before_a_merge_survives_it_and_a_restart() {
+    use tessera_types::layer::{
+        ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
+
+    engine
+        .register_layer(LayerDeclaration {
+            scope: Default::default(),
+            name: "clusters/a".into(),
+            title: None,
+            views: vec!["s0".into()],
+            membership: MembershipSource::Enumerated,
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            require_member_visibility: None,
+            hierarchy: Hierarchy {
+                kind: HierarchyKind::Nested,
+                prune_children: false,
+            },
+            content: ContentDeclaration {
+                computed: Vec::new(),
+                supplied: Vec::new(),
+            },
+            depends_on: Vec::new(),
+            levels: Vec::new(),
+            layout: None,
+            shape: None,
+        })
+        .expect("the layer registers");
+    let version = engine.registered_layer("clusters/a").unwrap().version;
+    let cycle = engine.request_flush_publication();
+    wait_until("the empty cycle to close", WAIT, || engine.publication() >= cycle);
+
+    run_merge(&engine, &entities);
+    drop(engine);
+    let reopened = engine_at(tmp.path(), &root);
+    assert_eq!(
+        reopened.registered_layer("clusters/a").map(|l| l.version),
+        Some(version)
+    );
+}

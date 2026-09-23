@@ -920,6 +920,7 @@ impl LayerRegistry {
             declaration: Box::new(declaration),
             layer_entity,
             runs,
+            version: self.version + 1,
         })
     }
 
@@ -2664,6 +2665,7 @@ impl LayerRegistry {
         }
         Ok(WalRecord::LayerDrop {
             name: name.to_string(),
+            version: self.version + 1,
         })
     }
 
@@ -2675,9 +2677,11 @@ impl LayerRegistry {
     /// publication — gate and all, reachable again by whoever the old declaration admitted. It is
     /// the same seed-before-replay ordering the overlay follows, and for the same reason.
     ///
-    /// The version is set past every seeded layer's, so a subsequent registration cannot mint a
-    /// version a session has already cached a resolution against.
-    pub fn seed(&mut self, layers: &[RegisteredLayer], tombstones: &[String]) {
+    /// `version` is the counter the manifest saved. The counter resumes from it or from the highest
+    /// seeded layer's version, whichever is higher, so a registration replayed or made after the
+    /// seed is never given a version lower than one already served.
+    pub fn seed(&mut self, layers: &[RegisteredLayer], tombstones: &[String], version: u64) {
+        self.version = self.version.max(version);
         for layer in layers {
             self.version = self.version.max(layer.version);
             self.layers
@@ -2745,16 +2749,12 @@ impl LayerRegistry {
                 declaration,
                 layer_entity,
                 runs,
+                version,
             } => {
-                // Replay over a seed that already holds this registration keeps its version:
-                // nothing about the layer changed.
-                let version = match self.layers.get(&declaration.name) {
-                    Some(held) if held.entity == *layer_entity => held.version,
-                    _ => {
-                        self.version += 1;
-                        self.version
-                    }
-                };
+                // The record's own version, so a replay over a seed that already counts it moves
+                // nothing.
+                let version = *version;
+                self.version = self.version.max(version);
                 self.layers.insert(
                     declaration.name.clone(),
                     RegisteredLayer {
@@ -2779,10 +2779,10 @@ impl LayerRegistry {
                     },
                 );
             }
-            WalRecord::LayerDrop { name } => {
+            WalRecord::LayerDrop { name, version } => {
                 self.layers.remove(name);
                 self.tombstones.insert(name.clone());
-                self.version += 1;
+                self.version = self.version.max(*version);
             }
             // A publication's only effect on the *registry* is the reservation it grew. The
             // artifacts themselves belong to the store, applied from the same record.

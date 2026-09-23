@@ -513,29 +513,6 @@ async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
     );
 }
 
-/// A served fixture whose write executor takes a fault switchboard, so a test can shut the
-/// flush's gate from inside the process.
-async fn serve_with_faults(tmp: &TempDir) -> (TestServer, Arc<FaultSwitchboard>) {
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
-    let config = default_engine_config();
-    let max_k = config.max_k;
-    let mut engine = Engine::open(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        Passthrough::new(),
-        config,
-    )
-    .expect("engine should open against a freshly built bundle");
-    let faults = Arc::new(FaultSwitchboard::new());
-    engine
-        .start_write_executor_with_faults(1024, Arc::clone(&faults))
-        .expect("the write executor starts once per engine");
-    let server =
-        mount_server_with_faults(engine, max_k, generous_test_gate(), Arc::clone(&faults)).await;
-    (server, faults)
-}
-
 /// Wait until the executor is parked at the publication seam, so a cycle is open as a fact.
 async fn await_seam(faults: &Arc<FaultSwitchboard>) {
     wait_until(

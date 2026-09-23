@@ -184,9 +184,11 @@ pub struct GenerationStamp {
 // numbers. A 16 manifest's arrays do not deserialise as strings, so a stale bundle refuses.
 // 18: a packed artifact record carries its own access label after its parents. A 17 record read
 // at 18 takes the shape's marker for the label's count, so a stale bundle refuses.
+// 19: a side-manifest carries `layer_registry_version`, the layer registry's version counter. An
+// 18 manifest lacks the field and is refused as malformed.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 18;
+pub const BUNDLE_FORMAT: u32 = 19;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
