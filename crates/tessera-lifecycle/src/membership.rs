@@ -2068,6 +2068,13 @@ impl ArtifactStore {
         Some(&target.members)
     }
 
+    /// One level's slots by ordinal, a hole being `None`. Empty for a level nothing holds.
+    pub fn slots(&self, layer: &str, level: u32) -> &[Option<ArtifactRecord>] {
+        self.levels
+            .get(&(layer.to_string(), level))
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// Every artifact of one level, with its ordinal. Holes are skipped.
     pub fn level(&self, layer: &str, level: u32) -> impl Iterator<Item = (u32, &ArtifactRecord)> {
         self.levels
