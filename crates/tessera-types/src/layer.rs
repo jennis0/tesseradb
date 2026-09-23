@@ -1549,6 +1549,42 @@ pub fn expand_views(
     Ok(expanded)
 }
 
+/// A name a group-scoped layer's `views` gives outside the scope's key set, and the groups that
+/// hold that key set, for a refusal to name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutsideScope {
+    pub view: String,
+    pub sharing: Vec<String>,
+}
+
+/// Refuse a layer scoped to `group` whose `views` names anything outside `group`'s key set. Its
+/// artifacts are a set per view of that key set, so a view holding no key of it would draw none.
+/// A name is admitted where it is `group`, a group declaring `members` of `group`, or a view of
+/// either. `groups` is every group's name with the group it declares `members` of, and
+/// `view_group` answers the group a view belongs to, `None` for a plain view or any other name.
+pub fn check_scoped_views<'a>(
+    declared: &[String],
+    group: &str,
+    groups: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    view_group: impl Fn(&str) -> Option<String>,
+) -> Result<(), OutsideScope> {
+    let sharing: Vec<&str> = groups
+        .into_iter()
+        .filter(|(name, members_of)| *name == group || *members_of == Some(group))
+        .map(|(name, _)| name)
+        .collect();
+    let admitted = |name: &str| {
+        sharing.contains(&name) || view_group(name).is_some_and(|g| sharing.contains(&g.as_str()))
+    };
+    match declared.iter().find(|name| !admitted(name)) {
+        None => Ok(()),
+        Some(view) => Err(OutsideScope {
+            view: view.clone(),
+            sharing: sharing.iter().map(|name| name.to_string()).collect(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1565,6 +1601,32 @@ mod tests {
         assert_eq!(
             expand_views(&declared(&["papers", "nowhere"]), group, view),
             Err("nowhere".to_string())
+        );
+    }
+
+    #[test]
+    fn a_scoped_layer_names_only_its_key_sets_groups_and_their_views() {
+        let groups = [("years", None), ("decades", Some("years")), ("regions", None)];
+        let view_group = |name: &str| name.split_once(':').map(|(group, _)| group.to_string());
+        let check = |names: &[&str]| {
+            let declared: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            check_scoped_views(&declared, "years", groups, view_group)
+        };
+        assert_eq!(check(&["years", "decades", "years:2010", "decades:2010"]), Ok(()));
+        let sharing = vec!["years".to_string(), "decades".to_string()];
+        assert_eq!(
+            check(&["years", "papers"]),
+            Err(OutsideScope {
+                view: "papers".to_string(),
+                sharing: sharing.clone()
+            })
+        );
+        assert_eq!(
+            check(&["regions:north"]),
+            Err(OutsideScope {
+                view: "regions:north".to_string(),
+                sharing
+            })
         );
     }
 

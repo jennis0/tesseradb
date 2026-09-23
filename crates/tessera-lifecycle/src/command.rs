@@ -209,8 +209,9 @@ pub struct ValuesRequest {
     pub batch_id: String,
     pub body_hash: [u8; 32],
     /// The view this batch's fills belong to: the `x-tessera-view` header where one was given,
-    /// and the deployment's only view otherwise. It decides which flush pass writes the fills and
-    /// which view's column of a group-scoped family a scoped cell addresses. `None` on a batch
+    /// and the deployment's first view otherwise, which a batch filling only entity-scoped cells
+    /// may take since any view's pass writes those. It decides which flush pass writes the fills
+    /// and which view's column of a group-scoped family a scoped cell addresses. `None` on a batch
     /// that fills no cell.
     pub view: Option<String>,
     /// The declared column names this batch carries, in the caller's order.

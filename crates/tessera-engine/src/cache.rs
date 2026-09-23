@@ -163,8 +163,7 @@ impl CacheWeight for RowProjection {
     /// ~2×), so the bound is approximate — but that caveat does not apply where it matters here.**
     /// At the ≥25%-coverage dense bound this cache is sized against (a *measured* 125.12 MB per
     /// entry at 10⁹), the mask is bitmap-container dominated and in-memory size equals serialised
-    /// size. The caveat is stated here, at the site that computes the number, because the same claim
-    /// is easy to reach for in `tessera-server::config` to justify a margin it does not explain.
+    /// size.
     ///
     /// **A projection is run-optimised at construction** (`crate::projection::RowProjection::from_rows`),
     /// so a grant covering runs of row space is charged the run containers it holds rather than the
@@ -196,10 +195,7 @@ impl CacheWeight for RowProjection {
 ///
 /// At the *measured* 125.12 MB per entry at 10⁹ and the branch's 48-way admission width, that
 /// second term is ~6 GB — larger than some deployments' whole cache bound. **An operator sizing a
-/// box from the config key alone will under-provision.** Stated here rather than at the config site
-/// because this is where the second term's operand lives; `tessera-server`'s startup validation
-/// refuses a bound below `expected_concurrent_sessions × per_entry`, which is a floor on the first
-/// term and says nothing about the second.
+/// box from the config key alone will under-provision.**
 pub(crate) struct RowProjectionCache {
     inner: SingleFlightCache<RowProjectionKey, SessionGeometry>,
 }
