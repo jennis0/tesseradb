@@ -588,14 +588,14 @@ pub struct InlineArtifact {
     /// The resolution this artifact sits at. `0` for a layer with no levels.
     #[serde(default)]
     pub level: u32,
-    /// The membership, by inclusion.
+    /// The membership, by inclusion, as integer ids ([`crate::ids::integer_ids`]).
     #[serde(default)]
-    pub members: Option<Vec<u64>>,
+    pub members: Option<Vec<i64>>,
     /// The membership, by exclusion — the entities it leaves out. Complemented once at build
     /// against the view's entity set, so the published artifact is the one `members` would have
     /// produced (`annotation-write-cycle.md` §6.1). Declaring both is refused.
     #[serde(default)]
-    pub excluding: Option<Vec<u64>>,
+    pub excluding: Option<Vec<i64>>,
     /// The ranked contents, best first: one entry per rank, each a value per supplied kind.
     #[serde(default)]
     pub contents: Vec<Vec<String>>,

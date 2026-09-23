@@ -38,6 +38,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthoriseReq {
     auth_data: String,
 }
@@ -93,6 +94,7 @@ async fn authorise(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RevokeReq {
     token_id: u64,
 }
