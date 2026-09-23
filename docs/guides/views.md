@@ -395,7 +395,10 @@ membership = "enumerated"
 By default (`scope = "entity"`) a layer draws **one artifact set** on every view it names — a
 curated reading list shown identically on the map and on every quarter. `scope = { group = "quarter" }`
 instead draws a **different artifact set per view**, the artifact rows carrying a `view` column via
-`fields.view`; edges may not cross views, and keys are unique per `(layer, view)`:
+`fields.view`; edges may not cross views, and keys are unique per `(layer, view)`. A label layer
+attached into a group-scoped layer is scoped to the same group, or to a group sharing its views: one
+scoped to any other group is refused at publication, at a build and at a running service, since its
+target is never drawn on its views:
 
 ```toml
 [[layer]]

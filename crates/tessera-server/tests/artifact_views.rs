@@ -1411,11 +1411,11 @@ async fn a_recreated_view_serves_none_of_its_predecessors_artifacts() {
     assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
 }
 
-/// A label of another group attached to an artifact of a dropped view is deleted with it, so
-/// after a fold its key is free to label the artifact the recreated view publishes. Such a label
-/// is never served, its target not being drawn on its view, so its key is what shows it.
+/// A label layer scoped to another group, attached to an artifact of this group, is refused at
+/// publication, before and after a restart: its target is drawn only on this group's views, so
+/// the label could never be served.
 #[tokio::test]
-async fn a_label_of_another_group_goes_with_the_artifact_of_a_dropped_view() {
+async fn a_label_attached_across_groups_is_refused_at_publication() {
     const LABELS: &str = "labels/tally";
     let tmp = TempDir::new().unwrap();
     build_group(tmp.path(), false, true);
@@ -1427,7 +1427,6 @@ async fn a_label_of_another_group_goes_with_the_artifact_of_a_dropped_view() {
     register(&server, labels).await;
     let label = json!([{ "key": "n1", "view": "q2", "members": members(0..10),
                          "attached_to": { "layer": SCOPED, "key": "c1" } }]);
-
     let (status, body) = put(
         &server,
         SCOPED,
@@ -1435,27 +1434,12 @@ async fn a_label_of_another_group_goes_with_the_artifact_of_a_dropped_view() {
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    let (status, body) = put(&server, LABELS, label.clone()).await;
-    assert_eq!(status, 201, "{body}");
-    let (status, body) = put(&server, LABELS, label.clone()).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["created"], 0, "the key is held: {body}");
 
-    recreate(&server, "q2").await;
-    flush_and_fold(&server, Some("quarter:q1")).await;
+    let (status, body) = put(&server, LABELS, label.clone()).await;
+    assert_eq!(status, 422, "{body}");
     let server = restart(server, &tmp).await;
-    ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
-    tick(&server).await;
-    let (status, body) = put(
-        &server,
-        SCOPED,
-        json!([{ "key": "c1", "view": "q2", "members": members(20_000..20_020) }]),
-    )
-    .await;
-    assert_eq!(status, 201, "{body}");
     let (status, body) = put(&server, LABELS, label).await;
-    assert_eq!(status, 201, "{body}");
-    assert_eq!(body["created"], 1, "{body}");
+    assert_eq!(status, 422, "{body}");
 }
 
 /// A hierarchy and the labels attached to it, published into a view that is then dropped and

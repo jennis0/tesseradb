@@ -362,7 +362,11 @@ pub(crate) fn parse_ingest_batch(
         // The projection runs here, before anything else reads the coordinates, as the build
         // runs it on a points file.
         clipped += project_columns(projection, &mut x, &mut y)?;
-        let access = labels_col(&batch, "access")?;
+        let access = labels_col(body_name, &batch, "access")?.ok_or_else(|| {
+            DecodeError(format!(
+                "ingest body: column 'access' is missing; send it as {LABELS_SHAPE}"
+            ))
+        })?;
 
         let memberships =
             check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
@@ -417,7 +421,7 @@ pub(crate) fn parse_ingest_batch(
                 external_id,
                 x: x[i],
                 y: y[i],
-                labels: access.labels_at(i)?,
+                labels: access.labels_at(body_name, i)?,
                 scalars,
                 scoped: scoped_values,
             });
@@ -699,10 +703,15 @@ fn coordinate_col(
     }
 }
 
-/// The `access` column, `list<utf8>` or `large_list<utf8>`: each element is one label, taken
+/// How an `access` column is spelled, for a refusal to name.
+const LABELS_SHAPE: &str = "list<utf8> or large_list<utf8>, one label per element, an empty list \
+                            for a row with no label";
+
+/// An `access` column, `list<utf8>` or `large_list<utf8>`: each element is one label, taken
 /// verbatim, so a label containing a separator is one term, as at the build. A scalar `utf8`
-/// column is refused rather than read as one label per row.
-enum LabelCells<'a> {
+/// column is refused rather than read as one label per row. The ingest body and the Arrow form of
+/// a growth both read theirs through it.
+pub(crate) enum LabelCells<'a> {
     List(&'a arrow::array::ListArray),
     Large(&'a arrow::array::LargeListArray),
 }
@@ -734,9 +743,12 @@ impl LabelCells<'_> {
     }
 
     /// Row `row`'s labels, verbatim and in order. A null or empty list is a row with no label,
-    /// which the view's declared default fills or refuses, as the JSON decode reads a null
-    /// `access`; a null element is refused.
-    fn labels_at(&self, row: usize) -> Result<Vec<Vec<u8>>, DecodeError> {
+    /// as the JSON decode reads a null `access`; a null element is refused.
+    pub(crate) fn labels_at(
+        &self,
+        body_name: &str,
+        row: usize,
+    ) -> Result<Vec<Vec<u8>>, DecodeError> {
         let Some(entries) = self.entries(row) else {
             return Ok(Vec::new());
         };
@@ -745,7 +757,7 @@ impl LabelCells<'_> {
             .map(|index| {
                 if values.is_null(index) {
                     return Err(DecodeError(format!(
-                        "ingest body: column 'access' has a null element at row {row}; send \
+                        "{body_name}: column 'access' has a null element at row {row}; send \
                          each label as a string and leave nulls out"
                     )));
                 }
@@ -755,19 +767,17 @@ impl LabelCells<'_> {
     }
 }
 
-fn labels_col<'a>(
+/// The batch's labels column `name`, or `None` where the batch does not carry it.
+pub(crate) fn labels_col<'a>(
+    body_name: &str,
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
-) -> Result<LabelCells<'a>, DecodeError> {
+) -> Result<Option<LabelCells<'a>>, DecodeError> {
     use arrow::array::{LargeListArray, ListArray};
     use arrow::datatypes::DataType;
 
-    const SHAPE: &str = "list<utf8> or large_list<utf8>, one label per element, an empty list \
-                         for a row with no label";
     let Some(column) = batch.column_by_name(name) else {
-        return Err(DecodeError(format!(
-            "ingest body: column '{name}' is missing; send it as {SHAPE}"
-        )));
+        return Ok(None);
     };
     let cells = match column.data_type() {
         DataType::List(_) => LabelCells::List(
@@ -784,12 +794,13 @@ fn labels_col<'a>(
         ),
         DataType::Utf8 | DataType::LargeUtf8 => {
             return Err(DecodeError(format!(
-                "ingest body: column '{name}' is utf8, one string per row; send it as {SHAPE}"
+                "{body_name}: column '{name}' is utf8, one string per row; send it as \
+                 {LABELS_SHAPE}"
             )));
         }
         other => {
             return Err(DecodeError(format!(
-                "ingest body: column '{name}' is {other:?}; send it as {SHAPE}"
+                "{body_name}: column '{name}' is {other:?}; send it as {LABELS_SHAPE}"
             )));
         }
     };
@@ -799,10 +810,10 @@ fn labels_col<'a>(
     };
     if element != DataType::Utf8 {
         return Err(DecodeError(format!(
-            "ingest body: column '{name}' is a list of {element:?}; send it as {SHAPE}"
+            "{body_name}: column '{name}' is a list of {element:?}; send it as {LABELS_SHAPE}"
         )));
     }
-    Ok(cells)
+    Ok(Some(cells))
 }
 
 #[cfg(test)]

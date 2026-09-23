@@ -1276,6 +1276,35 @@ def test_a_layer_declared_with_its_label_column_takes_labels_after_an_empty_comm
     assert db.check().ok
 
 
+def test_an_artifacts_insert_naming_no_label_column_is_refused_before_and_after_the_first_commit(
+    served, corpus
+):
+    """On a layer that reads labels, whether its column was declared or sent by a commit, an
+    artifacts insert without `access=` is refused before the first commit and after it, and
+    nothing reaches the server."""
+    unlabelled = pa.table({"key": pa.array(["blue-team"], pa.string())})
+
+    def declared(db):
+        clustering(db)
+        db.declare_layer(
+            "teams", kind="flat", artifact_visibility={"field": "team", "default": "inherited"}
+        )
+        with pytest.raises(Refusal):
+            db.insert("teams", artifacts=unlabelled, key="key")
+
+    def labelled(db):
+        clustering(db)
+        labelled_teams(db)
+        with pytest.raises(Refusal):
+            db.insert("teams", artifacts=unlabelled, key="key")
+
+    for db, served_before in ((served(declared), []), (served(labelled), ["open-team"])):
+        with pytest.raises(Refusal):
+            db.insert("teams", artifacts=unlabelled, key="key")
+        assert db.commit().ok
+        assert teams_seen(db, ["public"]) == served_before
+
+
 def test_the_label_column_a_commit_sent_is_the_one_every_later_insert_names(served, corpus):
     """Whichever commit first sends a layer's label column, from a build or a later declaration,
     the local declaration records it and an insert naming another column is refused."""

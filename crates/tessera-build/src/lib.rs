@@ -1731,6 +1731,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 &args.out.join(PREFIX),
                 PHASH,
                 std::slice::from_ref(&view.view_id),
+                &args.groups,
                 // The linear build holds its values on the items rather than in typed entity
                 // columns, which is the only thing about the two builds this rule sees.
                 &crate::layers::predicate_artifact_keys(

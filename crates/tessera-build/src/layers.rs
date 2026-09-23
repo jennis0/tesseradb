@@ -1612,14 +1612,11 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
     &mut artifact.contents[index]
 }
 
-/// Register every declaration, publish every artifact, and write the extents that carry them.
-///
-/// `resolve` maps a **source** entity id to the entity this build assigned it, and `high_water` is
-/// the point region's mark — passed so the allocator refuses rather than letting the two regions
-/// meet unnoticed.
-#[allow(clippy::too_many_arguments)]
-/// The views this build writes, each at the incarnation a build gives it.
-struct DeclaredViews<'a>(&'a [String]);
+/// The views and groups this build writes, each view at the incarnation a build gives it.
+struct DeclaredViews<'a> {
+    views: &'a [String],
+    groups: &'a [tessera_store::manifest::GroupDescriptor],
+}
 
 impl tessera_lifecycle::GroupViews for DeclaredViews<'_> {
     fn incarnation_of(
@@ -1628,20 +1625,29 @@ impl tessera_lifecycle::GroupViews for DeclaredViews<'_> {
         key: &str,
     ) -> Option<tessera_types::view::ViewIncarnation> {
         let id = format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR);
-        self.0
+        self.views
             .contains(&id)
             .then_some(tessera_types::view::DECLARED_INCARNATION)
     }
     fn keys_of(&self, group: &str) -> Vec<String> {
-        self.0
+        self.views
             .iter()
             .filter_map(|id| id.split_once(tessera_store::GROUP_SEPARATOR))
             .filter(|(held, _)| *held == group)
             .map(|(_, key)| key.to_string())
             .collect()
     }
+    fn owner_of(&self, group: &str) -> String {
+        tessera_store::manifest::owner_of_group(self.groups, group)
+    }
 }
 
+/// Register every declaration, publish every artifact, and write the extents that carry them.
+///
+/// `resolve` maps a **source** entity id to the entity this build assigned it, and `high_water` is
+/// the point region's mark — passed so the allocator refuses rather than letting the two regions
+/// meet unnoticed.
+#[allow(clippy::too_many_arguments)]
 pub fn publish(
     plan: &mut LayerPlan,
     resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
@@ -1649,6 +1655,7 @@ pub fn publish(
     prefix_dir: &Path,
     partition: &str,
     views: &[String],
+    groups: &[tessera_store::manifest::GroupDescriptor],
     derived: &BTreeMap<String, Vec<String>>,
 ) -> Result<PublishedLayers> {
     let mut registry = LayerRegistry::new();
@@ -1886,7 +1893,7 @@ pub fn publish(
                     &store,
                     &mut alloc,
                     &tessera_lifecycle::no_pending,
-                    &DeclaredViews(views),
+                    &DeclaredViews { views, groups },
                 )
                 .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
             // The record carries its own copy of every membership, so the bitmaps this built are
@@ -4524,6 +4531,7 @@ mod tests {
             prefix.path(),
             "default",
             &["world".to_string()],
+            &[],
             &BTreeMap::new(),
         )
         .expect("two artifacts publish");
