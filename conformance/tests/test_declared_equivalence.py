@@ -609,8 +609,7 @@ TEXT_LOST_AT_RESTART = (
 )
 
 GROUP_VIEW_RECREATED = (
-    "a group view dropped and recreated loses its scoped families after a fold and a restart; "
-    "being fixed on branch fix/recreated-view-restart"
+    "a group view dropped and recreated loses its scoped families after a fold and a restart"
 )
 
 #: Cases and stages expected to fail as a whole, why, and the exception they fail with. Strict,
@@ -642,7 +641,8 @@ KNOWN = (
         "layers",
         ("restart", "fold", "fold-restart"),
         ((r"meta", r"\.layers\[\d+\]\.version"),),
-        "a restart moves the version of each layer registered live, with no gate edit",
+        "a restart moves the version `/v1/meta` gives each layer registered live, though nothing "
+        "about who may see the layer changed",
     ),
     Known(
         "artifact-order",
