@@ -1893,9 +1893,7 @@ pub struct SegmentsManifest {
     /// layer silently inherit every stale reference to the old one.
     pub layer_tombstones: Vec<String>,
     /// The layer registry's version counter: the last version handed to a registration or a drop.
-    /// A drop moves it without leaving a layer that holds it, so it is saved here rather than
-    /// taken from `layers` at open, or a registration replayed after the log rotated would be
-    /// given a version lower than the one it was served at.
+    /// Open resumes the counter from it.
     pub layer_registry_version: u64,
     /// Every view **created while the service runs**, complete current state (`views.md` §3.2).
     ///
