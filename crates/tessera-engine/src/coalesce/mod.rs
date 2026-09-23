@@ -4,8 +4,10 @@
 //! nothing: no posting is dropped and no tombstone applied.
 //!
 //! [`plan_coalesce`] runs on the executor, [`execute_coalesce`] writes on the background pool, and
-//! [`rebased`] applies the result to the manifest on the executor. That manifest edit is the only
-//! commit point: a pass discarded before it leaves orphan files and every consumed entry standing.
+//! [`rebased`] applies the result to a copy of the manifest on the executor. The commit point is
+//! the side-manifest write in `publish_coalesce`. A pass discarded before it, because the window
+//! moved or the new layers would not compose, leaves orphan files and every consumed entry
+//! standing.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
