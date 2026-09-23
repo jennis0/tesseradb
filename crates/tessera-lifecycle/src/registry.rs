@@ -79,6 +79,8 @@ pub enum RegistryError {
     /// An artifact carries an access label on a layer whose `artifact_visibility` names no field,
     /// so nothing would read it.
     Access { layer: String, key: Option<String> },
+    /// An artifact's access labels are more, or longer, than a stored record can hold.
+    AccessTooLong { layer: String, key: Option<String> },
     /// A layer named in `depends_on` is not registered. Refused at create rather than discovered at
     /// the first edge, because an edge's target must exist before the edge (`annotation-write-cycle.md`
     /// §5.0.4) and a dangling dependency is that ordering constraint already broken.
@@ -439,6 +441,17 @@ impl std::fmt::Display for RegistryError {
             RegistryError::Content { layer, detail } => {
                 write!(f, "{layer}: {detail}")
             }
+            RegistryError::AccessTooLong { layer, key } => write!(
+                f,
+                "{layer}: the artifact{} carries more than {} access labels, or one longer than {} \
+                 bytes; send fewer or shorter labels",
+                match key {
+                    Some(key) => format!(" keyed {key}"),
+                    None => String::new(),
+                },
+                u16::MAX - 1,
+                u16::MAX - 1
+            ),
             RegistryError::Access { layer, key } => write!(
                 f,
                 "{layer}: the artifact{} carries an access label, and this layer's \
@@ -731,21 +744,32 @@ fn scoped_view<'a>(
     }
 }
 
-/// The one rule on what access label an artifact may carry: any, on a layer whose
-/// `artifact_visibility` names a field, and none elsewhere.
+/// The one rule on what access label an artifact may carry: any a stored record can hold, on a
+/// layer whose `artifact_visibility` names a field, and none elsewhere.
 fn check_access(
     layer_name: &str,
     declaration: &LayerDeclaration,
     key: Option<&str>,
     access: &[Vec<u8>],
 ) -> Result<(), RegistryError> {
-    if access.is_empty() || declaration.artifact_visibility.carries_own_labels() {
+    if access.is_empty() {
         return Ok(());
     }
-    Err(RegistryError::Access {
-        layer: layer_name.to_string(),
-        key: key.map(str::to_string),
-    })
+    if !declaration.artifact_visibility.carries_own_labels() {
+        return Err(RegistryError::Access {
+            layer: layer_name.to_string(),
+            key: key.map(str::to_string),
+        });
+    }
+    // A packed record counts its labels and their lengths in a `u16`, whose top value marks a
+    // record it could not write.
+    if access.len() >= u16::MAX as usize || access.iter().any(|d| d.len() >= u16::MAX as usize) {
+        return Err(RegistryError::AccessTooLong {
+            layer: layer_name.to_string(),
+            key: key.map(str::to_string),
+        });
+    }
+    Ok(())
 }
 
 impl std::error::Error for RegistryError {}
@@ -4631,5 +4655,36 @@ mod tests {
             .prepare_put("clusters/a", 0, &[other], &store, &mut alloc)
             .unwrap_err();
         assert!(matches!(refused, RegistryError::PartConflict { .. }), "{refused:?}");
+    }
+
+    /// A label longer than a stored record can hold, or more labels than it can count, is refused
+    /// at publication and at a fill, rather than packed into a record the next open cannot read.
+    #[test]
+    fn an_access_label_too_long_to_store_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let mut d = declaration("clusters/a");
+        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        register(&mut reg, &mut alloc, d).unwrap();
+        publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[incoming("held", &[1])]).unwrap();
+
+        let long = vec![b'x'; u16::MAX as usize];
+        let many: Vec<Vec<u8>> = (0..u16::MAX as u32).map(|i| i.to_le_bytes().to_vec()).collect();
+        for access in [vec![long.clone()], many.clone()] {
+            let mut fresh = incoming("c1", &[1]);
+            fresh.access = access.clone();
+            assert!(reg
+                .prepare_put("clusters/a", 0, &[fresh], &store, &mut alloc)
+                .is_err());
+            let mut fill = incoming("held", &[]);
+            fill.access = access;
+            assert!(reg
+                .prepare_put("clusters/a", 0, &[fill], &store, &mut alloc)
+                .is_err());
+        }
+        let mut fits = incoming("c2", &[1]);
+        fits.access = vec![vec![b'x'; u16::MAX as usize - 1]];
+        assert!(reg.prepare_put("clusters/a", 0, &[fits], &store, &mut alloc).is_ok());
     }
 }
