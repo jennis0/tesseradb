@@ -20,7 +20,7 @@ use crate::error::{EngineError, Result};
 const KEY_DOMAIN: &[u8] = b"tessera-records-cursor-key-v1";
 const AAD_DOMAIN: &[u8] = b"tessera-records-cursor-v1";
 /// The sealed payload's layout. A cursor of another format does not open.
-const FORMAT: u8 = 2;
+const FORMAT: u8 = 3;
 const NONCE_LEN: usize = 24;
 
 /// The route a cursor was issued on, bound into its associated data.
@@ -121,24 +121,18 @@ impl CursorKey {
 /// Item numbers are held only inside the seal.
 pub(super) type Key = (u32, u64);
 
-/// How far a read has gone. `last` is the last row returned, and `scan` the position every row at
-/// or before which has been considered; a read resumes after `scan`, which is never before
-/// `last`.
+/// How far a read has gone: `scan` is the position every row at or before which has been
+/// returned or passed over, and a read resumes after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Position {
     pub(super) order: RecordsOrder,
-    pub(super) last: Option<Key>,
     pub(super) scan: Option<Key>,
 }
 
 impl Position {
     /// The start of a read in `order`.
     pub(super) fn start(order: RecordsOrder) -> Position {
-        Position {
-            order,
-            last: None,
-            scan: None,
-        }
+        Position { order, scan: None }
     }
 }
 
@@ -152,15 +146,12 @@ pub(super) struct ItemsCursor {
     pub(super) stretch: u32,
 }
 
-/// `idset, order, flags, last (u32, u64), scan (u32, u64), stretch`, little-endian, where bit 0 of
-/// `flags` says `last` is present and bit 1 that `scan` is.
-const PAYLOAD_LEN: usize = 4 + 1 + 1 + 12 + 12 + 4;
-const HAS_LAST: u8 = 1;
-const HAS_SCAN: u8 = 2;
+/// `idset, order, has_scan, scan (u32, u64), stretch`, little-endian.
+const PAYLOAD_LEN: usize = 4 + 1 + 1 + 12 + 4;
 
 impl ItemsCursor {
     pub(super) fn encode(&self) -> Vec<u8> {
-        let Position { order, last, scan } = self.position;
+        let Position { order, scan } = self.position;
         let order = match order {
             RecordsOrder::Map => 0u8,
             RecordsOrder::Stored => 1u8,
@@ -168,13 +159,10 @@ impl ItemsCursor {
         let mut out = Vec::with_capacity(PAYLOAD_LEN);
         out.extend_from_slice(&self.idset.to_le_bytes());
         out.push(order);
-        let flags = (if last.is_some() { HAS_LAST } else { 0 })
-            | (if scan.is_some() { HAS_SCAN } else { 0 });
-        out.push(flags);
-        for (a, b) in [last.unwrap_or((0, 0)), scan.unwrap_or((0, 0))] {
-            out.extend_from_slice(&a.to_le_bytes());
-            out.extend_from_slice(&b.to_le_bytes());
-        }
+        out.push(u8::from(scan.is_some()));
+        let (a, b) = scan.unwrap_or((0, 0));
+        out.extend_from_slice(&a.to_le_bytes());
+        out.extend_from_slice(&b.to_le_bytes());
         out.extend_from_slice(&self.stretch.to_le_bytes());
         out
     }
@@ -182,15 +170,13 @@ impl ItemsCursor {
     /// A payload that opened but does not parse is refused like one that did not open: it can
     /// only be a payload of another format.
     pub(super) fn decode(payload: &[u8]) -> Result<ItemsCursor> {
-        if payload.len() != PAYLOAD_LEN || payload[5] & !(HAS_LAST | HAS_SCAN) != 0 {
+        if payload.len() != PAYLOAD_LEN || payload[5] > 1 {
             return Err(EngineError::CursorRefused);
         }
         let u32_at = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().expect("4"));
         let u64_at = |at: usize| u64::from_le_bytes(payload[at..at + 8].try_into().expect("8"));
         let idset = u32_at(0);
-        let flags = payload[5];
-        let last = (flags & HAS_LAST != 0).then(|| (u32_at(6), u64_at(10)));
-        let scan = (flags & HAS_SCAN != 0).then(|| (u32_at(18), u64_at(22)));
+        let scan = (payload[5] == 1).then(|| (u32_at(6), u64_at(10)));
         let order = match payload[4] {
             0 => RecordsOrder::Map,
             1 => RecordsOrder::Stored,
@@ -198,8 +184,8 @@ impl ItemsCursor {
         };
         Ok(ItemsCursor {
             idset,
-            position: Position { order, last, scan },
-            stretch: u32_at(30),
+            position: Position { order, scan },
+            stretch: u32_at(18),
         })
     }
 }
@@ -226,7 +212,6 @@ mod tests {
             idset: 7,
             position: Position {
                 order: RecordsOrder::Map,
-                last: Some((3, 99)),
                 scan: Some((4, u64::MAX)),
             },
             stretch: 16_384,
@@ -255,7 +240,6 @@ mod tests {
             idset: 1,
             position: Position {
                 order: RecordsOrder::Stored,
-                last: None,
                 scan: Some((12, 0)),
             },
             stretch: 4096,

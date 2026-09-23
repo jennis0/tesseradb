@@ -93,7 +93,7 @@ pub(super) enum Walked {
 pub(super) struct Collected {
     pub(super) rows: Vec<Taken>,
     pub(super) walked: Walked,
-    /// The position after every row taken: the last of them, and how far the scan went.
+    /// The position after every row taken: how far the scan went.
     pub(super) position: Position,
 }
 
@@ -281,11 +281,7 @@ impl Walk {
         need: usize,
         clock: &mut Clock,
     ) -> Result<Collected> {
-        let Position {
-            order,
-            last,
-            mut scan,
-        } = self.position;
+        let Position { order, mut scan } = self.position;
         let mut rows: Vec<Taken> = Vec::new();
         let walked = loop {
             if self.stretch.as_ref().is_some_and(|stretch| {
@@ -343,14 +339,10 @@ impl Walk {
             };
             scan = scan.max(before(until));
         };
-        let last = rows
-            .last()
-            .map(|row| key_of(order, cx.segments(), row))
-            .or(last);
         Ok(Collected {
             rows,
             walked,
-            position: Position { order, last, scan },
+            position: Position { order, scan },
         })
     }
 
@@ -359,7 +351,6 @@ impl Walk {
         let key = key_of(self.position.order, cx.segments(), row);
         Position {
             order: self.position.order,
-            last: Some(key),
             scan: Some(key),
         }
     }
