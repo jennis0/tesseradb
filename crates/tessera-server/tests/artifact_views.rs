@@ -1173,7 +1173,12 @@ async fn fold_settled(server: &TestServer) -> bool {
 
 /// The `tessera_id`s one view serves over the whole extent, to a principal holding every term.
 async fn points_of(server: &TestServer, view: &str) -> BTreeSet<u64> {
-    let auth = authorise(server, &["0", "1"]).await;
+    points_as(server, &["0", "1"], view).await
+}
+
+/// The same, to a principal holding `terms`.
+async fn points_as(server: &TestServer, terms: &[&str], view: &str) -> BTreeSet<u64> {
+    let auth = authorise(server, terms).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -1265,4 +1270,28 @@ async fn a_flushed_segment_the_size_of_the_base_is_not_read_off_the_base_column(
     server.shutdown().await;
     let server = open(&tmp).await;
     assert_eq!(served(&server, "quarter:q2", SHAPES).await, before);
+}
+
+/// A view dropped and created again with as many rows as its predecessor held serves exactly its
+/// own items after a restart, to a principal who may see them and to one who may not.
+#[tokio::test]
+async fn a_recreated_view_the_size_of_its_predecessor_serves_its_own_items_after_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    recreate(&server, "q2").await;
+    let own = ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    flush(&server).await;
+    assert_eq!(points_of(&server, "quarter:q2").await, own);
+
+    // The new items carry `0` alone, so a principal holding `1` alone sees none of them. The
+    // dropped view's items divisible by three carry `1`.
+    assert!(points_as(&server, &["1"], "quarter:q2").await.is_empty());
+
+    server.shutdown().await;
+    let server = open(&tmp).await;
+    assert_eq!(points_of(&server, "quarter:q2").await, own);
+    assert!(
+        points_as(&server, &["1"], "quarter:q2").await.is_empty(),
+        "a restart masks the recreated view's rows by its own items"
+    );
 }
