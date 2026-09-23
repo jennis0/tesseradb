@@ -1790,10 +1790,10 @@ fn a_response_ends_at_its_pages_its_bytes_and_cancellation_and_the_read_resumes(
 // Inside one response
 // ---------------------------------------------------------------------------------------------
 
-/// A sink that collects, and runs `between` once, after the first page it is given.
+/// A sink that collects, and after its first pages runs one of `after` each, in order.
 struct Between<'a> {
     inner: Collect,
-    between: Option<Box<dyn FnOnce() + 'a>>,
+    after: std::collections::VecDeque<Box<dyn FnOnce() + 'a>>,
 }
 
 impl ItemsSink for Between<'_> {
@@ -1803,11 +1803,29 @@ impl ItemsSink for Between<'_> {
 
     fn page(&mut self, batch: &RecordBatch, end: &ItemsPageEnd) -> SinkResult {
         self.inner.page(batch, end)?;
-        if let Some(between) = self.between.take() {
-            between();
+        if let Some(after) = self.after.pop_front() {
+            after();
         }
         Ok(())
     }
+}
+
+/// One response whose sink runs each of `after` after one of its first pages.
+fn respond_after<'a>(
+    engine: &Engine,
+    session: &Session,
+    req: ItemsRequest<'_>,
+    after: Vec<Box<dyn FnOnce() + 'a>>,
+) -> (Collect, ItemsTrailer) {
+    let mut sink = Between {
+        inner: Collect::default(),
+        after: after.into(),
+    };
+    let trailer = engine
+        .items_stream(session, req, &mut sink)
+        .expect("a response");
+    assert!(sink.after.is_empty(), "the response carried a page for every step");
+    (sink.inner, trailer)
 }
 
 /// One response whose sink runs `between` after its first page.
@@ -1817,15 +1835,7 @@ fn respond_between<'a>(
     req: ItemsRequest<'_>,
     between: impl FnOnce() + 'a,
 ) -> (Collect, ItemsTrailer) {
-    let mut sink = Between {
-        inner: Collect::default(),
-        between: Some(Box::new(between)),
-    };
-    let trailer = engine
-        .items_stream(session, req, &mut sink)
-        .expect("a response");
-    assert!(sink.between.is_none(), "the response carried a first page");
-    (sink.inner, trailer)
+    respond_after(engine, session, req, vec![Box::new(between)])
 }
 
 /// **A suppression and a deletion accepted between two pages of one response are absent from
@@ -2238,5 +2248,100 @@ fn chained_responses_cancelled_mid_scan_complete_a_sparse_read() {
         }
         assert!(responses > 1, "{order:?}: the cut ended at least one response");
         assert_eq!(ids, whole, "{order:?}: every row once, in order");
+    }
+}
+
+/// **A projection refreshed between two pages of one response serves the rows it makes
+/// visible**, matched as the filter matches them. Rows ingested and flushed after the first page
+/// are outside the session's projection, served a generation stale, on the second; the refresh
+/// lands after it with no new generation, and the pages after it must answer for them, both in
+/// the rows they return and in the matched bit.
+#[test]
+fn rows_a_refreshed_projection_makes_visible_are_served_and_matched() {
+    let mut fx = Fx::new();
+    fx.engine.set_background_refresh_for_test(true);
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let mut held = N;
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        for keep_unmatched in [false, true] {
+            assert_eq!(viewport_counts(&fx.engine, &session, "s0", None).0, held);
+            let later: Vec<u64> = (held..held + 300).collect();
+            let fields = names(&["prose"]);
+            let mut req = request("s0", &fields);
+            req.order = Some(order);
+            req.page_rows = Some(100);
+            req.keep_unmatched = keep_unmatched;
+            req.filter = Some(leaf(
+                "prose",
+                FilterOperand::Match {
+                    query: "group1".into(),
+                    minimum: None,
+                },
+            ));
+            let engine = &fx.engine;
+            let inserted = std::cell::RefCell::new(Vec::new());
+            let (sink, trailer) = respond_after(
+                engine,
+                &session,
+                req,
+                vec![
+                    Box::new(|| {
+                        engine.set_refresh_paused_for_test(true);
+                        *inserted.borrow_mut() = ingest_sources(engine, "late", &later);
+                        flush(engine);
+                        assert_eq!(
+                            viewport_counts(engine, &session, "s0", None).0,
+                            held,
+                            "the projection is served stale"
+                        );
+                    }),
+                    Box::new(|| {
+                        engine.set_refresh_paused_for_test(false);
+                        wait_until("the refresh to land", Duration::from_secs(60), || {
+                            viewport_counts(engine, &session, "s0", None).0 == held + 300
+                        });
+                    }),
+                ],
+            );
+            assert_eq!(trailer.ended_by, ResponseEndedBy::End);
+            for (&s, entity) in later.iter().zip(inserted.into_inner()) {
+                fx.entity.insert(s, entity.raw());
+            }
+            let cut = *ids_of(&sink.pages[1].0).last().unwrap();
+            let all: Vec<u64> = (0..held + 300).collect();
+            let in_order = match order {
+                RecordsOrder::Map => fx.map_order(all.iter().copied(), "s0"),
+                RecordsOrder::Stored => fx.stored_order(all.iter().copied()),
+            };
+            let rank: BTreeMap<u64, usize> = in_order
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| (fx.tid(s), i))
+                .collect();
+            let matches = |s: u64| s % 3 == 1;
+            let expected: Vec<u64> = in_order
+                .iter()
+                .copied()
+                .filter(|&s| keep_unmatched || matches(s))
+                .filter(|&s| s < held || rank[&fx.tid(s)] > rank[&cut])
+                .collect();
+            let by_tid: BTreeMap<u64, u64> = all.iter().map(|&s| (fx.tid(s), s)).collect();
+            let ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
+            assert_eq!(
+                ids,
+                fx.tids(&expected),
+                "{order:?} keep_unmatched={keep_unmatched}: rows"
+            );
+            if keep_unmatched {
+                for (batch, _) in &sink.pages {
+                    let matched = col::<BooleanArray>(batch, "tessera:matched");
+                    for (i, tid) in ids_of(batch).into_iter().enumerate() {
+                        let s = by_tid[&tid];
+                        assert_eq!(matched.value(i), matches(s), "{order:?}: matched bit of {s}");
+                    }
+                }
+            }
+            held += 300;
+        }
     }
 }

@@ -4,10 +4,15 @@
 //! in map order, a range of item numbers in stored order. It starts at the scan position and
 //! spans a target number of rows, and when a page empties one before filling, the next is four
 //! times longer, so a sparse filter costs a few evaluations per read rather than one per page. The
-//! size reached travels in the cursor, so a resumed read continues at it. The filter's answer is
-//! held in the row positions of the publication it was evaluated under, so a stretch is evaluated
-//! again when the prefix, the segment set or the overlay moves.
-//! Visibility is never held: every page tests every row against the mask composed for that page.
+//! size reached travels in the cursor, so a resumed read continues at it.
+//!
+//! A stretch's filter is evaluated under the viewer's whole candidate set, brought forward to the
+//! page's generation, narrowed to the stretch's items, so it answers for every item the viewer
+//! may see there whatever the page's mask admits. Its answer is held in the row positions of the
+//! generation and the mask it was evaluated under, so a stretch is evaluated again when the
+//! prefix, the segment set, the overlay or the session's composed mask moves, as it does when a
+//! projection served stale is refreshed. Visibility is never held: every page tests every row
+//! against the mask composed for that page.
 //!
 //! Every leaf is evaluated on the row route wherever the column affords one, in both orders, so
 //! the two orders test each row by the same rule and return the same rows. A region past the
@@ -30,6 +35,7 @@ use crate::compose::{for_each_run_in, FilterRows};
 use crate::engine::Engine;
 use crate::error::Result;
 use crate::filter::FilterExpr;
+use crate::histogram::MaskIdentity;
 use crate::region::RegionVerdict;
 use crate::viewport::{crossing_domain, segment_holding, OpenView, RoutedRows};
 use crate::Generation;
@@ -147,6 +153,9 @@ pub(super) struct Walk {
 /// The part of the view ahead of a scan position that one filter evaluation covers.
 struct Stretch {
     under: Arc<Generation>,
+    /// The composed mask the filter was evaluated under, whose region and `member_of` leaves
+    /// answer through it.
+    mask: MaskIdentity,
     /// The scan position it was opened after.
     from: Option<Key>,
     /// Every row whose key's first half is below this; `2^32` past the last.
@@ -276,7 +285,9 @@ impl Walk {
         let mut rows: Vec<Taken> = Vec::new();
         let walked = loop {
             if self.stretch.as_ref().is_some_and(|stretch| {
-                !same_publication(&stretch.under, cx.generation) || stretch.from > scan
+                !same_publication(&stretch.under, cx.generation)
+                    || stretch.mask != cx.open.served.mask_identity
+                    || stretch.from > scan
             }) {
                 self.stretch = None;
             }
@@ -395,30 +406,33 @@ impl Walk {
                         (start < end).then_some((s, start..end))
                     })
                     .collect();
-                // The candidate is the stretch's visible items, so an entity-space scan costs the
-                // stretch and not the view.
+                // The viewer's candidate narrowed to the stretch's items, so an entity-space scan
+                // costs the stretch and not the view.
                 let mut entities: Vec<u32> = Vec::new();
                 for (s, range) in &parts {
-                    let (segment, base) = segments[*s];
-                    let ids = segment.columns.tessera_id();
-                    let visible = cx.open.mask.rows_in_range(base + range.start..base + range.end);
+                    let ids = segments[*s].0.columns.tessera_id();
                     entities.extend(
-                        visible
+                        ids[range.start as usize..range.end as usize]
                             .iter()
-                            .map(|row| cx.entity_of(ids[(row - base) as usize])),
+                            .map(|&id| cx.entity_of(id)),
                     );
                 }
                 entities.sort_unstable();
+                let mut candidate = Bitmap::of(&entities);
+                candidate.and_inplace(
+                    &cx.engine
+                        .filter_candidate(cx.open.served.session, cx.generation)?,
+                );
                 let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
                 let domain = crossing_domain(&[parts], &row_bases);
-                let routed =
-                    filter_rows(cx, expr, Some(&Bitmap::of(&entities)), &domain, true, cancel)?;
+                let routed = filter_rows(cx, expr, Some(&candidate), &domain, true, cancel)?;
                 self.region = RegionVerdict::coarsest(self.region, routed.region);
                 Some(routed.rows)
             }
         };
         Ok(Some(Stretch {
             under: Arc::clone(cx.generation),
+            mask: cx.open.served.mask_identity,
             from: scan,
             until,
             filter,
@@ -481,6 +495,7 @@ impl Walk {
         };
         Ok(Some(Stretch {
             under: Arc::clone(cx.generation),
+            mask: cx.open.served.mask_identity,
             from: scan,
             until,
             filter,
