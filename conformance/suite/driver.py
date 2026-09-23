@@ -296,6 +296,8 @@ def _suite_config(
     control_port: int,
     compute_threads: int | None = None,
     big_batches: bool = False,
+    max_merged_segment_bytes: int | None = 1048576,
+    automatic_folds: bool = True,
 ) -> str:
     # θ and both caps above any *fixture* total, so at fixture size every tile is saturated and
     # the diff compares exact membership. No cap clears every corpus — saturation is observed per
@@ -305,6 +307,26 @@ def _suite_config(
     # from selection (module doc); the config loader refuses the value if the base ever shrinks
     # under it, which is the loud failure this suite wants.
     threads_line = "" if compute_threads is None else f"compute_threads = {compute_threads}\n"
+    # A corpus smaller than the cap cannot fold under it, so such a harness leaves it unset.
+    merge_line = (
+        ""
+        if max_merged_segment_bytes is None
+        else f"max_merged_segment_bytes = {max_merged_segment_bytes}\n"
+    )
+    # The window being off leaves the schedule's gauge triggers armed; these turn them off too.
+    fold_lines = (
+        ""
+        if automatic_folds
+        else "\n".join(
+            f'{key} = "off"'
+            for key in (
+                "compaction_max_segments",
+                "compaction_after_deletions",
+                "compaction_dead_rows_fraction",
+                "compaction_dead_bytes_ratio",
+            )
+        )
+    )
     # A plan asking for large batches raises both ceilings together: rows alone would leave the
     # byte ceiling binding first, and the pair is what the WAL-headroom relation is stated over.
     batch_lines = (
@@ -335,11 +357,11 @@ max_k = 1000000
 k_min = 2
 k_max_marks = 1000000
 theta_target_marks = 1099511627776
-max_merged_segment_bytes = 1048576
-{threads_line}
+{merge_line}{threads_line}
 [ingest]
 flush_max_age_secs = 86400
 compaction_window_start = "off"
+{fold_lines}
 {batch_lines}
 """
 
@@ -540,6 +562,11 @@ class SuiteHarness:
     underlay_offset: int = 2
     #: The resource regime this walk runs in (§7, §12.5). The default is no regime at all.
     profile: Profile = Profile()
+    #: The merge cap written into the server's config, or None to leave it unset.
+    max_merged_segment_bytes: int | None = 1048576
+    #: Whether the schedule may dispatch a fold on its own; False leaves `/control/compact` as the
+    #: only way one runs.
+    automatic_folds: bool = True
 
     server: Server | None = None
     proc: subprocess.Popen | None = None
@@ -594,6 +621,8 @@ class SuiteHarness:
                 control_port,
                 compute_threads=self.profile.compute_threads,
                 big_batches=os.environ.get("TESSERA_SUITE_BIG_BATCHES") == "1",
+                max_merged_segment_bytes=self.max_merged_segment_bytes,
+                automatic_folds=self.automatic_folds,
             )
         )
         env = os.environ.copy()
