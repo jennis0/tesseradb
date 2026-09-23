@@ -4,6 +4,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::Arc;
 
+/// Whether a unit of one kind is running, or finished and not yet published, read from its two
+/// flags.
+pub(crate) fn outstanding(in_flight: &AtomicBool, completed_pending: &AtomicBool) -> bool {
+    in_flight.load(Ordering::SeqCst) || completed_pending.load(Ordering::SeqCst)
+}
+
 /// One kind of background work. At most one unit of a kind is in flight. A finished unit waits in
 /// the channel until the executor thread takes it, since only that thread publishes.
 pub(in crate::write) struct Background<C> {
@@ -48,7 +54,7 @@ impl<C> Background<C> {
 
     /// Running, or finished and not yet published.
     pub(super) fn outstanding(&self) -> bool {
-        self.in_flight() || self.completed_pending()
+        outstanding(&self.in_flight, &self.completed_pending)
     }
 
     /// A number no earlier unit of this kind was given, for naming what the unit writes.

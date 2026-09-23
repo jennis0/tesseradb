@@ -12,6 +12,7 @@ mod wal;
 mod window;
 
 pub(super) use background::Background;
+pub(crate) use background::outstanding;
 pub(super) use manifest::SideManifests;
 pub(super) use wal::ExecutorLog;
 

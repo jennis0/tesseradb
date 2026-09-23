@@ -39,7 +39,7 @@ Each stage's barrier is wire- or filesystem-observable, never a sleep:
 | stage | barrier |
 |---|---|
 | build, load | the spawn's own health wait, then `/control/status` readiness |
-| write (ingest + flush) | ``flush.flushes`` up, then ``flush.refreshes`` up — the second half is decision 0044 D1: an established session serves its old projection until the background refresh replaces it, so a recording after the version bump alone is short by exactly the batch |
+| write (ingest + flush) | ``flush.flushes`` up, then ``flush.refreshes`` up and ``flush.refresh_in_flight`` false: an established session serves its old projection until the background refresh replaces it, so a recording after the version bump alone is short by exactly the batch |
 | merge | ``merges`` up, ``segments_version`` bumped, ``refreshes`` up (a merge's publication runs the same refresh pass) |
 | coalesce | ``coalesces`` up — the one stage that moves no row and bumps no version (write-path §7), so its barrier must be a counter; the version is asserted *unchanged* |
 | deny | the 200 acknowledgement itself — a deny is fail-closed at acceptance (write-path §5.4), so there is nothing later to wait for |
@@ -931,9 +931,17 @@ def _publication_counts(h: SuiteHarness) -> dict:
 
 
 def _settled(executor: dict) -> bool:
-    """No work-lane job queued and no flush on the pool. Status reports nothing narrower for a
-    merge or coalesce still running on the pool."""
-    return executor["work_depth"] == 0 and not executor["flush"]["in_flight"]
+    """No work-lane job queued, no flush, merge or coalesce running or finished and not yet
+    published, and no refresh running. A publication arms its refresh as it lands, and a request made before the
+    refresh ends may be refused with 429."""
+    flush = executor["flush"]
+    return (
+        executor["work_depth"] == 0
+        and not flush["in_flight"]
+        and not executor["merge_in_flight"]
+        and not executor["coalesce_in_flight"]
+        and not flush["refresh_in_flight"]
+    )
 
 
 def _assert_isolated(h: SuiteHarness, label: str, before: dict, own: tuple[str, ...]) -> None:
@@ -1076,10 +1084,14 @@ class Write(Stage):
             lambda: h.executor()["flush"]["flushes"] > self._snap["flushes"],
             f"{self.label}: the flush never published",
         )
+        # A merge riding the same tick publishes its own generation with its own refresh, and
+        # either refresh can raise the counter first. Until the newest one ends, a request may be
+        # answered from the previous generation's projection, which lacks this batch, while a
+        # later request in the same recording has it. So wait for the newest refresh to end too.
         poll(
-            lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
-            f"{self.label}: the background refresh never replaced the resident projection — "
-            f"a recording now would be short by exactly this batch (decision 0044 D1)",
+            lambda: (flush := h.executor()["flush"])["refreshes"] > self._snap["refreshes"]
+            and not flush["refresh_in_flight"],
+            f"{self.label}: the background refresh never replaced the resident projection",
         )
         _assert_isolated(h, self.label, self._counts, own=("flushes",))
 

@@ -2189,6 +2189,94 @@ async fn status_stage_barriers_move_when_their_stages_run() {
     .await;
 }
 
+/// `/control/status` reports a refresh or a merge publication in flight while it is held, and
+/// clears the flag once it is released.
+#[tokio::test]
+async fn status_reports_a_held_refresh_and_a_held_merge_as_in_flight() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let engine = &server.state.engine;
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    // A resident projection, so a flush has something to refresh.
+    let auth = authorise(&server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .json(&serde_json::json!({"view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let idle = control_status(&server).await;
+    let executor = &idle["write_executor"];
+    assert_eq!(executor["flush"]["refresh_in_flight"], false, "{idle}");
+    assert_eq!(executor["merge_in_flight"], false, "{idle}");
+    assert_eq!(executor["coalesce_in_flight"], false, "{idle}");
+
+    let flush_round = async |round: u64| {
+        let (code, body) = post_ingest(
+            &server,
+            &format!("in-flight-{round}"),
+            &rows_from(40_000 + round * 10, 2),
+            true,
+        )
+        .await;
+        assert_eq!(code, 200, "round {round}'s ingest must land: {body}");
+        let resp = server
+            .client
+            .post(server.control_url("/control/flush"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 202);
+        wait_until(&format!("round {round}'s flush publishing"), WAIT, async || {
+            control_status(&server).await["write_executor"]["flush"]["flushes"].as_u64()
+                == Some(round)
+        })
+        .await;
+    };
+
+    // The refresh a flush arms is held, so the flag stays set until it is released.
+    engine.set_refresh_paused_for_test(true);
+    flush_round(1).await;
+    let held = control_status(&server).await;
+    assert_eq!(held["write_executor"]["flush"]["refresh_in_flight"], true, "{held}");
+    engine.set_refresh_paused_for_test(false);
+    wait_until("the released refresh ending", WAIT, async || {
+        control_status(&server).await["write_executor"]["flush"]["refresh_in_flight"] == false
+    })
+    .await;
+
+    // Four same-tier flush extents make a merge eligible; its finished unit is held unpublished.
+    engine.set_merge_publication_paused_for_test(true);
+    let mut round = 1;
+    while !engine.merge_publication_is_held_for_test() {
+        round += 1;
+        assert!(round <= 16, "sixteen flush rounds never produced a merge to hold");
+        flush_round(round).await;
+        // A merge the tick dispatched may still be running.
+        wait_until("a dispatched merge finishing", WAIT, async || {
+            engine.merge_publication_is_held_for_test()
+                || control_status(&server).await["write_executor"]["merge_in_flight"] == false
+        })
+        .await;
+    }
+    let held = control_status(&server).await;
+    assert_eq!(held["write_executor"]["merge_in_flight"], true, "{held}");
+    assert_eq!(held["write_executor"]["merges"], 0, "{held}");
+    engine.set_merge_publication_paused_for_test(false);
+    wait_until("the released merge publishing", WAIT, async || {
+        let status = control_status(&server).await;
+        status["write_executor"]["merges"].as_u64() > Some(0)
+            && status["write_executor"]["merge_in_flight"] == false
+    })
+    .await;
+}
+
 /// **Unbounded ingest hangs the viewer plane rather than shedding it, and this closes that.**
 ///
 /// `ComputeGate::admit` is `async` and awaited **before** `spawn_blocking`, so viewer *demand* is
