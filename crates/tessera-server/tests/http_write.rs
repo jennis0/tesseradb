@@ -178,8 +178,7 @@ async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
     let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
 
     const SUPPRESS_SOURCE_ID: u64 = 5;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let external_id = member(SUPPRESS_SOURCE_ID);
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
@@ -545,8 +544,7 @@ async fn changes_batch_validates_before_applying_anything() {
     let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
 
     const REAL_SOURCE_ID: u64 = 9;
-    let real_external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(REAL_SOURCE_ID));
+    let real_external_id = member(REAL_SOURCE_ID);
     // Not a real external id (never ingested/built) — must 404 during validation.
     let bogus_external_id =
         base64::engine::general_purpose::STANDARD.encode(b"this-external-id-does-not-exist");
@@ -596,12 +594,7 @@ async fn changes_batch_validates_before_applying_anything() {
 #[test]
 fn concurrent_ingest_and_change_both_survive() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
 
     let mut engine = Engine::open(
         &bundle_root,
@@ -889,12 +882,7 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
 #[tokio::test]
 async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut config = default_engine_config();
     // Wide enough to let the request below through `Engine::viewport`'s own bounds checks
     // (`EngineError::UnderlayRefused`) rather than being rejected before it ever costs anything.
@@ -1069,8 +1057,7 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
     tokio::task::yield_now().await;
 
     const SUPPRESS_SOURCE_ID: u64 = 7;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let external_id = member(SUPPRESS_SOURCE_ID);
     let suppress_start = std::time::Instant::now();
     let suppress_resp = server
         .client
@@ -1182,12 +1169,7 @@ async fn readyz_status(server: &TestServer, url: String) -> u16 {
 #[tokio::test]
 async fn a_stepped_down_partition_is_not_ready() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
 
     // Copy SEGMENTS-0 to a newer SEGMENTS-1 naming a file that does not exist, so the walk steps
     // down to SEGMENTS-0 and serves.
@@ -1253,12 +1235,7 @@ async fn a_stepped_down_partition_is_not_ready() {
 #[tokio::test]
 async fn an_engine_without_a_write_executor_is_not_ready() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     // `mount_server`, not `spawn_server_from_engine`: the latter starts an executor unconditionally.
     let engine = Engine::open(
         &bundle_root,
@@ -1374,12 +1351,7 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
         return;
     }
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     // The WAL gets its own directory: `chmod` is applied to the *directory*, and the bundle and
     // cache must stay writable.
     let wal_dir = tmp.path().join("wal");
@@ -1424,7 +1396,7 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
     let suppress = |id: u64| {
         let client = server.client.clone();
         let url = server.control_url("/control/changes");
-        let external_id = base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
+        let external_id = member(id);
         async move {
             client
                 .post(url)
@@ -1522,12 +1494,7 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
         return;
     }
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let wal_dir = tmp.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
     let server = spawn_server(
@@ -1710,12 +1677,7 @@ const PARKED_MAX_BLOCKING_THREADS: usize = 4;
 const PARKED_INGEST_ADMISSION: usize = 2;
 
 async fn parked_fixture(tmp: &TempDir) -> ParkedFixture {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
 
     let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (arrived_tx, arrived) = tokio::sync::mpsc::unbounded_channel();
@@ -1850,12 +1812,7 @@ fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
 async fn ingest_is_refused_by_buffer_occupancy() {
     const BUFFER_MAX: usize = 8;
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1932,12 +1889,7 @@ async fn ingest_is_refused_by_buffer_occupancy() {
 #[tokio::test]
 async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let wal_path = tmp.path().join("wal.log");
     let server = spawn_server(&bundle_root, &tmp.path().join("cache"), &wal_path).await;
 
@@ -2467,8 +2419,7 @@ fn changes_never_429s() {
         assert_eq!(body["error"], "backpressure");
 
         const SUPPRESS_SOURCE_ID: u64 = 5;
-        let external_id =
-            base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+        let external_id = member(SUPPRESS_SOURCE_ID);
         let resp = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             fx.server
@@ -2542,12 +2493,7 @@ fn changes_never_429s() {
 #[tokio::test]
 async fn ingest_429s_when_the_queue_is_full() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -2616,8 +2562,7 @@ async fn ingest_429s_when_the_queue_is_full() {
 
     // And the never-shed lane is unaffected in the very same state.
     const SUPPRESS_SOURCE_ID: u64 = 6;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let external_id = member(SUPPRESS_SOURCE_ID);
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
@@ -2649,12 +2594,7 @@ async fn ingest_429s_when_the_queue_is_full() {
 #[tokio::test]
 async fn an_oversized_batch_is_422_not_a_queue_slot() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -2735,12 +2675,7 @@ async fn an_oversized_batch_is_422_not_a_queue_slot() {
 #[tokio::test]
 async fn an_oversized_body_is_422_not_413() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let one_row = build_ingest_batch(&rows_from(820, 1));
     let cap = one_row.len();
 
@@ -2830,12 +2765,7 @@ async fn an_oversized_body_is_422_not_413() {
 #[tokio::test]
 async fn backpressure_is_invisible_before_auth() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let one_row = build_ingest_batch(&rows_from(840, 1));
     let cap = one_row.len();
 
@@ -2929,12 +2859,7 @@ async fn backpressure_is_invisible_before_auth() {
     // **Its own bundle**, because both servers run write executors and one executor owns a bundle
     // root (write-path §1.2). Nothing here is about the two sharing a corpus: each server's
     // subject is the order of its own refusals.
-    let bundle_root_b = tmp.path().join("bundle-b");
-    build_fixture(
-        &bundle_root_b,
-        &tmp.path().join("points-b.parquet"),
-        &tmp.path().join("pairs-b.parquet"),
-    );
+    let bundle_root_b = build_fixture(&tmp.path().join("b"), N_ITEMS);
     let mut engine_b = Engine::open(
         &bundle_root_b,
         &tmp.path().join("cache-b"),
@@ -3020,12 +2945,7 @@ async fn backpressure_is_invisible_before_auth() {
 #[tokio::test]
 async fn the_overlay_soft_limit_alarms_and_does_not_act() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -3040,7 +2960,7 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
     let server = mount_server(engine, 200, generous_test_gate()).await;
 
     let suppress = |id: u64| {
-        let external_id = base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
+        let external_id = member(id);
         server
             .client
             .post(server.control_url("/control/changes"))
@@ -3129,12 +3049,7 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
 #[tokio::test]
 async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -3148,8 +3063,7 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
 
     // A syntactically valid change array well past the 2 MiB cap. Every item names a real external
     // id, so nothing but the size can be what refuses it.
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let external_id = member(SUPPRESS_SOURCE_ID);
     const SUPPRESS_SOURCE_ID: u64 = 7;
     let mut items = Vec::new();
     while serde_json::to_vec(&items).unwrap().len() < 3 * 1024 * 1024 {
@@ -3454,12 +3368,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
         return;
     }
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let wal_dir = tmp.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
     let server = spawn_server(

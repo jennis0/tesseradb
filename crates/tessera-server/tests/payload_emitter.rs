@@ -16,6 +16,10 @@ use common::*;
 use serde_json::Value;
 use tempfile::TempDir;
 
+/// The items of the built bundle, which carries one view, `s0`, and nothing the declaration names:
+/// every object below is one the running service created from a payload.
+const ITEMS: u64 = 64;
+
 /// The declaration these tests post: two plain views, a view group, two vocabularies (one with
 /// inline values), three attributes and one layer.
 ///
@@ -122,12 +126,6 @@ fn payloads(dir: &Path, declaration: &str) -> Value {
     tessera_build::config::control_payloads(&config)
 }
 
-/// A built bundle carrying one view, `s0`, and nothing this declaration names: every object below
-/// is one the running service created from a payload.
-fn fixture(dir: &Path) -> std::path::PathBuf {
-    fixture_in(dir, 64)
-}
-
 async fn put(served: &Served, path: &str, body: &Value) -> (u16, Value) {
     send(served, reqwest::Method::PUT, path, body).await
 }
@@ -161,7 +159,7 @@ fn accepted(status: u16, answer: &Value, what: &str) {
 /// before the layer drawn on it.
 #[tokio::test]
 async fn every_emitted_body_is_taken_by_its_route() {
-    let served = Served::build(fixture).await;
+    let served = Served::build(|dir| build_fixture(dir, ITEMS)).await;
     let dir = TempDir::new().unwrap();
     let payloads = payloads(dir.path(), DECLARATION);
 
@@ -237,7 +235,7 @@ async fn every_emitted_body_is_taken_by_its_route() {
 /// a column quietly declared without it.
 #[tokio::test]
 async fn the_route_refuses_render_and_says_why() {
-    let served = Served::build(fixture).await;
+    let served = Served::build(|dir| build_fixture(dir, ITEMS)).await;
     let dir = TempDir::new().unwrap();
     let payloads = payloads(
         dir.path(),

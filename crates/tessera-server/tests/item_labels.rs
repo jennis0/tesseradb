@@ -13,7 +13,6 @@
 
 mod common;
 
-use base64::Engine as _;
 use tempfile::TempDir;
 
 use common::*;
@@ -249,8 +248,7 @@ async fn a_suppressed_item_is_the_identical_404() {
     let changes: Vec<serde_json::Value> = (0..N_ITEMS)
         .map(|source| {
             serde_json::json!({
-                "external_id": base64::engine::general_purpose::STANDARD
-                    .encode(external_id_of(source)),
+                "external_id": member(source),
                 "op": "suppress"
             })
         })

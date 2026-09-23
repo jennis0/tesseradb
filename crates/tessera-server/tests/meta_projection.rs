@@ -205,12 +205,7 @@ async fn a_web_mercator_sub_square_publishes_the_tile_it_is() {
 #[tokio::test]
 async fn a_none_view_publishes_none_and_no_scheme() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let view = meta_view(&bundle_root, tmp.path(), "none").await;
 
     assert_eq!(view["projection"], "none");

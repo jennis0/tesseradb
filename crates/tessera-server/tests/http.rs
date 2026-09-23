@@ -9,7 +9,6 @@
 
 mod common;
 
-use base64::Engine as _;
 use tempfile::TempDir;
 
 use tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS;
@@ -408,12 +407,7 @@ async fn d_unknown_view_404_and_malformed_bbox_422() {
 #[tokio::test]
 async fn h_config_missing_disclosure_refuses_to_start() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
 
     std::env::set_var("TESSERA_TEST_H_SESSION", SESSION_CREDENTIAL);
     std::env::set_var("TESSERA_TEST_H_OPERATOR", OPERATOR_CREDENTIAL);
@@ -812,12 +806,7 @@ async fn compute_status(server: &TestServer) -> serde_json::Value {
 #[tokio::test]
 async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -884,12 +873,7 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
 #[tokio::test]
 async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -962,8 +946,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     // `/control/changes` suppress: the case this test exists for. The entire control plane is off
     // the viewer/session gate; a deny op must reach the WAL regardless.
     const SUPPRESS_SOURCE_ID: u64 = 3;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let external_id = member(SUPPRESS_SOURCE_ID);
     let suppress_resp = server
         .client
         .post(server.control_url("/control/changes"))
@@ -989,12 +972,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
 #[tokio::test]
 async fn no_permit_leak_after_a_shed_or_a_completion() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1088,12 +1066,7 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
 #[tokio::test]
 async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     // compute_queue = 1 (not 0): the queued fast request below must be ADMITTED (a slot) and
     // then WAIT for a compute permit, rather than being shed outright by stage 1 — that wait is
     // exactly what `x-tessera-admission-us` needs to capture. A generous timeout so it is never
@@ -1258,12 +1231,7 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 #[tokio::test]
 async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1407,13 +1375,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 #[tokio::test]
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
+    let bundle_root = build_fixture(tmp.path(), PARALLEL_HEADLINE_ITEMS);
 
     let config_1 = EngineConfig {
         compute_threads: 1,
@@ -1548,13 +1510,7 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles(
 ) {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
+    let bundle_root = build_fixture(tmp.path(), PARALLEL_HEADLINE_ITEMS);
 
     let config_1 = EngineConfig {
         compute_threads: 1,
@@ -1667,13 +1623,7 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
 #[tokio::test]
 async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
+    build_fixture(tmp.path(), PARALLEL_HEADLINE_ITEMS);
     let server = open(&tmp).await;
 
     // The generous default gate: 48 admission permits against the handful of requests below, so
@@ -1750,12 +1700,7 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
 #[tokio::test]
 async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
 
     let chunked = spawn_server_with_stream_flush(
         &bundle_root,
@@ -1984,13 +1929,7 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     use tokio::io::AsyncReadExt as _;
     const SHED_FIXTURE_ITEMS: u64 = 2_000_000;
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        SHED_FIXTURE_ITEMS,
-    );
+    let bundle_root = build_fixture(tmp.path(), SHED_FIXTURE_ITEMS);
     let server = spawn_server_with_stream_flush(
         &bundle_root,
         &tmp.path().join("cache"),

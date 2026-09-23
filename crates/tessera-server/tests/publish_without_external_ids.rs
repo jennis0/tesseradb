@@ -41,11 +41,7 @@ async fn serve_fixture(mint_external_ids: bool) -> (TempDir, TestServer) {
 
 /// Publish one artifact whose members are the given external ids; return status and body text.
 async fn publish(server: &TestServer, layer: &str, members: &[u64]) -> (u16, String) {
-    use base64::Engine as _;
-    let members: Vec<String> = members
-        .iter()
-        .map(|e| base64::engine::general_purpose::STANDARD.encode(external_id_of(*e)))
-        .collect();
+    let members: Vec<String> = members.iter().map(|e| member(*e)).collect();
     let encoded = layer.replace('/', "%2F");
     let resp = server
         .client

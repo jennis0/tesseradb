@@ -174,31 +174,23 @@ pub fn write_lon_lat(path: &Path, places: &[(f64, f64)]) {
     );
 }
 
-/// [`build_fixture`] over `n` items.
-pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
-    build_fixture_with_access(
-        out,
-        points_path,
-        pairs_path,
-        n,
-        AccessInput::relation(pairs_path),
-    );
+/// The standard fixture: `n` items placed by [`scatter`], with the terms [`terms_of`] gives them,
+/// built into `dir/bundle` from points and pairs files written beside it in `dir`.
+pub fn build_fixture(dir: &Path, n: u64) -> std::path::PathBuf {
+    build_fixture_with_access(dir, n, AccessInput::relation(dir.join("pairs.parquet")))
 }
 
-/// [`build_fixture_n`] under a `point_visibility` of the caller's choosing — the declared
-/// default is what `/control/ingest` fills an empty `access` list with, or refuses on
-/// (decision 0133), so a test of that needs a fixture declaring each.
-pub fn build_fixture_with_access(
-    out: &Path,
-    points_path: &Path,
-    pairs_path: &Path,
-    n: u64,
-    access: AccessInput,
-) {
-    write_points_n(points_path, n);
-    write_pairs_n(pairs_path, n);
-    let view = view_args("s0", points_path, access);
-    build(&build_args(out, vec![view])).expect("fixture build should succeed");
+/// [`build_fixture`] under the `point_visibility` given, whose default is what an ingested row
+/// with an empty `access` list takes.
+pub fn build_fixture_with_access(dir: &Path, n: u64, access: AccessInput) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let points = dir.join("points.parquet");
+    write_points_n(&points, n);
+    write_pairs_n(&dir.join("pairs.parquet"), n);
+    let out = dir.join("bundle");
+    let view = view_args("s0", &points, access);
+    build(&build_args(&out, vec![view])).expect("fixture build should succeed");
+    out
 }
 
 /// A build of `views` into `out` under the test identity key, minting external ids and writing no
@@ -242,22 +234,6 @@ pub fn view_args(view_id: &str, points: &Path, access: AccessInput) -> ViewArgs 
         select: None,
         access,
     }
-}
-
-pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
-    build_fixture_n(out, points_path, pairs_path, N_ITEMS)
-}
-
-/// [`build_fixture_n`] into `dir/bundle`, with its points and pairs files beside it in `dir`.
-pub fn fixture_in(dir: &Path, n: u64) -> std::path::PathBuf {
-    let out = dir.join("bundle");
-    build_fixture_n(
-        &out,
-        &dir.join("points.parquet"),
-        &dir.join("pairs.parquet"),
-        n,
-    );
-    out
 }
 
 /// Build one plain view, `s0`, over `points` and `pairs` into `out`, declaring the attributes and
@@ -461,8 +437,20 @@ pub async fn open_with(dir: impl AsRef<Path>, config: EngineConfig) -> TestServe
 
 /// Build the standard fixture ([`build_fixture`]) into `dir` and serve it.
 pub async fn serve(dir: impl AsRef<Path>) -> TestServer {
-    fixture_in(dir.as_ref(), N_ITEMS);
+    build_fixture(dir.as_ref(), N_ITEMS);
     open(dir).await
+}
+
+/// The standard fixture, served, under a `point_visibility` declaring `default` or none.
+pub async fn serve_with_default(default: Option<&str>) -> (TempDir, TestServer) {
+    let tmp = TempDir::new().unwrap();
+    let access = AccessInput {
+        source: tessera_build::config::AccessSource::Relation(tmp.path().join("pairs.parquet")),
+        default: default.map(str::to_string),
+    };
+    build_fixture_with_access(tmp.path(), N_ITEMS, access);
+    let server = open(&tmp).await;
+    (tmp, server)
 }
 
 /// Stop `server` and serve the bundle in `dir` again, over the same cache and log.
@@ -1213,6 +1201,39 @@ pub async fn fold(server: &TestServer) {
         now.folds > before.folds
     })
     .await;
+}
+
+/// Ingest one point, into `view` where the bundle holds several, then [`tick`] and [`fold`]. A
+/// flush with nothing buffered publishes nothing, so the point gives the fold something to fold.
+pub async fn flush_and_fold(server: &TestServer, view: Option<&str>) {
+    let ingested = external_id_of(9_001);
+    let mut request = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "flush-and-fold")
+        .header("content-type", "application/vnd.apache.arrow.stream");
+    if let Some(view) = view {
+        request = request.header("x-tessera-view", view);
+    }
+    let resp = request
+        .body(build_ingest_batch_optional(&[(
+            Some(&ingested[..]),
+            10.0,
+            10.0,
+            "0",
+        )]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "{}",
+        resp.text().await.unwrap()
+    );
+    tick(server).await;
+    fold(server).await;
 }
 
 /// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no idset).

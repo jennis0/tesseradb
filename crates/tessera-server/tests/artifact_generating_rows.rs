@@ -412,11 +412,7 @@ async fn a_suppressed_member_of_a_generating_set_withholds_the_content_from_ever
 #[tokio::test]
 async fn a_merge_leaves_every_answer_where_it_was() {
     let tmp = TempDir::new().unwrap();
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    build_fixture(tmp.path(), N_ITEMS);
     // `tier_width` 2, so two flushed segments select a merge.
     let server = spawn_server_with_config(
         &tmp.path().join("bundle"),

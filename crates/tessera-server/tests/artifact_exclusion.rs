@@ -163,12 +163,7 @@ async fn an_exclusion_serves_what_the_inclusion_spelling_serves_and_replays() {
 #[tokio::test]
 async fn a_list_over_the_bound_is_refused_naming_the_inclusion_spelling() {
     let tmp = TempDir::new().unwrap();
-    let bundle = tmp.path().join("bundle");
-    build_fixture(
-        &bundle,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = tessera_engine::Engine::open(
         &bundle,
         &tmp.path().join("cache"),

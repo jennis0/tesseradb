@@ -187,9 +187,7 @@ async fn publish_layer(server: &TestServer) -> Vec<String> {
         resp.text().await.unwrap()
     );
 
-    let member = |source_id: u64| {
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-    };
+    let member = |source_id: u64| member(source_id);
     let members_all: Vec<String> = (0..12u64).map(member).collect();
     let members_broad: Vec<String> = (12..24u64).filter(|s| s % 3 != 0).map(member).collect();
     let resp = server

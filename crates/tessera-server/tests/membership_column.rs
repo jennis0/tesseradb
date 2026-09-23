@@ -403,13 +403,9 @@ async fn ingest_tail(
             .as_u64()
             .expect("every 200 reports what its own keys created");
     }
-    flush_and_fold(server).await;
-    minted
-}
-
-async fn flush_and_fold(server: &TestServer) {
     tick(server).await;
     fold(server).await;
+    minted
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1001,7 +997,8 @@ async fn one_unknown_key_mints_one_artifact_however_many_points_name_it() {
         "ten points, one artifact"
     );
 
-    flush_and_fold(&server).await;
+    tick(&server).await;
+    fold(&server).await;
     let view = client_view(&server, &["0", "1"]).await;
     let minted = view
         .artifacts
@@ -1082,7 +1079,8 @@ async fn a_suppressed_artifacts_key_mints_nothing_and_the_point_joins_it() {
     // The point joined the artifact that was there all along: lift the suppression, fold so the
     // ingested row is a base row, and the masked count carries it.
     suppress(&server, &id, "unsuppress").await;
-    flush_and_fold(&server).await;
+    tick(&server).await;
+    fold(&server).await;
     let view = client_view(&server, &["0", "1"]).await;
     let artifact = view
         .artifacts
@@ -1136,7 +1134,8 @@ async fn a_deleted_key_that_returns_is_a_new_artifact() {
         "the key names no live artifact, so it creates one: {detail}"
     );
 
-    flush_and_fold(&server).await;
+    tick(&server).await;
+    fold(&server).await;
     let view = client_view(&server, &["0", "1"]).await;
     let artifact = view
         .artifacts

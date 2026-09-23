@@ -181,7 +181,7 @@ async fn a_values_only_commit_is_readable_once_the_counter_reaches_the_answer() 
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "values-1")
         .header("x-tessera-view", "s0")
-        .json(&json!([{"external_id": b64(&external_id_of(3)), "tag": "alpha"}]))
+        .json(&json!([{"external_id": member(3), "tag": "alpha"}]))
         .send()
         .await
         .unwrap();
@@ -248,7 +248,7 @@ async fn an_artifacts_only_commit_is_served_once_the_counter_reaches_the_answer(
             "addressing": "external",
             "artifacts": [{
                 "key": "k0",
-                "members": [b64(&external_id_of(1)), b64(&external_id_of(2))],
+                "members": [member(1), member(2)],
             }],
         }))
         .send()
@@ -430,12 +430,7 @@ async fn rows_buffered_into_two_views_are_both_served_at_the_number() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let config = default_engine_config();
     let max_k = config.max_k;
     let mut engine = Engine::open(
@@ -521,12 +516,7 @@ async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
 /// A served fixture whose write executor takes a fault switchboard, so a test can shut the
 /// flush's gate from inside the process.
 async fn serve_with_faults(tmp: &TempDir) -> (TestServer, Arc<FaultSwitchboard>) {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let config = default_engine_config();
     let max_k = config.max_k;
     let mut engine = Engine::open(
@@ -656,7 +646,7 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "op": "suppress", "external_id": b64(&external_id_of(1)) }]))
+        .json(&json!([{ "op": "suppress", "external_id": member(1) }]))
         .send()
         .await
         .unwrap();
@@ -823,7 +813,7 @@ async fn wait_visible_holds_an_artifact_publication_until_it_is_served() {
             "addressing": "external",
             "artifacts": [{
                 "key": "k0",
-                "members": [b64(&external_id_of(1)), b64(&external_id_of(2))],
+                "members": [member(1), member(2)],
             }],
         }))
         .send()
@@ -874,12 +864,7 @@ async fn wait_visible_holds_a_declaration_until_it_is_published() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_wait_is_bounded_and_says_so() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_visible_wait(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -918,12 +903,7 @@ async fn the_wait_is_bounded_and_says_so() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_largest_wait_ceiling_waits_for_the_publication() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_visible_wait(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1046,12 +1026,7 @@ async fn wait_visible_holds_a_flush_until_the_unwaited_pages_are_served() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_flush_wait_is_bounded_and_says_so() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_visible_wait(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1128,7 +1103,7 @@ async fn a_replayed_values_page_is_flagged() {
     )
     .await;
 
-    let body = json!([{"external_id": b64(&external_id_of(3)), "tag": "alpha"}]);
+    let body = json!([{"external_id": member(3), "tag": "alpha"}]);
     let first = post_values(&server, "values-1", &body).await;
     assert_eq!(first["filled"], json!(1));
     assert!(first.get("replayed").is_none(), "{first}");

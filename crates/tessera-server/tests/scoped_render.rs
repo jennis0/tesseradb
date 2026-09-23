@@ -1766,7 +1766,6 @@ async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_diff
 /// it dedupes an equal value and is refused a different one, and the flush that follows publishes.
 #[tokio::test]
 async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
-    use base64::Engine as _;
     let served = Served::build(build_with_families).await;
     const AGREES: u64 = 9_601;
     const DISAGREES: u64 = 9_602;
@@ -1784,7 +1783,7 @@ async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
     .await;
     drain(&served.server).await;
 
-    let id = |e: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(e));
+    let id = |e: u64| member(e);
     let resp = served
         .server
         .client
@@ -1870,15 +1869,8 @@ async fn a_written_cell_of_an_unflagged_family_dedupes_or_is_refused() {
 }
 
 /// One `tag` value for one entity through `POST /control/values`, with its status and body.
-async fn fill(
-    served: &Served,
-    batch_id: &str,
-    view: &str,
-    entity: u64,
-    tag: f32,
-) -> (u16, Value) {
-    use base64::Engine as _;
-    let id = base64::engine::general_purpose::STANDARD.encode(external_id_of(entity));
+async fn fill(served: &Served, batch_id: &str, view: &str, entity: u64, tag: f32) -> (u16, Value) {
+    let id = member(entity);
     let resp = served
         .server
         .client
@@ -2350,7 +2342,6 @@ async fn a_gate_failed_view_is_absent_from_the_drill_down_and_its_key_is_not() {
 /// view is dropped goes with it: the drop says how many, and none of them holds the log.
 #[tokio::test]
 async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
-    use base64::Engine as _;
     let served = Served::build(build_with_families).await;
     // An entity ingested and published, so the cell this fills is empty and nothing else is
     // buffered. A built cell holds the build's own value, which the fill would be refused for.
@@ -2364,7 +2355,7 @@ async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
     )
     .await;
     drain(&served.server).await;
-    let id = base64::engine::general_purpose::STANDARD.encode(external_id_of(FRESH));
+    let id = member(FRESH);
     let resp = served
         .server
         .client

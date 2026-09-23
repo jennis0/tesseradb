@@ -12,7 +12,6 @@
 
 mod common;
 
-use base64::Engine as _;
 use common::*;
 use tempfile::TempDir;
 
@@ -129,7 +128,7 @@ async fn a_mixed_bulk_batch_applies_both_address_forms() {
     let token = token_for(&server, &["0"]).await;
 
     // Two different fixture items, named two different ways.
-    let by_external = base64::engine::general_purpose::STANDARD.encode(external_id_of(5));
+    let by_external = member(5);
     let by_tessera = a_drawn_tessera_id(&server, &token).await;
     let before = visible(&server, &token).await;
 
@@ -209,7 +208,7 @@ async fn an_element_names_exactly_one_address_form() {
     let token = token_for(&server, &["0"]).await;
 
     let id = ingest_anonymous(&server, "anon-1").await;
-    let external = base64::engine::general_purpose::STANDARD.encode(external_id_of(5));
+    let external = member(5);
     let before = visible(&server, &token).await;
 
     for (what, body) in [
@@ -252,12 +251,7 @@ async fn an_element_names_exactly_one_address_form() {
 #[tokio::test]
 async fn a_tessera_addressed_deny_replays_to_the_same_entity() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let root = build_fixture(tmp.path(), N_ITEMS);
     let cache = tmp.path().join("cache");
     let wal = tmp.path().join("wal.log");
 

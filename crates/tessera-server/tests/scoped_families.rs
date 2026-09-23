@@ -1660,9 +1660,8 @@ async fn values_without_view(
     wait: bool,
     cells: Value,
 ) -> (u16, Value) {
-    use base64::Engine as _;
     let mut row = json!({
-        "external_id": base64::engine::general_purpose::STANDARD.encode(external_id_of(FILLED)),
+        "external_id": member(FILLED),
     });
     for (name, value) in cells.as_object().unwrap() {
         row[name] = value.clone();

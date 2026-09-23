@@ -243,7 +243,7 @@ fn arrow_body(rows: &[Row]) -> Vec<u8> {
 /// have to send; `seen` as the integer microseconds the roster's `timestamp_us` takes.
 fn json_record(row: &Row) -> Value {
     json!({
-        "external_id": b64(&external_id_of(row.id)),
+        "external_id": member(row.id),
         "x": row.x,
         "y": row.y,
         "access": ["0"],
@@ -544,25 +544,8 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
 /// no label at all and is refused. The Arrow door's four are in `access_list.rs`.
 #[tokio::test]
 async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_the_count() {
-    async fn served_with_default(default: Option<&str>) -> (TempDir, TestServer) {
-        let tmp = TempDir::new().unwrap();
-        let bundle_root = tmp.path().join("bundle");
-        let pairs = tmp.path().join("pairs.parquet");
-        build_fixture_with_access(
-            &bundle_root,
-            &tmp.path().join("points.parquet"),
-            &pairs,
-            N_ITEMS,
-            tessera_build::config::AccessInput {
-                source: tessera_build::config::AccessSource::Relation(pairs.clone()),
-                default: default.map(str::to_string),
-            },
-        );
-        let server = open(&tmp).await;
-        (tmp, server)
-    }
     fn body() -> Vec<u8> {
-        let id = |i: u64| b64(&external_id_of(N_ITEMS + 500 + i));
+        let id = |i: u64| member(N_ITEMS + 500 + i);
         json!([
             { "external_id": id(0), "x": 10.0, "y": 10.0, "access": [] },
             { "external_id": id(1), "x": 11.0, "y": 11.0, "access": null },
@@ -588,7 +571,7 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
         tiles.iter().map(|t| t.1).sum()
     }
 
-    let (_tmp, server) = served_with_default(Some("ir:sealed")).await;
+    let (_tmp, server) = serve_with_default(Some("ir:sealed")).await;
     let before = visible_to(&server, &["ir:sealed"]).await;
     let (status, resp) = ingest(&server, "filled", Some("application/json"), body()).await;
     assert_eq!(status, 200, "{resp}");
@@ -600,7 +583,7 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
         "the three unlabelled rows landed under the declared default; the labelled row kept its own"
     );
 
-    let (_tmp, server) = served_with_default(None).await;
+    let (_tmp, server) = serve_with_default(None).await;
     let high_water = control_status(&server).await["entity_id_high_water"].clone();
     let (status, resp) = ingest(&server, "refused", Some("application/json"), body()).await;
     assert_eq!(status, 422, "{resp}");
@@ -618,7 +601,7 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
         &server,
         "empty-element",
         Some("application/json"),
-        json!([{ "external_id": b64(&external_id_of(N_ITEMS + 600)), "x": 1.0, "y": 1.0, "access": [""] }])
+        json!([{ "external_id": member(N_ITEMS + 600), "x": 1.0, "y": 1.0, "access": [""] }])
             .to_string()
             .into_bytes(),
     )
@@ -631,7 +614,7 @@ fn plain_json_body(ids: std::ops::Range<u64>) -> Vec<u8> {
     Value::Array(
         ids.map(|id| {
             json!({
-                "external_id": b64(&external_id_of(N_ITEMS + 1_000 + id)),
+                "external_id": member(N_ITEMS + 1_000 + id),
                 "x": 10.0 + (id % 7) as f64,
                 "y": 20.0 + (id % 5) as f64,
                 "access": ["0"],
@@ -728,12 +711,7 @@ fn grow_arrow(artifacts: &[(&str, Vec<String>)]) -> Vec<u8> {
 /// A server over the plain fixture at the limits given, with the layer registered.
 async fn served_plain(limits: IngestLimits) -> (TempDir, TestServer) {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let engine = engine_over(&bundle_root, tmp.path());
     let server = mount_server_with_ingest_limits(engine, 200, generous_test_gate(), limits).await;
     register_layer(&server, "closed").await;

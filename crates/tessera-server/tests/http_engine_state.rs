@@ -137,8 +137,7 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
     let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
 
     const SUPPRESS_SOURCE_ID: u64 = 7;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    let external_id = member(SUPPRESS_SOURCE_ID);
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
@@ -340,12 +339,7 @@ async fn authorise_n(server: &TestServer, n: usize) -> Vec<serde_json::Value> {
 #[tokio::test]
 async fn expired_sessions_do_not_accumulate_in_the_registry() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut config = default_engine_config();
     config.token_max_lifetime_secs = 0;
     let server = spawn_server_with_config(
@@ -445,12 +439,7 @@ async fn the_sweep_keeps_every_live_session() {
 #[tokio::test]
 async fn the_sweep_prunes_what_the_engine_holds_for_an_expired_session() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut config = default_engine_config();
     config.token_max_lifetime_secs = 2;
     let server = spawn_server_with_config(
@@ -566,12 +555,7 @@ async fn revocation_takes_effect_without_waiting_for_a_sweep() {
 #[tokio::test]
 async fn an_expired_session_is_refused_while_still_retained() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut config = default_engine_config();
     config.token_max_lifetime_secs = 0;
     let server = spawn_server_with_config(

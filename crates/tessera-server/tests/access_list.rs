@@ -96,31 +96,6 @@ async fn visible_to(server: &TestServer, terms: &[&str]) -> u64 {
     tiles.iter().map(|t| t.1).sum()
 }
 
-async fn served() -> (TempDir, TestServer) {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-    (tmp, server)
-}
-
-/// The same fixture under a `point_visibility` declaring `default`, or none.
-async fn served_with_default(default: Option<&str>) -> (TempDir, TestServer) {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    let pairs = tmp.path().join("pairs.parquet");
-    build_fixture_with_access(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &pairs,
-        N_ITEMS,
-        tessera_build::config::AccessInput {
-            source: tessera_build::config::AccessSource::Relation(pairs.clone()),
-            default: default.map(str::to_string),
-        },
-    );
-    let server = open(&tmp).await;
-    (tmp, server)
-}
-
 /// A points file carrying its own `list<string>` access column, `N_ITEMS` rows: every row
 /// labelled `ir:analyst` except `NULL_ROW`, whose label is null. The field-sourced shape, which
 /// is the one the build fills a null label on.
@@ -201,7 +176,8 @@ async fn a_field_sourced_view_fills_a_null_label_and_an_empty_list_alike() {
 /// fragment.
 #[tokio::test]
 async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
-    let (_tmp, server) = served().await;
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
 
     let body = body_with_access(
         3,
@@ -233,7 +209,8 @@ async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
 /// schema — whole batch, no effect — naming the column and the shape it takes.
 #[tokio::test]
 async fn a_scalar_utf8_access_column_is_refused_naming_the_column_and_the_shape() {
-    let (_tmp, server) = served().await;
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
     let body = body_with_access(1, Arc::new(StringArray::from(vec![VIENNA])));
@@ -256,7 +233,7 @@ async fn a_scalar_utf8_access_column_is_refused_naming_the_column_and_the_shape(
 /// carrying labels of its own is not also given the default.
 #[tokio::test]
 async fn an_empty_list_takes_the_views_declared_default() {
-    let (_tmp, server) = served_with_default(Some("ir:sealed")).await;
+    let (_tmp, server) = serve_with_default(Some("ir:sealed")).await;
     let sealed_before = visible_to(&server, &["ir:sealed"]).await;
     let zero_before = visible_to(&server, &["0"]).await;
 
@@ -288,7 +265,8 @@ async fn an_empty_list_takes_the_views_declared_default() {
 /// declares that, so an empty list there is a row every principal sees.
 #[tokio::test]
 async fn an_empty_list_under_a_public_default_is_public() {
-    let (_tmp, server) = served().await;
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
     let before = visible_to(&server, &[]).await;
 
     let body = body_with_access(1, Arc::new(access_lists(&[&[]])));
@@ -304,7 +282,7 @@ async fn an_empty_list_under_a_public_default_is_public() {
 /// An empty *element* stays refused as it was, whatever the view declares.
 #[tokio::test]
 async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared() {
-    let (_tmp, server) = served_with_default(None).await;
+    let (_tmp, server) = serve_with_default(None).await;
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
     let body = body_with_access(3, Arc::new(access_lists(&[&[], &["0"], &[]])));
@@ -352,7 +330,7 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
         lists.append(true);
         body_with_access(2, Arc::new(lists.finish()))
     }
-    let (_tmp, server) = served_with_default(Some("ir:sealed")).await;
+    let (_tmp, server) = serve_with_default(Some("ir:sealed")).await;
     let before = visible_to(&server, &["ir:sealed"]).await;
     let resp = ingest(&server, "filled", null_and_empty()).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
@@ -363,7 +341,7 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
         "the null cell and the empty list both landed under the declared default"
     );
 
-    let (_tmp, server) = served_with_default(None).await;
+    let (_tmp, server) = serve_with_default(None).await;
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
     let resp = ingest(&server, "refused", null_and_empty()).await;
     assert_eq!(resp.status(), 422);
@@ -418,7 +396,8 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
 /// effect.
 #[tokio::test]
 async fn a_null_element_is_refused_naming_the_row() {
-    let (_tmp, server) = served().await;
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
     let mut null_element = ListBuilder::new(StringBuilder::new());

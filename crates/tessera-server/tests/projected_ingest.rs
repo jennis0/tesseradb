@@ -365,12 +365,7 @@ async fn a_projected_view_refuses_the_cartesian_spelling() {
 #[tokio::test]
 async fn a_view_with_no_projection_refuses_the_geographic_spelling() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_config(
         &root,
         &tmp.path().join("cache"),

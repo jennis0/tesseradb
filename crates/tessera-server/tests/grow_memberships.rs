@@ -131,36 +131,6 @@ async fn change(server: &TestServer, item: serde_json::Value) {
     assert_eq!(status, 200, "{}", resp.text().await.unwrap());
 }
 
-/// Flush, then fold. **One point is ingested first**: a flush with nothing buffered publishes
-/// nothing, so the row is what gives the flush an extent to write and the fold something to fold
-/// into the base.
-async fn flush_and_fold(server: &TestServer) {
-    let ingested = external_id_of(9_001);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "grow-fold")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(&ingested[..]),
-            10.0,
-            10.0,
-            "0",
-        )]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "{}",
-        resp.text().await.unwrap()
-    );
-    tick(server).await;
-    fold(server).await;
-}
-
 /// The receipt says what joined and nothing else.
 fn assert_receipt(artifact: &serde_json::Value, key: &str, tessera_id: &str, joined: u64) {
     assert_eq!(artifact["key"], key, "{artifact}");
@@ -374,7 +344,7 @@ async fn growth_survives_a_restart_and_a_fold() {
     assert_receipt(&body["artifacts"][0], "a", &id, 10);
     assert_eq!(count(&server, &["0"]).await, 30);
 
-    flush_and_fold(&server).await;
+    flush_and_fold(&server, None).await;
     assert_eq!(
         count(&server, &["0"]).await,
         30,

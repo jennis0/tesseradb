@@ -334,38 +334,6 @@ async fn a_parent_in_another_view_is_refused() {
     );
 }
 
-/// Flush, then fold — `grow_memberships.rs`' sequence, and its reason: a flush with nothing
-/// buffered publishes nothing, so a row is ingested first to give the fold something to fold.
-async fn flush_and_fold(server: &TestServer) {
-    let ingested = external_id_of(9_001);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "views-fold")
-        // A multi-view bundle names the batch's view: which one a row belongs to is not
-        // inferable (contracts §3.4).
-        .header("x-tessera-view", format!("quarter:{}", KEYS[0]))
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(&ingested[..]),
-            10.0,
-            10.0,
-            "0",
-        )]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "{}",
-        resp.text().await.unwrap()
-    );
-    tick(server).await;
-    fold(server).await;
-}
-
 /// **The view survives the fold and the reopen** (`bundle_format` 8): the fold packs each record
 /// into a membership extent and a restart seeds the store from those bytes, so a view lost there
 /// would collapse two views' keys into one index and draw one view's artifacts on every view of
@@ -392,7 +360,7 @@ async fn a_group_scoped_level_survives_a_fold_and_a_reopen_with_its_views() {
         .unwrap()
         .to_string();
 
-    flush_and_fold(&server).await;
+    flush_and_fold(&server, Some(format!("quarter:{}", KEYS[0]).as_str())).await;
     assert_eq!(
         served(&server, "quarter:q1", SCOPED).await,
         vec![("c1".to_string(), 10)],
@@ -482,7 +450,7 @@ async fn a_shape_published_into_one_view_is_drawn_on_no_other() {
     );
 
     // The same after a fold, which rebuilds the level's forms from the packed records.
-    flush_and_fold(&server).await;
+    flush_and_fold(&server, Some(format!("quarter:{}", KEYS[0]).as_str())).await;
     assert_eq!(
         served(&server, "quarter:q1", SHAPES).await,
         Vec::new(),
@@ -621,7 +589,7 @@ async fn an_artifact_of_another_view_of_the_group_is_absent_from_every_verb() {
     // fold rebuilds the level's forms from.
     for round in ["published", "folded"] {
         if round == "folded" {
-            flush_and_fold(&server).await;
+            flush_and_fold(&server, Some(format!("quarter:{}", KEYS[0]).as_str())).await;
         }
         assert_eq!(
             browsed(&server, &both, "quarter:q1", SCOPED).await,
@@ -918,7 +886,7 @@ async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_re
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    flush_and_fold(&server).await;
+    flush_and_fold(&server, Some(format!("quarter:{}", KEYS[0]).as_str())).await;
     let untouched = served(&server, "quarter:q1", SHAPES).await;
     assert!(!untouched.is_empty(), "the control view draws its shape");
 
@@ -1113,7 +1081,7 @@ async fn a_flushed_segment_the_size_of_the_base_is_not_read_off_the_base_column(
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    flush_and_fold(&server).await;
+    flush_and_fold(&server, Some(format!("quarter:{}", KEYS[0]).as_str())).await;
 
     ingest_right_of_the_shape(&server, "quarter:q2", "outside").await;
     tick(&server).await;

@@ -14,7 +14,6 @@
 
 mod common;
 
-use std::path::Path;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema};
@@ -22,13 +21,9 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::{json, Value};
 
+/// The items of the built bundle, which holds one plain view, `s0`, and no group: every group and
+/// every other view below is one the running service declared.
 const N: u64 = 20;
-
-/// One plain view, `s0`, and no group at all: every group and every other view below is one the
-/// running service declared.
-fn fixture(dir: &Path) -> std::path::PathBuf {
-    fixture_in(dir, N)
-}
 
 async fn put(served: &Served, path: &str, body: Value) -> (u16, Value) {
     let resp = served
@@ -178,7 +173,7 @@ async fn points(served: &Served, view: &str) -> Vec<u64> {
 /// refuse, and `404` for a `members` group naming a group this deployment does not carry.
 #[tokio::test]
 async fn the_group_route_declares_answers_redeclarations_and_refuses_what_the_rules_refuse() {
-    let mut served = Served::build(fixture).await;
+    let mut served = Served::build(|dir| build_fixture(dir, N)).await;
     assert!(group_names(&served).await.is_empty());
 
     let (status, body) = declare_group(&served, "quarter", quarter()).await;
@@ -249,7 +244,7 @@ async fn the_group_route_declares_answers_redeclarations_and_refuses_what_the_ru
 /// a build-declared group already gets (`views.md` §3.2).
 #[tokio::test]
 async fn a_group_created_at_runtime_accepts_a_view_under_it() {
-    let mut served = Served::build(fixture).await;
+    let mut served = Served::build(|dir| build_fixture(dir, N)).await;
     assert_eq!(declare_group(&served, "quarter", quarter()).await.0, 201);
 
     let (status, body) = put(
@@ -298,7 +293,7 @@ async fn a_group_created_at_runtime_accepts_a_view_under_it() {
 /// served as written.
 #[tokio::test]
 async fn a_roster_integer_past_its_declared_width_is_refused_at_a_create() {
-    let mut served = Served::build(fixture).await;
+    let mut served = Served::build(|dir| build_fixture(dir, N)).await;
     let group = json!({
         "extent": frame(),
         "point_visibility": { "default": "public" },
@@ -341,7 +336,7 @@ async fn a_roster_integer_past_its_declared_width_is_refused_at_a_create() {
 /// groups.
 #[tokio::test]
 async fn a_plain_view_created_at_runtime_takes_rows_at_its_first_flush() {
-    let mut served = Served::build(fixture).await;
+    let mut served = Served::build(|dir| build_fixture(dir, N)).await;
     let (status, body) = declare_view(&served, "embedding", embedding()).await;
     assert_eq!(status, 201, "{body}");
     assert_eq!(
@@ -410,7 +405,7 @@ async fn a_plain_view_created_at_runtime_takes_rows_at_its_first_flush() {
 /// cannot read is refused rather than stored as a gate nobody could satisfy.
 #[tokio::test]
 async fn a_gate_is_one_label_or_a_list_on_both_routes() {
-    let served = Served::build(fixture).await;
+    let served = Served::build(|dir| build_fixture(dir, N)).await;
 
     let mut one = embedding();
     one["visibility"] = json!("0");
@@ -511,7 +506,7 @@ async fn a_gate_is_one_label_or_a_list_on_both_routes() {
 /// two refusals, transcribed.
 #[tokio::test]
 async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
-    let served = Served::build(fixture).await;
+    let served = Served::build(|dir| build_fixture(dir, N)).await;
 
     // The plugin arm is exercised by no case here: this fixture's plugin reads every non-empty
     // label as a term, so a label it *cannot* read has no spelling. What the two cases below
@@ -542,7 +537,7 @@ async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
 /// is what the manifest's merge order exists for.
 #[tokio::test]
 async fn the_declarations_survive_a_restart_and_a_fold() {
-    let served = Served::build(fixture).await;
+    let served = Served::build(|dir| build_fixture(dir, N)).await;
     assert_eq!(declare_group(&served, "quarter", quarter()).await.0, 201);
     assert_eq!(declare_view(&served, "embedding", embedding()).await.0, 201);
     assert_eq!(

@@ -52,12 +52,7 @@ async fn flushes_published(server: &TestServer) -> u64 {
 #[tokio::test]
 async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let config = default_engine_config();
     let max_k = config.max_k;
     let mut engine = Engine::open(
@@ -177,12 +172,7 @@ async fn the_arming_surface_is_gated_and_names_its_sites() {
 #[tokio::test]
 async fn an_executor_panic_fails_readiness_and_reports_dead() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let config = default_engine_config();
     let max_k = config.max_k;
     let mut engine = Engine::open(
