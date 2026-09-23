@@ -62,7 +62,8 @@ pub struct EngineConfig {
     /// forms one tier. `None` keeps the built-in default (16 MiB); see [`merge_policy`].
     pub segment_floor_bytes: Option<u64>,
     /// How many same-tier entries, per axis, select an entity-space coalesce. `None` keeps the
-    /// built-in default (8), see [`crate::coalesce::CoalescePolicy`]. Must be at least
+    /// built-in default (8), see [`crate::coalesce::CoalescePolicy`]. The external-id runs and
+    /// their locator extents keep their own width (4) whatever this is. Must be at least
     /// [`MIN_SELECTION_WIDTH`] when set, for [`Self::tier_width`]'s reason.
     pub coalesce_width: Option<usize>,
     /// When a fold is dispatched with nobody asking for one. [`CompactionSchedule::off`] is the
@@ -115,8 +116,7 @@ pub(crate) fn merge_policy(config: &EngineConfig) -> tessera_store::merge::Merge
 }
 
 /// The entity-space coalesce's policy, with `EngineConfig::coalesce_width` applied when set. Only
-/// the width is configurable; the floor and the input cap keep
-/// [`crate::coalesce::CoalescePolicy`]'s defaults.
+/// that width is configurable; the rest keep [`crate::coalesce::CoalescePolicy`]'s defaults.
 pub(crate) fn coalesce_policy(config: &EngineConfig) -> crate::coalesce::CoalescePolicy {
     let mut policy = crate::coalesce::CoalescePolicy::default();
     if let Some(width) = config.coalesce_width {

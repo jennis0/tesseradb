@@ -19,6 +19,19 @@ pub fn wait_until(what: &str, within: Duration, mut cond: impl FnMut() -> bool) 
     }
 }
 
+/// Drive ticks until `cond` holds. A pass is dispatched on a tick only while none of its kind is
+/// outstanding, so waiting on one tick can miss the pass a test is waiting for.
+pub fn tick_until(engine: &Engine, what: &str, within: Duration, mut cond: impl FnMut() -> bool) {
+    let mut last = Instant::now() - Duration::from_secs(1);
+    wait_until(what, within, || {
+        if last.elapsed() >= Duration::from_millis(50) {
+            engine.request_flush();
+            last = Instant::now();
+        }
+        cond()
+    });
+}
+
 /// Force a flush and wait for it to publish.
 pub fn flush(engine: &Engine) {
     let before = engine.write_executor_stats().flushes;
