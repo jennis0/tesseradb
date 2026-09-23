@@ -149,7 +149,7 @@ impl Fixture {
             scalar_schema: &[],
             row_base,
         };
-        tessera_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input).unwrap()
+        tessera_store::write_flush_segment(&self.prefix_dir, PARTITION, "s0", input, &[]).unwrap()
     }
 
     fn write_dict(&self, dir_rel: &str, descriptors: &[String]) -> String {
@@ -167,7 +167,8 @@ impl Fixture {
     fn write_build(&mut self) {
         let base = self.write_segment("base", &[0, 1, 2, 3], 0);
         self.build_files.extend(base.files);
-        self.manifest.external_id_runs.push(base.external_id_run);
+        let run = base.locator_extent.expect("the base binds").external_id_run;
+        self.manifest.external_id_runs.push(run);
         let path = self.write_dict("terms", &["base-0".into(), "base-1".into()]);
         self.build_files.insert(path.clone(), self.digest_of(&path));
         self.manifest.dict_extents.push(DictExtent { path, records: 2 });
@@ -176,11 +177,7 @@ impl Fixture {
     fn write_flush(&mut self, flush: u32) {
         let entities = entities_of(flush);
         let seg = format!("flush-{flush}-1");
-        let segment = self.write_segment(&seg, &entities, 4 + 3 * flush);
-        self.manifest.files.extend(segment.files);
-        self.manifest.external_id_runs.push(segment.external_id_run);
-        let seg_rel = segment.locator_extent.path.rsplit_once('/').unwrap().0.to_string();
-        self.manifest.locator_extents.push(segment.locator_extent);
+        let seg_rel = self.write_bindings(flush, &entities);
 
         let tier = format!("{seg_rel}/delta.arrow");
         let pairs = [
@@ -212,6 +209,18 @@ impl Fixture {
             self.write_text("memo", Some(view), &seg, &entities);
         }
         self.write_entity_terms(&seg, flush, &entities);
+    }
+
+    /// A flush's segment, external-id run and locator extent, listed; returns its directory.
+    fn write_bindings(&mut self, flush: u32, entities: &[u32]) -> String {
+        let seg = format!("flush-{flush}-1");
+        let segment = self.write_segment(&seg, entities, 4 + 3 * flush);
+        self.manifest.files.extend(segment.files);
+        let locator = segment.locator_extent.expect("the flush binds");
+        self.manifest.external_id_runs.push(locator.external_id_run.clone());
+        let seg_rel = locator.path.rsplit_once('/').unwrap().0.to_string();
+        self.manifest.locator_extents.push(locator);
+        seg_rel
     }
 
     fn column_rel(column: &str, view: Option<(&str, ViewIncarnation)>) -> String {
@@ -370,6 +379,16 @@ impl Fixture {
 
     /// Each flushed entity's external id, and the entity each external id resolves to.
     fn external_ids(&self, manifest: &SegmentsManifest) -> Vec<(Option<Vec<u8>>, Option<u64>)> {
+        self.external_ids_of(manifest, flushed_entities())
+    }
+
+    /// [`Self::external_ids`] over `entities`, through a sidecar opened from `manifest` as a
+    /// restart opens it.
+    fn external_ids_of(
+        &self,
+        manifest: &SegmentsManifest,
+        entities: impl IntoIterator<Item = u32>,
+    ) -> Vec<(Option<Vec<u8>>, Option<u64>)> {
         let generation = crate::Generation::synthetic(
             "v00000",
             0,
@@ -382,7 +401,8 @@ impl Fixture {
         bundle.entity_id_high_water = 4;
         let sidecar = ExternalIdSidecar::deferred_from_manifest(&bundle, manifest, &self.prefix_dir)
             .unwrap();
-        flushed_entities()
+        entities
+            .into_iter()
             .map(|e| {
                 let external_id = sidecar.external_id_of_checked(EntityId::new(e.into()), 100);
                 let entity = sidecar.resolve(format!("ext-{e}").as_bytes()).unwrap();
@@ -714,10 +734,36 @@ fn title_flushes(keyword: [bool; 3]) -> Fixture {
     fx
 }
 
-/// A keyword layer whose ordinals reach past its own dictionary fails the pass, which leaves
-/// nothing to publish.
+/// A keyword layer whose ordinals reach past its own dictionary fails its own window, which stays
+/// listed, and every other window still publishes.
 #[test]
-fn a_keyword_window_the_merge_refuses_fails_the_pass() {
+fn a_window_the_merge_refuses_fails_alone() {
+    let fx = Fixture::with_every_kind();
+    let faulted = fx.manifest.attr_extents.iter().find(|e| e.column == "title").unwrap();
+    let faulted = faulted.dict.clone().unwrap();
+    tessera_filter::write_sorted_dict(&fx.path(&faulted), ["a"]).unwrap();
+    let plan = fx.plan().expect("every kind qualifies");
+    let completed = fx.execute(plan).expect("the other windows write");
+    assert_eq!(completed.failures.len(), 1, "the title window failed");
+    let windows: BTreeSet<&str> =
+        completed.attrs.iter().map(|m| m.consumed.column.as_str()).collect();
+    assert_eq!(windows, BTreeSet::from(["year", "mood"]));
+    assert!(completed.tier.is_some() && completed.record.is_some() && completed.terms.is_some());
+
+    let after = rebased(&fx.manifest, &completed).expect("nothing moved under the pass");
+    let titles = |m: &SegmentsManifest| {
+        let listed = m.attr_extents.iter().filter(|e| e.column == "title");
+        listed.map(|e| e.values.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(titles(&after), titles(&fx.manifest), "the failed window stays listed");
+    for rel in completed.files.keys() {
+        assert!(!rel.contains("/attrs/title"), "{rel} is digested from the failed window");
+    }
+}
+
+/// A pass whose every window fails produces nothing.
+#[test]
+fn a_pass_whose_every_window_fails_is_an_error() {
     let fx = title_flushes([true; 3]);
     let faulted = fx.manifest.attr_extents[1].dict.clone().unwrap();
     tessera_filter::write_sorted_dict(&fx.path(&faulted), ["a"]).unwrap();
@@ -849,14 +895,33 @@ fn an_entry_with_an_undigested_file_is_not_taken() {
     assert_eq!(columns, ["department"]);
 }
 
-/// Overlapping locator spans refuse the run kind and leave the others alone.
+/// Flushes whose entity ids interleave, as two views' flushes from one commit window do, have
+/// overlapping locator spans. They coalesce into one extent over the union of the spans, and every
+/// entity and external id resolves both ways as before, through a sidecar opened as a restart
+/// opens it.
 #[test]
-fn overlapping_locator_spans_refuse_only_the_runs() {
-    let (mut manifest, build_files) = listed(3);
-    manifest.locator_extents[1].entity_lo = 0;
-    let plan = plan(&manifest, &build_files).expect("a plan");
-    assert!(plan.locators.is_empty());
-    assert!(!plan.tiers.is_empty());
+fn overlapping_locator_spans_coalesce_and_keep_every_binding() {
+    let mut fx = Fixture::empty();
+    fx.write_build();
+    let flushes = [vec![10, 13, 16], vec![11, 14, 17], vec![12, 15, 18]];
+    for (flush, entities) in flushes.iter().enumerate() {
+        fx.write_bindings(flush as u32, entities);
+    }
+    let entities = 10..=18;
+    let before = fx.external_ids_of(&fx.manifest, entities.clone());
+    for (entity, (key, resolved)) in entities.clone().zip(&before) {
+        let expected = (entity % 10 != 2).then(|| format!("ext-{entity}").into_bytes());
+        assert_eq!(key, &expected, "entity {entity} names its key");
+        assert_eq!(*resolved, expected.map(|_| u64::from(entity)), "ext-{entity} names its entity");
+    }
+
+    let plan = fx.plan().expect("a plan");
+    assert_eq!(plan.locators.len(), 3, "the overlapping extents are taken");
+    let completed = fx.execute(plan).expect("the pass writes");
+    let after = rebased(&fx.manifest, &completed).expect("nothing moved under the pass");
+    let merged = &completed.run.as_ref().expect("the runs are coalesced").output;
+    assert_eq!((merged.entity_lo, merged.entity_hi), (10, 18), "the union of the spans");
+    assert_eq!(fx.external_ids_of(&after, entities), before);
 }
 
 /// A window whose entries fall in two size classes is not taken.

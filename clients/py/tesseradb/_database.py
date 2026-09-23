@@ -14,9 +14,11 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Hashable, Iterable, Sequence
 
@@ -106,6 +108,20 @@ class Database:
         self._loaded_text: str | None = None
         #: Category keys looked up by `sample()`, per reader: by server address and terms.
         self._keys: dict = {}
+
+    @property
+    def binary(self) -> str:
+        """The `tessera` program this database runs.
+
+        `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else the one the
+        `tesseradb-native` wheel installed, else a checkout's own build.
+        """
+        return _instance.find_binary()[0]
+
+    def __repr__(self) -> str:
+        kind = "a temporary database" if self.temporary else "a database"
+        state = "committed" if self.built else "not yet committed"
+        return f"{kind} at {self.path}, {state}"
 
     # ------------------------------------------------------------------ declarations
 
@@ -230,7 +246,7 @@ class Database:
         """Declare every column of a data frame from its data type, and return what was declared.
 
         Each column is declared as a detail: stored, and shown when an item is opened, but neither
-        drawn nor filterable unless named below. The table of what was declared is also printed.
+        drawn nor filterable unless named below. The report returned lists what was declared.
 
         - `frame`: a pandas or polars data frame or a pyarrow table. Only its column types are read.
         - `skip`: columns to leave out, such as the id and the coordinates.
@@ -264,11 +280,7 @@ class Database:
                 self.declare("vocabulary", block)
         for block in attributes:
             self.declare("attribute", block)
-        report = Declared(
-            columns=rows, vocabularies=[block["name"] for block in vocabularies]
-        )
-        print(report)
-        return report
+        return Declared(columns=rows, vocabularies=[block["name"] for block in vocabularies])
 
     def declare_layer(self, name: str, kind: str, **kwargs) -> dict:
         """Declare an annotation layer, and return its block.
@@ -296,9 +308,11 @@ class Database:
         - `require_member_visibility`: how much of an annotation's membership a reader must see
           for it to be shown: `"all"`, `"any"`, `"none"`, `{"fraction": 0.1}` or `{"count": 50}`.
         - `visibility`: who may see the layer at all: `"public"` or an access label.
-        - `artifact_visibility`: whether each annotation also carries an access label of its own.
-          Not built yet: nothing sets such a label, so a layer that declares one shows no
-          annotations to anyone.
+        - `artifact_visibility`: the access label of an annotation that carries none of its own,
+          or `{"field": column, "default": label}`. The field names the column each annotation's
+          own labels are read from; an artifacts insert names that column with `access=`, and an
+          insert naming another column is refused. Without a field, the first artifacts insert
+          naming `access=` sets it.
         - `computed`: which properties the server computes per reader: `"centroid"`, `"box"` and
           `"hull"`.
         - `supplied`: content you provide per annotation, such as text, as
@@ -333,7 +347,9 @@ class Database:
         - `content_requires`: `"inherited"` (the default) shows a label wherever its annotation is
           shown. `"all"` shows it only to a reader who may see every item the text was written
           from; those items come from `insert(name, members=table, id=, key=)`.
-        - `require_member_visibility`, `artifact_visibility`, `title`: as for `declare_layer`.
+        - `require_member_visibility`, `title`: as for `declare_layer`.
+        - `artifact_visibility`: the access label of every label in the set. A label carries none
+          of its own, so no `field` is taken.
 
             db.declare_labels("topics", of="clusters")
             db.insert("topics", {"c0": "graph neural networks", "c1": "diffusion models"})
@@ -415,8 +431,8 @@ class Database:
 
         A categorical column (a pandas `Categorical` or an Arrow dictionary column) is read as the
         values it holds, wherever a column of those values is read. A column the call does not
-        name is ignored, and the call prints what it read and what it ignored. On the anchor view, a column named like a declared attribute fills that
-        attribute. Several inserts into one target add up. Nothing is sent until `commit()`.
+        name is ignored, and the record returned says what was read and what was ignored. On the
+        anchor view, a column named like a declared attribute fills that attribute. Several inserts into one target add up. Nothing is sent until `commit()`.
 
             db.insert("papers", frame, id="paper_id", x="x", y="y", access="labels")
             db.insert("clusters", frame, id="paper_id", key="cluster")
@@ -430,6 +446,7 @@ class Database:
                 f"insert into {kind} {target!r}: a {kind} takes no {role} table"
             )
         self._refuse_an_insert_the_target_cannot_take(target, kind, role, block, named)
+        self._refuse_a_second_label_column(target, kind, role, block, named)
         projected = kind in ("view", "view_group") and block.get("projection", "none") != "none"
         metadata = D.metadata_names(block) if role == "roster" else ()
         if kind == "labels" and role == "text":
@@ -452,7 +469,6 @@ class Database:
         insert = self._accumulated(insert)
         (self.pending if self.built else self.inserts).append(insert)
         self._save_state()
-        print(insert)
         return insert
 
     def _target(
@@ -532,7 +548,7 @@ class Database:
     def _refuse_an_insert_the_target_cannot_take(
         self, target: str, kind: str, role: str, block: dict, named: dict
     ) -> None:
-        """What this target cannot be given: the scope's own column, and the rule not built yet."""
+        """Refuse rows for a scoped layer that do not name their view."""
         scope = block.get("scope")
         group = scope.get("group") if isinstance(scope, dict) else None
         if group is not None and role in ("artifacts", "members", "key") and "view" not in named:
@@ -541,6 +557,16 @@ class Database:
                 f"its artifacts per view, one key in two views being two artifacts, so every row "
                 f"carries the view it belongs to. Name the column that says which with view="
             )
+
+    def _refuse_a_second_label_column(
+        self, target: str, kind: str, role: str, block: dict, named: dict
+    ) -> None:
+        """Refuse an artifacts insert whose `access=` differs from the column the layer declares
+        or an earlier insert named."""
+        column = named.get("access")
+        if kind != "layer" or role != "artifacts" or not column:
+            return
+        D.carry_labels(target, {"artifact_visibility": block.get("artifact_visibility")}, column)
 
     def _refuse_a_second_view_without_its_labels(
         self, kind: str, role: str, target: str, insert: Insert
@@ -855,7 +881,7 @@ class Database:
         each problem it finds, reading the files' column types only. After it, the report lists the
         requests the commit would send and any problem found before sending.
 
-            print(db.check())
+            db.check()
         """
         if self.built:
             return self._paged(sent=False)
@@ -868,8 +894,9 @@ class Database:
             frames=self._frames(document),
             render_columns=render_columns_of(document.get("attribute", [])),
             notes=self._notes(),
+            rows=self._inserted_rows(),
             findings=findings,
-            output=page,
+            log=page,
         )
 
     def _checked(self) -> tuple[bool, str]:
@@ -902,7 +929,7 @@ class Database:
         before anything was sent, a build that failed, or every request refused. A commit in which
         some requests succeeded returns its report, with the refusals listed.
 
-            print(db.commit())
+            db.commit()
         """
         if self.built:
             return self._paged(sent=True)
@@ -914,6 +941,7 @@ class Database:
                 "commit: the pre-flight found what follows, and nothing was sent or built\n"
                 + "\n".join(f"  {finding}" for finding in findings)
             )
+        started = time.monotonic()
         ok, page = self._checked()
         if not ok:
             raise Refusal("commit: the declaration did not check\n" + page)
@@ -933,19 +961,43 @@ class Database:
             frames=self._frames(document),
             render_columns=render_columns_of(document.get("attribute", [])),
             notes=self._notes(),
-            output=page + "\n" + build.stdout + build.stderr,
+            rows=self._inserted_rows(),
+            log=page + "\n" + build.stdout + build.stderr,
             identity=self._identity_in_words(),
         )
         if build.returncode != 0:
-            raise Refusal("commit: the build failed\n" + report.output, report)
+            raise Refusal("commit: the build failed\n" + report.log, report)
         self.built = True
+        self._record_label_columns(document.get("layer", []))
         self._record_terms(document)
         self.serve()
+        report.seconds = time.monotonic() - started
         if self.listening is not None:
             report.viewer = self.listening.viewer
             report.session = self.listening.session
             report.control = self.listening.control
+        for view in self.meta().get("views", []):
+            name = view.get("group") or view["id"]
+            report.views[name] = report.views.get(name, 0) + 1
+        # From the declaration: a layer gated on a label no row carries is in no reader's meta.
+        for block in document.get("layer", []):
+            report.layers.append(block["name"])
+            if "labels" in block:
+                report.layers.append(block["labels"]["name"])
+        built = _BUILT.search(build.stdout + build.stderr)
+        if built is not None:
+            report.items = int(built.group("items"))
+            report.minted = int(built.group("minted"))
+            report.unclustered = int(built.group("unclustered"))
         return report
+
+    def _inserted_rows(self) -> dict:
+        """The rows inserted before the first commit, by view or view group."""
+        rows: dict = {}
+        for insert in self.inserts:
+            if insert.role == "rows":
+                rows[insert.target] = rows.get(insert.target, 0) + insert.rows
+        return rows
 
     def _preflight(self, document: dict) -> list[C.Finding]:
         """The findings the build's own inserts can raise, before a byte is read."""
@@ -990,6 +1042,7 @@ class Database:
         if report.findings:
             raise Refusal(str(report), report)
         accepted = C.run(control, pages, report)
+        self._record_label_columns(page.body for page in accepted if page.kind == "layer")
         self._record_terms(self._document())
         self.pending.clear()
         self._save_state()
@@ -1200,6 +1253,15 @@ class Database:
             f"rows are named by '{insert.id_column}' on the insert into "
             f"{insert.target!r}, read as {kind}"
         )
+
+    def _record_label_columns(self, layers: Iterable[dict]) -> None:
+        """Write onto the SDK's own layer blocks the label column each layer was committed with,
+        so a later insert naming another column is refused."""
+        for layer in layers:
+            field = dict(layer.get("artifact_visibility") or {}).get("field")
+            if field:
+                D.carry_labels(layer["name"], self.blocks.layer(layer["name"]), field)
+        self._save_state()
 
     def _record_terms(self, document: dict) -> None:
         """Remember every access label inserted so far: the terms `viewer()` holds by default."""
@@ -1533,6 +1595,15 @@ def _extent_in_words(extent: Any) -> str:
     return str(extent)
 
 
+#: The build's closing line: `built <bundle> (v…): N items, …, M artifact(s) minted, K
+#: unclustered member row(s)`.
+_BUILT = re.compile(
+    r"^built .*: (?P<items>\d+) items, .* (?P<minted>\d+) artifact\(s\) minted, "
+    r"(?P<unclustered>\d+) unclustered member row\(s\)$",
+    re.MULTILINE,
+)
+
+
 # ---------------------------------------------------------------------- create and open
 
 
@@ -1545,7 +1616,7 @@ def create(path: str | os.PathLike | None = None, replace: bool = False) -> Data
     - `replace`: `True` deletes a Tessera database already at `path` first. A directory that holds
       anything else is refused.
 
-    The call prints where the database is and which `tessera` program it will use.
+    `db.path` is where the database is, and `db.binary` the `tessera` program it runs.
 
         db = tesseradb.create()
         db = tesseradb.create("~/maps/papers", replace=True)
@@ -1553,8 +1624,6 @@ def create(path: str | os.PathLike | None = None, replace: bool = False) -> Data
     if path is None:
         parent = RAM_BACKED if RAM_BACKED.is_dir() else None
         directory = Path(tempfile.mkdtemp(prefix="tesseradb-", dir=parent))
-        where = "a RAM-backed filesystem" if parent is not None else "disk"
-        print(f"tesseradb: a temporary database at {directory}, on {where}")
         database = Database(directory, temporary=True)
     else:
         directory = Path(path).expanduser()
@@ -1575,16 +1644,7 @@ def create(path: str | os.PathLike | None = None, replace: bool = False) -> Data
         database = Database(directory)
     (database.path / "sources").mkdir(parents=True, exist_ok=True)
     (database.path / ".tessera").mkdir(parents=True, exist_ok=True)
-    print(f"tesseradb: {_binary_in_words()}")
     return database
-
-
-def _binary_in_words() -> str:
-    try:
-        binary, where = _instance.find_binary()
-    except Refusal as why:
-        return str(why)
-    return f"the binary is {binary} (from {where})"
 
 
 def open(path: str | os.PathLike) -> Database:  # noqa: A001

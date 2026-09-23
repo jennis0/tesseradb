@@ -71,6 +71,8 @@ fn starts_us(slot: u32) -> i64 {
     1_767_225_600_000_000 + i64::from(slot) * 7_776_000_000_000
 }
 
+static MULTIVIEW: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+
 /// The nine-view bundle: one plain view, one group of four with metadata, and a second group over
 /// the same four keys with its own layout (`views.md` §3.1, §3.3).
 fn build_multiview(dir: &Path) -> std::path::PathBuf {
@@ -227,7 +229,7 @@ fn meta_schema() -> jsonschema::Validator {
 /// walk without reading a key.
 #[tokio::test]
 async fn meta_publishes_every_view_and_its_roster_in_creation_order() {
-    let served = Served::build(build_multiview).await;
+    let served = Served::copy(&MULTIVIEW, build_multiview).await;
     let body = meta(&served).await;
     let errors: Vec<String> = meta_schema()
         .iter_errors(&body)
@@ -325,7 +327,7 @@ async fn meta_publishes_every_view_and_its_roster_in_creation_order() {
 /// The shared entity is the observable — one identity, two positions (`views.md` §1).
 #[tokio::test]
 async fn a_groups_view_answers_with_its_own_geometry() {
-    let served = Served::build(build_multiview).await;
+    let served = Served::copy(&MULTIVIEW, build_multiview).await;
     let world = points(&served, "world").await;
     let quarter = points(&served, "quarter:2026-Q2").await;
     assert_eq!(world.len(), (WORLD.end - WORLD.start) as usize);
@@ -359,7 +361,7 @@ async fn a_groups_view_answers_with_its_own_geometry() {
 /// entities `quarter:2026-Q2` does, drawn somewhere else.
 #[tokio::test]
 async fn a_sharing_group_serves_one_membership_in_two_geometries() {
-    let served = Served::build(build_multiview).await;
+    let served = Served::copy(&MULTIVIEW, build_multiview).await;
     let owner = points(&served, "quarter:2026-Q2").await;
     let sharing = points(&served, "quarter_alt:2026-Q2").await;
 
@@ -388,7 +390,7 @@ async fn a_sharing_group_serves_one_membership_in_two_geometries() {
 /// plane — a second resolution would eventually disagree about what a name means.
 #[tokio::test]
 async fn a_key_addresses_its_view_on_both_planes() {
-    let served = Served::build(build_multiview).await;
+    let served = Served::copy(&MULTIVIEW, build_multiview).await;
     assert!(
         !points(&served, "quarter:2026-Q2").await.is_empty(),
         "the group's second view answers by key"
@@ -425,16 +427,25 @@ async fn a_key_addresses_its_view_on_both_planes() {
 /// be an existence oracle over the roster.
 #[tokio::test]
 async fn an_unknown_view_and_an_absent_key_are_the_same_404() {
-    let served = Served::build(build_multiview).await;
+    let served = Served::copy(&MULTIVIEW, build_multiview).await;
     // A group is not a view either (`views.md` §3.1): naming one is the same 404 as naming
     // nothing, because it has no row space to answer from.
+    let mut shapes = std::collections::BTreeSet::new();
     for view in ["no_such_view", "quarter:2099-Q9", "quarter:#99", "quarter"] {
         let resp = viewport(&served, view).await;
         assert_eq!(resp.status().as_u16(), 404, "{view} is not a served view");
         let body: Value = resp.json().await.unwrap();
-        // One code and one detail shape, differing only in the caller's own words back — which is
-        // the same information the request carried, and so no oracle.
         assert_eq!(body["error"], "unknown", "{body}");
-        assert_eq!(body["detail"], format!("unknown view '{view}'"), "{body}");
+        // The detail differs only by the caller's own words back, which the request carried.
+        shapes.insert(body["detail"].as_str().unwrap().replace(view, ""));
+    }
+    assert_eq!(shapes.len(), 1, "one detail for every unknown name: {shapes:?}");
+    // And nothing the bundle holds: no view, group or key of its roster.
+    let shape = shapes.first().unwrap();
+    for name in ["world", "quarter"]
+        .into_iter()
+        .chain(QUARTERS.iter().map(|(key, _, _)| *key))
+    {
+        assert!(!shape.contains(name), "{name} in {shape}");
     }
 }

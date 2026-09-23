@@ -709,6 +709,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Contract"
         "429":
           $ref: "#/components/responses/Backpressure"
         "500":
@@ -959,6 +961,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Contract"
         "429":
           $ref: "#/components/responses/Backpressure"
         "500":

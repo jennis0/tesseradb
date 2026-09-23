@@ -89,6 +89,14 @@ pub type PendingExtent = (String, u32, u32, Vec<Vec<u8>>);
 /// encode them one at a time. See [`ArtifactStore::pending_ranges`].
 pub type PendingRange = (String, u32, u32, u32);
 
+/// What [`ArtifactStore::retire_dead_views`] removed: the levels it changed, and the artifacts
+/// of other views attached to what it removed, which the caller deletes.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RetiredViews {
+    pub levels: Vec<(String, u32)>,
+    pub dependents: Vec<EntityId>,
+}
+
 /// What [`ArtifactStore::fill`] did with one part, under the fill rule (`ingest.md` §1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillOutcome {
@@ -819,6 +827,11 @@ pub struct ArtifactRecord {
     /// reopened comes back with each artifact in the view it was published into, which is what
     /// keeps two views' keys apart across a fold.
     pub view: Option<String>,
+    /// The incarnation of `view` this artifact was published under, and
+    /// [`tessera_types::view::DECLARED_INCARNATION`] where `view` is `None`. A view dropped and
+    /// created again under the same key is a new incarnation, and none of the old one's artifacts
+    /// belong to it ([`ArtifactStore::retire_dead_views`]).
+    pub incarnation: tessera_types::view::ViewIncarnation,
     /// Entity-space membership — the canonical, view-invariant record. Owned, or read through a
     /// mapping of the bytes that carry it (see [`Members`]).
     pub members: Members,
@@ -1677,6 +1690,7 @@ impl ArtifactStore {
                     entity: published.entity,
                     key: published.key.clone(),
                     view: published.view.clone(),
+                    incarnation: published.incarnation,
                     members: Members::owned(members),
                     contents,
                     attached_to: published.attached_to.clone().map(|a| Attachment {
@@ -2062,6 +2076,13 @@ impl ArtifactStore {
         Some(&target.members)
     }
 
+    /// One level's slots by ordinal, a hole being `None`. Empty for a level nothing holds.
+    pub fn slots(&self, layer: &str, level: u32) -> &[Option<ArtifactRecord>] {
+        self.levels
+            .get(&(layer.to_string(), level))
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// Every artifact of one level, with its ordinal. Holes are skipped.
     pub fn level(&self, layer: &str, level: u32) -> impl Iterator<Item = (u32, &ArtifactRecord)> {
         self.levels
@@ -2274,48 +2295,34 @@ impl ArtifactStore {
 
     /// Every level's artifacts that are **not yet in a manifest**, as
     /// `(layer, level, ordinal_lo, blobs)` ready to pack — see [`encode_record`].
-    ///
-    /// **A level with a hole in its unpublished range is skipped whole and reported**, rather than
-    /// packed around: an extent addresses `[ordinal_lo, ordinal_lo + count)` densely, so a hole
-    /// would shift every later artifact's identity by one. A hole here means a publication landed
-    /// out of order, which nothing does today.
-    pub fn unpublished(&self) -> (Vec<PendingExtent>, Vec<(String, u32)>) {
-        let (ranges, skipped) = self.pending_ranges();
-        let ready = ranges
+    pub fn unpublished(&self) -> Vec<PendingExtent> {
+        self.pending_ranges()
             .into_iter()
             .map(|(layer, level, ordinal_lo, count)| {
-                let blobs: Vec<Vec<u8>> = self
-                    .encode_pending(&layer, level, ordinal_lo, count)
-                    .map(|blob| blob.expect("pending_ranges returned a dense range"))
-                    .collect();
+                let blobs: Vec<Vec<u8>> =
+                    self.encode_pending(&layer, level, ordinal_lo, count).collect();
                 (layer, level, ordinal_lo, blobs)
             })
-            .collect();
-        (ready, skipped)
+            .collect()
     }
 
     /// The same levels [`Self::unpublished`] answers, as **ranges rather than blobs**:
-    /// `(layer, level, ordinal_lo, count)`, and the levels skipped for a hole.
+    /// `(layer, level, ordinal_lo, count)`.
     ///
-    /// **What a caller that means to stream them asks instead**, [`Self::encode_at`] being the
+    /// **What a caller that means to stream them asks instead**, [`Self::encode_pending`] being the
     /// other half. A build publishes every level of a corpus in one pass, so encoding them all
     /// before the first is written holds the whole corpus's memberships a second time, beside the
     /// bitmaps they came from; a level's ordinal range is enough to open the extent and take them
     /// one at a time. The online publication materialises instead, and not from preference: it
     /// reads this store under a lock it may not hold across an fsync.
-    pub fn pending_ranges(&self) -> (Vec<PendingRange>, Vec<(String, u32)>) {
+    pub fn pending_ranges(&self) -> Vec<PendingRange> {
         let mut ready = Vec::new();
-        let mut skipped = Vec::new();
         for ((layer, level), slots) in &self.levels {
             let from = *self
                 .published_through
                 .get(&(layer.clone(), *level))
                 .unwrap_or(&0) as usize;
             if from >= slots.len() {
-                continue;
-            }
-            if slots[from..].iter().any(Option::is_none) {
-                skipped.push((layer.clone(), *level));
                 continue;
             }
             ready.push((
@@ -2325,15 +2332,15 @@ impl ArtifactStore {
                 (slots.len() - from) as u32,
             ));
         }
-        (ready, skipped)
+        ready
     }
 
     /// The blobs of one pending range, **encoded as they are taken** — the other half of
     /// [`Self::pending_ranges`].
     ///
-    /// An item is `None` where the level holds no record at that ordinal. Inside a range
-    /// `pending_ranges` returned that is a bug rather than a hole: it reports a level with a hole
-    /// as skipped and never as a range.
+    /// A hole is an empty blob, as the fold writes one: an extent addresses its range densely, so
+    /// a hole left out would shift every later artifact's identity by one. Publication claims
+    /// ordinals in order, so a hole here is an artifact removed, never one still to arrive.
     ///
     /// The level is looked up once, not once an artifact: the store is keyed by an owned
     /// `(String, u32)`, so a lookup per ordinal would be a `String` allocation per artifact on the
@@ -2344,11 +2351,13 @@ impl ArtifactStore {
         level: u32,
         ordinal_lo: u32,
         count: u32,
-    ) -> impl Iterator<Item = Option<Vec<u8>>> + 'a {
+    ) -> impl Iterator<Item = Vec<u8>> + 'a {
         let slots = self.levels.get(&(layer.to_string(), level));
         (ordinal_lo..ordinal_lo + count).map(move |ordinal| {
-            let record = slots?.get(ordinal as usize)?.as_ref()?;
-            Some(encode_record(record, self.shape_of(layer, level, ordinal)))
+            slots
+                .and_then(|slots| slots.get(ordinal as usize)?.as_ref())
+                .map(|record| encode_record(record, self.shape_of(layer, level, ordinal)))
+                .unwrap_or_default()
         })
     }
 
@@ -2455,11 +2464,6 @@ impl ArtifactStore {
     /// together ([`withdraw_content_of_retired_members`], decision 0135): containment is
     /// all-or-nothing and a set that lost a member fails it for every principal for ever; the
     /// caller re-declares.
-    ///
-    /// A level with a hole is reported rather than packed around, exactly as in
-    /// [`Self::unpublished`] — but the consequence differs and the caller must not treat it as a
-    /// skip: an extent this rewrite omits is a level the new prefix does not carry at all, whose
-    /// artifacts come back registered, addressable and served as absent.
     pub fn repack_all(&self, retired: &Bitmap) -> Vec<PendingExtent> {
         let mut ready = Vec::new();
         for ((layer, level), slots) in &self.levels {
@@ -2470,11 +2474,9 @@ impl ArtifactStore {
                 .iter()
                 .enumerate()
                 .map(|(ordinal, slot)| {
-                    // **An empty blob is a hole, and a hole is a real state** — an artifact this
-                    // fold retired, or one whose publication is still in flight. It has to be
-                    // *written* rather than packed around: an ordinal is identity, so closing a gap
-                    // would hand every later artifact in the level the identity of its neighbour,
-                    // and every `tessera_id` a caller holds would name the wrong cluster.
+                    // An empty blob is a hole: an artifact a fold or a view drop removed. It is
+                    // written rather than packed around, because an ordinal is identity and closing
+                    // the gap would hand every later artifact its neighbour's `tessera_id`.
                     let Some(record) = slot else {
                         return Vec::new();
                     };
@@ -2582,6 +2584,82 @@ impl ArtifactStore {
         self.dependents
             .retain(|target, _| !retired.contains(target.raw() as u32));
         moved
+    }
+
+    /// Remove every artifact of a view incarnation that `live` rejects, leaving a hole at each.
+    /// `live` is asked `(layer, view, incarnation)` for each artifact that belongs to a view.
+    ///
+    /// A view dropped and created again under the same key is a new incarnation, so this is what
+    /// keeps the predecessor's artifacts, and their keys, out of the new view. A key goes only
+    /// where it still names the removed artifact, since a republication into the new view may
+    /// hold it. An artifact of another layer attached to a removed one is not removed here; it is
+    /// returned, with its own dependents, for the caller to delete.
+    pub fn retire_dead_views(
+        &mut self,
+        live: impl Fn(&str, &str, tessera_types::view::ViewIncarnation) -> bool,
+    ) -> RetiredViews {
+        let dead: Vec<(String, u32, u32)> = self
+            .levels
+            .iter()
+            .flat_map(|((layer, level), slots)| {
+                slots.iter().enumerate().filter_map(|(ordinal, slot)| {
+                    let record = slot.as_ref()?;
+                    let view = record.view.as_deref()?;
+                    (!live(layer, view, record.incarnation))
+                        .then(|| (layer.clone(), *level, ordinal as u32))
+                })
+            })
+            .collect();
+        let roots: Vec<EntityId> = dead
+            .iter()
+            .filter_map(|(layer, level, ordinal)| Some(self.get(layer, *level, *ordinal)?.entity))
+            .collect();
+        let dependents = self.cascade_from(&roots);
+        let mut moved: Vec<(String, u32)> = Vec::new();
+        for (layer, level, ordinal) in dead {
+            let Some(record) = self
+                .levels
+                .get_mut(&(layer.clone(), level))
+                .and_then(|slots| slots[ordinal as usize].take())
+            else {
+                continue;
+            };
+            if let Some(key) = &record.key {
+                if let Some(keys) = self
+                    .keys
+                    .get_mut(layer.as_str())
+                    .and_then(|levels| levels.get_mut(&level))
+                    .and_then(|views| views.get_mut(&record.view))
+                {
+                    if keys.get(key.as_str()) == Some(&ordinal) {
+                        keys.remove(key.as_str());
+                    }
+                }
+            }
+            if let Some(shape) = self
+                .shapes
+                .get_mut(layer.as_str())
+                .and_then(|levels| levels.get_mut(&level))
+                .and_then(|shapes| shapes.get_mut(ordinal as usize))
+            {
+                *shape = None;
+            }
+            self.content_pending
+                .remove(&(layer.clone(), level, ordinal));
+            self.forget_dependency(&record);
+            self.dependents.remove(&record.entity);
+            if moved.last() != Some(&(layer.clone(), level)) {
+                moved.push((layer, level));
+            }
+        }
+        for (layer, level) in &moved {
+            self.bump(layer, *level);
+            self.bump_lineage(layer, *level);
+        }
+        RetiredViews {
+            levels: moved,
+            dependents,
+        }
     }
 
     /// The supplied content of every artifact not yet in a manifest, as `(entity, tagged values)`.
@@ -2798,6 +2876,7 @@ impl ArtifactStore {
 /// ```text
 /// blob       := u16 LE key_len | key bytes (UTF-8)
 ///             | u16 LE view_len | view bytes (UTF-8)   -- 0 on an entity-scoped layer
+///             | u64 LE incarnation                     -- only where view_len is not 0
 ///             | u16 LE content_count
 ///             | u32 LE members_len | membership bytes (portable Roaring)
 ///             | content*
@@ -2884,6 +2963,9 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
     out.extend_from_slice(&view_len.to_le_bytes());
     if view_len != u16::MAX {
         out.extend_from_slice(view);
+        if view_len != 0 {
+            out.extend_from_slice(&record.incarnation.to_le_bytes());
+        }
     }
     // Same argument, one level up: more contents than a `u16` can count is a publication this
     // encoding cannot read back, so it refuses rather than writing a prefix of the ranking. A
@@ -2988,7 +3070,7 @@ pub fn members_bytes(blob: &[u8]) -> Option<&[u8]> {
     if view_len == u16::MAX as usize {
         return None;
     }
-    let at = at + 2 + view_len;
+    let at = at + 2 + view_len + if view_len == 0 { 0 } else { 8 };
     let count = u16::from_le_bytes(blob.get(at..at + 2)?.try_into().ok()?) as usize;
     if count == u16::MAX as usize {
         return None;
@@ -3050,10 +3132,11 @@ pub fn decode_record(
     if view_len == u16::MAX as usize {
         return None;
     }
-    let view = if view_len == 0 {
-        None
+    let (view, incarnation) = if view_len == 0 {
+        (None, tessera_types::view::DECLARED_INCARNATION)
     } else {
-        Some(std::str::from_utf8(take(view_len)?).ok()?.to_string())
+        let view = std::str::from_utf8(take(view_len)?).ok()?.to_string();
+        (Some(view), u64::from_le_bytes(take(8)?.try_into().ok()?))
     };
     let count = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
     if count == u16::MAX as usize {
@@ -3177,6 +3260,7 @@ pub fn decode_record(
             entity,
             key,
             view,
+            incarnation,
             members: Members::owned(members),
             contents,
             attached_to,
@@ -3290,6 +3374,7 @@ mod tests {
             entity: EntityId::new(entity),
             key: None,
             view: None,
+            incarnation: 0,
             members: Members::owned(Bitmap::of(members)),
             contents: Vec::new(),
             attached_to: None,
@@ -3419,22 +3504,21 @@ mod tests {
     /// **The streaming route and the materialising one answer the same thing.** A build takes
     /// ranges and encodes an artifact at a time; the online publication takes the blobs. Two routes
     /// to one set of bytes is one place for them to drift, so the equality is asserted rather than
-    /// argued — including which levels are skipped for a hole, where the two must agree exactly or
-    /// a build would pack around one.
+    /// argued. A hole is an empty blob in both, at its own ordinal.
     #[test]
     fn the_ranges_and_the_blobs_describe_the_same_pending_levels() {
         let mut store = ArtifactStore::new();
         store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
         store.put("clusters/a", 0, 1, record(101, &[4]), None);
         store.put("clusters/a", 1, 0, record(102, &[]), None);
-        // A level with a hole: reported as skipped by both, and never as a range.
         store.put("holed/h", 0, 1, record(103, &[7]), None);
 
-        let (ready, skipped) = store.unpublished();
-        let (ranges, skipped_ranges) = store.pending_ranges();
-        assert_eq!(skipped, skipped_ranges);
-        assert_eq!(skipped, vec![("holed/h".to_string(), 0)]);
+        let ready = store.unpublished();
+        let ranges = store.pending_ranges();
         assert_eq!(ready.len(), ranges.len());
+        let holed = ready.iter().find(|(layer, ..)| layer == "holed/h").unwrap();
+        assert_eq!((holed.2, holed.3.len()), (0, 2));
+        assert!(holed.3[0].is_empty() && !holed.3[1].is_empty());
         for ((layer, level, lo, blobs), (r_layer, r_level, r_lo, count)) in
             ready.iter().zip(ranges.iter())
         {
@@ -3442,10 +3526,47 @@ mod tests {
             assert_eq!(blobs.len(), *count as usize);
             let streamed: Vec<Vec<u8>> = store
                 .encode_pending(r_layer, *r_level, *r_lo, *count)
-                .map(|blob| blob.expect("a range holds a record at every ordinal"))
                 .collect();
             assert_eq!(*blobs, streamed);
         }
+    }
+
+    /// A dead incarnation's artifacts leave holes and free their keys, and a key the live
+    /// incarnation already holds again stays with it. Entity-scoped records are never asked about,
+    /// and the artifacts attached to a removed one are returned rather than removed.
+    #[test]
+    fn a_dead_views_artifacts_leave_holes_and_a_republished_key_stays() {
+        let scoped = |entity: u64, key: &str, incarnation| ArtifactRecord {
+            key: Some(key.into()),
+            view: Some("q2".into()),
+            incarnation,
+            ..record(entity, &[1])
+        };
+        let mut store = ArtifactStore::new();
+        store.put("clusters/q", 0, 0, scoped(100, "c1", 1), None);
+        store.put("clusters/q", 0, 1, scoped(101, "c2", 1), None);
+        store.put("clusters/q", 0, 2, scoped(102, "c1", 2), None);
+        store.put("clusters/p", 0, 0, record(103, &[1]), None);
+        // A label of another group on the dead c2, and one on that label.
+        store.put("labels/t", 0, 0, attached(200, 101, "clusters/q", 1), None);
+        store.put("labels/u", 0, 0, attached(201, 200, "labels/t", 0), None);
+        let before = store.level_version("clusters/q", 0);
+
+        let retired = store.retire_dead_views(|_, _, incarnation| incarnation == 2);
+        assert_eq!(retired.levels, vec![("clusters/q".to_string(), 0)]);
+        assert!(store.level_version("clusters/q", 0) > before);
+        let held: Vec<u32> = store.level("clusters/q", 0).map(|(ordinal, _)| ordinal).collect();
+        assert_eq!(held, vec![2]);
+        assert_eq!(store.ordinal_of_key("clusters/q", 0, Some("q2"), "c1"), Some(2));
+        assert_eq!(store.ordinal_of_key("clusters/q", 0, Some("q2"), "c2"), None);
+        assert_eq!(store.next_ordinal("clusters/q", 0), 3);
+        assert_eq!(store.level("clusters/p", 0).count(), 1);
+        assert_eq!(retired.dependents, vec![EntityId::new(200), EntityId::new(201)]);
+        assert_eq!(store.level("labels/t", 0).count(), 1, "a dependent is the caller's to delete");
+        assert_eq!(
+            store.retire_dead_views(|_, _, incarnation| incarnation == 2),
+            RetiredViews::default()
+        );
     }
 
     #[test]
@@ -3827,9 +3948,13 @@ mod tests {
         let mut scoped = record(100, &[1, 2, 3]);
         scoped.key = Some("c1".into());
         scoped.view = Some("q1".into());
+        scoped.incarnation = 7;
         let (restored, _) = decode_record(scoped.entity, &encode_record(&scoped, None))
             .expect("the blob round-trips");
         assert_eq!(restored.view.as_deref(), Some("q1"));
+        assert_eq!(restored.incarnation, 7);
+        let blob = encode_record(&scoped, None);
+        assert_eq!(members_bytes(&blob), Some(&serialise_members(&scoped.members)[..]));
         assert_eq!(restored.key.as_deref(), Some("c1"));
         assert_eq!(restored.members, scoped.members);
 
@@ -4118,6 +4243,7 @@ mod tests {
                 entity: EntityId::new(entity),
                 key: Some(format!("c{ordinal}")),
                 view: None,
+                incarnation: 0,
                 members: serialise_members(&Bitmap::of(members)),
                 contents: Vec::new(),
                 attached_to: None,

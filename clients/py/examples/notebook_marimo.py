@@ -1,222 +1,344 @@
-# A guided walk through the SDK, as a Marimo notebook:
-# `marimo edit clients/py/examples/notebook_marimo.py`. `notebook.ipynb` is the same walk for
-# Jupyter. The sections are python-sdk.md §10.1 to §10.5 and §10.7.
+# TesseraDB's Python client, as a marimo notebook: `marimo edit clients/py/examples/notebook_marimo.py`.
 #
-# Marimo folds every synced trait of a widget into one `.value`, so a cell that reads a map
-# re-runs at every settle. The reading cells are kept apart from the ones that build for that
-# reason.
+# `notebook.ipynb` beside it is generated from this file, and is not edited by hand:
+#
+#     marimo export ipynb clients/py/examples/notebook_marimo.py -o clients/py/examples/notebook.ipynb
+#
+# The Jupyter copy needs marimo installed, and its year slider does not drive the map there.
+#
+# Each map is drawn in a cell of its own, so running a map's cell again rebuilds nothing.
 import marimo
 
-__generated_with = "0.24.0"
+__generated_with = "0.24.2"
 app = marimo.App(width="medium")
 
 
 @app.cell
 def _():
-    import json
-    import math
+    import datetime
     import os
     import pathlib
+    import tempfile
 
     import marimo as mo
+    import pandas as pd
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
+    from sklearn.cluster import KMeans
 
     import tesseradb as td
 
-    def corpus_directory():
-        """`data/notebook/`: 50,000 arXiv papers, three clusterings and the topics over two.
+    return KMeans, datetime, mo, os, pa, pathlib, pc, pd, pq, td, tempfile
 
-        Neither front end promises a working directory, so the corpus is looked for above this
-        file and above the working directory, and `TESSERA_NOTEBOOK_DATA` names it anywhere else.
-        """
+
+@app.cell
+def _(mo):
+    mo.md("""
+    # TesseraDB in a notebook
+
+    TesseraDB is an open-source engine for interactive maps of large datasets. You give it
+    records with 2D coordinates, which can be places on Earth or positions in an embedding
+    space, and it serves a map you can pan, filter, search and cluster.
+
+    Each person viewing the map sees it computed from only the records they may see. That
+    covers every count, density, sample, cluster and label, as well as which points are drawn.
+
+    This notebook maps arXiv papers. You look at the map as two readers with different access,
+    ask it questions, step through it a year at a time, add a week of papers while it is
+    serving, and save it.
+
+    Three calls do the work. `declare_*` says what the database holds: a view, a column, a
+    clustering. `insert` gives it data and names each column it reads. `commit` sends
+    everything inserted since the last commit.
+
+    The notebook maps all 2.4 million papers, and the first build takes a few minutes. Set
+    `SCALE` below to `"sample"` to use a random 200,000 of them instead, which builds in
+    seconds.
+    """)
+    return
+
+
+@app.cell
+def _():
+    SCALE = "whole"  # or "sample"
+    return (SCALE,)
+
+
+@app.cell
+def _(SCALE, os, pathlib):
+    def corpus_directory():
+        """`data/<corpus>/` above this file or the working directory, or `TESSERA_NOTEBOOK_DATA`."""
         named = os.environ.get("TESSERA_NOTEBOOK_DATA")
         if named:
             return pathlib.Path(named).expanduser()
+        corpus = {"whole": "notebook-2m4-live", "sample": "notebook-sample"}[SCALE]
         starts = [pathlib.Path.cwd().resolve()]
         here = globals().get("__file__")
         if here:
             starts.append(pathlib.Path(here).resolve().parent)
         for start in starts:
             for directory in [start, *start.parents]:
-                if (directory / "data" / "notebook" / "schema.toml").exists():
-                    return directory / "data" / "notebook"
+                if (directory / "data" / corpus / "schema.toml").exists():
+                    return directory / "data" / corpus
         raise FileNotFoundError(
-            "data/notebook/ is above neither this file nor the working directory. "
+            f"data/{corpus}/ is above neither this file nor the working directory. "
             "Set TESSERA_NOTEBOOK_DATA to the corpus directory"
         )
 
     DATA = corpus_directory()
-
-    def counts(table):
-        """A served table's `visible`, `matched` and `served`, which its schema metadata carries.
-
-        `visible` is what the principal may see, `matched` what the filters kept and `served` what
-        came back under the point budget. A served set is not the whole set.
-        """
-        return json.loads(table.schema.metadata[b"tessera.counts"])
-
-    return DATA, counts, math, mo, os, pa, pathlib, pc, pq, td
+    return (DATA,)
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        # A Tessera database in a notebook
+    mo.md("""
+    ## 1. A map from a DataFrame
 
-        Six steps. A frame of points becomes a served map; the arXiv corpus becomes a database
-        with terms and three clusterings; a week of new papers goes into the running database; a
-        second clustering is published over rows it already holds; one set of points is mapped
-        under two projections; and the whole thing is saved, reopened and handed to `tessera
-        serve`.
-
-        Three verbs carry it, and each does one thing. `declare_*` says what exists and takes no
-        data. `insert(target, table, **columns)` hands a table to a declared thing and names every
-        column it reads. `commit()` sends what was inserted and forgets it, so adding more data is
-        the same `insert` calls again.
-
-        Every map here is computed inside the viewer's own mask. `viewer(terms)` is another
-        principal's map, computed inside that principal's mask.
-        """
-    )
-    return
-
-
-@app.cell
-def _(mo):
-    mo.md(
-        """
-        ## 1. A frame, a cluster column, a label for each cluster
-
-        The starting point is a DataFrame: coordinates, a column of cluster keys and a title to
-        hover. `declare_columns` declares every column of it that is not skipped, from its dtype;
-        `insert` hands the frame to the view and names the columns the view reads, and the title
-        is filled by name because this is the allocation view's own frame.
-
-        A layer given a table with an id column and a key column mints one artifact per distinct
-        key and joins the rows, so the clustering needs no table of its own.
-
-        The cluster keys here come from the corpus's k-means membership file, joined onto the
-        points so the frame carries one column of keys.
-
-        Each cluster has a line of text, inserted as a mapping from cluster key to text. A label
-        with no members of its own is the label of its cluster (decision 0145): it is drawn where
-        the cluster is drawn, counted over the cluster's members and served to whoever is served
-        the cluster, so the mapping is the whole of it.
-        """
-    )
+    Start with a DataFrame with one row per paper: an id, a position, a title and the cluster
+    the paper belongs to. The positions are a 2D layout of each paper's text embedding, so
+    papers on similar subjects sit close together. The clusters are the finest level of the
+    topics that section 2 uses, and a paper in none of them has no cluster.
+    """)
     return
 
 
 @app.cell
 def _(DATA, pq):
-    _points = pq.read_table(DATA / "points.parquet").to_pandas()
-    _members = pq.read_table(DATA / "clusters-kmeans-members.parquet").to_pandas()
+    _points = pq.read_table(DATA / "points.parquet", columns=["entity_id", "x", "y", "title"])
+    _members = pq.read_table(DATA / "clusters-toponymy-members.parquet").to_pandas()
+    _finest = _members[_members["level"] == 3].set_index("entity")["key"]
 
-    frame = _points[["entity_id", "x", "y", "title"]].copy()
-    frame["cluster"] = frame["entity_id"].map(_members.set_index("entity")["key"])
+    frame = _points.to_pandas()
+    frame["cluster"] = frame["entity_id"].map(_finest)
     frame.head()
     return (frame,)
 
 
 @app.cell
-def _(DATA, mo, pq):
-    # One line of text per cluster, keyed by the cluster it was written about.
-    _topics = pq.read_table(DATA / "topics-kmeans.parquet").to_pandas()
-    topic_names = {row.attached_key: row.contents[0][0] for row in _topics.itertuples()}
-    mo.md(f"{len(topic_names)} labels, one per cluster: {list(topic_names.values())[:3]}")
+def _(DATA, pq):
+    # The title of each named cluster at the finest level, keyed by the cluster it describes.
+    _topics = pq.read_table(DATA / "topics-toponymy.parquet").to_pandas()
+    topic_names = {row.attached_key: row.contents[0][0] for row in _topics.itertuples()
+                   if row.attached_level == 3}
     return (topic_names,)
 
 
 @app.cell
-def _(frame, td, topic_names):
-    simple = td.create()  # a temporary directory, on /dev/shm where the platform has one
-    simple.declare_view("map")
-    simple.declare_columns(frame, skip=["entity_id", "x", "y", "cluster"], index=["title"])
-    simple.declare_layer("clusters", kind="flat")
-    simple.declare_labels("topics", of="clusters")
+def _(mo):
+    mo.md("""
+    `td` is the `tesseradb` package, imported in the first cell. `td.create()` makes a new
+    database in a temporary directory, and everything after it is a call on that database.
 
-    simple.insert("map", frame, id="entity_id", x="x", y="y")  # title is read by name
-    simple.insert("clusters", frame, id="entity_id", key="cluster")
-    simple.insert("topics", topic_names)  # {cluster_key: text}
-    return (simple,)
+    The declarations say what the database will hold, before it holds anything:
 
+    - `declare_view("map")` declares a **view**: a set of points with 2D positions, drawn as
+      one map. A database can hold several views of the same records, as section 2 does.
+    - `declare_columns(frame, ...)` declares a column for each column of the frame, typed from
+      the frame. `skip` leaves out the columns that the view and the clustering use in their
+      own way. `index=["title"]` makes titles searchable and filterable. A column that is not
+      indexed is stored with the paper and shown when you open it.
+    - `declare_layer("topics", kind="flat")` declares a **layer**: a set of groups of points
+      drawn over the map, here a clustering. `kind="flat"` means one level of clusters with no
+      hierarchy. Section 2 has layers of the other kinds, whose clusters sit inside larger ones.
+    - `declare_labels("names", of="topics")` declares a line of text for each cluster of the
+      `topics` layer.
 
-@app.cell
-def _(simple):
-    print(simple.commit())  # tessera check, tessera build, tessera serve
+    The inserts then give it the data, and each names the frame's columns it uses:
+
+    - `insert("map", frame, id="entity_id", x="x", y="y")` makes each row a point. `id` names
+      the column that identifies each paper, and `x` and `y` the columns holding its position.
+      The view also takes `title`, because a column of that name was declared.
+    - `insert("topics", frame, id="entity_id", key="cluster")` puts each paper in a cluster.
+      `key` names the column that says which cluster, and each distinct key becomes one
+      cluster. A paper with no cluster is in none.
+    - `insert("names", topic_names)` takes a dictionary from cluster key to text.
+
+    Each insert returns a record of the columns it read and the columns it ignored.
+
+    `commit()` sends everything inserted. The first commit checks the declarations against the
+    data, builds the database's files and starts a local server for the database. It returns a
+    report of what it built, shown under the cell.
+    """)
     return
 
 
 @app.cell
+def _(frame, td, topic_names):
+    simple = td.create()
+    simple.declare_view("map")
+    simple.declare_columns(frame, skip=["entity_id", "x", "y", "cluster"], index=["title"])
+    simple.declare_layer("topics", kind="flat")
+    simple.declare_labels("names", of="topics")
+
+    simple.insert("map", frame, id="entity_id", x="x", y="y")
+    simple.insert("topics", frame, id="entity_id", key="cluster")
+    simple.insert("names", topic_names)
+    simple.commit()
+    return (simple,)
+
+
+@app.cell
 def _(mo):
-    mo.md(
-        """
-        Each call above printed what it did: `declare_columns` the table it declared, and each
-        `insert` the columns it read and the columns it ignored. `cluster` is ignored by the
-        view's insert and read by the layer's, and neither call guessed a name.
-
-        The report is the build's own: what each declaration read, what the frame did to the
-        coordinates, and the three addresses the server bound.
-
-        **Try**: hover a point, then drag a box (shift-drag) or a lasso over one cluster and read
-        the next cell.
-        """
-    )
+    mo.md("""
+    `map()` draws the database's map in the notebook, served by that local server.
+    Two settings decide what the map shows. `colour_by` is what the points are coloured by: a
+    column, or `cluster:` followed by a layer's name, so `"cluster:topics"` colours each point
+    by its cluster in the `topics` layer. `layers` is the layers drawn over the points: here the
+    `topics` clusters with their names. The two are independent, so a map can colour by one
+    layer and draw another, or colour by a layer and draw nothing over it.
+    Hover over a point to see its title, and zoom in to see more points.
+    """)
     return
 
 
 @app.cell
 def _(mo, simple):
-    simple_map = mo.ui.anywidget(simple.map(colour_by="cluster:clusters", height=520))
-    simple_map
-    return (simple_map,)
-
-
-@app.cell
-def _(simple_map):
-    # Re-runs at every settle: `.value` is every synced trait at once.
-    {
-        key: simple_map.value.get(key)
-        for key in ("bbox", "layers", "colour_by", "selected", "selected_artifact", "region")
-    }
+    mo.ui.anywidget(simple.map(colour_by="cluster:topics", layers=["topics"], height=520))
     return
-
-
-@app.cell
-def _(counts, simple):
-    # The same numbers without a browser: `sample()` goes through the viewer plane with a token.
-    simple_counts = counts(simple.view("map").sample())
-    simple_counts
-    return (simple_counts,)
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## 2. The corpus from files, with terms and three clusterings
-
-        The same corpus as `data/notebook/schema.toml`, declared as calls. A path is accepted
-        wherever a table is and is read where it lies rather than copied.
-
-        `access="categories"` on the view's insert makes each paper's arXiv categories its access
-        terms. A viewer holding `astro-ph` sees the papers filed under `astro-ph` and nothing
-        else. Every count, every cluster and every topic line is computed inside that mask.
-
-        A layer takes two tables under their own keywords, `artifacts=` and `members=`, because
-        both carry `key` and `level`, so each insert names its own columns.
-        """
-    )
+    mo.md("""
+    `view()` asks the same server from Python. `view("map")` is the whole of the view as this
+    reader sees it, and later sections narrow it with filters. `count()` is the number of
+    papers in it. `sample()` is the points a map draws at one zoom level, which is a sample
+    for display, so it holds fewer rows than there are papers.
+    """)
     return
 
 
 @app.cell
-def _(td):
+def _(simple):
+    on_map = simple.view("map")
+    first_count = on_map.count()
+    {"papers": first_count, "points drawn at zoom 0": on_map.sample().num_rows}
+    return (first_count,)
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 2. The arXiv database
+
+    The same papers, now as a database with more to it. There are two kinds of view: `papers`
+    holds every paper, and the view group `years` holds one view per year of submission. Each
+    year's view uses the same coordinates as `papers`, so a place on the map means the same
+    field in every year.
+
+    Each paper's arXiv categories are its access terms. A reader who holds `cs.LG` sees the
+    papers filed under `cs.LG` and no others.
+
+    The papers are clustered by topic, in a hierarchy of four levels. Each topic is named by a
+    language model from a few of the papers in it. A topic's name is shown only to readers who
+    can see every paper it was written from.
+
+    The last seven days of submissions are held back from the build, so that section 5 can add
+    them to the running database.
+    """)
+    return
+
+
+@app.cell
+def _(DATA, datetime, pa, pc, pq):
+    points = pq.read_table(DATA / "points.parquet")
+    points = points.append_column(
+        "year", pc.cast(pc.year(points["submitted_at"]), pa.string())
+    )
+
+    _cutoff = pc.subtract(pc.max(points["submitted_at"]), datetime.timedelta(days=7))
+    _recent = pc.greater(points["submitted_at"], _cutoff)
+    week = points.filter(_recent)
+    points = points.filter(pc.invert(_recent))
+
+    def _split(name):
+        table = pq.read_table(DATA / f"{name}-members.parquet")
+        in_week = pc.is_in(table["entity"], week["entity_id"])
+        return table.filter(pc.invert(in_week)), table.filter(in_week)
+
+    # The corpus gives each topic name two texts, a title (rank 0) and keywords (rank 1), each
+    # with the papers it was written from. Only the titles are used here.
+    def _titles(table):
+        return table.filter(
+            pc.or_kleene(pc.is_null(table["rank"]), pc.equal(table["rank"], 0))
+        )
+
+    members, week_members = {}, {}
+    for _name in ["clusters-toponymy", "topics-toponymy"]:
+        members[_name], week_members[_name] = _split(_name)
+    members["topics-toponymy"] = _titles(members["topics-toponymy"])
+    week_members["topics-toponymy"] = _titles(week_members["topics-toponymy"])
+
+    # A build refuses a topic name whose title has no source paper. So a name whose title was
+    # written only from papers in the week is held back with the week, and every member row of
+    # it goes in with the week in section 5.
+    def _ranks(table):
+        written = table.filter(pc.is_valid(table["rank"]))
+        return set(zip(written["key"].to_pylist(), written["rank"].to_pylist()))
+
+    _topic_rows = members["topics-toponymy"]
+    _all_ranks = _ranks(pa.concat_tables([_topic_rows, week_members["topics-toponymy"]]))
+    _waiting = pa.array(sorted({key for key, _ in _all_ranks - _ranks(_topic_rows)}), pa.string())
+    _names = pq.read_table(DATA / "topics-toponymy.parquet")
+    _names = _names.set_column(
+        _names.schema.get_field_index("contents"), "contents",
+        pc.list_slice(_names["contents"], 0, 1),
+    )
+    # The corpus's files call the clustering `clusters/toponymy`, and this database `topics`.
+    _names = _names.set_column(
+        _names.schema.get_field_index("attached_layer"), "attached_layer",
+        pa.array(["topics"] * _names.num_rows),
+    )
+    named_topics = _names.filter(pc.invert(pc.is_in(_names["key"], _waiting)))
+    week_topics = _names.filter(pc.is_in(_names["key"], _waiting))
+    _held_back = pc.is_in(_topic_rows["key"], _waiting)
+    members["topics-toponymy"] = _topic_rows.filter(pc.invert(_held_back))
+    week_members["topics-toponymy"] = pa.concat_tables(
+        [week_members["topics-toponymy"], _topic_rows.filter(_held_back)]
+    )
+
+    years = sorted(set(points["year"].to_pylist()))
+    {"papers built": points.num_rows, "papers held back": week.num_rows,
+     "years": f"{years[0]}-{years[-1]}"}
+    return members, named_topics, points, week, week_members, week_topics, years
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    This time each column is declared on its own, with more control over each.
+
+    `declare_view_group("years")` declares a **view group**: a set of views that share their
+    settings and differ by a key, here the year. Its views are named when the data is inserted,
+    in a table with one row per year.
+
+    A **vocabulary** is the set of values a category column takes, such as arXiv's archives.
+    `closed=True` means no other values are accepted, and `width` is how many bytes each value's
+    code takes.
+
+    An **attribute** is a column, and its `type` decides how it is stored and searched. A
+    `category` takes its values from a vocabulary. `text` is searched word by word. A `keyword`
+    is matched exactly, as an arXiv ID is. `render=True` keeps the value with each point, so the
+    map can colour and filter by it. `index=True` makes the column searchable or filterable. A
+    column with neither is stored with the paper and shown when you open it.
+
+    The clustering is a layer. `views` says which views it is drawn on. `kind="tiered"` means
+    fixed levels, from coarse to fine, which `levels` names.
+
+    Two settings decide what a reader is shown. `require_member_visibility` shows a cluster to
+    a reader only when they can see at least the number of its papers set below. `content_requires="all"` shows a
+    topic's name only to a reader who can see every paper the name was written from.
+    """)
+    return
+
+
+@app.cell
+def _(SCALE, td):
     db = td.create()
-    db.declare_view("s0", title="arXiv, 50,000 papers")
+    db.declare_view("papers", title="arXiv")
+    db.declare_view_group("years", title="arXiv, one year at a time")
+
     db.declare_vocabulary("archive", closed=True, width="u8", title="arXiv archive")
     db.declare_vocabulary("primary_category", closed=True, width="u16",
                           title="arXiv subject class")
@@ -229,451 +351,465 @@ def _(td):
     db.declare_attribute("abstract", type="text", index=True)
     db.declare_attribute("arxiv_id", type="keyword", index=True, title="arXiv ID")
 
-    # Three clusterings: flat, nested and tiered. Each states its `require_member_visibility`:
-    # how much of a cluster a viewer must already see before that cluster is served to them, as a
-    # floor on the count or a share of the cluster's own size.
-    db.declare_layer("clusters/kmeans", kind="flat", value_set="open",  # §3 mints into it
-                     require_member_visibility={"count": 50}, title="k-means clusters")
-    db.declare_labels("topics/kmeans", of="clusters/kmeans", content_requires="all",
-                      title="k-means topics")
-    db.declare_layer("clusters/hdbscan", kind="nested",
-                     require_member_visibility={"fraction": 0.05}, title="HDBSCAN clusters")
-    db.declare_labels("topics/hdbscan", of="clusters/hdbscan", content_requires="all",
-                      title="HDBSCAN topics")
-    db.declare_layer("taxonomy/arxiv", kind="tiered",
-                     levels=[(0, "archive"), (1, "subject class")],
-                     require_member_visibility={"count": 1}, computed=("centroid", "box"),
-                     title="arXiv classification")
+    # How many of a topic's papers a reader must see before the topic is shown to them.
+    _floor = {"whole": 50, "sample": 5}[SCALE]
+    db.declare_layer("topics", kind="tiered", views=["papers", "years"],
+                     levels=[(0, "coarsest"), (1, "coarse"), (2, "fine"), (3, "finest")],
+                     require_member_visibility={"count": _floor}, title="Topics")
+    db.declare_labels("topic_names", of="topics", content_requires="all",
+                      title="Topic names")
+    db
     return (db,)
 
 
 @app.cell
-def _(DATA, db):
+def _(mo):
+    mo.md("""
+    The inserts take tables or paths to Parquet files, and a path is read from disk without being copied.
+
+    `access="categories"` names the column holding each paper's access terms, a list of arXiv
+    categories. The `years` group takes a roster of its views, one row per year, and then the
+    papers, with `view="year"` naming the column that says which year's view each paper goes
+    in.
+
+    The clustering takes two tables. `artifacts=` holds the clusters, one row each, and
+    `members=` says which papers are in which cluster. Every column the call uses is named on
+    it, as before: `parent` is a cluster's parent in the hierarchy, `contents` is a label's
+    text, `attached_layer`, `attached_level` and `attached_key` name the cluster a label
+    belongs to, and `rank` in a members table marks the papers a topic name was written from.
+    The clusters' members table carries `rank` empty, and a column a table carries is always
+    named.
+    """)
+    return
+
+
+@app.cell
+def _(DATA, db, members, pa, points, named_topics, years):
     db.insert("archive", str(DATA / "archive.parquet"), key="key", title="title", code="code")
     db.insert("primary_category", str(DATA / "primary_category.parquet"), key="key",
               title="title", code="code")
-    # The six attribute columns are read by name from the frame inserted into the allocation view.
-    db.insert("s0", str(DATA / "points.parquet"), id="entity_id", x="x", y="y",
-              access="categories")
-    for _layer, _name in [("clusters/kmeans", "clusters-kmeans"),
-                          ("clusters/hdbscan", "clusters-hdbscan"),
-                          ("taxonomy/arxiv", "taxonomy-arxiv")]:
-        # Every column these tables carry is named, canonical or not: the build reads a
-        # canonical column under its own name whatever the call says, so one passed over is
-        # refused rather than read silently.
-        db.insert(_layer, artifacts=str(DATA / f"{_name}.parquet"), key="key", level="level",
-                  parent="parent", contents="contents", attached_layer="attached_layer",
-                  attached_key="attached_key")
-        db.insert(_layer, members=str(DATA / f"{_name}-members.parquet"), id="entity", key="key",
-                  level="level", rank="rank")
-    for _labels, _name in [("topics/kmeans", "topics-kmeans"),
-                           ("topics/hdbscan", "topics-hdbscan")]:
-        db.insert(_labels, str(DATA / f"{_name}.parquet"), key="key", level="level",
-                  contents="contents", parent="parent", attached_layer="attached_layer",
-                  attached_key="attached_key")
-        db.insert(_labels, members=str(DATA / f"{_name}-members.parquet"), id="entity", key="key",
-                  level="level", rank="rank")
-    return
 
+    db.insert("papers", points, id="entity_id", x="x", y="y", access="categories")
+    db.insert("years", roster=pa.table({"year": years}), key="year")
+    db.insert("years", points.select(["entity_id", "x", "y", "categories", "year"]),
+              id="entity_id", x="x", y="y", access="categories", view="year")
 
-@app.cell
-def _(db):
-    # `check()` is a commit with nothing sent: the schemas each declaration reads and the
-    # disclosure decision it makes, from Parquet headers alone. No rows are read, so a clean check
-    # is not a clean build.
-    print(db.check())
-    return
-
-
-@app.cell
-def _(db):
-    print(db.commit())
-    return
-
-
-@app.cell
-def _(db):
-    # The declaration the SDK wrote, which is `schema.toml` in the database's directory. Every
-    # block names the source and the column names its inserts gave it.
-    print(db.declaration)
+    _columns = dict(key="key", level="level", parent="parent", contents="contents",
+                    attached_layer="attached_layer", attached_level="attached_level",
+                    attached_key="attached_key")
+    db.insert("topics", artifacts=str(DATA / "clusters-toponymy.parquet"), **_columns)
+    db.insert("topics", members=members["clusters-toponymy"], id="entity", key="key",
+              level="level", rank="rank")
+    db.insert("topic_names", named_topics, **_columns)
+    db.insert("topic_names", members=members["topics-toponymy"], id="entity", key="key",
+              level="level", rank="rank")
+    db.check()
     return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        Three maps follow: the database's own principal, who holds every term the SDK inserted,
-        and two arXiv categories. `astro-ph` is 2,105 papers in one region of the projection, and
-        14 of the 64 k-means clusters clear its member requirement. `cs.LG` with `stat.ML` is
-        about twice as many papers, somewhere else, drawn over the HDBSCAN clustering rather than
-        all three layers.
+    mo.md("""
+    The commit checks the declaration against the tables, builds the database and starts its
+    server. `check()` above is the same check with nothing built. The commit report gives the
+    time it took. On the whole corpus it was 144 seconds on a 12-core AMD Ryzen 9
+    5900X that was also running other work.
+    """)
+    return
 
-        Neither category principal is served a topic line, where the first map's principal is
-        served every one. A topic line is generated from the papers of its cluster, those papers
-        span categories, and the line is read only by a viewer who may read every one of them. So
-        the cluster is drawn and keyed, and the sentence written about it is not served.
 
-        **Try**: read the cluster counts on the second and third maps. They are smaller than the
-        first map's, and they are counted over each principal's own rows rather than taken from
-        the first map's numbers.
-        """
-    )
+@app.cell
+def _(db):
+    db.commit()
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    The first map is the database's own view. Its reader holds every access term, so it sees
+    every paper, every topic and every topic name.
+    """)
     return
 
 
 @app.cell
 def _(db, mo):
-    arxiv_map = mo.ui.anywidget(db.map(colour_by="cluster:clusters/kmeans", height=520))
-    arxiv_map
-    return (arxiv_map,)
-
-
-@app.cell
-def _(db, mo):
-    mo.ui.anywidget(db.viewer(["astro-ph"]).map(colour_by="cluster:clusters/kmeans", height=380))
+    mo.ui.anywidget(db.map(view="papers", colour_by="cluster:topics", layers=["topics"], height=520))
     return
-
-
-@app.cell
-def _(db, mo):
-    mo.ui.anywidget(
-        db.viewer(["cs.LG", "stat.ML"]).map(layers=["clusters/hdbscan"], height=380)
-    )
-    return
-
-
-@app.cell
-def _(counts, db):
-    # What each of the three was served, as numbers: the union, one term, two terms.
-    whole_counts = counts(db.view("s0").sample())
-    one_term_counts = counts(db.viewer(["astro-ph"]).view("s0").sample())
-    two_term_counts = counts(db.viewer(["cs.LG", "stat.ML"]).view("s0").sample())
-    (whole_counts["visible"], one_term_counts["visible"], two_term_counts["visible"])
-    return one_term_counts, two_term_counts, whole_counts
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## 3. A week of new papers, into the database that is already serving
+    mo.md("""
+    `viewer(terms)` is the map of a reader who holds only those terms. The two below are an
+    astronomer, who holds every `astro-ph` category, and a machine-learning reader, who holds
+    `cs.LG` and `stat.ML`.
 
-        The same verbs: adding more data is the same `insert` calls again. The commit pages them
-        through the control plane and waits for the publication that makes them visible, so the
-        cell after it sees them.
-
-        Sixty papers, one new cluster, one topic line over it and the generating set that line
-        was written from. Sixty because `clusters/kmeans` requires 50 visible members, so a
-        smaller cluster would exist for nobody. They land in a patch a few hundred units across
-        at the middle of the frame, about a thousandth of its width, so the map below needs
-        zooming in to see them apart.
-
-        The new cluster is one key column beside the papers: `clusters/kmeans` was declared
-        `value_set = "open"` in section 2, so a key its artifacts do not declare mints the cluster
-        it names, with the batch's rows as its first members. The topic line over it attaches to
-        that key in the same commit, so the commit flushes between the two: an artifact is
-        resolvable from its publication, and this one is published by the values page.
-        """
-    )
-    return
-
-
-@app.cell
-def _(counts, db, pa):
-    before_delta = counts(db.view("s0").sample())["visible"]
-
-    _quantisation = db.meta()["views"][0]["quantisation"]
-    _x = (_quantisation["x_min"] + _quantisation["x_max"]) / 2.0
-    _y = (_quantisation["y_min"] + _quantisation["y_max"]) / 2.0
-    new_ids = list(range(900_001, 900_061))
-    # An eight-wide grid at 80 units a step: a patch about 560 units across, rather than the
-    # sixty points on top of each other that a 0.001 step would give.
-    _at = [(_x + 80.0 * (i % 8) - 280.0, _y + 80.0 * (i // 8) - 260.0)
-           for i in range(len(new_ids))]
-
-    new_papers = pa.table(
-        {
-            "entity_id": pa.array(new_ids, pa.uint64()),
-            "x": pa.array([x for x, _ in _at], pa.float64()),
-            "y": pa.array([y for _, y in _at], pa.float64()),
-            "categories": pa.array([["cs.LG"] for _ in new_ids], pa.list_(pa.string())),
-            "arxiv_id": pa.array([f"2609.{i:05d}" for i in new_ids], pa.string()),
-            "archive": pa.array(["cs"] * len(new_ids), pa.string()),
-            "primary_category": pa.array(["cs.LG"] * len(new_ids), pa.string()),
-            "submitted_at": pa.array([1_757_000_000_000_000 + i for i in new_ids],
-                                     pa.timestamp("us")),
-            "title": pa.array([f"Diffusion models for audio, part {i}" for i in new_ids],
-                              pa.string()),
-            "abstract": pa.array([f"An abstract about audio diffusion, {i}." for i in new_ids],
-                                 pa.string()),
-            "cluster": pa.array(["km-audio"] * len(new_ids), pa.string()),
-        }
-    )
-    (before_delta, new_papers.num_rows)
-    return before_delta, new_ids, new_papers
-
-
-@app.cell
-def _(db, new_ids, new_papers, pa):
-    db.insert("s0", new_papers, id="entity_id", x="x", y="y", access="categories")
-    db.insert("clusters/kmeans", new_papers, id="entity_id", key="cluster")
-    db.insert(
-        "topics/kmeans",
-        pa.table({"level": pa.array([0], pa.uint32()),
-                  "key": pa.array(["km-audio-label"], pa.string()),
-                  "contents": pa.array([[["Audio diffusion"]]], pa.list_(pa.list_(pa.string()))),
-                  "attached_layer": pa.array(["clusters/kmeans"], pa.string()),
-                  "attached_key": pa.array(["km-audio"], pa.string())}),
-        key="key",
-        level="level",
-        contents="contents",
-        attached_layer="attached_layer",
-        attached_key="attached_key",
-    )
-    # A label's member table carries two grains: a null rank is the membership, and rank *k* is
-    # the set content *k* was generated from.
-    db.insert(
-        "topics/kmeans",
-        members=pa.table({"level": pa.array([0] * (2 * len(new_ids)), pa.uint32()),
-                          "key": pa.array(["km-audio-label"] * (2 * len(new_ids)), pa.string()),
-                          "rank": pa.array([None] * len(new_ids) + [0] * len(new_ids),
-                                           pa.uint32()),
-                          "entity": pa.array(new_ids + new_ids, pa.uint64())}),
-        id="entity",
-        key="key",
-        level="level",
-        rank="rank",
-    )
-    # The plan: the pages this commit would send, in the order §6.2 fixes. Points come before the
-    # artifacts that name them, and a clustering before its labels.
-    print(db.check())
+    Compare them with the map above. Each shows its own part of the layout, each cluster count
+    is the number of papers that reader can see, and a topic appears only where the reader
+    can see enough of its papers. A topic's name appears only where the reader can see every
+    paper it was written from, so a reader can see fewer names than the database's own map.
+    """)
     return
 
 
 @app.cell
 def _(db):
-    delta_report = db.commit()
-    print(delta_report)
-    return (delta_report,)
+    astro = db.viewer(["astro-ph", "astro-ph.CO", "astro-ph.EP", "astro-ph.GA", "astro-ph.HE",
+                       "astro-ph.IM", "astro-ph.SR"])
+    learning = db.viewer(["cs.LG", "stat.ML"])
+    return astro, learning
 
 
 @app.cell
-def _(counts, db):
-    # The commit waited for the publication its flush armed, so this needs no wait of its own.
-    after_delta = counts(db.view("s0").sample())["visible"]
-    after_delta
-    return (after_delta,)
-
-
-@app.cell
-def _(mo):
-    mo.md(
-        """
-        The new papers carry `cs.LG`, so the map below is that principal's: the cluster `km-audio`
-        is drawn among the clusters they already held.
-
-        Not built yet: a label whose content is gated `all` fails containment for every principal
-        when its generating set is rows that arrived by ingest (issue #150). The line written
-        about this cluster is published and addressable, and no principal is served its text. The
-        cluster is drawn, and so are the papers.
-        """
-    )
+def _(astro, mo):
+    mo.ui.anywidget(astro.map(view="papers", colour_by="cluster:topics", layers=["topics"], height=380))
     return
 
 
 @app.cell
-def _(after_delta, db, mo):
-    _ = after_delta  # the delta is visible before this map asks for it
-    mo.ui.anywidget(db.viewer(["cs.LG"]).map(colour_by="cluster:clusters/kmeans", height=440))
+def _(learning, mo):
+    mo.ui.anywidget(learning.map(view="papers", colour_by="cluster:topics", layers=["topics"], height=380))
     return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## 4. A second clustering over rows the database already holds
-
-        §10.4 is one insert: a table with an id column and a key column, over rows the database
-        holds. This layer declares no artifacts table, so its value set is `open`, and the values
-        route mints one artifact per key the column names and joins the rows that name it, which
-        is what the build and the ingest route do with the same column.
-
-        This one splits the corpus by decade of submission, which every principal can see some of.
-
-        **Try**: colour by decade, then open the k-means clustering beside it. The same points,
-        cut two ways.
-        """
-    )
+    mo.md("""
+    The same comparison in numbers.
+    """)
     return
 
 
 @app.cell
-def _(DATA, db, pa, pc, pq):
-    _points = pq.read_table(DATA / "points.parquet", columns=["entity_id", "submitted_at"])
-    _years = pc.year(_points.column("submitted_at")).to_pylist()
-    _entities = _points.column("entity_id").to_pylist()
-    _keys = ["era-1990s" if y < 2000 else "era-2000s" if y < 2010 else "era-2010s"
-             for y in _years]
-    _by_decade = pa.table({"entity_id": pa.array(_entities, pa.uint64()),
-                           "era": pa.array(_keys, pa.string())})
-
-    db.declare_layer("clusters/era", kind="flat", title="By decade")
-    db.insert("clusters/era", _by_decade, id="entity_id", key="era")
-    era_report = db.commit()
-    print(era_report)
-    return (era_report,)
+def _(astro, db, learning):
+    reader_counts = {
+        "database": db.view("papers").count(),
+        "astro-ph.*": astro.view("papers").count(),
+        "cs.LG + stat.ML": learning.view("papers").count(),
+    }
+    reader_counts
+    return (reader_counts,)
 
 
 @app.cell
-def _(db, era_report, mo):
-    _ = era_report  # the layer and its three artifacts exist before this map asks for them
-    mo.ui.anywidget(db.map(colour_by="cluster:clusters/era", height=440))
+def _(mo):
+    mo.md("""
+    ## 3. Asking questions
+
+    A filter is a dictionary. A condition names one column and one operator: `eq` or `in` for
+    a category, `range` for a number or a date, `match` or `phrase` for text. `all_of`,
+    `any_of` and `none_of` combine conditions.
+
+    `filter()` narrows a view to the papers that match, and filters added one after another
+    must all match.
+    """)
+    return
+
+
+@app.cell
+def _(pd):
+    def since(day):
+        """A date as the microseconds `submitted_at` holds."""
+        return int(pd.Timestamp(day).value // 1000)
+
+    recent_cs = {"all_of": [
+        {"archive": {"eq": "cs"}},
+        {"submitted_at": {"range": {"gte": since("2020-01-01")}}},
+    ]}
+    black_holes = {"abstract": {"phrase": "black hole"}}
+    transformers = {"title": {"match": "transformer"}}
+    return black_holes, recent_cs, since, transformers
+
+
+@app.cell
+def _(black_holes, db, recent_cs, transformers):
+    papers = db.view("papers")
+    filter_counts = {
+        "cs since 2020": papers.filter(recent_cs).count(),
+        "'black hole' in the abstract": papers.filter(black_holes).count(),
+        "cs since 2020, 'transformer' in the title":
+            papers.filter(recent_cs).filter(transformers).count(),
+    }
+    filter_counts
+    return filter_counts, papers
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    `map()` on a filtered view draws it with the filter applied. Change the filter from Python
+    by setting the map's `filters`, or use the filter panel on the map.
+    """)
+    return
+
+
+@app.cell
+def _(mo, papers, recent_cs):
+    mo.ui.anywidget(papers.filter(recent_cs).map(colour_by="cluster:topics", layers=["topics"],
+                                                 height=440))
     return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## 5. One set of points, two projections
-
-        A view is a frame and a projection. Two views over the same papers are two inserts with
-        the same id column, a second pair of coordinates, and the same access column: a view's
-        mask is read from the frame inserted into it, so a second view either names that column
-        or is refused.
-
-        The second projection here is the first turned 30 degrees about its centre. It is cheap and
-        deterministic, so the two maps are recognisably the same corpus in two arrangements. A
-        real second view is a second embedding.
-
-        The clustering is one key column over the first view's frame, which is the build's own
-        route: a layer drawn on both views, over one set of members.
-        """
-    )
+    mo.md("""
+    `item()` returns one paper's record: its fields, the labels this reader holds, and the
+    views it is in. The cell below uses `sample()` to take one paper with "black hole" in its
+    abstract from the points the map would draw.
+    """)
     return
 
 
 @app.cell
-def _(DATA, math, pa, pc, pq, td):
-    _points = pq.read_table(DATA / "points.parquet",
-                            columns=["entity_id", "x", "y", "categories"])
-    _members = pq.read_table(DATA / "clusters-kmeans-members.parquet", columns=["key", "entity"])
-    _cluster_of = dict(zip(_members.column("entity").to_pylist(),
-                           _members.column("key").to_pylist()))
-    _keys = pa.array([_cluster_of.get(e) for e in _points.column("entity_id").to_pylist()],
-                     pa.string())
-    _knn = _points.append_column("cluster", _keys)
-
-    _angle = math.radians(30)
-    _x, _y = _points.column("x"), _points.column("y")
-    _cx, _cy = pc.mean(_x).as_py(), pc.mean(_y).as_py()
-    _dx, _dy = pc.subtract(_x, _cx), pc.subtract(_y, _cy)
-    _rotated = pa.table(
-        {
-            "entity_id": _points.column("entity_id"),
-            "x": pc.add(pc.add(pc.multiply(_dx, math.cos(_angle)),
-                               pc.multiply(_dy, -math.sin(_angle))), _cx),
-            "y": pc.add(pc.add(pc.multiply(_dx, math.sin(_angle)),
-                               pc.multiply(_dy, math.cos(_angle))), _cy),
-            "categories": _points.column("categories"),
-        }
-    )
-
-    turned = td.create()
-    turned.declare_view("knn", title="k-NN projection")
-    turned.declare_view("rotated", title="the same points, turned 30 degrees")
-    turned.declare_layer("clusters/kmeans", kind="flat", views=["knn", "rotated"],
-                         title="k-means clusters")
-    turned.insert("knn", _knn, id="entity_id", x="x", y="y", access="categories")
-    turned.insert("rotated", _rotated, id="entity_id", x="x", y="y", access="categories")
-    turned.insert("clusters/kmeans", _knn, id="entity_id", key="cluster")
-    print(turned.commit())
-    return (turned,)
-
-
-@app.cell
-def _(mo, turned):
-    mo.ui.anywidget(turned.map(view="knn", colour_by="cluster:clusters/kmeans", height=380))
+def _(black_holes, db, papers):
+    _drawn = papers.filter(black_holes).sample(k=1)
+    db.item(_drawn["tessera_id"][0].as_py())
     return
-
-
-@app.cell
-def _(mo, turned):
-    mo.ui.anywidget(turned.map(view="rotated", colour_by="cluster:clusters/kmeans", height=380))
-    return
-
-
-@app.cell
-def _(counts, turned):
-    # One layer across both views: the artifacts are laid out per view, over the same members.
-    knn_counts = counts(turned.view("knn").sample())
-    rotated_counts = counts(turned.view("rotated").sample())
-    (knn_counts["visible"], rotated_counts["visible"])
-    return knn_counts, rotated_counts
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ## 6. Keep it, reopen it, serve it elsewhere
+    mo.md("""
+    `browse_artifacts()` lists a clustering's clusters with two counts for the reader who asks:
+    `masked_count` is how many of the cluster's papers they can see, and `matched_count` how
+    many of those pass the filter. The table below puts the two readers side by side over the
+    coarsest level of the topics, counting papers submitted since 2020.
 
-        A temporary database is removed at `close()`. `save(path)` copies it out; `open(path)`
-        reads it back, serves it, and its next `commit()` ingests, the bundle being there.
+    The topic names in this table come from the corpus's own file, since the table is for you,
+    the notebook's operator. The server gives a reader a topic's name only where they can see
+    every paper it was written from.
 
-        The directory is the whole database: the declaration, the sources, the bundle and the
-        deployment file. The same directory on another machine is
-
-        ```
-        tessera serve --deployment <path>/tessera.toml
-        ```
-
-        The cell below saves to `~/tessera/arxiv`, in your own home directory, and opens that
-        rather than saving over it where a database is already there. `TESSERA_DEMO_HOME` names
-        somewhere else.
-        """
-    )
+    Not built yet: a request that returns every matching paper as a table. `sample()`
+    returns a sample for drawing, so analysis here uses the counts.
+    """)
     return
 
 
 @app.cell
-def _(counts, db, os, pathlib, td):
-    saved_at = pathlib.Path(os.environ.get("TESSERA_DEMO_HOME", "~/tessera/arxiv")).expanduser()
-    if saved_at.exists() and any(saved_at.iterdir()):
-        print(f"{saved_at} already holds a database; opening that rather than saving over it")
-    else:
-        db.save(saved_at)
-        print(f"saved to {saved_at}")
+def _(DATA, astro, learning, pd, pq, since):
+    _names = {row.attached_key: row.contents[0][0]
+              for row in pq.read_table(DATA / "topics-toponymy.parquet").to_pandas().itertuples()}
+    _since_2020 = {"submitted_at": {"range": {"gte": since("2020-01-01")}}}
 
+    def per_topic(reader):
+        page = reader.browse_artifacts("papers", "topics", level=0,
+                                       filters=_since_2020)
+        return pd.DataFrame(page["artifacts"]).set_index("key")[["masked_count", "matched_count"]]
+
+    pd.concat({"astro-ph.*": per_topic(astro), "cs.LG + stat.ML": per_topic(learning)},
+              axis=1).rename(index=_names).astype("Int64")
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 4. A year at a time
+
+    Each year has its own view in the `years` group, named `years:<year>`. `map(view=...)`
+    draws one of them, and setting the map's `view` from Python switches it to another. The
+    slider below does that, and the map keeps its position as you move, because every year
+    uses the same coordinates.
+    """)
+    return
+
+
+@app.cell
+def _(mo, years):
+    year = mo.ui.slider(steps=[int(one) for one in years], value=int(years[-1]), label="Year",
+                        show_value=True)
+    year
+    return (year,)
+
+
+@app.cell
+def _(db, mo, years):
+    year_map = db.map(view=f"years:{years[-1]}", colour_by="cluster:topics", layers=["topics"],
+                      height=440)
+    mo.ui.anywidget(year_map)
+    return (year_map,)
+
+
+@app.cell
+def _(year, year_map):
+    year_map.view = f"years:{year.value}"
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    A view of its own lets each year have its own clusters. The cell below runs scikit-learn's
+    k-means on each year's positions, with about one cluster per 250 papers and at most 20,
+    and adds the result to the running database as a new layer, `yearly`.
+
+    `scope={"group": "years"}` puts the layer on every view of the `years` group, with separate
+    clusters in each, and on no other view. The insert names the cluster column with `key`, as
+    in section 1, and the year column with `view`. Each year numbers its clusters from `"00"`,
+    and the same key in two years names two different clusters. Each year's fitted k-means is
+    kept, so that section 5 can place new papers in that year's clusters.
+
+    The clusters are computed from each paper's position on the map, so they group papers that
+    sit together in that year.
+    """)
+    return
+
+
+@app.cell
+def _(KMeans, db, points):
+    yearly = points.select(["entity_id", "x", "y", "year"]).to_pandas()
+    fitted = {}
+    for _year, _papers in yearly.groupby("year"):
+        _k = min(20, max(1, len(_papers) // 250))
+        fitted[_year] = KMeans(n_clusters=_k, n_init=1, random_state=0).fit(_papers[["x", "y"]])
+        yearly.loc[_papers.index, "cluster"] = [f"{one:02d}" for one in fitted[_year].labels_]
+
+    db.declare_layer("yearly", kind="flat", scope={"group": "years"},
+                     require_member_visibility={"count": 1}, title="Clusters of each year")
+    db.insert("yearly", yearly, id="entity_id", key="cluster", view="year")
+    yearly_report = db.commit()
+    yearly_report
+    return fitted, yearly_report
+
+
+@app.cell
+def _(db, mo, yearly_report, years):
+    _ = yearly_report  # draws after the commit that adds the layer
+    mo.ui.anywidget(db.map(view=f"years:{years[-1]}", colour_by="cluster:yearly", height=440))
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 5. Changes while it serves
+
+    The week held back in section 2 goes into the running database with the same calls as
+    before. Its papers go into `papers` and into the `years` group. Its memberships go into
+    `topics`, and the topic names held back with it go into `topic_names`, with the rows that
+    say which of the week's papers each title was written from. Each paper also joins the
+    cluster of `yearly` that its year's k-means from section 4 predicts for it.
+
+    After the first commit, a commit sends its inserts to the running server, which takes them
+    while it goes on answering readers. There is no rebuild. The commit waits until the new
+    papers are visible, so the counts after it include them.
+    """)
+    return
+
+
+@app.cell
+def _(db, years):
+    def visible(reader):
+        return {view: reader.view(view).count() for view in ("papers", f"years:{years[-1]}")}
+
+    before_week = visible(db)
+    return before_week, visible
+
+
+@app.cell
+def _(db, fitted, week, week_members, week_topics):
+    db.insert("papers", week, id="entity_id", x="x", y="y", access="categories")
+    db.insert("years", week.select(["entity_id", "x", "y", "categories", "year"]),
+              id="entity_id", x="x", y="y", access="categories", view="year")
+    db.insert("topics", members=week_members["clusters-toponymy"], id="entity", key="key",
+              level="level", rank="rank")
+    db.insert("topic_names", week_topics, key="key", level="level", parent="parent",
+              contents="contents", attached_layer="attached_layer",
+              attached_level="attached_level", attached_key="attached_key")
+    db.insert("topic_names", members=week_members["topics-toponymy"], id="entity", key="key",
+              level="level", rank="rank")
+
+    _placed = week.select(["entity_id", "x", "y", "year"]).to_pandas()
+    for _year, _papers in _placed.groupby("year"):
+        _predicted = fitted[_year].predict(_papers[["x", "y"]])
+        _placed.loc[_papers.index, "cluster"] = [f"{one:02d}" for one in _predicted]
+    db.insert("yearly", _placed, id="entity_id", key="cluster", view="year")
+
+    week_report = db.commit()
+    week_report
+    return (week_report,)
+
+
+@app.cell
+def _(before_week, db, pd, visible, week_report):
+    _ = week_report  # counts after the commit that adds the week
+    after_week = visible(db)
+    pd.DataFrame({"before": before_week, "after": after_week})
+    return (after_week,)
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    `suppress()` hides papers from every reader from the moment it is accepted, without
+    deleting them, and `unsuppress()` shows them again. `remove()` deletes. The cell below
+    suppresses five of the new machine-learning papers and counts what the database and the
+    machine-learning reader see at each step.
+    """)
+    return
+
+
+@app.cell
+def _(db, learning, pd, visible, week, week_report):
+    _ = week_report  # the papers suppressed here are the ones the week's commit added
+    _is_learning = [bool({"cs.LG", "stat.ML"} & set(one)) for one in week["categories"].to_pylist()]
+    hidden = [one for one, keep in zip(week["entity_id"].to_pylist(), _is_learning) if keep][:5]
+
+    def both():
+        return {"database": visible(db)["papers"], "cs.LG + stat.ML": visible(learning)["papers"]}
+
+    _before = both()
+    print(db.suppress(hidden))
+    _suppressed = both()
+    print(db.unsuppress(hidden))
+    suppression = pd.DataFrame(
+        {"before": _before, "suppressed": _suppressed, "unsuppressed": both()}
+    )
+    suppression
+    return hidden, suppression
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 6. Save it and serve it elsewhere
+
+    A database is a directory holding its declaration, its data and its server settings.
+    `create()` with no path makes a temporary one, which is removed when you call `close()` or
+    when Python exits. `save(path)` copies it somewhere permanent, and `open(path)` starts it
+    again.
+    """)
+    return
+
+
+@app.cell
+def _(db, td, tempfile):
+    saved_at = db.save(tempfile.mkdtemp(prefix="tessera-arxiv-"))
     reopened = td.open(saved_at)
-    reopened_counts = counts(reopened.view("s0").sample())
-    reopened_counts
-    return reopened, reopened_counts, saved_at
+    print(saved_at)
+    reopened.view("papers").count()
+    return reopened, saved_at
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        A deployment somebody else runs is the same widget and the same read verbs, against a
-        token that deployment issued you. There is no `viewer(terms)` there: minting another
-        principal needs the session credential.
+    mo.md("""
+    The saved directory runs on any machine with the `tessera` binary:
 
-        ```python
-        v = td.connect("https://tessera.example/viewer", token=my_token)
-        v.map(colour_by="cluster:clusters/kmeans")
-        ```
+    ```
+    tessera serve --deployment <path>/tessera.toml
+    ```
 
-        The page there calls the viewer plane from this page's origin, so that origin must be in
-        the deployment's CORS list. A database made here needs no list: its three planes are on
-        loopback, and `serve.cors_loopback` admits a page served from a loopback address.
+    To use a database somebody else runs, connect with the token its operator gave you. The
+    maps and the questions above work the same way, over what that token may see.
 
-        Four servers are running by now, one per database. `close()` stops one and removes a
-        temporary directory; quitting the kernel stops them all.
-        """
-    )
+    ```python
+    v = td.connect("https://tessera.example/viewer", token=my_token)
+    v.map(colour_by="cluster:topics", layers=["topics"])
+    ```
+    """)
     return
 
 

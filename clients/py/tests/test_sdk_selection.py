@@ -42,7 +42,7 @@ def db(tmp_path_factory):
     one = create(tmp_path_factory.mktemp("selection"))
     declare_notebook(one, notebook_corpus())
     report = one.commit()
-    assert report.ok, report.output
+    assert report.ok, report.log
     yield one
     one.close()
 

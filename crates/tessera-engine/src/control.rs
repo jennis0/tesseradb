@@ -473,47 +473,9 @@ impl Engine {
 
         // A declared member that is deleted refuses the batch; a suppressed one is accepted, being
         // a live member temporarily outside every mask. The refusal reports a count and a
-        // position, never an entity id. A view the layer's own group has no key for is refused,
-        // naming the group's keys.
-        {
-            let named: std::collections::BTreeSet<&str> = artifacts
-                .iter()
-                .filter_map(|artifact| artifact.view.as_deref())
-                .collect();
-            if !named.is_empty() {
-                let scope = self
-                    .registered_layer(&layer)
-                    .and_then(|registered| registered.declaration.scope.group().map(String::from));
-                if let Some(group) = scope {
-                    let generation = self.generation();
-                    let keys: Vec<&str> = generation
-                        .bundle
-                        .manifest
-                        .groups
-                        .iter()
-                        .filter(|held| held.name == group)
-                        .flat_map(|held| held.views.iter().map(|view| view.key.as_str()))
-                        .collect();
-                    if let Some(unknown) = named.iter().find(|view| !keys.contains(*view)) {
-                        return Err(crate::write::AcceptError::Exec(
-                            tessera_lifecycle::ExecError::LayerRefused {
-                                detail: format!(
-                                    "this batch names view '{unknown}', which group '{group}' \
-                                     has no such key for. Its keys are: {}. An artifact belongs \
-                                     to one view and its keys are unique per (layer, view), so a \
-                                     key nobody declared is a refusal rather than an artifact \
-                                     drawn nowhere (views §3.5)",
-                                    keys.join(", ")
-                                ),
-                            },
-                        ));
-                    }
-                }
-            }
-        }
-
-        // A membership spelled by exclusion carries no members here: the complement is taken on
-        // the executor, so both checks above pass over the empty set the record carries here.
+        // position, never an entity id. A membership spelled by exclusion carries no members here:
+        // the complement is taken on the executor, so this and the row-less check pass over the
+        // empty set the record carries.
         let generation = self.generation();
         let mut deleted = 0u64;
         let mut first_artifact = None;

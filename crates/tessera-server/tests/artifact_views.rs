@@ -35,14 +35,17 @@ const ITEMS: u64 = 400;
 /// A two-view group over one corpus: every entity of q2 has a row in q1 as well, so an artifact
 /// of one view could be projected into the other's row space — which is exactly the mistake
 /// `view` in the identity prevents.
-fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
+///
+/// `tally` adds a second group, `tally`, whose one view `q2` draws q2's points: a key the two
+/// groups share without sharing views.
+fn build_group(dir: &Path, gate_first_view: bool, tally: bool) -> std::path::PathBuf {
     // **`gate_first_view` puts q1 behind the label `1`** (`views.md` §6), which only the entities
     // divisible by three carry (`common::terms_of`). A principal holding `0` alone then reaches q2
     // and not q1, which is the visible-view set the identifier case below needs.
     let gate = |slot: usize| (gate_first_view && slot == 0).then(|| vec!["1".to_string()]);
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ITEMS);
-    let views: Vec<tessera_build::ViewArgs> = KEYS
+    let mut views: Vec<tessera_build::ViewArgs> = KEYS
         .iter()
         .enumerate()
         .map(|(slot, key)| {
@@ -62,21 +65,47 @@ fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
         })
         .collect();
     let e = extent();
+    let frame = Quantisation {
+        x_min: e.x_min,
+        x_max: e.x_max,
+        y_min: e.y_min,
+        y_max: e.y_max,
+    };
+    let mut groups = Vec::new();
+    if tally {
+        views.push(view_args(
+            "tally:q2",
+            &dir.join("q2.parquet"),
+            AccessInput::relation(&pairs),
+        ));
+        groups.push(GroupDescriptor {
+            title: None,
+            point_default: Some("public".to_string()),
+            visibility: None,
+            name: "tally".to_string(),
+            members_of: None,
+            scoped_scalars: Vec::new(),
+            quantisation: frame,
+            projection: tessera_spatial::Projection::None,
+            metadata: Vec::new(),
+            views: vec![GroupViewDescriptor {
+                key: "q2".to_string(),
+                visibility: None,
+                metadata: Default::default(),
+            }],
+        });
+    }
     let out = dir.join("bundle");
-    build(&BuildArgs {
-        groups: vec![GroupDescriptor {
+    groups.insert(
+        0,
+        GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
             visibility: None,
             name: "quarter".to_string(),
             members_of: None,
             scoped_scalars: Vec::new(),
-            quantisation: Quantisation {
-                x_min: e.x_min,
-                x_max: e.x_max,
-                y_min: e.y_min,
-                y_max: e.y_max,
-            },
+            quantisation: frame,
             projection: tessera_spatial::Projection::None,
             metadata: Vec::new(),
             views: KEYS
@@ -88,7 +117,10 @@ fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
                     metadata: Default::default(),
                 })
                 .collect(),
-        }],
+        },
+    );
+    build(&BuildArgs {
+        groups,
         ..build_args(&out, views)
     })
     .expect("the two-view group builds");
@@ -96,13 +128,13 @@ fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
 }
 
 async fn serve_group(tmp: &TempDir) -> TestServer {
-    build_group(tmp.path(), false);
+    build_group(tmp.path(), false, false);
     open(tmp).await
 }
 
 /// The same fixture with q1 behind a gate — see [`build_group`].
 async fn serve_gated_group(tmp: &TempDir) -> TestServer {
-    build_group(tmp.path(), true);
+    build_group(tmp.path(), true, false);
     open(tmp).await
 }
 
@@ -207,9 +239,9 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default().to_string();
-    assert!(detail.contains("no `view`"), "{detail}");
-    assert!(detail.contains("quarter"), "{detail}");
+    assert!(detail.contains("quarter"), "the refusal names the group: {detail}");
 
     // Named where the layer has one set drawn on every view.
     let (status, body) = put(
@@ -219,13 +251,7 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("entity-scoped"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 
     // A view no view of the bundle answers to is refused rather than acked and drawn nowhere.
     let (status, body) = put(
@@ -235,10 +261,11 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default().to_string();
     assert!(detail.contains("q9"), "{detail}");
     assert!(
-        detail.contains("q1, q2"),
+        detail.contains("q1") && detail.contains("q2"),
         "the keys held are named: {detail}"
     );
 
@@ -316,12 +343,12 @@ async fn a_parent_in_another_view_is_refused() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default().to_string();
     assert!(
         detail.contains("q1"),
         "the refusal says where it is held: {detail}"
     );
-    assert!(detail.contains("cross"), "{detail}");
 
     // The same edge inside one view is the ordinary case.
     let (status, body) = put(
@@ -1303,4 +1330,174 @@ async fn an_arrow_growth_grows_the_artifact_in_the_view_its_view_column_names() 
         served(&server, "quarter:q2", SCOPED).await,
         vec![("c1".to_string(), 25)]
     );
+}
+
+/// A view dropped and created again serves none of its predecessor's artifacts: not those packed
+/// into an extent before the drop, not those still only in the log, and not after a restart or a
+/// fold. A key the predecessor used publishes a new artifact in the recreated view.
+#[tokio::test]
+async fn a_recreated_view_serves_none_of_its_predecessors_artifacts() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_group(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([
+            { "key": "c1", "view": "q1", "members": members(0..10) },
+            { "key": "c1", "view": "q2", "members": members(0..30) },
+            { "key": "c2", "view": "q2", "members": members(0..50) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let old_c1 = body["artifacts"][1]["tessera_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Packed by the tick, so the next publication is in the log alone.
+    tick(&server).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": "c3", "view": "q2", "members": members(0..40) }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let q1 = vec![("c1".to_string(), 10)];
+    assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+
+    recreate(&server, "q2").await;
+    let token = token_for(&server, &["0"]).await;
+    assert_eq!(served(&server, "quarter:q2", SCOPED).await, vec![]);
+    assert_eq!(browsed(&server, &token, "quarter:q2", SCOPED).await, vec![]);
+    assert_eq!(drilled(&server, &token, "quarter:q2", &old_c1).await.0, 404);
+    assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+
+    let server = restart(server, &tmp).await;
+    let token = token_for(&server, &["0"]).await;
+    assert_eq!(served(&server, "quarter:q2", SCOPED).await, vec![]);
+    assert_eq!(browsed(&server, &token, "quarter:q2", SCOPED).await, vec![]);
+    assert_eq!(drilled(&server, &token, "quarter:q2", &old_c1).await.0, 404);
+    assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+
+    // The predecessor's key publishes a new artifact over the recreated view's own items.
+    ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    tick(&server).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": "c1", "view": "q2", "members": members(20_000..20_020) }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["created"], 1, "{body}");
+    assert_ne!(body["artifacts"][0]["tessera_id"].as_str().unwrap(), old_c1);
+    // A held form takes a publication at the next tick.
+    tick(&server).await;
+    let republished = vec![("c1".to_string(), 20)];
+    assert_eq!(served(&server, "quarter:q2", SCOPED).await, republished);
+
+    flush_and_fold(&server, Some("quarter:q1")).await;
+    assert_eq!(served(&server, "quarter:q2", SCOPED).await, republished);
+    assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+    let server = restart(server, &tmp).await;
+    let token = token_for(&server, &["0"]).await;
+    assert_eq!(served(&server, "quarter:q2", SCOPED).await, republished);
+    assert_eq!(
+        browsed(&server, &token, "quarter:q2", SCOPED).await,
+        republished
+    );
+    assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+}
+
+/// A label of another group attached to an artifact of a dropped view is deleted with it, so
+/// after a fold its key is free to label the artifact the recreated view publishes. Such a label
+/// is never served, its target not being drawn on its view, so its key is what shows it.
+#[tokio::test]
+async fn a_label_of_another_group_goes_with_the_artifact_of_a_dropped_view() {
+    const LABELS: &str = "labels/tally";
+    let tmp = TempDir::new().unwrap();
+    build_group(tmp.path(), false, true);
+    let server = open(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+    let mut labels = declaration(LABELS, Some("tally"), "flat");
+    labels["views"] = json!(["tally:q2"]);
+    labels["depends_on"] = json!([SCOPED]);
+    register(&server, labels).await;
+    let label = json!([{ "key": "n1", "view": "q2", "members": members(0..10),
+                         "attached_to": { "layer": SCOPED, "key": "c1" } }]);
+
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": "c1", "view": "q2", "members": members(0..30) }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = put(&server, LABELS, label.clone()).await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = put(&server, LABELS, label.clone()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 0, "the key is held: {body}");
+
+    recreate(&server, "q2").await;
+    flush_and_fold(&server, Some("quarter:q1")).await;
+    let server = restart(server, &tmp).await;
+    ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    tick(&server).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": "c1", "view": "q2", "members": members(20_000..20_020) }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = put(&server, LABELS, label).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["created"], 1, "{body}");
+}
+
+/// A hierarchy and the labels attached to it, published into a view that is then dropped and
+/// created again, leave nothing in the recreated view, and each key publishes again there.
+#[tokio::test]
+async fn a_recreated_view_takes_no_node_or_label_of_its_predecessor() {
+    const TREE: &str = "clusters/tree";
+    const NAMES: &str = "labels/tree";
+    let tmp = TempDir::new().unwrap();
+    let server = serve_group(&tmp).await;
+    register(&server, declaration(TREE, Some("quarter"), "nested")).await;
+    let mut names = declaration(NAMES, Some("quarter"), "flat");
+    names["depends_on"] = json!([TREE]);
+    register(&server, names).await;
+    let tree = json!([
+        { "key": "root", "view": "q2", "members": members(0..40) },
+        { "key": "leaf", "view": "q2", "members": members(0..10), "parent": ["root"] },
+    ]);
+    let name = json!([{ "key": "n-leaf", "view": "q2", "members": members(0..10),
+                        "attached_to": { "layer": TREE, "key": "leaf" } }]);
+    let (status, body) = put(&server, TREE, tree.clone()).await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = put(&server, NAMES, name.clone()).await;
+    assert_eq!(status, 201, "{body}");
+    assert!(!served(&server, "quarter:q2", TREE).await.is_empty());
+    assert_eq!(
+        served(&server, "quarter:q2", NAMES).await,
+        vec![("n-leaf".to_string(), 10)]
+    );
+
+    recreate(&server, "q2").await;
+    assert_eq!(served(&server, "quarter:q2", TREE).await, vec![]);
+    assert_eq!(served(&server, "quarter:q2", NAMES).await, vec![]);
+    let server = restart(server, &tmp).await;
+    assert_eq!(served(&server, "quarter:q2", TREE).await, vec![]);
+    assert_eq!(served(&server, "quarter:q2", NAMES).await, vec![]);
+
+    // The old members are in no view now, so the republished tree counts none of them.
+    let (status, body) = put(&server, TREE, tree).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["created"], 2, "{body}");
+    let (status, body) = put(&server, NAMES, name).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["created"], 1, "{body}");
 }

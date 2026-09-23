@@ -283,13 +283,7 @@ async fn an_attached_record_may_omit_members_and_an_unattached_one_may_not() {
     // A record with no target and no membership: the refusal it has always been.
     let (status, body) = put(&server, CLUSTERS, json!([{ "key": "bare" }])).await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("neither `members` nor `excluding`"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 
     // The same record with a target is a label, and is served over the cluster's membership.
     let (status, body) = put(

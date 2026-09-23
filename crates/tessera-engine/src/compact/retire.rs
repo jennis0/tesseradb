@@ -17,8 +17,8 @@ impl CarriedForward {
         }
     }
 
-    /// A flush publishes segment, tier, run and locator extent over one contiguous entity range,
-    /// so the segment's range covers them all, including an item with no terms.
+    /// A flush's tier, run and locator extent lie within its segment's entity range, so that range
+    /// covers them all, including an item with no terms.
     pub(crate) fn add_segment(&mut self, descriptor: &SegmentDescriptor) {
         self.add_range(descriptor.entity_lo, descriptor.entity_hi);
     }

@@ -484,41 +484,6 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
     assert_eq!(json["accepted"], 2_000);
 }
 
-/// `GET /control/status` must require the operator bearer credential — it discloses
-/// `entity_id_high_water`, a global unmasked corpus-size fact, and the control listener may be
-/// plain loopback TCP, not only a unix socket.
-#[tokio::test]
-async fn control_status_requires_bearer() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let resp = server
-        .client
-        .get(server.control_url("/control/status"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    let resp = server
-        .client
-        .get(server.control_url("/control/status"))
-        .bearer_auth("not-the-operator-credential")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    let resp = server
-        .client
-        .get(server.control_url("/control/status"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-}
-
 /// A `/control/changes` batch whose *later* item fails validation (unknown external
 /// id) must leave every earlier item in the same batch unapplied — validate-first, not
 /// apply-then-abort. Suppresses a real item first in the batch, then names a nonexistent external
@@ -2224,6 +2189,94 @@ async fn status_stage_barriers_move_when_their_stages_run() {
     .await;
 }
 
+/// `/control/status` reports a refresh or a merge publication in flight while it is held, and
+/// clears the flag once it is released.
+#[tokio::test]
+async fn status_reports_a_held_refresh_and_a_held_merge_as_in_flight() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let engine = &server.state.engine;
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    // A resident projection, so a flush has something to refresh.
+    let auth = authorise(&server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .json(&serde_json::json!({"view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let idle = control_status(&server).await;
+    let executor = &idle["write_executor"];
+    assert_eq!(executor["flush"]["refresh_in_flight"], false, "{idle}");
+    assert_eq!(executor["merge_in_flight"], false, "{idle}");
+    assert_eq!(executor["coalesce_in_flight"], false, "{idle}");
+
+    let flush_round = async |round: u64| {
+        let (code, body) = post_ingest(
+            &server,
+            &format!("in-flight-{round}"),
+            &rows_from(40_000 + round * 10, 2),
+            true,
+        )
+        .await;
+        assert_eq!(code, 200, "round {round}'s ingest must land: {body}");
+        let resp = server
+            .client
+            .post(server.control_url("/control/flush"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 202);
+        wait_until(&format!("round {round}'s flush publishing"), WAIT, async || {
+            control_status(&server).await["write_executor"]["flush"]["flushes"].as_u64()
+                == Some(round)
+        })
+        .await;
+    };
+
+    // The refresh a flush arms is held, so the flag stays set until it is released.
+    engine.set_refresh_paused_for_test(true);
+    flush_round(1).await;
+    let held = control_status(&server).await;
+    assert_eq!(held["write_executor"]["flush"]["refresh_in_flight"], true, "{held}");
+    engine.set_refresh_paused_for_test(false);
+    wait_until("the released refresh ending", WAIT, async || {
+        control_status(&server).await["write_executor"]["flush"]["refresh_in_flight"] == false
+    })
+    .await;
+
+    // Four same-tier flush extents make a merge eligible; its finished unit is held unpublished.
+    engine.set_merge_publication_paused_for_test(true);
+    let mut round = 1;
+    while !engine.merge_publication_is_held_for_test() {
+        round += 1;
+        assert!(round <= 16, "sixteen flush rounds never produced a merge to hold");
+        flush_round(round).await;
+        // A merge the tick dispatched may still be running.
+        wait_until("a dispatched merge finishing", WAIT, async || {
+            engine.merge_publication_is_held_for_test()
+                || control_status(&server).await["write_executor"]["merge_in_flight"] == false
+        })
+        .await;
+    }
+    let held = control_status(&server).await;
+    assert_eq!(held["write_executor"]["merge_in_flight"], true, "{held}");
+    assert_eq!(held["write_executor"]["merges"], 0, "{held}");
+    engine.set_merge_publication_paused_for_test(false);
+    wait_until("the released merge publishing", WAIT, async || {
+        let status = control_status(&server).await;
+        status["write_executor"]["merges"].as_u64() > Some(0)
+            && status["write_executor"]["merge_in_flight"] == false
+    })
+    .await;
+}
+
 /// **Unbounded ingest hangs the viewer plane rather than shedding it, and this closes that.**
 ///
 /// `ComputeGate::admit` is `async` and awaited **before** `spawn_blocking`, so viewer *demand* is
@@ -3026,25 +3079,22 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
 
 /// **`/control/changes` answers 422, not axum's 413, and never before the bearer check.**
 ///
-/// A bare `post(changes)` with a `Json(items)` extractor rejects inside the extractor and answers a
-/// plain **413** — a status outside contracts §3.1's closed code list — with axum's own body. An
-/// operator submitting tens of thousands of suppressions (a couple of MiB of JSON) meets it, on the
-/// never-shed lane, which is where an out-of-list status is least defensible. The remedy is the one
-/// `/control/ingest` uses: `Result<Json<..>, JsonRejection>`, mapped rather than escaping.
+/// The handler takes `Result<ApiJson<..>, ApiJsonRejection>` and maps a body axum could not read,
+/// including one over the byte cap, to a 422 `contract` naming the cap, rather than axum's plain 413.
 ///
 /// Three legs, because the rejection has two shapes and the ordering rule is a third property:
 /// oversize, malformed JSON, and the same oversize body without a credential.
 ///
 /// **Leg 3's refuser is the router layer, and the leg is kept for what it shows.** The 401 comes
 /// from `control::require_operator_credential`, a layer over the whole control router,
-/// rather than from this handler's first statement — so leg 3 no longer discriminates
-/// `Result<Json<..>, _>` from `Json(items)` (the layer answers first either way). It still asserts
+/// rather than from this handler's first statement, so leg 3 does not tell the handler's body
+/// extractor apart from any other (the layer answers first either way). It still asserts
 /// the property that matters on the wire: an unauthenticated caller cannot learn this endpoint's
 /// body cap by bisection. The layer's own coverage is
-/// `every_control_route_not_exempt_requires_the_operator_credential`.
+/// `every_path_on_the_control_listener_needs_the_credential`.
 ///
-/// **Mutations this kills:** taking `Json(items)` instead of `Result<Json<..>, _>` (leg 1 becomes
-/// 413); collapsing the two rejection shapes onto one detail (leg 2's assertion that it is *not*
+/// **Mutations this kills:** taking `ApiJson(items)` instead of the `Result` (leg 1 becomes 413);
+/// collapsing the two rejection shapes onto one detail (leg 2's assertion that it is *not*
 /// reported as an oversize batch goes red); deleting the credential layer (leg 3 becomes 422).
 #[tokio::test]
 async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
@@ -3201,6 +3251,38 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
             assert_eq!(body["error"], "bad-credential", "{method} {path}: {body}");
             assert!(body.get("retry_after_s").is_none(), "{method} {path}: {body}");
         }
+    }
+}
+
+/// **A JSON body of the wrong shape is refused with the error envelope and `contract` on every
+/// control route that takes one.**
+#[tokio::test]
+async fn a_body_of_the_wrong_shape_is_a_contract_refusal_on_every_json_control_route() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    let routes = [
+        ("PUT", "/control/layers"),
+        ("PUT", "/control/attributes"),
+        ("PUT", "/control/vocabularies/genre"),
+        ("PATCH", "/control/vocabularies/genre/values"),
+        ("PUT", "/control/view_groups/quarter"),
+        ("PUT", "/control/views/plain"),
+        ("PUT", "/control/views/quarter/2026-Q3"),
+        ("POST", "/control/changes"),
+        ("POST", "/control/faults/arm"),
+    ];
+    for (method, path) in routes {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        let resp = server
+            .client
+            .request(method.clone(), server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&serde_json::json!({ "unexpected": 1 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused(resp, 422).await, "contract", "{method} {path}");
     }
 }
 

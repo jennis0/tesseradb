@@ -45,11 +45,12 @@ pub use command::{
 pub use faults::WalMeter;
 pub use membership::{
     ArtifactRecord, ArtifactStore, FillOutcome, FixedParts, IncomingArtifact, IncomingGrowth,
-    Members,
+    Members, RetiredViews,
 };
 pub use overlay::{owner_id_only, replay, Overlay};
 pub use registry::{
-    no_pending, EdgeCheck, LayerRegistry, PreparedGrow, PreparedPut, RegistryError, ResolvedLayers,
+    no_pending, EdgeCheck, GroupViews, LayerRegistry, PreparedGrow, PreparedPut, RegistryError,
+    ResolvedLayers,
 };
 pub use roster::{GroupFacts, RosterError, ViewRoster};
 pub use wal::{

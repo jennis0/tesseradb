@@ -565,6 +565,10 @@ fn reconstruct_writes(
             ),
             layers: &manifest_layers,
             tombstones: &manifest_layer_tombstones,
+            registry_version: across_partitions(bundle, |m| [m.layer_registry_version])
+                .into_iter()
+                .max()
+                .unwrap_or(0),
             created_views: &manifest_created_views,
             dead_view_incarnations: &manifest_dead_incarnations,
             declared_views,
@@ -843,7 +847,7 @@ impl Engine {
         let ReconstructedWrites {
             overlay,
             buffer,
-            state,
+            mut state,
             vocabularies,
         } = reconstruct_writes(wal_path, &bundle, &readers, side)?;
 
@@ -864,6 +868,13 @@ impl Engine {
         );
 
         let bundle = served_bundle(bundle, &state, &vocabularies);
+        // The dependents are not deleted here: the drop deleted them, and one whose deletion did
+        // not reach the log is attached to a hole, which serves it to nobody.
+        crate::write::retire_dead_view_artifacts(
+            &state.registry,
+            &mut state.artifacts,
+            &bundle.manifest,
+        );
         // The suggestion indexes go in the engine's own cache directory, never in the bundle:
         // they are derived, and rebuilt every open.
         let suggest_dir = cache_dir.join(crate::suggest::SUGGEST_DIR);

@@ -111,12 +111,18 @@ fn build_categories(dir: &Path) {
     build_declared(&dir.join("bundle"), &points, &pairs, SCHEMA_TOML);
 }
 
+/// A copy of [`build_categories`]' bundle in `tmp`, built once for this binary.
+fn copy_categories(tmp: &TempDir) {
+    static BUILT: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    copy_built(&BUILT, tmp.path(), build_categories);
+}
+
 /// A server over the suggestion fixture, plus a session token for a fully-granted principal.
 /// `max_suggestions = 4` and `max_suggestion_walk = 1_000` (`spawn_server`'s test defaults), small
 /// enough that the fixture's five- and eleven-value vocabularies exercise `limit` and paging
 /// behaviour on an ordinary request rather than only on a contrived one.
 async fn serve(tmp: &TempDir) -> (TestServer, String) {
-    build_categories(tmp.path());
+    copy_categories(tmp);
     let server = open(tmp).await;
     let token = token_for(&server, &["0"]).await;
     (server, token)
@@ -173,7 +179,7 @@ async fn a_public_column_is_suggested_as_authored() {
 #[tokio::test]
 async fn a_derived_column_is_filtered_per_principal_exactly_as_the_enumeration_is() {
     let tmp = TempDir::new().unwrap();
-    build_categories(tmp.path());
+    copy_categories(&tmp);
     let server = open(&tmp).await;
     let full = token_for(&server, &["0"]).await;
     let narrow = token_for(&server, &["1"]).await;
@@ -212,7 +218,7 @@ async fn a_derived_column_is_filtered_per_principal_exactly_as_the_enumeration_i
 #[tokio::test]
 async fn a_narrow_principal_sees_an_empty_page_where_the_wide_one_does_not() {
     let tmp = TempDir::new().unwrap();
-    build_categories(tmp.path());
+    copy_categories(&tmp);
     let server = open(&tmp).await;
     let wide = token_for(&server, &["0"]).await;
     let narrow = token_for(&server, &["1"]).await;
@@ -284,7 +290,7 @@ async fn counts_are_present_iff_asked_and_are_exact() {
 #[tokio::test]
 async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
     let tmp = TempDir::new().unwrap();
-    build_categories(tmp.path());
+    copy_categories(&tmp);
     let bundle_root = tmp.path().join("bundle");
     let engine_config = default_engine_config();
     let max_k = engine_config.max_k;

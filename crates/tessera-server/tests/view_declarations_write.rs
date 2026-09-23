@@ -211,7 +211,7 @@ async fn the_group_route_declares_answers_redeclarations_and_refuses_what_the_ru
     )
     .await;
     assert_eq!(status, 422, "a chain is refused: {body}");
-    assert!(body["detail"].as_str().unwrap().contains("Chains"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
     let (status, body) = declare_group(
         &served,
         "orphan",
@@ -423,6 +423,7 @@ async fn a_gate_is_one_label_or_a_list_on_both_routes() {
     public_beside["visibility"] = json!(["public", "0"]);
     let (status, body) = declare_view(&served, "bad_gate", public_beside).await;
     assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
     assert!(body["detail"].as_str().unwrap().contains("public"), "{body}");
 
     let mut empty_element = embedding();

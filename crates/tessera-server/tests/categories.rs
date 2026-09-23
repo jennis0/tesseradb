@@ -171,13 +171,17 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
     build_declared(out, points, pairs, SCHEMA_TOML);
 }
 
-/// A server over the categories fixture, plus a session token for a fully-granted principal.
+/// A server over a copy of the categories fixture, plus a session token for a fully-granted
+/// principal.
 async fn serve(tmp: &TempDir) -> (TestServer, String) {
-    build_fixture_with_categories(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    static BUILT: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    copy_built(&BUILT, tmp.path(), |dir| {
+        build_fixture_with_categories(
+            &dir.join("bundle"),
+            &dir.join("points.parquet"),
+            &dir.join("pairs.parquet"),
+        )
+    });
     let server = open(tmp).await;
     let token = token_for(&server, &["0"]).await;
     (server, token)
@@ -614,22 +618,6 @@ async fn a_plain_scalar_and_an_unknown_name_are_the_same_404() {
         plain["detail"], missing["detail"],
         "a plain column and an absent one must be indistinguishable: {plain} vs {missing}"
     );
-}
-
-/// Authenticated like every other route on this plane: a vocabulary is corpus shape, and an
-/// unauthenticated route would hand it to anyone who can reach the listener.
-#[tokio::test]
-async fn the_route_requires_a_session_token() {
-    let tmp = TempDir::new().unwrap();
-    let (server, _token) = serve(&tmp).await;
-
-    let resp = server
-        .client
-        .get(server.viewer_url("/v1/categories/archive"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
 }
 
 /// The page ceiling clamps rather than refuses — it bounds a response, not a disclosure — but a

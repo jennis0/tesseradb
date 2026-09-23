@@ -60,7 +60,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
             shard_id: 0,
             scalar_schema: &[],
             row_base: 0,
-        },
+        }, &[],
     )
     .expect("the input segment writes");
     root.join("v00000/partitions")

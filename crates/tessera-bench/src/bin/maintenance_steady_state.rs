@@ -18,9 +18,10 @@
 //!
 //! Every side-manifest still on disc after a tick is checked once against the ordering rules the
 //! readers rely on: the base run is `external_id_runs[0]`; the other runs are the runs the locator
-//! extents name, in the same order; the locator spans ascend without overlap; each view's segments
-//! ascend without overlap in entity order. At the end every ingested binding is looked up both
-//! ways through a sidecar opened from the bundle on disc.
+//! extents name, in the same order; each locator span is well formed (spans may overlap, since a
+//! lookup asks every extent covering an entity); each view's segments ascend without overlap in
+//! entity order. At the end every ingested binding is looked up both ways through a sidecar opened
+//! from the bundle on disc.
 //!
 //! ```text
 //! cargo run --release -p tessera-bench --bin maintenance_steady_state -- \
@@ -325,6 +326,7 @@ struct Row {
     coalesce_dirs: u64,
     coalesces: u64,
     coalesce_failures: u64,
+    coalesce_passes_failed: u64,
     coalesce_abandoned: u64,
 }
 
@@ -352,7 +354,8 @@ impl Row {
             ("merge_abandoned", |r| r.merge_abandoned),
             ("coalesce_dirs", |r| r.coalesce_dirs),
             ("coalesces", |r| r.coalesces),
-            ("coalesce_failed", |r| r.coalesce_failures),
+            ("coalesce_windows_failed", |r| r.coalesce_failures),
+            ("coalesce_passes_failed", |r| r.coalesce_passes_failed),
             ("coalesce_abandoned", |r| r.coalesce_abandoned),
         ]
     }
@@ -374,8 +377,8 @@ impl Row {
 struct Probe {
     root: PathBuf,
     /// Published and failed counts of engines already closed: merges, merge failures, coalesces,
-    /// coalesce failures.
-    carried: [u64; 4],
+    /// failed coalesce windows, failed coalesce passes.
+    carried: [u64; 5],
     base_run: Option<String>,
     checked: BTreeSet<(String, u64)>,
     breaches: Vec<String>,
@@ -385,7 +388,7 @@ impl Probe {
     fn new(root: &Path, base_run: Option<String>) -> Self {
         Probe {
             root: root.to_path_buf(),
-            carried: [0; 4],
+            carried: [0; 5],
             base_run,
             checked: BTreeSet::new(),
             breaches: Vec::new(),
@@ -397,6 +400,7 @@ impl Probe {
         self.carried[1] += stats.merge_failures;
         self.carried[2] += stats.coalesces;
         self.carried[3] += stats.coalesce_failures;
+        self.carried[4] += stats.coalesce_passes_failed;
     }
 
     fn sample(&mut self, tick: usize, engine: &Engine) -> Result<Row, Box<dyn std::error::Error>> {
@@ -405,11 +409,13 @@ impl Probe {
         let (partition, data) = generation.bundle.partitions.iter().next().expect("one partition");
         let m = &data.manifest;
         let stats = engine.write_executor_stats();
-        let [merges, merge_failures, coalesces, coalesce_failures] = self.carried;
+        let [merges, merge_failures, coalesces, coalesce_failures, coalesce_passes_failed] =
+            self.carried;
         let merges = merges + stats.merges;
         let merge_failures = merge_failures + stats.merge_failures;
         let coalesces = coalesces + stats.coalesces;
         let coalesce_failures = coalesce_failures + stats.coalesce_failures;
+        let coalesce_passes_failed = coalesce_passes_failed + stats.coalesce_passes_failed;
 
         let (files, bytes) = walk(&prefix_dir, |_| true);
         let segments_dir = tessera_store::view_path(&prefix_dir.join("partitions").join(partition), VIEW).join("segments");
@@ -440,7 +446,9 @@ impl Probe {
             coalesce_dirs,
             coalesces,
             coalesce_failures,
-            coalesce_abandoned: coalesce_dirs.saturating_sub(coalesces + coalesce_failures),
+            coalesce_passes_failed,
+            // Every pass writes one directory and either publishes or fails as a whole.
+            coalesce_abandoned: coalesce_dirs.saturating_sub(coalesces + coalesce_passes_failed),
         })
     }
 
@@ -485,12 +493,9 @@ fn ordering_breaches(m: &SegmentsManifest, base_run: Option<&str>) -> Vec<String
             out.push(format!("locator extent names unlisted run {run}"));
         }
     }
-    for pair in m.locator_extents.windows(2) {
-        if pair[0].entity_hi >= pair[1].entity_lo || pair[0].entity_lo > pair[0].entity_hi {
-            out.push(format!(
-                "locator spans {}..={} then {}..={} do not ascend without overlap",
-                pair[0].entity_lo, pair[0].entity_hi, pair[1].entity_lo, pair[1].entity_hi
-            ));
+    for extent in &m.locator_extents {
+        if extent.entity_lo > extent.entity_hi {
+            out.push(format!("locator span {}..={} is empty", extent.entity_lo, extent.entity_hi));
         }
     }
     let views: BTreeSet<&str> = m.segments.iter().map(|s| s.view.as_str()).collect();
@@ -533,7 +538,7 @@ fn check_bindings(root: &Path, bindings: &[(EntityId, Vec<u8>)], high_water: u64
 fn settle(root: &Path, engine: &Engine) -> Result<(), Box<dyn std::error::Error>> {
     let state = || {
         let s = engine.write_executor_stats();
-        (walk(root, |_| true), s.merges, s.merge_failures, s.coalesces, s.coalesce_failures)
+        (walk(root, |_| true), s.merges, s.merge_failures, s.coalesces, s.coalesce_failures, s.coalesce_passes_failed)
     };
     let deadline = Instant::now() + WAIT;
     let mut last = state();

@@ -550,6 +550,31 @@ fn load_locator(desc: &LocatorDesc) -> std::result::Result<Mmap, String> {
     Ok(mapping)
 }
 
+/// One locator that can hold an entity's slot: a flushed extent, by its position in the
+/// manifest's list, or the base locator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Locator {
+    Extent(usize),
+    Base,
+}
+
+/// The locators that can hold `entity`'s slot, in the order a lookup asks them: every flushed
+/// extent whose span covers it, newest first, then the base locator if `entity` is below its
+/// length `base_len`. An entity's external id is the first slot any of them holds; spans may
+/// overlap one another and the base.
+pub fn locators_covering<'a, T>(
+    entity: u64,
+    base_len: u64,
+    extents: &'a [T],
+    span: impl Fn(&T) -> (u64, u64) + 'a,
+) -> impl Iterator<Item = Locator> + 'a {
+    let flushed = extents.iter().enumerate().rev().filter_map(move |(i, extent)| {
+        let (lo, hi) = span(extent);
+        (lo <= entity && entity <= hi).then_some(Locator::Extent(i))
+    });
+    flushed.chain((entity < base_len).then_some(Locator::Base))
+}
+
 /// The external-ID sidecar for one partition: `external_id → entity` for the control plane
 /// (`/control/changes` past WAL retention, `/control/ingest`'s duplicate check) and
 /// `entity → external_id` (via the locator) for `/v1/items` drill-down. See the module doc for
@@ -818,24 +843,27 @@ impl ExternalIdSidecar {
         if self.runs.is_empty() && self.locator.is_none() {
             return Ok(None);
         }
-        if entity.raw() < self.locator_len() {
-            return self.external_id_of(entity);
-        }
-        // **Past the build locator's end is where a flushed entity lives**, and a flush publishes a
-        // locator extent for exactly its own entity range. Without this the drill-down answered a
-        // typed error for ever once rotation reclaimed the WAL record the live map was rebuilt
-        // from — an item visible on the map that `/v1/items` refuses to name.
-        //
-        // A hit here is authoritative either way: `LOCATOR_NONE` means the item was ingested with
-        // no external id (contracts §2.4 r6's ordinary case) and `Ok(None)` is the right answer,
-        // never the inconsistency below.
-        if let Some(slot) = self
-            .locator_runs
-            .iter()
-            .find(|s| entity.raw() >= s.desc.entity_lo && entity.raw() <= s.desc.entity_hi)
-        {
+        // Every locator that can hold the entity's slot is asked in the lookup order until one
+        // holds it: two views' flushes from one commit window overlap, a fold's base overlaps an
+        // extent flushed during its flight, and each holds the absent marker for an entity whose
+        // binding another holds. Covered with no slot anywhere is an entity ingested without an
+        // external id.
+        let mut covered = false;
+        for locator in locators_covering(entity.raw(), self.locator_len(), &self.locator_runs, |s| {
+            (s.desc.entity_lo, s.desc.entity_hi)
+        }) {
+            covered = true;
+            let slot = match locator {
+                Locator::Base => {
+                    if let Some(key) = self.external_id_of(entity)? {
+                        return Ok(Some(key));
+                    }
+                    continue;
+                }
+                Locator::Extent(i) => &self.locator_runs[i],
+            };
             let Some(ordinal) = slot.ordinal_of(entity)? else {
-                return Ok(None);
+                continue;
             };
             let run = self
                 .runs
@@ -844,9 +872,7 @@ impl ExternalIdSidecar {
                 .ok_or_else(|| StoreError::InvalidSidecar {
                     path: slot.desc.path.clone(),
                     detail: format!(
-                        "this locator extent indexes run '{}', which the manifest does not list — \
-                         the ordinal cannot be resolved and an absent external id would be the \
-                         wrong answer",
+                        "this locator extent indexes run '{}', which the manifest does not list",
                         slot.desc.run_rel
                     ),
                 })?;
@@ -862,6 +888,9 @@ impl ExternalIdSidecar {
                 });
             }
             return Ok(Some(validated.key(ordinal as usize).to_vec()));
+        }
+        if covered {
+            return Ok(None);
         }
         if entity.raw() < high_water {
             let path = self

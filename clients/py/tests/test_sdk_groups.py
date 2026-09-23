@@ -176,7 +176,7 @@ def grouped(tmp_path, corpus):
         view="slice",
     )
     report = db.commit()
-    assert report.ok, report.output
+    assert report.ok, report.log
     yield db
     db.close()
 

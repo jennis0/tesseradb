@@ -27,7 +27,7 @@ use tessera_engine::{
 
 use crate::error::{map_engine_error, ApiError};
 use crate::health::{healthz, readyz};
-use crate::state::{AppState, GatePermits, ViewerSession};
+use crate::state::{ApiJson, AppState, GatePermits, ViewerSession};
 use crate::stream::{CancelGuard, Producer};
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -1106,7 +1106,7 @@ fn run_viewport_stream(
 async fn viewport(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
-    Json(req): Json<ViewportReq>,
+    ApiJson(req): ApiJson<ViewportReq>,
 ) -> Result<Response, ApiError> {
     if req.zoom > 16 {
         return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
@@ -1544,7 +1544,7 @@ fn browse_row(row: tessera_engine::browse::BrowseRow) -> BrowseRowResp {
 async fn browse(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
-    Json(req): Json<BrowseReq>,
+    ApiJson(req): ApiJson<BrowseReq>,
 ) -> Result<Json<BrowseResp>, ApiError> {
     use tessera_engine::browse::{BrowseCursor, BrowseForm, BrowseRequest};
     // `limit` clamps and `0` refuses, as on `/v1/categories`.
@@ -1637,7 +1637,7 @@ async fn artifact(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
     AxumPath(raw): AxumPath<u64>,
-    Json(req): Json<ArtifactReq>,
+    ApiJson(req): ApiJson<ArtifactReq>,
 ) -> Result<Json<ArtifactResp>, ApiError> {
     let served = state
         .gated(move |state| {
@@ -1680,7 +1680,7 @@ async fn item(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
     AxumPath(raw): AxumPath<u64>,
-    Json(req): Json<ItemReq>,
+    ApiJson(req): ApiJson<ItemReq>,
 ) -> Result<Json<ItemResp>, ApiError> {
     // `Engine::item` checks the idset against the one generation it loads, so a stale-idset
     // request holds a gate permit rather than being refused before admission.

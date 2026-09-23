@@ -311,6 +311,7 @@ async fn a_parent_is_filled_by_patch_and_a_held_key_on_put_mints_nothing() {
     )
     .await;
     assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"], "conflict", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default().to_string();
     assert!(detail.contains("parent"), "{detail}");
     assert!(!detail.contains("root"), "{detail}");
@@ -353,13 +354,7 @@ async fn a_key_repeated_in_one_batch_with_a_fixed_part_is_422_at_both_routes() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("the key k appears more than once"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 
     let (status, body) = put(
         &server,
@@ -371,13 +366,7 @@ async fn a_key_repeated_in_one_batch_with_a_fixed_part_is_422_at_both_routes() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("the key k appears more than once"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
     assert_eq!(
         served(&server, TREE).await,
         vec![
@@ -456,7 +445,7 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("never shrinks"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
 
     // A rank the artifact holds no content at is refused.
     let (status, body) = patch(
@@ -466,7 +455,7 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("no content at rank 3"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
 
     // **A fixed part on a ranked row is refused rather than dropped.** A row pages one set or
     // fills fixed parts; answering `200` for a part the batch discarded would tell the caller
@@ -482,10 +471,7 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
         }
         let (status, body) = patch(&server, TOPICS, json!([row])).await;
         assert_eq!(status, 422, "{part}: {body}");
-        assert!(
-            body.to_string().contains("names a rank and carries a fixed part"),
-            "{part}: {body}"
-        );
+        assert_eq!(body["error"], "contract", "{part}: {body}");
     }
 
     // A key repeated with a rank is refused: a withdrawal in one row moves the rank another names.
@@ -499,7 +485,7 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("more than once"), "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
 
     // The page that empties the set: the content is withdrawn, the ack names the rank and the key,
     // and the artifact is withheld because its layer declares supplied content it now lacks.

@@ -173,15 +173,35 @@ def test_the_serving_layout_and_the_artifact_gate_reach_the_declaration(db, chec
     assert checked(db).ok
 
 
-def test_the_label_column_is_named_on_the_insert_and_not_on_the_layer(db):
+def test_a_layer_reads_its_labels_from_one_column_whichever_call_names_it(db, checked):
+    """The label column is declared on the layer or named by its first labelled insert, and an
+    insert naming another is refused."""
+    import tomllib
+
+    team = pd.DataFrame({"key": ["a"], "team": ["x"]})
+    squad = pd.DataFrame({"key": ["b"], "squad": ["x"]})
+    db.declare_layer("d", kind="flat", artifact_visibility={"field": "team", "default": "inherited"})
     with pytest.raises(Refusal):
-        db.declare_layer("d", kind="flat", artifact_visibility={"field": "team", "default": "inherited"})
+        db.insert("d", artifacts=squad, key="key", access="squad")
+    db.insert("d", artifacts=team, key="key", access="team")
     db.declare_layer("e", kind="flat")
-    db.insert("e", artifacts=pd.DataFrame({"key": ["a"], "team": ["x"]}), key="key", access="team")
+    db.insert("e", artifacts=team, key="key", access="team")
     with pytest.raises(Refusal):
-        db.insert(
-            "e", artifacts=pd.DataFrame({"key": ["b"], "squad": ["x"]}), key="key", access="squad"
+        db.insert("e", artifacts=squad, key="key", access="squad")
+    layers = {one["name"]: one for one in tomllib.loads(db.declaration)["layer"]}
+    assert layers["d"]["artifact_visibility"] == {"default": "inherited", "field": "team"}
+    assert layers["e"]["artifact_visibility"] == {"default": "inherited", "field": "team"}
+    assert checked(db).ok
+
+
+def test_a_label_set_takes_no_label_column(db):
+    """A label set's text insert carries no labels of its own, so a column for them is refused."""
+    db.declare_layer("clusters", kind="flat")
+    with pytest.raises(Refusal):
+        db.declare_labels(
+            "topics", of="clusters", artifact_visibility={"field": "team", "default": "inherited"}
         )
+    db.declare_labels("topics", of="clusters", artifact_visibility={"default": "inherited"})
 
 
 # ---------------------------------------------------------------------------- vocabularies
@@ -215,14 +235,14 @@ def test_the_check_refuses_a_declaration_the_verbs_wrote_and_names_the_layer(db,
     db.declare_layer("clusters", kind="nested", levels=[(0, "Top", None)])
     report = checked(db)
     assert not report.ok
-    assert "clusters" in report.output
+    assert "clusters" in report.log
 
 
 def test_a_shape_on_an_artifact_row_of_a_layer_that_evaluates_none_is_refused(db, checked):
     db.declare_layer("cases", kind="flat", artifacts=[{"key": "ring", "wkt": "POLYGON EMPTY"}])
     report = checked(db)
     assert not report.ok
-    assert "cases" in report.output and "ring" in report.output
+    assert "cases" in report.log and "ring" in report.log
 
 
 def test_one_row_carries_one_shape(db, checked):
@@ -230,7 +250,7 @@ def test_one_row_carries_one_shape(db, checked):
                      artifacts=[{"key": "both", "bbox": [0, 0, 1, 1], "circle": [0, 0, 1]}])
     report = checked(db)
     assert not report.ok
-    assert "regions" in report.output and "both" in report.output
+    assert "regions" in report.log and "both" in report.log
 
 
 def test_a_rows_shape_is_its_layers_kind_and_no_other(db, checked):
@@ -238,7 +258,7 @@ def test_a_rows_shape_is_its_layers_kind_and_no_other(db, checked):
                      artifacts=[{"key": "round", "circle": [0, 0, 1]}])
     report = checked(db)
     assert not report.ok
-    assert "regions" in report.output and "round" in report.output
+    assert "regions" in report.log and "round" in report.log
 
 
 def test_an_inline_roster_with_no_row_is_refused(db):

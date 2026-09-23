@@ -46,20 +46,18 @@ pub enum FlushStage {
     /// `publish_flush`'s gates, and composing the flush's filter, record and text extents.
     Compose,
     /// Assembling the side-manifest from the live partition manifest, deny state included. The
-    /// four stages below partition it.
+    /// three stages below partition it.
     Manifest,
     /// Within [`FlushStage::Manifest`]: cloning the live partition manifest to assemble onto.
     ManifestClone,
-    /// Within [`FlushStage::Manifest`]: `write_live_state` — the layers, views, attributes,
-    /// vocabularies and group declarations no fold has written into a `MANIFEST.json` yet.
-    ManifestLiveState,
     /// Within [`FlushStage::Manifest`]: `write_deny_state` — the overlay's suppressions and
     /// tombstones, restated in full at every publication.
     ManifestDenyState,
     /// Within [`FlushStage::Manifest`]: `write_vocabulary_extensions` — every live binding beyond
     /// what the bundle's own manifest carries.
     ManifestVocabExtensions,
-    /// `commit_side_manifest`: the manifest write and its fsyncs. The commit point.
+    /// `commit_side_manifest`: the live registry, roster and declarations restated, the manifest
+    /// write and its fsyncs. The commit point.
     Commit,
     /// `Bundle::with_segment`: the new bundle and its extended row space.
     WithSegment,
@@ -129,16 +127,15 @@ pub enum FlushStage {
 const _: () = assert!(FlushStage::COUNT == FlushStage::PoolWall as usize + 1);
 
 impl FlushStage {
-    pub const COUNT: usize = 39;
+    pub const COUNT: usize = 38;
     /// The executor's stages in run order, the `Manifest*` sub-stages after the stage they
     /// partition; `Plan`/`Dispatch` run at the tick, the rest at publication.
-    pub const EXECUTOR: [FlushStage; 19] = [
+    pub const EXECUTOR: [FlushStage; 18] = [
         FlushStage::Plan,
         FlushStage::Dispatch,
         FlushStage::Compose,
         FlushStage::Manifest,
         FlushStage::ManifestClone,
-        FlushStage::ManifestLiveState,
         FlushStage::ManifestDenyState,
         FlushStage::ManifestVocabExtensions,
         FlushStage::Commit,
@@ -209,9 +206,8 @@ impl FlushStage {
         FlushStage::Failed,
     ];
     /// The stages that partition `Manifest`, in the order the publication runs them.
-    pub const MANIFEST: [FlushStage; 4] = [
+    pub const MANIFEST: [FlushStage; 3] = [
         FlushStage::ManifestClone,
-        FlushStage::ManifestLiveState,
         FlushStage::ManifestDenyState,
         FlushStage::ManifestVocabExtensions,
     ];
@@ -230,7 +226,6 @@ impl FlushStage {
             FlushStage::Compose => "compose",
             FlushStage::Manifest => "manifest",
             FlushStage::ManifestClone => "  .manifest_clone",
-            FlushStage::ManifestLiveState => "  .live_state",
             FlushStage::ManifestDenyState => "  .deny_state",
             FlushStage::ManifestVocabExtensions => "  .vocab_extensions",
             FlushStage::Commit => "manifest_commit",
@@ -332,6 +327,8 @@ pub(crate) struct FlushPlan {
     pub(crate) consumed_fills: Vec<EntityId>,
     /// The same for the group-scoped fills, by the `(entity, owner view)` cell they address.
     pub(crate) consumed_scoped_fills: Vec<(EntityId, String)>,
+    /// The joins whose key a published run already records, ascending: they write no binding.
+    pub(crate) recorded_joins: Vec<EntityId>,
 }
 
 impl FlushPlan {
@@ -462,11 +459,29 @@ pub(crate) fn plan_flush(
     items.sort_unstable_by_key(|(entity, _)| entity.raw());
     fills.sort_by_key(|(entity, _)| entity.raw());
 
+    // The first flush to give an entity a row writes its binding, whether that row is the
+    // entity's own or a join: a dropped view can take the own row with it before it flushes. So
+    // a join whose entity already has a row in some view finds its key recorded.
+    let rowed = |entity: EntityId| {
+        generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .values()
+                .any(|data| data.row_space.row_of(entity).is_some())
+        })
+    };
+    let recorded_joins = items
+        .iter()
+        .filter(|(entity, item)| item.join && rowed(*entity))
+        .map(|(entity, _)| *entity)
+        .collect();
+
     Ok(FlushPlan {
         items,
         fills,
         consumed_fills,
         consumed_scoped_fills,
+        recorded_joins,
     })
 }
 
@@ -636,8 +651,8 @@ pub(crate) struct SegmentFlush {
     pub(crate) descriptor: tessera_store::manifest::SegmentDescriptor,
     pub(crate) watermark: u64,
     pub(crate) entity_id_high_water: u64,
-    pub(crate) external_id_run: String,
-    pub(crate) locator_extent: tessera_store::manifest::LocatorExtent,
+    /// The locator extent over the rows that bind an entity, and the run it indexes; `None` where every row is a join.
+    pub(crate) locator_extent: Option<tessera_store::manifest::LocatorExtent>,
     pub(crate) tier: Arc<DeltaTier>,
     /// The tier's prefix-relative path; carried rather than re-derived, since a coalesce moves it.
     pub(crate) tier_path: String,
@@ -735,6 +750,7 @@ fn execute_flush_stages(
                     scalar_schema: &ctx.scalar_schema,
                     row_base: ctx.row_base,
                 },
+                &plan.recorded_joins,
             )
             .map_err(|e| MaintenanceFailed(format!("segment: {e}")))?,
         )
@@ -912,7 +928,6 @@ fn execute_flush_stages(
             descriptor: out.segment,
             watermark: out.watermark,
             entity_id_high_water: out.entity_id_high_water,
-            external_id_run: out.external_id_run,
             locator_extent: out.locator_extent,
             tier,
             tier_path,

@@ -146,6 +146,26 @@ impl std::fmt::Display for BindingConflict {
 
 impl std::error::Error for BindingConflict {}
 
+/// Why a declared vocabulary could not be given its codes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclareError {
+    /// A pinned code clashes with another pin or with a reserved code.
+    Conflict(BindingConflict),
+    /// A key is empty, or the width has no code left to draw.
+    Mint(MintError),
+}
+
+impl std::fmt::Display for DeclareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeclareError::Conflict(e) => e.fmt(f),
+            DeclareError::Mint(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for DeclareError {}
+
 /// Whether [`VocabularyMinter::mint`] found the key or created it.
 ///
 /// The caller must distinguish them: a fresh code has to reach the WAL and the manifest before the
@@ -241,6 +261,30 @@ impl VocabularyMinter {
             assigned: BTreeSet::new(),
             beyond_manifest: 0,
         }
+    }
+
+    /// A vocabulary as declared, at a build or at a running service: `reserved` set aside, each
+    /// `pinned` binding held, and a code drawn for every other key of `keys` in turn.
+    pub fn declared<'a>(
+        name: impl Into<String>,
+        kind: VocabularyKind,
+        visibility: Visibility,
+        width: ScalarType,
+        reserved: &[u32],
+        pinned: impl IntoIterator<Item = (&'a str, u32)>,
+        keys: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, DeclareError> {
+        let mut minter = VocabularyMinter::new(name, kind, visibility, width);
+        for &code in reserved {
+            minter.seed_reserved(code);
+        }
+        for (key, code) in pinned {
+            minter.seed_value(key, code).map_err(DeclareError::Conflict)?;
+        }
+        for key in keys {
+            minter.mint(key).map_err(DeclareError::Mint)?;
+        }
+        Ok(minter)
     }
 
     /// Seed one already-durable binding. Idempotent for an identical one, so seed-then-replay is

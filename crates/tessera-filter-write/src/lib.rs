@@ -36,13 +36,11 @@
 //! deletion — which moves it from §2.1's bare-array addressing to the presence-addressed one, both
 //! measured and both inside budget.
 //!
-//! # Why the merge is linear, and what it refuses
+//! # How the merge orders values, and what it refuses
 //!
-//! The layers partition entity space and each is entity-ascending, and a flush's entities are ids
-//! issued above every earlier layer's (**I9**) — so the concatenation is a linear merge with no
-//! sort. Both halves of that premise are *checked* rather than assumed, because neither has a
-//! symptom if it fails: values would be paired with the wrong entities from the first violation
-//! onwards, and every later filter would answer confidently and wrongly.
+//! The layers partition entity space and each is entity-ascending, but their ranges may
+//! interleave: two views flushed from one commit window hold alternate ids. The merge walks every
+//! layer's runs at once and writes them in entity order.
 //!
 //! **The duplicate-entity refusal is this pass's own, and it cannot be borrowed from composition.**
 //! `FilterColumns::compose` tests disjointness *between* layers; once those layers collapse into
@@ -52,9 +50,8 @@
 //!
 //! # Two producers of one merge: the fold, and the coalesce
 //!
-//! [`fold_value_column`] and [`coalesce_attr_extents`] are the same linear merge under two
-//! different obligations, so they share it rather than each stating the checks above (§5.2's
-//! "attribute extents are the same shape as delta tiers, and take the same safety argument").
+//! [`fold_value_column`] and [`coalesce_attr_extents`] are the same merge under two different
+//! obligations, so they share it rather than each stating the checks above.
 //! [`fold_keyword_column`] and [`coalesce_keyword_extents`] are the same two producers again, over
 //! a family whose values are ordinals into a per-layer dictionary; they reach the merge through the
 //! same order and the same guards, and add a remap of their own that the `keyword` module argues
@@ -175,11 +172,10 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 /// One column's layers merged into one base, with `tombstones` blanked.
 ///
-/// `layers` is the base column followed by every extent the fold consumes, in any order — the merge
-/// sorts them by their own entity ranges and refuses an interleaving. `bound` is one past the
-/// highest entity the fold's snapshot covers: the presence bitmap is **omitted** only when every
-/// entity from 0 to that bound is present, which is the reader's dense-from-zero convention ("the
-/// entity id is the array index", §2.1) and nothing looser.
+/// `layers` is the base column followed by every extent the fold consumes, in any order. `bound`
+/// is one past the highest entity the fold's snapshot covers: the presence bitmap is **omitted**
+/// only when every entity from 0 to that bound is present, which is the reader's dense-from-zero
+/// convention ("the entity id is the array index") and nothing looser.
 ///
 /// Returns whether a presence bitmap was written, so the caller can name exactly the files that
 /// exist in the manifest.
@@ -209,8 +205,7 @@ pub fn fold_value_column(
 
 /// One column's extents merged into one, for the entity-space coalesce (`filter-index.md` §5.2).
 ///
-/// `inputs` is a window of one column's own extents, in any order — the merge sorts them by their
-/// entity ranges and refuses an interleaving, exactly as the fold's merge does. What is written is
+/// `inputs` is a window of one column's own extents, in any order. What is written is
 /// the same `(entity, value)` relation the inputs carried between them, in one values file and one
 /// presence bitmap: layers are unioned at composition, so their division into files is immaterial
 /// and the pass is a **content-preserving re-encode**.
@@ -243,15 +238,11 @@ pub fn coalesce_attr_extents(
     )
 }
 
-/// The layers in the order the linear merge reads them, and the presence the merged column carries.
+/// The non-empty layers with their entity sets, and the presence the merged column carries.
 ///
-/// Both refusals live here rather than at either caller, and neither has a symptom if it is
-/// skipped — the values would be paired with the wrong entities from the first violation onwards,
-/// and every later filter would answer confidently and wrongly.
-///
-/// The empty layers are dropped rather than ordered: an extent for a column no flushed entity
-/// carried a value in is written anyway, so the file set is a function of the schema (§2.5), and
-/// such a layer has no entity range to sort by.
+/// Refuses layers that claim one entity twice: the reader takes the layers as a partition of
+/// entity space, and once they collapse into one file the overlap could not be seen again. An
+/// empty layer is dropped; a flush writes one for a column none of its entities carried.
 pub(crate) fn merge_order(
     layers: &[&ValueColumn],
     tombstones: &Bitmap,
@@ -263,26 +254,11 @@ pub(crate) fn merge_order(
              base"
         )));
     }
-    let present: Vec<(usize, Bitmap)> = layers
+    let mut present: Vec<(usize, Bitmap)> = layers
         .iter()
         .enumerate()
         .map(|(i, layer)| (i, layer.present()))
         .collect();
-    let (present, union) = ordered_disjoint(present, pass)?;
-    Ok((present, union.andnot(tombstones)))
-}
-
-/// The two refusals both merge axes rest on — value columns and the record blob alike — over the
-/// layers' entity sets alone: no layer claims an entity another holds, and the layers do not
-/// interleave, so the concatenation in sorted order is a linear merge. Returns the non-empty
-/// layers in merge order and the union of every layer's entities.
-///
-/// Shared rather than restated because neither refusal has a symptom if one copy drifts: values
-/// (or rows) would be paired with the wrong entities from the first violation onwards.
-pub(crate) fn ordered_disjoint(
-    mut present: Vec<(usize, Bitmap)>,
-    pass: &str,
-) -> io::Result<(Vec<(usize, Bitmap)>, Bitmap)> {
     let mut union = Bitmap::new();
     let mut sum = 0u64;
     for (_, p) in &present {
@@ -292,39 +268,25 @@ pub(crate) fn ordered_disjoint(
     if union.cardinality() != sum {
         return Err(invalid(format!(
             "{pass} was given layers claiming one entity twice: {} entities across the layers, {} \
-             distinct. Once they collapse into one file the overlap is invisible to the \
-             between-layer check for ever, so it is refused here",
+             distinct",
             sum,
             union.cardinality()
         )));
     }
-
     present.retain(|(_, p)| !p.is_empty());
-    present.sort_by_key(|(_, p)| p.minimum().expect("the empty layers were dropped"));
-    for pair in present.windows(2) {
-        let (before, after) = (&pair[0].1, &pair[1].1);
-        if before.maximum() >= after.minimum() {
-            return Err(invalid(format!(
-                "{pass} was given interleaved layers: entity ids are issued monotonically from the \
-                 high-water (I9), so a layer's entities sit above every earlier layer's and the \
-                 merge is linear. Refused rather than sorted, because a sort here would be papering \
-                 over a broken allocator"
-            )));
-        }
-    }
-    Ok((present, union))
+    Ok((present, union.andnot(tombstones)))
 }
 
-/// Stream the ordered layers into one column, skipping `tombstones`.
+/// Stream the layers into one column in entity order, skipping `tombstones`.
 ///
-/// `presence` is the file the reader will address by, or `None` where the caller's convention lets
-/// it be omitted — which is a base column dense from zero, and never an extent.
+/// The layers' entity sets are disjoint but may interleave, so the merge takes the layer whose
+/// next run starts lowest and keeps taking its runs until another layer's next run is lower. A
+/// run is contiguous in entity space and in the layer's slots, so without a remap each is pushed
+/// as a borrowed slice of the layer's values.
 ///
-/// `remap` is the keyword family's `old ordinal -> new ordinal` table per layer, and its presence
-/// is what separates the two write paths: without it every value is pushed as a **borrowed slice**
-/// of the layer's own buffers, so the bytes cannot change; with it every value is rewritten. That
-/// difference is the whole reason the `keyword` module carries a content guard the checks above
-/// cannot supply, and the guard runs before this function is called.
+/// `presence` is the file the reader will address by, or `None` for a base column dense from
+/// zero. `remap` is the keyword family's `old ordinal -> new ordinal` table per layer; with it
+/// every value is rewritten into a buffer pushed a chunk at a time.
 pub(crate) fn write_merged(
     layers: &[&ValueColumn],
     order: &[(usize, Bitmap)],
@@ -334,45 +296,78 @@ pub(crate) fn write_merged(
     presence: Option<&Bitmap>,
     remap: Option<&[Vec<u32>]>,
 ) -> io::Result<()> {
-    // **The family comes from the first layer, not from the schema.** Both passes rewrite what
-    // exists, and a kind re-derived from the declaration would silently re-type a column whose file
-    // says otherwise; a chunk that disagrees is refused by the writer, which is the second line.
+    // The kind comes from the first layer's file, not the declaration, so a rewrite never
+    // re-types a column; the writer refuses a chunk of another kind.
     let kind = ColumnKind::of(layers[0].codes());
     let mut writer = ValueColumnWriter::create(values_path, presence_path, kind)?;
-    for (layer, layer_present) in order {
+    let keeps: Vec<Bitmap> = order.iter().map(|(_, p)| p.andnot(tombstones)).collect();
+    let mut runs: Vec<Runs<'_>> = keeps.iter().map(Runs::new).collect();
+    // `(position in order, next run)` for every layer with runs left.
+    let mut live: Vec<(usize, (u32, u32))> = runs
+        .iter_mut()
+        .enumerate()
+        .filter_map(|(at, r)| r.next().map(|run| (at, run)))
+        .collect();
+    let mut recoloured: Vec<u32> = Vec::new();
+    while !live.is_empty() {
+        // The window is a handful of layers, so a scan beats a heap.
+        let lowest = (0..live.len()).min_by_key(|&i| live[i].1 .0).expect("a live layer");
+        let bound = (0..live.len())
+            .filter(|&i| i != lowest)
+            .map(|i| live[i].1 .0)
+            .min()
+            .unwrap_or(u32::MAX);
+        let at = live[lowest].0;
+        let (layer, layer_present) = &order[at];
         let codes = layers[*layer].codes();
-        // The kept entities of this layer. A run of them is contiguous in entity space *and* in
-        // slot space — every entity in it is present in this layer, so its slots are consecutive —
-        // which is what lets the merge push a borrowed slice of the layer's values rather than
-        // walking it a value at a time.
-        let keep = layer_present.andnot(tombstones);
-        let mut runs = Runs::new(&keep);
-        while let Some((start, last)) = runs.next() {
-            let slot0 = (layer_present.rank(start) - 1) as usize;
-            let mut at = slot0;
-            let mut left = (last - start) as usize + 1;
-            while left > 0 {
-                let take = left.min(MERGE_CHUNK);
+        let mut next = Some(live[lowest].1);
+        while let Some((start, last)) = next.filter(|(start, _)| *start < bound) {
+            let slot = (layer_present.rank(start) - 1) as usize;
+            let len = (last - start) as usize + 1;
+            let mut done = 0;
+            while done < len {
+                let take = (len - done).min(MERGE_CHUNK - recoloured.len());
                 match remap {
-                    None => writer.push(&slice_codes(codes, at, take))?,
-                    Some(tables) => writer.push(&recolour(codes, at, take, &tables[*layer])?)?,
+                    None => writer.push(&slice_codes(codes, slot + done, take))?,
+                    Some(tables) => {
+                        recolour(codes, slot + done, take, &tables[*layer], &mut recoloured)?;
+                        if recoloured.len() == MERGE_CHUNK {
+                            let chunk = std::mem::take(&mut recoloured);
+                            writer.push(&Codes::U32(ScalarBuffer::from(chunk)))?;
+                        }
+                    }
                 }
-                at += take;
-                left -= take;
+                done += take;
+            }
+            next = runs[at].next();
+        }
+        match next {
+            Some(run) => live[lowest].1 = run,
+            None => {
+                live.swap_remove(lowest);
             }
         }
+    }
+    if !recoloured.is_empty() {
+        writer.push(&Codes::U32(ScalarBuffer::from(recoloured)))?;
     }
     writer.finish(presence)
 }
 
-/// `len` ordinals from `start`, each rewritten through this layer's remap.
+/// `len` ordinals from `start`, each rewritten through this layer's remap and appended to `out`.
 ///
 /// The one place in either pass where a merged value is **built** rather than borrowed, which is
-/// why the two refusals here are worth their cost per chunk. An ordinal past the end of the remap
-/// is a column paired with a dictionary that never coloured it; an ordinal mapping to
+/// why the two refusals here are worth their cost. An ordinal past the end of the remap is a
+/// column paired with a dictionary that never coloured it; an ordinal mapping to
 /// [`keyword::NO_KEY`] is an entity still reaching a key the rebuild found no survivor for. Both
 /// are contradictions, and both would otherwise be published as some other key.
-fn recolour(codes: &Codes, start: usize, len: usize, remap: &[u32]) -> io::Result<Codes> {
+fn recolour(
+    codes: &Codes,
+    start: usize,
+    len: usize,
+    remap: &[u32],
+    out: &mut Vec<u32>,
+) -> io::Result<()> {
     let Codes::U32(src) = codes else {
         return Err(invalid(format!(
             "a remapped merge was given a {:?} column; only a keyword layer's u32 ordinals are \
@@ -380,7 +375,6 @@ fn recolour(codes: &Codes, start: usize, len: usize, remap: &[u32]) -> io::Resul
             ColumnKind::of(codes)
         )));
     };
-    let mut out = Vec::with_capacity(len);
     for &ordinal in &src[start..start + len] {
         let new = *remap.get(ordinal as usize).ok_or_else(|| {
             invalid(format!(
@@ -397,7 +391,7 @@ fn recolour(codes: &Codes, start: usize, len: usize, remap: &[u32]) -> io::Resul
         }
         out.push(new);
     }
-    Ok(Codes::U32(ScalarBuffer::from(out)))
+    Ok(())
 }
 
 /// `len` values from `start`, borrowed rather than copied: every arm is a window onto the layer's
@@ -780,23 +774,40 @@ mod tests {
         assert!(coalesce_to(dir.path(), "alone", &[&first]).is_err());
     }
 
-    /// **Interleaved layers are refused rather than sorted.** The merge is linear because entity
-    /// ids are issued monotonically (**I9**); a sort here would paper over an allocator that had
-    /// stopped doing that, and the symptom would be values paired with the wrong entities.
+    /// Layers whose entities interleave merge by entity. Two views flushed from one commit window
+    /// leave extents like these, and runs of more than one entity cross between the layers.
     #[test]
-    fn interleaved_layers_are_refused() {
+    fn interleaved_layers_merge_by_entity() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let odd = ValueColumn::partial(codes_u32(vec![1, 3]), bitmap([1, 3])).expect("a layer");
-        let even = ValueColumn::partial(codes_u32(vec![0, 2]), bitmap([0, 2])).expect("a layer");
-        let err = fold_value_column(
-            &[&odd, &even],
-            &Bitmap::new(),
-            4,
-            &dir.path().join("v.arrow"),
-            &dir.path().join("p.roaring"),
-        )
-        .expect_err("interleaving is refused");
-        assert!(err.to_string().contains("interleaved"), "{err}");
+        let a = [1u32, 3, 4, 5, 9];
+        let b = [0u32, 2, 6, 7, 8, 10];
+        let layer = |entities: &[u32]| {
+            let values = entities.iter().map(|e| e * 100).collect();
+            ValueColumn::partial(codes_u32(values), bitmap(entities.iter().copied()))
+                .expect("a layer")
+        };
+        let (a, b) = (layer(&a), layer(&b));
+        let every: Vec<u32> = (0..=10).collect();
+
+        for inputs in [[&a, &b], [&b, &a]] {
+            let out = coalesce_to(dir.path(), "coalesced", &inputs).expect("the coalesce");
+            assert_eq!(out.present().iter().collect::<Vec<_>>(), every);
+            for e in 0..=10u32 {
+                assert_eq!(out.value_of(e).map(|v| v.raw()), Some(e * 100), "entity {e}");
+            }
+        }
+
+        let values = dir.path().join("folded-values.arrow");
+        let presence = dir.path().join("folded-presence.roaring");
+        let partial = fold_value_column(&[&b, &a], &bitmap([4, 7]), 11, &values, &presence)
+            .expect("the fold");
+        assert!(partial, "two blanked entities leave the column partial");
+        let out = ValueColumn::open(&values, Some(&presence), tessera_filter::Access::Read)
+            .expect("the folded column");
+        for e in 0..=10u32 {
+            let expected = (e != 4 && e != 7).then_some(e * 100);
+            assert_eq!(out.value_of(e).map(|v| v.raw()), expected, "entity {e}");
+        }
     }
 
     /// **The postings are what the folded column says**, code for code — which is what makes one a

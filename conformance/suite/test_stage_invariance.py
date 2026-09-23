@@ -2,29 +2,31 @@
 
 One plan, walked once (the module-scoped fixture), every stage judged from the same recorded
 evidence: the battery before, the battery after, and the delta between them compared against the
-stage's entitlement. Eight writes, two merges, a coalesce, the three deny ops, a WAL rotation,
+stage's entitlement. Six writes, two merges, a coalesce, the three deny ops, a WAL rotation,
 two reloads and a fold — every §2 stage class the suite can currently drive.
 
 ## Why the writes are counted the way they are
 
-A pulled tick dispatches *everything* eligible (§12.3), and the driver's server runs at the
-default ladder widths (`tier_width` 4 and `coalesce_width` 8, which its config does not set), so
-isolation is arithmetic:
+A pulled tick dispatches *everything* eligible, so isolation is arithmetic. The server
+runs at a merge width of three ([`MERGE_TIER_WIDTH`]) and a coalesce width of four
+([`COALESCE_WIDTH`]). The coalesce takes external-id runs four at a time whatever the config
+says, so at the default merge width of four a merge and that coalesce always come due together;
+at three they come due one flush apart. Every flush adds one flushed segment and one entry on
+each entity-space axis, and a tick plans against the state before its own flush:
 
-- flush extents and their merged outputs all clamp to the 16 MiB floor tier, and a merge selects
-  from them only, never the base segment — so merge eligibility is simply
-  "four of them exist". Four writes, then the merge tick; three more (the merged segment counts as
-  one), then the second merge tick. No write's own tick ever sees four, because the extent that
-  write publishes is not yet published when its tick plans.
-- every flush appends one entry per entity-space axis and nothing before the coalesce consumes
-  them, so after the eighth write — and only then — the delta-tier axis is at the width. The
-  coalesce tick follows the eighth write; at that tick the segment ladder holds three (base,
-  second merge, eighth extent), below the merge width.
-- rotation needs WAL growth since the last flush publication's own rotation, which is what the
-  three denies provide; its tick dispatches nothing else (one delta tier, three segments).
+- flushed segments and their merged outputs all clamp to the 16 MiB floor tier, and a merge
+  selects from them only, never the base segment, so merge eligibility is "three of them exist".
+- the coalesce's axes all reach four together, and a coalesce takes each back to one.
 
-The tick stages' barriers assert the flush counter did not move, so if this arithmetic ever
-drifts from the engine's, the failure names the plan rather than mis-attributing a delta.
+Three writes, then the first merge tick (three segments, three entries). One write (two
+segments, four entries), then the coalesce tick. One write (three segments, two entries), then
+the second merge tick, over the first merge's output and two new segments. One last write leaves
+two segments and three entries, so neither the rotation's tick nor any later one finds work.
+Rotation needs WAL growth since the last rotation, which the three denies provide.
+
+Every stage that pulls a tick asserts that no flush, merge, coalesce or fold but its own
+published on it, so if this arithmetic drifts from the engine's, the failure names the plan
+rather than mis-attributing a delta.
 
 ## The negative controls
 
@@ -68,6 +70,7 @@ from .driver import (
     Fold,
     Load,
     Merge,
+    MergeAndCoalesce,
     Rotate,
     StageInvarianceViolation,
     StageResult,
@@ -90,6 +93,9 @@ GRANTS = tuple(next(c for c in cat.catalogue() if c.name == "crossover_above").g
 INGEST_ACCESS = cat.BLOCKS["cross_lo"].descriptor
 #: An established department key (the battery's filter key, so the filtered surface moves too).
 FILTER_DEPARTMENT = sorted(cat.DEPARTMENT_CODES)[0]
+#: The ladder widths the plan's arithmetic is counted against (module doc).
+MERGE_TIER_WIDTH = 3
+COALESCE_WIDTH = 4
 
 #: fx_key -> source id for every planted item — how a served row is traced back to the external
 #: id the deny lane addresses.
@@ -203,14 +209,12 @@ CHECKED_LABELS = [
     "write-1",
     "write-2",
     "write-3",
-    "write-4",
     "merge-1",
-    "write-5",
-    "write-6",
-    "write-7",
-    "merge-2",
-    "write-8",
+    "write-4",
     "coalesce",
+    "write-5",
+    "merge-2",
+    "write-6",
     "suppress",
     "unsuppress",
     "delete",
@@ -229,7 +233,7 @@ def plan_results(tmp_path_factory, private_catalogue_bundle) -> dict[str, StageR
     prefix* (`conformance/conftest.py`'s private-copy rationale), and this module publishes more
     than any other.
     """
-    fx = cat.ingest_fx_keys(16)
+    fx = cat.ingest_fx_keys(12)
     h = SuiteHarness(
         bundle_root=private_catalogue_bundle("stage-invariance"),
         run_dir=tmp_path_factory.mktemp("stage-invariance-run"),
@@ -238,20 +242,20 @@ def plan_results(tmp_path_factory, private_catalogue_bundle) -> dict[str, StageR
         bbox=BBOX,
         k=K,
         filters={"department": {"eq": FILTER_DEPARTMENT}},
+        merge_tier_width=MERGE_TIER_WIDTH,
+        coalesce_width=COALESCE_WIDTH,
     )
     plan = [
         Build(),
         _write_stage(0, fx[0:2]),
         _write_stage(1, fx[2:4]),
         _write_stage(2, fx[4:6]),
-        _write_stage(3, fx[6:8]),
         Merge("merge-1"),
-        _write_stage(4, fx[8:10]),
-        _write_stage(5, fx[10:12]),
-        _write_stage(6, fx[12:14]),
-        Merge("merge-2"),
-        _write_stage(7, fx[14:16]),
+        _write_stage(3, fx[6:8]),
         Coalesce("coalesce"),
+        _write_stage(4, fx[8:10]),
+        Merge("merge-2"),
+        _write_stage(5, fx[10:12]),
         Deny("suppress", _battery_item(0)),
         Deny("unsuppress", _battery_item(0)),
         Deny("delete", _battery_item(1)),
@@ -295,6 +299,41 @@ def test_the_stage_changed_exactly_what_it_was_entitled_to(plan_results, label):
     ingested rows for each write's flush.
     """
     check(plan_results[label])
+
+
+# -- the default widths -------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def default_width_results(tmp_path_factory, private_catalogue_bundle) -> dict[str, StageResult]:
+    """Four writes at the shipped widths, then the tick on which the merge and the run coalesce
+    both come due. The main plan keeps them apart; this keeps the pair a deployment meets
+    covered."""
+    fx = cat.ingest_fx_keys(8)
+    h = SuiteHarness(
+        bundle_root=private_catalogue_bundle("default-widths"),
+        run_dir=tmp_path_factory.mktemp("default-widths-run"),
+        grants=GRANTS,
+        view_id=cat.VIEW_ID,
+        bbox=BBOX,
+        k=K,
+        filters={"department": {"eq": FILTER_DEPARTMENT}},
+    )
+    plan = [
+        Build(),
+        *(_write_stage(i, fx[2 * i : 2 * i + 2]) for i in range(4)),
+        MergeAndCoalesce("merge-and-coalesce"),
+    ]
+    try:
+        yield {r.label: r for r in run_plan(h, plan)}
+    finally:
+        h.stop()
+
+
+def test_a_merge_and_coalesce_on_one_tick_change_nothing(default_width_results):
+    result = default_width_results["merge-and-coalesce"]
+    check(result)
+    assert result.delta == Nothing()
 
 
 # -- negative controls -------------------------------------------------------------------------

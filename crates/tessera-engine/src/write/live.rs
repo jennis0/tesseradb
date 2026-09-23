@@ -28,6 +28,15 @@ pub(in crate::write) type AcceptedBatches = FxHashMap<String, AcceptedBatch>;
 /// extension id to hand out.
 pub(in crate::write) type ResolverState = (FxHashMap<Vec<u8>, TermId>, u32);
 
+/// The layer registry as a side-manifest carries it, with the allocator's row-less mark.
+pub(in crate::write) struct RegistryForPublication {
+    pub layers: Vec<tessera_types::layer::RegisteredLayer>,
+    pub tombstones: Vec<String>,
+    /// The registry's version counter.
+    pub version: u64,
+    pub low_water: u64,
+}
+
 /// State the handler side reads and the executor thread writes.
 ///
 /// Each field carries its own lock because it is read concurrently by a request path that is not
@@ -147,10 +156,7 @@ impl LiveState {
     /// Everything not yet in a manifest, packed and ready. See [`ArtifactStore::unpublished`].
     pub(in crate::write) fn unpublished_memberships(
         &self,
-    ) -> (
-        Vec<tessera_lifecycle::membership::PendingExtent>,
-        Vec<(String, u32)>,
-    ) {
+    ) -> Vec<tessera_lifecycle::membership::PendingExtent> {
         lock_recover(&self.artifacts).unpublished()
     }
 
@@ -417,19 +423,19 @@ impl LiveState {
         lock_recover(&self.roster).snapshot()
     }
 
-    /// The registry as a manifest carries it, plus the mark that must be published beside it.
-    ///
-    /// The three travel together, which is why one lock returns them. A manifest carrying a
-    /// layer whose reserved run sits above the published mark would, at the next restart, hand
-    /// that run out again. Reading them separately, with a registration in between, is a way to
-    /// publish exactly that inconsistency.
-    pub(in crate::write) fn registry_for_publication(
-        &self,
-    ) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
+    /// The registry as a manifest carries it, read under one lock so that no registration lands
+    /// between its parts: a layer whose reserved run sat above the published mark would have that
+    /// run handed out again at the next restart.
+    pub(in crate::write) fn registry_for_publication(&self) -> RegistryForPublication {
         let registry = lock_recover(&self.registry);
         let low_water = lock_recover(&self.allocator).low_water();
         let (layers, tombstones) = registry.snapshot();
-        (layers, tombstones, low_water)
+        RegistryForPublication {
+            layers,
+            tombstones,
+            version: registry.version(),
+            low_water,
+        }
     }
 
     pub(crate) fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {

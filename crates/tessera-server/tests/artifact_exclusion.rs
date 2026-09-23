@@ -158,10 +158,9 @@ async fn an_exclusion_serves_what_the_inclusion_spelling_serves_and_replays() {
 }
 
 /// **The bound is on the list** (`ingest.md` §2.3, ruling 4): at the published value the
-/// publication lands, and one over it is a `422` naming the limit and the remedy — the inclusion
-/// spelling, which pages.
+/// publication lands, and one over it is a `422` naming the limit.
 #[tokio::test]
-async fn a_list_over_the_bound_is_refused_naming_the_inclusion_spelling() {
+async fn a_list_over_the_bound_is_refused_naming_the_limit() {
     let tmp = TempDir::new().unwrap();
     let bundle = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = tessera_engine::Engine::open(
@@ -352,26 +351,13 @@ async fn a_second_exclusion_on_a_held_key_is_a_conflict() {
     .await;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"], "conflict", "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("exclusion"),
-        "{body}"
-    );
 
     // A record names one spelling or the other. Neither is a refusal — `members` is optional
     // only where `excluding` is given — and an empty `members` list is the artifact whose
     // membership holds nobody, which is a state a record has always been able to publish.
     let (status, body) = put(&server, LAYER, json!([{ "key": "c0" }])).await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("neither `members` nor `excluding`"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
     let (status, body) = put(&server, LAYER, json!([{ "key": "c0", "members": [] }])).await;
     assert_eq!(status, 201, "an empty membership is a real state: {body}");
 

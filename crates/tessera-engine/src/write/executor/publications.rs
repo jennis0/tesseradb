@@ -228,14 +228,27 @@ impl Executor {
 
         let unit = self.coalesce.start();
         let health = Arc::clone(&self.health);
+        let windows = plan.windows();
         self.deps.pool.spawn(move || {
             match crate::coalesce::execute_coalesce(plan, ctx) {
-                Ok(completed) => unit.complete(completed),
+                Ok(completed) => {
+                    // A failed window stays listed and the rest of the pass publishes.
+                    for e in &completed.failures {
+                        health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            error = %e,
+                            "a coalesce window failed; its extents stay as they are, and the \
+                             same window is retried at every tick until something changes"
+                        );
+                    }
+                    unit.complete(completed)
+                }
                 Err(e) => {
                     // Nothing happened, retry next tick: the manifest is the only commit point,
                     // so a failure before it leaves orphan files nothing references and every
                     // consumed entry still stands.
-                    health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                    health.coalesce_failures.fetch_add(windows, Ordering::Relaxed);
+                    health.coalesce_passes_failed.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
                         error = %e,
                         "an entity-space coalesce failed; the axes it would have bounded keep \
@@ -320,7 +333,7 @@ impl Executor {
     /// Nothing waits on the rebuild: a value in the side map is suggested exactly as one in the
     /// base is, so a rebuild that never finishes costs residency, not a missing answer.
     pub(super) fn dispatch_suggest_rebuild(&mut self) {
-        if self.suggest.in_flight() {
+        if self.suggest.outstanding() {
             return;
         }
         let generation = self.generation.load_full();
@@ -681,10 +694,12 @@ impl Executor {
         }
         // Every counted discard below is the same posture, so it is one closure rather than the
         // shape repeated. It owns what it reports, so it borrows nothing the sequence below needs.
+        let taken = completed.windows();
         let discard = {
             let health = Arc::clone(&self.health);
             move |reason: &str| {
-                health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                health.coalesce_failures.fetch_add(taken, Ordering::Relaxed);
+                health.coalesce_passes_failed.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     "ALARM: discarding a completed coalesce: {reason}. Its files are orphans, \
                      every consumed entry still stands, and the next tick re-plans"
@@ -872,6 +887,9 @@ impl Executor {
                 // serving the pre-coalesce sidecar, which answers identically.
                 self.health
                     .coalesce_failures
+                    .fetch_add(taken, Ordering::Relaxed);
+                self.health
+                    .coalesce_passes_failed
                     .fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     error = %e,
@@ -917,6 +935,9 @@ impl Executor {
                 // The manifest is already committed, as at the sidecar exit above.
                 self.health
                     .coalesce_failures
+                    .fetch_add(taken, Ordering::Relaxed);
+                self.health
+                    .coalesce_passes_failed
                     .fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     tier = %rel,
@@ -1540,12 +1561,6 @@ impl Executor {
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.manifest.clone();
             write_deny_state(&mut manifest, &live.overlay);
-            // The registry travels with this publication too, and not only with a flush. A
-            // manifest naming memberships for a layer it does not declare is internally
-            // inconsistent, and at open the layer's reserved runs are what turn an ordinal into
-            // an entity, so the extents would be skipped whole and every artifact would come back
-            // absent. The two are written together or the manifest is wrong.
-            self.write_live_state(&mut manifest, &live.vocabularies);
             // Membership extents are written before the manifest that names them, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -1776,18 +1791,7 @@ impl Executor {
         partition: &str,
         n: u64,
     ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
-        let (ready, skipped) = self.live.unpublished_memberships();
-        for (layer, level) in skipped {
-            // Unreachable while publication is append-only, and alarmed rather than asserted: an
-            // extent addresses a dense ordinal range, so packing around a hole would shift every
-            // later artifact's identity by one.
-            tracing::error!(
-                layer = %layer,
-                level,
-                "ALARM: a level has a hole below its ordinal high-water, so its memberships are \
-                 not published; they stay WAL-durable and the log stays pinned"
-            );
-        }
+        let ready = self.live.unpublished_memberships();
         pack_membership_extents(prefix_dir, partition, n, ready)
     }
 
@@ -2023,14 +2027,6 @@ impl Executor {
                 .map(|s| s.entity_id_high_water)
                 .unwrap_or(0),
         );
-        // The row-less half of the same obligation. A flush is the routine publication, so it is
-        // where a registration, a create or a declaration made since the last one stops depending
-        // on the WAL surviving: rotation reclaims their records, and without this the mark and
-        // everything it covers go with them.
-        self.write_live_state(&mut manifest, &live.vocabularies);
-        n = self
-            .health
-            .flush_lap(crate::flush::FlushStage::ManifestLiveState, n);
         // And the group-scoped columns this flush gave a view its first of. Carried forward and
         // appended to, never restated: the list is what a restart recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
@@ -2049,17 +2045,15 @@ impl Executor {
                 manifest.scoped_columns.push(entry);
             }
         }
-        // The segment's own four manifest lists, taken together or not at all: a values-only
-        // publication wrote none of the files they name.
+        // The segment's own manifest lists, taken together or not at all: a values-only
+        // publication wrote none of the files they name, and a flush of joins alone wrote no run.
         if let Some(segment) = &completed.segment {
             manifest.segments.push(segment.descriptor.clone());
             manifest.deltas.push(segment.tier_path.clone());
-            manifest
-                .external_id_runs
-                .push(segment.external_id_run.clone());
-            manifest
-                .locator_extents
-                .push(segment.locator_extent.clone());
+            if let Some(extent) = &segment.locator_extent {
+                manifest.external_id_runs.push(extent.external_id_run.clone());
+                manifest.locator_extents.push(extent.clone());
+            }
         }
         manifest.files.extend(completed.files);
         if let Some(extent) = completed.dict_extent {
@@ -2416,6 +2410,7 @@ mod dispatch_rules_tests {
             fills: Vec::new(),
             consumed_fills: Vec::new(),
             consumed_scoped_fills: Vec::new(),
+            recorded_joins: Vec::new(),
         }
     }
 

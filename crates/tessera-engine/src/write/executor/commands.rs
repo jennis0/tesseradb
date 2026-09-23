@@ -417,8 +417,10 @@ impl Executor {
             reply.fail(e);
             return;
         }
+        let served = self.generation.load_full();
+        let views = crate::write::ServedViews(&served.bundle.manifest);
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
-            registry.prepare_put(&layer, level, &incoming, store, alloc)
+            registry.prepare_put(&layer, level, &incoming, store, alloc, &views)
         });
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -684,7 +686,7 @@ impl Executor {
         // `ArtifactStore::remove_layer` is reached from nowhere: a drop touches the registry and
         // stops there. Releasing it changes what the next fold repacks and how far back the
         // rotation pin holds the log.
-        if let WalRecord::LayerDrop { name } = &record {
+        if let WalRecord::LayerDrop { name, .. } = &record {
             // The deltas held for the tick describe forms that are going with the layer.
             self.pending_forms.retain(|(layer, _), _| layer != name);
             self.deps.artifact_projections.forget(name);
@@ -1290,25 +1292,27 @@ impl Executor {
         };
         // The codes, drawn into a minter this thread owns and nothing has published. A draw that
         // exhausts the width refuses with nothing appended and no binding anywhere.
-        let mut minter = tessera_store::vocabulary::VocabularyMinter::new(
+        let mut minter = match tessera_store::vocabulary::VocabularyMinter::declared(
             compiled.name.clone(),
             compiled.kind,
             compiled.visibility,
             compiled.width,
-        );
-        for &code in &compiled.reserved {
-            minter.seed_reserved(code);
-        }
+            &compiled.reserved,
+            [],
+            request.values.iter().map(|v| v.key.as_str()),
+        ) {
+            Ok(minter) => minter,
+            Err(e) => {
+                reply.fail(ExecError::VocabularyRefused {
+                    detail: e.to_string(),
+                });
+                return;
+            }
+        };
         let mut codes = Vec::with_capacity(request.values.len());
         for value in &request.values {
-            match minter.mint(&value.key) {
-                Ok(minted) => codes.push((value.key.clone(), minted.code())),
-                Err(e) => {
-                    reply.fail(ExecError::VocabularyRefused {
-                        detail: e.to_string(),
-                    });
-                    return;
-                }
+            if let Some(code) = minter.code_of(&value.key) {
+                codes.push((value.key.clone(), code));
             }
             if let Some(title) = &value.title {
                 minter.set_title(&value.key, title.clone());
@@ -1543,16 +1547,29 @@ impl Executor {
         }
         self.live.with_roster(|roster| roster.apply(&record));
         let fills_dropped = self.publish_roster(&generation, started, &ids);
+        let served = self.generation.load_full();
+        let retired = self.live.with_publication_state(|registry, store, _| {
+            crate::write::retire_dead_view_artifacts(registry, store, &served.bundle.manifest)
+        });
+        for (layer, _) in &retired.levels {
+            self.pending_forms.retain(|(held, _), _| held != layer);
+            self.deps.artifact_projections.forget(layer);
+            self.deps.lineages.forget(layer);
+            self.deps.level_contents.forget(layer);
+        }
         self.side_manifests.behind_live = true;
         // Ordinary deletions, through the ordinary lane. They are appended, fsynced and applied by
         // the same path a `/control/changes` delete takes, so they retire at the fold and nowhere
         // else. A failure here is reported the way that lane reports one, in force and possibly
         // not durable, and does not un-drop the view, which is already acknowledged as far as the
         // log is concerned.
+        // An artifact of another view attached to a retired one is deleted with its own
+        // dependents, as a deletion of its target would delete it.
         let deleted = dangling.len() as u64;
-        if !dangling.is_empty() {
+        if !dangling.is_empty() || !retired.dependents.is_empty() {
             let mut entries: Vec<DenyEntry> = dangling
                 .into_iter()
+                .chain(retired.dependents)
                 .map(|entity| DenyEntry {
                     record: WalRecord::ChangeByEntity {
                         entity_id: entity,

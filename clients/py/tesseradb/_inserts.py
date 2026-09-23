@@ -34,7 +34,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ._refusal import Refusal
-from ._reports import Printed
+from ._reports import Summarised, _count
 
 #: Where a frame inserted after the first commit is written. Not `sources/`: `tessera check` reads
 #: every key of `[sources]` as a file the declaration is built from.
@@ -158,9 +158,14 @@ CONTRACTS: dict[tuple[str, str], Contract] = {
 PROJECTED = {"x": "lon", "y": "lat"}
 
 
-@dataclass
-class Insert(Printed):
-    """One table bound to one declared thing, and the columns it reads."""
+@dataclass(repr=False)
+class Insert(Summarised):
+    """One table bound to one declared thing, and the columns it reads.
+
+    It shows as one line: the target, the rows, the columns read and how many were ignored.
+    `columns` is what the call named, `read` and `ignored` the table's columns in its own order,
+    and `path` where the rows are, `in_place` saying whether that is the file the call gave.
+    """
 
     target: str
     #: The block kind the target is: `view`, `view_group`, `attribute`, `layer`, `labels` or
@@ -205,21 +210,17 @@ class Insert(Printed):
         """The rows, read back from wherever this insert put them."""
         return pq.read_table(self.path)
 
-    def lines(self) -> list[str]:
-        """What this insert prints: the columns it read, and the columns it ignored."""
-        where = "read in place" if self.in_place else "written to " + str(self.declared_path)
-        named = ", ".join(f"{role}={column!r}" for role, column in self.columns.items())
-        into = f"{self.kind} {self.target!r}"
+    def summary(self) -> list[str]:
+        into = self.target if self.role in ("rows", "key", "values") else (
+            f"{self.target} ({self.role})"
+        )
         if self.view_key is not None:
-            into += f", view {self.view_key!r}"
-        out = [
-            f"insert into {into} ({self.role}): {self.rows} row(s), {where}",
-            f"  read:    {', '.join(self.read) or 'nothing'}",
-            f"  ignored: {', '.join(self.ignored) or 'nothing'}",
+            into += f", view {self.view_key}"
+        ignored = f"; ignored {', '.join(self.ignored)}" if self.ignored else ""
+        return [
+            f"{into}: {_count(self.rows, 'row')} "
+            f"(read {', '.join(self.read) or 'nothing'}{ignored})"
         ]
-        if named:
-            out.insert(1, f"  columns: {named}")
-        return out
 
 
 #: The integer types an id column may be read as, by the name `str(type)` gives them. The build

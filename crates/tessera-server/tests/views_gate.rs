@@ -384,14 +384,17 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                     name: "mood".to_string(),
                     title: None,
                     value_set: ValueSet::Closed,
-                    visibility: tessera_build::config::Visibility::Public,
                     width: ScalarType::U8,
-                    codes: MOODS
-                        .iter()
-                        .enumerate()
-                        .map(|(i, key)| (key.to_string(), i as u32 + 1))
-                        .collect(),
-                    titles: std::collections::BTreeMap::new(),
+                    values: tessera_build::config::VocabularyMinter::declared(
+                        "mood",
+                        tessera_build::config::VocabularyKind::Declared,
+                        tessera_build::config::Visibility::Public,
+                        ScalarType::U8,
+                        &[],
+                        MOODS.iter().zip(1..).map(|(key, code)| (*key, code)),
+                        [],
+                    )
+                    .expect("distinct pinned codes"),
                     reserved: Vec::new(),
                 },
             )]),
@@ -775,6 +778,26 @@ fn leaf(column: &str) -> Value {
     json!({ column: {"range": {"gte": 5.0}} })
 }
 
+/// Assert that filtering `world` on `spelling` with `operand` is refused for `token` exactly as a
+/// column that was never declared is: the same code and the same detail once the caller's own
+/// name is taken out.
+async fn refused_as_undeclared(served: &Served, token: &str, spelling: &str, operand: Value) {
+    let base = spelling.split('@').next().unwrap();
+    let never = spelling.replacen(base, "never_declared", 1);
+    let mut shapes = Vec::new();
+    for (name, stem) in [(spelling, base), (never.as_str(), "never_declared")] {
+        let (status, body) = viewport(served, token, "world", Some(json!({ name: operand }))).await;
+        assert_eq!(status, 422, "{name}: {body}");
+        assert_eq!(body["error"], "contract", "{name}: {body}");
+        let detail = body["detail"].as_str().unwrap_or_default();
+        shapes.push(detail.replace(name, "").replace(stem, ""));
+    }
+    assert_eq!(
+        shapes[0], shapes[1],
+        "{spelling} is refused as a column that was never declared"
+    );
+}
+
 /// **For a principal who cannot reach the group, the scoped attribute is undeclared**
 /// (`views.md` §5): absent from `filter_operands`, and both spellings — bare and pinned — take the
 /// ordinary unknown-column `422`, which names no group and confirms no key.
@@ -805,23 +828,20 @@ async fn a_scoped_attribute_collapses_whole_outside_its_groups_gate() {
     );
 
     for spelling in ["sentiment", "sentiment@s1", "sentiment@#0"] {
-        let (status, body) = viewport(&served, &outsider, "world", Some(leaf(spelling))).await;
-        assert_eq!(status, 422, "{spelling} is refused as an unknown column");
+        let (_, body) = viewport(&served, &outsider, "world", Some(leaf(spelling))).await;
         let detail = body["detail"].as_str().unwrap_or_default().to_string();
-        assert!(
-            detail.contains("not a filterable column"),
-            "{spelling}: {detail}"
-        );
         assert!(
             !detail.contains("sealed"),
             "the refusal must not name the group: {detail}"
         );
+        refused_as_undeclared(&served, &outsider, spelling, json!({"range": {"gte": 5.0}})).await;
     }
 
     // The holder gets the ordinary answers instead: a bare leaf under a view that decides nothing
     // is the `422` naming the group, and a pin resolves.
     let (status, body) = viewport(&served, &holder, "world", Some(leaf("sentiment"))).await;
     assert_eq!(status, 422);
+    assert_eq!(body["error"], "contract", "{body}");
     assert!(
         body["detail"].as_str().unwrap().contains("sealed"),
         "a principal inside the gate is told which group to pin: {body}"
@@ -864,24 +884,21 @@ async fn the_category_text_and_render_only_families_collapse_at_the_same_site() 
         assert!(!out.contains(&column.to_string()), "{column}: {out:?}");
     }
 
-    for (spelling, body) in [
-        ("mood", json!({"mood": {"eq": "calm"}})),
-        ("mood@s1", json!({"mood@s1": {"eq": "calm"}})),
-        ("note", json!({"note": {"match": "calm"}})),
-        ("note@s1", json!({"note@s1": {"match": "calm"}})),
-        ("glow", json!({"glow": {"range": {"gte": 1.0}}})),
-        ("glow@s1", json!({"glow@s1": {"range": {"gte": 1.0}}})),
-        ("tint", json!({"tint": {"eq": "calm"}})),
-        ("tint@s1", json!({"tint@s1": {"eq": "calm"}})),
+    for (spelling, operand) in [
+        ("mood", json!({"eq": "calm"})),
+        ("mood@s1", json!({"eq": "calm"})),
+        ("note", json!({"match": "calm"})),
+        ("note@s1", json!({"match": "calm"})),
+        ("glow", json!({"range": {"gte": 1.0}})),
+        ("glow@s1", json!({"range": {"gte": 1.0}})),
+        ("tint", json!({"eq": "calm"})),
+        ("tint@s1", json!({"eq": "calm"})),
     ] {
-        let (status, answer) = viewport(&served, &outsider, "world", Some(body)).await;
-        assert_eq!(status, 422, "{spelling}");
+        let filter = json!({ spelling: operand.clone() });
+        let (_, answer) = viewport(&served, &outsider, "world", Some(filter)).await;
         let detail = answer["detail"].as_str().unwrap_or_default().to_string();
-        assert!(
-            detail.contains("not a filterable column"),
-            "{spelling}: {detail}"
-        );
         assert!(!detail.contains("sealed"), "{spelling}: {detail}");
+        refused_as_undeclared(&served, &outsider, spelling, operand).await;
     }
 
     // The value list, the surface a category has and no other family does. The outsider gets the

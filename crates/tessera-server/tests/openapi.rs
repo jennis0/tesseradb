@@ -19,6 +19,9 @@
 
 mod common;
 
+use std::path::Path;
+use std::sync::OnceLock;
+
 use arrow::array::{Float32Array, StringArray};
 use base64::Engine as _;
 use common::*;
@@ -68,10 +71,17 @@ fn assert_invalid(doc: &Value, schema: &str, instance: &Value) {
     );
 }
 
-/// The error envelope on a refusal: the status the description declares, one closed code, and
-/// — on a 429 — `Retry-After` agreeing with the body. Returns the body for further asserts.
+/// The error envelope on a refusal: a status the description declares for the route, one closed
+/// code, and — on a 429 — `Retry-After` agreeing with the body. Returns the body for further
+/// asserts.
 async fn assert_refusal(doc: &Value, resp: reqwest::Response, status: u16, code: &str) -> Value {
     assert_eq!(resp.status().as_u16(), status);
+    let path = resp.url().path().to_string();
+    let responses = described_responses(doc, &path);
+    assert!(
+        responses.get(status.to_string()).is_some(),
+        "{path} answered {status}, which the description does not declare for it"
+    );
     let retry_after = resp
         .headers()
         .get("retry-after")
@@ -95,6 +105,36 @@ async fn assert_refusal(doc: &Value, resp: reqwest::Response, status: u16, code:
         assert!(body.get("retry_after_s").is_none());
     }
     body
+}
+
+/// The `responses` the description declares for the route `path` was sent to. A literal segment
+/// outranks a parameter, so `/v1/artifacts/browse` is not read as `/v1/artifacts/{tessera_id}`;
+/// every described path has one operation.
+fn described_responses<'a>(doc: &'a Value, path: &str) -> &'a Value {
+    let sent: Vec<&str> = path.split('/').collect();
+    let (_, item) = doc["paths"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter_map(|(template, item)| {
+            let described: Vec<&str> = template.split('/').collect();
+            if described.len() != sent.len() {
+                return None;
+            }
+            let mut literal = 0;
+            for (d, s) in described.iter().zip(&sent) {
+                if d == s {
+                    literal += 1;
+                } else if !d.starts_with('{') {
+                    return None;
+                }
+            }
+            Some((literal, item))
+        })
+        .max_by_key(|(literal, _)| *literal)
+        .unwrap_or_else(|| panic!("{path} is not a described route"));
+    let (_, operation) = item.as_object().unwrap().iter().next().unwrap();
+    &operation["responses"]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -129,9 +169,9 @@ type     = "f32"
 render   = true
 "#;
 
-fn build_bundle(tmp: &TempDir) -> std::path::PathBuf {
-    let points = tmp.path().join("points.parquet");
-    let pairs = tmp.path().join("pairs.parquet");
+fn build_bundle(dir: &Path) {
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
     let ids: Vec<u64> = (0..N).collect();
     let archive = StringArray::from_iter_values(
         ids.iter()
@@ -148,9 +188,13 @@ fn build_bundle(tmp: &TempDir) -> std::path::PathBuf {
         ],
     );
     write_pairs_n(&pairs, N);
-    let bundle_root = tmp.path().join("bundle");
-    build_declared(&bundle_root, &points, &pairs, SCHEMA_TOML);
-    bundle_root
+    build_declared(&dir.join("bundle"), &points, &pairs, SCHEMA_TOML);
+}
+
+/// A copy of [`build_bundle`]'s bundle in `tmp`, built once for this binary.
+fn copy_bundle(tmp: &TempDir) -> std::path::PathBuf {
+    static BUILT: OnceLock<TempDir> = OnceLock::new();
+    copy_built(&BUILT, tmp.path(), build_bundle)
 }
 
 const LAYER: &str = "clusters/a";
@@ -227,7 +271,7 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let tmp = TempDir::new().unwrap();
-    build_bundle(&tmp);
+    copy_bundle(&tmp);
     let server = open(&tmp).await;
     let artifacts = publish_layer(&server).await;
     Fixture {
@@ -382,9 +426,8 @@ fn every_429_in_the_description_requires_retry_after() {
     }
 }
 
-/// The ruled `layers` semantics are in the schema: an array, or the literal string `"all"`, and
-/// nothing else. The server in this tree does not yet accept the string — see
-/// [`an_omitted_layers_field_means_no_artifacts_frame`] — so this is the shape alone.
+/// The `layers` field is an array or the literal string `"all"` in the schema, and nothing else.
+/// What the server does with each is `viewport_membership.rs`' to assert.
 #[test]
 fn the_layers_field_is_an_array_or_the_string_all() {
     let doc = description();
@@ -529,7 +572,7 @@ async fn authorise_and_revoke_match_the_description() {
 async fn a_saturated_gate_sheds_authorise_with_the_described_429() {
     let doc = description();
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_bundle(&tmp);
+    let bundle_root = copy_bundle(&tmp);
     // No slots at all: every admission is shed before any wait.
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
@@ -900,44 +943,6 @@ async fn viewport_carries_the_described_headers_and_framing() {
     assert_refusal(&doc, resp, 404, "unknown").await;
     let resp = viewport(&f.server, "not-a-token", &viewport_body(json!({}))).await;
     assert_refusal(&doc, resp, 401, "bad-credential").await;
-}
-
-/// **The ruled semantics of an omitted `layers`, at the wire.** Owner ruling 2026-08-25: omitted
-/// or `[]` means *no* layers, the string `"all"` means every reachable layer. The server change
-/// landed, and this test runs — it was written against the ruled behaviour before the server had
-/// it, `#[ignore]`d with that reason, and enabled at integration.
-///
-/// What it pins that its siblings do not is the pair *at one principal in one fixture*: the same
-/// broad token, the same request but for the field, absent giving no artifacts frame and `"all"`
-/// giving both reachable artifacts. `viewport_membership.rs`'s
-/// `omitted_layers_means_none_and_the_word_all_means_every_reachable_layer` pins the same ruling
-/// against the engine's membership columns, and
-/// [`the_layers_field_is_an_array_or_the_string_all`] pins the shape the description accepts.
-#[tokio::test]
-async fn an_omitted_layers_field_means_no_artifacts_frame() {
-    let doc = description();
-    let f = fixture().await;
-    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-
-    let resp = viewport(&f.server, token, &viewport_body(json!({ "k": 0 }))).await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    assert!(decoded.artifacts.is_none(), "omitted `layers` is no layers");
-
-    let resp = viewport(
-        &f.server,
-        token,
-        &viewport_body(json!({ "k": 0, "layers": "all" })),
-    )
-    .await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    assert_eq!(
-        decoded.artifacts.map(|a| a.len()),
-        Some(2),
-        "\"all\" is every reachable layer"
-    );
 }
 
 #[tokio::test]
@@ -1359,11 +1364,15 @@ async fn every_viewer_route_requires_a_session_token() {
                 if kind != Malformed::No {
                     let resp =
                         send_viewer_probe(&f.server, &method, path, kind, Some(token)).await;
-                    assert_eq!(
-                        resp.status().as_u16(),
-                        with_token,
-                        "{method} {path} ({kind:?}) with a valid token"
-                    );
+                    if kind == Malformed::Shape {
+                        assert_refusal(&doc, resp, with_token, "contract").await;
+                    } else {
+                        assert_eq!(
+                            resp.status().as_u16(),
+                            with_token,
+                            "{method} {path} ({kind:?}) with a valid token"
+                        );
+                    }
                 }
             }
         }
@@ -1520,11 +1529,15 @@ async fn both_session_routes_require_the_credential_before_the_body() {
         for (kind, status) in malformed {
             let req = f.server.client.post(url.clone()).bearer_auth(SESSION_CREDENTIAL);
             let resp = with_body(req, kind, body).send().await.unwrap();
-            assert_eq!(
-                resp.status().as_u16(),
-                status,
-                "POST {path} ({kind:?}) with the session credential"
-            );
+            if kind == Malformed::Shape {
+                assert_refusal(&doc, resp, status, "contract").await;
+            } else {
+                assert_eq!(
+                    resp.status().as_u16(),
+                    status,
+                    "POST {path} ({kind:?}) with the session credential"
+                );
+            }
         }
     }
 }

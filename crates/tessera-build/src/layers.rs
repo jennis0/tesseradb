@@ -535,6 +535,8 @@ pub struct PublishedLayers {
     /// unscoped layer, whose one set is drawn on every view it names.
     pub artifact_views: BTreeMap<String, BTreeMap<(u32, u32), String>>,
     pub layers: Vec<RegisteredLayer>,
+    /// The registry's version counter as the build leaves it.
+    pub registry_version: u64,
     /// Edges whose child escapes its parent's membership — reported, never acted on.
     pub containment_violations: Vec<ContainmentViolation>,
     /// Per-parent coverage: how much of each split its children hold between them.
@@ -596,6 +598,7 @@ impl Default for PublishedLayers {
     fn default() -> Self {
         PublishedLayers {
             layers: Vec::new(),
+            registry_version: 0,
             artifact_views: BTreeMap::new(),
             containment_violations: Vec::new(),
             split_coverage: Vec::new(),
@@ -936,8 +939,8 @@ fn read_artifacts(
         let spaces = space_column(path, &batch, fields)?;
         let level = optional_u32(path, &batch, LEVEL)?;
         let contents = optional_ranked_values(path, &batch, fields, "contents")?;
-        let members = optional_u64_list(path, &batch, fields, "members")?;
-        let excluding = optional_u64_list(path, &batch, fields, "excluding")?;
+        let members = optional_u64_list(path, &batch, fields, "members", ids)?;
+        let excluding = optional_u64_list(path, &batch, fields, "excluding", ids)?;
         let target_layer = optional_utf8(path, &batch, fields, "attached_layer")?;
         let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
@@ -1033,10 +1036,10 @@ fn read_artifacts(
             // carried.
             let membership = match (&members, &excluding) {
                 (Some(column), _) => {
-                    PlannedMembership::Included(u64s_at(path, column, row, &address.2, ids)?)
+                    PlannedMembership::Included(u64s_at(path, column, row, &address.2)?)
                 }
                 (_, Some(column)) => {
-                    PlannedMembership::Excluded(u64s_at(path, column, row, &address.2, ids)?)
+                    PlannedMembership::Excluded(u64s_at(path, column, row, &address.2)?)
                 }
                 (None, None) => PlannedMembership::default(),
             };
@@ -1114,8 +1117,8 @@ fn plan_inline(
             view_key: None,
             membership: match (&row.members, &row.excluding) {
                 // Both is refused at parse, where the declaration can name the artifact.
-                (Some(members), _) => PlannedMembership::Included(members.clone()),
-                (_, Some(excluding)) => PlannedMembership::Excluded(excluding.clone()),
+                (Some(members), _) => PlannedMembership::Included(inline_ids(members)),
+                (_, Some(excluding)) => PlannedMembership::Excluded(inline_ids(excluding)),
                 (None, None) => PlannedMembership::default(),
             },
             contents: row
@@ -1615,6 +1618,30 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
 /// the point region's mark — passed so the allocator refuses rather than letting the two regions
 /// meet unnoticed.
 #[allow(clippy::too_many_arguments)]
+/// The views this build writes, each at the incarnation a build gives it.
+struct DeclaredViews<'a>(&'a [String]);
+
+impl tessera_lifecycle::GroupViews for DeclaredViews<'_> {
+    fn incarnation_of(
+        &self,
+        group: &str,
+        key: &str,
+    ) -> Option<tessera_types::view::ViewIncarnation> {
+        let id = format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR);
+        self.0
+            .contains(&id)
+            .then_some(tessera_types::view::DECLARED_INCARNATION)
+    }
+    fn keys_of(&self, group: &str) -> Vec<String> {
+        self.0
+            .iter()
+            .filter_map(|id| id.split_once(tessera_store::GROUP_SEPARATOR))
+            .filter(|(held, _)| *held == group)
+            .map(|(_, key)| key.to_string())
+            .collect()
+    }
+}
+
 pub fn publish(
     plan: &mut LayerPlan,
     resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
@@ -1859,6 +1886,7 @@ pub fn publish(
                     &store,
                     &mut alloc,
                     &tessera_lifecycle::no_pending,
+                    &DeclaredViews(views),
                 )
                 .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
             // The record carries its own copy of every membership, so the bitmaps this built are
@@ -1890,12 +1918,6 @@ pub fn publish(
             let batch_lo = ordinal_lo + start as u32;
             let batch_len = (end - start) as u32;
             for blob in store.encode_pending(layer, level, batch_lo, batch_len) {
-                let blob = blob.ok_or_else(|| {
-                    BuildError::Invalid(format!(
-                        "{layer} level {level} has no record at an ordinal this publication just \
-                         assigned"
-                    ))
-                })?;
                 writer.push(&blob).map_err(BuildError::Store)?;
             }
             // The bytes are in the writer, so the store's own bitmaps have one reader left — the
@@ -1948,6 +1970,7 @@ pub fn publish(
     let (layers, _tombstones) = registry.snapshot();
     let mut published = PublishedLayers {
         layers,
+        registry_version: registry.version(),
         artifact_views,
         containment_violations: violations,
         split_coverage: coverage,
@@ -2232,8 +2255,8 @@ pub fn predicate_artifact_keys(
         let mut key_of_code: BTreeMap<u32, &str> = BTreeMap::new();
         if let Some(name) = &attribute.vocabulary {
             if let Some(vocabulary) = schema.vocabularies.get(name) {
-                for (key, code) in &vocabulary.codes {
-                    key_of_code.insert(*code, key.as_str());
+                for (key, code) in vocabulary.values.bindings() {
+                    key_of_code.insert(code, key);
                 }
             }
             if let Some(minter) = minters.get(name) {
@@ -3060,17 +3083,7 @@ fn write_membership_extents(
     published: &mut PublishedLayers,
     streamed: &mut BTreeMap<(String, u32), StreamedPack>,
 ) -> Result<()> {
-    let (ready, skipped) = store.pending_ranges();
-    if let Some((layer, level)) = skipped.first() {
-        // Unreachable from a build: every artifact of a level is published in one batch, so a
-        // level cannot have a hole below its high-water. A refusal rather than an alarm, because a
-        // build can simply not produce the bundle.
-        return Err(BuildError::Invalid(format!(
-            "{layer} level {level} has a hole in its ordinals, so its memberships cannot be packed \
-             — an extent addresses a dense range and packing around a hole shifts every later \
-             artifact's identity by one"
-        )));
-    }
+    let ready = store.pending_ranges();
     if ready.is_empty() {
         return Ok(());
     }
@@ -3121,16 +3134,6 @@ fn write_membership_extents(
                         .map_err(BuildError::Store)?;
                 let mut pushed = 0u32;
                 for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
-                    // Unreachable: `pending_ranges` reports a level with a hole as skipped above
-                    // rather than as a range. A refusal rather than an assertion because the
-                    // alternative is an extent one blob short of the range it addresses, which
-                    // serves every ordinal above the hole as another artifact's membership.
-                    let blob = blob.ok_or_else(|| {
-                        BuildError::Invalid(format!(
-                            "{layer} level {level} has no record at an ordinal inside the range \
-                             it reported as ready to pack"
-                        ))
-                    })?;
                     writer.push(&blob).map_err(BuildError::Store)?;
                     pushed += 1;
                 }
@@ -3501,16 +3504,16 @@ fn optional_utf8<'a>(
 
 /// One member table batch's `entity` column, at whichever type the declaration spells identity.
 ///
-/// The integer route hands back the `uint64` column itself, with no copy. A supplied id column is
-/// resolved to the source ids the build joins on, one per row; a key no points file carries
-/// becomes [`crate::ids::NO_SOURCE_ID`], which is the refusal an unknown integer earns where the
-/// member is attached.
-enum MemberEntities<'a> {
-    Integer(&'a UInt64Array),
+/// The integer route reads the column as `uint64` from any integer type a points file's ids may
+/// have. A supplied id column is resolved to the source ids the build joins on, one per row; a key
+/// no points file carries becomes [`crate::ids::NO_SOURCE_ID`], which is the refusal an unknown
+/// integer earns where the member is attached.
+enum MemberEntities {
+    Integer(UInt64Array),
     Supplied(Vec<Option<u64>>),
 }
 
-impl MemberEntities<'_> {
+impl MemberEntities {
     fn is_null(&self, row: usize) -> bool {
         match self {
             MemberEntities::Integer(column) => column.is_null(row),
@@ -3526,12 +3529,12 @@ impl MemberEntities<'_> {
     }
 }
 
-fn member_entities<'a>(
+fn member_entities(
     path: &Path,
-    batch: &'a arrow::record_batch::RecordBatch,
+    batch: &arrow::record_batch::RecordBatch,
     fields: &Fields,
     ids: &crate::ids::IdSpace,
-) -> Result<MemberEntities<'a>> {
+) -> Result<MemberEntities> {
     let column = required(path, batch, fields, "entity")?;
     if let Some(keys) = ids.supplied() {
         keys.require_same_family(
@@ -3552,9 +3555,9 @@ fn member_entities<'a>(
         }
         return Ok(MemberEntities::Supplied(rows));
     }
-    Ok(MemberEntities::Integer(typed(
+    Ok(MemberEntities::Integer(crate::input::id_values(
         path,
-        column,
+        column.as_ref(),
         fields.of("entity"),
     )?))
 }
@@ -3595,14 +3598,33 @@ fn optional_list<'a>(
     }
 }
 
-/// The membership list on an artifact row, included or excluded.
+/// The membership lists on a batch's artifact rows, included or excluded. On the integer route
+/// every row's items are read as `uint64` together; a supplied id column's are resolved row by row.
+struct MembershipLists<'a> {
+    lists: &'a ListArray,
+    items: ListItems<'a>,
+}
+
+enum ListItems<'a> {
+    Integers(UInt64Array),
+    Keys(&'a crate::ids::SuppliedIds),
+}
+
 fn optional_u64_list<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
     fields: &Fields,
     canonical: &str,
-) -> Result<Option<&'a ListArray>> {
-    optional_list(path, batch, fields, canonical)
+    ids: &'a crate::ids::IdSpace,
+) -> Result<Option<MembershipLists<'a>>> {
+    let Some(lists) = optional_list(path, batch, fields, canonical)? else {
+        return Ok(None);
+    };
+    let items = match ids.supplied() {
+        Some(keys) => ListItems::Keys(keys),
+        None => ListItems::Integers(crate::input::id_values(path, lists, fields.of(canonical))?),
+    };
+    Ok(Some(MembershipLists { lists, items }))
 }
 
 /// The ranked `contents` on an artifact row: a list of entries, each a list of values.
@@ -3631,56 +3653,53 @@ fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
     (!column.is_null(row)).then(|| column.value(row))
 }
 
+/// An inline membership's ids, read by the rule every integer id column is.
+fn inline_ids(ids: &[i64]) -> Vec<u64> {
+    crate::ids::integer_ids(&arrow::array::Int64Array::from(ids.to_vec()))
+        .expect("int64 is an integer id type")
+        .values()
+        .to_vec()
+}
+
 /// One row's membership, as source entity ids.
 ///
 /// **A null element is a refusal rather than entity zero**, on the member source's own rule: Arrow
 /// reads the values buffer whatever the validity bitmap says, so a producer whose join missed a row
 /// would otherwise publish the corpus's lowest-numbered document into the artifact.
-fn u64s_at(
-    path: &Path,
-    column: &ListArray,
-    row: usize,
-    key: &str,
-    ids: &crate::ids::IdSpace,
-) -> Result<Vec<u64>> {
-    if column.is_null(row) {
+fn u64s_at(path: &Path, column: &MembershipLists<'_>, row: usize, key: &str) -> Result<Vec<u64>> {
+    if column.lists.is_null(row) {
         return Ok(Vec::new());
     }
-    let values = column.value(row);
-    // **Named the way the declaration names a row** (`crate::ids`): the integer route takes the
-    // list of uint64 it always did, and a supplied id column makes this a list of keys, each
-    // resolved to the source id the build joins on.
-    if let Some(keys) = ids.supplied() {
-        keys.require_same_family(path, key, "members", values.data_type())?;
-        return (0..values.len())
-            .map(|i| {
-                let member =
-                    crate::ids::key_at(values.as_ref(), i).ok_or_else(|| null_member(path, key))?;
-                match keys.rank(&member) {
-                    crate::ids::NO_SOURCE_ID => Err(unknown_member(path, &member)),
-                    source_id => Ok(source_id),
-                }
-            })
-            .collect();
+    // **Named the way the declaration names a row** (`crate::ids`): the integer route takes a
+    // list of any integer type a points file's ids may have, and a supplied id column makes this
+    // a list of keys, each resolved to the source id the build joins on.
+    match &column.items {
+        ListItems::Integers(integers) => {
+            let offsets = column.lists.value_offsets();
+            (offsets[row] as usize..offsets[row + 1] as usize)
+                .map(|i| {
+                    if integers.is_null(i) {
+                        return Err(null_member(path, key));
+                    }
+                    Ok(integers.value(i))
+                })
+                .collect()
+        }
+        ListItems::Keys(keys) => {
+            let values = column.lists.value(row);
+            keys.require_same_family(path, key, "members", values.data_type())?;
+            (0..values.len())
+                .map(|i| {
+                    let member = crate::ids::key_at(values.as_ref(), i)
+                        .ok_or_else(|| null_member(path, key))?;
+                    match keys.rank(&member) {
+                        crate::ids::NO_SOURCE_ID => Err(unknown_member(path, &member)),
+                        source_id => Ok(source_id),
+                    }
+                })
+                .collect()
+        }
     }
-    let ids = values
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| {
-            BuildError::Invalid(format!(
-            "{}: the membership of {key} is a list of {:?}, and this reader takes a list of uint64",
-            path.display(),
-            values.data_type()
-        ))
-        })?;
-    (0..ids.len())
-        .map(|i| {
-            if ids.is_null(i) {
-                return Err(null_member(path, key));
-            }
-            Ok(ids.value(i))
-        })
-        .collect()
 }
 
 /// **A member naming a row no points file carries is refused**, exactly as an integer naming an
@@ -4256,14 +4275,10 @@ pub(crate) fn key_at(key: &KeyColumn, row: usize) -> String {
     key.key_at(row).unwrap_or_else(|| format!("row {row}"))
 }
 
-/// The view one row of a group-scoped layer's source names, checked against the group's roster —
-/// and `None` on an unscoped layer, whose one artifact set is drawn on every view it names
-/// (`views.md` §3.5).
-///
-/// **Read by both of a layer's sources**, the artifacts and the members, because a key means
-/// nothing without it on such a layer: keys are unique per `(layer, view)`, so a member row naming
-/// a key alone could be either of two artifacts, and whichever it joined would be the file's
-/// column order rather than anything the caller wrote.
+/// The view one artifact row of a group-scoped layer names, and `None` on an unscoped layer,
+/// whose one artifact set is drawn on every view it names (`views.md` §3.5). A key means nothing
+/// without it on such a layer: keys are unique per `(layer, view)`. Whether the group has the view
+/// is the registry's rule, checked when the level is published.
 fn view_of_row<'a>(
     path: &Path,
     layer: &str,
@@ -4285,17 +4300,6 @@ fn view_of_row<'a>(
             scope.group
         )));
     };
-    if scope.keys.binary_search_by(|held| held.as_str().cmp(named)).is_err() {
-        return Err(BuildError::Invalid(format!(
-            "{}: {} names view '{named}', which group '{}' has no such key for. Its keys are: {}. \
-             An artifact belongs to one view and its keys are unique per (layer, view), so a key \
-             nobody declared is a refusal rather than an artifact drawn nowhere (views §3.5)",
-            path.display(),
-            key_at(key, row),
-            scope.group,
-            scope.keys.join(", ")
-        )));
-    }
     Ok(Some(named))
 }
 

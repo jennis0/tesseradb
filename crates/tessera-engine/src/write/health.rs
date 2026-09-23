@@ -134,8 +134,10 @@ pub struct ExecutorHealth {
     pub(crate) foreign_side_manifests: AtomicU64,
     /// Entity-space coalesce publications since the executor started.
     pub(crate) coalesces: AtomicU64,
-    /// Coalesces that failed or no longer rebased.
+    /// Coalesce windows that failed, or were lost with a pass that did not publish.
     pub(crate) coalesce_failures: AtomicU64,
+    /// Coalesce passes that wrote a directory and published nothing.
+    pub(crate) coalesce_passes_failed: AtomicU64,
     /// Row-space merge publications.
     pub(crate) merges: AtomicU64,
     pub(crate) merge_failures: AtomicU64,
@@ -435,9 +437,12 @@ pub struct ExecutorStats {
     pub flush_failures: u64,
     /// See [`ExecutorHealth::foreign_side_manifests`].
     pub foreign_side_manifests: u64,
-    /// Entity-space coalesce publications, and the ones that produced nothing.
+    /// Entity-space coalesce publications.
     pub coalesces: u64,
+    /// Coalesce windows that failed, or were lost with a pass that did not publish.
     pub coalesce_failures: u64,
+    /// Coalesce passes that wrote a directory and published nothing.
+    pub coalesce_passes_failed: u64,
     /// Row-space merge publications, and the ones that produced nothing.
     pub merges: u64,
     pub merge_failures: u64,
@@ -460,8 +465,12 @@ pub struct ExecutorStats {
     pub last_fold_attr_written: u64,
     /// Whether a `POST /control/flush` is awaiting the next tick.
     pub flush_requested: bool,
-    /// Whether a flush unit is executing on the pool — see [`ExecutorHealth::flush_in_flight`].
+    /// Whether a flush is running on the pool or finished and not yet published.
     pub flush_in_flight: bool,
+    /// Whether a merge is running on the pool or finished and not yet published.
+    pub merge_in_flight: bool,
+    /// Whether a coalesce is running on the pool or finished and not yet published.
+    pub coalesce_in_flight: bool,
     /// See [`ExecutorHealth::overlay_diverged`].
     pub overlay_diverged: bool,
     /// See [`ExecutorHealth::prefix_diverged`].
@@ -578,6 +587,7 @@ impl ExecutorHealth {
             foreign_side_manifests: AtomicU64::new(0),
             coalesces: AtomicU64::new(0),
             coalesce_failures: AtomicU64::new(0),
+            coalesce_passes_failed: AtomicU64::new(0),
             merges: AtomicU64::new(0),
             merge_failures: AtomicU64::new(0),
             folds: AtomicU64::new(0),
@@ -818,6 +828,7 @@ impl ExecutorHealth {
             foreign_side_manifests: self.foreign_side_manifests.load(Ordering::Relaxed),
             coalesces: self.coalesces.load(Ordering::Relaxed),
             coalesce_failures: self.coalesce_failures.load(Ordering::Relaxed),
+            coalesce_passes_failed: self.coalesce_passes_failed.load(Ordering::Relaxed),
             merges: self.merges.load(Ordering::Relaxed),
             merge_failures: self.merge_failures.load(Ordering::Relaxed),
             folds: self.folds.load(Ordering::Relaxed),
@@ -833,7 +844,12 @@ impl ExecutorHealth {
             last_fold_attr_written: self.last_fold_attr_written.load(Ordering::Relaxed),
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
-            flush_in_flight: self.flush_in_flight.load(Ordering::SeqCst),
+            flush_in_flight: outstanding(&self.flush_in_flight, &self.flush_completed_pending),
+            merge_in_flight: outstanding(&self.merge_in_flight, &self.merge_completed_pending),
+            coalesce_in_flight: outstanding(
+                &self.coalesce_in_flight,
+                &self.coalesce_completed_pending,
+            ),
         }
     }
 

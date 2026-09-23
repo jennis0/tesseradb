@@ -1,139 +1,178 @@
-"""The reports that `check()`, `commit()`, `declare_columns()` and the change methods return.
+"""The reports that `check()`, `commit()`, `insert()`, `declare_columns()` and the change methods
+return.
 
-Each prints as plain text, so a notebook cell that returns one shows it.
+No call prints. Each report shows as a short summary of what happened, in numbers, so a notebook
+cell that ends in one shows it. Every refusal and every finding is in the summary in full. The
+detail is on the report's attributes, which each class's docstring lists.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Sequence
 
 from ._columns import DeclaredColumn
 
 
-class Printed:
-    """A report that prints as the lines `lines()` returns."""
+class Summarised:
+    """A report that shows as the lines `summary()` returns."""
 
-    def lines(self) -> list[str]:
+    def summary(self) -> list[str]:
         raise NotImplementedError
 
     def __str__(self) -> str:
-        return "\n".join(self.lines())
+        return "\n".join(self.summary())
 
-    __repr__ = __str__
+    def __repr__(self) -> str:
+        return str(self)
 
 
-@dataclass
-class Declared(Printed):
-    """What `declare_columns` declared: one row per column, and the vocabularies it added.
+#: The check page's closing line, which counts the warnings above it.
+_WARNINGS = re.compile(r"^check OK:.* (\d+) warning\(s\)$")
 
-    - `columns`: each column's name, data type, what it was declared as, its `render` and
-      `index` flags, and why.
+
+def _count(n: int, one: str, many: str | None = None) -> str:
+    return f"{n:,} {one if n == 1 else (many or one + 's')}"
+
+
+@dataclass(repr=False)
+class Declared(Summarised):
+    """What `declare_columns` declared.
+
+    - `columns`: one row per column declared: its name, data type, what it was declared as, its
+      `render` and `index` flags, and why.
     - `vocabularies`: the vocabularies declared for category columns.
     """
 
     columns: list[DeclaredColumn] = field(default_factory=list)
     vocabularies: list[str] = field(default_factory=list)
 
-    def lines(self) -> list[str]:
+    def summary(self) -> list[str]:
+        def flags(column: DeclaredColumn) -> str:
+            named = [flag for flag in ("render", "index") if getattr(column, flag)]
+            return column.declared_as + "".join(f", {flag}" for flag in named)
+
         out = [
-            "declare_columns: every column below is declared as details, stored in the record "
-            "blob and shown at drill-down, with the flags render= and index= named",
-            f"  {'column':<26} {'dtype':<16} {'declared as':<14} {'render':<7} {'index':<6} why",
+            f"declared {_count(len(self.columns), 'column')}: "
+            + (", ".join(f"{c.name} ({flags(c)})" for c in self.columns) or "none")
         ]
-        for column in self.columns:
-            out.append(
-                f"  {column.name:<26} {column.dtype:<16} {column.declared_as:<14} "
-                f"{str(column.render).lower():<7} {str(column.index).lower():<6} {column.why}"
-            )
         if self.vocabularies:
             out.append(
-                "  vocabularies declared open and public: "
-                + ", ".join(self.vocabularies)
-                + ". Every reader may list their values"
+                f"and {_count(len(self.vocabularies), 'open vocabulary', 'open vocabularies')}, "
+                "public, so every reader may list their values: " + ", ".join(self.vocabularies)
             )
         return out
 
 
-@dataclass
-class Report(Printed):
-    """What `check()` or a first `commit()` found, and what the package decided on the way.
+@dataclass(repr=False)
+class Report(Summarised):
+    """What `check()` found before the first commit, or what the first `commit()` did.
 
     - `what`: `"check"` or `"commit"`.
     - `ok`: `True` if nothing was refused.
+    - `rows`: the rows inserted, by view or view group.
     - `frames`: each view's name and the extent it gets.
     - `render_columns`: the columns sent with every point drawn.
     - `notes`: what each insert read and ignored, and each declared column no insert fills.
-    - `findings`: problems found before anything was built.
-    - `output`: the page the declaration check and the build printed.
+      Each is in the summary, since a declared column with nothing to fill it fails the build.
+    - `findings`: problems found before anything was built. Each is in the summary.
+    - `log`: the text the declaration check printed, and on a commit the build's log after it.
+      Its warnings are in the summary. A check or build that failed is refused somewhere in it,
+      so the summary of a report that is not `ok` carries the whole log.
     """
 
     what: str
     ok: bool
+    rows: dict = field(default_factory=dict)
     frames: list[tuple[str, str]] = field(default_factory=list)
     render_columns: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     findings: list = field(default_factory=list)
-    output: str = ""
+    log: str = ""
 
-    def lines(self) -> list[str]:
-        out = [f"{self.what}: {'ok' if self.ok else 'FAILED'}"]
-        out += [f"  {note}" for note in self.notes]
-        if self.frames:
-            out.append("frames (a frame is fixed at the first commit and never changes)")
-            out += [f"  {view:<26} {extent}" for view, extent in self.frames]
-        if self.render_columns:
-            out.append(
-                "render columns, fixed at the first commit (a later declare_attribute(render=True) "
-                "is refused; an indexed column can be added at any time)"
-            )
-            out.append("  " + ", ".join(self.render_columns))
-        if self.findings:
-            out.append("pre-flight")
-            out += [f"  {finding}" for finding in self.findings]
-        if self.output:
-            out.append("")
-            out.append(self.output.rstrip())
+    def _rows_in_words(self) -> str:
+        return "; ".join(f"{target}: {_count(n, 'row')}" for target, n in self.rows.items())
+
+    def summary(self) -> list[str]:
+        out = [
+            f"check: {'ok' if self.ok else 'FAILED'}, inserted "
+            f"{self._rows_in_words() or 'no rows'}"
+        ]
+        return out + self._problems()
+
+    def _problems(self) -> list[str]:
+        """The notes, the findings, and the log's warnings, or the whole log where not `ok`."""
+        out = [f"  {note}" for note in self.notes]
+        out += [str(finding) for finding in self.findings]
+        if not self.ok:
+            if self.log:
+                out.append(self.log.rstrip())
+            return out
+        for line in self.log.splitlines():
+            stripped = line.strip()
+            counted = _WARNINGS.search(stripped)
+            if stripped.startswith("WARNING") or (counted and int(counted.group(1)) > 0):
+                out.append(f"  {stripped}")
         return out
 
 
-@dataclass
+@dataclass(repr=False)
 class CommitReport(Report):
-    """What the first `commit()` did: a `Report`, and where the new server listens.
+    """What the first `commit()` did: a `Report`, and the database it built and started.
 
+    - `views`: the views the database serves, each group's views counted under the group.
+    - `layers`: the annotation layers and label sets it declares.
+    - `items`, `minted`, `unclustered`: the build's own figures, read from its log: the items
+      it built, the annotations it made from key columns, and the member rows in no annotation
+      (a null key). Each is `None` where the log does not give it.
+    - `seconds`: how long the check, the build and the server's start took.
     - `viewer`, `session`, `control`: the addresses readers read from, tokens are made at, and
       the operator writes to.
     - `identity`: how the rows are named, by their id column or by `tessera_id`.
     """
 
+    views: dict = field(default_factory=dict)
+    layers: list[str] = field(default_factory=list)
+    items: int | None = None
+    minted: int | None = None
+    unclustered: int | None = None
+    seconds: float | None = None
     viewer: str | None = None
     session: str | None = None
     control: str | None = None
     identity: str = ""
 
-    def lines(self) -> list[str]:
-        out = super().lines()
-        if self.identity:
-            out.insert(1, f"  {self.identity}")
-        out.insert(
-            1,
-            "  the items' order on disk was chosen from the whole inserted corpus, which affects "
-            "speed and never answers",
-        )
-        if self.viewer:
-            out.append("")
-            out.append(
-                f"serving  viewer {self.viewer}  session {self.session}  control {self.control}"
-            )
-        return out
+    def summary(self) -> list[str]:
+        if not self.ok:
+            return ["commit: FAILED"] + self._problems()
+        views = [
+            name if n == 1 else f"{name} ({_count(n, 'view')})" for name, n in self.views.items()
+        ]
+        if self.items is None:
+            out = [f"inserted {self._rows_in_words() or 'no rows'}"]
+        else:
+            out = [f"built {_count(self.items, 'item')} from {self._rows_in_words() or 'no rows'}"]
+        if self.minted:
+            out.append(f"  {_count(self.minted, 'annotation')} made from key columns")
+        if self.unclustered:
+            out.append(f"  {_count(self.unclustered, 'member row')} in no annotation")
+        if views:
+            out.append(f"  {_count(len(views), 'view')}: {', '.join(views)}")
+        if self.layers:
+            out.append(f"  {_count(len(self.layers), 'layer')}: {', '.join(self.layers)}")
+        took = "" if self.seconds is None else f"in {self.seconds:.1f} s; "
+        out.append(f"  {took}serving at {self.viewer}" if self.viewer else f"  {took}not serving")
+        return out + self._problems()
 
 
-@dataclass
-class PagedReport(Printed):
+@dataclass(repr=False)
+class PagedReport(Summarised):
     """What a `check()` or `commit()` after the first one planned or did.
 
-    `check()` returns it with `sent` false: the requests a commit would send, in order, and any
-    problem found before sending. `commit()` returns the same plan with what happened:
+    `check()` returns it with `sent` false: `plan` lists the requests a commit would send, in
+    order, and `findings` any problem found before sending. `commit()` returns the same plan with
+    what happened:
 
     - `rows_accepted`: rows added, by view. `rows` is their total.
     - `artifacts_minted`, `memberships_joined`: annotations added and memberships joined.
@@ -150,7 +189,8 @@ class PagedReport(Printed):
     - `publication`, `flush_wait`, `flush_reached`: the point at which the changes can be read,
       how long the commit waited for it in seconds, and whether it was reached in time.
 
-    `ok` is `True` when nothing was refused and nothing was found before sending.
+    `ok` is `True` when nothing was refused and nothing was found before sending. Every finding
+    and refusal is in the summary.
     """
 
     sent: bool = False
@@ -182,56 +222,57 @@ class PagedReport(Printed):
     def rows(self) -> int:
         return sum(self.rows_accepted.values())
 
-    def lines(self) -> list[str]:
-        what = "commit" if self.sent else "check"
-        out = [f"{what}: {'ok' if self.ok else 'FAILED'}"]
-        if self.plan:
-            out.append(f"plan ({len(self.plan)} request(s), in the order they are sent)")
-            out += [f"  {line}" for line in self.plan]
-        else:
-            out.append("plan: nothing to send")
-        if self.findings:
-            out.append("pre-flight")
-            out += [f"  {finding}" for finding in self.findings]
+    def summary(self) -> list[str]:
         if not self.sent:
-            return out
-        out.append("sent")
-        for view, rows in self.rows_accepted.items():
-            out.append(f"  rows accepted into view '{view}': {rows}")
-        out.append(f"  artifacts minted: {self.artifacts_minted}")
-        out.append(f"  memberships joined: {self.memberships_joined}")
-        if self.values_filled:
-            out.append(f"  values filled: {self.values_filled}")
-        if self.values_bound:
-            out.append(f"  vocabulary values bound to a code: {self.values_bound}")
-        if self.titles_set:
-            out.append(f"  vocabulary titles replaced: {self.titles_set}")
-        out.append(f"  parts already present: {self.already_present}")
-        if self.without_content:
-            out.append(f"  artifacts published without their declared content: {self.without_content}")
-        if self.clipped:
-            out.append(f"  rows clipped onto the frame's edge by the projection: {self.clipped}")
-        for line in self.replayed:
-            out.append(f"  replayed, nothing landed: {line}")
+            out = [
+                f"check: {'ok' if self.ok else 'FAILED'}, "
+                f"{_count(len(self.plan), 'request')} planned, nothing sent"
+            ]
+            return out + [str(finding) for finding in self.findings]
+        added = [f"{_count(n, 'row')} to {view}" for view, n in self.rows_accepted.items()]
+        for n, what in (
+            (self.artifacts_minted, "annotation"),
+            (self.memberships_joined, "membership"),
+            (self.values_filled, "value"),
+            (self.values_bound, "vocabulary value"),
+            (self.titles_set, "vocabulary title"),
+        ):
+            if n:
+                added.append(_count(n, what))
+        line = f"commit: {'ok' if self.ok else 'FAILED'}, added " + (", ".join(added) or "nothing")
         if self.flush_wait is not None:
-            reached = "" if self.flush_reached else ", not reached within the wait"
-            at = "" if self.publication is None else f" {self.publication}"
-            out.append(f"  waited {self.flush_wait:.2f} s for publication{at}{reached}")
-        for refusal in self.refusals:
+            at = "" if self.publication is None else f" for publication {self.publication}"
+            if self.flush_reached:
+                line += f"; visible after {self.flush_wait:.2f} s{at}"
+            else:
+                line += f"; not visible after waiting {self.flush_wait:.2f} s{at}"
+        out = [line]
+        if self.already_present:
+            out.append(f"  already present, changing nothing: {self.already_present:,}")
+        if self.without_content:
             out.append(
-                f"  refused {refusal['status']} on {refusal['what']}: {refusal['detail']}"
+                f"  annotations published without their declared content: {self.without_content:,}"
             )
+        if self.clipped:
+            out.append(f"  rows clipped onto the frame's edge by the projection: {self.clipped:,}")
+        if self.replayed:
+            out.append(f"  requests replayed, adding nothing: {len(self.replayed):,}")
+        out += [str(finding) for finding in self.findings]
+        out += [
+            f"refused {refusal['status']} on {refusal['what']}: {refusal['detail']}"
+            for refusal in self.refusals
+        ]
         return out
 
 
-@dataclass
-class ChangeReport(Printed):
+@dataclass(repr=False)
+class ChangeReport(Summarised):
     """What `remove`, `suppress`, `unsuppress` or `leave` did.
 
     - `op`: which of them it was.
     - `requested`: how many ids were given.
     - `refusals`: each refused request, with its status and the server's answer. `ok` is `True`
-      when there were none.
+      when there were none. Each is in the summary.
     """
 
     op: str
@@ -242,10 +283,9 @@ class ChangeReport(Printed):
     def ok(self) -> bool:
         return not self.refusals
 
-    def lines(self) -> list[str]:
-        out = [f"{self.op}: {self.requested} id(s), {'ok' if self.ok else 'FAILED'}"]
-        for refusal in self.refusals:
-            out.append(f"  refused {refusal['status']}: {refusal['detail']}")
+    def summary(self) -> list[str]:
+        out = [f"{self.op}: {_count(self.requested, 'id')}, {'ok' if self.ok else 'FAILED'}"]
+        out += [f"refused {refusal['status']}: {refusal['detail']}" for refusal in self.refusals]
         return out
 
 

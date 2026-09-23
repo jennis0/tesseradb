@@ -1331,6 +1331,242 @@ fn a_row_membership_and_a_member_source_build_the_same_bundle() {
     assert_bundles_identical(&from_row, &from_source, "a member source against a row");
 }
 
+/// A curated layer's memberships with every id written at `ty`, as a list on each artifact row or,
+/// with `member_table`, as a `[layer.members]` table beside rows carrying only their keys.
+fn write_curated_ids_at(
+    inputs: &Inputs,
+    member_table: bool,
+    ty: &DataType,
+    artifacts: &[(&str, Vec<i64>)],
+) {
+    let ids = |values: Vec<i64>| -> ArrayRef {
+        id_column_at(ty, &values.iter().map(|&id| id as u64).collect::<Vec<_>>())
+    };
+    let keys: ArrayRef = Arc::new(StringArray::from(
+        artifacts.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+    ));
+    if !member_table {
+        let item = Arc::new(Field::new("item", ty.clone(), true));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("members", DataType::List(item.clone()), true),
+        ]));
+        let lists = ListArray::new(
+            item,
+            OffsetBuffer::from_lengths(artifacts.iter().map(|(_, members)| members.len())),
+            ids(artifacts.iter().flat_map(|(_, m)| m.clone()).collect()),
+            None,
+        );
+        write(
+            &inputs.at("curated.parquet"),
+            schema.clone(),
+            RecordBatch::try_new(schema, vec![keys, Arc::new(lists)]).unwrap(),
+        );
+        return;
+    }
+    let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
+    write(
+        &inputs.at("curated.parquet"),
+        schema.clone(),
+        RecordBatch::try_new(schema, vec![keys]).unwrap(),
+    );
+
+    let (member_keys, member_ids): (Vec<&str>, Vec<i64>) = artifacts
+        .iter()
+        .flat_map(|(key, members)| members.iter().map(move |&m| (*key, m)))
+        .unzip();
+    let table_schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("entity", ty.clone(), false),
+    ]));
+    write(
+        &inputs.at("curated_members.parquet"),
+        table_schema.clone(),
+        RecordBatch::try_new(
+            table_schema,
+            vec![Arc::new(StringArray::from(member_keys)), ids(member_ids)],
+        )
+        .unwrap(),
+    );
+}
+
+/// The curated layer read from its rows' lists, or from its member table.
+fn curated_from(member_table: bool) -> String {
+    if member_table {
+        format!(
+            "{CURATED_LAYER}source = \"curated\"\n  [layer.members]\n  source = \"curated_members\"\n"
+        )
+    } else {
+        format!("{CURATED_LAYER}source = \"curated\"\n")
+    }
+}
+
+fn curated_signed() -> Vec<(&'static str, Vec<i64>)> {
+    CURATED
+        .iter()
+        .map(|(key, members)| (*key, members.iter().map(|&m| m as i64).collect()))
+        .collect()
+}
+
+/// **A member id at any integer type a points file's id may have builds the same bundle as at
+/// `uint64`**, on the artifact row and in a member table alike.
+#[test]
+fn a_member_id_at_any_integer_type_builds_the_same_bundle_as_at_uint64() {
+    for member_table in [false, true] {
+        let layer = curated_from(member_table);
+        let (unsigned, _a) = build_spelling(&layer, |inputs| {
+            write_curated_ids_at(inputs, member_table, &DataType::UInt64, &curated_signed())
+        });
+        for ty in [DataType::Int64, DataType::Int32, DataType::UInt32] {
+            let (other, _b) = build_spelling(&layer, |inputs| {
+                write_curated_ids_at(inputs, member_table, &ty, &curated_signed())
+            });
+            assert_bundles_identical(
+                &unsigned,
+                &other,
+                &format!("{ty:?} against UInt64, member table {member_table}"),
+            );
+        }
+    }
+}
+
+/// An id column at `ty` holding `ids`, each id's low bits read at that width: `u64::MAX - 4` is
+/// `-5` at `int64` and at `int32`.
+fn id_column_at(ty: &DataType, ids: &[u64]) -> ArrayRef {
+    match ty {
+        DataType::UInt64 => Arc::new(UInt64Array::from(ids.to_vec())),
+        DataType::UInt32 => Arc::new(UInt32Array::from_iter_values(
+            ids.iter().map(|&id| id as u32),
+        )),
+        DataType::Int64 => Arc::new(Int64Array::from_iter_values(
+            ids.iter().map(|&id| id as i64),
+        )),
+        DataType::Int32 => Arc::new(arrow::array::Int32Array::from_iter_values(
+            ids.iter().map(|&id| id as i32),
+        )),
+        other => panic!("no id column at {other:?} here"),
+    }
+}
+
+/// Rewrite the `uint64` column `name` of the Parquet file at `path` at `ty`, by [`id_column_at`].
+fn retype_ids(path: &Path, name: &str, ty: &DataType) {
+    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        File::open(path).unwrap(),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let batches: Vec<RecordBatch> = reader.map(Result::unwrap).collect();
+    let schema = batches[0].schema();
+    let at = schema.index_of(name).unwrap();
+    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+    fields[at] = Field::new(name, ty.clone(), fields[at].is_nullable());
+    let retyped = Arc::new(Schema::new(fields));
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), retyped.clone(), None).unwrap();
+    for batch in batches {
+        let mut columns = batch.columns().to_vec();
+        let ids = columns[at].as_any().downcast_ref::<UInt64Array>().unwrap();
+        columns[at] = id_column_at(ty, ids.values());
+        w.write(&RecordBatch::try_new(retyped.clone(), columns).unwrap())
+            .unwrap();
+    }
+    w.close().unwrap();
+}
+
+/// The fixture's items under ids from `-5`, written as their two's-complement `uint64` values.
+/// The first cluster's members include the five negative ones.
+fn twos_complement_ids() -> Vec<u64> {
+    (0..N_ITEMS as i64).map(|o| (o - 5) as u64).collect()
+}
+
+/// **A negative point id is its two's-complement unsigned id.** A points file writing its ids at
+/// `int64` or `int32`, some of them negative, builds the same bundle as the same ids at `uint64`,
+/// with the pairs and the member tables naming them at `uint64`.
+#[test]
+fn a_negative_point_id_is_its_twos_complement_unsigned_id() {
+    let ids = twos_complement_ids();
+    let unsigned = inputs_over(&ids);
+    let unsigned_out = unsigned.dir.join("bundle");
+    run(&unsigned, &unsigned_out).expect("a build over uint64 ids succeeds");
+    for ty in [DataType::Int64, DataType::Int32] {
+        let signed = inputs_over(&ids);
+        retype_ids(&signed.points, "entity_id", &ty);
+        let signed_out = signed.dir.join("bundle");
+        run(&signed, &signed_out).expect("a build over negative point ids succeeds");
+        assert_bundles_identical(&unsigned_out, &signed_out, &format!("{ty:?} points"));
+    }
+}
+
+/// **A negative member id is its two's-complement unsigned id**, in a member table and in a list
+/// on the artifact row alike.
+#[test]
+fn a_negative_member_id_is_its_twos_complement_unsigned_id() {
+    let ids = twos_complement_ids();
+    let unsigned = inputs_over(&ids);
+    let unsigned_out = unsigned.dir.join("bundle");
+    run(&unsigned, &unsigned_out).expect("a build over uint64 ids succeeds");
+    for ty in [DataType::Int64, DataType::Int32] {
+        let signed = inputs_over(&ids);
+        for table in ["clusters_members.parquet", "topics_members.parquet"] {
+            retype_ids(&signed.at(table), "entity", &ty);
+        }
+        let signed_out = signed.dir.join("bundle");
+        run(&signed, &signed_out).expect("a build over negative member ids succeeds");
+        assert_bundles_identical(&unsigned_out, &signed_out, &format!("{ty:?} member tables"));
+    }
+
+    let lists = |ty: DataType| {
+        let inputs = inputs_over(&ids);
+        std::fs::write(
+            &inputs.config,
+            format!("{VIEW_TOML}{}", curated_from(false)),
+        )
+        .unwrap();
+        let signed: Vec<(&str, Vec<i64>)> = vec![("c-0", vec![-5, -4, 0]), ("c-1", vec![3, -1])];
+        write_curated_ids_at(&inputs, false, &ty, &signed);
+        let out = inputs.dir.join("bundle");
+        run(&inputs, &out).expect("a build over negative member ids succeeds");
+        (out, inputs)
+    };
+    let (unsigned_lists, _a) = lists(DataType::UInt64);
+    for ty in [DataType::Int64, DataType::Int32] {
+        let (signed_lists, _b) = lists(ty.clone());
+        assert_bundles_identical(&unsigned_lists, &signed_lists, &format!("{ty:?} lists"));
+    }
+}
+
+/// **A negative inline member id is its two's-complement unsigned id**, as it is in a file.
+#[test]
+fn a_negative_inline_member_id_is_its_twos_complement_unsigned_id() {
+    let ids = twos_complement_ids();
+    let signed: Vec<(&str, Vec<i64>)> = vec![("c-0", vec![-5, -4, 0]), ("c-1", vec![3, -1])];
+    let build_with = |layer: String, write_sources: &dyn Fn(&Inputs)| {
+        let inputs = inputs_over(&ids);
+        std::fs::write(&inputs.config, format!("{VIEW_TOML}{layer}")).unwrap();
+        write_sources(&inputs);
+        let out = inputs.dir.join("bundle");
+        run(&inputs, &out).expect("a build over negative member ids succeeds");
+        (out, inputs)
+    };
+    let (from_file, _a) = build_with(curated_from(false), &|inputs| {
+        write_curated_ids_at(inputs, false, &DataType::UInt64, &signed)
+    });
+    let inline = format!(
+        "{CURATED_LAYER}artifacts = [{}]\n",
+        signed
+            .iter()
+            .map(|(key, members)| format!("{{ key = \"{key}\", members = {members:?} }}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let (from_declaration, _b) = build_with(inline, &|_| {});
+    assert_bundles_identical(
+        &from_file,
+        &from_declaration,
+        "negative inline against a file",
+    );
+}
+
 /// **An excluded id this build did not assign refuses the build**, where an unknown *member*
 /// refuses it for the mirror-image reason: an exclusion that resolves to nothing silently widens
 /// the membership by the item it was written to keep out.

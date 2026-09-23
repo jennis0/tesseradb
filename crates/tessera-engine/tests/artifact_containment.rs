@@ -198,6 +198,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                 entity: EntityId::new(u64::from(u32::MAX - ordinal)),
                 key: None,
                 view: None,
+                incarnation: 0,
                 members: members.into(),
                 contents: sets
                     .into_iter()

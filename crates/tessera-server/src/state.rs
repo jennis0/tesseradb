@@ -617,6 +617,48 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for SessionCredential {
     }
 }
 
+/// A JSON request body. It is read only after the credential is checked, by the handler's
+/// credential extractor on the viewer and session planes or by the control plane's middleware.
+pub struct ApiJson<T>(pub T);
+
+/// Why [`ApiJson`] refused a body.
+pub enum ApiJsonRejection {
+    /// JSON that is not the route's request object, as a `contract` refusal with serde's reason.
+    Shape(ApiError),
+    /// A body that is not JSON, not sent as JSON, or not read; answered as axum answers it.
+    Body(axum::extract::rejection::JsonRejection),
+}
+
+impl axum::response::IntoResponse for ApiJsonRejection {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            ApiJsonRejection::Shape(e) => e.into_response(),
+            ApiJsonRejection::Body(rejection) => rejection.into_response(),
+        }
+    }
+}
+
+impl<T: serde::de::DeserializeOwned> axum::extract::FromRequest<Arc<AppState>> for ApiJson<T> {
+    type Rejection = ApiJsonRejection;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &Arc<AppState>,
+    ) -> Result<Self, ApiJsonRejection> {
+        use axum::extract::rejection::JsonRejection;
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(value)) => Ok(ApiJson(value)),
+            Err(JsonRejection::JsonDataError(e)) => {
+                Err(ApiJsonRejection::Shape(ApiError::Contract(format!(
+                    "{}; send the fields this route defines, with the values its schema allows",
+                    e.body_text()
+                ))))
+            }
+            Err(other) => Err(ApiJsonRejection::Body(other)),
+        }
+    }
+}
+
 impl AppState {
     /// Run `f` on the blocking pool behind the compute gate. The permits move into the closure, so
     /// they release when the work finishes, not when the caller stops waiting.

@@ -12,10 +12,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::response::Response;
 use serde::Deserialize;
 
 use tessera_engine::filter::FilterExpr;
@@ -29,7 +27,7 @@ use tessera_wire::{
 };
 
 use crate::error::{map_engine_error, ApiError};
-use crate::state::{AppState, GatePermits, ViewerSession};
+use crate::state::{ApiJson, AppState, GatePermits, ViewerSession};
 use crate::stream::{CancelGuard, Producer};
 use crate::viewer::FilterParser;
 
@@ -176,32 +174,12 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// The request object, or the answer to a body that is not one: a `422` saying what serde found,
-/// or for a body that is not JSON, or not sent as JSON, axum's own refusal.
-fn request_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, Box<Response>> {
-    match body {
-        Ok(Json(req)) => Ok(req),
-        Err(JsonRejection::JsonDataError(e)) => Err(Box::new(
-            ApiError::Contract(format!(
-                "{}; send the fields this route defines, with the values its schema allows",
-                e.body_text()
-            ))
-            .into_response(),
-        )),
-        Err(other) => Err(Box::new(other.into_response())),
-    }
-}
-
 /// `POST /v1/items`.
 pub(crate) async fn items(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
-    body: Result<Json<ItemsReq>, JsonRejection>,
+    ApiJson(req): ApiJson<ItemsReq>,
 ) -> Result<Response, ApiError> {
-    let req = match request_body(body) {
-        Ok(req) => req,
-        Err(answer) => return Ok(*answer),
-    };
     let compression = req.compression;
     let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
         run_items(state, session, req, cancel, sink)
@@ -214,12 +192,8 @@ pub(crate) async fn items(
 pub(crate) async fn artifacts(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
-    body: Result<Json<ArtifactsReq>, JsonRejection>,
+    ApiJson(req): ApiJson<ArtifactsReq>,
 ) -> Result<Response, ApiError> {
-    let req = match request_body(body) {
-        Ok(req) => req,
-        Err(answer) => return Ok(*answer),
-    };
     let compression = req.compression;
     let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
         run_artifacts(state, session, req, cancel, sink)
