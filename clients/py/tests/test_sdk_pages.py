@@ -1279,3 +1279,37 @@ def test_a_labelled_insert_into_a_held_layer_leaves_the_declaration_and_the_rout
     with pytest.raises(Refusal):
         db.commit()
     assert "c9" not in [row[1] for row in artifact_rows_of(db)]
+
+
+def test_the_databases_own_viewer_holds_a_layers_named_default(served, corpus):
+    """`viewer()` and `token()` with no terms hold every label the database was given, a layer's
+    named default among them, so an artifact taking that default is served to its own principal."""
+    def declare(db):
+        clustering(db)
+        db.declare_layer("teams", kind="flat", artifact_visibility="red")
+        db.insert(
+            "teams",
+            artifacts=pa.table(
+                {
+                    "key": pa.array(["bare"], pa.string()),
+                    "team": pa.array([None], pa.list_(pa.string())),
+                }
+            ),
+            key="key",
+            access="team",
+        )
+        db.insert(
+            "teams",
+            members=pa.table(
+                {
+                    "key": pa.array(["bare"] * 5, pa.string()),
+                    "entity": pa.array([f"p{i}" for i in range(5)], pa.string()),
+                }
+            ),
+            id="entity",
+            key="key",
+        )
+
+    db = served(declare)
+    assert "bare" in teams_seen(db, None)
+    assert "bare" not in teams_seen(db, ["public"])

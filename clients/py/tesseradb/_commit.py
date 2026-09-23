@@ -903,10 +903,17 @@ def _label_lists(column) -> pa.Array:
     label, and a view declaring none refuses the batch, in the terms the build refuses the same
     corpus.
     """
-    values = column.to_pylist()
-    if pa.types.is_list(column.type) or pa.types.is_large_list(column.type):
-        return pa.array([[] if v is None else list(v) for v in values], pa.list_(pa.string()))
-    return pa.array([[] if v is None else [str(v)] for v in values], pa.list_(pa.string()))
+    return pa.array([_labels(v) for v in column.to_pylist()], pa.list_(pa.string()))
+
+
+def _labels(value) -> list[str]:
+    """One cell of an access column as its labels: a list is its elements, a scalar one label, and
+    a null none."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(one) for one in value]
+    return [str(value)]
 
 
 def _halved(start: int, count: int, cap: int, encode):
@@ -1166,10 +1173,9 @@ def _artifact_parts(row: dict, record: dict) -> None:
         row["excluding"] = list(record["excluding"])
     if record.get("members") is not None:
         row["members"] = list(record["members"])
-    access = record.get("access")
-    if access is not None:
-        # A list column carries several labels, a scalar one; a null is no label.
-        row["access"] = [str(one) for one in access] if isinstance(access, list) else [str(access)]
+    labels = _labels(record.get("access"))
+    if labels:
+        row["access"] = labels
 
 
 def _records(table: pa.Table, insert) -> list[dict]:

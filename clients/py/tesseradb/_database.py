@@ -1210,11 +1210,15 @@ class Database:
 
     def _inserted_terms(self, document: dict) -> list[str]:
         """Every access label inserted into a view or onto an artifact, plus each view's default
-        label."""
+        label and each layer's named default."""
         terms: list[str] = []
         for block in document.get("view", []) + document.get("view_group", []):
             default = dict(block.get("point_visibility") or {}).get("default")
             if default:
+                terms.append(default)
+        for block in document.get("layer", []):
+            default = dict(block.get("artifact_visibility") or {}).get("default")
+            if default and default != "inherited":
                 terms.append(default)
         for insert in self.inserts + self.pending:
             column = insert.columns.get("access") if insert.role in ("rows", "artifacts") else None

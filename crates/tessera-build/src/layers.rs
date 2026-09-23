@@ -945,14 +945,13 @@ fn read_artifacts(
         let access = match access_field {
             None => None,
             Some(field) => {
-                let column = batch.column_by_name(field).ok_or_else(|| BuildError::Schema {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "layer '{layer}': `artifact_visibility.field = \"{field}\"` names a \
-                         column this file does not carry. Its columns are: {}",
-                        column_names(&batch)
-                    ),
-                })?;
+                if let Some(detail) = crate::check::access_column_problem(field, &batch.schema()) {
+                    return Err(BuildError::Schema {
+                        path: path.to_path_buf(),
+                        detail: format!("layer '{layer}': {detail}"),
+                    });
+                }
+                let column = batch.column_by_name(field).expect("the check found the column");
                 Some(crate::input::access_labels(path, column, field)?)
             }
         };

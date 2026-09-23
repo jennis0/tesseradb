@@ -758,35 +758,34 @@ fn check_group_labels(
 /// strings. A view's `point_visibility.field` and a layer's `artifact_visibility.field` both name
 /// one.
 fn check_access_column(object: &Object, field: &str, schema: &ArrowSchema, report: &mut CheckReport) {
-    match schema.column_with_name(field) {
-        None => report.note(
-            object,
-            format!(
-                "`{field}` is named as the access column, and this source does not carry it. Its \
-                 columns are: {}",
-                columns(schema)
-            ),
-        ),
-        Some((_, found)) => {
-            let ok = match found.data_type() {
-                DataType::List(inner) | DataType::LargeList(inner) => {
-                    crate::utf8::is_utf8(inner.data_type())
-                }
-                DataType::Dictionary(_, values) => crate::utf8::is_utf8(values),
-                other => crate::utf8::is_utf8(other),
-            };
-            if !ok {
-                report.note(
-                    object,
-                    format!(
-                        "the access column '{field}' holds {:?}. Access labels are strings, one \
-                         or a list of them",
-                        found.data_type()
-                    ),
-                );
-            }
-        }
+    if let Some(problem) = access_column_problem(field, schema) {
+        report.note(object, problem);
     }
+}
+
+/// What is wrong with the column named as where access labels are read from, or `None`: it must be
+/// present, and a string, a list of strings or a dictionary of strings. The check and the build's
+/// reader of an artifact source both ask this.
+pub(crate) fn access_column_problem(field: &str, schema: &ArrowSchema) -> Option<String> {
+    let Some((_, found)) = schema.column_with_name(field) else {
+        return Some(format!(
+            "`{field}` is named as the access column, and this source does not carry it. Its \
+             columns are: {}",
+            columns(schema)
+        ));
+    };
+    let ok = match found.data_type() {
+        DataType::List(inner) | DataType::LargeList(inner) => crate::utf8::is_utf8(inner.data_type()),
+        DataType::Dictionary(_, values) => crate::utf8::is_utf8(values),
+        other => crate::utf8::is_utf8(other),
+    };
+    (!ok).then(|| {
+        format!(
+            "the access column '{field}' holds {:?}. Access labels are strings, one or a list of \
+             them",
+            found.data_type()
+        )
+    })
 }
 
 /// Where each point's access terms come from: a column of the view's own source, or an exploded
