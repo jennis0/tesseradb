@@ -169,9 +169,10 @@ impl SideManifests {
 }
 
 impl Executor {
-    /// Checks the manifest does not regress durable state, stamps its level versions, restates the
-    /// extent lists unless a fold brings its own, and writes it; a refusal writes nothing. Also
-    /// prunes the partition's superseded side-manifests, unless it is stepped down.
+    /// Restates the live registry, roster and declarations, checks the manifest does not regress
+    /// durable state, stamps its level versions, restates the extent lists unless a fold brings its
+    /// own, and writes it; a refusal writes nothing. Also prunes the partition's superseded
+    /// side-manifests, unless it is stepped down.
     pub(super) fn commit_side_manifest(
         &self,
         partition_data: &tessera_store::read::PartitionData,
@@ -182,6 +183,7 @@ impl Executor {
         fold: Option<FoldDerived<'_>>,
     ) -> Result<(), ManifestCommitRefused> {
         let live_manifest = &partition_data.manifest;
+        self.write_live_state(next, fold.is_some());
         let (derived, pending) = match &fold {
             Some(fold) => (fold.written, Some(fold.pending_retirement)),
             None => (self.side_manifests.derived_extents.as_slice(), None),
@@ -221,19 +223,24 @@ impl Executor {
         Ok(())
     }
 
-    /// Restate the live row-less state into a side-manifest about to be committed, never carried
-    /// forward from the clone, which may be several behind. `min`, not `max`, for the low-water
-    /// mark: the row-less region grows downward.
-    pub(super) fn write_live_state(&self, manifest: &mut SegmentsManifest, vocabularies: &Vocabularies) {
-        let (layers, layer_tombstones, registry_version, low_water) =
-            self.live.registry_for_publication();
-        manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
-        manifest.layers = layers;
-        manifest.layer_tombstones = layer_tombstones;
-        manifest.layer_registry_version = registry_version;
+    /// Restate the live registry, roster and runtime declarations into a side-manifest about to be
+    /// committed, never carried forward from the partition's manifest, which is as of the last
+    /// geometry swap. `min`, not `max`, for the low-water mark: the row-less region grows downward.
+    /// A fold writes the declarations into its `MANIFEST.json` and sets its own list of those made
+    /// since it planned, so `fold` leaves them alone.
+    fn write_live_state(&self, manifest: &mut SegmentsManifest, fold: bool) {
+        let registry = self.live.registry_for_publication();
+        manifest.entity_id_low_water = manifest.entity_id_low_water.min(registry.low_water);
+        manifest.layers = registry.layers;
+        manifest.layer_tombstones = registry.tombstones;
+        manifest.layer_registry_version = registry.version;
         let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
         manifest.views = created_views;
         manifest.dead_view_incarnations = dead_view_incarnations;
+        if fold {
+            return;
+        }
+        let vocabularies = &self.generation.load().vocabularies;
         let (attributes, scoped_attributes) = self.live.attributes_for_publication();
         manifest.attributes = attributes;
         manifest.scoped_attributes = scoped_attributes;
