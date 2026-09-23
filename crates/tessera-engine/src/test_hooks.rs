@@ -150,6 +150,25 @@ impl Engine {
             .load(Ordering::SeqCst)
     }
 
+    /// Whether nothing handed off the executor thread is outstanding: no flush, merge or coalesce
+    /// running or waiting to publish, and no refresh pass in flight. For a test to poll rather
+    /// than sleep before it asks something a publication in flight would change.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn maintenance_idle_for_test(&self) -> bool {
+        let health = self.write.health();
+        let busy = [
+            &health.flush_in_flight,
+            &health.flush_completed_pending,
+            &health.merge_in_flight,
+            &health.merge_completed_pending,
+            &health.coalesce_in_flight,
+            &health.coalesce_completed_pending,
+        ];
+        busy.iter().all(|flag| !flag.load(Ordering::SeqCst))
+            && self.refresh_in_flight.load(Ordering::SeqCst) == crate::refresh::NO_REFRESH
+    }
+
     /// Hold the background refresh in flight, so a test can land a racer in that window.
     /// Distinct from [`Self::set_background_refresh_for_test`], which stops a refresh from
     /// running at all rather than holding one mid-flight.
