@@ -1312,8 +1312,8 @@ fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
     // The flush is handed back while the executor is parked past its drain, and a tick is owed
     // when it wakes.
     engine.set_flush_paused_for_test(false);
-    wait_until("the flush to leave the pool", WAIT, || {
-        !engine.write_executor_stats().flush_in_flight
+    wait_until("the flush to be handed back", WAIT, || {
+        engine.flush_handed_back_for_test()
     });
     engine.request_flush();
     faults.release();

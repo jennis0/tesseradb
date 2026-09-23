@@ -169,6 +169,13 @@ impl Engine {
             && !self.refresh_in_flight()
     }
 
+    /// Whether a flush has finished on the pool and waits for the executor to publish it.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn flush_handed_back_for_test(&self) -> bool {
+        self.write.health().flush_completed_pending.load(Ordering::SeqCst)
+    }
+
     /// Hold the background refresh in flight, so a test can land a racer in that window.
     /// Distinct from [`Self::set_background_refresh_for_test`], which stops a refresh from
     /// running at all rather than holding one mid-flight.
