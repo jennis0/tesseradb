@@ -64,7 +64,8 @@ export function layerEntries(layers: readonly Layer[]): LayerEntry[] {
  * The server changes nothing for it. This is a reading of a declaration, not a new field.
  */
 export function isFilterLayer(layer: Layer): boolean {
-  return layer.computedContent.length === 0;
+  // A labels layer declares no geometry either: its text is drawn at the artifact it depends on.
+  return layer.computedContent.length === 0 && layer.depsOn.length === 0;
 }
 
 /** The layers a client may draw — every layer that is not a filter layer. */
