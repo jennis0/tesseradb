@@ -13,12 +13,12 @@
 //! **One merge, two entry points, one implementation.** [`coalesce_external_id_runs`] is the
 //! ordinary maintenance coalesce: nothing is dropped, and the locator is a small in-memory `Vec`,
 //! because the span a coalesce covers is bounded by the run-count policy this module exists to
-//! enforce. [`fold_external_id_runs`] is the **same**
-//! keep-newest merge — `merge_runs_core` beneath both is the one implementation, never two — with
-//! the two things a merge's span never needs: dropping the keys of the entities `tombstones`
-//! names, and writing the locator through [`crate::locator::LocatorWriter`]'s mapping rather than
-//! a `Vec`, because the fold's span is the whole entity space (compaction §3: 4 GB resident at
-//! 10⁹ as a `Vec`, page cache through a mapping).
+//! enforce. [`fold_external_id_runs`] is the **same** keep-newest merge — `merge_runs_core`
+//! beneath both is the one implementation, never two — with the two things a coalesce's span
+//! never needs: dropping the keys of the entities `tombstones` names, and writing the locator
+//! through [`crate::locator::LocatorWriter`]'s mapping rather than a `Vec`, because the fold's
+//! span is the whole entity space (compaction §3: 4 GB resident at 10⁹ as a `Vec`, page cache
+//! through a mapping).
 //!
 //! **Dropping a key here is not Rule F's retirement, and does not claim to be.** Rule F's route
 //! out of `Overlay::deleted` is `Overlay::retire` (`tessera-lifecycle`, compaction §5) — a
@@ -204,9 +204,8 @@ impl RunCursor {
 }
 
 /// The one keep-newest k-way merge, shared by [`coalesce_external_id_runs`] and
-/// [`fold_external_id_runs`] — **no
-/// second implementation of the tie-break exists**, so a fix or a regression in one path is a fix
-/// or a regression in both.
+/// [`fold_external_id_runs`] — **no second implementation of the tie-break exists**, so a fix or a
+/// regression in one path is a fix or a regression in both.
 ///
 /// **The output is exactly what a stable sort of the concatenation followed by a keep-last pass
 /// produces**, which is what this replaced: ascending by key, ties broken by ascending run index
@@ -215,10 +214,9 @@ impl RunCursor {
 /// older binding of the same key** — an older binding under decision 0047 is already a forgotten,
 /// deleted holder, tombstoned or not, so there is nothing to fall back *to*. That equivalence is
 /// the whole correctness argument for the merge half — see
-/// `coalesce_runs::a_key_in_two_runs_keeps_the_newest_binding`, where the tie-break is pinned, and
-/// `merge_execution::the_external_id_runs_coalesce_in_key_order` for the ordering —
-/// `fold_external_ids::a_tombstoned_newest_binding_drops_the_key_rather_than_falling_back` is the
-/// tombstone half's own pin.
+/// `coalesce_runs::a_key_in_two_runs_keeps_the_newest_binding`, where the tie-break and the
+/// ordering are pinned; `fold_external_ids::a_tombstoned_newest_binding_drops_the_key_rather_than_falling_back`
+/// is the tombstone half's own pin.
 ///
 /// **A heap that clones the key, rather than a linear scan or a borrow-free tournament.** A scan
 /// over *k* per row is O(n·k), which is fine at a merge's `tier_width` of 4 and not at a fold's
