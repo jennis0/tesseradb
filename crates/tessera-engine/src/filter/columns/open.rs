@@ -142,6 +142,21 @@ fn text_extent_layers<'a>(
         .collect()
 }
 
+/// The layers an entity-scoped text column's published extents open as.
+fn entity_text_layers(
+    prefix_dir: &Path,
+    texts: &[tessera_store::manifest::TextExtent],
+    column: &str,
+    mmap: bool,
+) -> Result<Vec<TextLayer>, ComposeError> {
+    text_extent_layers(
+        prefix_dir,
+        texts.iter().filter(|e| e.column == column && e.view.is_none()),
+        column,
+        mmap,
+    )
+}
+
 /// The record blob's stack for one partition: the base the schema owes, plus every extent named.
 ///
 /// The base is owed exactly when the compiled schema has a blob-resident column with no other
@@ -287,10 +302,19 @@ impl FilterColumns {
                 placements.insert(scalar.name.clone(), placement);
             }
             // A column declared at a running service and not yet folded has no base: its stack
-            // starts empty and the extents compose onto it below.
+            // starts empty and its extents compose onto it, a text column's here and a value
+            // column's with the attribute extents below.
             if unfolded.iter().any(|name| name == &scalar.name) {
-                if let Some(layers) = runtime_layers(scalar, declared_index, vocabularies)? {
-                    columns.insert(scalar.name.clone(), layers);
+                if let Some(mut column) = runtime_layers(scalar, declared_index, vocabularies)? {
+                    if let Some(text) = column.text_layers_mut() {
+                        text.extend(entity_text_layers(
+                            prefix_dir,
+                            extents.texts,
+                            &scalar.name,
+                            mmap,
+                        )?);
+                    }
+                    columns.insert(scalar.name.clone(), column);
                 }
                 continue;
             }
@@ -306,12 +330,9 @@ impl FilterColumns {
                     &dir,
                     request_access(mmap),
                 )?];
-                text_layers.extend(text_extent_layers(
+                text_layers.extend(entity_text_layers(
                     prefix_dir,
-                    extents
-                        .texts
-                        .iter()
-                        .filter(|e| e.column == scalar.name && e.view.is_none()),
+                    extents.texts,
                     &scalar.name,
                     mmap,
                 )?);

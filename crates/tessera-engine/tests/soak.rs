@@ -52,6 +52,16 @@ fn viewport(
     }
 }
 
+/// Wait until no publication or refresh is in flight. A request that lands between a publication
+/// and its refresh is served from the generation before, or, if a merge published before the
+/// flush's refresh built its entry, builds inline; either would make the counts below measure the
+/// race rather than the steady state.
+fn settle(engine: &Engine) {
+    wait_until("maintenance and the refresh to go idle", WAIT, || {
+        engine.maintenance_idle_for_test()
+    });
+}
+
 /// **Sustained ingest, and every axis stops growing.**
 ///
 /// **Mutation:** disable either maintenance pass and the corresponding count reaches `ROUNDS`.
@@ -124,6 +134,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
         });
         // A request every round, so the cache stays resident and the refresh has work — the
         // steady state this soak is about, rather than an idle node.
+        settle(&engine);
         viewport(&engine, &session);
     }
 
@@ -147,6 +158,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
         }
     }
 
+    settle(&engine);
     let generation = engine.generation();
     let partition = &generation.bundle.partitions["default"];
     let manifest = &partition.manifest;
@@ -190,21 +202,21 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
         "maintenance must not be failing its way to a low count: {stats:?}"
     );
 
-    // **Decision 0044's D1, under sustained load and in one number.** One full projection build —
-    // the session's own establishment — across {ROUNDS} flush publications and every merge among
-    // them. Update-induced request-path work is zero in the steady state; what the session paid
-    // instead was a stale serve per round, which costs a cache read.
+    // One full projection build, the session's own establishment, across {ROUNDS} flush
+    // publications and every merge among them: each later round's entry was built by the
+    // background refresh, and the request only read it.
     assert_eq!(
         engine.full_projection_builds(),
         1,
         "a session that asked in every round must have rebuilt exactly once, at establishment"
     );
     assert!(
-        engine.stale_serves() > 0 && engine.refreshes() >= ROUNDS as u64,
+        engine.refreshes() >= ROUNDS as u64,
         "and it must have been served from the refresh's entries rather than building them"
     );
 
     // **Nothing was lost bounding them**, which is the half a count assertion cannot see.
+    settle(&engine);
     let out = viewport(&engine, &session);
     assert_eq!(
         out.tiles.iter().map(|t| t.visible).sum::<u64>(),

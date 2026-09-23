@@ -22,13 +22,11 @@ at the executor's tick. The driver therefore sequences by eligibility (§12.3):
   stage's barrier asserts the flush counter did not move — a plan that mis-counted fails loudly as
   a broken plan, not quietly as a mis-attributed delta.
 
-Two of §12.3's named knobs did not survive contact with the running system. ``serve.tier_width``
-and ``serve.segment_floor_bytes`` are parsed by the server's config and **never reach the
-engine** — `tessera_engine::session::merge_policy` hard-codes 4 and 16 MiB — and the coalesce's
-width is a `CoalescePolicy` default (8) with no config key at all. So the driver takes the ladder
-as found: merge eligibility is four same-tier segments, coalesce eligibility is eight same-tier
-delta-axis entries. The base segment is in no merge window whatever ``max_merged_segment_bytes``
-says: a merge selects from the flushed segments only.
+``serve.tier_width``, ``serve.segment_floor_bytes`` and ``serve.coalesce_width`` reach the
+engine's merge and coalesce policies, and the config written below sets none of them, so the
+defaults hold (4, 16 MiB and 8): merge eligibility is four same-tier segments, coalesce
+eligibility is eight same-tier delta-axis entries. The base segment is in no merge window
+whatever ``max_merged_segment_bytes`` says: a merge selects from the flushed segments only.
 
 ## Barriers
 

@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {layerClosure, layerEntries} from '../src/layers.js';
+import {colourLayers, drawableLayers, isFilterLayer, layerClosure, layerEntries} from '../src/layers.js';
 import type {Layer} from '../src/types.js';
 
 const layer = (name: string, depsOn: string[] = []): Layer => ({
@@ -43,5 +43,28 @@ describe('the layer closure', () => {
   it('offers a dependent whose dependency this principal does not reach as a root of what they were given', () => {
     const entries = layerEntries([layer('labels', ['clusters'])]);
     expect(entries.map((e) => e.root.name)).toEqual(['labels']);
+  });
+});
+
+describe('a filter layer', () => {
+  it('is a layer declaring no computed geometry that depends on nothing', () => {
+    expect(isFilterLayer(layer('descriptors'))).toBe(true);
+    expect(isFilterLayer({...layer('clusters'), computedContent: ['centroid']})).toBe(false);
+  });
+
+  it('is never a labels layer, which declares no geometry and is drawn at the artifact it names', () => {
+    const clusters = {...layer('clusters'), computedContent: ['centroid']};
+    const labels = layer('labels', ['clusters']);
+    expect(isFilterLayer(labels)).toBe(false);
+    expect(drawableLayers([clusters, labels, layer('descriptors')]).map((l) => l.name)).toEqual(['clusters', 'labels']);
+  });
+});
+
+describe('the layers points may be coloured by', () => {
+  it('are the drawable layers that are not labels layers', () => {
+    const clusters = {...layer('clusters'), computedContent: ['centroid']};
+    const districts = {...layer('districts'), computedContent: ['box']};
+    const roster = [clusters, layer('labels', ['clusters']), layer('descriptors'), districts];
+    expect(colourLayers(roster).map((l) => l.name)).toEqual(['clusters', 'districts']);
   });
 });

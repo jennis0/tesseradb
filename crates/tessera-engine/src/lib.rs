@@ -132,6 +132,8 @@ pub use tessera_store::member_key;
 // and each row's value arrives as the build's value type.
 pub use tessera_spatial::tiler::ScalarValue;
 pub use tessera_store::scalar_column;
+// A batch's category column is read by the rule a build reads a points file's category keys by.
+pub use tessera_store::utf8;
 // The write path's **outcome** vocabulary, and nothing else.
 //
 // `LifecycleHandle`, `LifecycleQueues`, `Command` and `Reply` are deliberately **not** here, and

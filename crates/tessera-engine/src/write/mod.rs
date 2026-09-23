@@ -436,22 +436,26 @@ impl WritePath {
                         seeded_content_extents,
                         growth_unpublished,
                     ),
-                    coalesce: executor::Background::new(worker_bell.clone()),
+                    coalesce: executor::Background::sharing(
+                        worker_bell.clone(),
+                        Arc::clone(&health.coalesce_in_flight),
+                        Arc::clone(&health.coalesce_completed_pending),
+                    ),
                     merge: executor::Background::sharing(
                         worker_bell.clone(),
-                        Default::default(),
+                        Arc::clone(&health.merge_in_flight),
                         Arc::clone(&health.merge_completed_pending),
                     ),
                     fold: executor::Background::sharing(
                         worker_bell.clone(),
-                        Default::default(),
+                        Arc::clone(&health.fold_in_flight),
                         Arc::clone(&health.fold_completed_pending),
                     ),
                     suggest: executor::Background::new(worker_bell.clone()),
                     flush: executor::Background::sharing(
                         worker_bell,
                         Arc::clone(&health.flush_in_flight),
-                        Default::default(),
+                        Arc::clone(&health.flush_completed_pending),
                     ),
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
@@ -567,10 +571,14 @@ impl WritePath {
     /// command's reply is typed to carry.
     fn submit<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, AcceptError> {
         let (reply, pending) = Reply::channel(
+            Some(Arc::clone(&self.health)),
             #[cfg(feature = "fault-injection")]
             self.faults.clone(),
         );
-        self.handle()?.enqueue(command(reply))?;
+        let command = command(reply);
+        // A reply built here counts its job completed, which is right only for the work lane.
+        debug_assert!(!command.is_never_shed());
+        self.handle()?.enqueue(command)?;
         pending.accept()
     }
 
@@ -782,6 +790,7 @@ impl WritePath {
         op: ChangeOp,
     ) -> Result<PendingChange, AcceptError> {
         let (reply, pending) = Reply::channel(
+            None,
             #[cfg(feature = "fault-injection")]
             self.faults.clone(),
         );

@@ -1251,3 +1251,98 @@ fn the_merge_publication_seam_parks_the_executor_between_execution_and_publicati
         "and every item is served across it, at the same identities"
     );
 }
+
+/// **A flush handed back while the executor is parked is published once, and the bundle reopens.**
+///
+/// The flush finishes on the pool after the executor's drain and before its tick, the window in
+/// which the flush is no longer running and not yet published. The tick that follows must not
+/// plan the same rows again, and every late item ends at one row, served once by this process and
+/// found at that row by a restart.
+///
+/// The merge seam is the lever: the executor parks in `publish_merge`, after its drain and before
+/// its tick, and the held flush is released into that window.
+#[test]
+fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
+    use tessera_lifecycle::faults::{PauseAction, PauseSite};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let (engine, faults) = engine_at_with_faults(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    flush_interleaved_segments(&engine);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let served_before = served_ids(&engine, &session).len();
+
+    // One tick dispatches both: a flush of four new items, held on the pool once it has
+    // executed, and a merge of the four earlier segments, which parks the executor.
+    faults.arm_pause(PauseSite::BeforeMergePublish, PauseAction::Stall);
+    engine.set_merge_for_test(true);
+    engine.set_flush_paused_for_test(true);
+    let late: Vec<UnallocatedRow> = (0..4)
+        .map(|i| {
+            let descriptors = vec![b"0".to_vec()];
+            UnallocatedRow {
+                external_id: Some(format!("late-{i}").into_bytes()),
+                view: "s0".to_string(),
+                join: None,
+                x: (10 + i * 40) as f64,
+                y: 15.0,
+                scalars: Vec::new(),
+                terms: engine.resolve_terms(&descriptors),
+                descriptors,
+                scoped: Vec::new(),
+            }
+        })
+        .collect();
+    let late = engine
+        .accept_ingest(late, "batch-late".to_string(), [9u8; 32])
+        .expect("ingest is accepted");
+    engine.request_flush();
+    wait_until("the flush to hold on the pool", WAIT, || {
+        engine.flush_is_holding_for_test()
+    });
+    faults.await_arrivals(PauseSite::BeforeMergePublish, 1, WAIT);
+
+    // The flush is handed back while the executor is parked past its drain, and a tick is owed
+    // when it wakes.
+    engine.set_flush_paused_for_test(false);
+    wait_until("the flush to leave the pool", WAIT, || {
+        !engine.write_executor_stats().flush_in_flight
+    });
+    engine.request_flush();
+    faults.release();
+
+    // Everything settles: the buffer empties, nothing is in flight, and two further ticks have
+    // run, so every flush handed back has been drained and published or discarded.
+    wait_until("the late items to publish", WAIT, || {
+        let stats = engine.write_executor_stats();
+        stats.buffered_items == 0 && !stats.flush_in_flight
+    });
+    for _ in 0..2 {
+        let ticks = engine.write_executor_stats().ticks;
+        engine.request_flush();
+        wait_until("a tick", WAIT, || engine.write_executor_stats().ticks > ticks);
+    }
+    assert_eq!(
+        served_ids(&engine, &session).len(),
+        served_before + late.len(),
+        "the late items are served once each by the process that published them"
+    );
+
+    // And the bundle on disc is one a restart opens, holding each late item at one row.
+    let bundle = tessera_store::open_bundle(&root).expect("the bundle on disc opens");
+    let row_space = &bundle.partitions["default"].views["s0"].row_space;
+    let mut rows: Vec<u32> = late
+        .iter()
+        .map(|e| row_space.row_of(*e).expect("a late item has a row").raw())
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    assert_eq!(rows.len(), late.len(), "each late item at its own row");
+}

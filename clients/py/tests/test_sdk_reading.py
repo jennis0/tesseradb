@@ -31,17 +31,6 @@ ONE_TERM = "cs.LG"
 
 
 @pytest.fixture
-def stub_bundle(monkeypatch, tmp_path):
-    """The components' bundle, stubbed: no browser here, and nothing reads its text."""
-    import tesseradb.widget as widget
-
-    stub = tmp_path / "tessera-components.js"
-    stub.write_text("export function render() {}")
-    monkeypatch.setattr(widget, "bundle_path", lambda: stub)
-    return stub
-
-
-@pytest.fixture
 def db(served, corpus):
     """The notebook corpus, committed and served, as its own all-terms principal."""
     return served(lambda one: declare_notebook(one, corpus))
@@ -94,16 +83,16 @@ def test_a_viewer_sees_what_its_terms_allow_and_not_what_the_operator_sees(db):
     principal's `visible` is smaller than the union's and larger than nothing — a filter applied
     to the operator's answer would give the same number by a route that discloses.
     """
-    whole = db.viewport()
-    subset = db.viewer([ONE_TERM]).viewport()
-    assert 0 < visible_count(subset) < visible_count(whole)
+    whole = db.view("s0").count()
+    subset = db.viewer([ONE_TERM]).view("s0").count()
+    assert 0 < subset < whole
 
 
 def test_a_term_the_database_has_not_inserted_is_minted_and_sees_nothing_of_it(db):
     """Which terms a session may hold is the session plane's, so the SDK mints what it is asked
     for: a term no row carries reaches no row."""
     typo = db.viewer(["cs.LGG"])
-    assert visible_count(typo.viewport()) == 0
+    assert typo.view("s0").count() == 0
 
 
 def test_viewer_refuses_an_empty_term_set(db):
@@ -121,11 +110,11 @@ def test_the_union_is_every_access_label_the_sdk_inserted(db):
 # ---------------------------------------------------------------------------- the query verbs
 
 
-def test_a_viewport_frame_carries_the_rendered_columns_and_the_served_count(db):
+def test_a_sample_carries_the_rendered_columns_and_the_served_count(db):
     """The points surface: `tessera_id`, `code` and what `/v1/meta` declares as rendered."""
     meta = db.meta()
     rendered = {s["name"] for s in meta["declared_scalars"] if s["render"]}
-    table = db.viewport(k=64)
+    table = db.view("s0").sample(k=64)
     assert set(table.column_names) == {"tessera_id", "code"} | rendered
     # A served set is not the whole set: `k` bounds it, and the counts are what say by how much.
     assert table.num_rows == served_count(table)
@@ -133,27 +122,9 @@ def test_a_viewport_frame_carries_the_rendered_columns_and_the_served_count(db):
     assert json.loads(table.schema.metadata[b"tessera.trailer"])["points"] == table.num_rows
 
 
-def test_a_viewport_over_a_box_answers_for_that_box_alone(db):
-    """`bbox` is the view's own extent, and a quarter of it holds fewer points.
-
-    At depth 3, where the box spans tiles rather than the single tile of zoom 0: the counts are
-    per tile, and one tile covering the world is one count whatever box asked for it.
-    """
-    whole = db.viewport(zoom=3)
-    frame = db.meta()["views"][0]["quantisation"]
-    corner = [
-        frame["x_min"],
-        frame["y_min"],
-        (frame["x_min"] + frame["x_max"]) / 2.0,
-        (frame["y_min"] + frame["y_max"]) / 2.0,
-    ]
-    part = db.viewport(corner, zoom=3)
-    assert 0 < visible_count(part) < visible_count(whole)
-
-
-def test_item_is_the_record_for_a_point_the_viewport_served(db):
+def test_item_is_the_record_for_a_point_a_sample_served(db):
     """The drill-down: the record by declared column name, and the satisfied terms only."""
-    table = db.viewport(k=8)
+    table = db.view("s0").sample(k=8)
     one = table.column("tessera_id")[0].as_py()
     record = db.item(one)
     assert record["fields"]["arxiv_id"]
@@ -163,14 +134,9 @@ def test_item_is_the_record_for_a_point_the_viewport_served(db):
     assert [view["id"] for view in record["views"]] == ["s0"]
 
 
-def test_a_viewport_refusal_says_what_the_plane_said(db):
-    with pytest.raises(Refusal):
-        db.viewport(view="not-a-view")
-
-
-def test_a_viewport_that_serves_no_point_still_has_the_two_fixed_columns(db):
+def test_a_sample_that_serves_no_point_still_has_the_two_fixed_columns(db):
     """A response with no points frame: the table is empty, and its columns are not invented."""
-    empty = db.viewport(filters={"arxiv_id": {"eq": "no-such-paper"}})
+    empty = db.view("s0").filter({"arxiv_id": {"eq": "no-such-paper"}}).sample()
     assert empty.num_rows == 0
     assert empty.column_names == ["tessera_id", "code"]
     assert json.loads(empty.schema.metadata[b"tessera.counts"])["matched"] == 0
@@ -183,7 +149,7 @@ def test_the_external_id_comes_back_as_the_column_that_carried_it(db):
     little-endian bytes back as that integer. A `connect()` viewer has no declaration to read and
     answers with the bytes.
     """
-    table = db.viewport(k=8)
+    table = db.view("s0").sample(k=8)
     one = table.column("tessera_id")[0].as_py()
     carried = db.item(one)["external_id"]
     assert isinstance(carried, int)
@@ -199,7 +165,7 @@ def test_a_string_id_column_comes_back_as_the_string_it_carried(served):
     from test_sdk_pages import small
 
     one = served(small)
-    table = one.viewport(k=8)
+    table = one.view("map").sample(k=8)
     picked = one.item(table.column("tessera_id")[0].as_py())["external_id"]
     assert isinstance(picked, str) and picked.startswith("p")
 
@@ -212,7 +178,7 @@ def test_connect_reads_a_hosted_deployment_with_the_token_it_was_given(db):
     token = authorise(db.session_url, db.session_credential, [ONE_TERM])
     v = connect(db.viewer_url, token)
     assert v.meta()["views"][0]["id"] == "s0"
-    table = v.viewport(k=8)
+    table = v.view("s0").sample(k=8)
     assert table.num_rows > 0
     assert v.item(table.column("tessera_id")[0].as_py())["fields"]
 
@@ -241,7 +207,14 @@ def test_reading_an_uncommitted_database_names_the_commit_that_would_build_it(tm
 
     db = create(tmp_path / "unbuilt")
     try:
-        for read in (db.map, db.meta, db.viewport, lambda: db.item(1), lambda: db.viewer(["a"])):
+        for read in (
+            db.map,
+            db.meta,
+            lambda: db.view("s0"),
+            lambda: db.categories("archive"),
+            lambda: db.item(1),
+            lambda: db.viewer(["a"]),
+        ):
             with pytest.raises(Refusal):
                 read()
     finally:

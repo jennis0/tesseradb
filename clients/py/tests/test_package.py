@@ -1,9 +1,8 @@
 """The package's own surface: what `import tesseradb` gives, and what it says when it cannot.
 
-The base install depends on nothing outside the standard library, so `Map` and the SDK's verbs
-are imported on first use. What is asserted here is that the names `__all__` publishes resolve to
-the objects behind them, and that a missing extra is an error naming the extra to install rather
-than the import error underneath it.
+`Map` and the database verbs are imported on first use. What is asserted here is that the names
+`__all__` publishes resolve to the objects behind them, that a missing optional package is an
+error naming what to install, and that pandas is never needed to import or use the package.
 """
 
 from __future__ import annotations
@@ -64,8 +63,20 @@ def test_the_widget_without_anywidget_names_the_extra_to_install(monkeypatch):
     assert "tesseradb[widget]" in str(why.value)
 
 
-def test_the_sdk_without_pyarrow_names_the_extra_to_install(monkeypatch):
+def test_the_sdk_without_pyarrow_names_what_to_install(monkeypatch):
     hidden(monkeypatch, "pyarrow")
     with pytest.raises(ImportError) as why:
         tesseradb.create
-    assert "tesseradb[local]" in str(why.value)
+    assert "pyarrow" in str(why.value)
+
+
+def test_the_package_imports_and_loads_every_module_without_pandas(monkeypatch):
+    hidden(monkeypatch, "pandas")
+    for name in list(sys.modules):
+        if name == "tesseradb" or name.startswith("tesseradb."):
+            monkeypatch.delitem(sys.modules, name)
+    import tesseradb as fresh
+
+    assert fresh.create and fresh.open and fresh.connect and fresh.Selection
+    pytest.importorskip("anywidget")
+    assert fresh.Map

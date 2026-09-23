@@ -45,21 +45,18 @@ pub const DEFAULT_STREAM_WRITE_STALL_MS: u64 = 10_000;
 
 pub const DEFAULT_STREAM_DEADLINE_MS: u64 = 60_000;
 
-/// `compute_admission` defaults to this many permits per compute thread: small requests are
-/// bound by scheduling rather than CPU, so admitting more than one per core keeps cores busy.
+/// `compute_admission`'s default per compute thread; small requests wait on scheduling, not CPU.
 pub const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;
 
 /// Equal to [`DEFAULT_INGEST_MAX_BATCH_ROWS`], so one maximal batch is one maximal window.
 pub const DEFAULT_COMMIT_WINDOW_MAX_ITEMS: usize = 10_000;
 
-/// Below [`DEFAULT_INGEST_ADMISSION`], so the queue-full 429 can fire: an admitted handler holds
-/// at most one queue entry, since it blocks on its receipt.
+/// Below [`DEFAULT_INGEST_ADMISSION`] so the 429 can fire: an admitted handler holds one entry.
 pub const DEFAULT_INGEST_QUEUE_BOUND: usize = 32;
 
 pub const DEFAULT_INGEST_ADMISSION: usize = 64;
 
-/// Blocking threads beyond the two admission bounds, for the deny lane's fallback and for work
-/// tokio itself puts on the pool.
+/// Blocking threads beyond both admission bounds, for the deny lane's fallback and tokio's own.
 pub const BLOCKING_THREAD_RESERVE: usize = 32;
 
 pub const DEFAULT_INGEST_MAX_BATCH_ROWS: usize = 10_000;
@@ -78,15 +75,12 @@ pub const DEFAULT_MAX_EXCLUDED_PER_REQUEST: usize = 1_000_000;
 /// The overlay depth that raises an alarm, and the default deletion count that dispatches a fold.
 pub const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 
-/// Four commit windows between publications.
 pub const DEFAULT_FLUSH_MAX_ITEMS: usize = 4 * DEFAULT_COMMIT_WINDOW_MAX_ITEMS;
 
 pub const DEFAULT_FLUSH_MAX_AGE_SECS: u64 = 90;
 
-/// At most one automatic fold a day.
 pub const DEFAULT_COMPACTION_MIN_INTERVAL_SECS: u64 = 86_400;
 
-/// Midnight UTC.
 pub const DEFAULT_COMPACTION_WINDOW_START_SECS: u32 = 0;
 
 pub const DEFAULT_COMPACTION_WINDOW_SECS: u32 = 4 * 3_600;
