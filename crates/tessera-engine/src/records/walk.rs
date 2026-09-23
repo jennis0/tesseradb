@@ -142,7 +142,7 @@ impl Clock {
     }
 
     /// Why the scan would stop here.
-    fn stop(&self) -> Option<ResponseEndedBy> {
+    pub(super) fn stop(&self) -> Option<ResponseEndedBy> {
         if self.cancelled() {
             return Some(ResponseEndedBy::Deadline);
         }
@@ -185,7 +185,7 @@ struct Stretch {
 
 /// Whether two generations share the row positions and the deny state a stretch was evaluated
 /// under.
-fn same_publication(a: &Generation, b: &Generation) -> bool {
+pub(super) fn same_publication(a: &Generation, b: &Generation) -> bool {
     a.prefix == b.prefix
         && a.segments_version == b.segments_version
         && Arc::ptr_eq(&a.overlay, &b.overlay)

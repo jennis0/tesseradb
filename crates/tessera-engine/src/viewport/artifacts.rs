@@ -66,13 +66,28 @@ pub(super) struct GatedArtifact {
 /// The view is [`ServedView`] whole because a dependency's verdict must be reached with the same
 /// generation, segments and deny mask as the artifact it is attached to — otherwise the two could
 /// disagree about what the viewer sees.
-struct DependencyContext<'a> {
+pub(crate) struct DependencyContext<'a> {
     served: &'a ServedView<'a>,
     mask: &'a crate::compose::EffectiveMask,
     reachable: &'a tessera_lifecycle::ResolvedLayers,
     /// Each target layer's label test for this viewer, settled once per request: a named default
     /// is put through the plugin once rather than once per candidate.
     labels: std::cell::RefCell<rustc_hash::FxHashMap<String, crate::artifacts::LabelGate<'a>>>,
+}
+
+impl<'a> DependencyContext<'a> {
+    pub(crate) fn new(
+        served: &'a ServedView<'a>,
+        mask: &'a crate::compose::EffectiveMask,
+        reachable: &'a tessera_lifecycle::ResolvedLayers,
+    ) -> Self {
+        DependencyContext {
+            served,
+            mask,
+            reachable,
+            labels: Default::default(),
+        }
+    }
 }
 
 /// What [`Engine::warm_artifact_projections`] did, for the open's own log line: a count and a
@@ -365,12 +380,7 @@ impl Engine {
         let containment = rows
             .partition()
             .map(|p| p.answer_for_one(session.satisfied()));
-        let ctx = DependencyContext {
-            served,
-            mask,
-            reachable: &reachable,
-            labels: Default::default(),
-        };
+        let ctx = DependencyContext::new(served, mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
         let artifact_view = crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
@@ -596,7 +606,7 @@ impl Engine {
     /// `require_member_visibility`. The slot is blanked after reading: the geometry travels
     /// separately as rings. A slot that does not read as a shape draws nothing rather than a guess.
     #[allow(clippy::too_many_arguments)]
-    fn drawn_shape(
+    pub(crate) fn drawn_shape(
         &self,
         declaration: &tessera_types::layer::LayerDeclaration,
         view: &str,
@@ -868,7 +878,7 @@ impl Engine {
     }
 
     /// The prerequisite as the predicate takes it: a closure over one request's state.
-    fn dependency_gate<'a>(
+    pub(crate) fn dependency_gate<'a>(
         &'a self,
         ctx: &'a DependencyContext<'a>,
     ) -> impl Fn(&tessera_lifecycle::membership::Attachment) -> bool + 'a {
@@ -909,12 +919,7 @@ impl Engine {
         }
         // Built from the same resolution: a label's target may live in any layer its own
         // `depends_on` names, reachable or not.
-        let ctx = DependencyContext {
-            served,
-            mask,
-            reachable: &reachable,
-            labels: Default::default(),
-        };
+        let ctx = DependencyContext::new(served, mask, &reachable);
         let dependency_served = self.dependency_gate(&ctx);
 
         // The rows this request's tiles span, which every set below is taken over.

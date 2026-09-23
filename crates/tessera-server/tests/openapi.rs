@@ -331,9 +331,9 @@ fn every_closed_dto_is_declared_closed() {
         "Pin",
         "ViewportRequest",
         "ItemsRequest",
-        "ItemsHead",
-        "ItemsPageEnd",
-        "ItemsTrailer",
+        "RecordsHead",
+        "PageEnd",
+        "RecordsTrailer",
         "ItemRequest",
         "ItemResponse",
         "ArtifactRequest",
@@ -1038,14 +1038,14 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
     // the region verdict only with a region leaf, which this request has not.
     assert!(resp.headers().contains_key("x-tessera-identity-key"));
     assert!(!resp.headers().contains_key("x-tessera-region"));
-    let decoded = decode_items(&resp.bytes().await.unwrap());
-    assert_valid(&doc, "ItemsHead", &decoded.head);
+    let decoded = decode_records(&resp.bytes().await.unwrap());
+    assert_valid(&doc, "RecordsHead", &decoded.head);
     assert!(decoded.head["visible"].is_u64() && decoded.head["matched"].is_u64());
     assert_eq!(decoded.pages.len(), 3);
     for (_, end) in &decoded.pages {
-        assert_valid(&doc, "ItemsPageEnd", end);
+        assert_valid(&doc, "PageEnd", end);
     }
-    assert_valid(&doc, "ItemsTrailer", &decoded.trailer);
+    assert_valid(&doc, "RecordsTrailer", &decoded.trailer);
     let cursor = decoded.trailer["next"].as_str().unwrap().to_string();
 
     // The rest of the read, from the cursor, to its end.
@@ -1053,9 +1053,9 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
-    let decoded = decode_items(&resp.bytes().await.unwrap());
-    assert_valid(&doc, "ItemsHead", &decoded.head);
-    assert_valid(&doc, "ItemsTrailer", &decoded.trailer);
+    let decoded = decode_records(&resp.bytes().await.unwrap());
+    assert_valid(&doc, "RecordsHead", &decoded.head);
+    assert_valid(&doc, "RecordsTrailer", &decoded.trailer);
     assert!(decoded.trailer["next"].is_null());
     assert_eq!(decoded.trailer["ended_by"], "end");
 

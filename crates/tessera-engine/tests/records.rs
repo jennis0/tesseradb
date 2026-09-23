@@ -33,8 +33,8 @@ use tessera_build::{
 use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, MemberOfLeaf, RegionLeaf, Scalar};
 use tessera_engine::shapes::ShapeF64;
 use tessera_engine::{
-    Engine, EngineError, ItemsHead, ItemsLimits, ItemsPageEnd, ItemsRequest, ItemsSink,
-    ItemsTrailer, LayerSelection, PageEndedBy, RecordsOrder, RecordsRefused, RegionVerdict,
+    Engine, EngineError, RecordsHead, RecordsLimits, PageEnd, ItemsRequest, RecordsSink,
+    RecordsTrailer, LayerSelection, PageEndedBy, RecordsOrder, RecordsRefused, RegionVerdict,
     ResponseEndedBy, Session, SinkResult, ViewportRequest,
 };
 use tessera_lifecycle::wal::{ChangeOp, WalScalar};
@@ -552,8 +552,8 @@ fn both_credential() -> Vec<u8> {
     br#"{"terms": ["0", "1"]}"#.to_vec()
 }
 
-fn limits() -> ItemsLimits {
-    ItemsLimits {
+fn limits() -> RecordsLimits {
+    RecordsLimits {
         max_page_rows: 100_000,
         max_page_bytes: 64 << 20,
         response_bytes: 256 << 20,
@@ -585,18 +585,18 @@ fn names(names: &[&str]) -> Vec<String> {
 
 #[derive(Default)]
 struct Collect {
-    head: Option<ItemsHead>,
-    pages: Vec<(RecordBatch, ItemsPageEnd)>,
+    head: Option<RecordsHead>,
+    pages: Vec<(RecordBatch, PageEnd)>,
 }
 
-impl ItemsSink for Collect {
-    fn head(&mut self, head: &ItemsHead) -> SinkResult {
+impl RecordsSink for Collect {
+    fn head(&mut self, head: &RecordsHead) -> SinkResult {
         assert!(self.head.is_none(), "one head per response");
         self.head = Some(head.clone());
         Ok(())
     }
 
-    fn page(&mut self, batch: &RecordBatch, end: &ItemsPageEnd) -> SinkResult {
+    fn page(&mut self, batch: &RecordBatch, end: &PageEnd) -> SinkResult {
         assert!(self.head.is_some(), "the head precedes every page");
         self.pages.push((batch.clone(), end.clone()));
         Ok(())
@@ -609,7 +609,7 @@ fn respond(
     engine: &Engine,
     session: &Session,
     req: ItemsRequest<'_>,
-) -> Result<(Collect, ItemsTrailer), EngineError> {
+) -> Result<(Collect, RecordsTrailer), EngineError> {
     let mut sink = Collect::default();
     match engine.items_stream(session, req, &mut sink) {
         Ok(trailer) => {
@@ -625,9 +625,9 @@ fn respond(
 
 /// A whole read: every response from no cursor until one ends with none.
 struct Read {
-    heads: Vec<ItemsHead>,
-    pages: Vec<(RecordBatch, ItemsPageEnd)>,
-    trailers: Vec<ItemsTrailer>,
+    heads: Vec<RecordsHead>,
+    pages: Vec<(RecordBatch, PageEnd)>,
+    trailers: Vec<RecordsTrailer>,
 }
 
 impl Read {
@@ -1144,7 +1144,7 @@ fn a_narrower_viewer_reads_only_what_they_see_and_counts_as_the_viewport_does() 
             let counts = sink.head.unwrap().counts.expect("counts asked for");
             let (viewport_visible, viewport_matched) =
                 viewport_counts(&fx.engine, &session, "s0", Some(filter.clone()));
-            assert_eq!(counts.visible, viewport_visible, "{order:?} {name}");
+            assert_eq!(counts.served, viewport_visible, "{order:?} {name}");
             assert_eq!(counts.matched, viewport_matched, "{order:?} {name}");
             assert_eq!(counts.matched, rows, "{order:?} {name}: the rows read");
             if let Some(admitted) = admitted {
@@ -1620,7 +1620,7 @@ fn keep_unmatched_marks_every_visible_row_and_count_heads_the_response() {
         base.pages = Some(1);
         let (sink, trailer) = respond(&fx.engine, &session, base.clone()).unwrap();
         let counts = sink.head.as_ref().unwrap().counts.unwrap();
-        assert_eq!(counts.visible, N);
+        assert_eq!(counts.served, N);
         assert_eq!(counts.matched, (0..N).filter(|&s| matches(s)).count() as u64);
         let mut rows = 0;
         let mut pages = sink.pages;
@@ -1647,7 +1647,7 @@ fn keep_unmatched_marks_every_visible_row_and_count_heads_the_response() {
     unfiltered.count = true;
     let (sink, _) = respond(&fx.engine, &session, unfiltered).unwrap();
     let counts = sink.head.unwrap().counts.unwrap();
-    assert_eq!((counts.visible, counts.matched), (N, N));
+    assert_eq!((counts.served, counts.matched), (N, N));
     for (batch, _) in &sink.pages {
         assert!(col::<BooleanArray>(batch, "tessera:matched").iter().all(|b| b == Some(true)));
     }
@@ -1697,9 +1697,9 @@ fn the_order_follows_the_fields_and_malformed_requests_are_refused() {
         req.pages = Some(1);
         respond(&fx.engine, &session, req).unwrap().0.head.unwrap().order
     };
-    assert_eq!(order_of(&["band", "score", "tag", "kind"]), RecordsOrder::Map);
-    assert_eq!(order_of(&["band", "note"]), RecordsOrder::Stored);
-    assert_eq!(order_of(&["prose"]), RecordsOrder::Stored);
+    assert_eq!(order_of(&["band", "score", "tag", "kind"]), Some(RecordsOrder::Map));
+    assert_eq!(order_of(&["band", "note"]), Some(RecordsOrder::Stored));
+    assert_eq!(order_of(&["prose"]), Some(RecordsOrder::Stored));
 
     let refusal =
         |req: ItemsRequest<'_>| respond(&fx.engine, &session, req).map(|_| ()).unwrap_err();
@@ -1853,12 +1853,12 @@ struct Between<'a> {
     after: std::collections::VecDeque<Box<dyn FnOnce() + 'a>>,
 }
 
-impl ItemsSink for Between<'_> {
-    fn head(&mut self, head: &ItemsHead) -> SinkResult {
+impl RecordsSink for Between<'_> {
+    fn head(&mut self, head: &RecordsHead) -> SinkResult {
         self.inner.head(head)
     }
 
-    fn page(&mut self, batch: &RecordBatch, end: &ItemsPageEnd) -> SinkResult {
+    fn page(&mut self, batch: &RecordBatch, end: &PageEnd) -> SinkResult {
         self.inner.page(batch, end)?;
         if let Some(after) = self.after.pop_front() {
             after();
@@ -1873,7 +1873,7 @@ fn respond_after<'a>(
     session: &Session,
     req: ItemsRequest<'_>,
     after: Vec<Box<dyn FnOnce() + 'a>>,
-) -> (Collect, ItemsTrailer) {
+) -> (Collect, RecordsTrailer) {
     let mut sink = Between {
         inner: Collect::default(),
         after: after.into(),
@@ -1891,7 +1891,7 @@ fn respond_between<'a>(
     session: &Session,
     req: ItemsRequest<'_>,
     between: impl FnOnce() + 'a,
-) -> (Collect, ItemsTrailer) {
+) -> (Collect, RecordsTrailer) {
     respond_after(engine, session, req, vec![Box::new(between)])
 }
 

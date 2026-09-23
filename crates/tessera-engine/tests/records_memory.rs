@@ -23,7 +23,7 @@ use tessera_build::{build, BuildArgs, ViewArgs};
 use tessera_engine::filter::{FilterExpr, RegionLeaf};
 use tessera_engine::shapes::ShapeF64;
 use tessera_engine::{
-    Engine, ItemsHead, ItemsLimits, ItemsPageEnd, ItemsRequest, ItemsSink, RecordsOrder,
+    Engine, RecordsHead, RecordsLimits, PageEnd, ItemsRequest, RecordsSink, RecordsOrder,
     Session, SinkResult,
 };
 use tessera_spatial::shape::Space;
@@ -91,12 +91,12 @@ struct Count {
     rows: usize,
 }
 
-impl ItemsSink for Count {
-    fn head(&mut self, _: &ItemsHead) -> SinkResult {
+impl RecordsSink for Count {
+    fn head(&mut self, _: &RecordsHead) -> SinkResult {
         Ok(())
     }
 
-    fn page(&mut self, batch: &RecordBatch, _: &ItemsPageEnd) -> SinkResult {
+    fn page(&mut self, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
         self.rows += batch.num_rows();
         Ok(())
     }
@@ -124,7 +124,7 @@ fn read(
         pages: None,
         cursor: None,
         idset: None,
-        limits: ItemsLimits {
+        limits: RecordsLimits {
             max_page_rows: 1 << 20,
             max_page_bytes,
             response_bytes: 1 << 40,

@@ -79,7 +79,7 @@ pub use request::{
 };
 pub use sweep::{segments_with_row_bases, SERIAL_FALLBACK_MAX_ROWS, TILE_PAR_MIN_TILES};
 
-pub(crate) use artifacts::response_rungs;
+pub(crate) use artifacts::{response_rungs, DependencyContext};
 pub(crate) use item::{
     category_code, category_key, flushed_row_scalar, slice_value, stored_field_out,
 };

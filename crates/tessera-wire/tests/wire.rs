@@ -7,10 +7,10 @@ use arrow::datatypes::{DataType, TimeUnit, UInt16Type};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use tessera_wire::{
-    artifacts_frame, artifacts_identity_frame, items_head_frame, page_end_frame, points_frame,
+    artifacts_frame, artifacts_identity_frame, records_head_frame, page_end_frame, points_frame,
     points_highlight_frame, records_frame, split_frames, sub_cells_frame, tiles_frame,
     trailer_frame, ArtifactRow, FrameError, RecordsCompression, ScalarColumn, FRAME_ARTIFACTS,
-    FRAME_HEADER_BYTES, FRAME_ITEMS_HEAD, FRAME_PAGE_END, FRAME_POINTS, FRAME_RECORDS,
+    FRAME_HEADER_BYTES, FRAME_RECORDS_HEAD, FRAME_PAGE_END, FRAME_POINTS, FRAME_RECORDS,
     FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER,
 };
 
@@ -595,7 +595,7 @@ fn records_page(rows: u64) -> RecordBatch {
 #[test]
 fn an_items_body_splits_into_its_four_kinds() {
     let page = records_page(10);
-    let mut body = items_head_frame(br#"{"order":"map","page_rows":10}"#);
+    let mut body = records_head_frame(br#"{"order":"map","page_rows":10}"#);
     body.extend(records_frame(&page, RecordsCompression::None).unwrap());
     body.extend(page_end_frame(br#"{"next":null,"ended_by":"end"}"#));
     body.extend(trailer_frame(br#"{"pages":1,"rows":10,"next":null,"ended_by":"end"}"#));
@@ -603,7 +603,7 @@ fn an_items_body_splits_into_its_four_kinds() {
     let kinds: Vec<u8> = frames.iter().map(|(kind, _)| *kind).collect();
     assert_eq!(
         kinds,
-        vec![FRAME_ITEMS_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER]
+        vec![FRAME_RECORDS_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER]
     );
     assert_eq!(frames[0].1, br#"{"order":"map","page_rows":10}"#);
     assert_eq!(batches(frames[1].1), vec![page]);

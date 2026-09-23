@@ -40,6 +40,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/viewport", post(viewport))
         .route("/v1/items", post(crate::records::items))
         .route("/v1/items/{tessera_id}", post(item))
+        .route("/v1/artifacts", post(crate::records::artifacts))
         .route("/v1/artifacts/{tessera_id}", post(artifact))
         .route("/v1/artifacts/browse", post(browse))
         .route("/healthz", get(healthz))

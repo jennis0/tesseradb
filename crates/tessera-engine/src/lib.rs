@@ -26,6 +26,7 @@ mod engine;
 mod error;
 pub mod filter;
 mod flush;
+mod gated_level;
 pub mod gate;
 mod generation;
 mod geometry;
@@ -71,7 +72,7 @@ pub use compact::{CompactionSchedule, PassCost};
 pub use compose::{buffered_rows_of, compose, denied_rows_of, visible_to, EffectiveMask};
 pub use projection::{ProjectionInputs, ProjectionRoute, RowProjection};
 pub use records::{
-    ItemsCounts, ItemsHead, ItemsLimits, ItemsPageEnd, ItemsRequest, ItemsSink, ItemsTrailer,
+    ArtifactsRequest, RecordsCounts, RecordsHead, RecordsLimits, PageEnd, ItemsRequest, RecordsSink, RecordsTrailer,
     PageEndedBy, RecordsOrder, RecordsRefused, ResponseEndedBy,
 };
 // The publication guard's refusal, which a publisher outside this crate must handle.

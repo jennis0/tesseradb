@@ -207,17 +207,17 @@ async fn post_items(server: &TestServer, token: &str, body: &Value) -> reqwest::
 }
 
 /// One response, which must be a 200, decoded.
-async fn items_ok(server: &TestServer, token: &str, body: &Value) -> DecodedItems {
+async fn items_ok(server: &TestServer, token: &str, body: &Value) -> DecodedRecords {
     let resp = post_items(server, token, body).await;
     let status = resp.status().as_u16();
     let bytes = resp.bytes().await.unwrap();
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
-    decode_items(&bytes)
+    decode_records(&bytes)
 }
 
 /// A whole read: `body` sent, then again with each response's `next` as its cursor until that is
 /// null. Returns every response.
-async fn read_all(server: &TestServer, token: &str, body: &Value) -> Vec<DecodedItems> {
+async fn read_all(server: &TestServer, token: &str, body: &Value) -> Vec<DecodedRecords> {
     let mut responses = Vec::new();
     let mut body = body.clone();
     loop {
@@ -237,8 +237,8 @@ async fn read_all(server: &TestServer, token: &str, body: &Value) -> Vec<Decoded
     }
 }
 
-fn ids_of(responses: &[DecodedItems]) -> Vec<u64> {
-    responses.iter().flat_map(DecodedItems::tessera_ids).collect()
+fn ids_of(responses: &[DecodedRecords]) -> Vec<u64> {
+    responses.iter().flat_map(DecodedRecords::tessera_ids).collect()
 }
 
 /// The viewport's visible and matched counts over the whole view.
@@ -417,7 +417,7 @@ async fn count_puts_the_viewports_counts_in_the_head() {
             .bytes()
             .all(|b| b.is_ascii_digit()));
     }
-    let decoded = decode_items(&resp.bytes().await.unwrap());
+    let decoded = decode_records(&resp.bytes().await.unwrap());
     assert_eq!(decoded.head["visible"], json!(visible));
     assert_eq!(decoded.head["matched"], json!(matched));
 
@@ -435,7 +435,7 @@ async fn count_puts_the_viewports_counts_in_the_head() {
     // No counts unless asked, and no region header without a region leaf.
     let resp = post_items(&f.server, &token, &json!({ "view": "s0", "fields": [], "pages": 1 })).await;
     assert!(resp.headers().get("x-tessera-region").is_none());
-    let decoded = decode_items(&resp.bytes().await.unwrap());
+    let decoded = decode_records(&resp.bytes().await.unwrap());
     assert!(decoded.head.get("visible").is_none() && decoded.head.get("matched").is_none());
 }
 
@@ -454,14 +454,14 @@ async fn zstd_pages_decode_to_the_uncompressed_pages() {
     let mut zstd_body = body.clone();
     zstd_body["compression"] = json!("zstd");
     let zstd = read_all(&f.server, &token, &zstd_body).await;
-    let batches = |responses: &[DecodedItems]| -> Vec<RecordBatch> {
+    let batches = |responses: &[DecodedRecords]| -> Vec<RecordBatch> {
         responses
             .iter()
             .flat_map(|r| r.pages.iter().map(|(batch, _)| batch.clone()))
             .collect()
     };
     assert_eq!(batches(&plain), batches(&zstd));
-    let size = |responses: &[DecodedItems]| -> usize {
+    let size = |responses: &[DecodedRecords]| -> usize {
         responses
             .iter()
             .flat_map(|r| r.records_payloads.iter().map(Vec::len))
