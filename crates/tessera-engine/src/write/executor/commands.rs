@@ -171,6 +171,8 @@ pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croari
 pub struct ValuesReceipt {
     pub filled: u64,
     pub held: u64,
+    /// How many memberships this batch's layer columns added, to artifacts it created and to
+    /// artifacts already held alike.
     pub joined: u64,
     /// How many artifacts this batch's layer columns created: a key no artifact held, on a layer
     /// whose value set is open. Under `open` a typo creates a permanent object rather than being
@@ -270,8 +272,8 @@ pub(super) fn refusal_of(e: tessera_lifecycle::RegistryError) -> ExecError {
 /// A key the level held is accepted under the fill rule and is not created, so `created` is how
 /// many artifacts the batch minted, `without_content` how many of those carry no content on a
 /// layer declaring some, `filled` how many fixed parts were filled on held artifacts, and `joined`
-/// how many members joined held artifacts. Each is bounded by the caller's own request and names
-/// no artifact.
+/// how many memberships the batch added, to the artifacts it created and to held ones alike. None
+/// names an artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishedBatch {
     pub(crate) entities: Vec<EntityId>,
@@ -476,9 +478,8 @@ impl Executor {
     /// closed: an entity ingested after this step is in the inclusion spelling's membership and
     /// not in the exclusion's, and a suppressed entity is in both, suppression not being deletion.
     ///
-    /// The size is logged rather than answered: how large a membership a caller's exclusion came
-    /// to is operator-facing, and a count of the corpus is not something a publication's
-    /// acknowledgement carries.
+    /// The complement's size is logged, and the acknowledgement's `joined` counts it among the
+    /// memberships the batch added.
     pub(super) fn materialise_exclusions(
         &self,
         layer: &str,
@@ -858,15 +859,13 @@ impl Executor {
                 return;
             }
         };
-        // Read beside the preparation and before the apply, on `growth_receipt`'s rule:
-        // afterwards every joining member is a member and how many were new is gone.
-        // `joined` counts members of artifacts that already existed, at this door as at
-        // `PUT /control/layers/{name}/artifacts`: an artifact this batch created is reported under
-        // `minted`, and its first members are what creating it means rather than a second number.
+        // Read before the apply, on `growth_receipt`'s rule: afterwards every joining member is a
+        // member and how many were new is gone.
         let joined = self.live.with_artifacts(|store| {
-            growth
+            mints
                 .iter()
-                .map(|record| new_members_of(record, store))
+                .chain(&growth)
+                .map(|record| tessera_lifecycle::membership::members_added(record, store))
                 .sum::<u64>()
         });
 

@@ -3156,6 +3156,37 @@ pub fn growth_record<'a>(
     })
 }
 
+/// How many memberships `record` adds, read against `store` before the record is applied: every
+/// member of an artifact a publication creates, and every joining member a growth's artifact does
+/// not already hold. A write's `joined` is this summed over the records it appends, so an artifact
+/// created by the same request counts its members exactly as a held one counts its new ones.
+///
+/// A generating-set page and a fill add no membership and count nothing, and neither does a
+/// growth naming an ordinal the store does not hold.
+pub fn members_added(record: &crate::wal::WalRecord, store: &ArtifactStore) -> u64 {
+    match record {
+        crate::wal::WalRecord::ArtifactPublish { artifacts, .. } => artifacts
+            .iter()
+            .filter_map(|artifact| deserialise_members(&artifact.members))
+            .map(|members| members.cardinality())
+            .sum(),
+        crate::wal::WalRecord::ArtifactGrow {
+            layer,
+            level,
+            growth,
+        } => growth
+            .iter()
+            .filter(|delta| delta.set == crate::wal::GrownSet::Membership)
+            .filter_map(|delta| {
+                let joining = deserialise_members(&delta.joining)?;
+                let held = store.get(layer, *level, delta.ordinal)?;
+                Some(joining.andnot_cardinality(&held.members))
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
 /// A growth's **leaving** set, where no bytes at all is the empty set.
 ///
 /// The membership route writes no bytes rather than the serialisation of an empty bitmap
@@ -3983,6 +4014,32 @@ mod tests {
             }];
         }
         record
+    }
+
+    /// **A write's `joined` counts every membership it adds**: all the members of an artifact the
+    /// write creates, and the members a held artifact did not already hold.
+    #[test]
+    fn members_added_counts_created_artifacts_whole_and_held_ones_by_their_new_members() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1, 2, 3]), 0), 0);
+
+        let minted = publication("clusters/a", 1, 101, &[4, 5, 6, 7]);
+        assert_eq!(members_added(&minted, &store), 4);
+
+        let joining = growth("clusters/a", 0, 0, &[2, 3, 8, 9]);
+        assert_eq!(members_added(&joining, &store), 2);
+
+        let restated = growth("clusters/a", 0, 0, &[1, 2, 3]);
+        assert_eq!(members_added(&restated, &store), 0);
+
+        let mut generating = growth("clusters/a", 0, 0, &[10, 11]);
+        if let crate::wal::WalRecord::ArtifactGrow { growth, .. } = &mut generating {
+            growth[0].set = crate::wal::GrownSet::GeneratingSet {
+                rank: 0,
+                cardinality: 2,
+            };
+        }
+        assert_eq!(members_added(&generating, &store), 0, "a generating set is no membership");
     }
 
     /// **`levels_moved_by` reports exactly the levels `retire` moves, and `retire` moves each by
