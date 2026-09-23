@@ -768,9 +768,11 @@ impl Executor {
     ///
     /// It creates no point and no row. Every entity a row names was resolved at the boundary, so
     /// this pass adds cells to entities that have them and members to artifacts; a subject that
-    /// does not exist refused the batch before it was submitted. What it does create is an
-    /// artifact a layer column named and no artifact held, on an `open` layer, through the same
-    /// [`Executor::prepare_mints`] the ingest door's window close uses.
+    /// does not exist refused the batch before it was submitted. What it does create, each
+    /// through the function the ingest window's close uses: a code for an open vocabulary's new
+    /// key; an artifact a layer column named and no artifact held, on an `open` layer
+    /// ([`Executor::prepare_mints`]); and an artifact a filled value names on a layer whose
+    /// artifacts are a column's values ([`Executor::derive_records`]).
     ///
     /// The fill rule is evaluated here and nowhere else, beside the join arm and for its reason:
     /// the sources are the commit-window buffer, the unflushed fills and the flushed homes, and
@@ -778,9 +780,9 @@ impl Executor {
     /// identical value is a no-op, and a cell holding a different value refuses the whole batch
     /// with a `409` naming the column and the key and never the held value.
     ///
-    /// One append, one fsync, one apply. The values record and the growth records its layer
-    /// columns produced are made durable together, so there is no state in which a cell is filled
-    /// and its membership is not.
+    /// One append, one fsync, one apply. The vocabulary mint records, the values record, and the
+    /// publications and growths its columns produced are made durable together and in that order,
+    /// so there is no state in which a cell is filled and its code or membership is not.
     pub(super) fn commit_values(
         &mut self,
         mut request: tessera_lifecycle::ValuesRequest,
@@ -918,9 +920,7 @@ impl Executor {
         // claimed, and replay applies the sequence in order, so an artifact must exist before
         // anything addresses it.
         let artifact_records: Vec<&WalRecord> = mints.iter().chain(growth.iter()).collect();
-        // The level version each record is the delta against, read before the apply moves it, on
-        // `commit_growth`'s rule, carried forward across the sequence because a mint and a growth
-        // of this batch may name one level and each moves it exactly once.
+        // The vocabulary mints go first, since the values record carries their codes.
         let mut durable: Vec<&WalRecord> = vocabulary_records.iter().collect();
         durable.push(&values_record);
         durable.extend(&artifact_records);

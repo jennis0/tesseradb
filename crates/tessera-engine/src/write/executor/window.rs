@@ -113,9 +113,9 @@ impl ClosingWindow {
     }
 }
 
-/// What a window's vocabulary pass drew.
+/// What a vocabulary pass drew, over a commit window's rows or a values batch's cells.
 pub(super) struct MintedCodes {
-    /// The bindings the window publishes if it survives, the live ones plus whatever it drew.
+    /// The bindings published if the write commits: the live ones plus whatever the pass drew.
     pub(super) vocabularies: Vocabularies,
     /// `(vocabulary, key, code)` per key bound, in the order the durable records are appended.
     pub(super) fresh: Vec<(String, String, u32)>,
