@@ -69,11 +69,13 @@ def run(command: Sequence[str], cwd: Path, env: dict[str, str] | None = None) ->
 
 
 def text_column(rung_dir: Path) -> str | None:
-    """The rung's first indexed text attribute — what the battery's `match` asks on, read from
-    the declaration rather than defaulted."""
+    """The rung's first indexed text attribute holding one value per entity — what the battery's
+    `match` asks on, read from the declaration rather than defaulted. A group-scoped one has no
+    value on the plain view the battery draws."""
     declared = tomllib.loads((rung_dir / "corpus.toml").read_text())
     for attribute in declared.get("attribute", []):
-        if attribute.get("type") == "text" and attribute.get("index"):
+        scoped = isinstance(attribute.get("scope"), dict)
+        if attribute.get("type") == "text" and attribute.get("index") and not scoped:
             return attribute["name"]
     return None
 
