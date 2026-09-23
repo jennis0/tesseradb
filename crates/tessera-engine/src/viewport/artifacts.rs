@@ -37,6 +37,32 @@ pub(crate) fn level_is_selected(
     }
 }
 
+/// The authored shapes an artifact's content carries at its layer's shape slot, taken out of the
+/// content. The slot names every view of the layer and holds each one's canonical shape, so it is
+/// blanked before the content is served or searched. `None` where the layer authors no shape or
+/// the slot does not read as one.
+pub(crate) fn take_authored_shapes(
+    declaration: &tessera_types::layer::LayerDeclaration,
+    content: &mut [String],
+) -> Option<tessera_lifecycle::membership::ArtifactShapes> {
+    let (slot, _) = declaration.authored_shape()?;
+    let text = content.get_mut(slot)?;
+    let shapes = tessera_lifecycle::membership::ArtifactShapes::from_content_text(text);
+    text.clear();
+    shapes
+}
+
+/// One view's authored shape as rings for the wire, and whether the vertex budget fired; `None`
+/// where the artifact authored none for `view` or its bytes do not decode.
+pub(crate) fn authored_rings(
+    shapes: &tessera_lifecycle::membership::ArtifactShapes,
+    view: &str,
+    zoom: Option<u8>,
+) -> Option<(Vec<Vec<Vec<[u32; 2]>>>, bool)> {
+    let shape = tessera_spatial::shape::Shape::decode(shapes.for_view(view)?).ok()?;
+    Some(crate::shapes::served_rings(&shape, zoom))
+}
+
 /// How long a chain of dependencies one request will follow.
 ///
 /// The dependency graph is acyclic by construction, so a real chain is one or two links deep.
@@ -641,22 +667,11 @@ impl Engine {
                 guarded
             }
             Some(crate::shapes::DrawnShape::Authored) => {
-                let Some((slot, _)) = declaration.authored_shape() else {
-                    return false;
-                };
-                let Some(text) = content.get_mut(slot) else {
-                    return false;
-                };
-                let shapes = tessera_lifecycle::membership::ArtifactShapes::from_content_text(text);
-                text.clear();
-                let Some(shape) = shapes
-                    .as_ref()
-                    .and_then(|s| s.for_view(view))
-                    .and_then(|bytes| tessera_spatial::shape::Shape::decode(bytes).ok())
+                let Some((parts, guarded)) = take_authored_shapes(declaration, content)
+                    .and_then(|shapes| authored_rings(&shapes, view, zoom))
                 else {
                     return false;
                 };
-                let (parts, guarded) = crate::shapes::served_rings(&shape, zoom);
                 derived.shape = Some(parts);
                 guarded
             }

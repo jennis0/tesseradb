@@ -1,6 +1,6 @@
 //! What `POST /v1/artifacts/browse` and `POST /v1/artifacts` read a layer by: the layer resolved
-//! for one viewer, one level of it gated and counted under one composed mask, and a filter's rows
-//! over the whole view.
+//! for one viewer, one level of it resolved and counted under one composed mask, and a filter's
+//! rows over the whole view.
 //!
 //! Both routes walk a layer's artifacts off the viewport, so both need the filter answered over
 //! every row of the view: a leaf over a render-only column is answered by the viewport only inside
@@ -93,19 +93,17 @@ impl Engine {
         })
     }
 
-    /// One level of `layer` under `mask`: its row form, its masked counts, its contents and,
-    /// where `filter_rows` is given and the level is served from its column, the filtered count
-    /// of every artifact in one walk. `geometry` also accumulates the visible members' positions
-    /// on a level served from its column alone, for a centroid or box read off the counts.
-    pub(crate) fn gated_level(
+    /// One level of `layer` under `mask`: its row form, its masked counts and its contents.
+    /// `geometry` also accumulates the visible members' positions on a level served from its
+    /// column alone, for a centroid or box read off the counts.
+    pub(crate) fn read_level(
         &self,
         served: &ServedView<'_>,
         mask: &EffectiveMask,
         layer: &RegisteredLayer,
         level: u32,
-        filter_rows: Option<&Bitmap>,
         geometry: bool,
-    ) -> GatedLevel {
+    ) -> ReadLevel {
         let generation = served.generation;
         let name = layer.declaration.name.as_str();
         let vocabulary = crate::viewport::predicate_vocabulary(generation, &layer.declaration);
@@ -153,15 +151,6 @@ impl Engine {
             (geometry && crate::artifacts::derives_accumulated_geometry(&layer.declaration))
                 .then_some(&served.segments[..]),
         );
-        // A label column has no per-artifact membership to intersect, so the filtered counts are
-        // one walk of `visible ∩ filter`, the shape the masked counts take.
-        let filtered = match (rows.column(), filter_rows) {
-            (Some(column), Some(filter_rows)) => {
-                let visible = mask.visible_all().and(filter_rows);
-                Some(self.pool.install(|| column.histogram_over(&visible)))
-            }
-            _ => None,
-        };
         let contents = match layer.runs.get(level as usize) {
             Some(runs) if !layer.declaration.content.supplied.is_empty() => {
                 Some(self.level_contents.get_or_build(
@@ -174,11 +163,11 @@ impl Engine {
             }
             _ => None,
         };
-        GatedLevel {
+        ReadLevel {
             level,
             rows,
             counts,
-            filtered,
+            filtered: None,
             contents,
         }
     }
@@ -205,16 +194,17 @@ pub(crate) fn check_level(
 }
 
 /// One level of one layer, resolved for one viewer under one composed mask.
-pub(crate) struct GatedLevel {
+pub(crate) struct ReadLevel {
     pub(crate) level: u32,
     pub(crate) rows: Arc<ArtifactRows>,
     pub(crate) counts: Option<Arc<MaskedCounts>>,
-    /// Each artifact's visible members matching the filter, on a level served from its column.
-    filtered: Option<Vec<u32>>,
+    /// Each artifact's visible members matching the filter, on a level served from its column;
+    /// set from [`ReadLevel::filtered_counts`].
+    pub(crate) filtered: Option<Arc<Vec<u32>>>,
     contents: Option<Arc<LevelContent>>,
 }
 
-impl GatedLevel {
+impl ReadLevel {
     /// The one verdict over this level for `session`, with `dependency_served` answering for an
     /// attached artifact's target.
     pub(crate) fn view<'a>(
@@ -266,7 +256,22 @@ impl GatedLevel {
         )
     }
 
-    /// How many of the artifact's visible members are in `filter_rows`.
+    /// Every artifact's visible members in `filter_rows`, in one walk of `visible ∩ filter`, on a
+    /// level served from its column, which has no per-artifact membership to intersect; `None` on
+    /// any other level.
+    pub(crate) fn filtered_counts(
+        &self,
+        engine: &Engine,
+        mask: &EffectiveMask,
+        filter_rows: &Bitmap,
+    ) -> Option<Arc<Vec<u32>>> {
+        let column = self.rows.column()?;
+        let visible = mask.visible_all().and(filter_rows);
+        Some(Arc::new(engine.pool.install(|| column.histogram_over(&visible))))
+    }
+
+    /// How many of the artifact's visible members are in `filter_rows`, from
+    /// [`ReadLevel::filtered`] where the level is served from its column.
     pub(crate) fn matched_count(
         &self,
         ordinal: u32,

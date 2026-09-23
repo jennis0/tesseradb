@@ -9,9 +9,11 @@
 //! Every page resolves the layer again, composes the view's mask again and runs the one verdict,
 //! [`crate::artifacts::ArtifactView::verdict`], for each artifact it walks, with the dependency
 //! hook the viewport uses, so an attached artifact is served only while its target is. Content
-//! decides servability as it does on browse. Nothing about the layer is gated or sorted whole per
-//! page; the filter alone is evaluated over the whole view, once per response and again after a
-//! publication renumbers the rows it is held in.
+//! decides servability as it does on browse, and an authored shape's slot is taken out of the
+//! content before it is served or searched, as the drill-down takes it. Nothing about the layer
+//! is checked or sorted whole per page. The filter alone is evaluated over the whole view, with a
+//! column-served level's filtered counts beside it, once per response and again after a
+//! publication or a change to the mask renumbers the rows it is held in.
 
 use std::sync::Arc;
 
@@ -37,14 +39,15 @@ use crate::derived::{ComputedProperty, DerivedContent, RowLocator};
 use crate::engine::Engine;
 use crate::error::{EngineError, Result};
 use crate::filter::FilterExpr;
-use crate::gated_level::{check_level, GatedLevel, LayerRefusal};
+use crate::layer_read::{check_level, ReadLevel, LayerRefusal};
 use crate::histogram::MaskIdentity;
 use crate::region::RegionVerdict;
 use crate::session::Session;
 use crate::shapes::DrawnShape;
-use crate::viewport::{filter_refusal, DependencyContext, OpenView};
+use crate::viewport::{
+    authored_rings, filter_refusal, take_authored_shapes, DependencyContext, OpenView,
+};
 use crate::Generation;
-
 
 /// How many ordinals are walked between two readings of the clock.
 const CHUNK: u32 = 1024;
@@ -124,11 +127,19 @@ enum Ended {
     End,
 }
 
-/// The filter's rows over the whole view, and the publication and mask they are held under.
+/// The filter's rows over the whole view, and the publication and mask they are held under,
+/// with each level's filtered counts beside the row form they were counted over.
 struct HeldFilter {
     under: Arc<Generation>,
     mask: MaskIdentity,
     rows: Bitmap,
+    levels: Vec<Option<HeldCounts>>,
+}
+
+/// One level's filtered counts, and the row form they count over.
+struct HeldCounts {
+    rows: Arc<crate::artifacts::ArtifactRows>,
+    counts: Option<Arc<Vec<u32>>>,
 }
 
 /// The artifacts route's pager.
@@ -165,22 +176,34 @@ struct Row {
     matched: Option<u64>,
 }
 
-/// What an artifact is when the verdict serves it: its entity, its count and its content.
+/// What an artifact is when the verdict serves it: its entity and identifier, its count, its
+/// content with any authored shape taken out of it, and that shape.
 struct Served {
     entity: EntityId,
+    tessera_id: u64,
     masked_count: u64,
     content: Vec<String>,
+    authored: Option<tessera_lifecycle::membership::ArtifactShapes>,
 }
 
-/// One page's view of the layer: every level gated under the page's mask, and what a candidate
+/// The layer an attached layer's artifacts hang from, every level of it read under the page's
+/// mask, for naming a target only where it is served.
+struct TargetLayer<'a> {
+    layer: &'a RegisteredLayer,
+    levels: &'a [ReadLevel],
+    views: Vec<crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask>>,
+}
+
+/// One page's view of the layer: every level read under the page's mask, and what a candidate
 /// is tested against.
 struct Scope<'a> {
     engine: &'a Engine,
     open: &'a OpenView<'a>,
     generation: &'a Generation,
     layer: &'a RegisteredLayer,
-    levels: &'a [GatedLevel],
+    levels: &'a [ReadLevel],
     views: &'a [crate::artifacts::ArtifactView<'a, crate::compose::EffectiveMask>],
+    targets: &'a [TargetLayer<'a>],
     filter_rows: Option<&'a Bitmap>,
     /// Under `parent`: the parent's position where this viewer is served it, and `None` where no
     /// artifact is its child.
@@ -191,7 +214,7 @@ struct Scope<'a> {
 impl Scope<'_> {
     /// The artifact at `(level, ordinal)` where this viewer is served it.
     fn served(&self, level: u32, ordinal: u32) -> Option<Served> {
-        let gated = self.levels.get(level as usize)?;
+        let read = self.levels.get(level as usize)?;
         let entity = self.layer.runs[level as usize]
             .entity_of(u64::from(ordinal))
             .map(EntityId::new)?;
@@ -200,12 +223,16 @@ impl Scope<'_> {
         else {
             return None;
         };
-        let content =
-            gated.content(self.engine, self.generation, self.layer, ordinal, entity, rank)?;
+        let mut content =
+            read.content(self.engine, self.generation, self.layer, ordinal, entity, rank)?;
+        let tessera_id = self.tessera_id(entity)?;
+        let authored = take_authored_shapes(&self.layer.declaration, &mut content);
         Some(Served {
             entity,
+            tessera_id,
             masked_count,
             content,
+            authored,
         })
     }
 
@@ -215,6 +242,32 @@ impl Scope<'_> {
             .forward(self.shard, entity)
             .ok()
             .map(|id| id.raw())
+    }
+
+    /// The identifier of the artifact `attachment` names, where the verdict serves it and its
+    /// content can be read, as a served row's is.
+    fn target(&self, attachment: &tessera_lifecycle::membership::Attachment) -> Option<u64> {
+        let target = self
+            .targets
+            .iter()
+            .find(|t| t.layer.declaration.name == attachment.layer)?;
+        let level = attachment.level as usize;
+        let crate::artifacts::ArtifactVerdict::Serve { rank, .. } = target
+            .views
+            .get(level)?
+            .verdict(attachment.entity, attachment.ordinal)
+        else {
+            return None;
+        };
+        target.levels[level].content(
+            self.engine,
+            self.generation,
+            target.layer,
+            attachment.ordinal,
+            attachment.entity,
+            rank,
+        )?;
+        self.tessera_id(attachment.entity)
     }
 
     /// Whether a served artifact passes `parent` and `q`: the narrowings that decide which served
@@ -408,23 +461,79 @@ impl ArtifactsPager<'_> {
                     under: Arc::clone(generation),
                     mask: served.mask_identity,
                     rows,
+                    levels: Vec::new(),
                 });
             }
         }
-        let filter_rows = self.filter.as_ref().map(|held| &held.rows);
         let geometry = self
             .properties
             .iter()
             .any(|p| matches!(p, Property::Centroid | Property::Box));
-        let levels: Vec<GatedLevel> = (0..layer.runs.len() as u32)
-            .map(|level| engine.gated_level(served, &open.mask, &layer, level, filter_rows, geometry))
+        let mut levels: Vec<ReadLevel> = (0..layer.runs.len() as u32)
+            .map(|level| engine.read_level(served, &open.mask, &layer, level, geometry))
             .collect();
+        if let Some(held) = &mut self.filter {
+            // Each level's filtered counts are held with the filter while the level's row form
+            // is the one they were counted over.
+            held.levels.resize_with(levels.len(), || None);
+            for (level, slot) in levels.iter_mut().zip(held.levels.iter_mut()) {
+                let current = slot
+                    .as_ref()
+                    .filter(|counts| Arc::ptr_eq(&counts.rows, &level.rows));
+                let counts = match current {
+                    Some(counts) => counts.counts.clone(),
+                    None => {
+                        let counts = level.filtered_counts(engine, &open.mask, &held.rows);
+                        *slot = Some(HeldCounts {
+                            rows: Arc::clone(&level.rows),
+                            counts: counts.clone(),
+                        });
+                        counts
+                    }
+                };
+                level.filtered = counts;
+            }
+        }
+        let filter_rows = self.filter.as_ref().map(|held| &held.rows);
         let reachable = engine.reachable_layers(served.session);
         let ctx = DependencyContext::new(served, &open.mask, &reachable);
         let dependency_served = engine.dependency_gate(&ctx);
         let views: Vec<_> = levels
             .iter()
             .map(|level| level.view(engine, served, &open.mask, &layer, &dependency_served))
+            .collect();
+        // The layers this one hangs from, read only where a target is to be named.
+        let target_layers: Vec<(RegisteredLayer, Vec<ReadLevel>)> =
+            if self.properties.contains(&Property::Target) {
+                layer
+                    .declaration
+                    .depends_on
+                    .iter()
+                    .filter_map(|name| engine.write.live().registered_layer(name))
+                    .map(|target| {
+                        let levels = (0..target.runs.len() as u32)
+                            .map(|level| {
+                                engine.read_level(served, &open.mask, &target, level, false)
+                            })
+                            .collect();
+                        (target, levels)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        let targets: Vec<TargetLayer<'_>> = target_layers
+            .iter()
+            .map(|(target, levels)| TargetLayer {
+                layer: target,
+                levels,
+                views: levels
+                    .iter()
+                    .map(|level| {
+                        level.view(engine, served, &open.mask, target, &dependency_served)
+                    })
+                    .collect(),
+            })
             .collect();
         let mut scope = Scope {
             engine,
@@ -433,6 +542,7 @@ impl ArtifactsPager<'_> {
             layer: &layer,
             levels: &levels,
             views: &views,
+            targets: &targets,
             filter_rows,
             parent: None,
             shard: generation.bundle.manifest.identity.shard_id,
@@ -453,9 +563,9 @@ impl ArtifactsPager<'_> {
 
     /// Build the row for a served artifact that the request selects, with the properties named.
     fn row(&self, scope: &Scope<'_>, level: u32, ordinal: u32, served: Served) -> Result<Row> {
-        let gated = &scope.levels[level as usize];
+        let read = &scope.levels[level as usize];
         let mut row = Row {
-            tessera_id: scope.tessera_id(served.entity).unwrap_or_default(),
+            tessera_id: served.tessera_id,
             level,
             masked_count: served.masked_count,
             matched: scope.matched(level, ordinal),
@@ -467,30 +577,26 @@ impl ArtifactsPager<'_> {
                 Property::Key => row.key = scope.key(level, ordinal),
                 Property::Level | Property::MaskedCount => {}
                 Property::Parents => {
-                    let mut ids: Vec<u64> = gated
+                    let mut ids: Vec<u64> = read
                         .rows
                         .parents(ordinal)
                         .iter()
-                        .filter_map(|p| {
-                            let parent = scope.served(p.level, p.ordinal)?;
-                            scope.tessera_id(parent.entity)
-                        })
+                        .filter_map(|p| Some(scope.served(p.level, p.ordinal)?.tessera_id))
                         .collect();
                     ids.sort_unstable();
                     ids.dedup();
                     row.parents = ids;
                 }
                 Property::Target => {
-                    // The verdict served this artifact only because its target is served.
-                    row.target = gated
+                    row.target = read
                         .rows
                         .attachment(ordinal)
-                        .and_then(|a| scope.tessera_id(a.entity));
+                        .and_then(|a| scope.target(a));
                 }
                 Property::Content => row.content = served.content.clone(),
                 Property::Centroid | Property::Box => {
                     if row.centroid.is_none() && row.bbox.is_none() {
-                        let derived = visible_geometry(scope, gated, ordinal);
+                        let derived = visible_geometry(scope, read, ordinal);
                         let frame = frame()?;
                         row.centroid = derived.centroid.map(|[x, y]| frame.point(x, y));
                         row.bbox = derived.bbox.map(|[x0, y0, x1, y1]| {
@@ -501,7 +607,7 @@ impl ArtifactsPager<'_> {
                     }
                 }
                 Property::Shape => {
-                    row.shape = drawn_shape(scope, gated, ordinal, &served.content)
+                    row.shape = drawn_shape(scope, read, ordinal, &served)
                         .map(|parts| -> Result<Vec<u8>> {
                             let frame = frame()?;
                             let parts: tessera_spatial::shape::RingsF64 = parts
@@ -663,13 +769,13 @@ fn parent_position(scope: &Scope<'_>, parent: TesseraId) -> Option<(u32, u32)> {
 
 /// The artifact's centroid and box over the members this viewer can see, in grid units: read off
 /// the level's accumulation where it has one, and computed from the visible rows otherwise.
-fn visible_geometry(scope: &Scope<'_>, gated: &GatedLevel, ordinal: u32) -> DerivedContent {
+fn visible_geometry(scope: &Scope<'_>, read: &ReadLevel, ordinal: u32) -> DerivedContent {
     let wanted = [ComputedProperty::Centroid, ComputedProperty::Box];
-    if let Some(geometry) = gated.counts.as_ref().and_then(|c| c.geometry()) {
+    if let Some(geometry) = read.counts.as_ref().and_then(|c| c.geometry()) {
         return crate::derived::accumulated(&wanted, geometry, ordinal);
     }
     let locator = RowLocator::new(scope.open.served.segments.clone());
-    let visible = gated.rows.visible_rows(ordinal, &scope.open.mask);
+    let visible = read.rows.visible_rows(ordinal, &scope.open.mask);
     crate::derived::compute(&wanted, &visible, &locator)
 }
 
@@ -677,25 +783,29 @@ fn visible_geometry(scope: &Scope<'_>, gated: &GatedLevel, ordinal: u32) -> Deri
 /// this viewer can see, or the predicate or authored shape whole, as the drill-down serves it.
 fn drawn_shape(
     scope: &Scope<'_>,
-    gated: &GatedLevel,
+    read: &ReadLevel,
     ordinal: u32,
-    content: &[String],
+    served: &Served,
 ) -> Option<Vec<Vec<Vec<[u32; 2]>>>> {
     let declaration = &scope.layer.declaration;
     match declaration.drawn_shape()? {
         DrawnShape::Derived => {
             let locator = RowLocator::new(scope.open.served.segments.clone());
-            let visible = gated.rows.visible_rows(ordinal, &scope.open.mask);
+            let visible = read.rows.visible_rows(ordinal, &scope.open.mask);
             crate::derived::compute(&[ComputedProperty::Hull], &visible, &locator).shape
         }
-        DrawnShape::Predicate | DrawnShape::Authored => {
-            let mut content = content.to_vec();
+        DrawnShape::Authored => {
+            let shapes = served.authored.as_ref()?;
+            Some(authored_rings(shapes, scope.open.served.name, None)?.0)
+        }
+        DrawnShape::Predicate => {
+            let mut content = Vec::new();
             let mut derived = DerivedContent::default();
             scope.engine.drawn_shape(
                 declaration,
                 scope.open.served.name,
                 &declaration.name,
-                gated.level,
+                read.level,
                 ordinal,
                 &mut content,
                 &mut derived,
@@ -709,6 +819,7 @@ fn drawn_shape(
 impl Pager for ArtifactsPager<'_> {
     /// The artifacts the request selects that this viewer is served, and of them the ones with a
     /// visible member matching the filter, over the whole layer under the first page's mask.
+    /// Cancellation ends it, and the response with it.
     fn count(
         &mut self,
         engine: &Engine,
@@ -719,6 +830,12 @@ impl Pager for ArtifactsPager<'_> {
             let (mut served_count, mut matched) = (0u64, 0u64);
             for level in pager.levels(scope.layer) {
                 for ordinal in 0..scope.levels[level as usize].rows.len() as u32 {
+                    // The count runs before the first page, so only cancellation ends it.
+                    if ordinal % CHUNK == 0
+                        && pager.req.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
+                    {
+                        return Err(EngineError::Cancelled);
+                    }
                     let Some(served) = scope.served(level, ordinal) else {
                         continue;
                     };

@@ -47,7 +47,7 @@ use tessera_types::{EntityId, TesseraId};
 
 use crate::compose::compose;
 use crate::filter::FilterExpr;
-use crate::gated_level::{check_level, LayerRefusal};
+use crate::layer_read::{check_level, LayerRefusal};
 use crate::viewport::{response_rungs, segments_with_row_bases};
 use crate::error::Result;
 use crate::EngineError;
@@ -330,10 +330,12 @@ impl crate::Engine {
         let shard = generation.bundle.manifest.identity.shard_id;
         for (walked, runs) in layer.runs.iter().enumerate() {
             let walked = walked as u32;
-            let gated_level =
-                self.gated_level(&served, &mask, &layer, walked, filter_rows.as_ref(), false);
-            let rows = &gated_level.rows;
-            let view_of = gated_level.view(self, &served, &mask, &layer, &|_| false);
+            let mut level_read = self.read_level(&served, &mask, &layer, walked, false);
+            if let Some(filter_rows) = &filter_rows {
+                level_read.filtered = level_read.filtered_counts(self, &mask, filter_rows);
+            }
+            let rows = &level_read.rows;
+            let view_of = level_read.view(self, &served, &mask, &layer, &|_| false);
             for ordinal in 0..rows.len() as u32 {
                 let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
                     continue;
@@ -351,14 +353,14 @@ impl crate::Engine {
                 // missing (decision 0076), which is why this runs inside the gate and not beside
                 // the row build.
                 let Some(content) =
-                    gated_level.content(self, &generation, &layer, ordinal, entity, rank)
+                    level_read.content(self, &generation, &layer, ordinal, entity, rank)
                 else {
                     continue;
                 };
                 if let Some(filter_rows) = filter_rows.as_ref() {
                     filtered.insert(
                         (walked, ordinal),
-                        gated_level.matched_count(ordinal, &mask, filter_rows),
+                        level_read.matched_count(ordinal, &mask, filter_rows),
                     );
                 }
                 names.insert((walked, ordinal), content.into_iter().next());

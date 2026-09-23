@@ -206,15 +206,18 @@ fn fixture() -> Fx {
     engine.register_layer(tree).unwrap();
     let mut planted = Vec::new();
     for r in 0..ROOTS {
-        let mut node = IncomingArtifact::from_entities(Some(root_key(r)), fx.entities(root_members(r)));
+        let mut node =
+            IncomingArtifact::from_entities(Some(root_key(r)), fx.entities(root_members(r)));
         node.contents = content(format!("The {} group", root_key(r)));
         if r == LABELLED_ROOT {
             node.access = vec![b"1".to_vec()];
         }
         planted.push(node);
         for c in 0..3 {
-            let mut child =
-                IncomingArtifact::from_entities(Some(child_key(r, c)), fx.entities(child_members(r, c)));
+            let mut child = IncomingArtifact::from_entities(
+                Some(child_key(r, c)),
+                fx.entities(child_members(r, c)),
+            );
             child.parent_keys = vec![root_key(r)];
             child.contents = content(format!("Subgroup {}", child_key(r, c)));
             if (r, c) == HIDDEN_CHILD {
@@ -273,7 +276,9 @@ fn fixture() -> Fx {
     floor.content.computed = vec!["hull".into()];
     engine.register_layer(floor).unwrap();
     let floors: Vec<IncomingArtifact> = (0..10)
-        .map(|f| IncomingArtifact::from_entities(Some(format!("f{f}")), fx.entities(floor_members(f))))
+        .map(|f| {
+            IncomingArtifact::from_entities(Some(format!("f{f}")), fx.entities(floor_members(f)))
+        })
         .collect();
     engine.publish_artifacts(FLOOR.into(), 0, floors).unwrap();
 
@@ -958,7 +963,10 @@ fn malformed_requests_are_refused() {
         ("an unknown layer", request("clusters/nowhere", &fields)),
         ("an unknown property", request(TREE, &bad_fields)),
         ("a repeated property", request(TREE, &twice)),
-        ("level on a one-level kind", ArtifactsRequest { level: Some(0), ..request(TREE, &fields) }),
+        (
+            "level on a one-level kind",
+            ArtifactsRequest { level: Some(0), ..request(TREE, &fields) },
+        ),
         ("a level not held", ArtifactsRequest { level: Some(2), ..request(TIERS, &fields) }),
         (
             "parent with q",
@@ -1054,8 +1062,12 @@ fn geometry_is_over_the_visible_members_in_view_coordinates() {
                     visible.iter().map(|p| p.1).sum::<f64>() / n,
                 );
                 assert!((cx.value(i) - mean.0).abs() < STEP && (cy.value(i) - mean.1).abs() < STEP);
-                let lo = |pick: fn(&(f64, f64)) -> f64| visible.iter().map(pick).fold(f64::MAX, f64::min);
-                let hi = |pick: fn(&(f64, f64)) -> f64| visible.iter().map(pick).fold(f64::MIN, f64::max);
+                let lo = |pick: fn(&(f64, f64)) -> f64| {
+                    visible.iter().map(pick).fold(f64::MAX, f64::min)
+                };
+                let hi = |pick: fn(&(f64, f64)) -> f64| {
+                    visible.iter().map(pick).fold(f64::MIN, f64::max)
+                };
                 assert!((bx0.value(i) - lo(|p| p.0)).abs() < STEP);
                 assert!((by0.value(i) - lo(|p| p.1)).abs() < STEP);
                 assert!((bx1.value(i) - hi(|p| p.0)).abs() < STEP);
@@ -1066,7 +1078,9 @@ fn geometry_is_over_the_visible_members_in_view_coordinates() {
                 for ring in &rings {
                     for v in ring.iter() {
                         assert!(
-                            visible.iter().any(|p| (p.0 - v.0).abs() < STEP && (p.1 - v.1).abs() < STEP),
+                            visible
+                                .iter()
+                                .any(|p| (p.0 - v.0).abs() < STEP && (p.1 - v.1).abs() < STEP),
                             "a hull vertex {v:?} is not a visible member"
                         );
                     }
@@ -1108,4 +1122,357 @@ fn geometry_is_over_the_visible_members_in_view_coordinates() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Budgets, pages and the held filter
+// ---------------------------------------------------------------------------------------------
+
+/// **A byte ceiling below one row's size cuts every page after its first row, and the row a page
+/// was cut before starts the next**: every served artifact arrives exactly once.
+#[test]
+fn a_small_byte_ceiling_neither_skips_nor_repeats_a_row() {
+    let fx = fixture();
+    let engine = fx.engine();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&["key", "content", "parents"]);
+    let mut req = request(TREE, &fields);
+    req.limits.max_page_bytes = 40;
+    req.pages = Some(3);
+    let mut cursor: Option<String> = None;
+    let mut read = Vec::new();
+    let mut by_bytes = 0;
+    loop {
+        let mut next = req.clone();
+        next.cursor = cursor.as_deref();
+        let (sink, trailer) = respond(engine, &session, next).unwrap();
+        for (batch, end) in sink.pages {
+            assert_eq!(batch.num_rows(), 1, "a row larger than the ceiling is sent alone");
+            by_bytes += usize::from(end.ended_by == tessera_engine::PageEndedBy::Bytes);
+            read.extend(keys(&[batch]));
+        }
+        cursor = trailer.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert!(by_bytes > 0, "no page was cut by bytes, so the case proves nothing");
+    assert_eq!(read, tree_served(true));
+}
+
+/// A flat layer of many one-member artifacts, one of whose keys is `needle`.
+fn many(fx: &Fx, count: u64, needle: u64) {
+    let engine = fx.engine();
+    engine
+        .register_layer(base_declaration("clusters/many", HierarchyKind::Flat))
+        .unwrap();
+    let artifacts = (0..count)
+        .map(|i| {
+            let key = if i == needle {
+                "needle".to_string()
+            } else {
+                format!("hay-{i}")
+            };
+            IncomingArtifact::from_entities(Some(key), fx.entities([i % N]))
+        })
+        .collect();
+    engine
+        .publish_artifacts("clusters/many".into(), 0, artifacts)
+        .unwrap();
+    tick(engine);
+}
+
+/// **A read with no time at all still moves on every response and loses nothing**: under a
+/// narrowing that one artifact in three thousand passes, each response walks at least one chunk
+/// of the layer, and the read ends having returned that artifact once.
+#[test]
+fn a_read_with_no_time_budget_moves_on_and_completes() {
+    let fx = fixture();
+    many(&fx, 3_000, 2_500);
+    let engine = fx.engine();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&["key"]);
+    let mut req = request("clusters/many", &fields);
+    req.q = Some("needle");
+    req.limits.response_time = Duration::ZERO;
+    let mut cursor: Option<String> = None;
+    let (mut read, mut responses) = (Vec::new(), 0);
+    loop {
+        let mut next = req.clone();
+        next.cursor = cursor.as_deref();
+        let (sink, trailer) = respond(engine, &session, next).unwrap();
+        responses += 1;
+        assert!(responses < 100, "the read does not move on");
+        read.extend(keys(&sink.pages.into_iter().map(|(b, _)| b).collect::<Vec<_>>()));
+        cursor = trailer.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert!(responses > 1, "one response walked the whole layer, so the budget was not read");
+    assert_eq!(read, vec!["needle"]);
+
+    req.q = None;
+    req.page_rows = Some(700);
+    let all = read_from(engine, &session, &req, None);
+    assert_eq!(keys(&all).len(), 3_000);
+    assert_eq!(keys(&all).into_iter().collect::<HashSet<_>>().len(), 3_000);
+}
+
+/// **A response cancelled before its first page, while it counts, is a head and a trailer ending
+/// by `deadline`**, with nothing counted and the cursor it was given.
+#[test]
+fn a_response_cancelled_before_it_starts_counts_nothing() {
+    let fx = fixture();
+    let engine = fx.engine();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&["key"]);
+    let cancel = tessera_engine::CancelToken::new();
+    cancel.cancel();
+    let mut req = request(TREE, &fields);
+    req.count = true;
+    req.cancel = Some(cancel);
+    let (sink, trailer) = respond(engine, &session, req).unwrap();
+    assert!(sink.pages.is_empty());
+    assert_eq!(sink.head.unwrap().counts, None);
+    assert_eq!(trailer.ended_by, tessera_engine::ResponseEndedBy::Deadline);
+}
+
+/// Items ingested into `s0` at `places`, visible to every viewer; their entities.
+fn ingest_at(engine: &Engine, batch: &str, places: &[(f64, f64)]) -> Vec<EntityId> {
+    let rows = places
+        .iter()
+        .enumerate()
+        .map(|(i, &(x, y))| tessera_lifecycle::UnallocatedRow {
+            external_id: Some(format!("{batch}-{i}").into_bytes()),
+            view: "s0".to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x,
+            y,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        })
+        .collect();
+    engine
+        .accept_ingest(rows, batch.to_string(), [0u8; 32])
+        .expect("the ingest is accepted")
+}
+
+/// A sink that runs `between` after the response's first page, before the next.
+struct Between<'a> {
+    inner: Collect,
+    between: Option<Box<dyn FnOnce() + 'a>>,
+}
+
+impl RecordsSink for Between<'_> {
+    fn head(&mut self, head: &RecordsHead) -> SinkResult {
+        self.inner.head(head)
+    }
+
+    fn page(&mut self, batch: &RecordBatch, end: &PageEnd) -> SinkResult {
+        self.inner.page(batch, end)?;
+        if let Some(between) = self.between.take() {
+            between();
+        }
+        Ok(())
+    }
+}
+
+/// **A merge landing between two pages of one response renumbers the rows the filter is held
+/// in, and the next page evaluates it again**: the matched counts after the merge are the
+/// oracle's.
+#[test]
+fn a_merge_between_two_pages_of_one_response_renews_the_filter() {
+    let fx = fixture();
+    let engine = fx.engine();
+    engine.set_merge_for_test(false);
+    // Four flushed segments of items alternately inside and outside the filter's box, in an
+    // order their merge rewrites.
+    let (_, rect) = middle();
+    let mut ingested = Vec::new();
+    let mut inside_count = 0u64;
+    for batch in 0..4u32 {
+        let places: Vec<(f64, f64)> = (0..6u32)
+            .map(|i| {
+                let k = f64::from(batch * 6 + i);
+                if i % 2 == 0 {
+                    (rect[2] - 10.0 - k * 7.0, rect[3] - 5.0 - k * 3.0)
+                } else {
+                    (950.0 - k * 5.0, 20.0 + k * 11.0)
+                }
+            })
+            .collect();
+        let entities = ingest_at(engine, &format!("b{batch}"), &places);
+        // The late artifact holds the first three batches only, so the rows it holds are not the
+        // same set of rows before the merge and after it.
+        if batch < 3 {
+            inside_count += places
+                .iter()
+                .filter(|&&(x, y)| x >= rect[0] && x <= rect[2] && y >= rect[1] && y <= rect[3])
+                .count() as u64;
+            ingested.extend(entities);
+        }
+        flush(engine);
+    }
+    let late = IncomingArtifact::from_entities(Some("f-late".into()), ingested.clone());
+    engine.publish_artifacts(FLOOR.into(), 0, vec![late]).unwrap();
+    tick(engine);
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let (filter, _) = middle();
+    let fields = names(&["key"]);
+    let mut req = request(FLOOR, &fields);
+    req.filter = Some(filter);
+    req.keep_unmatched = true;
+    req.page_rows = Some(1);
+    let merges = engine.write_executor_stats().merges;
+    let mut sink = Between {
+        inner: Collect::default(),
+        between: Some(Box::new(|| {
+            engine.set_merge_for_test(true);
+            engine.request_flush();
+            wait_until("the merge to publish", Duration::from_secs(60), || {
+                engine.write_executor_stats().merges > merges
+            });
+            engine.set_merge_for_test(false);
+        })),
+    };
+    engine.artifacts_stream(&session, req, &mut sink).unwrap();
+    assert!(engine.write_executor_stats().merges > merges, "no merge landed");
+    let pages: Vec<RecordBatch> = sink.inner.pages.into_iter().map(|(b, _)| b).collect();
+    let got: HashMap<String, u64> = keys(&pages)
+        .into_iter()
+        .zip(u64s(&pages, "matched_count"))
+        .collect();
+    assert_eq!(got["f-late"], inside_count);
+    assert!(inside_count > 0 && inside_count < ingested.len() as u64);
+    for f in 0..10u64 {
+        if let Some(&count) = got.get(&format!("f{f}")) {
+            let want = floor_members(f).filter(|&s| inside(rect, s)).count() as u64;
+            assert_eq!(count, want, "f{f}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// An authored shape over two views
+// ---------------------------------------------------------------------------------------------
+
+/// **An authored shape's content names every view of its layer and holds each one's geometry, and
+/// none of that reaches a viewer**: over a view they reach, the content slot is blank, `q` does
+/// not search it, and the shape is that view's alone. A second view, reachable only under a label
+/// the viewer does not hold, carries another shape, whose name and bytes appear nowhere in the
+/// response.
+#[test]
+fn an_authored_shape_names_no_other_view() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("points.parquet");
+    let pairs = tmp.path().join("pairs.parquet");
+    write_points_n(&points, N);
+    write_pairs_n(&pairs, N);
+    let root = tmp.path().join("bundle");
+    let view = |id: &str, visibility: Option<Vec<String>>| tessera_build::ViewArgs {
+        visibility,
+        view_id: id.to_string(),
+        projection: tessera_spatial::Projection::None,
+        extent: extent(),
+        points: points.clone(),
+        point_fields: Default::default(),
+        select: None,
+        access: tessera_build::config::AccessInput::relation(pairs.clone()),
+    };
+    tessera_build::build(&tessera_build::BuildArgs {
+        views: vec![view("s0", None), view("hidden", Some(vec!["1".to_string()]))],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: Vec::new(),
+        out: root.clone(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .unwrap();
+    let engine =
+        open_engine_publishing(&root, &tmp.path().join("cache"), &tmp.path().join("wal.log"));
+    let map = source_to_new_map(&root, "v00000");
+
+    let mut declaration = base_declaration("drawn/regions", HierarchyKind::Flat);
+    declaration.views = vec!["s0".into(), "hidden".into()];
+    declaration.content = text_content("outline", SuppliedRequirement::Inherited);
+    declaration.content.supplied[0].ty = "polygon".into();
+    engine.register_layer(declaration).unwrap();
+    let canonical = |rect: [f64; 4]| {
+        ShapeF64::Bbox {
+            min_x: rect[0],
+            min_y: rect[1],
+            max_x: rect[2],
+            max_y: rect[3],
+        }
+        .canonical(Space::View, &extent())
+        .unwrap()
+        .0
+        .encode()
+    };
+    let (seen, secret) = ([100.0, 100.0, 300.0, 300.0], [610.0, 620.0, 870.0, 880.0]);
+    let secret_bytes = canonical(secret);
+    let shapes = tessera_lifecycle::membership::ArtifactShapes::new(vec![
+        ("hidden".to_string(), secret_bytes.clone()),
+        ("s0".to_string(), canonical(seen)),
+    ])
+    .unwrap();
+    let slot = shapes.content_text();
+    let mut artifact = IncomingArtifact::from_entities(
+        Some("region".into()),
+        (0..40u64).map(|s| EntityId::new(map[&s])),
+    );
+    artifact.contents = content(slot.clone());
+    engine
+        .publish_artifacts("drawn/regions".into(), 0, vec![artifact])
+        .unwrap();
+    tick(&engine);
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&["key", "content", "shape"]);
+    let mut req = request("drawn/regions", &fields);
+    let pages = read_all(&engine, &session, &req);
+    assert_eq!(keys(&pages), vec!["region"]);
+    let mut sent = Vec::new();
+    for batch in &pages {
+        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut sent, &batch.schema())
+            .unwrap();
+        writer.write(batch).unwrap();
+        writer.finish().unwrap();
+    }
+    let contains = |needle: &[u8]| sent.windows(needle.len()).any(|w| w == needle);
+    assert!(!contains(b"hidden"), "the other view's name was served");
+    assert!(!contains(&secret_bytes), "the other view's shape was served");
+    assert!(!contains(slot.as_bytes()), "the content slot was served");
+    let content = column::<ListArray>(&pages[0], "content").value(0);
+    let content = content.as_any().downcast_ref::<StringArray>().unwrap();
+    assert!(content.value(0).is_empty(), "the shape slot is served blank");
+    let wkb = column::<BinaryArray>(&pages[0], "shape").value(0).to_vec();
+    let ring = tessera_spatial::shape::read_wkb(&wkb).unwrap()[0][0].clone();
+    for corner in [(seen[0], seen[1]), (seen[2], seen[3])] {
+        assert!(ring
+            .iter()
+            .any(|v| (v.0 - corner.0).abs() < 1e-3 && (v.1 - corner.1).abs() < 1e-3));
+    }
+
+    let hidden_hex: String = b"hidden".iter().map(|b| format!("{b:02x}")).collect();
+    req.q = Some(&hidden_hex);
+    assert!(read_all(&engine, &session, &req).is_empty(), "q searched the shape slot");
 }

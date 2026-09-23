@@ -546,7 +546,11 @@ impl Engine {
                 open => open?,
             };
             if response.count && counted.is_none() {
-                counted = Some(pager.count(self, &open, &generation)?);
+                // A count cancelled before the first page ends the response as one seen above.
+                counted = match pager.count(self, &open, &generation) {
+                    Err(EngineError::Cancelled) => break ResponseEndedBy::Deadline,
+                    counted => Some(counted?),
+                };
             }
             let page = pager.page(self, &open, &generation, &mut clock)?;
             send_head(pager, counted, Some(open.coordinates.identity_key), sink)?;

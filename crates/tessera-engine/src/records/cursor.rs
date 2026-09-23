@@ -1,9 +1,9 @@
 //! The cursor a page end carries: a position sealed to the read it belongs to.
 //!
 //! XChaCha20-Poly1305 under a key derived from the deployment's identity key, with a random
-//! 24-byte nonce drawn for each cursor. The route, the format, the view, the view's incarnation, the
-//! session's authorisation-data hash and, on the artifacts route, the layer, its entity and the
-//! level named are the associated data, so a cursor presented under any other binding does not
+//! 24-byte nonce drawn for each cursor. The route, the format, the view, the view's incarnation,
+//! the session's authorisation-data hash and, on the artifacts route, the layer, its entity and
+//! the level named are the associated data, so a cursor presented under any other binding does not
 //! open, and every such failure is the one refusal
 //! [`EngineError::CursorRefused`]. The idset and the order are sealed inside: another idset has a
 //! refusal of its own, and a request that names no order takes the cursor's. A client can read

@@ -26,7 +26,7 @@ mod engine;
 mod error;
 pub mod filter;
 mod flush;
-mod gated_level;
+mod layer_read;
 pub mod gate;
 mod generation;
 mod geometry;
@@ -72,8 +72,8 @@ pub use compact::{CompactionSchedule, PassCost};
 pub use compose::{buffered_rows_of, compose, denied_rows_of, visible_to, EffectiveMask};
 pub use projection::{ProjectionInputs, ProjectionRoute, RowProjection};
 pub use records::{
-    ArtifactsRequest, RecordsCounts, RecordsHead, RecordsLimits, PageEnd, ItemsRequest, RecordsSink, RecordsTrailer,
-    PageEndedBy, RecordsOrder, RecordsRefused, ResponseEndedBy,
+    ArtifactsRequest, ItemsRequest, PageEnd, PageEndedBy, RecordsCounts, RecordsHead,
+    RecordsLimits, RecordsOrder, RecordsRefused, RecordsSink, RecordsTrailer, ResponseEndedBy,
 };
 // The publication guard's refusal, which a publisher outside this crate must handle.
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's
