@@ -366,9 +366,11 @@ def main() -> None:
     # which is the ordinary case a layer over a group has to tolerate.
     # Each collection carries an access label of its own, which a principal must hold to be served
     # it: `public`, one country, two countries, or none, which the layer's `inherited` default
-    # answers with the layer's own label. The countries are those most common among the
-    # collection's members, so the principal ladder separates them.
+    # answers with the layer's own label. The layer asks for one visible member, so a principal on
+    # the ladder who sees a collection's members and lacks its label is withheld it by the label
+    # alone: every collection draws members from every country.
     collection_names = ["frontier", "core", "outliers", "review", "watchlist", "archive"]
+    collection_labels = [["public"], ["US"], None, ["CN", "RU"], ["IN"], None]
     coll_rows = {"key": [], "contents": [], "members": [], "access": []}
     for i, name in enumerate(collection_names):
         pick = hashed_unit(entity_id, 0xC0 + i) < 0.08  # ~8% of the whole population each
@@ -376,12 +378,7 @@ def main() -> None:
         coll_rows["key"].append(name)
         coll_rows["contents"].append([[f"{name}-tag"]])
         coll_rows["members"].append(members)
-        held = [access[j] for j in np.flatnonzero(pick) if access[j]]
-        common = [c for c, _ in sorted(
-            ((c, held.count(c)) for c in set(held)), key=lambda one: (-one[1], one[0])
-        )]
-        labels = {0: ["public"], 1: common[:1], 3: common[1:3], 4: common[:1]}.get(i)
-        coll_rows["access"].append(labels)
+        coll_rows["access"].append(collection_labels[i])
     coll_table = pa.table(
         {
             "key": pa.array(coll_rows["key"], type=pa.string()),
