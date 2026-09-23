@@ -535,6 +535,8 @@ pub struct PublishedLayers {
     /// unscoped layer, whose one set is drawn on every view it names.
     pub artifact_views: BTreeMap<String, BTreeMap<(u32, u32), String>>,
     pub layers: Vec<RegisteredLayer>,
+    /// The registry's version counter as the build leaves it.
+    pub registry_version: u64,
     /// Edges whose child escapes its parent's membership — reported, never acted on.
     pub containment_violations: Vec<ContainmentViolation>,
     /// Per-parent coverage: how much of each split its children hold between them.
@@ -596,6 +598,7 @@ impl Default for PublishedLayers {
     fn default() -> Self {
         PublishedLayers {
             layers: Vec::new(),
+            registry_version: 0,
             artifact_views: BTreeMap::new(),
             containment_violations: Vec::new(),
             split_coverage: Vec::new(),
@@ -1615,6 +1618,30 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
 /// the point region's mark — passed so the allocator refuses rather than letting the two regions
 /// meet unnoticed.
 #[allow(clippy::too_many_arguments)]
+/// The views this build writes, each at the incarnation a build gives it.
+struct DeclaredViews<'a>(&'a [String]);
+
+impl tessera_lifecycle::GroupViews for DeclaredViews<'_> {
+    fn incarnation_of(
+        &self,
+        group: &str,
+        key: &str,
+    ) -> Option<tessera_types::view::ViewIncarnation> {
+        let id = format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR);
+        self.0
+            .contains(&id)
+            .then_some(tessera_types::view::DECLARED_INCARNATION)
+    }
+    fn keys_of(&self, group: &str) -> Vec<String> {
+        self.0
+            .iter()
+            .filter_map(|id| id.split_once(tessera_store::GROUP_SEPARATOR))
+            .filter(|(held, _)| *held == group)
+            .map(|(_, key)| key.to_string())
+            .collect()
+    }
+}
+
 pub fn publish(
     plan: &mut LayerPlan,
     resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
@@ -1859,6 +1886,7 @@ pub fn publish(
                     &store,
                     &mut alloc,
                     &tessera_lifecycle::no_pending,
+                    &DeclaredViews(views),
                 )
                 .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
             // The record carries its own copy of every membership, so the bitmaps this built are
@@ -1890,12 +1918,6 @@ pub fn publish(
             let batch_lo = ordinal_lo + start as u32;
             let batch_len = (end - start) as u32;
             for blob in store.encode_pending(layer, level, batch_lo, batch_len) {
-                let blob = blob.ok_or_else(|| {
-                    BuildError::Invalid(format!(
-                        "{layer} level {level} has no record at an ordinal this publication just \
-                         assigned"
-                    ))
-                })?;
                 writer.push(&blob).map_err(BuildError::Store)?;
             }
             // The bytes are in the writer, so the store's own bitmaps have one reader left — the
@@ -1948,6 +1970,7 @@ pub fn publish(
     let (layers, _tombstones) = registry.snapshot();
     let mut published = PublishedLayers {
         layers,
+        registry_version: registry.version(),
         artifact_views,
         containment_violations: violations,
         split_coverage: coverage,
@@ -3060,17 +3083,7 @@ fn write_membership_extents(
     published: &mut PublishedLayers,
     streamed: &mut BTreeMap<(String, u32), StreamedPack>,
 ) -> Result<()> {
-    let (ready, skipped) = store.pending_ranges();
-    if let Some((layer, level)) = skipped.first() {
-        // Unreachable from a build: every artifact of a level is published in one batch, so a
-        // level cannot have a hole below its high-water. A refusal rather than an alarm, because a
-        // build can simply not produce the bundle.
-        return Err(BuildError::Invalid(format!(
-            "{layer} level {level} has a hole in its ordinals, so its memberships cannot be packed \
-             — an extent addresses a dense range and packing around a hole shifts every later \
-             artifact's identity by one"
-        )));
-    }
+    let ready = store.pending_ranges();
     if ready.is_empty() {
         return Ok(());
     }
@@ -3121,16 +3134,6 @@ fn write_membership_extents(
                         .map_err(BuildError::Store)?;
                 let mut pushed = 0u32;
                 for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
-                    // Unreachable: `pending_ranges` reports a level with a hole as skipped above
-                    // rather than as a range. A refusal rather than an assertion because the
-                    // alternative is an extent one blob short of the range it addresses, which
-                    // serves every ordinal above the hole as another artifact's membership.
-                    let blob = blob.ok_or_else(|| {
-                        BuildError::Invalid(format!(
-                            "{layer} level {level} has no record at an ordinal inside the range \
-                             it reported as ready to pack"
-                        ))
-                    })?;
                     writer.push(&blob).map_err(BuildError::Store)?;
                     pushed += 1;
                 }
@@ -4256,14 +4259,10 @@ pub(crate) fn key_at(key: &KeyColumn, row: usize) -> String {
     key.key_at(row).unwrap_or_else(|| format!("row {row}"))
 }
 
-/// The view one row of a group-scoped layer's source names, checked against the group's roster —
-/// and `None` on an unscoped layer, whose one artifact set is drawn on every view it names
-/// (`views.md` §3.5).
-///
-/// **Read by both of a layer's sources**, the artifacts and the members, because a key means
-/// nothing without it on such a layer: keys are unique per `(layer, view)`, so a member row naming
-/// a key alone could be either of two artifacts, and whichever it joined would be the file's
-/// column order rather than anything the caller wrote.
+/// The view one artifact row of a group-scoped layer names, and `None` on an unscoped layer,
+/// whose one artifact set is drawn on every view it names (`views.md` §3.5). A key means nothing
+/// without it on such a layer: keys are unique per `(layer, view)`. Whether the group has the view
+/// is the registry's rule, checked when the level is published.
 fn view_of_row<'a>(
     path: &Path,
     layer: &str,
@@ -4285,17 +4284,6 @@ fn view_of_row<'a>(
             scope.group
         )));
     };
-    if scope.keys.binary_search_by(|held| held.as_str().cmp(named)).is_err() {
-        return Err(BuildError::Invalid(format!(
-            "{}: {} names view '{named}', which group '{}' has no such key for. Its keys are: {}. \
-             An artifact belongs to one view and its keys are unique per (layer, view), so a key \
-             nobody declared is a refusal rather than an artifact drawn nowhere (views §3.5)",
-            path.display(),
-            key_at(key, row),
-            scope.group,
-            scope.keys.join(", ")
-        )));
-    }
     Ok(Some(named))
 }
 

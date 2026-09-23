@@ -1074,6 +1074,11 @@ impl Manifest {
             .map(|v| v.incarnation)
     }
 
+    /// [`Self::incarnation_of`] for the view `key` of `group`.
+    pub fn incarnation_of_key(&self, group: &str, key: &str) -> Option<ViewIncarnation> {
+        self.incarnation_of(&format!("{group}{}{key}", crate::GROUP_SEPARATOR))
+    }
+
     /// Is this artifact's `(view, incarnation)` stamp the live one?
     ///
     /// The predicate every carry-forward and every open filters on. A stamp naming a view this
@@ -1892,6 +1897,9 @@ pub struct SegmentsManifest {
     /// must not come to mean something else. A tombstone list that forgot would let a recreated
     /// layer silently inherit every stale reference to the old one.
     pub layer_tombstones: Vec<String>,
+    /// The layer registry's version counter: the last version handed to a registration or a drop.
+    /// Open resumes the counter from it.
+    pub layer_registry_version: u64,
     /// Every view **created while the service runs**, complete current state (`views.md` §3.2).
     ///
     /// **This is the roster's durable home, and the WAL is not.** The create and drop records are
@@ -2224,6 +2232,7 @@ impl SegmentsManifest {
             entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
+            layer_registry_version: 0,
             views: Vec::new(),
             scoped_columns: Vec::new(),
             attributes: Vec::new(),

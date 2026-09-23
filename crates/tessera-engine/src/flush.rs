@@ -46,20 +46,18 @@ pub enum FlushStage {
     /// `publish_flush`'s gates, and composing the flush's filter, record and text extents.
     Compose,
     /// Assembling the side-manifest from the live partition manifest, deny state included. The
-    /// four stages below partition it.
+    /// three stages below partition it.
     Manifest,
     /// Within [`FlushStage::Manifest`]: cloning the live partition manifest to assemble onto.
     ManifestClone,
-    /// Within [`FlushStage::Manifest`]: `write_live_state` — the layers, views, attributes,
-    /// vocabularies and group declarations no fold has written into a `MANIFEST.json` yet.
-    ManifestLiveState,
     /// Within [`FlushStage::Manifest`]: `write_deny_state` — the overlay's suppressions and
     /// tombstones, restated in full at every publication.
     ManifestDenyState,
     /// Within [`FlushStage::Manifest`]: `write_vocabulary_extensions` — every live binding beyond
     /// what the bundle's own manifest carries.
     ManifestVocabExtensions,
-    /// `commit_side_manifest`: the manifest write and its fsyncs. The commit point.
+    /// `commit_side_manifest`: the live registry, roster and declarations restated, the manifest
+    /// write and its fsyncs. The commit point.
     Commit,
     /// `Bundle::with_segment`: the new bundle and its extended row space.
     WithSegment,
@@ -129,16 +127,15 @@ pub enum FlushStage {
 const _: () = assert!(FlushStage::COUNT == FlushStage::PoolWall as usize + 1);
 
 impl FlushStage {
-    pub const COUNT: usize = 39;
+    pub const COUNT: usize = 38;
     /// The executor's stages in run order, the `Manifest*` sub-stages after the stage they
     /// partition; `Plan`/`Dispatch` run at the tick, the rest at publication.
-    pub const EXECUTOR: [FlushStage; 19] = [
+    pub const EXECUTOR: [FlushStage; 18] = [
         FlushStage::Plan,
         FlushStage::Dispatch,
         FlushStage::Compose,
         FlushStage::Manifest,
         FlushStage::ManifestClone,
-        FlushStage::ManifestLiveState,
         FlushStage::ManifestDenyState,
         FlushStage::ManifestVocabExtensions,
         FlushStage::Commit,
@@ -209,9 +206,8 @@ impl FlushStage {
         FlushStage::Failed,
     ];
     /// The stages that partition `Manifest`, in the order the publication runs them.
-    pub const MANIFEST: [FlushStage; 4] = [
+    pub const MANIFEST: [FlushStage; 3] = [
         FlushStage::ManifestClone,
-        FlushStage::ManifestLiveState,
         FlushStage::ManifestDenyState,
         FlushStage::ManifestVocabExtensions,
     ];
@@ -230,7 +226,6 @@ impl FlushStage {
             FlushStage::Compose => "compose",
             FlushStage::Manifest => "manifest",
             FlushStage::ManifestClone => "  .manifest_clone",
-            FlushStage::ManifestLiveState => "  .live_state",
             FlushStage::ManifestDenyState => "  .deny_state",
             FlushStage::ManifestVocabExtensions => "  .vocab_extensions",
             FlushStage::Commit => "manifest_commit",

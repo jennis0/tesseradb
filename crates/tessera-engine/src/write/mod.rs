@@ -245,6 +245,43 @@ impl From<SubmitError> for AcceptError {
     }
 }
 
+/// A generation's groups and their views, as a publication sees them.
+pub(crate) struct ServedViews<'a>(pub(crate) &'a tessera_store::manifest::Manifest);
+
+impl tessera_lifecycle::GroupViews for ServedViews<'_> {
+    fn incarnation_of(
+        &self,
+        group: &str,
+        key: &str,
+    ) -> Option<tessera_types::view::ViewIncarnation> {
+        self.0.incarnation_of_key(group, key)
+    }
+    fn keys_of(&self, group: &str) -> Vec<String> {
+        self.0
+            .groups
+            .iter()
+            .filter(|held| held.name == group)
+            .flat_map(|held| held.views.iter().map(|view| view.key.clone()))
+            .collect()
+    }
+}
+
+/// Remove every artifact of a group-scoped layer whose view is not at the incarnation it was
+/// published under. A view drop calls this, and so does an open, over records packed before a
+/// drop or replayed from before it.
+pub(crate) fn retire_dead_view_artifacts(
+    registry: &LayerRegistry,
+    store: &mut ArtifactStore,
+    manifest: &tessera_store::manifest::Manifest,
+) -> tessera_lifecycle::RetiredViews {
+    store.retire_dead_views(|layer, key, incarnation| {
+        match registry.get(layer).and_then(|held| held.declaration.scope.group()) {
+            Some(group) => manifest.incarnation_of_key(group, key) == Some(incarnation),
+            None => true,
+        }
+    })
+}
+
 /// Everything [`WritePath::reconstruct`] rebuilds from durable state.
 pub(crate) struct WritePathState {
     wal: Wal,

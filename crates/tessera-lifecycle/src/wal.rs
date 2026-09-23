@@ -357,6 +357,9 @@ pub enum WalRecord {
         /// The reserved runs backing each level, in level order. A layer declaring no levels has
         /// exactly one entry — its level 0.
         runs: Vec<ReservedRuns>,
+        /// The registry version this registration was given. Replay raises the counter to it
+        /// rather than adding one, so a record the manifest already counts is not counted twice.
+        version: u64,
     },
     /// A view of a group **created while the service runs** (`views.md` §3.2), carrying the whole
     /// roster record: the key, the ordinal it was given, its gate and its typed metadata.
@@ -401,7 +404,11 @@ pub enum WalRecord {
     /// ([decision 0072](../../../docs/decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)
     /// is settled and unbuilt). Reclaiming them is that decision's work, and its condition is that
     /// the membership-reconciliation clause ships with it.
-    LayerDrop { name: String },
+    LayerDrop {
+        name: String,
+        /// The registry version this drop moved the counter to, on `LayerCreate::version`'s rule.
+        version: u64,
+    },
     /// A batch of artifacts published into one level of one layer.
     ///
     /// **The WAL is currently the only durable home for a membership**, which makes this record
@@ -837,6 +844,9 @@ pub struct PublishedArtifact {
     /// artifact in the view its publication was acked in, which is what makes the identity
     /// survive a restart.
     pub view: Option<String>,
+    /// The incarnation of `view` the artifact was published under, and `DECLARED_INCARNATION`
+    /// where there is no view. A drop of the view retires the artifact.
+    pub incarnation: tessera_types::view::ViewIncarnation,
     /// Entity-space membership, CRoaring portable. **Entity space and not row space** — a row-space
     /// membership is a frozen projection, correct until the first fold and then naming other
     /// people's documents (`membership.rs`).
@@ -1055,7 +1065,11 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // 20 is refused.
 // **22**: `PublishedArtifact` gained `access`, an artifact's own access label, and `ArtifactPart`
 // gained `Access`. A log at 21 is refused.
-const WAL_VERSION: u16 = 22;
+// **23**: `LayerCreate` and `LayerDrop` carry the registry version each was given. A log at 22 is
+// refused.
+// **24**: `PublishedArtifact` gained `incarnation`, the incarnation of its view it was published
+// under. A log at 23 is refused.
+const WAL_VERSION: u16 = 24;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2460,9 +2474,11 @@ mod tests {
                     end: 4_294_836_224,
                 }]),
             ],
+            version: 1,
         };
         let dropped = WalRecord::LayerDrop {
             name: "clusters/old".into(),
+            version: 2,
         };
 
         let (mut wal, replayed) = Wal::open(&path).unwrap();
@@ -2502,6 +2518,7 @@ mod tests {
                     entity: EntityId::new(4_294_836_223),
                     key: Some("c-0017".into()),
                     view: None,
+                    incarnation: 0,
                     members: serialise_members(&first),
                     contents: Vec::new(),
                     attached_to: None,
@@ -2520,6 +2537,7 @@ mod tests {
                     // here so a record naming one round-trips and a reader that lost it would
                     // read the members' length as the view's.
                     view: Some("s0".into()),
+                    incarnation: 3,
                     members: serialise_members(&second),
                     contents: vec![PublishedContent {
                         values: vec!["a label".into()],
