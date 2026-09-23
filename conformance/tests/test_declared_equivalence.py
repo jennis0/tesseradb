@@ -600,10 +600,6 @@ RENDER_REFUSED = (
     "the control plane refuses `render = true` on PUT /control/attributes; a rendered column can "
     "only be declared at a build"
 )
-VALUES_DO_NOT_MINT = (
-    "POST /control/values buffers an open vocabulary's new key unminted, and every flush after "
-    "it fails on the column's type, so nothing more is published"
-)
 TEXT_LOST_AT_RESTART = (
     "a text column declared live matches nothing after a restart until a fold rebuilds its index"
 )
@@ -612,7 +608,6 @@ TEXT_LOST_AT_RESTART = (
 #: so each flips when the cause is fixed.
 EXPECTED_FAILURES = {
     **{("rendered-attributes", stage): (RENDER_REFUSED, RenderRefused) for stage in STAGES},
-    **{("open-category-values", stage): (VALUES_DO_NOT_MINT, fx.NeverVisible) for stage in STAGES},
 }
 
 
