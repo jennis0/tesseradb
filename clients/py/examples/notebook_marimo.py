@@ -294,8 +294,7 @@ def _(mo):
 
     Each clustering is a layer. `views` says which views it is drawn on. `kind="tiered"` means
     fixed levels, from coarse to fine, which `levels` names. `computed` is what the server works
-    out for each cluster for each reader, such as its centre and its bounding box. `scope` puts
-    `yearly` on every view of the `years` group, with separate clusters in each.
+    out for each cluster for each reader, such as its centre and its bounding box.
 
     Two settings decide what a reader is shown. `require_member_visibility` shows a cluster to
     a reader only when they can see enough of its papers. `content_requires="all"` shows a
@@ -333,11 +332,8 @@ def _(SCALE, td):
                      levels=[(0, "archive"), (1, "subject class")],
                      require_member_visibility={"count": 1}, computed=("centroid", "box"),
                      title="arXiv classification")
-    db.declare_layer("kmeans", kind="flat", views=["papers"], value_set="open",
+    db.declare_layer("kmeans", kind="flat", views=["papers"],
                      require_member_visibility={"count": 50}, title="k-means clusters")
-    # Filled in section 4, with a clustering of each year computed while the database serves.
-    db.declare_layer("yearly", kind="flat", scope={"group": "years"},
-                     require_member_visibility={"count": 1}, title="Clusters of each year")
     return (db,)
 
 
@@ -615,9 +611,12 @@ def _(mo):
     mo.md("""
     A view of its own lets each year have its own clusters. The cell below runs scikit-learn's
     k-means on each year's positions, with about one cluster per 250 papers and at most 20,
-    and adds the result to the running database as `yearly`. That clustering is
-    scoped to the `years` group, so each year's view gets its own clusters and the `papers`
-    view gets none.
+    and adds the result to the running database as a new layer, `yearly`.
+
+    `scope={"group": "years"}` puts the layer on every view of the `years` group, with separate
+    clusters in each, and on no other view. The insert names the cluster column with `key`, as
+    in section 1, and the year column with `view`. Each year numbers its clusters from `"00"`,
+    and the same key in two years names two different clusters.
 
     The clusters are computed from each paper's position on the map. They group papers that
     sit together in that year, which is not the same as clustering the papers' text.
@@ -630,15 +629,14 @@ def _(KMeans, db, pd, points):
     def _clusters(papers):
         k = min(20, max(1, len(papers) // 250))
         labels = KMeans(n_clusters=k, n_init=1, random_state=0).fit_predict(papers[["x", "y"]])
-        year = papers.name
-        return pd.Series([f"{year}-{label:02d}" for label in labels], index=papers.index)
+        return pd.Series([f"{label:02d}" for label in labels], index=papers.index)
 
     yearly = points.select(["entity_id", "x", "y", "year"]).to_pandas()
     yearly["cluster"] = yearly.groupby("year", group_keys=False)[["x", "y"]].apply(_clusters)
 
-    db.insert("yearly", artifacts=yearly[["year", "cluster"]].drop_duplicates(),
-              key="cluster", view="year")
-    db.insert("yearly", members=yearly, id="entity_id", key="cluster", view="year")
+    db.declare_layer("yearly", kind="flat", scope={"group": "years"},
+                     require_member_visibility={"count": 1}, title="Clusters of each year")
+    db.insert("yearly", yearly, id="entity_id", key="cluster", view="year")
     yearly_report = db.commit()
     print(yearly_report)
     return (yearly_report,)
@@ -658,7 +656,8 @@ def _(mo):
 
     The week held back in section 2 goes into the running database with the same calls as
     before: `insert` into `papers`, into the `years` group, and into the k-means clusters the
-    papers belong to.
+    papers belong to. The k-means insert takes a table of the week's papers and their clusters,
+    with `key` naming the cluster column, as in section 1.
 
     After the first commit, a commit sends its inserts to the running server, which takes them
     while it goes on answering readers. There is no rebuild. The commit waits until the new
@@ -682,8 +681,7 @@ def _(before_week, db, pd, visible, week, week_members):
     db.insert("papers", week, id="entity_id", x="x", y="y", access="categories")
     db.insert("years", week.select(["entity_id", "x", "y", "categories", "year"]),
               id="entity_id", x="x", y="y", access="categories", view="year")
-    db.insert("kmeans", members=week_members["clusters-kmeans"], id="entity", key="key",
-              level="level", rank="rank")
+    db.insert("kmeans", week_members["clusters-kmeans"], id="entity", key="key")
     print(db.commit())
     pd.DataFrame({"before": before_week, "after": visible(db)})
     return
