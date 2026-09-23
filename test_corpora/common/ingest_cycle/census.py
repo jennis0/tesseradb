@@ -115,8 +115,10 @@ def category_keys(
     viewer: str, token: str, view: str, column: str, where: str, incomplete: list[str]
 ) -> list[str] | None:
     """Every value key `/v1/categories` lists for `column` in this view, following `next` to the
-    last page; None, with a sentence in `incomplete`, where a page was refused."""
+    last page; None, with a sentence in `incomplete`, where a page was refused or a cursor came
+    back a second time."""
     keys: list[str] = []
+    cursors: set[str] = set()
     params = {"view": view}
     while True:
         r = requests.get(
@@ -130,9 +132,14 @@ def category_keys(
             return None
         page = r.json()
         keys += [value["key"] for value in page["values"]]
-        if page.get("next") is None:
+        cursor = page.get("next")
+        if cursor is None:
             return keys
-        params = {"view": view, "after": page["next"]}
+        if cursor in cursors:
+            incomplete.append(f"the census request at {where} answered the cursor {cursor!r} twice")
+            return None
+        cursors.add(cursor)
+        params = {"view": view, "after": cursor}
 
 
 def filter_probes(
