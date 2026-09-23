@@ -656,7 +656,7 @@ fn a_merge_collapses_segments_and_loses_no_item() {
          the Morton code, never through a dequantise-and-requantise"
     );
 
-    // Every binding survives the run coalesce the merge performed on the way.
+    // Every binding still answers: the merge leaves the runs and locator extents as they were.
     for (entity, external_id) in &items {
         assert_eq!(
             engine

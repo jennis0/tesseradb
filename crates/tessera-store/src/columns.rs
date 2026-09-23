@@ -340,26 +340,21 @@ fn buffer_bytes(width: Option<usize>, rows: usize) -> io::Result<usize> {
     }
 }
 
-/// The width one value of `ty` occupies in its Arrow values buffer — `None` for the bit-packed
-/// `bool`, and a refusal for the string family, which `render` is declined for at the declaration
-/// and which therefore never reaches a hot column (per-point-attributes §4.3).
+/// The bytes one value of `ty` occupies in its Arrow values buffer, from [`ScalarType::row_bits`]:
+/// `None` for the bit-packed `bool`, and a refusal for the string family, which `render` is
+/// refused for at the declaration and so never reaches a hot column.
 fn value_width(ty: ScalarType) -> io::Result<Option<usize>> {
-    Ok(match ty {
-        ScalarType::Bool => None,
-        ScalarType::U8 | ScalarType::I8 => Some(1),
-        ScalarType::U16 | ScalarType::I16 => Some(2),
-        ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => Some(4),
-        ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => Some(8),
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "columns.arrow: a render column is a fixed-width slot in every row and \
-                     {ty:?} is not one"
-                ),
-            ))
-        }
-    })
+    match ty.row_bits() {
+        Some(1) => Ok(None),
+        Some(bits) => Ok(Some(bits as usize / 8)),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "columns.arrow: a render column is a fixed-width slot in every row and {ty:?} is \
+                 not one"
+            ),
+        )),
+    }
 }
 
 /// The null-free array the layout pass puts in front of Arrow's writer. Its buffer is never read;

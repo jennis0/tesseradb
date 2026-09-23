@@ -162,8 +162,6 @@ fn main() {
                     scalar_schema: &schema,
                     absent_ok: &[],
                     row_base: 0,
-                    watermark: rows * segments,
-                    entity_id_high_water: rows * segments,
                 },
             )
             .expect("the merge executes");

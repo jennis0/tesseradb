@@ -21,6 +21,8 @@ fn policy() -> CoalescePolicy {
         width: 3,
         floor_bytes: 1 << 20,
         max_input_bytes: 1 << 30,
+        run_width: 3,
+        run_floor_bytes: 1 << 20,
     }
 }
 
@@ -864,6 +866,27 @@ fn a_window_spanning_two_size_classes_is_not_taken() {
     manifest.files.insert(manifest.deltas[1].clone(), digest(64 << 20));
     let plan = plan(&manifest, &build_files).expect("the other kinds qualify");
     assert!(plan.tiers.is_empty());
+}
+
+/// Under the built-in policy the runs are taken four at a time while the other kinds wait for
+/// eight, and runs below the run floor share one size class with a run far larger than the other
+/// kinds' floor.
+#[test]
+fn the_runs_take_their_own_narrower_window_and_floor() {
+    let (mut manifest, build_files) = listed(4);
+    manifest
+        .files
+        .insert(manifest.external_id_runs[1].clone(), digest(8 << 20));
+    let plan = plan_coalesce(
+        PARTITION,
+        &manifest,
+        &build_files,
+        CoalescePolicy::default(),
+        &all_live,
+    )
+    .expect("the runs qualify");
+    assert_eq!(plan.locators.len(), 4);
+    assert!(plan.tiers.is_empty() && plan.dicts.is_empty() && plan.attrs.is_empty());
 }
 
 /// Fewer entries than the width plan nothing.

@@ -3511,7 +3511,6 @@ fn engine_for_coalesce(fx: &Fixture, tag: &str) -> tessera_engine::Engine {
 /// Ingest and flush `COALESCE_WIDTH` rows, then drive the tick the coalesce is selected on and wait
 /// for it to publish. Returns the entities, in ingest order.
 fn flush_a_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -> Vec<u64> {
-    let coalesces = engine.write_executor_stats().coalesces;
     let entities: Vec<u64> = (from..from + COALESCE_WIDTH)
         .map(|i| {
             ingest_and_flush_with(
@@ -3525,16 +3524,22 @@ fn flush_a_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -> Ve
             )
         })
         .collect();
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().coalesces <= coalesces {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the coalesce never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    attrs_coalesced(engine);
     entities
+}
+
+/// Drive ticks until every column's live attribute extents are fewer than a window: the pass that
+/// takes them has published.
+fn attrs_coalesced(engine: &tessera_engine::Engine) {
+    tick_until(engine, "the attribute extents to coalesce", std::time::Duration::from_secs(30), || {
+        let generation = engine.generation();
+        let (_, partition) = generation.bundle.partitions.iter().next().unwrap();
+        let mut per_column: BTreeMap<&str, usize> = BTreeMap::new();
+        for extent in &partition.manifest.attr_extents {
+            *per_column.entry(extent.column.as_str()).or_default() += 1;
+        }
+        per_column.values().all(|&n| n < COALESCE_WIDTH)
+    });
 }
 
 /// This partition's live `attr_extents`, per column.
@@ -3970,13 +3975,8 @@ fn keyword_answers(
 
 /// Drive the tick a coalesce is selected on, with the pass enabled, and wait for it to publish.
 fn coalesce_now(engine: &tessera_engine::Engine) {
-    let coalesces = engine.write_executor_stats().coalesces;
     engine.set_coalesce_for_test(true);
-    engine.request_flush();
-    wait_until("the coalesce to publish", || {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        engine.write_executor_stats().coalesces > coalesces
-    });
+    attrs_coalesced(engine);
 }
 
 /// **A keyword column's window becomes one extent, installed with the dictionary its merge minted,

@@ -2349,17 +2349,22 @@ pub fn tile_ranges(seg: &SegmentData, tile: &Tile) -> Range<u32> {
 /// It is also the more honest construction: it *expresses* "sub-cells partition their parent"
 /// rather than searching the whole column again and relying on that being true.
 pub fn tile_ranges_within(seg: &SegmentData, tile: &Tile, within: Range<u32>) -> Range<u32> {
+    let (lo, hi) = tile.code_range();
+    let start = first_code_at_or_past(seg, lo, within.clone());
+    start..first_code_at_or_past(seg, hi, start..within.end)
+}
+
+/// The first row of `within` whose cell code is `code` or past it, found by a binary search of the
+/// sorted Morton column over `within` alone. Where no row of `within` is, the answer is `within`'s
+/// end, held to the column's length; where `within` holds no row of the column, its start.
+pub fn first_code_at_or_past(seg: &SegmentData, code: u64, within: Range<u32>) -> u32 {
     let codes = seg.morton.u32();
     let lo_idx = within.start as usize;
     let hi_idx = (within.end as usize).min(codes.len());
     if hi_idx <= lo_idx {
-        return within.start..within.start;
+        return within.start;
     }
-    let window = &codes[lo_idx..hi_idx];
-    let (lo, hi) = tile.code_range();
-    let start = lo_idx + window.partition_point(|&c| (c as u64) < lo);
-    let end = lo_idx + window.partition_point(|&c| (c as u64) < hi);
-    start as u32..end as u32
+    (lo_idx + codes[lo_idx..hi_idx].partition_point(|&c| (c as u64) < code)) as u32
 }
 
 /// `from + codes[from..].partition_point(|&c| (c as u64) < target)`, reached by doubling out

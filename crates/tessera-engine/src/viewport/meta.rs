@@ -78,6 +78,8 @@ pub struct EngineMeta {
     /// The view groups, in manifest order, each listing its views in creation order.
     pub groups: Vec<MetaGroup>,
     pub declared_scalars: Vec<DeclaredScalar>,
+    /// Where each of `declared_scalars`' values is read from, positionally.
+    pub homes: Vec<crate::filter::FieldHomes>,
     /// The group-scoped attribute column families, flattened over the groups in manifest order:
     /// one entry per family, naming the group whose views it has a column per and the view ids
     /// that have one.
@@ -128,6 +130,52 @@ pub enum LeafColumn {
     PinOnUnscoped { column: String },
 }
 
+/// What [`EngineMeta::resolve_column`] finds: [`LeafColumn`]'s outcomes, with the declaration a
+/// resolved column came from.
+pub(crate) enum Resolution<'a> {
+    /// An entity-scoped column, by its position in [`EngineMeta::declared_scalars`].
+    Declared(usize),
+    /// A group-scoped family's column for one view.
+    Scoped {
+        family: &'a tessera_store::manifest::ScopedScalar,
+        view: String,
+    },
+    Unknown,
+    Unpinned {
+        group: String,
+    },
+    UnknownPin {
+        group: String,
+        pin: String,
+    },
+    PinOnUnscoped {
+        column: String,
+    },
+}
+
+impl Resolution<'_> {
+    /// The outcome in the terms the filter surface and the value-list route answer in.
+    pub(crate) fn leaf_column(self, meta: &EngineMeta) -> LeafColumn {
+        match self {
+            Resolution::Declared(index) => {
+                let declared = &meta.declared_scalars[index];
+                LeafColumn::Resolved {
+                    column: declared.name.clone(),
+                    family: crate::filter::Family::of(declared),
+                }
+            }
+            Resolution::Scoped { family, view } => LeafColumn::Resolved {
+                column: crate::filter::scoped_column_name(&family.name, &view),
+                family: crate::filter::Family::of_scoped(family),
+            },
+            Resolution::Unknown => LeafColumn::Unknown,
+            Resolution::Unpinned { group } => LeafColumn::Unpinned { group },
+            Resolution::UnknownPin { group, pin } => LeafColumn::UnknownPin { group, pin },
+            Resolution::PinOnUnscoped { column } => LeafColumn::PinOnUnscoped { column },
+        }
+    }
+}
+
 impl EngineMeta {
     /// The view a request's id names — a plain view's name, or a group's `<group>:<key>` — or
     /// `None` for a view this bundle does not declare. One resolution for both planes: a viewer
@@ -173,22 +221,60 @@ impl EngineMeta {
         view: &str,
         visible: &crate::gate::VisibleViews,
     ) -> LeafColumn {
+        self.resolve_column(
+            leaf,
+            view,
+            visible,
+            crate::filter::is_filterable,
+            crate::filter::scoped_is_filterable,
+        )
+        .leaf_column(self)
+    }
+
+    /// Resolve a `/v1/categories` column spelling. A category has a value list whether or not it
+    /// is filterable, so an entity-scoped column resolves by declaration alone and a group-scoped
+    /// one as a filter admits it.
+    pub fn resolve_category_column(
+        &self,
+        leaf: &str,
+        view: &str,
+        visible: &crate::gate::VisibleViews,
+    ) -> LeafColumn {
+        self.resolve_column(
+            leaf,
+            view,
+            visible,
+            |_| true,
+            crate::filter::scoped_is_filterable,
+        )
+        .leaf_column(self)
+    }
+
+    /// Resolve a column spelling under `view`, over the entity-scoped columns `declared` admits
+    /// and the group-scoped families `scoped` admits: the one resolution the filter surface, the
+    /// value-list route and a records read share. See [`Self::resolve_filter_column`] for the
+    /// rules.
+    pub(crate) fn resolve_column(
+        &self,
+        leaf: &str,
+        view: &str,
+        visible: &crate::gate::VisibleViews,
+        declared: impl Fn(&DeclaredScalar) -> bool,
+        scoped: impl Fn(&tessera_store::manifest::ScopedScalar) -> bool,
+    ) -> Resolution<'_> {
         let (name, pin) = match leaf.split_once(crate::filter::PIN) {
             Some((name, pin)) => (name, Some(pin)),
             None => (leaf, None),
         };
         // Entity-scoped columns first: a name is one or the other, never both.
-        if let Some(declared) = self
+        if let Some(index) = self
             .declared_scalars
             .iter()
-            .find(|d| d.name == name && crate::filter::is_filterable(d))
+            .position(|d| d.name == name && declared(d))
         {
             return match pin {
-                None => LeafColumn::Resolved {
-                    column: name.to_string(),
-                    family: crate::filter::Family::of(declared),
-                },
-                Some(_) => LeafColumn::PinOnUnscoped {
+                None => Resolution::Declared(index),
+                Some(_) => Resolution::PinOnUnscoped {
                     column: name.to_string(),
                 },
             };
@@ -196,78 +282,36 @@ impl EngineMeta {
         let Some(family) = self
             .scoped_scalars
             .iter()
-            .find(|f| f.name == name && crate::filter::scoped_is_filterable(f))
+            .find(|f| f.name == name && scoped(f))
         else {
-            return LeafColumn::Unknown;
+            return Resolution::Unknown;
         };
         // The group's gate, ahead of the pin/bare split, so neither spelling confirms the group.
         if !visible.contains_group(&family.group) {
-            return LeafColumn::Unknown;
+            return Resolution::Unknown;
         }
-        let resolved = |view_id: &str| LeafColumn::Resolved {
-            column: crate::filter::scoped_column_name(name, view_id),
-            family: crate::filter::Family::of_scoped(family),
-        };
+        let group_view = |key: &str| format!("{}{}{key}", family.group, tessera_store::GROUP_SEPARATOR);
         match pin {
-            Some(pin) => {
-                let requested =
-                    format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, pin);
-                match self.resolve_visible_view(&requested, visible) {
-                    // A view with no column reads the same as a key nobody declared or a
-                    // gate-failed one: the pin names nothing to read either way.
-                    Some(view) if family.views.contains(&view.id) => resolved(&view.id),
-                    _ => LeafColumn::UnknownPin {
-                        group: family.group.clone(),
-                        pin: pin.to_string(),
-                    },
-                }
-            }
+            Some(pin) => match self.resolve_visible_view(&group_view(pin), visible) {
+                // A view with no column reads the same as a key nobody declared or a gate-failed
+                // one: the pin names nothing to read either way.
+                Some(view) if family.views.contains(&view.id) => Resolution::Scoped {
+                    family,
+                    view: view.id.clone(),
+                },
+                _ => Resolution::UnknownPin {
+                    group: family.group.clone(),
+                    pin: pin.to_string(),
+                },
+            },
             // The request's own view, where it is one of the family's own group or a sharing one.
-            None => match self.owning_key(view, &family.group) {
-                Some(key) => {
-                    let id = format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, key);
-                    match family.views.contains(&id) {
-                        true => resolved(&id),
-                        false => LeafColumn::Unpinned {
-                            group: family.group.clone(),
-                        },
-                    }
-                }
-                None => LeafColumn::Unpinned {
+            None => match self.owning_key(view, &family.group).map(group_view) {
+                Some(id) if family.views.contains(&id) => Resolution::Scoped { family, view: id },
+                _ => Resolution::Unpinned {
                     group: family.group.clone(),
                 },
             },
         }
-    }
-
-    /// Resolve a `/v1/categories` column spelling — [`Self::resolve_filter_column`]'s question
-    /// asked by the value-list route, whose admission is not the filter surface's. A category has
-    /// a value list whether or not it is filterable, so an entity-scoped category declared with
-    /// neither `render` nor `index` is resolved here by declaration alone, ahead of that
-    /// admission. Everything else falls through to [`Self::resolve_filter_column`] unchanged, so
-    /// one site still decides what a principal may reach.
-    pub fn resolve_category_column(
-        &self,
-        leaf: &str,
-        view: &str,
-        visible: &crate::gate::VisibleViews,
-    ) -> LeafColumn {
-        let (name, pin) = match leaf.split_once(crate::filter::PIN) {
-            Some((name, pin)) => (name, Some(pin)),
-            None => (leaf, None),
-        };
-        if let Some(declared) = self.declared_scalars.iter().find(|d| d.name == name) {
-            return match pin {
-                None => LeafColumn::Resolved {
-                    column: name.to_string(),
-                    family: crate::filter::Family::of(declared),
-                },
-                Some(_) => LeafColumn::PinOnUnscoped {
-                    column: name.to_string(),
-                },
-            };
-        }
-        self.resolve_filter_column(leaf, view, visible)
     }
 
     /// The key `view` holds in `group`'s roster — its own if it is a view of that group, and the
@@ -345,87 +389,97 @@ impl Engine {
     /// `GET /v1/meta`: read-only bundle facts, no session or authorisation involved. Loads the
     /// generation once, like every other request path.
     pub fn meta(&self) -> EngineMeta {
-        let generation = self.generation.load_full();
-        let manifest = &generation.bundle.manifest;
-        // The tile scheme is a function of the view's projection and frame together, derived
-        // here rather than at the wire, so the ingest plane cannot come to a different answer
-        // about the same bundle.
-        let meta_view = |s: &tessera_store::manifest::ViewDescriptor,
-                         roster: Option<MetaRoster>| MetaView {
-            id: s.id.clone(),
-            display_name: s.display_name.clone(),
-            quantisation: s.quantisation,
-            projection: s.projection,
-            tile: tessera_spatial::frame::tile_scheme(
-                s.projection,
-                &Bounds {
-                    x_min: s.quantisation.x_min,
-                    x_max: s.quantisation.x_max,
-                    y_min: s.quantisation.y_min,
-                    y_max: s.quantisation.y_max,
-                },
-            )
-            .map(|(scheme, square)| TileAddress {
-                scheme,
-                z: square.z,
-                x: square.x,
-                y: square.y,
-            }),
-            roster,
-            point_default: s.point_default.clone(),
-        };
-        // Serving order is the roster's order: plain views in manifest order, then each group's
-        // views in creation order. Nothing is sorted here — the record order is the order.
-        let rostered: std::collections::HashSet<String> = manifest
-            .groups
-            .iter()
-            .flat_map(|g| g.views.iter().map(move |v| format!("{}:{}", g.name, v.key)))
-            .collect();
-        let mut views: Vec<MetaView> = manifest
-            .views
-            .iter()
-            .filter(|v| !rostered.contains(&v.id))
-            .map(|v| meta_view(v, None))
-            .collect();
-        let mut groups: Vec<MetaGroup> = Vec::with_capacity(manifest.groups.len());
-        for group in &manifest.groups {
-            let mut ids = Vec::with_capacity(group.views.len());
-            for entry in &group.views {
-                let id = format!("{}:{}", group.name, entry.key);
-                // A roster entry with no declared view is refused at open, so this cannot
-                // silently drop one.
-                let Some(descriptor) = manifest.views.iter().find(|v| v.id == id) else {
-                    continue;
-                };
-                ids.push(id);
-                views.push(meta_view(
-                    descriptor,
-                    Some(MetaRoster {
-                        group: group.name.clone(),
-                        key: entry.key.clone(),
-                        metadata: entry.metadata.clone(),
-                    }),
-                ));
-            }
-            groups.push(MetaGroup {
-                name: group.name.clone(),
-                title: group.title.clone(),
-                members_of: group.members_of.clone(),
-                views: ids,
-            });
+        meta_of(&self.generation.load_full())
+    }
+}
+
+/// [`Engine::meta`] over a generation the caller already loaded, so a request resolves names
+/// against the same generation it reads.
+pub(crate) fn meta_of(generation: &Generation) -> EngineMeta {
+    let manifest = &generation.bundle.manifest;
+    // The tile scheme is a function of the view's projection and frame together, derived
+    // here rather than at the wire, so the ingest plane cannot come to a different answer
+    // about the same bundle.
+    let meta_view = |s: &tessera_store::manifest::ViewDescriptor,
+                     roster: Option<MetaRoster>| MetaView {
+        id: s.id.clone(),
+        display_name: s.display_name.clone(),
+        quantisation: s.quantisation,
+        projection: s.projection,
+        tile: tessera_spatial::frame::tile_scheme(
+            s.projection,
+            &Bounds {
+                x_min: s.quantisation.x_min,
+                x_max: s.quantisation.x_max,
+                y_min: s.quantisation.y_min,
+                y_max: s.quantisation.y_max,
+            },
+        )
+        .map(|(scheme, square)| TileAddress {
+            scheme,
+            z: square.z,
+            x: square.x,
+            y: square.y,
+        }),
+        roster,
+        point_default: s.point_default.clone(),
+    };
+    // Serving order is the roster's order: plain views in manifest order, then each group's
+    // views in creation order. Nothing is sorted here — the record order is the order.
+    let rostered: std::collections::HashSet<String> = manifest
+        .groups
+        .iter()
+        .flat_map(|g| g.views.iter().map(move |v| format!("{}:{}", g.name, v.key)))
+        .collect();
+    let mut views: Vec<MetaView> = manifest
+        .views
+        .iter()
+        .filter(|v| !rostered.contains(&v.id))
+        .map(|v| meta_view(v, None))
+        .collect();
+    let mut groups: Vec<MetaGroup> = Vec::with_capacity(manifest.groups.len());
+    for group in &manifest.groups {
+        let mut ids = Vec::with_capacity(group.views.len());
+        for entry in &group.views {
+            let id = format!("{}:{}", group.name, entry.key);
+            // A roster entry with no declared view is refused at open, so this cannot
+            // silently drop one.
+            let Some(descriptor) = manifest.views.iter().find(|v| v.id == id) else {
+                continue;
+            };
+            ids.push(id);
+            views.push(meta_view(
+                descriptor,
+                Some(MetaRoster {
+                    group: group.name.clone(),
+                    key: entry.key.clone(),
+                    metadata: entry.metadata.clone(),
+                }),
+            ));
         }
-        EngineMeta {
-            api_version: API_VERSION,
-            bundle_format: manifest.bundle_format,
-            views,
-            groups,
-            // The full compiled schema, including `filter`-only columns: `/v1/meta` describes
-            // what a caller may declare, not what occupies a row. Segment-facing readers narrow
-            // to `render_scalars` at their own sites.
-            declared_scalars: manifest.declared_scalars.clone(),
-            scoped_scalars: manifest.scoped_scalars(),
-            vocabularies: Arc::clone(&generation.vocabularies),
-            idset: manifest.identity.idset,
-        }
+        groups.push(MetaGroup {
+            name: group.name.clone(),
+            title: group.title.clone(),
+            members_of: group.members_of.clone(),
+            views: ids,
+        });
+    }
+    EngineMeta {
+        api_version: API_VERSION,
+        bundle_format: manifest.bundle_format,
+        views,
+        groups,
+        // The full compiled schema, including `filter`-only columns: `/v1/meta` describes
+        // what a caller may declare, not what occupies a row. Segment-facing readers narrow
+        // to `render_scalars` at their own sites.
+        declared_scalars: manifest.declared_scalars.clone(),
+        homes: manifest
+            .declared_scalars
+            .iter()
+            .map(|d| crate::filter::FieldHomes::of(d, &manifest.vocabularies))
+            .collect(),
+        scoped_scalars: manifest.scoped_scalars(),
+        vocabularies: Arc::clone(&generation.vocabularies),
+        idset: manifest.identity.idset,
     }
 }

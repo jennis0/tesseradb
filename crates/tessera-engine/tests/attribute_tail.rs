@@ -1647,15 +1647,9 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         "the live stack composes each flush's extent as it publishes"
     );
 
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().coalesces == 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the coalesce never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    tick_until(&engine, "the record extents to coalesce", std::time::Duration::from_secs(60), || {
+        engine.generation().filter_columns.record_layers() < 9
+    });
 
     // **The live stack shrank with the manifest, before any restart.** The blob's layers ride on
     // `Arc`s from one generation to the next, so a publication that edited only the manifest left

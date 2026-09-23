@@ -4,7 +4,6 @@ use tessera_store::manifest::{
 };
 
 use super::{ColumnExtent, CompletedCoalesce};
-use crate::merge::contiguous;
 
 /// `manifest` with `completed` applied, or `None` if a consumed window has moved and the pass is
 /// discarded. Each replacement takes its window's position, never the end, which keeps run
@@ -74,6 +73,26 @@ fn replace_window<T: Clone>(
     }
     entries.insert(taken[0], replacement);
     Some(())
+}
+
+/// Where `needle` sits in `haystack` as a contiguous run of equal keys, in order, or `None` if
+/// it does not or is empty.
+fn contiguous<'a, T, K: PartialEq + 'a>(
+    haystack: &'a [T],
+    needle: &[K],
+    key: impl Fn(&'a T) -> &'a K,
+) -> Option<std::ops::Range<usize>> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len())
+        .find(|&start| {
+            haystack[start..start + needle.len()]
+                .iter()
+                .map(&key)
+                .eq(needle.iter())
+        })
+        .map(|start| start..start + needle.len())
 }
 
 fn all<T>(_: &T) -> bool {

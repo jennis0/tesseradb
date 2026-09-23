@@ -61,6 +61,11 @@ parking_lot = "0.12"
 # second consumer (tessera-store's step-down warn, tessera-server's request logging) per the
 # workspace convention that a dependency taken by two crates is versioned in one place.
 tracing = "0.1"
+# The paged-records cursor's seal: XChaCha20-Poly1305, whose 24-byte nonce is drawn at random per
+# cursor without a counter to keep.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+# The paged-records cursor's text form, base64url without padding.
+base64 = "0.22"
 
 # Debug info in dev and test builds is line tables only. The 161 integration-test binaries each
 # statically link the engine; with full debug info they ran 300–600 MB apiece, every upstream

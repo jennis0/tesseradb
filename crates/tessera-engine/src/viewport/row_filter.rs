@@ -10,11 +10,11 @@ impl Engine {
     /// exactly over every range the request can ask about. A view with no `row-entity.u32` gets
     /// the projecting route regardless — also `per_tile_only`'s fallback, the highlight's route,
     /// since its answers are all inside the request's own tiles.
-    pub(super) fn cross_filter_into_row_space(
+    fn cross_filter_into_row_space(
         &self,
         served: &ServedView<'_>,
         entities: &croaring::Bitmap,
-        ranges: &[Vec<(usize, Range<u32>)>],
+        domain: &[Range<u32>],
         rows_in_ranges: u64,
         per_tile_only: bool,
     ) -> FilterRows {
@@ -22,24 +22,64 @@ impl Engine {
         let per_tile_looks_cheaper = per_tile_only
             || entities.cardinality() > rows_in_ranges.saturating_mul(PER_TILE_CROSSING_RATIO);
         if per_tile_looks_cheaper && row_space.can_invert() {
-            let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
-            let domain = crossing_domain(ranges, &row_bases);
             // `None` is the row space declining to invert a row; falling through to the exact
             // route costs latency only, where trusting a partial answer would drop rows.
             if let Some(rows) = self
                 .pool
-                .install(|| per_tile_crossing(row_space, entities, &domain, rows_in_ranges))
+                .install(|| per_tile_crossing(row_space, entities, domain, rows_in_ranges))
             {
                 self.counters
                     .filter_crossings_per_tile
                     .fetch_add(1, Ordering::Relaxed);
-                return FilterRows::Viewport { rows, domain };
+                return FilterRows::Viewport {
+                    rows,
+                    domain: domain.to_vec(),
+                };
             }
         }
         self.counters
             .filter_crossings_projected
             .fetch_add(1, Ordering::Relaxed);
         FilterRows::Complete(row_space.project(entities))
+    }
+
+    /// A routed filter's answer as rows over `domain`, ascending, disjoint and merged view-space
+    /// ranges holding `rows_in_ranges` rows: an entity-space verdict crossed into row space, or a
+    /// tree with row-space leaves evaluated there. `per_tile_only` holds either to the domain
+    /// rather than letting a whole-view projection be chosen where it is cheaper.
+    pub(crate) fn rows_of_routed(
+        &self,
+        served: &ServedView<'_>,
+        routed: crate::filter::RoutedFilter,
+        domain: &[Range<u32>],
+        rows_in_ranges: u64,
+        per_tile_only: bool,
+    ) -> Result<RoutedRows> {
+        Ok(match routed {
+            crate::filter::RoutedFilter::Entity(entities) => RoutedRows {
+                unmasked: Some(entities.cardinality()),
+                rows: self.cross_filter_into_row_space(
+                    served,
+                    &entities,
+                    domain,
+                    rows_in_ranges,
+                    per_tile_only,
+                ),
+                region: None,
+            },
+            crate::filter::RoutedFilter::Row(tree) => {
+                let rows =
+                    self.evaluate_row_route(&tree, served, domain, rows_in_ranges, per_tile_only)?;
+                self.counters.filter_row_routed.fetch_add(1, Ordering::Relaxed);
+                RoutedRows {
+                    // A region's interior rows have not met the mask, so their count is a
+                    // pre-mask quantity about the region, and is not taken.
+                    unmasked: (!tree.has_region()).then(|| rows.rows().cardinality()),
+                    region: tree.region_verdict(),
+                    rows,
+                }
+            }
+        })
     }
 
     /// Evaluate a routed filter tree with row-space leaves over the request's own rows, exact
@@ -132,6 +172,16 @@ impl Engine {
             }
         })
     }
+}
+
+/// [`Engine::rows_of_routed`]'s answer.
+pub(crate) struct RoutedRows {
+    pub(crate) rows: FilterRows,
+    /// The coarsest verdict a region leaf reached.
+    pub(crate) region: Option<crate::region::RegionVerdict>,
+    /// How many rows or entities matched before the mask, where that is a quantity about the
+    /// filter alone: `None` for a tree holding a region.
+    pub(crate) unmasked: Option<u64>,
 }
 
 /// The rows a row-space evaluation answers over — see [`Engine::evaluate_row_route`].
@@ -707,7 +757,8 @@ fn scan_rows(
             let mut buf: Vec<u32> = Vec::with_capacity(1024);
             // The segment owning `chunk.start`, advanced as the walk crosses a boundary: a merged
             // range can span two adjacent segments even though no domain range spans one.
-            let mut seg = slices.partition_point(|s| s.row_base <= chunk.start) - 1;
+            let (mut seg, _) = segment_holding(segments, chunk.start)
+                .expect("the first segment's rows begin at 0");
             let mut row = chunk.start;
             while row < chunk.end {
                 while seg + 1 < slices.len() && slices[seg + 1].row_base <= row {
@@ -761,7 +812,10 @@ const CROSSING_CHUNK_MIN_ROWS: u32 = 4096;
 
 /// The view-space rows a request's tiles span: every tile part shifted into view row space by its
 /// segment's `row_base`, sorted, and merged where adjacent, so the domain is never widened.
-pub(super) fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Vec<Range<u32>> {
+pub(crate) fn crossing_domain(
+    ranges: &[Vec<(usize, Range<u32>)>],
+    row_bases: &[u32],
+) -> Vec<Range<u32>> {
     let mut spans: Vec<Range<u32>> = ranges
         .iter()
         .flat_map(|parts| parts.iter())
@@ -883,44 +937,18 @@ impl Engine {
                  -> Result<(FilterRows, Option<crate::region::RegionVerdict>)> {
                     let routed = route(expr, rows_in_ranges <= v_total)?;
                     probe.lap(|t| &mut t.filter_eval_ns);
-                    let out = match routed {
-                        crate::filter::RoutedFilter::Entity(entities) => {
-                            if count_matched {
-                                probe.count(|t| &mut t.filter_matched, entities.cardinality());
-                            }
-                            (
-                                self.cross_filter_into_row_space(
-                                    served,
-                                    &entities,
-                                    &tiling.ranges,
-                                    rows_in_ranges,
-                                    per_tile_only,
-                                ),
-                                None,
-                            )
-                        }
-                        crate::filter::RoutedFilter::Row(tree) => {
-                            let verdict = tree.region_verdict();
-                            let rows = self.evaluate_row_route(
-                                &tree,
-                                served,
-                                &domain,
-                                rows_in_ranges,
-                                per_tile_only,
-                            )?;
-                            self.counters.filter_row_routed.fetch_add(1, Ordering::Relaxed);
-                            // Not counted when a region is in the tree: its interior rows have
-                            // not met the mask yet, so the cardinality would be a pre-mask
-                            // quantity about the region — not computed, for a metric or anything
-                            // else.
-                            if count_matched && !tree.has_region() {
-                                probe.count(|t| &mut t.filter_matched, rows.rows().cardinality());
-                            }
-                            (rows, verdict)
-                        }
-                    };
+                    let out = self.rows_of_routed(
+                        served,
+                        routed,
+                        &domain,
+                        rows_in_ranges,
+                        per_tile_only,
+                    )?;
+                    if let (true, Some(matched)) = (count_matched, out.unmasked) {
+                        probe.count(|t| &mut t.filter_matched, matched);
+                    }
                     probe.lap(|t| &mut t.filter_cross_ns);
-                    Ok(out)
+                    Ok((out.rows, out.region))
                 };
                 let filter_rows = match &req.filter {
                     None => None,
@@ -938,10 +966,8 @@ impl Engine {
                         let (rows, verdict) = evaluate(expr, true, false)?;
                         // The coarsest of the two: a cover anywhere makes the response's verdict
                         // a cover.
-                        region_verdict = match (region_verdict, verdict) {
-                            (Some(a), Some(b)) => Some(a.coarser(b)),
-                            (a, b) => a.or(b),
-                        };
+                        region_verdict =
+                            crate::region::RegionVerdict::coarsest(region_verdict, verdict);
                         Some(rows)
                     }
                 };
@@ -976,36 +1002,89 @@ impl Engine {
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
-        let fragment = self.fragment_for(served.session, served.generation)?;
-        let candidate = crate::filter::candidate(
+        let candidate = self.filter_candidate(served.session, served.generation)?;
+        let resolved = ResolvedLeaves::default();
+        self.route_filters_under(served, mask, &candidate, &resolved, cancel, body)
+    }
+
+    /// The entity-space set a request's filter is evaluated under: the session's fragment brought
+    /// forward to `generation`, with the deny state and the passing buffered entities composed in.
+    pub(crate) fn filter_candidate(
+        &self,
+        session: &Session,
+        generation: &Generation,
+    ) -> Result<croaring::Bitmap> {
+        let fragment = self.fragment_for(session, generation)?;
+        Ok(crate::filter::candidate(
             &fragment,
-            served.session.satisfied(),
-            &served.generation.overlay,
-            &served.generation.buffer,
-        );
-        let regions =
-            |leaf: &crate::filter::RegionLeaf| self.resolve_region(leaf, served, mask, cancel);
-        let members =
-            |leaf: &crate::filter::MemberOfLeaf| self.resolve_member_of(leaf, served, mask);
+            session.satisfied(),
+            &generation.overlay,
+            &generation.buffer,
+        ))
+    }
+
+    /// [`Self::route_filters`] under a candidate the caller composed: a subset of
+    /// [`Self::filter_candidate`]'s set, never wider, since every scan returns a subset of it.
+    /// A region or `member_of` leaf `resolved` holds is answered from it, and one it does not is
+    /// resolved and kept there; the caller holds it only while `served` and `mask` are the ones
+    /// it was filled under.
+    pub(crate) fn route_filters_under<T>(
+        &self,
+        served: &ServedView<'_>,
+        mask: &EffectiveMask,
+        candidate: &croaring::Bitmap,
+        resolved: &ResolvedLeaves,
+        cancel: &Option<CancelToken>,
+        body: impl FnOnce(
+            &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        let regions = |leaf: &crate::filter::RegionLeaf| {
+            let held = resolved
+                .regions
+                .borrow()
+                .iter()
+                .find(|(held, _)| held == leaf)
+                .map(|(_, rows)| rows.clone());
+            if let Some(rows) = held {
+                return Ok(rows);
+            }
+            let rows = self.resolve_region(leaf, served, mask, cancel)?;
+            resolved.regions.borrow_mut().push((leaf.clone(), rows.clone()));
+            Ok(rows)
+        };
+        let members = |leaf: &crate::filter::MemberOfLeaf| {
+            let held = resolved
+                .members
+                .borrow()
+                .iter()
+                .find(|(held, _)| held == leaf)
+                .map(|(_, rows)| rows.clone());
+            if let Some(rows) = held {
+                return Ok(rows);
+            }
+            let rows = self.resolve_member_of(leaf, served, mask)?;
+            resolved.members.borrow_mut().push((leaf.clone(), rows.clone()));
+            Ok(rows)
+        };
+        let layers = |layer: &str| self.reaches_layer(served.session, layer);
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
             members: &members,
+            layers: &layers,
         };
         body(&|expr: &crate::filter::FilterExpr, prefer_row: bool| {
             served
                 .generation
                 .filter_columns
-                .evaluate_routed(expr, &candidate, prefer_row, &resolvers)
-                .map_err(|e| {
-                    // Caller's fault or the deployment's — `FilterError` decides, at the variants.
-                    let detail = e.to_string();
-                    if e.is_callers_fault() {
-                        EngineError::FilterMalformed(detail)
-                    } else {
-                        EngineError::FilterRefused(detail)
-                    }
-                })
+                .evaluate_routed(expr, candidate, prefer_row, &resolvers)
+                .map_err(filter_refusal)
         })
+    }
+
+    /// Whether `session` reaches `layer`: whether a `member_of` may name it.
+    pub(crate) fn reaches_layer(&self, session: &Session, layer: &str) -> bool {
+        self.reachable_layers(session).contains(layer)
     }
 
     /// Answer one region leaf for one request. A drawn shape: its decomposition from the
@@ -1084,10 +1163,9 @@ impl Engine {
         }
     }
 
-    /// Answer one `member_of` leaf for one request. The gate, then the membership, never the
-    /// other order: the layer must be one this principal reaches, or
-    /// [`FilterError::UnknownLayer`], and then the artifact must pass its own existence criterion
-    /// through the same [`Engine::gated_artifact`] the drill-down calls. An artifact that does
+    /// Answer one `member_of` leaf for one request, whose layer the filter's admission has already
+    /// found this principal reaches. The artifact must pass its own existence criterion through
+    /// the same [`Engine::gated_artifact`] the drill-down calls. An artifact that does
     /// not pass — names nothing, is of another layer, is suppressed, is below the criterion — is
     /// the empty operand, one answer for every reason: refusing instead would make the leaf an
     /// existence oracle over what the criterion withholds. The membership is read two ways,
@@ -1101,10 +1179,6 @@ impl Engine {
         mask: &EffectiveMask,
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
         use crate::filter::FilterError;
-        let reachable = self.reachable_layers(served.session);
-        if !reachable.contains(&leaf.layer) {
-            return Err(FilterError::UnknownLayer(leaf.layer.clone()));
-        }
         let gated = self
             .gated_artifact(served, mask, leaf.artifact)
             .map_err(|e| FilterError::MemberOfUnavailable(e.to_string()))?;
@@ -1118,6 +1192,27 @@ impl Engine {
             self.counters.member_of_column_walks.fetch_add(1, Ordering::Relaxed);
         }
         Ok(gated.rows.visible_rows(gated.ordinal, mask))
+    }
+}
+
+/// The region and `member_of` leaves answered under one view and mask, so a leaf evaluated again
+/// under them is resolved once.
+#[derive(Default)]
+pub(crate) struct ResolvedLeaves {
+    regions: std::cell::RefCell<Vec<(crate::filter::RegionLeaf, crate::region::RegionRows)>>,
+    members: std::cell::RefCell<Vec<(crate::filter::MemberOfLeaf, croaring::Bitmap)>>,
+}
+
+/// A filter's refusal as the engine's: the caller's fault or the deployment's, as [`FilterError`]
+/// decides at its variants.
+///
+/// [`FilterError`]: crate::filter::FilterError
+pub(crate) fn filter_refusal(e: crate::filter::FilterError) -> EngineError {
+    let detail = e.to_string();
+    if e.is_callers_fault() {
+        EngineError::FilterMalformed(detail)
+    } else {
+        EngineError::FilterRefused(detail)
     }
 }
 
@@ -1644,3 +1739,4 @@ mod tests {
         );
     }
 }
+

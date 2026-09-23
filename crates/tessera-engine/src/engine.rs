@@ -144,6 +144,8 @@ pub struct Engine {
     /// Never leaves the server; `IdentityKey`'s `Debug` is redacted and it has no hex accessor, so
     /// this field cannot be logged.
     pub(crate) identity_key: IdentityKey,
+    /// The key records cursors are sealed under, derived from the identity key at open.
+    pub(crate) cursor_key: crate::records::CursorKey,
     /// A per-process random value folded into every content key. Without it a content key could
     /// collide across a restart, since `overlay_version` restarts at zero, and a client's held
     /// declaration would be honoured against a visible set it was never computed for.
@@ -408,6 +410,8 @@ pub(crate) struct PrefixReaders {
     /// The deployment's `tessera_id` key. `IdentityKey::from_hex` rejects a degenerate key,
     /// refusing a bundle rather than blinding identities with a collapsed round schedule.
     pub(crate) identity_key: IdentityKey,
+    /// The key records cursors are sealed under, derived from the same identity key.
+    pub(crate) cursor_key: crate::records::CursorKey,
 }
 
 impl PrefixReaders {
@@ -469,6 +473,7 @@ impl PrefixReaders {
 
         let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
             .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
+        let cursor_key = crate::records::CursorKey::of(&bundle.manifest.identity.key);
 
         Ok(PrefixReaders {
             prefix,
@@ -481,6 +486,7 @@ impl PrefixReaders {
             delta_postings,
             external_index,
             identity_key,
+            cursor_key,
         })
     }
 }
@@ -915,6 +921,7 @@ impl Engine {
             next_token_id: AtomicU64::new(0),
             write: WritePath::new(state),
             identity_key: readers.identity_key,
+            cursor_key: readers.cursor_key,
             boot_nonce: OsRng.next_u64(),
             switches,
             counters,
