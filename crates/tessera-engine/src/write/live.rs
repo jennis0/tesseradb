@@ -147,10 +147,7 @@ impl LiveState {
     /// Everything not yet in a manifest, packed and ready. See [`ArtifactStore::unpublished`].
     pub(in crate::write) fn unpublished_memberships(
         &self,
-    ) -> (
-        Vec<tessera_lifecycle::membership::PendingExtent>,
-        Vec<(String, u32)>,
-    ) {
+    ) -> Vec<tessera_lifecycle::membership::PendingExtent> {
         lock_recover(&self.artifacts).unpublished()
     }
 

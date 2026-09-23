@@ -250,6 +250,16 @@ pub fn no_pending(_: &str) -> Option<crate::wal::ParentRef> {
     None
 }
 
+/// The live incarnation of a group's view, by `(group, key)`, or `None` where the group has no
+/// such view. A publication stamps each artifact of a group-scoped layer with it.
+pub type IncarnationOf<'a> = &'a dyn Fn(&str, &str) -> Option<tessera_types::view::ViewIncarnation>;
+
+/// Every view at the incarnation a build gives it: what a build publishes under, having refused
+/// an undeclared view already.
+pub fn declared_incarnation(_: &str, _: &str) -> Option<tessera_types::view::ViewIncarnation> {
+    Some(tessera_types::view::DECLARED_INCARNATION)
+}
+
 /// What [`LayerRegistry::prepare_put`] prepared for one `PUT` batch: the records to append, in
 /// the order to apply them, and what the acknowledgement reports.
 ///
@@ -950,6 +960,7 @@ impl LayerRegistry {
     /// them ([`no_pending`] is the empty answer).
     ///
     /// [`parent_ref`]: LayerRegistry::parent_ref
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_publish(
         &self,
         layer_name: &str,
@@ -958,6 +969,7 @@ impl LayerRegistry {
         store: &ArtifactStore,
         alloc: &mut Allocator,
         pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
+        incarnation_of: IncarnationOf<'_>,
     ) -> Result<WalRecord, RegistryError> {
         let layer = self
             .layers
@@ -977,7 +989,7 @@ impl LayerRegistry {
                 layer: layer_name.to_string(),
             });
         }
-        self.prepare_artifacts(layer_name, level, incoming, store, alloc, pending)
+        self.prepare_artifacts(layer_name, level, incoming, store, alloc, pending, incarnation_of)
             .map(|(record, _)| record)
     }
 
@@ -1007,6 +1019,7 @@ impl LayerRegistry {
         incoming: &[IncomingArtifact],
         store: &ArtifactStore,
         alloc: &mut Allocator,
+        incarnation_of: IncarnationOf<'_>,
     ) -> Result<PreparedPut, RegistryError> {
         let layer = self
             .layers
@@ -1226,7 +1239,15 @@ impl LayerRegistry {
             // from it. The argument is for a caller minting artifacts *elsewhere* — the ingest
             // route's mint pass — which is entity-scoped.
             let (record, without_content) =
-                self.prepare_artifacts(layer_name, level, &fresh, store, alloc, &no_pending)?;
+                self.prepare_artifacts(
+                    layer_name,
+                    level,
+                    &fresh,
+                    store,
+                    alloc,
+                    &no_pending,
+                    incarnation_of,
+                )?;
             (Some(record), without_content)
         };
 
@@ -1649,6 +1670,7 @@ impl LayerRegistry {
             store,
             alloc,
             &crate::no_pending,
+            &declared_incarnation,
         )
         .map(|(record, _)| record)
     }
@@ -1662,6 +1684,7 @@ impl LayerRegistry {
     /// implementation.
     ///
     /// [`prepare_publish`]: LayerRegistry::prepare_publish
+    #[allow(clippy::too_many_arguments)]
     fn prepare_artifacts(
         &self,
         layer_name: &str,
@@ -1670,6 +1693,7 @@ impl LayerRegistry {
         store: &ArtifactStore,
         alloc: &mut Allocator,
         pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
+        incarnation_of: IncarnationOf<'_>,
     ) -> Result<(WalRecord, u64), RegistryError> {
         let layer = self
             .layers
@@ -1695,6 +1719,25 @@ impl LayerRegistry {
                     artifact.key.as_deref(),
                     artifact.view.as_deref(),
                 )
+            })
+            .collect::<Result<_, _>>()?;
+        let incarnations: Vec<tessera_types::view::ViewIncarnation> = incoming
+            .iter()
+            .zip(&views)
+            .map(|(artifact, view)| {
+                match (layer.declaration.scope.group(), view) {
+                    (Some(group), Some(key)) => incarnation_of(group, key).ok_or_else(|| {
+                        RegistryError::ViewIdentity {
+                            layer: layer_name.to_string(),
+                            key: artifact.key.clone().unwrap_or_else(|| "<no key>".to_string()),
+                            detail: format!(
+                                "group '{group}' has no view '{key}'. Name one of its views, or \
+                                 create this one first"
+                            ),
+                        }
+                    }),
+                    _ => Ok(tessera_types::view::DECLARED_INCARNATION),
+                }
             })
             .collect::<Result<_, _>>()?;
 
@@ -2065,6 +2108,7 @@ impl LayerRegistry {
                     // checked against the layer's scope above and recorded here, so replay lands
                     // the artifact in the view it was acked in.
                     view: artifact.view.clone(),
+                    incarnation: incarnations[i],
                     members: serialise_members(&artifact.members),
                     contents: artifact
                         .contents
@@ -3154,7 +3198,15 @@ mod tests {
         layer: &str,
         incoming: &[IncomingArtifact],
     ) -> Result<WalRecord, RegistryError> {
-        let record = reg.prepare_publish(layer, 0, incoming, store, alloc, &no_pending)?;
+        let record = reg.prepare_publish(
+            layer,
+            0,
+            incoming,
+            store,
+            alloc,
+            &no_pending,
+            &declared_incarnation,
+        )?;
         reg.apply(&record);
         assert_eq!(store.apply(&record, 0), 0);
         Ok(record)
@@ -3623,12 +3675,28 @@ mod tests {
 
         // And a level the layer never declared is a refusal too, not an implicit creation.
         assert_eq!(
-            reg.prepare_publish("clusters/nope", 0, &[], &store, &mut alloc, &no_pending),
+            reg.prepare_publish(
+                "clusters/nope",
+                0,
+                &[],
+                &store,
+                &mut alloc,
+                &no_pending,
+                &declared_incarnation,
+            ),
             Err(RegistryError::NoSuchLayer("clusters/nope".into()))
         );
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
         assert_eq!(
-            reg.prepare_publish("clusters/a", 3, &[], &store, &mut alloc, &no_pending),
+            reg.prepare_publish(
+                "clusters/a",
+                3,
+                &[],
+                &store,
+                &mut alloc,
+                &no_pending,
+                &declared_incarnation,
+            ),
             Err(RegistryError::NoSuchLevel {
                 layer: "clusters/a".into(),
                 level: 3
@@ -3663,6 +3731,7 @@ mod tests {
                 &store,
                 &mut alloc,
                 &no_pending,
+                &declared_incarnation,
             )
             .unwrap();
         reg.apply(&publication);
@@ -3709,7 +3778,15 @@ mod tests {
             .map(|i| incoming(&format!("c{i}"), &[i as u32]))
             .collect();
         let publication = reg
-            .prepare_publish("clusters/a", 0, &full, &store, &mut alloc, &no_pending)
+            .prepare_publish(
+                "clusters/a",
+                0,
+                &full,
+                &store,
+                &mut alloc,
+                &no_pending,
+                &declared_incarnation,
+            )
             .unwrap();
         reg.apply(&publication);
         assert_eq!(store.apply(&publication, 0), 0);
@@ -3808,6 +3885,7 @@ mod tests {
                 &[incoming("root", &[1, 2, 3]), incoming("child", &[1])],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap();
         assert_eq!((first.created, first.without_content), (2, 2));
@@ -3823,7 +3901,7 @@ mod tests {
         )];
         let mark = alloc.low_water();
         let second = reg
-            .prepare_put("topics/t", 0, &[child.clone()], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[child.clone()], &store, &mut alloc, &declared_incarnation)
             .unwrap();
         assert_eq!(alloc.low_water(), mark, "a held key allocates nothing");
         assert!(second.publish.is_none());
@@ -3861,7 +3939,7 @@ mod tests {
 
         // Identical again: no record at all.
         let third = reg
-            .prepare_put("topics/t", 0, &[child], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[child], &store, &mut alloc, &declared_incarnation)
             .unwrap();
         assert!(third.publish.is_none() && third.fills.is_empty() && third.growth.is_none());
         assert_eq!((third.created, third.joined), (0, 0));
@@ -3873,7 +3951,7 @@ mod tests {
             [],
         )];
         let refused = reg
-            .prepare_put("topics/t", 0, &[differing], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[differing], &store, &mut alloc, &declared_incarnation)
             .unwrap_err();
         assert_eq!(
             refused,
@@ -3892,13 +3970,13 @@ mod tests {
         // A differing parent, the same way.
         let other = incoming("other", &[7]);
         let put = reg
-            .prepare_put("topics/t", 0, &[other], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[other], &store, &mut alloc, &declared_incarnation)
             .unwrap();
         apply_put(&mut reg, &mut store, &put);
         let mut reparented = incoming("child", &[]);
         reparented.parent_keys = vec!["other".into()];
         let refused = reg
-            .prepare_put("topics/t", 0, &[reparented], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[reparented], &store, &mut alloc, &declared_incarnation)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::PartConflict { part, .. } if part == "parent"),
@@ -3941,6 +4019,7 @@ mod tests {
                 ],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap();
         assert_eq!(prepared.created, 2);
@@ -4033,6 +4112,7 @@ mod tests {
                 &[under("d", &["a"]), a_under_d],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap_err();
         assert!(
@@ -4070,7 +4150,7 @@ mod tests {
             key: "c0".into(),
         });
         let put = reg
-            .prepare_put("topics/x", 0, &[label], &store, &mut alloc)
+            .prepare_put("topics/x", 0, &[label], &store, &mut alloc, &declared_incarnation)
             .unwrap();
         assert_eq!(put.without_content, 1);
         apply_put(&mut reg, &mut store, &put);
@@ -4173,7 +4253,14 @@ mod tests {
             tessera_types::layer::SuppliedRequirement::All;
         register(&mut reg, &mut alloc, layer).unwrap();
         let put = reg
-            .prepare_put("topics/all", 0, &[incoming("t0", &[1])], &store, &mut alloc)
+            .prepare_put(
+                "topics/all",
+                0,
+                &[incoming("t0", &[1])],
+                &store,
+                &mut alloc,
+                &declared_incarnation,
+            )
             .unwrap();
         apply_put(&mut reg, &mut store, &put);
         let mut join = crate::membership::IncomingGrowth::from_entities("t0".into(), []);
@@ -4219,6 +4306,7 @@ mod tests {
                 &[under("k", &["a"]), under("k", &["b"])],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap_err();
         assert_eq!(
@@ -4239,6 +4327,7 @@ mod tests {
                 &[under("k", &["a"]), members_only],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap_err();
         assert!(
@@ -4252,6 +4341,7 @@ mod tests {
                 &[under("n", &["a"]), under("n", &["b"])],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap_err();
         assert!(
@@ -4309,7 +4399,14 @@ mod tests {
         let mut alloc = Allocator::new(0);
         register(&mut reg, &mut alloc, described("topics/t")).unwrap();
         let put = reg
-            .prepare_put("topics/t", 0, &[incoming("t0", &[1])], &store, &mut alloc)
+            .prepare_put(
+                "topics/t",
+                0,
+                &[incoming("t0", &[1])],
+                &store,
+                &mut alloc,
+                &declared_incarnation,
+            )
             .unwrap();
         apply_put(&mut reg, &mut store, &put);
 
@@ -4319,7 +4416,7 @@ mod tests {
             [EntityId::new(1)],
         )];
         let refused = reg
-            .prepare_put("topics/t", 0, &[with_set], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[with_set], &store, &mut alloc, &declared_incarnation)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("a content fill carries none")),
@@ -4333,7 +4430,7 @@ mod tests {
             [EntityId::new(2)],
         )];
         let refused = reg
-            .prepare_put("topics/t", 0, &[new_with_set], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[new_with_set], &store, &mut alloc, &declared_incarnation)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("declares a generating set, and none of this layer's content requires")),
@@ -4367,7 +4464,14 @@ mod tests {
 
         // Absent where the layer is a set per view.
         let refused = reg
-            .prepare_put("clusters/q", 0, &[incoming("c1", &[1])], &store, &mut alloc)
+            .prepare_put(
+                "clusters/q",
+                0,
+                &[incoming("c1", &[1])],
+                &store,
+                &mut alloc,
+                &declared_incarnation,
+            )
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::ViewIdentity { detail, .. } if detail.contains("scoped to the group 'quarter'")),
@@ -4381,6 +4485,7 @@ mod tests {
                 &[in_view("c1", "q1", &[1])],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap_err();
         assert!(
@@ -4397,6 +4502,7 @@ mod tests {
                 &[in_view("c1", "q1", &[1, 2]), in_view("c1", "q2", &[3])],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap();
         assert_eq!(prepared.created, 2);
@@ -4426,6 +4532,7 @@ mod tests {
                 &[in_view("c1", "q1", &[1, 2])],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap();
         assert_eq!(prepared.created, 0);
@@ -4450,6 +4557,7 @@ mod tests {
                 &[in_view("root", "q1", &[1])],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap();
         apply_put(&mut reg, &mut store, &prepared);
@@ -4457,7 +4565,7 @@ mod tests {
         let mut child = in_view("leaf", "q2", &[2]);
         child.parent_keys = vec!["root".into()];
         let refused = reg
-            .prepare_put("clusters/q", 0, &[child], &store, &mut alloc)
+            .prepare_put("clusters/q", 0, &[child], &store, &mut alloc, &declared_incarnation)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::CrossViewEdge { held_in, .. } if held_in == &["q1".to_string()]),
@@ -4467,7 +4575,7 @@ mod tests {
         let mut child = in_view("leaf", "q1", &[2]);
         child.parent_keys = vec!["root".into()];
         let prepared = reg
-            .prepare_put("clusters/q", 0, &[child], &store, &mut alloc)
+            .prepare_put("clusters/q", 0, &[child], &store, &mut alloc, &declared_incarnation)
             .unwrap();
         apply_put(&mut reg, &mut store, &prepared);
         assert_eq!(
@@ -4495,6 +4603,7 @@ mod tests {
                 &[incoming("c1", &[1, 2, 3])],
                 &store,
                 &mut alloc,
+                &declared_incarnation,
             )
             .unwrap();
         apply_put(&mut reg, &mut store, &prepared);
@@ -4502,7 +4611,7 @@ mod tests {
         let mut again = incoming("c1", &[]);
         again.exclude([EntityId::new(4)]);
         let refused = reg
-            .prepare_put("clusters/a", 0, &[again], &store, &mut alloc)
+            .prepare_put("clusters/a", 0, &[again], &store, &mut alloc, &declared_incarnation)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::ExclusionOnHeldKey { key, .. } if key == "c1"),
@@ -4598,13 +4707,20 @@ mod tests {
         let mut labelled = incoming("c1", &[1]);
         labelled.access = vec![b"team-a".to_vec()];
         let refused = reg
-            .prepare_put("clusters/a", 0, std::slice::from_ref(&labelled), &store, &mut alloc)
+            .prepare_put(
+                "clusters/a",
+                0,
+                std::slice::from_ref(&labelled),
+                &store,
+                &mut alloc,
+                &declared_incarnation,
+            )
             .unwrap_err();
         assert!(matches!(refused, RegistryError::Access { .. }), "{refused:?}");
 
         publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[incoming("c1", &[1])]).unwrap();
         let refused = reg
-            .prepare_put("clusters/a", 0, &[labelled], &store, &mut alloc)
+            .prepare_put("clusters/a", 0, &[labelled], &store, &mut alloc, &declared_incarnation)
             .unwrap_err();
         assert!(matches!(refused, RegistryError::Access { .. }), "{refused:?}");
     }
@@ -4623,7 +4739,14 @@ mod tests {
         let mut first = incoming("c1", &[1]);
         first.access = vec![b"b".to_vec(), b"a".to_vec(), b"b".to_vec()];
         let prepared = reg
-            .prepare_put("clusters/a", 0, &[first, incoming("c2", &[2])], &store, &mut alloc)
+            .prepare_put(
+                "clusters/a",
+                0,
+                &[first, incoming("c2", &[2])],
+                &store,
+                &mut alloc,
+                &declared_incarnation,
+            )
             .unwrap();
         apply_put(&mut reg, &mut store, &prepared);
         assert_eq!(
@@ -4635,7 +4758,14 @@ mod tests {
         let mut fill = incoming("c2", &[]);
         fill.access = vec![b"c".to_vec()];
         let prepared = reg
-            .prepare_put("clusters/a", 0, std::slice::from_ref(&fill), &store, &mut alloc)
+            .prepare_put(
+                "clusters/a",
+                0,
+                std::slice::from_ref(&fill),
+                &store,
+                &mut alloc,
+                &declared_incarnation,
+            )
             .unwrap();
         assert!(matches!(
             part_of(&prepared.fills[0]),
@@ -4645,14 +4775,21 @@ mod tests {
         assert_eq!(store.get("clusters/a", 0, 1).unwrap().access, vec![b"c".to_vec()]);
 
         let again = reg
-            .prepare_put("clusters/a", 0, std::slice::from_ref(&fill), &store, &mut alloc)
+            .prepare_put(
+                "clusters/a",
+                0,
+                std::slice::from_ref(&fill),
+                &store,
+                &mut alloc,
+                &declared_incarnation,
+            )
             .unwrap();
         assert!(again.fills.is_empty());
 
         let mut other = incoming("c2", &[]);
         other.access = vec![b"d".to_vec()];
         let refused = reg
-            .prepare_put("clusters/a", 0, &[other], &store, &mut alloc)
+            .prepare_put("clusters/a", 0, &[other], &store, &mut alloc, &declared_incarnation)
             .unwrap_err();
         assert!(matches!(refused, RegistryError::PartConflict { .. }), "{refused:?}");
     }
@@ -4675,16 +4812,23 @@ mod tests {
             let mut fresh = incoming("c1", &[1]);
             fresh.access = access.clone();
             assert!(reg
-                .prepare_put("clusters/a", 0, &[fresh], &store, &mut alloc)
+                .prepare_put("clusters/a", 0, &[fresh], &store, &mut alloc, &declared_incarnation)
                 .is_err());
             let mut fill = incoming("held", &[]);
             fill.access = access;
             assert!(reg
-                .prepare_put("clusters/a", 0, &[fill], &store, &mut alloc)
+                .prepare_put("clusters/a", 0, &[fill], &store, &mut alloc, &declared_incarnation)
                 .is_err());
         }
         let mut fits = incoming("c2", &[1]);
         fits.access = vec![vec![b'x'; u16::MAX as usize - 1]];
-        assert!(reg.prepare_put("clusters/a", 0, &[fits], &store, &mut alloc).is_ok());
+        assert!(reg.prepare_put(
+            "clusters/a",
+            0,
+            &[fits],
+            &store,
+            &mut alloc,
+            &declared_incarnation,
+        ).is_ok());
     }
 }

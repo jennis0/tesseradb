@@ -1859,6 +1859,7 @@ pub fn publish(
                     &store,
                     &mut alloc,
                     &tessera_lifecycle::no_pending,
+                    &tessera_lifecycle::declared_incarnation,
                 )
                 .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
             // The record carries its own copy of every membership, so the bitmaps this built are
@@ -1890,12 +1891,6 @@ pub fn publish(
             let batch_lo = ordinal_lo + start as u32;
             let batch_len = (end - start) as u32;
             for blob in store.encode_pending(layer, level, batch_lo, batch_len) {
-                let blob = blob.ok_or_else(|| {
-                    BuildError::Invalid(format!(
-                        "{layer} level {level} has no record at an ordinal this publication just \
-                         assigned"
-                    ))
-                })?;
                 writer.push(&blob).map_err(BuildError::Store)?;
             }
             // The bytes are in the writer, so the store's own bitmaps have one reader left — the
@@ -3060,17 +3055,7 @@ fn write_membership_extents(
     published: &mut PublishedLayers,
     streamed: &mut BTreeMap<(String, u32), StreamedPack>,
 ) -> Result<()> {
-    let (ready, skipped) = store.pending_ranges();
-    if let Some((layer, level)) = skipped.first() {
-        // Unreachable from a build: every artifact of a level is published in one batch, so a
-        // level cannot have a hole below its high-water. A refusal rather than an alarm, because a
-        // build can simply not produce the bundle.
-        return Err(BuildError::Invalid(format!(
-            "{layer} level {level} has a hole in its ordinals, so its memberships cannot be packed \
-             — an extent addresses a dense range and packing around a hole shifts every later \
-             artifact's identity by one"
-        )));
-    }
+    let ready = store.pending_ranges();
     if ready.is_empty() {
         return Ok(());
     }
@@ -3121,16 +3106,6 @@ fn write_membership_extents(
                         .map_err(BuildError::Store)?;
                 let mut pushed = 0u32;
                 for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
-                    // Unreachable: `pending_ranges` reports a level with a hole as skipped above
-                    // rather than as a range. A refusal rather than an assertion because the
-                    // alternative is an extent one blob short of the range it addresses, which
-                    // serves every ordinal above the hole as another artifact's membership.
-                    let blob = blob.ok_or_else(|| {
-                        BuildError::Invalid(format!(
-                            "{layer} level {level} has no record at an ordinal inside the range \
-                             it reported as ready to pack"
-                        ))
-                    })?;
                     writer.push(&blob).map_err(BuildError::Store)?;
                     pushed += 1;
                 }

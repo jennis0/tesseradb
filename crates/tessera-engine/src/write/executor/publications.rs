@@ -1776,18 +1776,7 @@ impl Executor {
         partition: &str,
         n: u64,
     ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
-        let (ready, skipped) = self.live.unpublished_memberships();
-        for (layer, level) in skipped {
-            // Unreachable while publication is append-only, and alarmed rather than asserted: an
-            // extent addresses a dense ordinal range, so packing around a hole would shift every
-            // later artifact's identity by one.
-            tracing::error!(
-                layer = %layer,
-                level,
-                "ALARM: a level has a hole below its ordinal high-water, so its memberships are \
-                 not published; they stay WAL-durable and the log stays pinned"
-            );
-        }
+        let ready = self.live.unpublished_memberships();
         pack_membership_extents(prefix_dir, partition, n, ready)
     }
 

@@ -1299,3 +1299,81 @@ async fn an_arrow_growth_grows_the_artifact_in_the_view_its_view_column_names() 
         vec![("c1".to_string(), 25)]
     );
 }
+
+/// A view dropped and created again serves none of its predecessor's artifacts: not those packed
+/// into an extent before the drop, not those still only in the log, and not after a restart or a
+/// fold. A key the predecessor used publishes a new artifact in the recreated view.
+#[tokio::test]
+async fn a_recreated_view_serves_none_of_its_predecessors_artifacts() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_group(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([
+            { "key": "c1", "view": "q1", "members": members(0..10) },
+            { "key": "c1", "view": "q2", "members": members(0..30) },
+            { "key": "c2", "view": "q2", "members": members(0..50) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let old_c1 = body["artifacts"][1]["tessera_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Packed by the tick, so the next publication is in the log alone.
+    tick(&server).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": "c3", "view": "q2", "members": members(0..40) }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let q1 = vec![("c1".to_string(), 10)];
+    assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+
+    recreate(&server, "q2").await;
+    let token = token_for(&server, &["0"]).await;
+    assert_eq!(served(&server, "quarter:q2", SCOPED).await, vec![]);
+    assert_eq!(browsed(&server, &token, "quarter:q2", SCOPED).await, vec![]);
+    assert_eq!(drilled(&server, &token, "quarter:q2", &old_c1).await.0, 404);
+    assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+
+    let server = restart(server, &tmp).await;
+    let token = token_for(&server, &["0"]).await;
+    assert_eq!(served(&server, "quarter:q2", SCOPED).await, vec![]);
+    assert_eq!(browsed(&server, &token, "quarter:q2", SCOPED).await, vec![]);
+    assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+
+    // The predecessor's key publishes a new artifact over the recreated view's own items.
+    ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    tick(&server).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": "c1", "view": "q2", "members": members(20_000..20_020) }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["created"], 1, "{body}");
+    assert_ne!(body["artifacts"][0]["tessera_id"].as_str().unwrap(), old_c1);
+    // A held form takes a publication at the next tick.
+    tick(&server).await;
+    let republished = vec![("c1".to_string(), 20)];
+    assert_eq!(served(&server, "quarter:q2", SCOPED).await, republished);
+
+    flush_and_fold(&server, Some("quarter:q1")).await;
+    assert_eq!(served(&server, "quarter:q2", SCOPED).await, republished);
+    assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+    let server = restart(server, &tmp).await;
+    let token = token_for(&server, &["0"]).await;
+    assert_eq!(served(&server, "quarter:q2", SCOPED).await, republished);
+    assert_eq!(
+        browsed(&server, &token, "quarter:q2", SCOPED).await,
+        republished
+    );
+    assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+}

@@ -49,7 +49,8 @@ pub use membership::{
 };
 pub use overlay::{owner_id_only, replay, Overlay};
 pub use registry::{
-    no_pending, EdgeCheck, LayerRegistry, PreparedGrow, PreparedPut, RegistryError, ResolvedLayers,
+    declared_incarnation, no_pending, EdgeCheck, IncarnationOf, LayerRegistry, PreparedGrow,
+    PreparedPut, RegistryError, ResolvedLayers,
 };
 pub use roster::{GroupFacts, RosterError, ViewRoster};
 pub use wal::{

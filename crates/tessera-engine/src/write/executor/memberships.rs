@@ -418,6 +418,9 @@ impl Executor {
         edges: &[tessera_lifecycle::BatchEdge],
     ) -> Result<PreparedMints, String> {
         use std::collections::BTreeMap;
+        let served = self.generation.load_full();
+        let incarnation_of =
+            |group: &str, key: &str| served.bundle.manifest.incarnation_of_key(group, key);
         self.live.with_publication_state(|registry, store, alloc| {
             let parents = parent_of_each_child(edges)?;
             // Re-resolved here, not trusted from admission, since a publication may land between.
@@ -470,7 +473,15 @@ impl Executor {
                     })
                 };
                 let record = registry
-                    .prepare_publish(layer, *level, &incoming, store, alloc, &pending)
+                    .prepare_publish(
+                        layer,
+                        *level,
+                        &incoming,
+                        store,
+                        alloc,
+                        &pending,
+                        &incarnation_of,
+                    )
                     .map_err(|e| e.to_string())?;
                 let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
                     unreachable!("prepare_publish returns an ArtifactPublish");

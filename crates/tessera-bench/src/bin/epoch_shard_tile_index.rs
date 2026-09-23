@@ -442,6 +442,7 @@ fn build_shard(fixture: &Fixture, sharding: &Sharding, shard: u32, scratch: &Pat
                     entity: record.entity,
                     key: None,
                     view: None,
+                    incarnation: 0,
                     members: Members::owned(members),
                     contents: Vec::new(),
                     attached_to: None,

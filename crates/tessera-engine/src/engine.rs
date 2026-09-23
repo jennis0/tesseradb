@@ -843,7 +843,7 @@ impl Engine {
         let ReconstructedWrites {
             overlay,
             buffer,
-            state,
+            mut state,
             vocabularies,
         } = reconstruct_writes(wal_path, &bundle, &readers, side)?;
 
@@ -864,6 +864,11 @@ impl Engine {
         );
 
         let bundle = served_bundle(bundle, &state, &vocabularies);
+        crate::write::retire_dead_view_artifacts(
+            &state.registry,
+            &mut state.artifacts,
+            &bundle.manifest,
+        );
         // The suggestion indexes go in the engine's own cache directory, never in the bundle:
         // they are derived, and rebuilt every open.
         let suggest_dir = cache_dir.join(crate::suggest::SUGGEST_DIR);

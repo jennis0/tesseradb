@@ -417,8 +417,11 @@ impl Executor {
             reply.fail(e);
             return;
         }
+        let served = self.generation.load_full();
+        let incarnation_of =
+            |group: &str, key: &str| served.bundle.manifest.incarnation_of_key(group, key);
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
-            registry.prepare_put(&layer, level, &incoming, store, alloc)
+            registry.prepare_put(&layer, level, &incoming, store, alloc, &incarnation_of)
         });
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -1543,6 +1546,16 @@ impl Executor {
         }
         self.live.with_roster(|roster| roster.apply(&record));
         let fills_dropped = self.publish_roster(&generation, started, &ids);
+        let served = self.generation.load_full();
+        let retired = self.live.with_publication_state(|registry, store, _| {
+            crate::write::retire_dead_view_artifacts(registry, store, &served.bundle.manifest)
+        });
+        for (layer, _) in &retired {
+            self.pending_forms.retain(|(held, _), _| held != layer);
+            self.deps.artifact_projections.forget(layer);
+            self.deps.lineages.forget(layer);
+            self.deps.level_contents.forget(layer);
+        }
         self.side_manifests.behind_live = true;
         // Ordinary deletions, through the ordinary lane. They are appended, fsynced and applied by
         // the same path a `/control/changes` delete takes, so they retire at the fold and nowhere
