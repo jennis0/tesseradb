@@ -190,10 +190,12 @@ identifier, an empty operand for `member_of` and the artifact region leaf, and n
 page. A label attached to it is withheld with it. An artifact's label narrows its layer's and never
 widens it.
 
-At a build the label is read from the artifact source's column the field names, a string or a list
-of strings, or from an inline row's `access`. At a running service each record of a publication or
-a growth carries `"access": ["team-a", "team-b"]`; a record carrying one on a layer that names no
-field is refused. A viewer is admitted by holding any one of the labels. An artifact with no label
+At a build the label is read from the artifact source's column the field names, a string, a list of
+strings or a dictionary of strings, or from an inline row's `access`. At a running service each
+record of a publication, and each JSON row of a growth, carries `"access": ["team-a", "team-b"]`; a
+record carrying one on a layer that names no field is refused, and so are labels the plugin maps to
+no term. On a layer scoped to a group a growth names the view its artifact belongs to, as a
+publication does: `view` on a JSON row, or a `view` column in the Arrow form. A viewer is admitted by holding any one of the labels. An artifact with no label
 takes the layer's `default`: `inherited` leaves it to the layer's own label and membership
 requirement, and a label treats it as carrying that label. A label is set once: an artifact
 published with none may be given one later, the same label again changes nothing, and a different
