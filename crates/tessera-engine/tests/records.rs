@@ -2249,8 +2249,10 @@ fn cancelled_mid_scan(batches: u64) {
         req.filter = Some(band.clone());
         // Larger than the band holds, so a page is still gathering rows whenever it is cut.
         req.page_rows = Some(1000);
-        let started = std::time::Instant::now();
+        // Timed warm, so the cut falls inside a read no slower than the ones it cuts.
         let whole = read_all(&engine, &session, &req).ids();
+        let started = std::time::Instant::now();
+        assert_eq!(read_all(&engine, &session, &req).ids(), whole, "{order:?}");
         let cut = started.elapsed() / 3;
         assert_eq!(whole.len() as u64, matched, "{order:?}");
 
@@ -2291,93 +2293,121 @@ fn cancelled_mid_scan(batches: u64) {
 /// visible**, matched as the filter matches them. Rows ingested and flushed after the first page
 /// are outside the session's projection, served a generation stale, on the second; the refresh
 /// lands after it with no new generation, and the pages after it must answer for them, both in
-/// the rows they return and in the matched bit.
+/// the rows they return and in the matched bit. The rows land on the edge of a region, where a
+/// region tests each row under the mask, and are matched by a text leaf, answered in entity
+/// space.
 #[test]
 fn rows_a_refreshed_projection_makes_visible_are_served_and_matched() {
     let mut fx = Fx::new();
     fx.engine.set_background_refresh_for_test(true);
+    // A merge of the flushed segments would publish a projection of its own mid-case.
+    fx.engine.set_merge_for_test(false);
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
-    let mut held = N;
-    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
-        for keep_unmatched in [false, true] {
-            assert_eq!(viewport_counts(&fx.engine, &session, "s0", None).0, held);
-            let later: Vec<u64> = (held..held + 300).collect();
-            let fields = names(&["prose"]);
-            let mut req = request("s0", &fields);
-            req.order = Some(order);
-            req.page_rows = Some(100);
-            req.keep_unmatched = keep_unmatched;
-            req.filter = Some(leaf(
-                "prose",
-                FilterOperand::Match {
-                    query: "group1".into(),
-                    minimum: None,
-                },
-            ));
-            let engine = &fx.engine;
-            let inserted = std::cell::RefCell::new(Vec::new());
-            let (sink, trailer) = respond_after(
-                engine,
-                &session,
-                req,
-                vec![
-                    Box::new(|| {
-                        engine.set_refresh_paused_for_test(true);
-                        *inserted.borrow_mut() = ingest_sources(engine, "late", &later);
-                        flush(engine);
-                        assert_eq!(
-                            viewport_counts(engine, &session, "s0", None).0,
-                            held,
-                            "the projection is served stale"
-                        );
-                    }),
-                    Box::new(|| {
-                        engine.set_refresh_paused_for_test(false);
-                        wait_until("the refresh to land", Duration::from_secs(60), || {
-                            viewport_counts(engine, &session, "s0", None).0 == held + 300
-                        });
-                    }),
-                ],
-            );
-            assert_eq!(trailer.ended_by, ResponseEndedBy::End);
-            for (&s, entity) in later.iter().zip(inserted.into_inner()) {
-                fx.entity.insert(s, entity.raw());
-            }
-            let cut = *ids_of(&sink.pages[1].0).last().unwrap();
-            let all: Vec<u64> = (0..held + 300).collect();
-            let in_order = match order {
-                RecordsOrder::Map => fx.map_order(all.iter().copied(), "s0"),
-                RecordsOrder::Stored => fx.stored_order(all.iter().copied()),
-            };
-            let rank: BTreeMap<u64, usize> = in_order
-                .iter()
-                .enumerate()
-                .map(|(i, &s)| (fx.tid(s), i))
-                .collect();
-            let matches = |s: u64| s % 3 == 1;
-            let expected: Vec<u64> = in_order
-                .iter()
-                .copied()
-                .filter(|&s| keep_unmatched || matches(s))
-                .filter(|&s| s < held || rank[&fx.tid(s)] > rank[&cut])
-                .collect();
-            let by_tid: BTreeMap<u64, u64> = all.iter().map(|&s| (fx.tid(s), s)).collect();
-            let ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
-            assert_eq!(
-                ids,
-                fx.tids(&expected),
-                "{order:?} keep_unmatched={keep_unmatched}: rows"
-            );
-            if keep_unmatched {
-                for (batch, _) in &sink.pages {
-                    let matched = col::<BooleanArray>(batch, "tessera:matched");
-                    for (i, tid) in ids_of(batch).into_iter().enumerate() {
-                        let s = by_tid[&tid];
-                        assert_eq!(matched.value(i), matches(s), "{order:?}: matched bit of {s}");
+    let text = leaf(
+        "prose",
+        FilterOperand::Match {
+            query: "group1".into(),
+            minimum: None,
+        },
+    );
+    // Every source congruent to 527 modulo 1000 lies at x = 499.25, inside the edge by a
+    // thousandth of a unit.
+    let edge = region_of(ShapeF64::Bbox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 499.251,
+        max_y: 1000.0,
+    });
+    let in_text = |s: u64| s % 3 == 1;
+    let in_edge = |s: u64| position(s).0 < 499.251;
+    type Matches<'a> = &'a dyn Fn(u64) -> bool;
+    let filters: [(&str, &FilterExpr, Matches<'_>); 2] =
+        [("text", &text, &in_text), ("region edge", &edge, &in_edge)];
+    let mut present: Vec<u64> = (0..N).collect();
+    let mut next = 1_000_000u64;
+    for (name, filter, matches) in filters {
+        for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+            for keep_unmatched in [false, true] {
+                let held = present.len() as u64;
+                assert_eq!(viewport_counts(&fx.engine, &session, "s0", None).0, held);
+                let later: Vec<u64> = (0..300).map(|k| next + 527 + 1000 * k).collect();
+                next += 1_000_000;
+                assert!(later.iter().all(|&s| position(s).0 == 499.25));
+                let fields = names(&["prose"]);
+                let mut req = request("s0", &fields);
+                req.order = Some(order);
+                req.page_rows = Some(100);
+                req.keep_unmatched = keep_unmatched;
+                req.filter = Some(filter.clone());
+                let engine = &fx.engine;
+                let inserted = std::cell::RefCell::new(Vec::new());
+                let (sink, trailer) = respond_after(
+                    engine,
+                    &session,
+                    req,
+                    vec![
+                        Box::new(|| {
+                            engine.set_refresh_paused_for_test(true);
+                            *inserted.borrow_mut() = ingest_sources(engine, "late", &later);
+                            flush(engine);
+                            assert_eq!(
+                                viewport_counts(engine, &session, "s0", None).0,
+                                held,
+                                "the projection is served stale"
+                            );
+                        }),
+                        Box::new(|| {
+                            engine.set_refresh_paused_for_test(false);
+                            wait_until("the refresh to land", Duration::from_secs(60), || {
+                                viewport_counts(engine, &session, "s0", None).0 == held + 300
+                            });
+                        }),
+                    ],
+                );
+                let case = format!("{name} {order:?} keep_unmatched={keep_unmatched}");
+                assert_eq!(trailer.ended_by, ResponseEndedBy::End, "{case}");
+                if name == "region edge" {
+                    assert_eq!(sink.head.as_ref().unwrap().region, Some(RegionVerdict::Exact));
+                }
+                for (&s, entity) in later.iter().zip(inserted.into_inner()) {
+                    fx.entity.insert(s, entity.raw());
+                }
+                let cut = *ids_of(&sink.pages[1].0).last().unwrap();
+                let before: BTreeSet<u64> = present.iter().copied().collect();
+                present.extend(&later);
+                let in_order = match order {
+                    RecordsOrder::Map => fx.map_order(present.iter().copied(), "s0"),
+                    RecordsOrder::Stored => fx.stored_order(present.iter().copied()),
+                };
+                let rank: BTreeMap<u64, usize> = in_order
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &s)| (fx.tid(s), i))
+                    .collect();
+                assert!(
+                    later.iter().any(|&s| rank[&fx.tid(s)] > rank[&cut]),
+                    "{case}: the late rows fall after the second page"
+                );
+                let expected: Vec<u64> = in_order
+                    .iter()
+                    .copied()
+                    .filter(|&s| keep_unmatched || matches(s))
+                    .filter(|&s| before.contains(&s) || rank[&fx.tid(s)] > rank[&cut])
+                    .collect();
+                let by_tid: BTreeMap<u64, u64> =
+                    present.iter().map(|&s| (fx.tid(s), s)).collect();
+                let ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
+                assert_eq!(ids, fx.tids(&expected), "{case}: rows");
+                if keep_unmatched {
+                    for (batch, _) in &sink.pages {
+                        let matched = col::<BooleanArray>(batch, "tessera:matched");
+                        for (i, tid) in ids_of(batch).into_iter().enumerate() {
+                            let s = by_tid[&tid];
+                            assert_eq!(matched.value(i), matches(s), "{case}: matched bit of {s}");
+                        }
                     }
                 }
             }
-            held += 300;
         }
     }
 }
