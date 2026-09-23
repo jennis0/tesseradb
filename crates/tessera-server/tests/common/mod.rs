@@ -1,13 +1,9 @@
-//! Shared fixtures for `tessera-server`'s integration tests.
-//!
-//! The integration tests are split by subject across several binaries — `http.rs` (viewer plane,
-//! session plane, config, byte shape, the compute-admission gate), `http_write.rs` (the control
-//! plane's write path) and `http_engine_state.rs` (pins and session revocation). This module holds
-//! every fixture they share, so the split does not become drift.
+//! What `tessera-server`'s integration tests share: building a bundle, serving it, writing to
+//! it, waiting for what a write publishes, and decoding what a viewer is served. A helper more
+//! than one test file needs lives here and nowhere else.
 
-// Each integration-test binary compiles this module separately, so a fixture used by only one of
-// them is genuinely dead code in the other. Allowing it here is what keeps the two halves from
-// each carrying their own copy — which is the drift this module exists to prevent.
+// Each test binary compiles this module on its own, so a helper one binary does not use is dead
+// code there.
 #![allow(dead_code)]
 
 use std::io::Cursor;

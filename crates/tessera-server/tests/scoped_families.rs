@@ -236,7 +236,7 @@ fn write_view_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: O
     let mut extra = Vec::new();
     if let Some(slot) = slot {
         // Nullable throughout: a null and a row this view does not carry are the same state,
-        // absent (decision 0064).
+        // absent.
         let mood = StringArray::from(ids.iter().map(|&e| mood(slot, e)).collect::<Vec<_>>());
         let sector = StringArray::from(ids.iter().map(|&e| sector(slot, e)).collect::<Vec<_>>());
         let note = StringArray::from(ids.iter().map(|&e| note(slot, e)).collect::<Vec<_>>());

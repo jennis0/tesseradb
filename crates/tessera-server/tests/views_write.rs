@@ -56,7 +56,7 @@ fn write_view_points(path: &Path, view: &str, ids: std::ops::Range<u64>, key: Op
     let ids: Vec<u64> = ids.collect();
     let score = arrow::array::Int32Array::from(ids.iter().map(|&e| e as i32).collect::<Vec<_>>());
     // One declared attribute, so the join rule's entity-scoped arm has a column to disagree
-    // about (`views.md` §4).
+    // about.
     let mut extra = vec![column("score", true, score)];
     if let Some(key) = key {
         extra.push(column(
