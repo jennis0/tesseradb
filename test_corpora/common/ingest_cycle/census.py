@@ -16,6 +16,7 @@ import requests
 from pyarrow import ipc
 
 from .. import serve_battery
+from .control import quote
 from .holdout import wire_columns
 from .split import read_view_rows
 
@@ -104,17 +105,34 @@ def ask_probes(
                 continue
             filters[probe["name"]] = s["counts"].get("matched")
         else:
-            r = requests.get(
-                f"{viewer}/v1/categories/{probe['categories']}",
-                headers={"Authorization": f"Bearer {token}"},
-                params={"view": view},
-                timeout=60,
-            )
-            if r.status_code != 200:
-                incomplete.append(f"the census request at {where} answered {r.status_code}: {r.text[:200]}")
-                continue
-            categories[probe["categories"]] = sorted(value["key"] for value in r.json()["values"])
+            keys = category_keys(viewer, token, view, probe["categories"], where, incomplete)
+            if keys is not None:
+                categories[probe["categories"]] = sorted(keys)
     return filters, categories
+
+
+def category_keys(
+    viewer: str, token: str, view: str, column: str, where: str, incomplete: list[str]
+) -> list[str] | None:
+    """Every value key `/v1/categories` lists for `column` in this view, following `next` to the
+    last page; None, with a sentence in `incomplete`, where a page was refused."""
+    keys: list[str] = []
+    params = {"view": view}
+    while True:
+        r = requests.get(
+            f"{viewer}/v1/categories/{quote(column)}",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=60,
+        )
+        if r.status_code != 200:
+            incomplete.append(f"the census request at {where} answered {r.status_code}: {r.text[:200]}")
+            return None
+        page = r.json()
+        keys += [value["key"] for value in page["values"]]
+        if page.get("next") is None:
+            return keys
+        params = {"view": view, "after": page["next"]}
 
 
 def filter_probes(
