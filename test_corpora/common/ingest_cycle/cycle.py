@@ -32,6 +32,7 @@ from .census import (
     coverage_failures,
     filter_probes,
     incomplete_sentences,
+    probe_failures,
 )
 from .control import Control, wait_for
 from .holdout import HoldOut
@@ -945,10 +946,11 @@ class Cycle:
             all_in_frames = {v["id"]: v["quantisation"] for v in all_in_meta["views"]}
             self.meta_layers = all_in_meta.get("layers") or []
             self.choose_boxes(allin.viewer, reference_token)
-            self.probes = {
-                view["name"]: filter_probes(self.rung, self.views, view, all_in_meta)
-                for view in self.views
-            }
+            offered: dict[str, int] = {}
+            for view in self.views:
+                self.probes[view["name"]], offered[view["name"]] = filter_probes(
+                    self.rung, self.views, view, all_in_meta, self.binary
+                )
             reference = self.census_views(allin, allin.credential("session"), ladder)
             self.reference = reference
         finally:
@@ -970,7 +972,7 @@ class Cycle:
             compared["frames_equal"] = self.frames[name] == all_in_frames.get(name)
             # What the folded deployment's census reached: the zooms, and each layer's levels.
             compared["census_coverage"] = census_coverage(
-                folded[name], self.declared_levels(name)
+                folded[name], self.declared_levels(name), offered[name], reference[name]
             )
             out["views"][name] = compared
             for surface, count in compared["differences_by_surface"].items():
@@ -1315,6 +1317,10 @@ class Cycle:
             out += [
                 f"the census on {name} proved nothing about a declared level: {sentence}"
                 for sentence in coverage_failures(compared.get("census_coverage") or {})
+            ]
+            out += [
+                f"the census on {name} {sentence}"
+                for sentence in probe_failures(compared.get("census_coverage") or {})
             ]
         out += [
             f"the census compared nothing on view {name}"

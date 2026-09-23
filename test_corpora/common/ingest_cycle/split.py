@@ -204,16 +204,29 @@ def declared_views(rung: Path) -> list[dict]:
     return views
 
 
-def read_view_rows(view: dict, columns: Sequence[str], keep: np.ndarray | None = None) -> pa.Table:
-    """`columns` of one view's rows, picked out of a shared file by its discriminator, and kept to
-    the sorted entity ids `keep` where given."""
+def read_view_rows(
+    view: dict, columns: Sequence[str], keep: np.ndarray | None = None, limit: int | None = None
+) -> pa.Table:
+    """`columns` of one view's rows, picked out of a shared file by its discriminator, kept to the
+    sorted entity ids `keep` where given, and stopping once `limit` rows are held."""
     select = view["select"]
     wanted = list(dict.fromkeys([*columns, *([select[0]] if select else [])]))
-    table = pq.read_table(view["points"], columns=wanted)
-    if select is not None:
-        table = table.filter(pc.equal(table.column(select[0]), select[1]))
-    if keep is not None:
-        table = table.filter(pa.array(in_sorted(table.column("entity_id").to_numpy(), keep)))
+    reader = pq.ParquetFile(view["points"])
+    parts: list[pa.Table] = []
+    held = 0
+    for index in range(reader.metadata.num_row_groups):
+        table = reader.read_row_group(index, columns=wanted)
+        if select is not None:
+            table = table.filter(pc.equal(table.column(select[0]), select[1]))
+        if keep is not None:
+            table = table.filter(pa.array(in_sorted(table.column("entity_id").to_numpy(), keep)))
+        parts.append(table)
+        held += table.num_rows
+        if limit is not None and held >= limit:
+            break
+    table = pa.concat_tables(parts) if parts else reader.schema_arrow.empty_table().select(wanted)
+    if limit is not None:
+        table = table.slice(0, limit)
     return table.select(list(columns))
 
 
