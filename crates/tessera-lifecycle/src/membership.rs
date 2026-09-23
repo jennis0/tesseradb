@@ -2466,11 +2466,9 @@ impl ArtifactStore {
                 .iter()
                 .enumerate()
                 .map(|(ordinal, slot)| {
-                    // **An empty blob is a hole, and a hole is a real state** — an artifact this
-                    // fold retired, or one whose publication is still in flight. It has to be
-                    // *written* rather than packed around: an ordinal is identity, so closing a gap
-                    // would hand every later artifact in the level the identity of its neighbour,
-                    // and every `tessera_id` a caller holds would name the wrong cluster.
+                    // An empty blob is a hole: an artifact a fold or a view drop removed. It is
+                    // written rather than packed around, because an ordinal is identity and closing
+                    // the gap would hand every later artifact its neighbour's `tessera_id`.
                     let Some(record) = slot else {
                         return Vec::new();
                     };
