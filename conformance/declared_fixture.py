@@ -19,8 +19,11 @@ live ingest appends), so anything carrying an identifier is rekeyed here, and on
   is pinned as a known difference awaiting a ruling. Whatever the live side serves is held to one
   code per key across every principal and every stage.
 
-Rows whose order is set by `tessera_id` (points within a tile, browse rows with equal counts,
-artifacts within a level) are sorted by the rekeyed identity instead.
+Rows whose order is set by `tessera_id` (points within a tile, browse rows with equal counts)
+are sorted by the rekeyed identity instead. The artifacts frame's rows are compared by key, and
+the order they were served in is kept beside them as its own answer: a build serves a level's
+artifacts in key order and a running service in the order they were published, which the test
+pins as a known difference.
 """
 
 from __future__ import annotations
@@ -604,6 +607,9 @@ def normalise_viewport(
             return None
         return local[tessera][1] if tessera in local else f"unserved artifact {tessera}"
 
+    # Kept apart from the rows, which are compared by key, so an order difference is reported as
+    # one and cannot hide a difference in what is served.
+    out["artifact order"] = [[row["layer"], row["key"]] for row in rows]
     for row in rows:
         row.pop("tessera_id")
         row["parent_ids"] = sorted(key(p) for p in row.get("parent_ids") or [])
