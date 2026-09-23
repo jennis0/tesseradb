@@ -862,6 +862,16 @@ impl Executor {
                 }
             }
         }
+        // A value this batch filled creates its artifact on a layer whose artifacts are that
+        // column's values, as the same value would at an ingest window's close.
+        let filled = planned.fills.iter().map(|(_, fill)| fill.scalars.as_slice());
+        match self.derive_records(filled, &minted.vocabularies) {
+            Ok(records) => mints.extend(records),
+            Err(detail) => {
+                reply.fail(ExecError::LayerRefused { detail });
+                return;
+            }
+        }
         let growth = match self
             .live
             .with_artifacts(|store| values_growth_records(&memberships, &request.rows, store))

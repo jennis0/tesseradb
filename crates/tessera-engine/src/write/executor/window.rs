@@ -617,7 +617,11 @@ impl Executor {
             }
         };
         // After the vocabulary mint above, since an artifact's key is a code only once drawn.
-        match self.derive_records(closing.entries(), &vocabularies) {
+        let rows = closing
+            .entries()
+            .iter()
+            .flat_map(|entry| entry.rows().iter().map(|row| row.scalars.as_slice()));
+        match self.derive_records(rows, &vocabularies) {
             Ok(records) => mint_records.extend(records),
             Err(detail) => {
                 closing.fail_all(&self.health, || ExecError::LayerRefused {
