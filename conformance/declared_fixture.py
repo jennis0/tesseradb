@@ -54,8 +54,8 @@ from suite.battery import (
     record_one,
 )
 from suite.canonical import Streamed
-from suite.driver import SuiteHarness, _poll
-from suite.verification import _streams_table
+from suite.driver import SuiteHarness, poll
+from suite.verification import streams_table
 
 ID_KEY_HEX = "d0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
 
@@ -326,7 +326,7 @@ class Deployment:
         return self.harness.server
 
     def _ready(self) -> None:
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in self.harness.status()["partitions"]),
             "the bundle never became ready",
             timeout=30.0,
@@ -343,16 +343,8 @@ class Deployment:
         self._ready()
 
     def fold(self) -> None:
-        before = self.harness.status()["compaction"]
-        self.control("POST", "/control/compact", expect=(202,))
-
-        def landed() -> bool:
-            now = self.harness.status()["compaction"]
-            if now["fold_failures"] > before["fold_failures"]:
-                raise RuntimeError(f"the fold failed: {now}")
-            return now["folds"] > before["folds"]
-
-        _poll(landed, "no fold landed", timeout=300.0)
+        """Ask for a fold, wait for it to land, then for the publication after it."""
+        self.server.compact()
         self.publish()
 
     def publish(self) -> None:
@@ -602,15 +594,15 @@ def normalise_viewport(
     Records every `tessera_id -> fx` and `tessera_id -> (layer, key)` it sees into the two maps,
     which the item and browse requests then read.
     """
-    tiles = _streams_table(canon.tiles)
-    underlay = _streams_table(canon.underlay)
+    tiles = streams_table(canon.tiles)
+    underlay = streams_table(canon.underlay)
     out: dict[str, object] = {
         "tiles": sorted(tuple(r.values()) for r in tiles.to_pylist()) if tiles else [],
         "underlay": sorted(tuple(r.values()) for r in underlay.to_pylist()) if underlay else None,
         "trailer": json.loads(canon.trailer),
     }
 
-    artifacts = _streams_table(canon.artifacts)
+    artifacts = streams_table(canon.artifacts)
     rows = artifacts.to_pylist() if artifacts is not None else []
     local = {row["tessera_id"]: (row["layer"], row["key"]) for row in rows}
     artifact_of.update(local)
@@ -630,7 +622,7 @@ def normalise_viewport(
             row["target"] = key(row["target"])
     out["artifacts"] = sorted(rows, key=lambda r: (r["layer"], r["key"] or "", r["rung"]))
 
-    points = _streams_table(canon.points)
+    points = streams_table(canon.points)
     served = []
     for row in points.to_pylist() if points is not None else []:
         fx_of[row.pop("tessera_id")] = row["fx"]

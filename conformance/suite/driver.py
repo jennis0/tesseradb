@@ -385,7 +385,7 @@ BIG_BATCH_ROWS = 250_000
 BIG_BATCH_BYTES = 64 * 1024 * 1024
 
 
-def _poll(predicate: Callable[[], bool], what: str, timeout: float = 60.0) -> None:
+def poll(predicate: Callable[[], bool], what: str, timeout: float = 60.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -732,7 +732,7 @@ class SuiteHarness:
         _advise_out_of_page_cache(self.bundle_root, self.run_dir)
         self.spawn()
         self.authorise()
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in self.status()["partitions"]),
             "the cold-booted bundle never became ready",
             timeout=30.0,
@@ -882,7 +882,7 @@ class SuiteHarness:
             timeout=10,
         )
         resp.raise_for_status()
-        _poll(
+        poll(
             lambda: self.executor()["flush"]["ticks"] > before,
             "the pulled tick was never consumed",
             timeout=30.0,
@@ -959,7 +959,7 @@ class Build(Stage):
         h.authorise()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             "the built bundle never became ready",
             timeout=30.0,
@@ -982,7 +982,7 @@ class Load(Stage):
         h.authorise()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             "the reopened bundle never became ready",
             timeout=30.0,
@@ -1032,11 +1032,11 @@ class Write(Stage):
         _post_flush(h.server)
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: h.executor()["flush"]["flushes"] > self._snap["flushes"],
             f"{self.label}: the flush never published",
         )
-        _poll(
+        poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             f"{self.label}: the background refresh never replaced the resident projection — "
             f"a recording now would be short by exactly this batch (decision 0044 D1)",
@@ -1090,7 +1090,7 @@ class Merge(_TickStage):
     tick, published with its own `segments_version` bump — and entitled to change nothing."""
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: h.executor()["merges"] > self._snap["merges"],
             f"{self.label}: no merge published — either the ladder was not eligible "
             f"(four same-tier segments) or the tick never dispatched it",
@@ -1103,7 +1103,7 @@ class Merge(_TickStage):
             )
         # A merge's publication runs the refresh pass; without this wait the after-recording
         # would compare the *old* projection with itself and the stage would test nothing.
-        _poll(
+        poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             f"{self.label}: the post-merge refresh never replaced the resident projection",
         )
@@ -1115,7 +1115,7 @@ class Coalesce(_TickStage):
     which is why its barrier must be the counter — and why the version is asserted still."""
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: h.executor()["coalesces"] > self._snap["coalesces"],
             f"{self.label}: no coalesce published — either no axis reached its width "
             f"(eight same-tier entries) or the tick never dispatched it",
@@ -1200,8 +1200,8 @@ class Fold(Stage):
                 raise RuntimeError(f"the fold failed rather than landed: {compaction}")
             return compaction["folds"] > self._snap["folds"]
 
-        _poll(landed, "no compaction fold landed", timeout=300.0)
-        _poll(
+        poll(landed, "no compaction fold landed", timeout=300.0)
+        poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             "the post-fold refresh never carried the resident session across the flip",
         )
@@ -1242,7 +1242,7 @@ class Rotate(Stage):
         h.pull_tick()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: _wal_member_index(h.wal_path) > self._snap["member"],
             "the WAL never rotated — was there growth since the last rotation for the tick "
             "to see?",
@@ -1339,7 +1339,7 @@ class Killed(Stage):
     def apply(self, h: SuiteHarness) -> None:
         h.stop()
         h.spawn(faults=True)
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             f"{self.label}: the faults build never became ready",
             timeout=30.0,
@@ -1348,7 +1348,7 @@ class Killed(Stage):
         self._snap = self._published_counters(h)
         h.arm(self.kill_at)
         self.stage.provoke(h)
-        _poll(
+        poll(
             lambda: h.arrivals(self.kill_at) >= 1,
             f"{self.label}: the executor never reached {self.kill_at}",
             timeout=300.0,
@@ -1370,7 +1370,7 @@ class Killed(Stage):
         h.authorise()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             f"{self.label}: the restarted bundle never became ready",
             timeout=30.0,
@@ -1472,6 +1472,7 @@ __all__ = [
     "SuiteHarness",
     "Write",
     "check",
+    "poll",
     "ensure_faults_cli_built",
     "run_plan",
     "scope_runner_unavailable",
