@@ -3159,20 +3159,23 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 // Whether a flush is running on the pool or finished and not yet published,
                 // which the two flush counts cannot show.
                 "in_flight": executor.flush_in_flight,
-                "merge_in_flight": executor.merge_in_flight,
-                "coalesce_in_flight": executor.coalesce_in_flight,
                 "buffered_items": executor.buffered_items,
                 "overlay_publications": executor.overlay_publications,
                 // Session projections refreshed after a flush or merge. A live session serves
                 // its old projection until then, so a version bump alone does not show the rows.
                 "refreshes": state.engine.refreshes(),
-                // Whether the refresh for the newest flush or merge is still running; the rows it
-                // adds are not served to a resident session until it ends.
+                // Whether the refresh for the newest flush or merge is still running. Until it
+                // ends, a resident session may be served the previous generation or refused with
+                // 429.
                 "refresh_in_flight": state.engine.refresh_in_flight(),
             },
             // A coalesce bumps no version, so this counter is the only sign one ran.
             "coalesces": executor.coalesces,
             "merges": executor.merges,
+            // Whether a coalesce or a merge is running on the pool or finished and not yet
+            // published.
+            "coalesce_in_flight": executor.coalesce_in_flight,
+            "merge_in_flight": executor.merge_in_flight,
             // How long the current job has run. The EWMA moves only when a job ends; the 429
             // estimate takes the larger of the two.
             "work_in_flight_nanos": executor.work_in_flight_nanos,

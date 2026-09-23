@@ -132,7 +132,7 @@ impl Engine {
     }
 
     /// Whether the background refresh for the newest flush or merge is still running. Until it
-    /// ends, a resident session may be served the previous generation's rows.
+    /// ends, a resident session may be served the previous generation or refused with 429.
     pub fn refresh_in_flight(&self) -> bool {
         self.refresh_in_flight.load(Ordering::SeqCst) != crate::refresh::NO_REFRESH
     }

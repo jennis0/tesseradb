@@ -938,8 +938,8 @@ def _settled(executor: dict) -> bool:
     return (
         executor["work_depth"] == 0
         and not flush["in_flight"]
-        and not flush["merge_in_flight"]
-        and not flush["coalesce_in_flight"]
+        and not executor["merge_in_flight"]
+        and not executor["coalesce_in_flight"]
         and not flush["refresh_in_flight"]
     )
 
