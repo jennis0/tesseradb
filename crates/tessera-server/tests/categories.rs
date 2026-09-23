@@ -171,13 +171,17 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
     build_declared(out, points, pairs, SCHEMA_TOML);
 }
 
-/// A server over the categories fixture, plus a session token for a fully-granted principal.
+/// A server over a copy of the categories fixture, plus a session token for a fully-granted
+/// principal.
 async fn serve(tmp: &TempDir) -> (TestServer, String) {
-    build_fixture_with_categories(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    static BUILT: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    copy_built(&BUILT, tmp.path(), |dir| {
+        build_fixture_with_categories(
+            &dir.join("bundle"),
+            &dir.join("points.parquet"),
+            &dir.join("pairs.parquet"),
+        )
+    });
     let server = open(tmp).await;
     let token = token_for(&server, &["0"]).await;
     (server, token)

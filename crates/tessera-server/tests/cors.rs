@@ -40,9 +40,9 @@ const EXPOSED: [&str; 7] = [
     "x-tessera-region",
 ];
 
-/// Build a bundle and serve it, with the CORS lists as given.
+/// Serve a copy of the standard fixture, with the CORS lists as given.
 async fn server_with_cors(tmp: &TempDir, cors: CorsOrigins) -> TestServer {
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     spawn_server_with_cors(
         &bundle_root,
         &tmp.path().join("cache"),

@@ -44,7 +44,7 @@ const _: () = assert!(PARALLEL_HEADLINE_ITEMS < SERIAL_FALLBACK_MAX_ROWS);
 #[tokio::test]
 async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -81,7 +81,7 @@ async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
 #[tokio::test]
 async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requests() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -154,7 +154,7 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
 #[tokio::test]
 async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -204,7 +204,7 @@ async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
 #[tokio::test]
 async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -277,7 +277,7 @@ async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
 #[tokio::test]
 async fn i_item_404s_identically_for_unknown_and_invisible() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     // Session A: term "0" -- every item carries it, so A sees the whole bundle.
     let auth_a = authorise(&server, &["0"]).await;
@@ -342,7 +342,7 @@ async fn i_item_404s_identically_for_unknown_and_invisible() {
 #[tokio::test]
 async fn b_missing_or_garbage_token_is_401() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let body = serde_json::json!({
         "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
@@ -371,7 +371,7 @@ async fn b_missing_or_garbage_token_is_401() {
 #[tokio::test]
 async fn d_unknown_view_404_and_malformed_bbox_422() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -407,7 +407,7 @@ async fn d_unknown_view_404_and_malformed_bbox_422() {
 #[tokio::test]
 async fn h_config_missing_disclosure_refuses_to_start() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
 
     std::env::set_var("TESSERA_TEST_H_SESSION", SESSION_CREDENTIAL);
     std::env::set_var("TESSERA_TEST_H_OPERATOR", OPERATOR_CREDENTIAL);
@@ -448,7 +448,7 @@ async fn h_config_missing_disclosure_refuses_to_start() {
 #[tokio::test]
 async fn viewer_meta_requires_bearer() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let resp = server
         .client
@@ -476,7 +476,7 @@ async fn viewer_meta_requires_bearer() {
 #[tokio::test]
 async fn viewer_meta_reports_the_idset_and_never_the_key() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -507,7 +507,7 @@ async fn viewer_meta_reports_the_idset_and_never_the_key() {
 #[tokio::test]
 async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -586,7 +586,7 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
 #[tokio::test]
 async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -805,7 +805,7 @@ async fn compute_status(server: &TestServer) -> serde_json::Value {
 #[tokio::test]
 async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -872,7 +872,7 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
 #[tokio::test]
 async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -971,7 +971,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
 #[tokio::test]
 async fn no_permit_leak_after_a_shed_or_a_completion() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1065,7 +1065,7 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
 #[tokio::test]
 async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     // compute_queue = 1 (not 0): the queued fast request below must be ADMITTED (a slot) and
     // then WAIT for a compute permit, rather than being shed outright by stage 1 — that wait is
     // exactly what `x-tessera-admission-us` needs to capture. A generous timeout so it is never
@@ -1230,7 +1230,7 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 #[tokio::test]
 async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1699,7 +1699,7 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
 #[tokio::test]
 async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let bundle_root = standard_fixture(tmp.path());
 
     let chunked = spawn_server_with_stream_flush(
         &bundle_root,
@@ -1759,7 +1759,7 @@ async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content
 #[tokio::test]
 async fn viewport_tiles_are_served_in_request_order_with_first_occurrence_dedup() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_standard(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 

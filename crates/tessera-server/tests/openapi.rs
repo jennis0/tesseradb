@@ -18,6 +18,9 @@
 
 mod common;
 
+use std::path::Path;
+use std::sync::OnceLock;
+
 use arrow::array::{Float32Array, StringArray};
 use base64::Engine as _;
 use common::*;
@@ -128,9 +131,9 @@ type     = "f32"
 render   = true
 "#;
 
-fn build_bundle(tmp: &TempDir) -> std::path::PathBuf {
-    let points = tmp.path().join("points.parquet");
-    let pairs = tmp.path().join("pairs.parquet");
+fn build_bundle(dir: &Path) {
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
     let ids: Vec<u64> = (0..N).collect();
     let archive = StringArray::from_iter_values(
         ids.iter()
@@ -147,9 +150,13 @@ fn build_bundle(tmp: &TempDir) -> std::path::PathBuf {
         ],
     );
     write_pairs_n(&pairs, N);
-    let bundle_root = tmp.path().join("bundle");
-    build_declared(&bundle_root, &points, &pairs, SCHEMA_TOML);
-    bundle_root
+    build_declared(&dir.join("bundle"), &points, &pairs, SCHEMA_TOML);
+}
+
+/// A copy of [`build_bundle`]'s bundle in `tmp`, built once for this binary.
+fn copy_bundle(tmp: &TempDir) -> std::path::PathBuf {
+    static BUILT: OnceLock<TempDir> = OnceLock::new();
+    copy_built(&BUILT, tmp.path(), build_bundle)
 }
 
 const LAYER: &str = "clusters/a";
@@ -226,7 +233,7 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let tmp = TempDir::new().unwrap();
-    build_bundle(&tmp);
+    copy_bundle(&tmp);
     let server = open(&tmp).await;
     let artifacts = publish_layer(&server).await;
     Fixture {
@@ -498,7 +505,7 @@ async fn authorise_and_revoke_match_the_description() {
 async fn a_saturated_gate_sheds_authorise_with_the_described_429() {
     let doc = description();
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_bundle(&tmp);
+    let bundle_root = copy_bundle(&tmp);
     // No slots at all: every admission is shed before any wait.
     let server = spawn_server_with_config_and_gate(
         &bundle_root,

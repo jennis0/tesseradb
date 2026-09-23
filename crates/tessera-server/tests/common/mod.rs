@@ -188,6 +188,75 @@ pub fn build_fixture_with_access(dir: &Path, n: u64, access: AccessInput) -> std
     out
 }
 
+/// Copy the bundle `build` writes into a directory's `bundle` to `dir/bundle`, building it on the
+/// first call in this test binary and keeping it in `once`. Serving a bundle writes nothing into
+/// it, but the write executor locks it, so each test that serves one serves its own copy.
+pub fn copy_built<R>(
+    once: &'static std::sync::OnceLock<TempDir>,
+    dir: &Path,
+    build: impl FnOnce(&Path) -> R,
+) -> std::path::PathBuf {
+    let built = once.get_or_init(|| {
+        let tmp = TempDir::new_in(fixtures_dir()).unwrap();
+        build(tmp.path());
+        tmp
+    });
+    let out = dir.join("bundle");
+    copy_dir(&built.path().join("bundle"), &out);
+    out
+}
+
+/// This process's directory for built fixtures. A static is never dropped, so the directories of
+/// processes that have exited are removed here instead.
+fn fixtures_dir() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("tessera-server-fixtures");
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let exited = name
+                    .parse::<u32>()
+                    .is_ok_and(|pid| !Path::new(&format!("/proc/{pid}")).exists());
+                if exited {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        let dir = root.join(std::process::id().to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    })
+    .clone()
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        match entry.file_type().unwrap().is_dir() {
+            true => copy_dir(&entry.path(), &target),
+            false => {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+}
+
+static STANDARD: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+
+/// [`build_fixture`] of [`N_ITEMS`] into `dir`, built once per test binary and copied.
+pub fn standard_fixture(dir: &Path) -> std::path::PathBuf {
+    copy_built(&STANDARD, dir, |built| build_fixture(built, N_ITEMS))
+}
+
+/// Serve a copy of the standard fixture ([`standard_fixture`]) from `dir`.
+pub async fn serve_standard(dir: impl AsRef<Path>) -> TestServer {
+    standard_fixture(dir.as_ref());
+    open(dir).await
+}
+
 /// A build of `views` into `out` under the test identity key, minting external ids and writing no
 /// oracle pairs, with every other input empty. A test sets what it varies with struct update
 /// syntax.
@@ -448,6 +517,16 @@ impl Served {
         let tmp = TempDir::new().unwrap();
         build(tmp.path());
         Served::open_with(tmp, config).await
+    }
+
+    /// [`Served::build`] over a copy of the bundle, built once per test binary ([`copy_built`]).
+    pub async fn copy<R>(
+        once: &'static std::sync::OnceLock<TempDir>,
+        build: impl FnOnce(&Path) -> R,
+    ) -> Served {
+        let tmp = TempDir::new().unwrap();
+        copy_built(once, tmp.path(), build);
+        Served::open(tmp).await
     }
 
     /// Serve the bundle already built in `tmp`.
