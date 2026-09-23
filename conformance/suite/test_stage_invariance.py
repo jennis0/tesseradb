@@ -7,7 +7,7 @@ two reloads and a fold — every §2 stage class the suite can currently drive.
 
 ## Why the writes are counted the way they are
 
-A pulled tick dispatches *everything* eligible (§12.3), so isolation is arithmetic. The server
+A pulled tick dispatches *everything* eligible, so isolation is arithmetic. The server
 runs at a merge width of three ([`MERGE_TIER_WIDTH`]) and a coalesce width of four
 ([`COALESCE_WIDTH`]). The coalesce takes external-id runs four at a time whatever the config
 says, so at the default merge width of four a merge and that coalesce always come due together;

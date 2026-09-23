@@ -20,17 +20,17 @@ at the executor's tick. The driver therefore sequences by eligibility (§12.3):
   that only it is eligible when its tick is pulled. That arrangement is the *plan's* job (the
   writes are counted so no write's own tick makes a merge or coalesce eligible), and every stage
   that pulls a tick asserts in its barrier that no flush, merge, coalesce or fold counter moved
-  but its own — a plan that mis-counted fails loudly as a broken plan, not quietly as a
+  but its own. A plan that mis-counted fails loudly as a broken plan, not quietly as a
   mis-attributed delta.
 
-``serve.tier_width``, ``serve.segment_floor_bytes`` and ``serve.coalesce_width`` reach the
-engine's merge and coalesce policies, and the config written below sets none of them unless a
-harness asks for its own widths, so the defaults hold (4, 16 MiB and 8): merge eligibility is four
-same-tier segments, coalesce eligibility is eight same-tier delta-axis entries. The coalesce also
-takes external-id runs four at a time under a 16 MiB floor, a cadence no config reaches, so at
-fixture size a merge tick at the default width also dispatches that coalesce. The base segment is
-in no merge window whatever ``max_merged_segment_bytes`` says: a merge selects from the flushed
-segments only.
+``serve.tier_width`` and ``serve.coalesce_width`` reach the engine's merge and coalesce policies
+through `tessera-config`. The config written below sets them only when a harness asks
+(`merge_tier_width`, `coalesce_width`); otherwise the defaults hold, four and eight, with a 16 MiB
+merge floor: merge eligibility is four same-tier segments, coalesce eligibility eight same-tier
+entries on each axis. The coalesce takes external-id runs four at a time under a 16 MiB floor
+whatever the config says, so at fixture size a merge tick at the default width also dispatches
+that coalesce. The base segment is in no merge window whatever ``max_merged_segment_bytes`` says:
+a merge selects from the flushed segments only.
 
 ## Barriers
 
@@ -1127,8 +1127,9 @@ class _TickStage(Stage):
 
 
 class Merge(_TickStage):
-    """The row-space merge: eligible once four same-tier segments exist, dispatched at the pulled
-    tick, published with its own `segments_version` bump — and entitled to change nothing."""
+    """The row-space merge: eligible once the harness's merge width of same-tier segments exist
+    (four by default), dispatched at the pulled tick, published with its own `segments_version`
+    bump, and entitled to change nothing."""
 
     own = ("merges",)
 

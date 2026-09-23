@@ -225,8 +225,8 @@ def test_the_manifest_discard_found_the_unpublished_files(manifest_seam):
 @pytest.fixture(scope="module")
 def merge_seam(tmp_path_factory, private_catalogue_bundle):
     """Three writes make a merge eligible at a merge width of three; the dispatching tick's
-    merge executes on the pool and is killed while parked at the top of its publication — output
-    segment on disc, inputs untouched, nothing committed. The orphan output is discarded and a
+    merge executes on the pool and is killed while parked at the top of its publication, with the
+    output segment on disc, the inputs untouched and nothing committed. The orphan output is discarded and a
     recovery tick merges the untouched inputs.
 
     The width is three because the coalesce takes external-id runs four at a time, one per
