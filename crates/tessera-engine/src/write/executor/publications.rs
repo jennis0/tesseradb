@@ -2170,13 +2170,16 @@ impl Executor {
                 ) {
                     Ok(bundle) => bundle,
                     Err(e) => {
-                        // Unreachable: the same rebase was asked of the same generation before
-                        // the commit. The manifest just committed names this segment, so a
-                        // restart before the next publication would refuse to open.
-                        discard(&format!(
-                            "its segment no longer rebases after its side-manifest was committed \
-                             ({e})"
-                        ));
+                        // Unreachable: the check before the commit asked this of the same
+                        // generation. Were it reached, the committed manifest names a segment this
+                        // process does not serve.
+                        self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::error!(
+                            error = %e,
+                            "ALARM: a flush's side-manifest was committed naming a segment its \
+                             view's row space refuses. This process does not serve the segment, \
+                             and a restart before the next publication refuses to open the bundle"
+                        );
                         return false;
                     }
                 };
