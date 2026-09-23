@@ -232,8 +232,8 @@ impl ReadLevel {
         }
     }
 
-    /// The content the verdict's `rank` chose, whole, or `None` where it cannot be read back,
-    /// which withholds the artifact.
+    /// The content the verdict's `rank` chose, with any authored shape taken out of it, or
+    /// `None` where it cannot be read back, which withholds the artifact.
     pub(crate) fn content(
         &self,
         engine: &Engine,
@@ -242,14 +242,13 @@ impl ReadLevel {
         ordinal: u32,
         entity: EntityId,
         rank: Option<u32>,
-    ) -> Option<Vec<String>> {
+    ) -> Option<crate::viewport::Supplied> {
         engine.supplied_content(
             generation,
-            &layer.declaration.name,
+            &layer.declaration,
             self.level,
             ordinal,
             entity,
-            layer.declaration.content.supplied.len(),
             rank,
             true,
             self.contents.as_deref(),

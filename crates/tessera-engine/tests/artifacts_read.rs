@@ -1360,13 +1360,21 @@ fn a_merge_between_two_pages_of_one_response_renews_the_filter() {
 // An authored shape over two views
 // ---------------------------------------------------------------------------------------------
 
-/// **An authored shape's content names every view of its layer and holds each one's geometry, and
-/// none of that reaches a viewer**: over a view they reach, the content slot is blank, `q` does
-/// not search it, and the shape is that view's alone. A second view, reachable only under a label
-/// the viewer does not hold, carries another shape, whose name and bytes appear nowhere in the
-/// response.
-#[test]
-fn an_authored_shape_names_no_other_view() {
+/// A layer drawing an authored shape over two views, one reachable only under a label the broad
+/// viewer does not hold, and one artifact whose shape differs between them.
+struct Authored {
+    _tmp: tempfile::TempDir,
+    engine: Engine,
+    /// The shape `s0` draws, in view coordinates.
+    seen: [f64; 4],
+    /// Everything about the other view that must not reach the viewer: its name, the stored slot
+    /// text, and its shape's canonical bytes spelled as the slot spells them.
+    secrets: Vec<String>,
+}
+
+const AUTHORED: &str = "drawn/regions";
+
+fn authored() -> Authored {
     let tmp = tempfile::tempdir().unwrap();
     let points = tmp.path().join("points.parquet");
     let pairs = tmp.path().join("pairs.parquet");
@@ -1408,9 +1416,10 @@ fn an_authored_shape_names_no_other_view() {
     .unwrap();
     let engine =
         open_engine_publishing(&root, &tmp.path().join("cache"), &tmp.path().join("wal.log"));
+    engine.set_background_refresh_for_test(false);
     let map = source_to_new_map(&root, "v00000");
 
-    let mut declaration = base_declaration("drawn/regions", HierarchyKind::Flat);
+    let mut declaration = base_declaration(AUTHORED, HierarchyKind::Flat);
     declaration.views = vec!["s0".into(), "hidden".into()];
     declaration.content = text_content("outline", SuppliedRequirement::Inherited);
     declaration.content.supplied[0].ty = "polygon".into();
@@ -1441,38 +1450,129 @@ fn an_authored_shape_names_no_other_view() {
     );
     artifact.contents = content(slot.clone());
     engine
-        .publish_artifacts("drawn/regions".into(), 0, vec![artifact])
+        .publish_artifacts(AUTHORED.into(), 0, vec![artifact])
         .unwrap();
     tick(&engine);
+    let hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+    Authored {
+        _tmp: tmp,
+        engine,
+        seen,
+        secrets: vec!["hidden".into(), hex(b"hidden"), slot, hex(&secret_bytes)],
+    }
+}
 
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
+impl Authored {
+    /// Fails where any of the other view's secrets appears in `text`.
+    fn assert_clean(&self, route: &str, text: &str) {
+        for secret in &self.secrets {
+            assert!(!text.contains(secret.as_str()), "{route} served '{secret}'");
+        }
+    }
+}
+
+/// **The viewport's artifacts frame serves an authored shape's content with its slot blank,
+/// whether or not the request asks for the shape.**
+#[test]
+fn an_authored_shape_names_no_other_view_on_the_viewport() {
+    let a = authored();
+    let session = a.engine.authorise(&full_coverage_credential()).unwrap();
+    for computed in [
+        tessera_engine::viewport::ComputedSelection::Named(&[]),
+        tessera_engine::viewport::ComputedSelection::Declared,
+    ] {
+        let out = a
+            .engine
+            .viewport(
+                &session,
+                tessera_engine::ViewportRequest::new("s0", 0, WHOLE_MAP, 0)
+                    .layers(tessera_engine::LayerSelection::Named(&[AUTHORED]))
+                    .computed(computed),
+            )
+            .unwrap();
+        let served: Vec<_> = out.artifacts.iter().filter(|x| x.layer == AUTHORED).collect();
+        assert_eq!(served.len(), 1, "the artifact is served");
+        a.assert_clean("the viewport", &format!("{served:?}"));
+    }
+}
+
+/// **The drill-down serves the content blank and the one view's shape.**
+#[test]
+fn an_authored_shape_names_no_other_view_on_the_drill_down() {
+    let a = authored();
+    let session = a.engine.authorise(&full_coverage_credential()).unwrap();
+    let pages = read_all(&a.engine, &session, &request(AUTHORED, &names(&["key"])));
+    let id = TesseraId::new(ids(&pages)[0]);
+    let out = a
+        .engine
+        .artifact(&session, id, None, "s0", None)
+        .unwrap()
+        .expect("the artifact is served");
+    a.assert_clean("the drill-down", &format!("{out:?}"));
+    assert!(out.derived.shape.is_some(), "the view's own shape is drawn");
+}
+
+/// **Browse names the artifact by its blank slot, and its search does not read the slot.**
+#[test]
+fn an_authored_shape_names_no_other_view_on_browse() {
+    let a = authored();
+    let session = a.engine.authorise(&full_coverage_credential()).unwrap();
+    let browse = |form| {
+        a.engine
+            .browse(
+                &session,
+                tessera_engine::browse::BrowseRequest {
+                    view: "s0",
+                    layer: AUTHORED,
+                    level: None,
+                    form,
+                    filter: None,
+                    limit: 10,
+                    cursor: None,
+                },
+            )
+            .unwrap()
+    };
+    let roots = browse(tessera_engine::browse::BrowseForm::Roots);
+    assert_eq!(roots.artifacts.len(), 1, "the artifact is served");
+    a.assert_clean("browse", &format!("{roots:?}"));
+    for secret in &a.secrets {
+        let found = browse(tessera_engine::browse::BrowseForm::Search(secret.clone()));
+        assert!(found.artifacts.is_empty(), "browse's search read the slot for '{secret}'");
+    }
+}
+
+/// **The artifacts read serves the content blank, draws the view's own shape, and `q` does not
+/// read the slot.**
+#[test]
+fn an_authored_shape_names_no_other_view_on_the_artifacts_read() {
+    let a = authored();
+    let session = a.engine.authorise(&full_coverage_credential()).unwrap();
     let fields = names(&["key", "content", "shape"]);
-    let mut req = request("drawn/regions", &fields);
-    let pages = read_all(&engine, &session, &req);
+    let req = request(AUTHORED, &fields);
+    let pages = read_all(&a.engine, &session, &req);
     assert_eq!(keys(&pages), vec!["region"]);
     let mut sent = Vec::new();
     for batch in &pages {
-        let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut sent, &batch.schema())
-            .unwrap();
+        let mut writer =
+            arrow::ipc::writer::StreamWriter::try_new(&mut sent, &batch.schema()).unwrap();
         writer.write(batch).unwrap();
         writer.finish().unwrap();
     }
-    let contains = |needle: &[u8]| sent.windows(needle.len()).any(|w| w == needle);
-    assert!(!contains(b"hidden"), "the other view's name was served");
-    assert!(!contains(&secret_bytes), "the other view's shape was served");
-    assert!(!contains(slot.as_bytes()), "the content slot was served");
+    a.assert_clean("the artifacts read", &String::from_utf8_lossy(&sent));
     let content = column::<ListArray>(&pages[0], "content").value(0);
     let content = content.as_any().downcast_ref::<StringArray>().unwrap();
     assert!(content.value(0).is_empty(), "the shape slot is served blank");
     let wkb = column::<BinaryArray>(&pages[0], "shape").value(0).to_vec();
     let ring = tessera_spatial::shape::read_wkb(&wkb).unwrap()[0][0].clone();
-    for corner in [(seen[0], seen[1]), (seen[2], seen[3])] {
+    for corner in [(a.seen[0], a.seen[1]), (a.seen[2], a.seen[3])] {
         assert!(ring
             .iter()
             .any(|v| (v.0 - corner.0).abs() < 1e-3 && (v.1 - corner.1).abs() < 1e-3));
     }
-
-    let hidden_hex: String = b"hidden".iter().map(|b| format!("{b:02x}")).collect();
-    req.q = Some(&hidden_hex);
-    assert!(read_all(&engine, &session, &req).is_empty(), "q searched the shape slot");
+    for secret in &a.secrets {
+        let mut req = req.clone();
+        req.q = Some(secret);
+        assert!(read_all(&a.engine, &session, &req).is_empty(), "q read the slot for '{secret}'");
+    }
 }

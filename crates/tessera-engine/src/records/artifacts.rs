@@ -45,7 +45,7 @@ use crate::region::RegionVerdict;
 use crate::session::Session;
 use crate::shapes::DrawnShape;
 use crate::viewport::{
-    authored_rings, filter_refusal, take_authored_shapes, DependencyContext, OpenView,
+    authored_rings, filter_refusal, DependencyContext, OpenView,
 };
 use crate::Generation;
 
@@ -223,16 +223,15 @@ impl Scope<'_> {
         else {
             return None;
         };
-        let mut content =
+        let supplied =
             read.content(self.engine, self.generation, self.layer, ordinal, entity, rank)?;
         let tessera_id = self.tessera_id(entity)?;
-        let authored = take_authored_shapes(&self.layer.declaration, &mut content);
         Some(Served {
             entity,
             tessera_id,
             masked_count,
-            content,
-            authored,
+            content: supplied.values,
+            authored: supplied.authored,
         })
     }
 
@@ -799,7 +798,6 @@ fn drawn_shape(
             Some(authored_rings(shapes, scope.open.served.name, None)?.0)
         }
         DrawnShape::Predicate => {
-            let mut content = Vec::new();
             let mut derived = DerivedContent::default();
             scope.engine.drawn_shape(
                 declaration,
@@ -807,7 +805,7 @@ fn drawn_shape(
                 &declaration.name,
                 read.level,
                 ordinal,
-                &mut content,
+                None,
                 &mut derived,
                 None,
             );

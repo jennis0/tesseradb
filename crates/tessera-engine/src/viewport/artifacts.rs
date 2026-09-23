@@ -38,10 +38,9 @@ pub(crate) fn level_is_selected(
 }
 
 /// The authored shapes an artifact's content carries at its layer's shape slot, taken out of the
-/// content. The slot names every view of the layer and holds each one's canonical shape, so it is
-/// blanked before the content is served or searched. `None` where the layer authors no shape or
-/// the slot does not read as one.
-pub(crate) fn take_authored_shapes(
+/// content, whose slot is left blank. `None` where the layer authors no shape or the slot does not
+/// read as one.
+fn take_authored_shapes(
     declaration: &tessera_types::layer::LayerDeclaration,
     content: &mut [String],
 ) -> Option<tessera_lifecycle::membership::ArtifactShapes> {
@@ -50,6 +49,13 @@ pub(crate) fn take_authored_shapes(
     let shapes = tessera_lifecycle::membership::ArtifactShapes::from_content_text(text);
     text.clear();
     shapes
+}
+
+/// An artifact's supplied content as it may leave the engine: the values, with an authored
+/// shape's slot blank, and the shapes taken from that slot.
+pub(crate) struct Supplied {
+    pub(crate) values: Vec<String>,
+    pub(crate) authored: Option<tessera_lifecycle::membership::ArtifactShapes>,
 }
 
 /// A drawn geometry as the wire carries it: parts, then rings, then vertices in grid units.
@@ -528,13 +534,12 @@ impl Engine {
             counts,
         } = gated;
         // Same call as the viewport's, so the two routes cannot serve different content.
-        let Some(content) = self.supplied_content(
+        let Some(supplied) = self.supplied_content(
             &generation,
-            &name,
+            &layer.declaration,
             level,
             ordinal,
             entity,
-            layer.declaration.content.supplied.len(),
             rank,
             true,
             // Reads the row directly: one artifact does not justify building the level's table.
@@ -592,7 +597,6 @@ impl Engine {
             }
         };
         // The one shape a client draws; this route always answers for it.
-        let mut content = content;
         let mut derived = derived;
         let shape_guard_fired = self.drawn_shape(
             &layer.declaration,
@@ -600,12 +604,12 @@ impl Engine {
             &name,
             level,
             ordinal,
-            &mut content,
+            supplied.authored.as_ref(),
             &mut derived,
             zoom,
         );
         Ok(Some(ArtifactOut {
-            content,
+            content: supplied.values,
             layer: name.clone(),
             tessera_id: id,
             key: self.write.live().with_artifacts(|store| {
@@ -631,9 +635,9 @@ impl Engine {
     /// A predicate shape is the level's held canonical shape, served only for an artifact its
     /// own verdict already admitted.
     ///
-    /// An authored shape is the supplied content at the layer's shape slot, already gated by
-    /// `require_member_visibility`. The slot is blanked after reading: the geometry travels
-    /// separately as rings. A slot that does not read as a shape draws nothing rather than a guess.
+    /// An authored shape is `authored`, taken from the supplied content's shape slot by
+    /// [`Engine::supplied_content`], drawn for `view` alone. A slot that did not read as a shape
+    /// draws nothing rather than a guess.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn drawn_shape(
         &self,
@@ -642,7 +646,7 @@ impl Engine {
         layer: &str,
         level: u32,
         ordinal: u32,
-        content: &mut [String],
+        authored: Option<&tessera_lifecycle::membership::ArtifactShapes>,
         derived: &mut crate::derived::DerivedContent,
         zoom: Option<u8>,
     ) -> bool {
@@ -670,8 +674,8 @@ impl Engine {
                 guarded
             }
             Some(crate::shapes::DrawnShape::Authored) => {
-                let Some((parts, guarded)) = take_authored_shapes(declaration, content)
-                    .and_then(|shapes| authored_rings(&shapes, view, zoom))
+                let Some((parts, guarded)) =
+                    authored.and_then(|shapes| authored_rings(shapes, view, zoom))
                 else {
                     return false;
                 };
@@ -691,8 +695,40 @@ impl Engine {
     ///
     /// `table` is the level's contents, read once by the viewport pass, keeping a response off
     /// one zstd block read per artifact. `None` reads the one entity's row directly.
+    ///
+    /// Every route that serves or searches supplied content takes it from here. An authored
+    /// shape's slot names every view of its layer and holds each one's canonical shape, so it is
+    /// taken out of the values here and returned beside them, for drawing one view's shape.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn supplied_content(
+        &self,
+        generation: &crate::Generation,
+        declaration: &tessera_types::layer::LayerDeclaration,
+        level: u32,
+        ordinal: u32,
+        entity: EntityId,
+        rank: Option<u32>,
+        materialise: bool,
+        table: Option<&crate::artifact_content::LevelContent>,
+    ) -> Option<Supplied> {
+        let mut values = self.supplied_values(
+            generation,
+            &declaration.name,
+            level,
+            ordinal,
+            entity,
+            declaration.content.supplied.len(),
+            rank,
+            materialise,
+            table,
+        )?;
+        let authored = take_authored_shapes(declaration, &mut values);
+        Some(Supplied { values, authored })
+    }
+
+    /// [`Engine::supplied_content`]'s values as the store holds them, the shape slot included.
+    #[allow(clippy::too_many_arguments)]
+    fn supplied_values(
         &self,
         generation: &crate::Generation,
         layer: &str,
@@ -1298,13 +1334,12 @@ impl Engine {
             // rather than served with its description missing. Asked under the identity
             // projection too, with `materialise = false`: an identity response must not carry a
             // row the full response would withhold.
-            let Some(content) = self.supplied_content(
+            let Some(supplied) = self.supplied_content(
                 generation,
-                name,
+                declaration,
                 number,
                 ordinal,
                 entity,
-                declaration.content.supplied.len(),
                 rank,
                 req.artifact_rows == ArtifactRows::Full,
                 contents.as_deref(),
@@ -1352,7 +1387,7 @@ impl Engine {
                 }
             };
             // Only where the request asked for it and the row is materialised.
-            let mut content = content;
+            let content = supplied.values;
             let mut derived = derived;
             let shape_guard_fired = if req.artifact_rows == ArtifactRows::Full
                 && req.computed.selects(crate::derived::ComputedProperty::Hull)
@@ -1363,7 +1398,7 @@ impl Engine {
                     name,
                     number,
                     ordinal,
-                    &mut content,
+                    supplied.authored.as_ref(),
                     &mut derived,
                     Some(req.zoom),
                 )

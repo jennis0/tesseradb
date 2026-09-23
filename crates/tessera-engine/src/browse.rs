@@ -363,7 +363,7 @@ impl crate::Engine {
                         level_read.matched_count(ordinal, &mask, filter_rows),
                     );
                 }
-                names.insert((walked, ordinal), content.into_iter().next());
+                names.insert((walked, ordinal), content.values.into_iter().next());
                 keys.insert(
                     (walked, ordinal),
                     self.write
