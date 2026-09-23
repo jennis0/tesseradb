@@ -13,6 +13,7 @@ members = [
     "crates/tessera-lifecycle",
     "crates/tessera-engine",
     "crates/tessera-wire",
+    "crates/tessera-config",
     "crates/tessera-server",
     "crates/tessera-filter-write",
     "crates/tessera-build",

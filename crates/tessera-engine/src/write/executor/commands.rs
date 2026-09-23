@@ -200,7 +200,7 @@ pub(super) fn growth_receipt(
         .enumerate()
         .map(|(index, (join, filled))| {
             let ordinal = registry
-                .resolve_growth_key(layer, level, &join.key, store)
+                .resolve_growth_key(layer, level, None, &join.key, store)
                 .expect("prepare_grow resolved every key before the receipt was read");
             let record = store
                 .get(layer, level, ordinal)
@@ -873,7 +873,7 @@ impl Executor {
         let values_record = WalRecord::ValuesBatch {
             batch_id: request.batch_id.clone(),
             body_hash: request.body_hash,
-            view: Some(request.view.clone()),
+            view: request.view.clone(),
             columns: request.columns.clone(),
             rows: request
                 .rows

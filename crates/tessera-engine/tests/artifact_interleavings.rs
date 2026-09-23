@@ -233,6 +233,7 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str, x: f64, y
                 memberships: vec![BatchMembership {
                     layer: layer.to_string(),
                     level: 0,
+                    view: None,
                     key: key.to_string(),
                     rows: vec![0],
                 }],
@@ -902,6 +903,7 @@ fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
                     memberships: vec![BatchMembership {
                         layer: LAYER.to_string(),
                         level: 0,
+                        view: None,
                         key: "k".to_string(),
                         rows: vec![0],
                     }],
@@ -1312,6 +1314,7 @@ fn ingest_with_edges(
                     .map(|key| BatchMembership {
                         layer: layer.to_string(),
                         level: 0,
+                        view: None,
                         key: key.to_string(),
                         rows: vec![0],
                     })
@@ -1321,6 +1324,7 @@ fn ingest_with_edges(
                     .map(|(child, parent)| tessera_lifecycle::BatchEdge {
                         layer: layer.to_string(),
                         level: 0,
+                        view: None,
                         child: child.to_string(),
                         parent: parent.to_string(),
                     })

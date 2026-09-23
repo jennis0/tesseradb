@@ -514,7 +514,7 @@ def test_the_page_is_identical_once_the_visible_value_set_is_warm(suggest_server
 
 
 @pytest.fixture(scope="session")
-def probe_route_server(tmp_path_factory, suggest_bundle):
+def probe_route_server(tmp_path_factory):
     """A second server that can never build a visible-value set.
 
     `max_suggest_set_entities = 1` is the schema's floor (`/v1/meta` publishes the constant with
@@ -523,8 +523,11 @@ def probe_route_server(tmp_path_factory, suggest_bundle):
     takes the probe route of §6.2 — which is the state C31 stays open in, and the one an operator
     who has not raised the constant is running.
     """
+    # Built separately, because a running server locks its bundle root and `suggest_server` holds
+    # the shared one. The oracle works in source ids, so the second build gives the same answers.
+    bundle = sf.build_suggest_bundle(tmp_path_factory.mktemp("suggest-probe-route-fixture"))
     server, proc = spawn_server(
-        suggest_bundle,
+        bundle,
         tmp_path_factory.mktemp("suggest-probe-route"),
         serve_extra="max_suggest_set_entities = 1\n",
     )

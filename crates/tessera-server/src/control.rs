@@ -28,17 +28,16 @@ use base64::Engine as _;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 
-use tessera_engine::{
-    AcceptError, DeclaredScalar, MetaView, Projection, ScalarType, ScopedScalar, Vocabularies,
-    VocabularyKind, ABSENT_CODE, DENY_WINDOW_MAX_ENTRIES,
-};
-use tessera_lifecycle::{
-    BatchArtifacts, BatchEdge, BatchMembership, ChangeOp, UnallocatedRow, WalScalar,
-};
+use tessera_engine::{AcceptError, MetaView, ScopedScalar, DENY_WINDOW_MAX_ENTRIES};
+use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 
 use tessera_types::view::ViewMetadataValue;
 use tessera_types::{EntityId, TermId, TesseraId};
 
+use crate::decode::{
+    parse_ingest_batch, parse_values_batch, Address, BodyEncoding, DecodeError, ParsedBatch,
+    ParsedValues,
+};
 use crate::error::{
     map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
 };
@@ -236,7 +235,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     // the operator set, and the answer is the 422 §3.1's "bounds exceeded" row calls for. The
     // handler takes `Result<Bytes, _>` rather than `Bytes` so that mapping is possible at all.
     let ingest_route = post(ingest).layer(axum::extract::DefaultBodyLimit::max(
-        state.ingest_max_batch_bytes,
+        state.limits.ingest_max_batch_bytes,
     ));
     // The same remedy on the change lane. A bare `Json<..>` extractor answers axum's own **413** —
     // outside contracts §3.1's closed code list, with axum's own body, on the never-shed lane, to an
@@ -248,7 +247,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     // a row, and the cost it puts on the executor and on a connection is the same shape, so it
     // takes the same cap rather than a second key an operator would have to keep in step.
     let values_route = post(values).layer(axum::extract::DefaultBodyLimit::max(
-        state.ingest_max_batch_bytes,
+        state.limits.ingest_max_batch_bytes,
     ));
     let router = Router::new()
         .route("/control/ingest", ingest_route)
@@ -309,7 +308,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::put(publish_artifacts)
                 .patch(grow_memberships)
                 .layer(axum::extract::DefaultBodyLimit::max(
-                    state.publish_max_body_bytes,
+                    state.limits.publish_max_body_bytes,
                 )),
         );
     // The faults build's arming surface (decision 0071) — absent from a default build rather
@@ -417,7 +416,7 @@ async fn require_operator_credential(
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
     // Unconditional: no path, routed or not, is exempt. See "Why there is no exemption" above.
-    state.check_bearer(bearer_token(request.headers()), &state.operator_credential)?;
+    state.check_bearer(crate::state::bearer_token(request.headers()), &state.operator_credential)?;
     Ok(next.run(request).await)
 }
 
@@ -452,48 +451,14 @@ fn layer_frames(
                 .iter()
                 .find(|v| v.id == *name)
                 .ok_or_else(|| ApiError::Unknown(format!("unknown view '{name}'")))?;
-            let q = view.quantisation;
             Ok(tessera_engine::shapes::ViewFrame::new(
                 &view.id,
                 view.projection,
-                tessera_engine::shapes::Bounds {
-                    x_min: q.x_min,
-                    x_max: q.x_max,
-                    y_min: q.y_min,
-                    y_max: q.y_max,
-                },
+                crate::filter_dto::view_extent(view),
             ))
         })
         .collect()
 }
-
-/// Every route [`router`] mounts, as `(method, path)` — the subject of
-/// `every_control_route_requires_the_operator_credential`.
-///
-/// **This list is the test's mechanism, and it is weaker than the layer it tests. Say so rather than
-/// claim otherwise.** axum 0.8's `Router` exposes no route enumeration — there is no public iterator
-/// over its `Method`/path table and no way to derive one — so a test cannot ask the router what it
-/// serves. A hard-coded list is what is available, and its limitation is exactly what you would
-/// expect: a route added to [`router`] and *not* added here is not covered by that test.
-///
-/// What makes that acceptable, and why this is not the discipline it replaces: the *layer* is
-/// router-wide, so an unlisted new route is authenticated anyway. The two mechanisms cover each
-/// other's gap — the layer makes a forgotten route safe, and this list makes a *removed or narrowed
-/// layer* fail the build. Neither alone would do; the pairing is the argument. If axum ever exposes
-/// its route table, this constant is the thing to delete.
-pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
-    ("POST", "/control/ingest"),
-    ("POST", "/control/values"),
-    ("POST", "/control/changes"),
-    ("GET", "/control/status"),
-    ("POST", "/control/flush"),
-    ("POST", "/control/compact"),
-    ("PUT", "/control/attributes"),
-    ("PUT", "/control/vocabularies/{name}"),
-    ("PATCH", "/control/vocabularies/{name}/values"),
-    ("PUT", "/control/view_groups/{name}"),
-    ("PUT", "/control/views/{name}"),
-];
 
 /// `/control/changes`'s request-body limit.
 ///
@@ -512,22 +477,17 @@ const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// naming the unit; a caller splits, and no deny is refused, only paged.
 const CHANGES_MAX_ITEMS: usize = 10_000;
 
-/// A declaration's body cap: axum's own default for the `Json` extractor, which `PUT
-/// /control/layers` and `PUT /control/views/{group}/{key}` inherit. Named so the `limits` block
-/// on `/control/status` can publish the number the extractor enforces.
+/// A declaration's body cap: axum's own default for the `Json` extractor, which every declaration
+/// route inherits. Named so the `limits` block on `/control/status` can publish the number the
+/// extractor enforces.
 const DECLARATION_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// What an over-cap `/control/ingest` or `/control/values` caller does next.
+const INGEST_BODY_REMEDY: &str =
+    "The limit is ingest.ingest_max_batch_bytes. Send fewer rows per batch";
 
 /// The content type that selects Arrow IPC on a record-bearing route (ingest §1.2).
 const ARROW_CONTENT_TYPE: &str = "application/vnd.apache.arrow.stream";
-
-/// The two encodings a record-bearing route takes (ingest §1.2). JSON is the default and Arrow
-/// IPC is selected by content type; nothing about a route's semantics depends on which carried
-/// the batch, since both decode to one row form before the executor sees either.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BodyEncoding {
-    Json,
-    Arrow,
-}
 
 /// Which encoding a request's `content-type` names. Absent is JSON, the default; a parameter
 /// (`; charset=utf-8`) is ignored; any other type is refused naming the two this route takes,
@@ -558,854 +518,47 @@ fn body_encoding(headers: &HeaderMap) -> Result<BodyEncoding, ApiError> {
     }
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-}
-
-/// Contracts §1: external IDs are caller-supplied byte strings, capped at **≤ 64 bytes**.
-/// Over-length is a typed error here and at build, never a truncation — truncating two callers'
-/// keys down to a shared 64-byte prefix would silently merge two different items into one
-/// entity, and sidecar disk scales linearly with key length, so the cap is load-bearing, not
-/// cosmetic. `/control/ingest` is the only caller-supplied-bytes path in this workspace (the
-/// build's external-id representation is fixed at exactly 8 bytes — `tessera-build`'s
-/// `BuildError::ExternalIdTooLong` cannot be reached by any build input), so this is where the
-/// cap is actually enforced and tested.
-const EXTERNAL_ID_MAX_LEN: usize = 64;
-
-#[derive(Debug)]
-struct RawIngestItem {
-    /// Optional (contracts §3.4): `None` when the caller supplied no external id. Such an item
-    /// gets no sidecar entry and is addressable only by its `tessera_id` (returned per row in
-    /// [`IngestResp`]).
-    external_id: Option<Vec<u8>>,
-    /// **The view's frame, never longitude and latitude** — the transform has already run
-    /// (`projections.md` §3). Everything downstream of the decode reads a frame coordinate: the
-    /// engine's out-of-frame check, the WAL record, the buffer and the flush's quantiser.
-    x: f64,
-    y: f64,
-    /// The row's labels, one element of the wire's `access` list each, verbatim (decision 0129).
-    /// Empty for a row that carries none, which the view's `point_default` then fills or refuses
-    /// (decision 0133); a null list or a null element is refused at the parse.
-    labels: Vec<Vec<u8>>,
-    scalars: Vec<WalScalar>,
-    /// The group-scoped values this row carries for its view's group, positional against the
-    /// families the batch was parsed with (`views.md` §5). Empty for a plain view and for a group
-    /// that owns no family.
-    scoped: Vec<WalScalar>,
-}
-
-/// The column names this schema gives a meaning of their own whatever the view, plus the
-/// coordinate pair [`coordinate_columns`] resolves; everything else in a batch is a
-/// caller-declared scalar **or a declared layer's name** (see [`parse_ingest_batch`]).
-const RESERVED_COLUMNS: [&str; 3] = ["external_id", "access", "node_id"];
-
-/// What this view's coordinate columns are called, and what the wrong spelling would have meant.
-///
-/// **A projected view spells them `lon` and `lat`; a view with no projection spells them `x` and
-/// `y`** (`projections.md` §2). Longitude-then-latitude is the order GeoJSON and WKT use and the
-/// opposite of the order many sources publish, and a corpus written with the two exchanged is
-/// silently mirrored about the diagonal — so the axes are named for what they hold rather than
-/// documented. The build applies the same rule to a points file's columns
-/// (`tessera_build::config`'s `compile_projected_fields`), and it has to exist on both paths or a
-/// projected view is something that can be built correctly and ingested into wrongly
-/// (decision 0091).
-fn coordinate_columns(projection: Projection) -> (&'static str, &'static str) {
-    match projection {
-        Projection::None => ("x", "y"),
-        _ => ("lon", "lat"),
-    }
-}
-
-/// One ingest batch, decoded: its rows, what its membership columns said, and how many of those
-/// rows the view's projection clipped.
-struct ParsedBatch {
-    items: Vec<RawIngestItem>,
-    artifacts: BatchArtifacts,
-    /// How many declared columns the batch omitted, each padded with its absence in every row
-    /// (`ingest.md` §7.1). Reported so a pipeline that stopped sending a column is seen.
-    padded_columns: u64,
-    /// Rows whose latitude fell outside the projection's own domain and were moved onto the
-    /// frame's edge (`projections.md` §7). Always `0` under `projection = "none"`, which has no
-    /// domain.
-    clipped: u64,
-}
-
-/// A column named for a declared layer, and what its cells mean.
-///
-/// **Named for the layer, exactly as an attribute column is named for the attribute** — the
-/// declaration's own `name`, never an acquisition-side spelling. `fields` on `[layer.members]` maps
-/// a *file's* column name onto the canonical meaning and is build-only for that reason
-/// (`configuration.md` §2): a deployment that never builds has no file to map from, and a name a
-/// running node had to be told about could not be checked against anything.
-struct MembershipColumn<'a> {
-    layer: &'a str,
-    meaning: tessera_types::layer::ListMeaning,
-    cells: KeyCells<'a>,
-}
-
-/// A key column's shape: one artifact per row, or a list of them.
-enum KeyCells<'a> {
-    Scalar(&'a dyn Array),
-    /// A `List`, whose rows may differ in length — which is what a lineage is.
-    Variable(&'a arrow::array::ListArray),
-    /// A `FixedSizeList`, every row of the arity its own type states.
-    Fixed(&'a arrow::array::FixedSizeListArray),
-}
-
-impl KeyCells<'_> {
-    /// The element array a row's entries are read out of — the column itself where it is a scalar.
-    fn values(&self) -> &dyn Array {
-        match self {
-            KeyCells::Scalar(array) => *array,
-            KeyCells::Variable(list) => {
-                let values: &Arc<dyn Array> = list.values();
-                values.as_ref()
-            }
-            KeyCells::Fixed(list) => {
-                let values: &Arc<dyn Array> = list.values();
-                values.as_ref()
-            }
-        }
-    }
-
-    /// Whether the cells are lists — a scalar carries one artifact per row and has no arity to
-    /// disagree with a declaration.
-    fn is_list(&self) -> bool {
-        !matches!(self, KeyCells::Scalar(_))
-    }
-
-    /// The range of `values()` one row occupies, or `None` where the row named no artifact at all.
-    ///
-    /// **A null cell and an empty list are the whole row's "in no artifact"**, which is the scalar
-    /// rule applied to a cell that holds no key: a point may be in no artifact at any resolution,
-    /// and a clusterer that emitted nothing for it is the ordinary way of saying so.
-    fn entries(&self, row: usize) -> Option<std::ops::Range<usize>> {
-        let (start, end) = match self {
-            KeyCells::Scalar(_) => (row, row + 1),
-            KeyCells::Variable(list) => {
-                if list.is_null(row) {
-                    return None;
-                }
-                let offsets = list.value_offsets();
-                (offsets[row] as usize, offsets[row + 1] as usize)
-            }
-            KeyCells::Fixed(list) => {
-                if list.is_null(row) {
-                    return None;
-                }
-                let start = list.value_offset(row) as usize;
-                (start, start + list.value_length() as usize)
-            }
-        };
-        (start != end).then_some(start..end)
-    }
-}
-
-/// The key one cell names, or `None` where it names no artifact.
-///
-/// **Text or an integer, and `null` or `-1` means this point is in no artifact**
-/// (`artifacts-from-points.md` §2). An integer key is read as its decimal spelling, so `3` and `"3"`
-/// name one artifact — the rule is [`tessera_types::layer::integer_key`]'s, which is also what a
-/// build reads a member table's key column by, because a membership spelled two ways must not
-/// resolve two ways.
-fn member_key_at(values: &dyn Array, index: usize) -> Option<String> {
-    use arrow::array::{
-        Int16Array, Int32Array, Int64Array, Int8Array, StringArray, UInt16Array, UInt32Array,
-        UInt64Array, UInt8Array,
-    };
-    if values.is_null(index) {
-        return None;
-    }
-    let any = values.as_any();
-    let integer: i128 = if let Some(a) = any.downcast_ref::<StringArray>() {
-        return Some(a.value(index).to_string());
-    } else if let Some(a) = any.downcast_ref::<Int8Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<Int16Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<Int32Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<Int64Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<UInt8Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<UInt16Array>() {
-        a.value(index) as i128
-    } else if let Some(a) = any.downcast_ref::<UInt32Array>() {
-        a.value(index) as i128
-    } else {
-        // The last arm is `u64` and the fallthrough is unreachable: `membership_column` refuses any
-        // other element type before a row is read.
-        any.downcast_ref::<UInt64Array>()?.value(index) as i128
-    };
-    tessera_types::layer::integer_key(integer)
-}
-
-/// Read one column named for a layer, at the shapes that layer may carry.
-///
-/// **Two refusals, and both are the declaration and the data disagreeing about arity.** A
-/// `FixedSizeList` states its length in its own type, so a levelled layer's is checked once here; a
-/// nested layer's lineage is as deep as each point's own branch and has no fixed arity at all. A
-/// plain list states its length a row at a time, and that check is in the row loop — reading the
-/// type alone would refuse every producer whose Arrow binding writes a plain list, which is most of
-/// them.
-fn membership_column<'a>(
-    name: &'a str,
-    column: &'a Arc<dyn Array>,
-    declaration: &tessera_types::layer::LayerDeclaration,
-) -> Result<MembershipColumn<'a>, ApiError> {
-    use arrow::array::{FixedSizeListArray, ListArray};
-    use arrow::datatypes::DataType;
-
-    // A predicate layer's membership is *evaluated* per request, so there is nothing for a column
-    // to say: a stored answer beside a live predicate is what the artifact store refuses a
-    // publication for, and this is the same refusal one step earlier, where the batch can still be
-    // rejected without effect.
-    if declaration.membership != tessera_types::layer::MembershipSource::Enumerated {
-        return Err(ApiError::Contract(format!(
-            "ingest body: column '{name}' names a layer whose membership is evaluated per \
-             request rather than enumerated — there is no stored membership for a point to join, \
-             and one written beside the predicate would diverge from it at the first write"
-        )));
-    }
-
-    let meaning = declaration.list_meaning();
-    let cells = match column.data_type() {
-        DataType::List(_) => KeyCells::Variable(
-            column
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .expect("a List column downcasts to a ListArray"),
-        ),
-        DataType::FixedSizeList(_, size) => {
-            match meaning {
-                tessera_types::layer::ListMeaning::Lineage => {
-                    return Err(ApiError::Contract(format!(
-                        "ingest body: column '{name}' is a fixed-size list of {size} and that \
-                         layer is declared nested, whose lineage is as deep as each point's own \
-                         branch — a fixed arity is one entry per level, which is the stacked and \
-                         tiered shape"
-                    )))
-                }
-                tessera_types::layer::ListMeaning::Levelled { levels, .. }
-                    if *size as usize != levels =>
-                {
-                    return Err(ApiError::Contract(format!(
-                        "ingest body: column '{name}' is a fixed-size list of {size} and that \
-                         layer declares {levels} levels. Entry k is the artifact at level k, so \
-                         the two counts are one number written twice"
-                    )))
-                }
-                _ => {}
-            }
-            KeyCells::Fixed(
-                column
-                    .as_any()
-                    .downcast_ref::<FixedSizeListArray>()
-                    .expect("a FixedSizeList column downcasts to a FixedSizeListArray"),
-            )
-        }
-        _ => KeyCells::Scalar(column.as_ref()),
-    };
-    let element = cells.values().data_type().clone();
-    if !matches!(
-        element,
-        DataType::Utf8
-            | DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-    ) {
-        return Err(ApiError::Contract(format!(
-            "ingest body: column '{name}' names a layer and carries {element:?}; a member key is \
-             text or an integer — an integer key is read as its decimal spelling, so `3` and \
-             \"3\" name one artifact"
-        )));
-    }
-    Ok(MembershipColumn {
-        layer: name,
-        meaning,
-        cells,
-    })
-}
-
-/// What one batch's membership columns said, gathered as the executor takes it.
-///
-/// **Keyed by `(layer, level, key)` and carrying row positions**, because a batch's entity ids do
-/// not exist until its commit window closes. The executor resolves the key to an ordinal at
-/// admission and turns the positions into entities after the assignment — see
-/// [`tessera_lifecycle::BatchMembership`].
-#[derive(Default)]
-struct MembershipTally {
-    rows_of: std::collections::BTreeMap<(String, u32, String), Vec<u32>>,
-    edges: std::collections::BTreeSet<(String, u32, String, String)>,
-}
-
-impl MembershipTally {
-    /// One row's cells of one membership column.
-    ///
-    /// `offset` is where this batch's rows start in the request's own numbering, since an Arrow IPC
-    /// stream may carry several record batches and the executor indexes one flat list of rows.
-    fn read(
-        &mut self,
-        column: &MembershipColumn<'_>,
-        row: usize,
-        offset: usize,
-    ) -> Result<(), ApiError> {
-        let Some(entries) = column.cells.entries(row) else {
-            return Ok(());
-        };
-        // **The declaration and the data must agree — where the data is a list.** A stacked or
-        // tiered layer's list is one entry per declared level, that being what makes entry k mean
-        // level k, so a row of any other length is a lineage against a levelled declaration and
-        // guessing which of the two the caller meant would store a hierarchy they did not write.
-        //
-        // **A scalar is not a short list**: it names one artifact at level 0, which is exactly what
-        // a member table with no `level` column means on a levelled layer. Applying the arity check
-        // to it would make the two entry points read one spelling two ways, which is the drift this
-        // whole column is written against.
-        if let Some(levels) = column.meaning.arity().filter(|_| column.cells.is_list()) {
-            if entries.len() != levels {
-                return Err(ApiError::Contract(format!(
-                    "ingest body: column '{}' names {} artifacts at row {row} and the layer \
-                     declares {levels} levels. A stacked or tiered layer's column is one entry \
-                     per level, nullable where the point is in no artifact at that resolution",
-                    column.layer,
-                    entries.len(),
-                )));
-            }
-        }
-        // **Each entry carries its own position**, so the edge below reads the child's level off
-        // the entry rather than searching for its key — a lineage may legitimately name one key
-        // twice, and a search would then charge the edge to the wrong level.
-        let values = column.cells.values();
-        let keys: Vec<Option<(u32, String)>> = entries
-            .enumerate()
-            .map(|(position, index)| {
-                member_key_at(values, index).map(|key| (column.meaning.level_of(position), key))
-            })
-            .collect();
-        for (level, key) in keys.iter().flatten() {
-            let at = self
-                .rows_of
-                .entry((column.layer.to_string(), *level, key.clone()))
-                .or_default();
-            // A row naming one artifact twice — a lineage that repeats a key — joins it once.
-            let index = (offset + row) as u32;
-            if at.last() != Some(&index) {
-                at.push(index);
-            }
-        }
-        if column.meaning.declares_edges() {
-            // The adjacency is `tessera_types::layer::parent_edges`' — the same function a build
-            // reads a member table's list column by, which is what keeps the two entry points from
-            // inferring different trees from one file.
-            for ((_, parent), (level, child)) in tessera_types::layer::parent_edges(&keys) {
-                self.edges.insert((
-                    column.layer.to_string(),
-                    *level,
-                    child.clone(),
-                    parent.clone(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn into_artifacts(self) -> BatchArtifacts {
-        BatchArtifacts {
-            memberships: self
-                .rows_of
-                .into_iter()
-                .map(|((layer, level, key), rows)| BatchMembership {
-                    layer,
-                    level,
-                    key,
-                    rows,
-                })
-                .collect(),
-            edges: self
-                .edges
-                .into_iter()
-                .map(|(layer, level, child, parent)| BatchEdge {
-                    layer,
-                    level,
-                    child,
-                    parent,
-                })
-                .collect(),
-        }
-    }
-}
-
-/// One value out of an ingest batch's column, read **at the column's declared wire type**
-/// ([`DeclaredScalar::wire_type`]) — `None` when the Arrow column is not that type, which the
-/// caller refuses naming both types rather than by dropping the column.
-///
-/// # The declaration drives the decode, and the match is exhaustive over `ScalarType`
-///
-/// Two constructions have failed here, and this shape exists against both:
-///
-/// * **A second type table.** An earlier form carried its own type spellings — `uint64` where the
-///   flush path parsed `u64` — so a manifest one path accepted was one the other refused. The
-///   spellings are gone entirely: the expected type arrives as a [`ScalarType`], and the one
-///   spelling in any refusal is [`ScalarType::arrow_type_name`]'s.
-/// * **Inferring the type from the array.** The successor answered "which type is this column?"
-///   by a chain of downcasts, and a chain holds exactly the types its author remembered — the
-///   compiler has nothing to check it against. Six declarable types (`bool`, `i8`, `i16`, `i32`,
-///   `f64`, `timestamp_us`) were declarable, buildable and un-ingestable that way,
-///   `timestamp_us` invisibly so: Arrow's `TimestampMicrosecondArray` is a distinct type that no
-///   `Int64Array` downcast reaches.
-///
-/// Matching on [`ScalarType`] makes the completeness structural rather than remembered: a type
-/// added to the declarable set fails to compile here until this function says what an ingest
-/// batch carries for it. `Keyword` and `Text` never arrive — `wire_type` maps both to `Utf8` —
-/// but decode identically rather than panicking, because a string *is* their wire form.
-fn scalar_at(col: &dyn Array, row: usize, ty: ScalarType) -> Option<WalScalar> {
-    use arrow::array::{
-        BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
-        StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
-    };
-    let any = col.as_any();
-    Some(match ty {
-        ScalarType::Bool => WalScalar::Bool(any.downcast_ref::<BooleanArray>()?.value(row)),
-        ScalarType::U8 => WalScalar::U8(any.downcast_ref::<UInt8Array>()?.value(row)),
-        ScalarType::U16 => WalScalar::U16(any.downcast_ref::<UInt16Array>()?.value(row)),
-        ScalarType::U32 => WalScalar::U32(any.downcast_ref::<UInt32Array>()?.value(row)),
-        ScalarType::U64 => WalScalar::U64(any.downcast_ref::<UInt64Array>()?.value(row)),
-        ScalarType::I8 => WalScalar::I8(any.downcast_ref::<Int8Array>()?.value(row)),
-        ScalarType::I16 => WalScalar::I16(any.downcast_ref::<Int16Array>()?.value(row)),
-        ScalarType::I32 => WalScalar::I32(any.downcast_ref::<Int32Array>()?.value(row)),
-        ScalarType::I64 => WalScalar::I64(any.downcast_ref::<Int64Array>()?.value(row)),
-        ScalarType::F32 => WalScalar::F32(any.downcast_ref::<Float32Array>()?.value(row)),
-        ScalarType::F64 => WalScalar::F64(any.downcast_ref::<Float64Array>()?.value(row)),
-        ScalarType::TimestampUs => {
-            WalScalar::TimestampUs(any.downcast_ref::<TimestampMicrosecondArray>()?.value(row))
-        }
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-            WalScalar::Utf8(any.downcast_ref::<StringArray>()?.value(row).to_string())
-        }
-    })
-}
-
-/// One category cell: its value key resolved to the pinned code, at the column's declared width.
-///
-/// **Resolution, never minting.** A handler that minted would let two requests racing one novel key
-/// draw two codes for it, splitting its rows between them, and whichever binding survived would
-/// recolour the other's. Minting happens once, on the write executor, where windows close serially
-/// (write-path §1.1).
-fn category_code(
-    col: &dyn Array,
-    row: usize,
-    declared: &DeclaredScalar,
-    vocabulary: &str,
-    vocabularies: &Vocabularies,
-) -> Result<WalScalar, ApiError> {
-    use arrow::array::StringArray;
-    let keys = col
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("a category column was validated as utf8 above");
-    if keys.is_null(row) {
-        return Ok(code_at(declared.arrow_type, ABSENT_CODE));
-    }
-    let key = keys.value(row);
-    if key.is_empty() {
-        return Err(ApiError::Contract(format!(
-            "ingest body: column '{}' carries the empty string, which is not a value key. An \
-             item with no value for this column carries null, which is stored as *absent*; \
-             minting a code for the empty string would make a typo a category \
-             (per-point-attributes §3.4)",
-            declared.name
-        )));
-    }
-    let minter = vocabularies.get(vocabulary).ok_or_else(|| {
+/// A body a write route could not take, as a 422 and never axum's own 413: over the route's `cap`
+/// bytes, where `remedy` says what to send instead, or not read to completion. The rejection's own
+/// text is not forwarded.
+fn body_refusal(status: StatusCode, body: &str, cap: usize, remedy: &str) -> ApiError {
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
         ApiError::Contract(format!(
-            "ingest body: column '{}' names vocabulary '{vocabulary}', which this bundle does \
-             not carry",
-            declared.name
+            "the {body} body exceeds the {cap}-byte per-request limit and was refused before \
+             decoding, so nothing was allocated or appended. {remedy}"
         ))
-    })?;
-    if let Some(code) = minter.code_of(key) {
-        return Ok(code_at(declared.arrow_type, code));
-    }
-    match minter.kind() {
-        // Declare-then-use: the value set is closed, so a key nothing binds is a typo — and a
-        // category carries properties and, through its postings, a visibility consequence. The
-        // refusal is here rather than on the executor because the whole batch can still be
-        // rejected without effect at this point, which is what a 422 promises.
-        VocabularyKind::Declared => Err(ApiError::Contract(format!(
-            "ingest body: column '{}' carries value '{key}', which vocabulary '{vocabulary}' \
-             does not list. Under `vocabulary = \"declared\"` there is no auto-mint: a category \
-             carries properties and, through its postings, a visibility consequence, so a typo \
-             must not create one (per-point-attributes §5)",
-            declared.name
-        ))),
-        // **The key travels as a key.** This handler must not mint: two requests racing one novel
-        // key would each draw, and that key would end up with two codes and its rows split
-        // between them. The commit-window close resolves it — serially, against the live bindings
-        // — and the row's scalar becomes the code there, before the WAL append.
-        VocabularyKind::Discovered => Ok(WalScalar::Utf8(key.to_string())),
+    } else {
+        ApiError::Contract(format!(
+            "the {body} body could not be read: the connection failed mid-upload, the transfer \
+             encoding is malformed, or it is not the body this route takes. This is not the size \
+             limit; nothing was allocated or appended"
+        ))
     }
 }
 
-/// A code at its column's declared width. `is_category_width` admits `u8`/`u16`/`u32` only, so the
-/// fallthrough is `u32` — the widest, which cannot truncate a code the other two could hold.
-fn code_at(width: ScalarType, code: u32) -> WalScalar {
-    match width {
-        ScalarType::U8 => WalScalar::U8(code as u8),
-        ScalarType::U16 => WalScalar::U16(code as u16),
-        _ => WalScalar::U32(code),
-    }
+/// The `x-tessera-batch-id` header a batch is recorded under. A value that is not UTF-8 is
+/// refused as a missing one is.
+fn batch_id_header(headers: &HeaderMap) -> Result<String, ApiError> {
+    headers
+        .get("x-tessera-batch-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))
 }
 
-/// Parse `/control/ingest`'s body: one Arrow IPC stream, schema
-/// `(external_id: binary, x: float32|float64, y: float32|float64, access: utf8, node_id: utf8?,
-/// ...scalars)` (R5). The coordinate columns take either float width and the narrower is widened —
-/// see [`coordinate_col`] for why the widening runs in that one direction. `node_id` is accepted
-/// — so a well-formed client request is never rejected for including it — but not stored: `WalRow`
-/// has no `node_id` field, because a buffered item has no row geometry until the next build and
-/// `node_id` is a segment-column concept.
-///
-/// # The scalar tail is validated against `MANIFEST.declared_scalars`, and misalignment is a 422
-///
-/// A row's scalars are stored **positionally**, against the manifest's declared order — nothing
-/// downstream carries a name. So a batch whose scalar columns are not within the declared set
-/// cannot be read back correctly, and two defects are the same defect:
-///
-/// * a column the manifest does not declare;
-/// * a declared column present at the wrong arrow type.
-///
-/// Each is refused with **422 naming the column** (contracts §3.1's "malformed request"), and the
-/// scalar vector is built in **declared** order rather than schema order, which is what makes the
-/// positional read safe. **A declared column the batch omits is absent in every row**
-/// (`ingest.md` §7.1): the vector still takes the column's slot, holding its absence, so the
-/// omission misaligns nothing, and a column declared at a running service is one an older
-/// client's batches do not carry. Silently dropping a column would shorten the vector and shift
-/// every later scalar by one: positional misalignment wearing a success's clothes, acknowledged
-/// with a 200.
-///
-/// # A category arrives as its key, and the key is checked for membership
-///
-/// The expected type is [`DeclaredScalar::wire_type`], not the declared width: a category column
-/// is `utf8` value keys on the wire, whatever width stores its codes. Codes are the server's to
-/// assign (per-point-attributes §3.1, §5), so a caller supplying one would be the minting
-/// authority, and the server could then guarantee neither the scatter nor never-reuse that §3.4
-/// exists for.
-///
-/// **This is what makes a category's value checkable at all.** A code can only be range-checked —
-/// a `u16` column accepted any `u16`, so an unassigned code, a `reserved` code or a typo was stored
-/// with no error anywhere and the row carried a code no key explains. A key can be
-/// membership-checked, and membership is the rule: an unknown key under `value_set = "closed"`
-/// is a 422 naming the column and the key, whole batch without effect (declare-then-use, §5,
-/// views §80).
-///
-/// It also makes a schema/client disagreement visible: a plain `u16` scalar and a `u16` category
-/// are now different types on the wire, so a client that thinks a column is one when the bundle
-/// says the other gets a 422 naming it rather than plausible integers stored as codes.
-///
-/// A **null** key is *absent* — [`ABSENT_CODE`], the reserved sentinel (§3.6). The **empty string**
-/// is not: it is what an unset field and a client bug both produce, so it is refused rather than
-/// folded into absence, which would accept the same defect silently.
-///
-/// # A column named for a declared layer is that point's artifacts
-///
-/// The acceptance rule is **reserved, or a declared attribute's name, or a declared layer's name**
-/// (`artifacts-from-points.md` §6.2) — the third being what
-/// [decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md) obliges:
-/// a point may name its artifacts in a file, so it may name them on the wire. The cell is a key, or
-/// a list of keys, on exactly the rules a build reads a member table by — `tessera_types::layer`
-/// holds them, and holds them for both readers.
-///
-/// **The layer's own `name`, exactly as an attribute column is named for the attribute's `name`.**
-/// `fields` on `[layer.members]` renames a *file's* columns and is build-only for the same reason
-/// `source` is: it says where rows come from rather than what they mean.
-///
-/// Reserved names are matched first and declared scalars second, so a layer sharing a name with
-/// either is read as the other — a layer called `x` cannot make the geometry column mean a cluster.
-fn parse_ingest_batch(
-    encoding: BodyEncoding,
-    body: &[u8],
-    projection: Projection,
-    declared: &[DeclaredScalar],
-    // The **group-scoped** attribute families this view's batch may carry, under their plain
-    // names — the families of the group that owns the view, in manifest order, and empty for
-    // every view outside a scope (`views.md` §5). See the section on them in this function's doc.
-    scoped: &[ScopedScalar],
-    vocabularies: &Vocabularies,
-    layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
-) -> Result<ParsedBatch, ApiError> {
-    let (x_name, y_name) = coordinate_columns(projection);
-    // **One decode below this line, whichever encoding carried the batch** (ingest §1.2). A JSON
-    // body is coerced into one record batch against the declared column types
-    // (`ingest_json::record_batch`) and then read by every rule the Arrow batches are.
-    let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, ApiError>>> =
-        match encoding {
-            BodyEncoding::Arrow => {
-                let cursor = std::io::Cursor::new(body);
-                let reader =
-                    arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
-                        ApiError::Contract(format!(
-                            "ingest body is not a valid Arrow IPC stream: {e}"
-                        ))
-                    })?;
-                Box::new(reader.map(|batch| {
-                    batch.map_err(|e| {
-                        ApiError::Contract(format!("ingest body: arrow decode error: {e}"))
-                    })
-                }))
-            }
-            BodyEncoding::Json => Box::new(std::iter::once(crate::ingest_json::record_batch(
-                body,
-                &crate::ingest_json::JsonColumns {
-                    x_name,
-                    y_name,
-                    declared,
-                    scoped,
-                    layer_of,
-                },
-            ))),
-        };
-    let mut items = Vec::new();
-    let mut tally = MembershipTally::default();
-    let mut clipped = 0u64;
-    let mut padded: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    for batch in batches {
-        let batch = batch?;
-        let schema = batch.schema();
-        padded.extend(
-            declared
-                .iter()
-                .filter(|d| batch.column_by_name(&d.name).is_none())
-                .map(|d| d.name.as_str()),
-        );
-        // Where this record batch's rows start in the request's own row numbering — what a
-        // membership names, since the executor indexes one flat list of rows per batch id.
-        let offset = items.len();
-
-        let ext = optional_binary_col(&batch, "external_id")?;
-        // **The spelling is checked before the columns are read**, so a batch that used the other
-        // one meets a refusal naming what this view calls its axes rather than a bare "column 'x'
-        // missing". Only fired where the right column is absent, so a `projection = "none"` view
-        // whose declared scalars happen to include a `lon` is unaffected: this is the surface
-        // every existing ingest uses.
-        for (wrong, right) in wrong_spellings(projection) {
-            if batch.column_by_name(wrong).is_some() && batch.column_by_name(right).is_none() {
-                return Err(ApiError::Contract(format!(
-                    "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}', \
-                     not '{wrong}' (projections.md §2, §3). The axes are named for what they hold \
-                     because a corpus written with longitude and latitude exchanged is mirrored \
-                     about the diagonal and malformed in no other way; rename '{wrong}' to \
-                     '{right}'",
-                    match projection {
-                        Projection::None =>
-                            "this view declares no projection, so it has no longitude".to_string(),
-                        _ => format!("this view is projected `{}`", projection.name()),
-                    }
-                )));
-            }
-        }
-        let mut x = coordinate_col(&batch, x_name)?;
-        let mut y = coordinate_col(&batch, y_name)?;
-        // **The transform runs here, at the boundary, before anything else looks at the numbers**
-        // (`projections.md` §3) — the same place `tessera_build::input` runs it, which is what
-        // makes a projected view ingestable rather than only buildable (decision 0091).
-        clipped += project_columns(projection, &mut x, &mut y)?;
-        let access = labels_col(&batch, "access")?;
-
-        // Whole-batch schema validation, before a single row is read: a batch whose scalar tail
-        // does not match the declaration has no effect at all, exactly as a duplicate 409 does.
-        let mut memberships: Vec<MembershipColumn> = Vec::new();
-        let mut declarations = Vec::new();
-        for field in schema.fields() {
-            let name = field.name().as_str();
-            if RESERVED_COLUMNS.contains(&name)
-                || name == x_name
-                || name == y_name
-                || declared.iter().any(|d| d.name == name)
-                // **A group-scoped family, under its plain name** (`views.md` §5): the view is
-                // known from the header, so the column is not qualified and the view decides
-                // which of the family's columns the value lands in. `scoped` is empty for every
-                // view outside a scope, so the refusal below is unchanged there — which is what
-                // keeps a scoped column un-nameable on an entity-space batch.
-                || scoped.iter().any(|f| f.name == name)
-            {
-                continue;
-            }
-            let Some(declaration) = layer_of(name) else {
-                return Err(ApiError::Contract(format!(
-                    "ingest body: column '{name}' is neither in MANIFEST.declared_scalars nor the \
-                     name of a registered layer (contracts §2.2). Scalars are stored positionally \
-                     against the declared order, so an undeclared column is refused rather than \
-                     dropped — dropping it would shift every later scalar by one and acknowledge \
-                     that with a 200"
-                )));
-            };
-            declarations.push((name.to_string(), declaration));
-        }
-        for (name, declaration) in &declarations {
-            let column = batch
-                .column_by_name(name)
-                .expect("the column was found in this batch's own schema");
-            memberships.push(membership_column(name, column, declaration)?);
-        }
-        // **A declared column the batch omits is absent in every row** (`ingest.md` §7.1): the
-        // scalar tail is built below in declared order, so an omission misaligns nothing, and
-        // a column declared at a running service is one an older client's batches do not
-        // carry. What is refused is a column present at the wrong type.
-        for d in declared {
-            let Some(col) = batch.column_by_name(&d.name) else {
-                continue;
-            };
-            // One row's worth is enough to identify the column's type, and a batch with no rows has
-            // no scalar to mistype. The decode is keyed by the declaration (see `scalar_at`), so
-            // "wrong type" and "a type this build cannot store" are one refusal: either way the
-            // column is not what the manifest says an ingest batch carries for it.
-            let expected = d.wire_type();
-            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(ApiError::Contract(format!(
-                    "ingest body: column '{}' is {:?}, but MANIFEST.declared_scalars declares \
-                     it {} (contracts §2.6); refused rather than dropped",
-                    d.name,
-                    col.data_type(),
-                    expected.arrow_type_name()
-                )));
-            }
-        }
-
-        // **The scoped families' columns, checked on the declared ones' rule** (`views.md` §5) —
-        // but a *missing* column is not an error here, where a missing declared scalar is: a
-        // family has no slot in the positional tail, so its absence misaligns nothing and simply
-        // means every row of the batch is absent in it. What is refused is the same wrong type,
-        // for the same reason: a value decoded against the wrong declaration is a wrong value
-        // stored with no error anywhere.
-        for f in scoped {
-            let Some(col) = batch.column_by_name(&f.name) else {
-                continue;
-            };
-            let expected = scoped_wire_type(f);
-            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(ApiError::Contract(format!(
-                    "ingest body: column '{}' is {:?}, but it is a group-scoped attribute \
-                     declared {} (views §5); refused rather than dropped",
-                    f.name,
-                    col.data_type(),
-                    expected.arrow_type_name()
-                )));
-            }
-        }
-
-        for i in 0..batch.num_rows() {
-            // The artifacts this row names, read before its scalars so a malformed membership
-            // column refuses the batch with nothing decoded into `items` — the whole-batch rule
-            // every other refusal here is held to.
-            for column in &memberships {
-                tally.read(column, i, offset)?;
-            }
-            // Built in DECLARED order, not schema order — the vector is read back by position and
-            // nothing downstream carries a name. Every column is present and correctly typed by the
-            // validation above, so neither `expect` here can fire on a caller's input.
-            let mut scalars = Vec::with_capacity(declared.len());
-            for d in declared {
-                let Some(col) = batch.column_by_name(&d.name) else {
-                    // The batch omits the column: this row's absence, on the family's own
-                    // spelling (`scoped_absent`'s rule, for a declared scalar).
-                    scalars.push(scoped_absent(&declared_as_scoped(d)));
-                    continue;
-                };
-                let value = match d.vocabulary.as_deref() {
-                    // A category's absence is in band and `category_code` already spends it: null
-                    // resolves to the reserved code 0, which its vocabulary keeps out of the value
-                    // space.
-                    Some(vocabulary) => {
-                        category_code(col.as_ref(), i, d, vocabulary, vocabularies)?
-                    }
-                    // **Null is absence, and it must be carried rather than read through.**
-                    // `a.value(row)` on a null slot returns whatever the values buffer holds
-                    // there — 0 for every numeric width — so reading without this check stores an
-                    // item with no score as one scoring zero, present and indistinguishable. It
-                    // then matches `{gte: -10, lte: 10}`, which is a wrong answer rather than a
-                    // missing feature (decision 0064). Every other family has somewhere in band to
-                    // put absence; a number has no spare bit pattern, so it travels beside the
-                    // value as `WalScalar::Null`.
-                    None if col.is_null(i) => WalScalar::Null,
-                    None => scalar_at(col.as_ref(), i, d.wire_type())
-                        .expect("every declared column's type was checked above"),
-                };
-                scalars.push(value);
-            }
-            // **The scoped tail, in the families' own order** — a second positional list rather
-            // than more slots in the one above, because the two are indexed against different
-            // declarations (`WalRow::scoped`). Absence takes each family's ordinary route: the
-            // reserved code 0 for a category, `WalScalar::Null` for everything else, which is
-            // decision 0064's presence bitmap.
-            let mut scoped_values = Vec::with_capacity(scoped.len());
-            for f in scoped {
-                let value = match batch.column_by_name(&f.name) {
-                    // A family the batch does not mention: every row is absent in it, which is
-                    // an ordinary state and not the omission a declared scalar's would be. A
-                    // family has no bundle-wide column, so nothing downstream is misaligned by a
-                    // batch that carries none of them.
-                    None => scoped_absent(f),
-                    Some(col) => match f.vocabulary.as_deref() {
-                        Some(vocabulary) => category_code(
-                            col.as_ref(),
-                            i,
-                            &scoped_as_declared(f),
-                            vocabulary,
-                            vocabularies,
-                        )?,
-                        None if col.is_null(i) => WalScalar::Null,
-                        None => scalar_at(col.as_ref(), i, scoped_wire_type(f))
-                            .expect("every scoped column's type was checked above"),
-                    },
-                };
-                scoped_values.push(value);
-            }
-            // Contracts §3.4: `external_id` is optional. Neither a missing column nor a null
-            // within the column is an error -- both simply mean this item has no caller-supplied
-            // external id and is addressable only by its `tessera_id`.
-            let external_id = match &ext {
-                Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
-                _ => None,
-            };
-            // Contracts §1: a typed error, never a truncation -- see `EXTERNAL_ID_MAX_LEN`'s
-            // doc. Checked here, inside the whole-batch parse, so an over-length id anywhere in
-            // the batch fails the parse before anything downstream (replay check, dedup,
-            // allocation, WAL append) ever runs: the batch has no effect, exactly as a duplicate
-            // 409 must.
-            if let Some(external_id) = &external_id {
-                if external_id.len() > EXTERNAL_ID_MAX_LEN {
-                    return Err(ApiError::Contract(format!(
-                        "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte cap \
-                         (contracts §1); refused rather than truncated",
-                        external_id.len()
-                    )));
-                }
-            }
-            items.push(RawIngestItem {
-                external_id,
-                x: x[i],
-                y: y[i],
-                labels: access.labels_at(i)?,
-                scalars,
-                scoped: scoped_values,
-            });
-        }
-    }
-    Ok(ParsedBatch {
-        items,
-        artifacts: tally.into_artifacts(),
-        padded_columns: padded.len() as u64,
-        clipped,
-    })
+/// The `x-tessera-view` header, where one was given. A value that is not UTF-8 names no view any
+/// manifest can hold, so it is refused rather than lossily decoded.
+fn view_header(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    headers
+        .get("x-tessera-view")
+        .map(|value| {
+            value.to_str().map(str::to_string).map_err(|_| {
+                ApiError::Contract(
+                    "x-tessera-view is not valid UTF-8, so it names no view".to_string(),
+                )
+            })
+        })
+        .transpose()
 }
 
 /// `POST /control/values`' acknowledgement (contracts §3.4).
@@ -1466,58 +619,32 @@ async fn values(
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<ValuesResp>, ApiError> {
-    // The route's byte cap, mapped as `/control/ingest`'s is: a 422 naming the unit, never axum's
-    // untyped 413, and told apart from a connection that failed mid-upload.
     let body = body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::Contract(format!(
-                "values body exceeds the {}-byte per-batch cap (ingest.ingest_max_batch_bytes); \
-                 refused before decoding, so it cost no queue slot and no WAL append",
-                state.ingest_max_batch_bytes
-            ))
-        } else {
-            ApiError::Contract(
-                "the values request body could not be read to completion — the connection failed \
-                 mid-upload, or the transfer encoding is malformed. This is NOT the per-batch cap; \
-                 nothing was decoded, queued or appended"
-                    .to_string(),
-            )
-        }
+        body_refusal(
+            rejection.status(),
+            "values",
+            state.limits.ingest_max_batch_bytes,
+            INGEST_BODY_REMEDY,
+        )
     })?;
-    let batch_id = headers
-        .get("x-tessera-batch-id")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
-        .to_string();
+    let batch_id = batch_id_header(&headers)?;
     let encoding = body_encoding(&headers)?;
-    let view = match headers.get("x-tessera-view") {
-        None => None,
-        Some(value) => Some(
-            value
-                .to_str()
-                .map_err(|_| {
-                    ApiError::Contract(
-                        "x-tessera-view is not valid UTF-8, so it names no view".to_string(),
-                    )
-                })?
-                .to_string(),
-        ),
-    };
+    let view = view_header(&headers)?;
     let Some(permit) = state.ingest_admission.try_admit() else {
         tracing::debug!("the ingest admission bound is saturated; answering 429 backpressure");
-        return Err(ApiError::IngestAdmissionBackpressure {
+        return Err(ApiError::Backpressure {
             retry_after_s: crate::error::admission_retry_after_s(
                 &state.engine.write_executor_stats(),
             ),
+            cause: crate::error::ShedCause::IngestAdmission,
         });
     };
-    let engine = Arc::clone(&state);
-    let mut resp = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        run_values(&engine, encoding, &body, batch_id, view.as_deref())
-    })
-    .await
-    .map_err(map_join_error)??;
+    let mut resp = state
+        .blocking(move |state| {
+            let _permit = permit;
+            run_values(state, encoding, &body, batch_id, view.as_deref())
+        })
+        .await?;
     let ack = publication_ack(&state, &wait).await?;
     resp.publication = ack.publication;
     resp.visible = ack.visible;
@@ -1536,22 +663,28 @@ fn run_values(
     let body_hash: [u8; 32] = Sha256::digest(body).into();
     let meta = state.engine.meta();
     // The view the fills belong to: the header where one was given, and the deployment's only
-    // view otherwise, on `/control/ingest`'s rule. It decides which flush pass writes the cells.
-    let resolved = resolve_view(view, &meta)?;
-    let resolved = resolved.id.clone();
-    // **The families this batch may name, and the header is half the answer** (`views.md` §5,
-    // decision 0116). The key is what addresses a scoped cell, so the check is
-    // `EngineMeta::owning_key` exactly as the ingest door's is — and the header is required
-    // beside it, because a batch that named no view has not said which key it is writing.
-    let scoped: Vec<ScopedScalar> = match view {
+    // view otherwise, on `/control/ingest`'s rule. It decides which flush pass writes the cells,
+    // so with no header and several views it is refused below only if the batch fills a cell.
+    let resolved = match resolve_view(view, &meta) {
+        Ok(resolved) => Ok(resolved.id.clone()),
+        Err(ambiguous) if view.is_none() => Err(ambiguous),
+        Err(unknown) => return Err(unknown),
+    };
+    // **The families and group-scoped layers this batch may name, and the header is half the
+    // answer** (`views.md` §5, decision 0116). The key is what addresses a scoped cell or artifact,
+    // so the check is `EngineMeta::owning_key` exactly as the ingest door's is — and the header is
+    // required beside it, because a batch that named no view has not said which key it is writing.
+    let named = view.and(resolved.as_ref().ok());
+    let scoped: Vec<ScopedScalar> = match named {
         None => Vec::new(),
-        Some(_) => meta
+        Some(resolved) => meta
             .scoped_scalars
             .iter()
-            .filter(|f| meta.owning_key(&resolved, &f.group).is_some())
+            .filter(|f| meta.owning_key(resolved, &f.group).is_some())
             .cloned()
             .collect(),
     };
+    let view_in = |group: &str| meta.owning_key(named?, group).map(str::to_string);
     let ParsedValues {
         columns,
         rows,
@@ -1563,73 +696,34 @@ fn run_values(
         &scoped,
         &meta.vocabularies,
         &|name| state.engine.registered_layer(name).map(|l| l.declaration),
-    )?;
+        &view_in,
+    )
+    .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
+    let resolved = match resolved {
+        Ok(resolved) => Some(resolved),
+        Err(_) if columns.is_empty() => None,
+        Err(ambiguous) => return Err(ambiguous),
+    };
 
     // The row cap, on `/control/ingest`'s rule and with its cost: the whole decode is spent
     // before the count is knowable, which is why the byte cap sits on the route.
-    if rows.len() > state.ingest_max_batch_rows {
+    if rows.len() > state.limits.ingest_max_batch_rows {
         return Err(ApiError::Contract(format!(
             "values batch has {} rows, exceeding the {}-row per-batch cap \
              (ingest.ingest_max_batch_rows); refused before the WAL append, so it cost no queue \
              slot and no record. The body was hashed and decoded in full before this fired — the \
              row count is not knowable earlier",
             rows.len(),
-            state.ingest_max_batch_rows
+            state.limits.ingest_max_batch_rows
         )));
     }
 
     // **Every entity is resolved here, at the boundary, and the executor sees entities alone**
-    // (**I10**, `Command::Change`'s rule). One batched call per address form: the external half
-    // opens each bundle extent at most once, and the tessera half takes one generation snapshot
-    // for the idset check and every inversion.
-    let mut idsets = rows.iter().filter_map(|row| match &row.address {
-        Address::Tessera { idset, .. } => Some(*idset),
-        Address::External(_) => None,
-    });
-    let mut inverted = match idsets.next() {
-        None => Vec::new().into_iter(),
-        Some(idset) => {
-            if idsets.any(|other| other != idset) {
-                return Err(ApiError::Contract(
-                    "one batch carries two different idsets; there is one per deployment, so this \
-                     list was assembled from a state that never existed"
-                        .to_string(),
-                ));
-            }
-            let ids: Vec<TesseraId> = rows
-                .iter()
-                .filter_map(|row| match &row.address {
-                    Address::Tessera { id, .. } => Some(*id),
-                    Address::External(_) => None,
-                })
-                .collect();
-            // **An identifier that names nothing is not refused here.** The idset check is —
-            // it decides for the whole batch, before a single identifier is inverted (decision
-            // 0025) — but an unheld id is answered by the row loop below, so both addressing
-            // arms give one status and count rows in one space: the batch's own, rather than a
-            // position inside whichever subsequence the row happened to fall in.
-            state
-                .engine
-                .resolve_tessera_ids(&ids, idset)
-                .map_err(crate::error::map_engine_error)?
-                .into_iter()
-        }
-    };
-    let keys: Vec<Vec<u8>> = rows
-        .iter()
-        .filter_map(|row| match &row.address {
-            Address::External(key) => Some(key.clone()),
-            Address::Tessera { .. } => None,
-        })
-        .collect();
-    let mut external = state
-        .engine
-        .resolve_external_ids(&keys)
-        .map_err(map_store_error)?
-        .into_iter();
+    // (**I10**, `Command::Change`'s rule).
+    let entities = resolve_addresses(state, rows.iter().map(|row| &row.address))?;
 
     let mut request_rows = Vec::with_capacity(rows.len());
-    for (index, row) in rows.into_iter().enumerate() {
+    for (index, (row, held)) in rows.into_iter().zip(entities).enumerate() {
         // **A subject that does not exist refuses the batch** (`ingest.md` §1.6): a values batch
         // creates nothing, so an id nothing holds is the caller's ordering mistake and the remedy
         // is to ingest the point first. Named by the batch's own row index, never by the id
@@ -1637,10 +731,6 @@ fn run_values(
         // unknown key — and **one status and one index space for both address forms**, so a
         // caller reading the refusal does not have to know which of the two subsequences their
         // row fell in.
-        let held = match &row.address {
-            Address::Tessera { .. } => inverted.next().flatten(),
-            Address::External(_) => external.next().flatten(),
-        };
         let Some(entity) = held else {
             return Err(ApiError::Contract(format!(
                 "row {index} names an identifier this deployment does not hold. A values batch \
@@ -1688,413 +778,6 @@ fn run_values(
         publication: 0,
         visible: None,
     })
-}
-
-/// One decoded `POST /control/values` batch, before its addresses are resolved.
-struct ParsedValues {
-    /// The declared and group-scoped column names this batch carries, in the order every row's
-    /// values are positional against.
-    columns: Vec<String>,
-    rows: Vec<ParsedValuesRow>,
-    artifacts: BatchArtifacts,
-}
-
-/// One values row: how it names its entity, and its cells.
-struct ParsedValuesRow {
-    address: Address,
-    values: Vec<WalScalar>,
-}
-
-/// Decode one `POST /control/values` body (`ingest.md` §1.2, §1.4), in whichever encoding carried
-/// it, into named columns and rows.
-///
-/// **The same rules as the ingest door, minus the ones about creating an entity.** A values row
-/// carries no coordinates and no `access` list, and names its entity by exactly one of
-/// `external_id` and `tessera_id`; a declared column present at the wrong type refuses the batch,
-/// an undeclared name refuses it, and a layer column is a membership join.
-///
-/// **A group-scoped column is nameable only where `scoped` holds its family**, which the caller
-/// resolves from the batch's own view header — so a batch that named no view meets the
-/// undeclared-column refusal for one, and so does a batch whose view's key is in no scope
-/// (`views.md` §5, decision 0116).
-fn parse_values_batch(
-    encoding: BodyEncoding,
-    body: &[u8],
-    declared: &[DeclaredScalar],
-    scoped: &[ScopedScalar],
-    vocabularies: &Vocabularies,
-    layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
-) -> Result<ParsedValues, ApiError> {
-    let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, ApiError>>> =
-        match encoding {
-            BodyEncoding::Arrow => {
-                let cursor = std::io::Cursor::new(body);
-                let reader =
-                    arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
-                        ApiError::Contract(format!(
-                            "values body is not a valid Arrow IPC stream: {e}"
-                        ))
-                    })?;
-                Box::new(reader.map(|batch| {
-                    batch.map_err(|e| {
-                        ApiError::Contract(format!("values body: arrow decode error: {e}"))
-                    })
-                }))
-            }
-            BodyEncoding::Json => {
-                Box::new(std::iter::once(crate::ingest_json::values_record_batch(
-                    body,
-                    &crate::ingest_json::JsonColumns {
-                        // A values row carries no coordinates, so the axis names name nothing it
-                        // may hold; the two spellings below are refused as undeclared like any
-                        // other name, which is what a values row naming a coordinate is.
-                        x_name: "",
-                        y_name: "",
-                        declared,
-                        scoped,
-                        layer_of,
-                    },
-                )))
-            }
-        };
-
-    let mut rows: Vec<ParsedValuesRow> = Vec::new();
-    let mut columns: Vec<String> = Vec::new();
-    let mut tally = MembershipTally::default();
-    for batch in batches {
-        let batch = batch?;
-        let schema = batch.schema();
-        let offset = rows.len();
-
-        // Which of the schema's names this batch's cells are, in one order for every row.
-        let carried: Vec<&DeclaredScalar> = declared
-            .iter()
-            .filter(|d| batch.column_by_name(&d.name).is_some())
-            .collect();
-        let carried_scoped: Vec<&ScopedScalar> = scoped
-            .iter()
-            .filter(|f| batch.column_by_name(&f.name).is_some())
-            .collect();
-        let names: Vec<String> = carried
-            .iter()
-            .map(|d| d.name.clone())
-            .chain(carried_scoped.iter().map(|f| f.name.clone()))
-            .collect();
-        if rows.is_empty() {
-            columns = names;
-        } else if columns != names {
-            return Err(ApiError::Contract(
-                "values body: two record batches of one stream carry different columns; a batch \
-                 is one column set, so every row's values are positional against one list"
-                    .to_string(),
-            ));
-        }
-
-        // Every other name is a layer's or is refused, on the ingest door's rule.
-        let mut declarations = Vec::new();
-        for field in schema.fields() {
-            let name = field.name().as_str();
-            if matches!(name, "external_id" | "tessera_id" | "idset")
-                || declared.iter().any(|d| d.name == name)
-                || scoped.iter().any(|f| f.name == name)
-            {
-                continue;
-            }
-            let Some(declaration) = layer_of(name) else {
-                return Err(ApiError::Contract(format!(
-                    "values body: column '{name}' is neither in MANIFEST.declared_scalars, nor a \
-                     group-scoped family whose key set holds this batch's view, nor the name of a \
-                     registered layer (contracts §2.2, `views.md` §5). An undeclared column is \
-                     refused rather than dropped"
-                )));
-            };
-            declarations.push((name.to_string(), declaration));
-        }
-        let mut memberships: Vec<MembershipColumn> = Vec::new();
-        for (name, declaration) in &declarations {
-            let column = batch
-                .column_by_name(name)
-                .expect("the column was found in this batch's own schema");
-            memberships.push(membership_column(name, column, declaration)?);
-        }
-
-        // A column present at the wrong type refuses the batch, on the ingest door's rule: a value
-        // decoded against the wrong declaration is a wrong value stored with no error anywhere.
-        for d in &carried {
-            let col = batch
-                .column_by_name(&d.name)
-                .expect("the column was found above");
-            let expected = d.wire_type();
-            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(ApiError::Contract(format!(
-                    "values body: column '{}' is {:?}, but MANIFEST.declared_scalars declares it \
-                     {} (contracts §2.6); refused rather than dropped",
-                    d.name,
-                    col.data_type(),
-                    expected.arrow_type_name()
-                )));
-            }
-        }
-        for f in &carried_scoped {
-            let col = batch
-                .column_by_name(&f.name)
-                .expect("the column was found above");
-            let expected = scoped_wire_type(f);
-            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
-                return Err(ApiError::Contract(format!(
-                    "values body: column '{}' is {:?}, but it is a group-scoped attribute \
-                     declared {} (views §5); refused rather than dropped",
-                    f.name,
-                    col.data_type(),
-                    expected.arrow_type_name()
-                )));
-            }
-        }
-
-        let ext = optional_binary_col(&batch, "external_id")?;
-        let tessera = match batch.column_by_name("tessera_id") {
-            None => None,
-            Some(col) => Some(
-                col.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .ok_or_else(|| {
-                        ApiError::Contract(
-                            "values body: column 'tessera_id' is present but not utf8; a \
-                             tessera_id is decimal digits in a string"
-                                .to_string(),
-                        )
-                    })?,
-            ),
-        };
-        let idset = match batch.column_by_name("idset") {
-            None => None,
-            Some(col) => Some(
-                col.as_any()
-                    .downcast_ref::<arrow::array::UInt32Array>()
-                    .ok_or_else(|| {
-                        ApiError::Contract(
-                            "values body: column 'idset' is present but not uint32".to_string(),
-                        )
-                    })?,
-            ),
-        };
-
-        for i in 0..batch.num_rows() {
-            for column in &memberships {
-                tally.read(column, i, offset)?;
-            }
-            let external = match &ext {
-                Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
-                _ => None,
-            };
-            let named = match &tessera {
-                Some(arr) if !arr.is_null(i) => Some(arr.value(i)),
-                _ => None,
-            };
-            let address = match (external, named) {
-                (Some(_), Some(_)) => {
-                    return Err(ApiError::Contract(format!(
-                        "values body: row {} names both an external_id and a tessera_id; a row \
-                         names its entity exactly one way",
-                        rows.len()
-                    )))
-                }
-                (None, None) => {
-                    return Err(ApiError::Contract(format!(
-                        "values body: row {} names no entity; a values row carries an \
-                         external_id, or a tessera_id with its idset (`ingest.md` §1.4)",
-                        rows.len()
-                    )))
-                }
-                (Some(external), None) => {
-                    if external.len() > EXTERNAL_ID_MAX_LEN {
-                        return Err(ApiError::Contract(format!(
-                            "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte \
-                             cap (contracts §1); refused rather than truncated",
-                            external.len()
-                        )));
-                    }
-                    Address::External(external)
-                }
-                (None, Some(named)) => {
-                    let id = named.parse::<u64>().map_err(|_| {
-                        ApiError::Contract(format!(
-                            "values body: row {}'s tessera_id is not decimal digits",
-                            rows.len()
-                        ))
-                    })?;
-                    // **Required with a `tessera_id`, refused without it** — `/control/changes`'s
-                    // rule, and it guards the same thing: an identifier's meaning depends on the
-                    // set it was minted under, and a rotation would otherwise silently redirect
-                    // the fill onto another entity.
-                    let Some(set) = idset.as_ref().filter(|arr| !arr.is_null(i)) else {
-                        return Err(ApiError::Contract(format!(
-                            "values body: row {} names a tessera_id with no idset; the \
-                             identifier set is required beside one, from `/v1/meta`",
-                            rows.len()
-                        )));
-                    };
-                    Address::Tessera {
-                        id: TesseraId::new(id),
-                        idset: set.value(i),
-                    }
-                }
-            };
-
-            let mut values = Vec::with_capacity(columns.len());
-            for d in &carried {
-                let col = batch
-                    .column_by_name(&d.name)
-                    .expect("the column was found above");
-                values.push(match d.vocabulary.as_deref() {
-                    Some(vocabulary) => {
-                        category_code(col.as_ref(), i, d, vocabulary, vocabularies)?
-                    }
-                    None if col.is_null(i) => WalScalar::Null,
-                    None => scalar_at(col.as_ref(), i, d.wire_type())
-                        .expect("every declared column's type was checked above"),
-                });
-            }
-            for f in &carried_scoped {
-                let col = batch
-                    .column_by_name(&f.name)
-                    .expect("the column was found above");
-                values.push(match f.vocabulary.as_deref() {
-                    Some(vocabulary) => category_code(
-                        col.as_ref(),
-                        i,
-                        &scoped_as_declared(f),
-                        vocabulary,
-                        vocabularies,
-                    )?,
-                    None if col.is_null(i) => WalScalar::Null,
-                    None => scalar_at(col.as_ref(), i, scoped_wire_type(f))
-                        .expect("every scoped column's type was checked above"),
-                });
-            }
-            rows.push(ParsedValuesRow { address, values });
-        }
-    }
-    Ok(ParsedValues {
-        columns,
-        rows,
-        artifacts: tally.into_artifacts(),
-    })
-}
-
-/// A group-scoped family as the declaration the row-level helpers take.
-///
-/// **The declaration is an ordinary attribute's** (`views.md` §5) — same types, same `index` and
-/// `render` — and what the scope changes is only which column file a value lands in. So a
-/// family's key check, wire type and code minting are the entity-scoped ones, asked of a borrowed
-/// declaration built here rather than restated as a second set of rules that could drift from
-/// [`DeclaredScalar`]'s.
-fn scoped_as_declared(family: &ScopedScalar) -> DeclaredScalar {
-    DeclaredScalar {
-        name: family.name.clone(),
-        arrow_type: family.arrow_type,
-        vocabulary: family.vocabulary.clone(),
-        analyser: family.analyser.clone(),
-        index: family.index,
-        render: family.render,
-    }
-}
-
-/// A declared scalar as the family-shaped helpers take it — [`scoped_as_declared`]'s inverse,
-/// so an omitted declared column takes the same absence an omitted family does.
-fn declared_as_scoped(d: &DeclaredScalar) -> ScopedScalar {
-    ScopedScalar {
-        name: d.name.clone(),
-        group: String::new(),
-        arrow_type: d.arrow_type,
-        vocabulary: d.vocabulary.clone(),
-        analyser: d.analyser.clone(),
-        index: d.index,
-        render: d.render,
-        views: Vec::new(),
-    }
-}
-
-/// What a batch column of this family carries on the wire — [`DeclaredScalar::wire_type`]'s
-/// answer, so a scoped category arrives as its **key** exactly as an entity-scoped one does and a
-/// caller is never the minting authority for a code (per-point-attributes §3.1, §5).
-pub(crate) fn scoped_wire_type(family: &ScopedScalar) -> ScalarType {
-    scoped_as_declared(family).wire_type()
-}
-
-/// The value a row carries for a family the batch does not mention at all.
-///
-/// A category spends its reserved code 0, which its vocabulary keeps out of the value space;
-/// every other family has no spare bit pattern and travels `Null`, which lands in the column's
-/// presence bitmap (decision 0064). The same split [`parse_ingest_batch`] makes per row, restated
-/// here for the whole-column case — which a family has and a declared scalar does not, a family
-/// having no slot in the positional tail to misalign.
-fn scoped_absent(family: &ScopedScalar) -> WalScalar {
-    match family.vocabulary {
-        Some(_) => code_at(family.arrow_type, ABSENT_CODE),
-        None => WalScalar::Null,
-    }
-}
-
-/// The coordinate columns a batch for this view must *not* carry, each paired with what it should
-/// have been called.
-///
-/// `x`/`y` and `lon`/`lat` are the only two spellings, so each view refuses exactly the other one
-/// and the pair is total rather than a list that could be empty.
-fn wrong_spellings(projection: Projection) -> [(&'static str, &'static str); 2] {
-    match projection {
-        Projection::None => [("lon", "x"), ("lat", "y")],
-        _ => [("x", "lon"), ("y", "lat")],
-    }
-}
-
-/// Project a batch's coordinate columns in place, returning how many rows the projection
-/// **clipped** (`projections.md` §3, §7).
-///
-/// # Two things go wrong here and they are not the same thing
-///
-/// A coordinate outside WGS84's own range is **not a coordinate** and is refused, exactly as the
-/// build refuses it (`projections.md` §2): the accepted input coordinate system is longitude
-/// within ±180 and latitude within ±90, and a caller holding anything else converts before
-/// arriving.
-///
-/// A latitude inside that range but outside the *projection's* domain — beyond ±85.0511287798066°
-/// for `web_mercator` — is **clipped onto the frame's edge, counted, and never refused** (§7). The
-/// same row builds, and a row a build accepts and an ingest rejects is a defect rather than a
-/// policy. Clipping never earns a refusal at any proportion: a clipped point's position is the
-/// projection's own domain boundary, which no choice of frame moves.
-///
-/// # Why the count is taken here and not downstream
-///
-/// The engine's out-of-frame check runs on what this function returns, and the frame's edge is
-/// exactly where the quantisation rule says a point is *not* out of frame — so at the whole-world
-/// frame that check structurally cannot see a single clipped row, however many there are. At a
-/// sub-square frame the two do overlap, a clipped point landing on the *world's* edge and so
-/// outside a frame that does not reach it; such a row is both clipped here and refused there,
-/// which §7 states as correct rather than as an exception to carve out.
-///
-/// `Projection::None` returns without touching either column — the identity, bit for bit, which is
-/// what keeps every existing ingest exactly as it was.
-fn project_columns(projection: Projection, x: &mut [f64], y: &mut [f64]) -> Result<u64, ApiError> {
-    if projection == Projection::None {
-        return Ok(0);
-    }
-    let mut clipped = 0u64;
-    for (row, (lon, lat)) in x.iter_mut().zip(y.iter_mut()).enumerate() {
-        if !lon.is_finite() || !lat.is_finite() || lon.abs() > 180.0 || lat.abs() > 90.0 {
-            return Err(ApiError::Contract(format!(
-                "ingest body: row {row} is at lon {lon}, lat {lat}, which is not a place. This \
-                 view is projected ({}), and the accepted input coordinate system is WGS84 \
-                 degrees — longitude within ±180, latitude within ±90 (projections.md §2). The \
-                 whole batch is refused, so nothing was queued or appended",
-                projection.name()
-            )));
-        }
-        clipped += u64::from(projection.is_clipped(*lat));
-        let (px, py) = projection.forward(*lon, *lat);
-        (*lon, *lat) = (px, py);
-    }
-    Ok(clipped)
 }
 
 /// `x-tessera-view` (contracts §3.4): optional when the bundle has one view, `422` if ambiguous.
@@ -2146,174 +829,6 @@ fn resolve_view<'a>(
             .resolve_view(id)
             .ok_or_else(|| ApiError::Unknown(format!("unknown view '{id}'"))),
     }
-}
-
-/// A binary column that may be null-within (any row) or absent entirely (contracts §3.4:
-/// `external_id` is optional). A present-but-wrong-typed column is still a typed error — only
-/// "missing" and "null at this row" mean "no external id", never "this batch is malformed".
-fn optional_binary_col<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-) -> Result<Option<&'a arrow::array::BinaryArray>, ApiError> {
-    match batch.column_by_name(name) {
-        None => Ok(None),
-        Some(col) => col
-            .as_any()
-            .downcast_ref::<arrow::array::BinaryArray>()
-            .map(Some)
-            .ok_or_else(|| {
-                ApiError::Contract(format!(
-                    "ingest body: column '{name}' present but not binary"
-                ))
-            }),
-    }
-}
-
-/// A coordinate column, as `f64` — **`float32` and `float64` are both accepted and the narrower is
-/// widened**, which is the rule the build reads a points file's coordinate columns by
-/// (`tessera_build::input`'s `read_f64_column`), stated here because ingest and build must not
-/// disagree about which files can be loaded (decision 0091).
-///
-/// The widening direction is the only one: an `f64` column is never narrowed. A frame at zoom
-/// offset *k* resolves `2^(8−k)` `f32` steps per cell, so past roughly offset 8 the narrowing would
-/// decide the **cell** a point occupies (`projections.md` §6), and it would do so inside a request
-/// the caller was acked for. A whole-world frame is served perfectly well by `float32`, which is
-/// why the narrower width stays acceptable rather than being refused.
-fn coordinate_col(
-    batch: &arrow::record_batch::RecordBatch,
-    name: &str,
-) -> Result<Vec<f64>, ApiError> {
-    let column = batch.column_by_name(name).ok_or_else(|| {
-        ApiError::Contract(format!(
-            "ingest body: column '{name}' missing or not float32/float64"
-        ))
-    })?;
-    let any = column.as_any();
-    if let Some(a) = any.downcast_ref::<arrow::array::Float64Array>() {
-        Ok(a.values().to_vec())
-    } else if let Some(a) = any.downcast_ref::<arrow::array::Float32Array>() {
-        Ok(a.values().iter().map(|v| f64::from(*v)).collect())
-    } else {
-        Err(ApiError::Contract(format!(
-            "ingest body: column '{name}' missing or not float32/float64"
-        )))
-    }
-}
-
-/// The `access` column: one list of labels per row, `list<utf8>` or `large_list<utf8>`
-/// (contracts §3.4, decision 0129).
-///
-/// **A list, because that is what the data is.** Each element is one label and is taken verbatim
-/// — the plugin's [`tessera_plugin::Plugin::terms_of_labels`], the same call a build puts a
-/// points file's term column through — so a label containing whatever separator a grammar might
-/// have chosen is one term, as it is at the build. A scalar `utf8` column is refused at the
-/// schema rather than read as a one-label row: it is the shape a separator grammar lived in, and
-/// accepting it beside the list would leave two spellings for one column.
-enum LabelCells<'a> {
-    List(&'a arrow::array::ListArray),
-    Large(&'a arrow::array::LargeListArray),
-}
-
-impl LabelCells<'_> {
-    fn values(&self) -> &arrow::array::StringArray {
-        let values: &Arc<dyn Array> = match self {
-            LabelCells::List(list) => list.values(),
-            LabelCells::Large(list) => list.values(),
-        };
-        values
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .expect("labels_col checked the element type")
-    }
-
-    /// The range of `values()` row `row` occupies, or `None` where the row's list is null.
-    fn entries(&self, row: usize) -> Option<std::ops::Range<usize>> {
-        match self {
-            LabelCells::List(list) => (!list.is_null(row)).then(|| {
-                let offsets = list.value_offsets();
-                offsets[row] as usize..offsets[row + 1] as usize
-            }),
-            LabelCells::Large(list) => (!list.is_null(row)).then(|| {
-                let offsets = list.value_offsets();
-                offsets[row] as usize..offsets[row + 1] as usize
-            }),
-        }
-    }
-
-    /// Row `row`'s labels, verbatim and in order. **A null list and an empty list are one case,
-    /// a row with no label** (decision 0133), which the view's declared default fills or, where
-    /// none is declared, refuses with the count; the JSON door reads an absent or null `access`
-    /// the same way, so the two doors agree. A whole column absent is still refused at the
-    /// schema. A null element has no bytes to be a label and is refused naming the row.
-    fn labels_at(&self, row: usize) -> Result<Vec<Vec<u8>>, ApiError> {
-        let Some(entries) = self.entries(row) else {
-            return Ok(Vec::new());
-        };
-        let values = self.values();
-        entries
-            .map(|index| {
-                if values.is_null(index) {
-                    return Err(ApiError::Contract(format!(
-                        "ingest body: column 'access' has a null element at row {row}; every \
-                         element of a row's list is one label, taken verbatim"
-                    )));
-                }
-                Ok(values.value(index).as_bytes().to_vec())
-            })
-            .collect()
-    }
-}
-
-fn labels_col<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-) -> Result<LabelCells<'a>, ApiError> {
-    use arrow::array::{LargeListArray, ListArray};
-    use arrow::datatypes::DataType;
-
-    const SHAPE: &str = "list<utf8> or large_list<utf8>, one label per element, an empty list \
-                         for a row with no label (contracts §3.4)";
-    let Some(column) = batch.column_by_name(name) else {
-        return Err(ApiError::Contract(format!(
-            "ingest body: column '{name}' missing; it is {SHAPE}"
-        )));
-    };
-    let cells = match column.data_type() {
-        DataType::List(_) => LabelCells::List(
-            column
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .expect("a List column downcasts to a ListArray"),
-        ),
-        DataType::LargeList(_) => LabelCells::Large(
-            column
-                .as_any()
-                .downcast_ref::<LargeListArray>()
-                .expect("a LargeList column downcasts to a LargeListArray"),
-        ),
-        DataType::Utf8 | DataType::LargeUtf8 => {
-            return Err(ApiError::Contract(format!(
-                "ingest body: column '{name}' is utf8, one string per row; it is {SHAPE}. Each \
-                 element is one label, verbatim, so a label containing a comma is one term \
-                 (decision 0129)"
-            )));
-        }
-        other => {
-            return Err(ApiError::Contract(format!(
-                "ingest body: column '{name}' is {other:?}; it is {SHAPE}"
-            )));
-        }
-    };
-    let element = match &cells {
-        LabelCells::List(list) => list.values().data_type().clone(),
-        LabelCells::Large(list) => list.values().data_type().clone(),
-    };
-    if element != DataType::Utf8 {
-        return Err(ApiError::Contract(format!(
-            "ingest body: column '{name}' is a list of {element:?}; it is {SHAPE}"
-        )));
-    }
-    Ok(cells)
 }
 
 #[derive(serde::Serialize)]
@@ -2443,7 +958,9 @@ fn run_ingest(
         &scoped,
         &meta.vocabularies,
         &|name| state.engine.registered_layer(name).map(|l| l.declaration),
-    )?;
+        &|group| meta.owning_key(&view, group).map(str::to_string),
+    )
+    .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
 
     // The row cap. 422 per contracts §3.1's "bounds exceeded" row, naming the bound and the
     // batch's own size.
@@ -2458,7 +975,7 @@ fn run_ingest(
     // state grows even on refused batches; checking the row cap first keeps an over-large batch out
     // of that. A batch that is *under* the row cap and fails later still contributes. Stated because
     // the check narrows the path rather than closing it.
-    if items.len() > state.ingest_max_batch_rows {
+    if items.len() > state.limits.ingest_max_batch_rows {
         return Err(ApiError::Contract(format!(
             "ingest batch has {} rows, exceeding the {}-row per-batch cap \
              (ingest.ingest_max_batch_rows); refused before ENTITY-ID allocation, so it cost no \
@@ -2466,7 +983,7 @@ fn run_ingest(
              before this fired — the row count is not knowable earlier — so it is not free; the \
              byte cap on the route is the refusal that costs nothing",
             items.len(),
-            state.ingest_max_batch_rows
+            state.limits.ingest_max_batch_rows
         )));
     }
 
@@ -2674,12 +1191,13 @@ fn run_ingest(
     // flushes were observed to take. A fixed period would tell a client behind a slow flush to
     // come back and be refused again.
     let buffered = state.engine.buffered_items();
-    if buffered >= state.ingest_buffer_max_items {
-        return Err(ApiError::WriteBackpressure {
+    if buffered >= state.limits.ingest_buffer_max_items {
+        return Err(ApiError::Backpressure {
             retry_after_s: tessera_engine::estimate_buffer_retry_after_s(
                 &state.engine.write_executor_stats(),
                 buffered as u64,
             ),
+            cause: crate::error::ShedCause::WriteQueue,
         });
     }
 
@@ -2817,53 +1335,17 @@ async fn ingest(
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
-    // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**, unknown filter operand",
-    // and a `BytesRejection` is either of the first two. **Branched on the rejection's own status,
-    // not collapsed**: this arm used to report every `BytesRejection` as "your batch is too big",
-    // and the variant also covers a client disconnecting mid-upload and a malformed transfer
-    // encoding — so an operator whose 4 KB batch was truncated by a flaky link was told to shrink
-    // their batches. The rejection's `Display` is still never forwarded (this module's rule).
     let body = body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::Contract(format!(
-                "ingest body exceeds the {}-byte per-batch cap (ingest.ingest_max_batch_bytes); \
-                 refused before decoding, so it cost no queue slot and no WAL append",
-                state.ingest_max_batch_bytes
-            ))
-        } else {
-            ApiError::Contract(
-                "the ingest request body could not be read to completion — the connection failed \
-                 mid-upload, or the transfer encoding is malformed. This is NOT the per-batch cap; \
-                 nothing was decoded, queued or appended"
-                    .to_string(),
-            )
-        }
+        body_refusal(
+            rejection.status(),
+            "ingest",
+            state.limits.ingest_max_batch_bytes,
+            INGEST_BODY_REMEDY,
+        )
     })?;
-
-    let batch_id = headers
-        .get("x-tessera-batch-id")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
-        .to_string();
+    let batch_id = batch_id_header(&headers)?;
     let encoding = body_encoding(&headers)?;
-
-    // Read here rather than inside `run_ingest` because a `HeaderMap` is the handler's, not the
-    // blocking closure's. A header whose bytes are not valid UTF-8 names no view any manifest can
-    // hold, so it is refused rather than lossily decoded — the same rule this handler applies to
-    // external ids one function over.
-    let view = match headers.get("x-tessera-view") {
-        None => None,
-        Some(value) => Some(
-            value
-                .to_str()
-                .map_err(|_| {
-                    ApiError::Contract(
-                        "x-tessera-view is not valid UTF-8, so it names no view".to_string(),
-                    )
-                })?
-                .to_string(),
-        ),
-    };
+    let view = view_header(&headers)?;
 
     // The admission bound, **before** `spawn_blocking`. See `IngestAdmission`.
     let Some(permit) = state.ingest_admission.try_admit() else {
@@ -2878,28 +1360,25 @@ async fn ingest(
         // line adds nothing a counter does not, which is the same argument `map_accept_error`
         // already makes for the queue's 429 one level down.
         tracing::debug!("the ingest admission bound is saturated; answering 429 backpressure");
-        return Err(ApiError::IngestAdmissionBackpressure {
+        return Err(ApiError::Backpressure {
             retry_after_s: crate::error::admission_retry_after_s(
                 &state.engine.write_executor_stats(),
             ),
+            cause: crate::error::ShedCause::IngestAdmission,
         });
     };
 
-    // Closure capture is `state` (moved in directly — nothing after this
-    // `.await` needs the handler's own copy), `body` (an owned `Bytes` — cheap, refcounted clone
-    // of the request body already read off the socket, not a copy) and `batch_id` (owned
-    // `String`). Never gated by `ComputeGate` (see `run_ingest`'s doc).
+    // Never gated by `ComputeGate` (see `run_ingest`'s doc).
     //
     // The permit is **moved in**, not held across the `.await`: a disconnected client's handler
     // future is dropped while this closure keeps running and keeps its thread, so releasing on
     // handler-drop would under-count exactly when the pool is under pressure.
-    let engine = Arc::clone(&state);
-    let mut resp = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        run_ingest(&engine, encoding, &body, batch_id, view.as_deref())
-    })
-    .await
-    .map_err(map_join_error)??;
+    let mut resp = state
+        .blocking(move |state| {
+            let _permit = permit;
+            run_ingest(state, encoding, &body, batch_id, view.as_deref())
+        })
+        .await?;
 
     // **After the rows are buffered, never before**: the number names the cycle that carries
     // them, and a cycle that opened before they arrived is not it.
@@ -2943,12 +1422,6 @@ struct ChangeItem {
     #[serde(default)]
     idset: Option<u32>,
     op: String,
-}
-
-/// How one item names its entity: the two address forms, already shape-validated.
-enum Address {
-    External(Vec<u8>),
-    Tessera { id: TesseraId, idset: u32 },
 }
 
 /// One `/control/changes` item whose shape is validated but whose external id is not yet resolved.
@@ -3079,95 +1552,90 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
         decoded.push(DecodedChange { address, op });
     }
 
-    // **Each address form resolved in one batched call, both before anything is enqueued.** The
-    // external half opens each bundle extent at most once regardless of N; the tessera half takes
-    // one generation snapshot for the idset check and every inversion, so a swap cannot land
-    // between them.
-    //
-    // **The idset decides first, and for the whole request.** A caller whose list was gathered
-    // before a key rotation is refused as a 409 before a single identifier is inverted — its ids
-    // would otherwise be reinterpreted under the new key and name different live items (decision
-    // 0025). Every tessera-addressed item must agree on the idset, because there is one per
-    // deployment and a request mixing two was assembled from a state that never existed.
-    let mut idsets = decoded.iter().filter_map(|d| match &d.address {
+    // Resolved before anything is enqueued. An unissued `tessera_id` is answered ahead of an
+    // unknown external id, wherever each sits in the request.
+    let resolved = resolve_addresses(state, decoded.iter().map(|d| &d.address))?;
+    if let Some(index) = decoded
+        .iter()
+        .zip(&resolved)
+        .position(|(d, entity)| matches!(d.address, Address::Tessera { .. }) && entity.is_none())
+    {
+        return Err(ApiError::Unknown(format!(
+            "the tessera_id of item {index} names nothing this deployment issued"
+        )));
+    }
+    let validated = decoded
+        .into_iter()
+        .zip(resolved)
+        .map(|(d, entity)| {
+            let entity =
+                entity.ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
+            Ok(ValidatedChange { entity, op: d.op })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    apply_validated(state, validated)
+}
+
+/// Resolve each address to the entity it names, in the order given, and `None` where it names
+/// nothing.
+///
+/// Each form is resolved in one batched call: the external half opens each bundle extent at most
+/// once, and the tessera half takes one generation snapshot for the idset check and every
+/// inversion, so a swap cannot land between them. **The idset decides first, for the whole
+/// list**: a list gathered before a key rotation is refused as a 409 before a single identifier is
+/// inverted, and every tessera address must carry the same idset, since there is one per
+/// deployment.
+fn resolve_addresses<'a>(
+    state: &AppState,
+    addresses: impl IntoIterator<Item = &'a Address>,
+) -> Result<Vec<Option<EntityId>>, ApiError> {
+    let addresses: Vec<&Address> = addresses.into_iter().collect();
+    let mut idsets = addresses.iter().filter_map(|address| match address {
         Address::Tessera { idset, .. } => Some(*idset),
         Address::External(_) => None,
     });
-    if let Some(idset) = idsets.next() {
-        if idsets.any(|other| other != idset) {
-            return Err(ApiError::Contract(
-                "one request carries two different idsets; there is one per deployment, so this \
-                 list was assembled from a state that never existed"
-                    .to_string(),
-            ));
+    let tessera = match idsets.next() {
+        None => Vec::new(),
+        Some(idset) => {
+            if idsets.any(|other| other != idset) {
+                return Err(ApiError::Contract(
+                    "one request carries two different idsets; there is one per deployment, so \
+                     this list was assembled from a state that never existed"
+                        .to_string(),
+                ));
+            }
+            let ids: Vec<TesseraId> = addresses
+                .iter()
+                .filter_map(|address| match address {
+                    Address::Tessera { id, .. } => Some(*id),
+                    Address::External(_) => None,
+                })
+                .collect();
+            state
+                .engine
+                .resolve_tessera_ids(&ids, idset)
+                .map_err(crate::error::map_engine_error)?
         }
-        let ids: Vec<TesseraId> = decoded
-            .iter()
-            .filter_map(|d| match &d.address {
-                Address::Tessera { id, .. } => Some(*id),
-                Address::External(_) => None,
-            })
-            .collect();
-        // Refuses with `StaleIdSet` before inverting anything — see `resolve_tessera_ids`.
-        let resolved = state
-            .engine
-            .resolve_tessera_ids(&ids, idset)
-            .map_err(crate::error::map_engine_error)?;
-        if let Some(position) = resolved.iter().position(|e| e.is_none()) {
-            return Err(ApiError::Unknown(format!(
-                "tessera_id at tessera-addressed position {position} names nothing this \
-                 deployment issued"
-            )));
-        }
-        let mut resolved = resolved.into_iter();
-        let external_keys: Vec<Vec<u8>> = decoded
-            .iter()
-            .filter_map(|d| match &d.address {
-                Address::External(key) => Some(key.clone()),
-                Address::Tessera { .. } => None,
-            })
-            .collect();
-        let mut external = state
-            .engine
-            .resolve_external_ids(&external_keys)
-            .map_err(map_store_error)?
-            .into_iter();
-
-        let mut validated = Vec::with_capacity(decoded.len());
-        for d in decoded {
-            let entity = match &d.address {
-                Address::Tessera { .. } => resolved
-                    .next()
-                    .flatten()
-                    .expect("checked complete just above"),
-                Address::External(_) => external
-                    .next()
-                    .flatten()
-                    .ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?,
-            };
-            validated.push(ValidatedChange { entity, op: d.op });
-        }
-        return apply_validated(state, validated);
-    }
-
-    let keys: Vec<Vec<u8>> = decoded
+    };
+    let keys: Vec<Vec<u8>> = addresses
         .iter()
-        .map(|d| match &d.address {
-            Address::External(key) => key.clone(),
-            Address::Tessera { .. } => unreachable!("no tessera address reaches here"),
+        .filter_map(|address| match address {
+            Address::External(key) => Some(key.clone()),
+            Address::Tessera { .. } => None,
         })
         .collect();
-    let resolved = state
+    let external = state
         .engine
         .resolve_external_ids(&keys)
         .map_err(map_store_error)?;
-    let mut validated = Vec::with_capacity(decoded.len());
-    for (d, entity) in decoded.into_iter().zip(resolved) {
-        let entity = entity.ok_or_else(|| ApiError::Unknown("unknown external id".to_string()))?;
-        validated.push(ValidatedChange { entity, op: d.op });
-    }
-
-    apply_validated(state, validated)
+    let (mut tessera, mut external) = (tessera.into_iter(), external.into_iter());
+    Ok(addresses
+        .iter()
+        .map(|address| match address {
+            Address::Tessera { .. } => tessera.next().flatten(),
+            Address::External(_) => external.next().flatten(),
+        })
+        .collect())
 }
 
 /// Enqueue and collect a validated batch — the apply half of [`run_changes`], reached by both
@@ -3313,26 +1781,14 @@ async fn changes(
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Result<Json<Vec<ChangeItem>>, axum::extract::rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**, unknown filter operand",
-    // which covers both shapes a `JsonRejection` carries. They are distinguished by the rejection's
-    // own status rather than collapsed, because "your batch is too large" and "your JSON is
-    // malformed" send an operator to different places. The rejection's `Display` is never forwarded
-    // — this module's rule.
     let Json(items) = body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::Contract(format!(
-                "the change request body exceeds the {CHANGES_MAX_BODY_BYTES}-byte per-request \
-                 cap; split it into smaller requests. Nothing in this request was applied — and \
-                 note that this is a cap on one REQUEST, never on a deny: /control/changes is never \
-                 load-shed (contracts §3.1)"
-            ))
-        } else {
-            ApiError::Contract(
-                "the change request body is not a valid JSON array of {external_id, op} \
-                 items; nothing in it was applied"
-                    .to_string(),
-            )
-        }
+        body_refusal(
+            rejection.status(),
+            "change request",
+            CHANGES_MAX_BODY_BYTES,
+            "Split it into smaller requests. This caps one request and never a deny: \
+             /control/changes is never load-shed",
+        )
     })?;
 
     // The record count (ingest §2.1), beside the byte cap the route enforced above: a 422 naming
@@ -3370,10 +1826,8 @@ async fn changes(
     // this plane carries it and a client should not have to remember which ones mean something.
     // No reader needs to wait on it, and `wait=visible` here waits for the next cycle rather than
     // for this change.
-    let mut body = serde_json::json!({});
-    publication_ack(&state, &wait).await?.merge(&mut body);
     // R5: `/control/changes` is 200 after fsync, never 429.
-    Ok((StatusCode::OK, Json(body)))
+    acknowledge(&state, &wait, StatusCode::OK, serde_json::json!({})).await
 }
 
 /// How often a `wait=visible` wait re-reads the publication counter.
@@ -3425,18 +1879,25 @@ impl PublicationAck {
     }
 }
 
-/// [`publication_ack`] for a declaration route, where what the number adds is uniformity.
-///
-/// **A declaration is in force from its answer** (`ingest.md` §1.3). It is WAL-durable before the
-/// 201 and resolvable from it, so the next request may name the column, the vocabulary, the layer
-/// or the view, and `/v1/meta` lists it. What a publication adds is the manifest entry that
-/// carries the declaration without a WAL replay, and that lands with the next flush that writes a
-/// segment. **No reader waits on this number**; it is carried because every write acknowledgement
-/// on this plane carries one, and a client should not have to remember which ones mean something.
-/// `wait=visible` on one of these routes waits for the next cycle rather than for the
-/// declaration, which is already in force.
-async fn declaration_ack(state: &AppState, wait: &WaitQuery) -> Result<PublicationAck, ApiError> {
-    publication_ack(state, wait).await
+/// A write route's answer: `status`, and `body` carrying the publication ack.
+async fn acknowledge(
+    state: &AppState,
+    wait: &WaitQuery,
+    status: StatusCode,
+    mut body: serde_json::Value,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    publication_ack(state, wait).await?.merge(&mut body);
+    Ok((status, Json(body)))
+}
+
+/// A declaration's status: `200` where the name already carried this identity, `201` where the
+/// declaration created it.
+fn declared(existing: bool) -> StatusCode {
+    if existing {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    }
 }
 
 /// The publication number a write acknowledgement carries, and `wait=visible`'s wait.
@@ -3469,7 +1930,7 @@ async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<Publicati
 /// wait.
 async fn await_publication(state: &AppState, publication: u64) -> PublicationAck {
     let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(state.visible_wait_max_secs);
+        std::time::Instant::now() + std::time::Duration::from_secs(state.limits.visible_wait_max_secs);
     loop {
         if state.engine.publication() >= publication {
             return PublicationAck {
@@ -3588,8 +2049,32 @@ async fn register_layer(
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<tessera_types::layer::LayerDeclaration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let declaration = body.0;
+    let mut declaration = body.0;
     let name = declaration.name.clone();
+    // A group's name is every view the group holds now, as it is at a build.
+    let meta = state.engine.meta();
+    declaration.views = tessera_types::layer::expand_views(
+        &declaration.views,
+        |view| {
+            meta.groups
+                .iter()
+                .find(|g| g.name == view)
+                .map(|g| g.views.clone())
+        },
+        |view| meta.resolve_view(view).is_some(),
+    )
+    .map_err(|view| {
+        ApiError::Contract(format!(
+            "layer '{name}' declares view '{view}', which is neither a view nor a view group of \
+             this deployment; name one of: {}",
+            meta.views
+                .iter()
+                .map(|v| v.id.as_str())
+                .chain(meta.groups.iter().map(|g| g.name.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    })?;
     // **Decision 0111's layer-level span rule, at the declaration.** A shape layer whose views are
     // a mix of projected and unprojected row spaces has no geometry that could span them, so it is
     // refused here — naming the layer and both sides — rather than at the first artifact, where
@@ -3597,7 +2082,6 @@ async fn register_layer(
     // read per view at publication (`layer_frames`).
     if declaration.membership == tessera_types::layer::MembershipSource::Spatial {
         let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
-        let meta = state.engine.meta();
         let frames = layer_frames(&meta, &views)?;
         tessera_engine::shapes::check_shape_span(
             &frames,
@@ -3608,14 +2092,11 @@ async fn register_layer(
     // The **shared** blocking pool, not the deny runtime beside it. That runtime exists so a
     // suppression is never queued behind ingest; a registration is not a deny, and delaying one
     // under ingest load is backpressure working rather than a security operation refused.
-    let engine = Arc::clone(&state);
-    let id = tokio::task::spawn_blocking(move || engine.engine.register_layer(declaration))
-        .await
-        .map_err(crate::error::map_join_error)?
-        .map_err(crate::error::map_accept_error)?;
-    let mut body = serde_json::json!({ "name": name, "tessera_id": id.raw().to_string() });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((StatusCode::CREATED, Json(body)))
+    let id = state
+        .write(move |state| state.engine.register_layer(declaration))
+        .await?;
+    let body = serde_json::json!({ "name": name, "tessera_id": id.raw().to_string() });
+    acknowledge(&state, &wait, StatusCode::CREATED, body).await
 }
 
 /// `DELETE /control/layers/{name}` — drop a layer and tombstone its name for ever.
@@ -3633,16 +2114,12 @@ async fn drop_layer(
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let engine = Arc::clone(&state);
-    tokio::task::spawn_blocking(move || engine.engine.drop_layer(name))
-        .await
-        .map_err(crate::error::map_join_error)?
-        .map_err(crate::error::map_accept_error)?;
+    state
+        .write(move |state| state.engine.drop_layer(name))
+        .await?;
     // **200 with a body rather than 204**, so every write acknowledgement on this plane carries
     // its publication number and a client needs no table of which ones do.
-    let mut body = serde_json::json!({});
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((StatusCode::OK, Json(body)))
+    acknowledge(&state, &wait, StatusCode::OK, serde_json::json!({})).await
 }
 
 /// `PUT /control/attributes`' body: the `[[attribute]]` block minus its acquisition keys
@@ -3705,19 +2182,11 @@ async fn declare_attribute(
         scope: body.scope,
     };
     // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
-    let engine = Arc::clone(&state);
-    let existing = tokio::task::spawn_blocking(move || engine.engine.declare_attribute(request))
-        .await
-        .map_err(crate::error::map_join_error)?
-        .map_err(crate::error::map_accept_error)?;
-    let status = if existing {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    let mut body = serde_json::json!({ "name": name, "existing": existing });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((status, Json(body)))
+    let existing = state
+        .write(move |state| state.engine.declare_attribute(request))
+        .await?;
+    let body = serde_json::json!({ "name": name, "existing": existing });
+    acknowledge(&state, &wait, declared(existing), body).await
 }
 
 /// `PUT /control/vocabularies/{name}`' body: the `[[vocabulary]]` block minus its acquisition
@@ -3819,26 +2288,16 @@ async fn declare_vocabulary(
         reserved: body.reserved,
     };
     // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
-    let (existing, added, titles) = tokio::task::spawn_blocking({
-        let state = Arc::clone(&state);
-        move || state.engine.declare_vocabulary(request)
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
-    let status = if existing {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    let mut body = serde_json::json!({
+    let (existing, added, titles) = state
+        .write(move |state| state.engine.declare_vocabulary(request))
+        .await?;
+    let body = serde_json::json!({
         "name": name,
         "existing": existing,
         "added": added,
         "titles": titles
     });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((status, Json(body)))
+    acknowledge(&state, &wait, declared(existing), body).await
 }
 
 /// `PATCH /control/vocabularies/{name}/values` — a page of values for a vocabulary that exists
@@ -3860,7 +2319,7 @@ async fn mint_vocabulary_values(
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<VocabularyValuesBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let values: Vec<tessera_engine::DeclaredValue> = body
         .0
         .values
@@ -3871,21 +2330,16 @@ async fn mint_vocabulary_values(
         })
         .collect();
     let vocabulary = name.clone();
-    let engine = Arc::clone(&state);
-    let (added, existing, titles) = tokio::task::spawn_blocking(move || {
-        engine.engine.mint_vocabulary_values(vocabulary, values)
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
-    let mut body = serde_json::json!({
+    let (added, existing, titles) = state
+        .write(move |state| state.engine.mint_vocabulary_values(vocabulary, values))
+        .await?;
+    let body = serde_json::json!({
         "name": name,
         "added": added,
         "existing": existing,
         "titles": titles
     });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok(Json(body))
+    acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 
 /// The frame a view or a group declares, in **frame coordinates**: the four bounds a Morton code
@@ -4031,20 +2485,11 @@ async fn create_view_group(
             .collect(),
     };
     // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
-    let engine = Arc::clone(&state);
-    let existing =
-        tokio::task::spawn_blocking(move || engine.engine.create_view_group(declaration))
-            .await
-            .map_err(crate::error::map_join_error)?
-            .map_err(crate::error::map_accept_error)?;
-    let status = if existing {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    let mut body = serde_json::json!({ "group": name, "existing": existing });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((status, Json(body)))
+    let existing = state
+        .write(move |state| state.engine.create_view_group(declaration))
+        .await?;
+    let body = serde_json::json!({ "group": name, "existing": existing });
+    acknowledge(&state, &wait, declared(existing), body).await
 }
 
 /// `PUT /control/views/{name}` — create a plain view while the service runs (`ingest.md` §1.3
@@ -4074,20 +2519,11 @@ async fn create_plain_view(
             .map(tessera_types::view::DeclaredGate::into_labels),
         point_default: body.point_visibility.and_then(|p| p.default),
     };
-    let engine = Arc::clone(&state);
-    let existing =
-        tokio::task::spawn_blocking(move || engine.engine.create_plain_view(declaration))
-            .await
-            .map_err(crate::error::map_join_error)?
-            .map_err(crate::error::map_accept_error)?;
-    let status = if existing {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    let mut body = serde_json::json!({ "view": name, "existing": existing });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((status, Json(body)))
+    let existing = state
+        .write(move |state| state.engine.create_plain_view(declaration))
+        .await?;
+    let body = serde_json::json!({ "view": name, "existing": existing });
+    acknowledge(&state, &wait, declared(existing), body).await
 }
 
 /// `PUT /control/views/{group}/{key}`'s body: the roster record, which is the inline
@@ -4201,24 +2637,19 @@ async fn create_view(
     // The **shared** blocking pool, not the deny runtime beside it, on `register_layer`'s rule: a
     // creation is not a deny, and delaying one under ingest load is backpressure working rather
     // than a security operation refused.
-    tokio::task::spawn_blocking({
-        let state = Arc::clone(&state);
-        move || {
+    state
+        .write(move |state| {
             state
                 .engine
                 .create_view(group_name, view_key, visibility, metadata)
-        }
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
-    let mut body = serde_json::json!({
+        })
+        .await?;
+    let body = serde_json::json!({
         "view": format!("{group}:{key}"),
         "group": group,
         "key": key,
     });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok((StatusCode::CREATED, Json(body)))
+    acknowledge(&state, &wait, StatusCode::CREATED, body).await
 }
 
 /// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key (`views.md` §3.4).
@@ -4238,21 +2669,16 @@ async fn drop_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<DropViewQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let wait = WaitQuery { wait: query.wait };
-    let engine = Arc::clone(&state);
-    let dropped = tokio::task::spawn_blocking(move || {
-        engine.engine.drop_view(group, key, query.delete_dangling)
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
-    let mut body = serde_json::json!({
+    let dropped = state
+        .write(move |state| state.engine.drop_view(group, key, query.delete_dangling))
+        .await?;
+    let body = serde_json::json!({
         "deleted": dropped.deleted,
         "fills_dropped": dropped.fills_dropped,
     });
-    declaration_ack(&state, &wait).await?.merge(&mut body);
-    Ok(Json(body))
+    acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 
 /// Turn a flat member offset back into `(artifact index, member index)`, so a refusal names the
@@ -4267,39 +2693,6 @@ fn position_in_batch(widths: &[usize], flat: usize) -> (usize, usize) {
         remaining -= width;
     }
     (widths.len(), 0)
-}
-
-/// The body refusals shared by the verbs on `/control/layers/{name}/artifacts`.
-///
-/// Contracts §3.1's 422 row is "malformed request, **bounds exceeded**", and a `BytesRejection`
-/// is one or the other. Branched on the rejection's own status rather than collapsed, on
-/// [`ingest`]'s argument: a caller whose 4 KB body was truncated mid-upload must not be told to
-/// send fewer artifacts. The rejection's `Display` is not forwarded (this module's rule). `noun`
-/// names the request in the refusal and `remedy` is what an over-cap caller does next: a
-/// publication pages by artifact and a growth by member (ingest §2.1).
-fn artifact_bytes(
-    state: &AppState,
-    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
-    noun: &str,
-    remedy: &str,
-) -> Result<Bytes, ApiError> {
-    body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::Contract(format!(
-                "the {noun} body exceeds the {}-byte per-request limit \
-                 (ingest.publish_max_body_bytes; limits.{noun}.max_body_bytes on \
-                 /control/status); refused before decoding, so it allocated no ordinal and \
-                 appended nothing. {remedy}",
-                state.publish_max_body_bytes
-            ))
-        } else {
-            ApiError::Contract(format!(
-                "the {noun} body could not be read to completion: the connection failed \
-                 mid-upload, or the transfer encoding is malformed. Nothing was decoded, \
-                 allocated or appended"
-            ))
-        }
-    })
 }
 
 /// A JSON body on an artifact route, decoded against `T`'s own shape. A field the shape does not
@@ -4735,7 +3128,23 @@ struct RowShape<'a> {
     space: &'a Option<String>,
 }
 
-impl IncomingArtifactBody {
+/// A publication's or a growth's row, as [`canonical_batch_shapes`] reads it.
+trait ShapedRow {
+    /// The row's key, as its shape report names it.
+    fn key(&self) -> serde_json::Value;
+    fn row_shape(&self) -> RowShape<'_>;
+    /// Whether the row's shape is read: a growth without a shape field fills no shape, where a
+    /// publication's row on a shape layer is refused without one.
+    fn fills_shape(&self) -> bool;
+    /// Each ranked content's rank and values.
+    fn contents_mut(&mut self) -> impl Iterator<Item = (usize, &mut Vec<String>)>;
+}
+
+impl ShapedRow for IncomingArtifactBody {
+    fn key(&self) -> serde_json::Value {
+        serde_json::json!(self.key)
+    }
+
     fn row_shape(&self) -> RowShape<'_> {
         RowShape {
             bbox: &self.bbox,
@@ -4744,10 +3153,25 @@ impl IncomingArtifactBody {
             wkt: &self.wkt,
             space: &self.space,
         }
+    }
+
+    fn fills_shape(&self) -> bool {
+        true
+    }
+
+    fn contents_mut(&mut self) -> impl Iterator<Item = (usize, &mut Vec<String>)> {
+        self.content
+            .iter_mut()
+            .enumerate()
+            .map(|(rank, content)| (rank, &mut content.values))
     }
 }
 
-impl GrowingArtifactBody {
+impl ShapedRow for GrowingArtifactBody {
+    fn key(&self) -> serde_json::Value {
+        serde_json::json!(self.key)
+    }
+
     fn row_shape(&self) -> RowShape<'_> {
         RowShape {
             bbox: &self.bbox,
@@ -4758,10 +3182,14 @@ impl GrowingArtifactBody {
         }
     }
 
-    /// Whether the row carries any shape field: a growth without one fills no shape, where a
-    /// publication's row on a shape layer is refused without one.
-    fn carries_shape(&self) -> bool {
+    fn fills_shape(&self) -> bool {
         self.bbox.is_some() || self.circle.is_some() || self.ellipse.is_some() || self.wkt.is_some()
+    }
+
+    fn contents_mut(&mut self) -> impl Iterator<Item = (usize, &mut Vec<String>)> {
+        self.content
+            .iter_mut()
+            .map(|content| (content.rank as usize, &mut content.values))
     }
 }
 
@@ -4788,7 +3216,7 @@ fn canonical_authored_content(
     ),
     ApiError,
 > {
-    use tessera_engine::shapes::{authored_shape_input, canonical_shapes, shape_input};
+    use tessera_engine::shapes::{authored_shape_input, shape_input};
     let refuse = |detail: String| {
         ApiError::Contract(format!(
             "artifact {index}: content {rank}: the authored {} content: {detail}",
@@ -4797,36 +3225,7 @@ fn canonical_authored_content(
     };
     let input = authored_shape_input(kind, text).map_err(|e| refuse(e.to_string()))?;
     let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
-    let meta = state.engine.meta();
-    let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
-    // **One frame per view of the layer**, and never the bundle's — the bundle has no frame of
-    // its own to read (decision 0040), and a layer's views need share neither projection nor
-    // extent (decision 0111). The shape goes through each view's own transform and is quantised
-    // against each view's own extent; [`layer_frames`] is where the two spans that cannot be
-    // resolved are refused instead.
-    let frames = layer_frames(&meta, &views)?;
-    let canonical = canonical_shapes(&shape, &frames, space, state.max_shape_vertices)
-        .map_err(|e| refuse(e.to_string()))?;
-    let report: Vec<serde_json::Value> = canonical
-        .reports
-        .iter()
-        .map(|(view, r, stats)| {
-            serde_json::json!({
-                "view": view,
-                "clipped": r.clipped,
-                "outside": r.outside,
-                "rings_dropped": r.rings_dropped,
-                "degrees_looking": r.degrees_looking,
-                "vertices_in": r.vertices_in,
-                "vertices_out": r.vertices_out,
-                "parts": stats.parts,
-                "rings": stats.rings,
-            })
-        })
-        .collect();
-    let shapes = tessera_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
-        .ok_or_else(|| refuse("canonicalised to no view".to_string()))?;
-    Ok((shapes, serde_json::Value::Array(report)))
+    canonical_for_layer(state, declaration, &shape, space, refuse)
 }
 
 /// One row's shape as the caller wrote it, canonicalised for every view of its layer.
@@ -4850,7 +3249,7 @@ fn canonical_row_shape(
     )>,
     ApiError,
 > {
-    use tessera_engine::shapes::{canonical_shapes, shape_input, ShapeInput, ShapeSpace};
+    use tessera_engine::shapes::{shape_input, ShapeInput, ShapeSpace};
     let refuse = |detail: String| ApiError::Contract(format!("artifact {index}: {detail}"));
     let mut carried: Vec<(&str, ShapeInput)> = Vec::new();
     let count = |field: &str, n: usize, want: usize| {
@@ -4914,6 +3313,23 @@ fn canonical_row_shape(
         }
     };
     let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
+    canonical_for_layer(state, declaration, &shape, space, refuse).map(Some)
+}
+
+/// One shape canonicalised for every view of its layer, and the per-view report of what that did.
+fn canonical_for_layer(
+    state: &AppState,
+    declaration: &tessera_types::layer::LayerDeclaration,
+    shape: &tessera_engine::shapes::ShapeF64,
+    space: tessera_engine::shapes::ShapeSpace,
+    refuse: impl Fn(String) -> ApiError,
+) -> Result<
+    (
+        tessera_lifecycle::membership::ArtifactShapes,
+        serde_json::Value,
+    ),
+    ApiError,
+> {
     let meta = state.engine.meta();
     let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
     // **One frame per view of the layer**, and never the bundle's — the bundle has no frame of
@@ -4922,8 +3338,13 @@ fn canonical_row_shape(
     // against each view's own extent; [`layer_frames`] is where the two spans that cannot be
     // resolved are refused instead.
     let frames = layer_frames(&meta, &views)?;
-    let canonical = canonical_shapes(&shape, &frames, space, state.max_shape_vertices)
-        .map_err(|e| refuse(e.to_string()))?;
+    let canonical = tessera_engine::shapes::canonical_shapes(
+        shape,
+        &frames,
+        space,
+        state.limits.max_shape_vertices,
+    )
+    .map_err(|e| refuse(e.to_string()))?;
     let report: Vec<serde_json::Value> = canonical
         .reports
         .iter()
@@ -4945,7 +3366,87 @@ fn canonical_row_shape(
         .collect();
     let shapes = tessera_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
         .ok_or_else(|| refuse("the layer is drawn in no view".to_string()))?;
-    Ok(Some((shapes, serde_json::Value::Array(report))))
+    Ok((shapes, serde_json::Value::Array(report)))
+}
+
+/// A batch's shapes, canonicalised before anything is resolved or allocated, and the report of
+/// what that did: each row's shape where it fills one, then each ranked content's authored shape.
+///
+/// **The authored shape content is read as a membership shape is** (`polygon-membership.md`
+/// §6.1, ruling (h)): where the layer declares a `polygon`, `circle` or `ellipse` content, that
+/// slot of every ranked content is canonicalised for every view of the layer — the same reader,
+/// the same report, the same vertex cap and **the same space**, the batch's `default_space` and
+/// the row's own `space` — and the slot then holds the canonical bytes in their content spelling,
+/// which is what the blob stores and the serve reads back into `shape_x`/`shape_y`. Refused as a
+/// membership shape is refused, naming the row. A layer this deployment does not hold
+/// canonicalises nothing here; the engine refuses it.
+fn canonical_batch_shapes(
+    state: &AppState,
+    declaration: Option<&tessera_types::layer::LayerDeclaration>,
+    default_space: Option<&str>,
+    rows: &mut [impl ShapedRow],
+) -> Result<
+    (
+        Vec<Option<tessera_lifecycle::membership::ArtifactShapes>>,
+        Vec<serde_json::Value>,
+    ),
+    ApiError,
+> {
+    use tessera_engine::shapes::ShapeSpace;
+    let default_space = match default_space {
+        None => ShapeSpace::View,
+        Some(word) => ShapeSpace::parse(word)
+            .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
+    };
+    let mut shapes = Vec::with_capacity(rows.len());
+    let mut reports: Vec<serde_json::Value> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let canonical = match declaration {
+            Some(declaration) if row.fills_shape() => {
+                canonical_row_shape(state, declaration, index, &row.row_shape(), default_space)?
+            }
+            _ => None,
+        };
+        match canonical {
+            Some((canonical, report)) => {
+                shapes.push(Some(canonical));
+                reports.push(serde_json::json!({
+                    "key": row.key(),
+                    "views": report,
+                }));
+            }
+            None => shapes.push(None),
+        }
+    }
+    let Some(declaration) = declaration else {
+        return Ok((shapes, reports));
+    };
+    let Some((slot, kind)) = declaration.authored_shape() else {
+        return Ok((shapes, reports));
+    };
+    for (index, row) in rows.iter_mut().enumerate() {
+        let space = match row.row_shape().space.as_deref() {
+            None => default_space,
+            Some(word) => ShapeSpace::parse(word)
+                .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
+        };
+        let key = row.key();
+        for (rank, values) in row.contents_mut() {
+            let Some(text) = values.get_mut(slot) else {
+                // Short of a value: the engine refuses the row, naming the count.
+                continue;
+            };
+            let (canonical, report) =
+                canonical_authored_content(state, declaration, index, rank, kind, space, text)?;
+            reports.push(serde_json::json!({
+                "key": key,
+                "content": rank,
+                "views": report,
+            }));
+            *text = canonical.content_text();
+        }
+    }
+    Ok((shapes, reports))
 }
 
 /// How a caller names an attachment's target.
@@ -5013,13 +3514,16 @@ async fn publish_artifacts(
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let body = artifact_bytes(
-        &state,
-        body,
-        "publish",
-        "Send fewer artifacts per request; a membership that does not fit beside its record is \
-         published with a first page and grown with `PATCH` in pages (decision 0127)",
-    )?;
+    let body = body.map_err(|rejection| {
+        body_refusal(
+            rejection.status(),
+            "publish",
+            state.limits.publish_max_body_bytes,
+            "The limit is ingest.publish_max_body_bytes (limits.publish.max_body_bytes on \
+             /control/status). Send fewer artifacts per request; a membership that does not fit \
+             beside its record is published with a first page and grown with `PATCH` in pages",
+        )
+    })?;
     // An artifact record is object-shaped (nested content, lineage and a shape) and is the JSON
     // this route has always taken (ingest §1.2); the row-shaped routes are the ones with an
     // Arrow form.
@@ -5044,14 +3548,14 @@ async fn publish_artifacts(
         ));
     }
     // The record count (ingest §2.1), before any shape is canonicalised or address resolved.
-    if artifacts.len() > state.max_artifacts_per_request {
+    if artifacts.len() > state.limits.max_artifacts_per_request {
         return Err(ApiError::Contract(format!(
             "the publication carries {} artifacts, exceeding the {}-artifact per-request limit \
              (ingest.max_artifacts_per_request; limits.publish.max_artifacts_per_request on \
              /control/status); refused before anything was resolved or allocated. Send fewer \
              artifacts per request",
             artifacts.len(),
-            state.max_artifacts_per_request
+            state.limits.max_artifacts_per_request
         )));
     }
 
@@ -5097,7 +3601,7 @@ async fn publish_artifacts(
                  leaves out (ingest.md §2.3)"
             )));
         }
-        if excluding.len() > state.max_excluded_per_request {
+        if excluding.len() > state.limits.max_excluded_per_request {
             return Err(ApiError::Contract(format!(
                 "artifact {index} of this publication excludes {} entities, exceeding the {} the \
                  exclusion spelling admits (ingest.max_excluded_per_request; \
@@ -5107,7 +3611,7 @@ async fn publish_artifacts(
                  this long is spelled as an inclusion instead, naming the members the artifact \
                  holds, which pages over as many requests as it takes (ingest.md §2.3)",
                 excluding.len(),
-                state.max_excluded_per_request
+                state.limits.max_excluded_per_request
             )));
         }
     }
@@ -5117,11 +3621,11 @@ async fn publish_artifacts(
     // executor, where the declaration is its own state; here the caller is told before a shape is
     // canonicalised or an id resolved. A layer this deployment does not hold is the engine's
     // refusal below, so an absent declaration checks nothing here.
-    if let Some(declaration) = state
+    let declaration = state
         .engine
         .registered_layer(&name)
-        .map(|registered| registered.declaration)
-    {
+        .map(|registered| registered.declaration);
+    if let Some(declaration) = &declaration {
         for (index, artifact) in artifacts.iter().enumerate() {
             match (declaration.scope.group(), artifact.view.as_deref()) {
                 (Some(_), Some(_)) | (None, None) => {}
@@ -5145,195 +3649,125 @@ async fn publish_artifacts(
         }
     }
 
-    // **The shapes, canonicalised before anything is resolved or allocated** — a refusal spends
-    // nothing, and the batch is the commit unit. The layer's declaration is the engine's state;
-    // a layer this deployment does not hold is the engine's refusal below, so here it simply
-    // canonicalises nothing.
-    let default_space = match default_space.as_deref() {
-        None => tessera_engine::shapes::ShapeSpace::View,
-        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-            .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
-    };
-    let declaration = state
-        .engine
-        .registered_layer(&name)
-        .map(|registered| registered.declaration);
-    let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
-        Vec::with_capacity(artifacts.len());
-    let mut shape_reports: Vec<serde_json::Value> = Vec::new();
-    for (index, artifact) in artifacts.iter().enumerate() {
-        match &declaration {
-            Some(declaration) => {
-                match canonical_row_shape(
-                    &state,
-                    declaration,
-                    index,
-                    &artifact.row_shape(),
-                    default_space,
-                )? {
-                    Some((canonical, report)) => {
-                        shapes.push(Some(canonical));
-                        shape_reports.push(serde_json::json!({
-                            "key": artifact.key,
-                            "views": report,
-                        }));
-                    }
-                    None => shapes.push(None),
-                }
-            }
-            None => shapes.push(None),
-        }
-    }
-    // **The authored shape content, read as a membership shape is** (`polygon-membership.md`
-    // §6.1, ruling (h)): where the layer declares a `polygon`, `circle` or `ellipse` content, that
-    // slot of every ranked content is canonicalised for every view of the layer — the same
-    // reader, the same report, the same vertex cap and **the same space**, the batch's
-    // `default_space` and the row's own `space` — and the slot then holds the canonical bytes
-    // in their content spelling, which is what the blob stores and the serve reads back into
-    // `shape_x`/`shape_y`. Refused as a membership shape is refused, naming the row.
-    if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
-        let declaration = declaration
-            .as_ref()
-            .expect("an authored slot names a declaration");
-        for (index, artifact) in artifacts.iter_mut().enumerate() {
-            let space = match artifact.space.as_deref() {
-                None => default_space,
-                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-                    .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
-            };
-            for (rank, content) in artifact.content.iter_mut().enumerate() {
-                let Some(text) = content.values.get_mut(slot) else {
-                    // Short of a value: the engine refuses the row below, naming the count.
-                    continue;
-                };
-                let (canonical, report) = canonical_authored_content(
-                    &state,
-                    declaration,
-                    index,
-                    rank,
-                    kind,
-                    space,
-                    text,
-                )?;
-                shape_reports.push(serde_json::json!({
-                    "key": artifact.key,
-                    "content": rank,
-                    "views": report,
-                }));
-                *text = canonical.content_text();
-            }
-        }
-    }
+    // The shared blocking pool, on `register_layer`'s argument: a publication is not a deny, and
+    // delaying one under ingest load is backpressure working. Canonicalising the shapes and
+    // resolving the members read the bundle, so they run here too.
+    let (batch, keys, shape_reports) = state
+        .blocking(move |state| {
+            let (shapes, shape_reports) = canonical_batch_shapes(
+                state,
+                declaration.as_ref(),
+                default_space.as_deref(),
+                &mut artifacts,
+            )?;
 
-    // Flattened once, so each address form is resolved in a single batched call whatever the shape
-    // of the batch: the external half opens each bundle extent at most once regardless of N, and
-    // the tessera half takes one generation snapshot for the idset check and every inversion.
-    // **Members first, then each content's generating set**, per artifact — one flat list, one
-    // resolution pass, whatever the shape. A generating set is resolved by the same route and at
-    // the same boundary as a membership, and for the same reason: a `tessera_id` in durable state
-    // would be reinterpreted by the next key rotation, and a containment test over a set that names
-    // different documents than the caller wrote is a disclosure rather than a stale answer.
-    // **The exclusion list is resolved on the membership's own route**, in the members' place:
-    // an excluded entity is named the way a member is, and a list that named a blinded identifier
-    // the boundary did not invert would exclude a different document at the next key rotation
-    // (I10) — the same reason the membership is resolved here.
-    let widths: Vec<usize> = artifacts
-        .iter()
-        .map(|a| {
-            a.members.as_ref().map_or(0, |m| m.len())
-                + a.excluding.as_ref().map_or(0, |e| e.len())
-                + a.content
-                    .iter()
-                    .map(|v| v.generated_from.len())
-                    .sum::<usize>()
-        })
-        .collect();
-    let flat: Vec<&String> = artifacts
-        .iter()
-        .flat_map(|a| {
-            a.members
+            // Flattened once, so each address form is resolved in a single batched call whatever the shape
+            // of the batch: the external half opens each bundle extent at most once regardless of N, and
+            // the tessera half takes one generation snapshot for the idset check and every inversion.
+            // **Members first, then each content's generating set**, per artifact — one flat list, one
+            // resolution pass, whatever the shape. A generating set is resolved by the same route and at
+            // the same boundary as a membership, and for the same reason: a `tessera_id` in durable state
+            // would be reinterpreted by the next key rotation, and a containment test over a set that names
+            // different documents than the caller wrote is a disclosure rather than a stale answer.
+            // **The exclusion list is resolved on the membership's own route**, in the members' place:
+            // an excluded entity is named the way a member is, and a list that named a blinded identifier
+            // the boundary did not invert would exclude a different document at the next key rotation
+            // (I10) — the same reason the membership is resolved here.
+            let widths: Vec<usize> = artifacts
                 .iter()
-                .flatten()
-                .chain(a.excluding.iter().flatten())
-                .chain(a.content.iter().flat_map(|v| v.generated_from.iter()))
-        })
-        .collect();
-
-    let resolved = resolve_member_addresses(
-        &state,
-        addressing,
-        idset,
-        &flat,
-        &widths,
-        "its members first, then each content's generating set",
-    )?;
-
-    // Walked back in exactly the order it was flattened: members, then each content's set.
-    let mut entities = resolved.into_iter();
-    let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
-        .into_iter()
-        .zip(shapes)
-        .map(|(artifact, shape)| {
-            let members: Vec<tessera_types::EntityId> = entities
-                .by_ref()
-                .take(artifact.members.as_ref().map_or(0, |m| m.len()))
-                .collect();
-            let excluded: Option<Vec<tessera_types::EntityId>> = artifact
-                .excluding
-                .as_ref()
-                .map(|list| entities.by_ref().take(list.len()).collect());
-            let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
-                .content
-                .into_iter()
-                .map(|v| {
-                    let set: Vec<tessera_types::EntityId> =
-                        entities.by_ref().take(v.generated_from.len()).collect();
-                    tessera_lifecycle::membership::IncomingContent::new(v.values, set)
+                .map(|a| {
+                    a.members.as_ref().map_or(0, |m| m.len())
+                        + a.excluding.as_ref().map_or(0, |e| e.len())
+                        + a.content
+                            .iter()
+                            .map(|v| v.generated_from.len())
+                            .sum::<usize>()
                 })
                 .collect();
-            let attached_to =
-                artifact
-                    .attached_to
-                    .map(|a| tessera_lifecycle::membership::IncomingAttachment {
-                        layer: a.layer,
-                        level: a.level,
-                        key: a.key,
-                    });
-            let mut incoming = match attached_to {
-                None => tessera_lifecycle::IncomingArtifact::with_content(
-                    artifact.key,
-                    members,
-                    contents,
-                ),
-                Some(attached_to) => tessera_lifecycle::IncomingArtifact::attached(
-                    artifact.key,
-                    members,
-                    contents,
-                    attached_to,
-                ),
-            };
-            incoming.shape = shape;
-            incoming.parent_keys = artifact.parent;
-            incoming.view = artifact.view;
-            // The list travels; the complement is the executor's, taken against the view's
-            // entity set before the record is written (`ingest.md` §2.3).
-            if let Some(excluded) = excluded {
-                incoming.exclude(excluded);
-            }
-            incoming
-        })
-        .collect();
-    let keys: Vec<Option<String>> = incoming.iter().map(|a| a.key.clone()).collect();
+            let flat: Vec<&String> = artifacts
+                .iter()
+                .flat_map(|a| {
+                    a.members
+                        .iter()
+                        .flatten()
+                        .chain(a.excluding.iter().flatten())
+                        .chain(a.content.iter().flat_map(|v| v.generated_from.iter()))
+                })
+                .collect();
 
-    // The **shared** blocking pool, on `register_layer`'s argument: a publication is not a deny,
-    // and delaying one under ingest load is backpressure working.
-    let batch = tokio::task::spawn_blocking({
-        let state = Arc::clone(&state);
-        move || state.engine.put_artifacts(name, level, incoming)
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
+            let resolved = resolve_member_addresses(
+                state,
+                addressing,
+                idset,
+                &flat,
+                &widths,
+                "its members first, then each content's generating set",
+            )?;
+
+            // Walked back in exactly the order it was flattened: members, then each content's set.
+            let mut entities = resolved.into_iter();
+            let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
+                .into_iter()
+                .zip(shapes)
+                .map(|(artifact, shape)| {
+                    let members: Vec<tessera_types::EntityId> = entities
+                        .by_ref()
+                        .take(artifact.members.as_ref().map_or(0, |m| m.len()))
+                        .collect();
+                    let excluded: Option<Vec<tessera_types::EntityId>> = artifact
+                        .excluding
+                        .as_ref()
+                        .map(|list| entities.by_ref().take(list.len()).collect());
+                    let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
+                        .content
+                        .into_iter()
+                        .map(|v| {
+                            let set: Vec<tessera_types::EntityId> =
+                                entities.by_ref().take(v.generated_from.len()).collect();
+                            tessera_lifecycle::membership::IncomingContent::new(v.values, set)
+                        })
+                        .collect();
+                    let attached_to =
+                        artifact
+                            .attached_to
+                            .map(|a| tessera_lifecycle::membership::IncomingAttachment {
+                                layer: a.layer,
+                                level: a.level,
+                                key: a.key,
+                            });
+                    let mut incoming = match attached_to {
+                        None => tessera_lifecycle::IncomingArtifact::with_content(
+                            artifact.key,
+                            members,
+                            contents,
+                        ),
+                        Some(attached_to) => tessera_lifecycle::IncomingArtifact::attached(
+                            artifact.key,
+                            members,
+                            contents,
+                            attached_to,
+                        ),
+                    };
+                    incoming.shape = shape;
+                    incoming.parent_keys = artifact.parent;
+                    incoming.view = artifact.view;
+                    // The list travels; the complement is the executor's, taken against the view's
+                    // entity set before the record is written (`ingest.md` §2.3).
+                    if let Some(excluded) = excluded {
+                        incoming.exclude(excluded);
+                    }
+                    incoming
+                })
+                .collect();
+            let keys: Vec<Option<String>> = incoming.iter().map(|a| a.key.clone()).collect();
+
+            let batch = state
+                .engine
+                .put_artifacts(name, level, incoming)
+                .map_err(crate::error::map_accept_error)?;
+            Ok((batch, keys, shape_reports))
+        })
+        .await?;
 
     let published: Vec<serde_json::Value> = batch
         .tessera_ids
@@ -5359,13 +3793,7 @@ async fn publish_artifacts(
     if !shape_reports.is_empty() {
         body["shapes"] = serde_json::Value::Array(shape_reports);
     }
-    let status = if batch.created > 0 {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    publication_ack(&state, &wait).await?.merge(&mut body);
-    Ok((status, Json(body)))
+    acknowledge(&state, &wait, declared(batch.created == 0), body).await
 }
 
 /// `PATCH /control/layers/{name}/artifacts`'s body: the publication's addressing, and per artifact
@@ -5487,13 +3915,16 @@ async fn grow_memberships(
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let body = artifact_bytes(
-        &state,
-        body,
-        "grow",
-        "Send fewer members per request: a growth is a delta, so a membership may be grown in as \
-         many requests as it needs",
-    )?;
+    let body = body.map_err(|rejection| {
+        body_refusal(
+            rejection.status(),
+            "grow",
+            state.limits.publish_max_body_bytes,
+            "The limit is ingest.publish_max_body_bytes (limits.grow.max_body_bytes on \
+             /control/status). Send fewer members per request: a growth is a delta, so a \
+             membership may be grown in as many requests as it needs",
+        )
+    })?;
     let GrowBody {
         level,
         addressing,
@@ -5511,161 +3942,110 @@ async fn grow_memberships(
         ));
     }
 
-    // **The shapes and the authored shape contents, canonicalised before anything is resolved**,
-    // on the publication's rule and through the publication's own reader, so a shape filled here
-    // is byte for byte the shape a publication would have stored. A row carrying no shape field
-    // fills no shape; one carrying a shape on a layer that declares none is refused as a
-    // publication's row is.
-    let default_space = match default_space.as_deref() {
-        None => tessera_engine::shapes::ShapeSpace::View,
-        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-            .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
-    };
-    let declaration = state
-        .engine
-        .registered_layer(&name)
-        .map(|registered| registered.declaration);
-    let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
-        Vec::with_capacity(artifacts.len());
-    let mut shape_reports: Vec<serde_json::Value> = Vec::new();
-    for (index, artifact) in artifacts.iter().enumerate() {
-        match &declaration {
-            Some(declaration) if artifact.carries_shape() => {
-                match canonical_row_shape(
-                    &state,
-                    declaration,
-                    index,
-                    &artifact.row_shape(),
-                    default_space,
-                )? {
-                    Some((canonical, report)) => {
-                        shapes.push(Some(canonical));
-                        shape_reports.push(serde_json::json!({
-                            "key": artifact.key,
-                            "views": report,
-                        }));
-                    }
-                    None => shapes.push(None),
-                }
-            }
-            _ => shapes.push(None),
-        }
-    }
-    if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
-        let declaration = declaration
-            .as_ref()
-            .expect("an authored slot names a declaration");
-        for (index, artifact) in artifacts.iter_mut().enumerate() {
-            let space = match artifact.space.as_deref() {
-                None => default_space,
-                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
-                    .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
-            };
-            for content in artifact.content.iter_mut() {
-                let rank = content.rank as usize;
-                let Some(text) = content.values.get_mut(slot) else {
-                    // Short of a value: the engine refuses the row below, naming the count.
-                    continue;
-                };
-                let (canonical, report) = canonical_authored_content(
-                    &state,
-                    declaration,
-                    index,
-                    rank,
-                    kind,
-                    space,
-                    text,
-                )?;
-                shape_reports.push(serde_json::json!({
-                    "key": artifact.key,
-                    "content": rank,
-                    "views": report,
-                }));
-                *text = canonical.content_text();
-            }
-        }
-    }
-
-    // **A row's members and its leaving members are one list at the boundary**, resolved in one
-    // pass and walked back in the order they were flattened: the two are addresses of the same
-    // kind and a page that named an entity in both must resolve it to one entity (`ingest.md`
-    // §1.1). The joins come first in each row, which is the order they are applied in.
-    let widths: Vec<usize> = artifacts
-        .iter()
-        .map(|a| a.members.len() + a.leaving.len())
-        .collect();
-    let flat: Vec<&String> = artifacts
-        .iter()
-        .flat_map(|a| a.members.iter().chain(a.leaving.iter()))
-        .collect();
     // The record count (ingest §2.1): members summed over the page's artifacts, before any
     // address is resolved.
-    if flat.len() > state.max_members_per_request {
+    let members: usize = artifacts
+        .iter()
+        .map(|a| a.members.len() + a.leaving.len())
+        .sum();
+    if members > state.limits.max_members_per_request {
         return Err(ApiError::Contract(format!(
             "the growth names {} members, exceeding the {}-member per-request limit \
              (ingest.max_members_per_request; limits.grow.max_members_per_request on \
              /control/status); refused before any address was resolved. Send fewer members per \
              request: a growth is a delta, so a membership may be grown in as many requests as it \
              needs",
-            flat.len(),
-            state.max_members_per_request
+            members,
+            state.limits.max_members_per_request
         )));
     }
-    let resolved =
-        resolve_member_addresses(&state, addressing, idset, &flat, &widths, "its members")?;
-
-    // Walked back in exactly the order it was flattened.
-    let mut entities = resolved.into_iter();
-    let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts
-        .into_iter()
-        .zip(shapes)
-        .map(|(artifact, shape)| {
-            let members: Vec<tessera_types::EntityId> =
-                entities.by_ref().take(artifact.members.len()).collect();
-            let leaving: Vec<tessera_types::EntityId> =
-                entities.by_ref().take(artifact.leaving.len()).collect();
-            // **One shape for every row, and the executor decides what the combination means.**
-            // A row naming a rank pages that content's generating set; one naming members leaving
-            // and no rank is refused there, which is where the caller is told that a membership
-            // never shrinks (`ingest.md` §10, R7); one naming a rank *and* a fixed part is refused
-            // there too. Dropping the parts here instead would answer `200` for a shape or a
-            // content the batch threw away.
-            let mut join = tessera_lifecycle::IncomingGrowth::page_of_entities(
-                artifact.key,
-                artifact.rank,
-                members,
-                leaving,
-            );
-            join.parts = tessera_lifecycle::FixedParts {
-                parent_keys: artifact.parent,
-                attached_to: artifact.attached_to.map(|a| {
-                    tessera_lifecycle::membership::IncomingAttachment {
-                        layer: a.layer,
-                        level: a.level,
-                        key: a.key,
-                    }
-                }),
-                contents: artifact
-                    .content
-                    .into_iter()
-                    .map(|c| (c.rank, c.values))
-                    .collect(),
-                shape,
-            };
-            join
-        })
-        .collect();
-    let keys: Vec<String> = joins.iter().map(|j| j.key.clone()).collect();
 
     // The shared blocking pool, on `publish_artifacts`'s argument: a growth is not a deny, and
-    // delaying one under ingest load is backpressure working.
-    let grown = tokio::task::spawn_blocking({
-        let state = Arc::clone(&state);
-        move || state.engine.grow_memberships(name, level, joins)
-    })
-    .await
-    .map_err(crate::error::map_join_error)?
-    .map_err(crate::error::map_accept_error)?;
+    // delaying one under ingest load is backpressure working. Canonicalising the shapes and
+    // resolving the members read the bundle, so they run here too.
+    let (grown, keys, shape_reports) = state
+        .blocking(move |state| {
+            // **The shapes and the authored shape contents, canonicalised before anything is resolved**,
+            // on the publication's rule and through the publication's own reader, so a shape filled here
+            // is byte for byte the shape a publication would have stored. A row carrying no shape field
+            // fills no shape; one carrying a shape on a layer that declares none is refused as a
+            // publication's row is.
+            let declaration = state
+                .engine
+                .registered_layer(&name)
+                .map(|registered| registered.declaration);
+            let (shapes, shape_reports) = canonical_batch_shapes(
+                state,
+                declaration.as_ref(),
+                default_space.as_deref(),
+                &mut artifacts,
+            )?;
+
+            // **A row's members and its leaving members are one list at the boundary**, resolved in one
+            // pass and walked back in the order they were flattened: the two are addresses of the same
+            // kind and a page that named an entity in both must resolve it to one entity (`ingest.md`
+            // §1.1). The joins come first in each row, which is the order they are applied in.
+            let widths: Vec<usize> = artifacts
+                .iter()
+                .map(|a| a.members.len() + a.leaving.len())
+                .collect();
+            let flat: Vec<&String> = artifacts
+                .iter()
+                .flat_map(|a| a.members.iter().chain(a.leaving.iter()))
+                .collect();
+            let resolved =
+                resolve_member_addresses(state, addressing, idset, &flat, &widths, "its members")?;
+
+            // Walked back in exactly the order it was flattened.
+            let mut entities = resolved.into_iter();
+            let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts
+                .into_iter()
+                .zip(shapes)
+                .map(|(artifact, shape)| {
+                    let members: Vec<tessera_types::EntityId> =
+                        entities.by_ref().take(artifact.members.len()).collect();
+                    let leaving: Vec<tessera_types::EntityId> =
+                        entities.by_ref().take(artifact.leaving.len()).collect();
+                    // **One shape for every row, and the executor decides what the combination means.**
+                    // A row naming a rank pages that content's generating set; one naming members leaving
+                    // and no rank is refused there, which is where the caller is told that a membership
+                    // never shrinks (`ingest.md` §10, R7); one naming a rank *and* a fixed part is refused
+                    // there too. Dropping the parts here instead would answer `200` for a shape or a
+                    // content the batch threw away.
+                    let mut join = tessera_lifecycle::IncomingGrowth::page_of_entities(
+                        artifact.key,
+                        artifact.rank,
+                        members,
+                        leaving,
+                    );
+                    join.parts = tessera_lifecycle::FixedParts {
+                        parent_keys: artifact.parent,
+                        attached_to: artifact.attached_to.map(|a| {
+                            tessera_lifecycle::membership::IncomingAttachment {
+                                layer: a.layer,
+                                level: a.level,
+                                key: a.key,
+                            }
+                        }),
+                        contents: artifact
+                            .content
+                            .into_iter()
+                            .map(|c| (c.rank, c.values))
+                            .collect(),
+                        shape,
+                    };
+                    join
+                })
+                .collect();
+            let keys: Vec<String> = joins.iter().map(|j| j.key.clone()).collect();
+
+            let grown = state
+                .engine
+                .grow_memberships(name, level, joins)
+                .map_err(crate::error::map_accept_error)?;
+            Ok((grown, keys, shape_reports))
+        })
+        .await?;
 
     let artifacts: Vec<serde_json::Value> = grown
         .iter()
@@ -5691,8 +4071,7 @@ async fn grow_memberships(
     if !shape_reports.is_empty() {
         body["shapes"] = serde_json::Value::Array(shape_reports);
     }
-    publication_ack(&state, &wait).await?.merge(&mut body);
-    Ok((StatusCode::OK, Json(body)))
+    acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 /// `POST /control/faults/arm` — the correctness suite's arming surface (decision 0071;
 /// correctness-suite §12.3). **The faults build only**; a default build does not mount the route.
@@ -6018,28 +4397,28 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         "limits": {
             "ingest": {
                 "route": "POST /control/ingest",
-                "max_batch_rows": state.ingest_max_batch_rows,
-                "max_batch_bytes": state.ingest_max_batch_bytes,
+                "max_batch_rows": state.limits.ingest_max_batch_rows,
+                "max_batch_bytes": state.limits.ingest_max_batch_bytes,
             },
             // The two units the values route publishes (`ingest.md` §2.1, §1.4). They are the
             // ingest route's own numbers, not a second pair of keys: a values row is a row, and
             // the cost it puts on the executor and on a connection is the same shape.
             "values": {
                 "route": "POST /control/values",
-                "max_batch_rows": state.ingest_max_batch_rows,
-                "max_batch_bytes": state.ingest_max_batch_bytes,
+                "max_batch_rows": state.limits.ingest_max_batch_rows,
+                "max_batch_bytes": state.limits.ingest_max_batch_bytes,
             },
             "publish": {
                 "route": "PUT /control/layers/{name}/artifacts",
-                "max_artifacts_per_request": state.max_artifacts_per_request,
-                "max_body_bytes": state.publish_max_body_bytes,
-                "max_shape_vertices": state.max_shape_vertices,
-                "max_excluded_per_request": state.max_excluded_per_request,
+                "max_artifacts_per_request": state.limits.max_artifacts_per_request,
+                "max_body_bytes": state.limits.publish_max_body_bytes,
+                "max_shape_vertices": state.limits.max_shape_vertices,
+                "max_excluded_per_request": state.limits.max_excluded_per_request,
             },
             "grow": {
                 "route": "PATCH /control/layers/{name}/artifacts",
-                "max_members_per_request": state.max_members_per_request,
-                "max_body_bytes": state.publish_max_body_bytes,
+                "max_members_per_request": state.limits.max_members_per_request,
+                "max_body_bytes": state.limits.publish_max_body_bytes,
             },
             "changes": {
                 "route": "POST /control/changes",
@@ -6047,7 +4426,11 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "max_body_bytes": CHANGES_MAX_BODY_BYTES,
             },
             "declarations": {
-                "route": "PUT /control/layers, PUT /control/views/{group}/{key}",
+                "route": "PUT /control/layers, PUT /control/attributes, \
+                          PUT /control/vocabularies/{name}, \
+                          PATCH /control/vocabularies/{name}/values, \
+                          PUT /control/view_groups/{name}, PUT /control/views/{name}, \
+                          PUT /control/views/{group}/{key}",
                 "max_records_per_request": 1,
                 "max_body_bytes": DECLARATION_MAX_BODY_BYTES,
             },
@@ -6403,238 +4786,6 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
 mod tests {
     use super::*;
     use std::sync::mpsc;
-
-    mod category_wire {
-        use super::*;
-        use arrow::array::{Float32Array, StringArray, UInt8Array};
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use std::sync::Arc;
-        use tessera_engine::{DeclaredScalar, Vocabularies};
-
-        const CODE_OPS: u32 = 4711;
-
-        fn declared() -> Vec<DeclaredScalar> {
-            vec![
-                DeclaredScalar {
-                    name: "department".to_string(),
-                    arrow_type: ScalarType::U16,
-                    vocabulary: Some("departments".to_string()),
-                    analyser: None,
-                    index: false,
-                    render: true,
-                },
-                DeclaredScalar {
-                    name: "score".to_string(),
-                    arrow_type: ScalarType::F32,
-                    vocabulary: None,
-                    analyser: None,
-                    index: false,
-                    render: true,
-                },
-            ]
-        }
-
-        fn vocabularies() -> Vocabularies {
-            vocabularies_of(VocabularyKind::Declared)
-        }
-
-        fn vocabularies_of(kind: VocabularyKind) -> Vocabularies {
-            Vocabularies::seed(
-                &[tessera_engine::ManifestVocabulary {
-                    name: "departments".to_string(),
-                    kind,
-                    visibility: tessera_engine::Visibility::Derived,
-                    width: tessera_engine::ScalarType::U16,
-                    values: vec![tessera_engine::ManifestVocabularyValue {
-                        key: "ops".to_string(),
-                        code: CODE_OPS,
-                        title: None,
-                    }],
-                    reserved: Vec::new(),
-                }],
-                &declared(),
-                &[],
-            )
-            .expect("the fixture bundle is consistent")
-        }
-
-        /// One batch of the fixed columns plus `department` (as `column`) and `score`.
-        fn body(column: arrow::array::ArrayRef, nullable: bool) -> Vec<u8> {
-            // One label per row, as a list (decision 0129).
-            let mut access = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
-            access.values().append_value("public");
-            access.append(true);
-            let access = access.finish();
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("x", DataType::Float32, false),
-                Field::new("y", DataType::Float32, false),
-                Field::new("access", access.data_type().clone(), false),
-                Field::new("department", column.data_type().clone(), nullable),
-                Field::new("score", DataType::Float32, false),
-            ]));
-            let batch = RecordBatch::try_new(
-                Arc::clone(&schema),
-                vec![
-                    Arc::new(Float32Array::from(vec![0.5])),
-                    Arc::new(Float32Array::from(vec![0.5])),
-                    Arc::new(access),
-                    column,
-                    Arc::new(Float32Array::from(vec![1.0])),
-                ],
-            )
-            .expect("the fixture batch is well-formed");
-            let mut out = Vec::new();
-            {
-                let mut w = arrow::ipc::writer::StreamWriter::try_new(&mut out, &schema).unwrap();
-                w.write(&batch).unwrap();
-                w.finish().unwrap();
-            }
-            out
-        }
-
-        fn parse(
-            column: arrow::array::ArrayRef,
-            nullable: bool,
-        ) -> Result<Vec<RawIngestItem>, ApiError> {
-            parse_ingest_batch(
-                BodyEncoding::Arrow,
-                &body(column, nullable),
-                Projection::None,
-                &declared(),
-                &[],
-                &vocabularies(),
-                &no_layers,
-            )
-            .map(|parsed| parsed.items)
-        }
-
-        /// These fixtures declare no layer, so every column here is a scalar or a refusal —
-        /// the membership column has its own cases in `tests/membership_column.rs`, over HTTP and
-        /// against a registry that holds one.
-        fn no_layers(_: &str) -> Option<tessera_types::layer::LayerDeclaration> {
-            None
-        }
-
-        /// A known key becomes its **pinned** code at the column's declared width. The code is
-        /// never re-derived from the data, so this is the whole of what the wire decides.
-        #[test]
-        fn a_known_key_is_stored_as_its_pinned_code() {
-            let items = parse(Arc::new(StringArray::from(vec!["ops"])), false)
-                .expect("a declared key is accepted");
-            assert_eq!(
-                items[0].scalars[0],
-                WalScalar::U16(CODE_OPS as u16),
-                "the row carries the vocabulary's code, at the declared width"
-            );
-        }
-
-        /// **Declare-then-use** (§5, views §80): a category carries properties and a visibility
-        /// consequence, so a typo must not create one. The refusal names both the column and the
-        /// key, and the whole batch is without effect.
-        #[test]
-        fn an_unknown_key_is_refused_naming_the_column_and_the_key() {
-            let err = parse(Arc::new(StringArray::from(vec!["k9-unit"])), false)
-                .expect_err("an undeclared key is refused");
-            let ApiError::Contract(detail) = err else {
-                panic!("declare-then-use is a contract violation, not a server error");
-            };
-            assert!(detail.contains("department"), "{detail}");
-            assert!(detail.contains("k9-unit"), "{detail}");
-        }
-
-        /// **The hole this closes.** A code on the wire was accepted by range alone, so an
-        /// unassigned code, a `reserved` code or a typo was stored with no error anywhere. The
-        /// wire type is now `utf8`, so the same batch is a 422 naming the column.
-        #[test]
-        fn a_code_on_the_wire_is_refused_where_it_used_to_be_stored() {
-            let err = parse(Arc::new(UInt8Array::from(vec![9u8])), false)
-                .expect_err("a category is utf8 on the wire, whatever stores its codes");
-            let ApiError::Contract(detail) = err else {
-                panic!("a wrong wire type is a contract violation");
-            };
-            assert!(detail.contains("department"), "{detail}");
-            assert!(detail.contains("utf8"), "{detail}");
-        }
-
-        /// Null means *absent* — the reserved code 0, which is why a `u8` category holds 255
-        /// values and not 256.
-        #[test]
-        fn a_null_key_is_absent() {
-            let items = parse(
-                Arc::new(StringArray::from(vec![None as Option<&str>])),
-                true,
-            )
-            .expect("an item may carry no value for a column");
-            assert_eq!(items[0].scalars[0], WalScalar::U16(ABSENT_CODE as u16));
-        }
-
-        /// The empty string is **not** absence. It is what an unset field and a client bug both
-        /// produce, so folding it into code 0 would accept the same defect silently.
-        #[test]
-        fn the_empty_string_is_refused_rather_than_folded_into_absence() {
-            let err = parse(Arc::new(StringArray::from(vec![""])), false)
-                .expect_err("the empty string is not a value key");
-            let ApiError::Contract(detail) = err else {
-                panic!("an empty key is a contract violation");
-            };
-            assert!(detail.contains("department"), "{detail}");
-        }
-
-        /// **Under a discovered vocabulary a novel key travels as a key**, for the write executor
-        /// to mint against the live bindings.
-        ///
-        /// The handler must not mint it here. Two requests racing one novel key would each draw,
-        /// and that key would end up with two codes with its rows split between them — whichever
-        /// binding survived would recolour the other's rows, silently. Windows close serially, so
-        /// resolving there is what makes the two agree.
-        #[test]
-        fn a_novel_key_under_a_discovered_vocabulary_travels_unresolved() {
-            let items = parse_ingest_batch(
-                BodyEncoding::Arrow,
-                &body(Arc::new(StringArray::from(vec!["k9-unit"])), false),
-                Projection::None,
-                &declared(),
-                &[],
-                &vocabularies_of(VocabularyKind::Discovered),
-                &no_layers,
-            )
-            .expect("a discovered vocabulary accepts a key it has not seen")
-            .items;
-            assert_eq!(
-                items[0].scalars[0],
-                WalScalar::Utf8("k9-unit".to_string()),
-                "the key reaches the executor as a key; a code here would be a handler that mints"
-            );
-        }
-
-        /// A key the discovered vocabulary already binds resolves in the handler like any other —
-        /// only the *novel* case needs the executor, so the common path costs no extra work.
-        #[test]
-        fn a_bound_key_under_a_discovered_vocabulary_still_resolves_here() {
-            let items = parse_ingest_batch(
-                BodyEncoding::Arrow,
-                &body(Arc::new(StringArray::from(vec!["ops"])), false),
-                Projection::None,
-                &declared(),
-                &[],
-                &vocabularies_of(VocabularyKind::Discovered),
-                &no_layers,
-            )
-            .expect("a bound key is bound whatever the kind")
-            .items;
-            assert_eq!(items[0].scalars[0], WalScalar::U16(CODE_OPS as u16));
-        }
-
-        /// A plain scalar of the same width is unchanged and still arrives as an integer — so a
-        /// client that thinks a column is a category when the bundle says otherwise gets a 422
-        /// naming it, rather than plausible integers stored as codes.
-        #[test]
-        fn a_plain_scalar_is_unaffected_by_the_category_rule() {
-            let items = parse(Arc::new(StringArray::from(vec!["ops"])), false).unwrap();
-            assert_eq!(items[0].scalars[1], WalScalar::F32(1.0));
-        }
-    }
 
     /// **The deny lane does not share tokio's blocking pool** — demonstrated rather than argued.
     ///

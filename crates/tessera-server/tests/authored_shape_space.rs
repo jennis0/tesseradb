@@ -380,6 +380,39 @@ async fn an_authored_wgs84_shape_lands_where_a_membership_one_does_through_eithe
     }
 }
 
+/// An authored shape content's report carries every field a membership shape's does, the
+/// decomposition's tile and cell counts included.
+#[tokio::test]
+async fn an_authored_shape_report_carries_the_decomposition() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_projected(&tmp).await;
+    assert_eq!(
+        register(&server, drawing_layer("regions/report")).await.0,
+        201
+    );
+    let members: Vec<String> = (0..PLACES.len() as u64).map(member).collect();
+    let (status, body) = publish(
+        &server,
+        "regions/report",
+        json!({
+            "addressing": "external",
+            "default_space": "wgs84",
+            "artifacts": [{ "key": "uk", "members": members, "content": [{ "values": [UK] }] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let entry = body["shapes"]
+        .as_array()
+        .and_then(|shapes| shapes.iter().find(|s| s["content"] == 0))
+        .unwrap_or_else(|| panic!("no report for the authored content: {body}"));
+    let view = &entry["views"][0];
+    assert_eq!(view["view"], "s0", "{body}");
+    for field in ["parts", "rings", "interior_tiles", "boundary_cells"] {
+        assert!(view[field].is_u64(), "'{field}' missing from {view}");
+    }
+}
+
 /// **A `wgs84` authored shape on a view with no projection is refused**, at the control plane as
 /// at the build: such a view has one space and nothing to convert a degree from
 /// (`polygon-membership.md` §4.3). And a `wgs84` coordinate outside ±180 × ±90 is not a

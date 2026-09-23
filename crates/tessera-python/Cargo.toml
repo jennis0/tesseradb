@@ -24,9 +24,9 @@ doctest = false
 # The whole crate, not a slice of it: the engine follows here, and the point of this module is
 # that the SDK runs the same code the binary runs rather than a second copy of the rules.
 tessera-build = { path = "../tessera-build" }
-# The deployment file — where the declaration is — is the server's to read, and `config::open`
-# is the pair the CLI's `check` verb resolves it with.
-tessera-server = { path = "../tessera-server" }
+# The deployment file, where the declaration is: `open` is the pair the CLI's `check` verb
+# resolves it with.
+tessera-config = { path = "../tessera-config" }
 serde_json = { workspace = true }
 
 [dependencies.pyo3]

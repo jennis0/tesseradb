@@ -482,7 +482,7 @@ pub enum WalRecord {
         /// gave one, and the deployment's only view otherwise. It decides which flush pass writes
         /// the fills and which view's column of a group-scoped family a scoped cell addresses, so
         /// it is recorded for every batch and not only for one carrying a scoped column
-        /// (`ingest.md` §1.4). `None` is a record no writer produces.
+        /// (`ingest.md` §1.4). `None` on a batch that fills no cell.
         view: Option<String>,
         /// The columns the batch carries, by declared name, in the batch's own order. Every row's
         /// values are positional to this list, so a batch may carry any subset of the schema.

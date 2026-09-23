@@ -409,43 +409,30 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         engine,
         sessions: parking_lot::Mutex::new(tessera_server::state::SessionRegistry::default()),
         heap: tessera_server::memory::HeapWatch::default(),
-        max_k,
-        max_category_values: 4,
-        // A budget of 2, so a walk over `department`'s 11 values stops on the walk-budget
-        // reading rather than the page-filled one — deterministic without needing a vocabulary
-        // too large for this test to build. `d00` sorts first and is carried by nothing (§3.3's
-        // gate excludes it, never the walk), so a budget of 1 alone would spend its only unit on
-        // an invisible value and prove nothing about a value actually being found; 2 leaves room
-        // for `d01`, the first this principal can see.
-        max_suggestions: 20,
-        max_suggestion_walk: 2,
-        // The probe route, always: this case is about the walk budget, which the set route does
-        // not spend (§6.3).
-        max_suggest_set_entities: 1,
-        max_browse_rows: 200,
+        limits: tessera_server::state::ServeLimits {
+            max_k,
+            max_category_values: 4,
+            // A budget of 2, so a walk over `department`'s 11 values stops on the walk-budget
+            // reading rather than the page-filled one — deterministic without needing a vocabulary
+            // too large for this test to build. `d00` sorts first and is carried by nothing (§3.3's
+            // gate excludes it, never the walk), so a budget of 1 alone would spend its only unit on
+            // an invisible value and prove nothing about a value actually being found; 2 leaves room
+            // for `d01`, the first this principal can see.
+            max_suggestions: 20,
+            max_suggestion_walk: 2,
+            // The probe route, always: this case is about the walk budget, which the set route does
+            // not spend (§6.3).
+            max_suggest_set_entities: 1,
+            ingest_max_batch_rows: 200_000,
+            ingest_buffer_max_items: 10_000_000,
+            ingest_max_batch_bytes: 64 * 1024 * 1024,
+            ..Default::default()
+        },
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
-        max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
-        max_region_vertices: 10_000,
-        max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
         compute_gate: generous_test_gate(),
         ingest_admission: tessera_server::state::IngestAdmission::new(64),
-        ingest_max_batch_rows: 200_000,
-        ingest_buffer_max_items: 10_000_000,
-        ingest_max_batch_bytes: 64 * 1024 * 1024,
-        publish_max_body_bytes: 64 * 1024 * 1024,
-        max_artifacts_per_request: 10_000,
-        max_members_per_request: 5_000_000,
-        max_excluded_per_request: 1_000_000,
-        stage_timing: false,
-        stream_flush_bytes: 1 << 20,
-        stream_write_stall_ms: 10_000,
-        stream_deadline_ms: 60_000,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
-        dev_cors_origins: Vec::new(),
-        cors_origins: Vec::new(),
-        cors_loopback: false,
-        visible_wait_max_secs: 30,
         faults: Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new()),
     });
 

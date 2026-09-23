@@ -12,9 +12,9 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{map_engine_error, map_join_error, ApiError};
+use crate::error::{map_engine_error, ApiError};
 use crate::health::{healthz, readyz};
-use crate::state::AppState;
+use crate::state::{bearer_token, AppState};
 
 pub fn router(state: Arc<AppState>) -> Router {
     // The **development** seam covers this plane as well as the viewer plane: on a laptop the
@@ -42,13 +42,6 @@ pub fn router(state: Arc<AppState>) -> Router {
     }
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-}
-
 #[derive(Debug, Deserialize)]
 struct AuthoriseReq {
     auth_data: String,
@@ -72,26 +65,11 @@ async fn authorise(
         .decode(&req.auth_data)
         .map_err(|e| ApiError::Contract(format!("auth_data is not valid base64: {e}")))?;
 
-    // Gated the same way as the viewer plane's closures — `admit()` sheds with 429 `backpressure`
-    // on either stage of the two-stage semaphore.
-    let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
-
-    // `engine.authorise` resolves the credential's granted terms and unions them into a fragment
-    // (I2: every aggregate must be computable from inside the viewer's own mask, so the mask is
-    // materialised here once) — on a fragment-cache miss this builds and writes the frozen fragment
-    // to disk (file IO), and either way is CPU work with no `.await` of its own. Moved off the
-    // reactor so a cold `authorise` cannot starve concurrent requests on this process's tokio
-    // worker threads. Closure capture: `state` is a cloned `Arc<AppState>` (cheap; sound because
-    // `Engine: Send + Sync`), `auth_data` is moved (owned `Vec<u8>`, only ever borrowed above), and
-    // `gate_permits` moves in so both permits release only when this closure returns.
-    let closure_state = Arc::clone(&state);
-    let session = tokio::task::spawn_blocking(move || {
-        let _gate_permits = gate_permits;
-        closure_state.engine.authorise(&auth_data)
-    })
-    .await
-    .map_err(map_join_error)?
-    .map_err(map_engine_error)?;
+    // `engine.authorise` resolves the credential's granted terms and unions them into a fragment,
+    // which on a fragment-cache miss builds and writes the frozen fragment to disk.
+    let session = state
+        .gated(move |state| state.engine.authorise(&auth_data).map_err(map_engine_error))
+        .await?;
 
     let resp = AuthoriseResp {
         token: session.token().to_string(),

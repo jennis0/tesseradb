@@ -465,11 +465,15 @@ impl WritePath {
             else {
                 continue;
             };
-            // A record with no view names no flush pass to write its cells; reading it as some
-            // view's would put a group-scoped cell in the wrong column.
+            // A record with no view fills no cell; reading one that does as some view's would put
+            // a group-scoped cell in the wrong column.
             let Some(view) = view else {
+                if columns.is_empty() {
+                    continue;
+                }
                 return Err(EngineError::Malformed(
-                    "the WAL carries a values batch naming no view, which no writer produces"
+                    "the WAL carries a values batch filling cells and naming no view, which no \
+                     writer produces"
                         .to_string(),
                 ));
             };

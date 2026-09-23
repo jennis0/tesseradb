@@ -834,7 +834,7 @@ fn resolve_identity(
 /// free to drift, and the whole value of a check is that it saw what the build will see.
 struct Declaration {
     deployment_path: PathBuf,
-    deployment: tessera_server::config::Config,
+    deployment: tessera_config::Config,
     config: tessera_build::config::Config,
 }
 
@@ -849,7 +849,7 @@ fn resolve_declaration(
     // missing one is a refusal naming what to create (configuration.md §3) — never a silent set of
     // defaults, since every path in it is a decision.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let (deployment_path, deployment) = tessera_server::config::open(deployment, &cwd)?;
+    let (deployment_path, deployment) = tessera_config::open(deployment, &cwd)?;
     let schema_path = config.unwrap_or_else(|| deployment.schema_path.clone());
     let bindings = collect_bindings(file)?;
     let config = tessera_build::config::Config::parse_with(&schema_path, &bindings, strictness)
@@ -1917,7 +1917,7 @@ fn main() -> ExitCode {
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
                 .init();
-            let deployment = match tessera_server::config::discover(
+            let deployment = match tessera_config::discover(
                 deployment.as_deref(),
                 &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ) {
@@ -1946,11 +1946,8 @@ fn main() -> ExitCode {
             //
             // Derived rather than asserted-against: `serving_blocking_threads` covers both bounds
             // plus a reserve, so there is no configuration in which an admitted request finds no
-            // thread. What `config::load` refuses is a pool the *machine* cannot carry
-            // (`SERVING_BLOCKING_THREAD_CEILING`), which is a different question and is already
-            // settled by the time this runs — `prepare` returned above.
-            let blocking_threads =
-                tessera_server::config::serving_blocking_threads(&prepared.config);
+            // thread.
+            let blocking_threads = tessera_config::serving_blocking_threads(&prepared.config);
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .max_blocking_threads(blocking_threads)
                 .enable_all()
