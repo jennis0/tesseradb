@@ -187,7 +187,10 @@ entity held back is held back from every view, and its rows are ingested in each
 A group's views read either their own file or one file shared by the group, picked out by its
 discriminator column (`view`, or the name its `fields.view` gives). A roster is read in any of the
 build's three forms: `[[view_group.view]]` blocks, a `[view_group.views]` table, or keys taken
-from the discriminator's distinct values. An
+from the discriminator's distinct values. Not built yet: a view whose `fields` give its geometry
+as `morton` and `residual` rather than a coordinate pair stops the cycle with a driver failure,
+and a layer whose `fields` rename its roster's columns fails its publication, since the roster is
+read under the canonical names. An
 attribute read from a file of its own is joined on entity id onto the batches of every view it
 applies to, picked by view key for a group-scoped one, as the build reads it beside the points.
 The fields below are the anchor view's figures; the driver's own result file also carries every
