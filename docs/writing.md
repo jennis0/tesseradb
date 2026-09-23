@@ -55,11 +55,11 @@ A tutorial takes a newcomer from nothing to a working result along one path. A g
 
 Address the reader as "you" and give instructions as imperatives. "Run `tessera check`." Do not write "we", "let's", "the user should" or "you may want to".
 
-Open a tutorial with what the reader will have at the end and what they need before starting, in two or three sentences. Then give the first step. Open a guide with the task. End a page when its last step is done. There is no recap, no "next steps" list padded out to three, and no congratulation.
+Open a tutorial with what the reader will have at the end and what they need before starting, in two or three sentences. Then give the first step. Open a guide with the task. End a page when its last step is done, without a recap or a list of next steps.
 
 A heading names what the reader does in that section ("Build the bundle"), or, in reference, the thing described (`[serve]`). A section holds as much as one step needs. Do not put a heading over every paragraph.
 
-Use a numbered list for steps done in order and a bulleted list for items that are truly parallel. Everything else is prose. No list item starts with a bold phrase and a colon.
+Use a numbered list for steps done in order and a bulleted list for items that are parallel. Everything else is prose. On these pages no list item starts with a bold phrase, whatever rule 5 allows elsewhere.
 
 An admonition box is for something that loses data, exposes an item a viewer should not see, or is not built yet. An ordinary sentence goes in the text.
 
@@ -73,7 +73,7 @@ Quote an error message exactly, and say what to change.
 
 ### What gives prose away as generated
 
-`scripts/check-register.sh` catches the vocabulary. It cannot catch these, and review looks for them:
+`scripts/check-register.sh` rejects the stock phrases of generated documentation on these pages as well as the vocabulary in the Register section; the script holds the list. It cannot catch the following, and review looks for them:
 
 - Paragraphs of the same length, each closing with a sentence that restates it.
 - Sentences opening "X lets you" or "With X, you can", or a colon reveal ("The result: a map").
