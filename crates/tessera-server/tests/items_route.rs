@@ -657,6 +657,33 @@ async fn a_bulk_read_holds_its_compute_for_the_whole_response() {
     drop(reader);
 }
 
+/// **`/control/status`'s `bulk` block reports the bulk-read limit**: its admission, no queue, the
+/// reads running and the refusals it made, apart from the viewport's `compute` block.
+#[tokio::test]
+async fn control_status_reports_the_bulk_read_limit() {
+    let f = fixture_with(N, 16, generous_test_gate(), ComputeGate::for_bulk_reads(3), |_| {}).await;
+    let bulk = control_status(&f.server).await["bulk"].clone();
+    assert_eq!(bulk["admission"], 3, "{bulk}");
+    assert_eq!(bulk["queue"], 0, "{bulk}");
+    assert_eq!(bulk["in_flight"], 0, "{bulk}");
+    assert_eq!(bulk["shed_total"], 0, "{bulk}");
+
+    let token = token(&f.server, &["0"]).await;
+    let held: Vec<_> = [
+        hold(&f.server.state.bulk_gate).await,
+        hold(&f.server.state.bulk_gate).await,
+        hold(&f.server.state.bulk_gate).await,
+    ]
+    .into();
+    let resp = post_items(&f.server, &token, &json!({ "view": "s0", "fields": [] })).await;
+    assert_eq!(refused(resp, 429).await, "backpressure");
+    let status = control_status(&f.server).await;
+    assert_eq!(status["bulk"]["in_flight"], 3, "{status}");
+    assert_eq!(status["bulk"]["shed_total"], 1, "{status}");
+    assert_eq!(status["compute"]["shed_total"], 0, "{status}");
+    drop(held);
+}
+
 /// **A client that disconnects mid-read frees its bulk slot.** The response is far larger than
 /// the sockets buffer, so its producer is blocked on the reader while the slot is held, and a
 /// second read is shed; once the reader goes, a read is served well inside the stall budget the

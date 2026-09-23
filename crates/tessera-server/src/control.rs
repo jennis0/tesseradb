@@ -2998,6 +2998,11 @@ fn parse_pause_site(name: &str) -> Result<tessera_lifecycle::faults::PauseSite, 
 
 /// `GET /control/status`: the operator's view of the node, behind the credential like every
 /// control route; it discloses corpus-wide figures such as `entity_id_high_water`.
+///
+/// `compute` is the admission limit the viewport, item and session routes share, and `bulk` the
+/// one `POST /v1/items` runs under, `serve.bulk_admission`: its `admission`, its `queue` (always
+/// 0, so a read past the limit is refused at once), the reads `in_flight`, which hold their
+/// compute for the whole response, `waiting`, and the `shed_total` of 429s it answered.
 async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiError> {
     // `shed_total` counts this gate's own sheds, not the engine's single-flight 429s.
     let gate = state.compute_gate.status();
