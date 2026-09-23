@@ -97,6 +97,10 @@ pub enum EngineError {
     /// against the same load the lookup already needs, so a generation swap landing between two
     /// separate loads cannot check one snapshot and serve another. Maps to HTTP 409 `conflict`.
     StaleIdSet,
+    /// A `POST /v1/items` request the caller can correct: a field or system field it named, or
+    /// one of its paging arguments. Every arm names only what the caller sent and published
+    /// schema.
+    RecordsRefused(crate::records::RecordsRefused),
     /// A records cursor that did not open: altered, forged, or issued to another credential,
     /// route, view, view incarnation or order. One variant with one message for every reason, so
     /// the refusal does not say which binding failed.
@@ -167,6 +171,7 @@ impl std::fmt::Display for EngineError {
             }
             EngineError::ConfigRefused(detail) => write!(f, "engine config refused: {detail}"),
             EngineError::StaleIdSet => write!(f, "stale idset"),
+            EngineError::RecordsRefused(why) => write!(f, "{why}"),
             EngineError::CursorRefused => write!(
                 f,
                 "this cursor was not issued for this request; pass the cursor the previous \

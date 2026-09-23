@@ -1,0 +1,450 @@
+//! A page's columns: every field read for the rows a walk took, and the Arrow batch they make.
+//!
+//! Every read here is for a row the walk already took from inside the composed mask. Rendered
+//! fields are read from the requested view's row tail, value columns per item, and the record
+//! store once per page over the page's items.
+
+use std::sync::Arc;
+
+use arrow::array::{
+    Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, Float32Array, Float64Array,
+    Int16Array, Int32Array, Int64Array, Int8Array, ListBuilder, StringArray, StringBuilder,
+    TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+};
+use arrow::datatypes::{DataType, Field, Int32Type, Schema};
+use arrow::record_batch::RecordBatch;
+use rustc_hash::FxHashMap;
+use tessera_filter::RecordValue as RV;
+use tessera_spatial::tiler::ScalarType;
+use tessera_types::{EntityId, MortonCode};
+
+use super::plan::{FieldPlan, Home, Named, SystemField};
+use super::walk::Taken;
+use crate::engine::Engine;
+use crate::error::{EngineError, Result};
+use crate::session::Session;
+use crate::viewport::{slice_value, OpenView};
+use crate::Generation;
+
+/// The grid's positions per axis: a stored position is a 32-bit fixed-point fraction of the frame.
+const GRID_SPAN: f64 = 4_294_967_296.0;
+
+/// One named field's values over a page, in page order.
+enum Values {
+    Scalar {
+        ty: ScalarType,
+        values: Vec<Option<RV>>,
+    },
+    /// A category's keys, resolved from its codes. An absent code, or one no binding explains, is
+    /// null.
+    Category { keys: Vec<Option<String>> },
+}
+
+/// One system field's values over a page, in page order.
+enum SystemValues {
+    Position(Vec<(f64, f64)>),
+    ExternalId(Vec<Option<Vec<u8>>>),
+    Labels(Vec<Vec<String>>),
+}
+
+/// Every column of one page, before it is cut to the byte ceiling.
+pub(crate) struct PageValues {
+    tessera_ids: Vec<u64>,
+    named: Vec<(String, Values)>,
+    system: Vec<SystemValues>,
+    /// Present under `keep_unmatched`.
+    matched: Option<Vec<bool>>,
+}
+
+impl Engine {
+    /// Read every field `plan` names for `rows`, from the generation the page was walked in.
+    pub(crate) fn read_page(
+        &self,
+        session: &Session,
+        generation: &Generation,
+        open: &OpenView<'_>,
+        plan: &FieldPlan,
+        rows: &[Taken],
+        keep_unmatched: bool,
+    ) -> Result<PageValues> {
+        let segments = &open.served.segments;
+        let mut named: Vec<(String, Vec<Option<RV>>)> = Vec::with_capacity(plan.named.len());
+        // Declaration position to the named field it fills, for the one record-store pass.
+        let mut record_slot: FxHashMap<u16, usize> = FxHashMap::default();
+        for (slot, field) in plan.named.iter().enumerate() {
+            let values = match &field.home {
+                Home::Rendered => rendered_values(segments, field, rows),
+                Home::ValueColumn(column) => rows
+                    .iter()
+                    .map(|row| generation.filter_columns.stored_value(column, row.entity))
+                    .collect(),
+                Home::Record(tag) => {
+                    record_slot.insert(*tag, slot);
+                    vec![None; rows.len()]
+                }
+            };
+            named.push((field.name.clone(), values));
+        }
+        if !record_slot.is_empty() {
+            let mut at: FxHashMap<u32, usize> = FxHashMap::default();
+            let mut entities: Vec<u32> = Vec::with_capacity(rows.len());
+            for (i, row) in rows.iter().enumerate() {
+                at.insert(row.entity, i);
+                entities.push(row.entity);
+            }
+            entities.sort_unstable();
+            generation
+                .filter_columns
+                .records()
+                .for_each_row_in(&croaring::Bitmap::of(&entities), &mut |entity, fields| {
+                    let Some(&i) = at.get(&entity) else {
+                        return Ok(());
+                    };
+                    for field in fields {
+                        if let Some(&slot) = record_slot.get(&field.tag) {
+                            named[slot].1[i] = Some(field.value);
+                        }
+                    }
+                    Ok(())
+                })
+                .map_err(|e| EngineError::Malformed(e.to_string()))?;
+        }
+        let named = plan
+            .named
+            .iter()
+            .zip(named)
+            .map(|(field, (name, values))| Ok((name, typed(field, values, generation)?)))
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut system = Vec::with_capacity(plan.system.len());
+        for field in &plan.system {
+            system.push(match field {
+                SystemField::Position => {
+                    SystemValues::Position(positions(generation, open, rows)?)
+                }
+                SystemField::ExternalId => SystemValues::ExternalId(
+                    rows.iter()
+                        .map(|row| {
+                            self.external_id_of_in(generation, EntityId::new(u64::from(row.entity)))
+                                .map_err(EngineError::Store)
+                        })
+                        .collect::<Result<_>>()?,
+                ),
+                SystemField::Labels => SystemValues::Labels(
+                    rows.iter()
+                        .map(|row| self.labels_for(generation, session, row.entity))
+                        .collect::<Result<_>>()?,
+                ),
+            });
+        }
+        Ok(PageValues {
+            tessera_ids: rows.iter().map(|row| row.tessera_id).collect(),
+            named,
+            system,
+            matched: keep_unmatched.then(|| rows.iter().map(|row| row.matched).collect()),
+        })
+    }
+}
+
+/// A rendered field's values: the slot in the row tail, where the segment holds the column and
+/// the row carries a value. Absence is a number's presence bitmap and a category's code 0.
+fn rendered_values(
+    segments: &[(&tessera_store::read::SegmentData, u32)],
+    field: &Named,
+    rows: &[Taken],
+) -> Vec<Option<RV>> {
+    let slices: Vec<_> = segments
+        .iter()
+        .map(|(segment, _)| segment.columns.scalar(&field.name))
+        .collect();
+    let presences: Vec<_> = segments
+        .iter()
+        .map(|(segment, _)| segment.columns.presence(&field.name))
+        .collect();
+    rows.iter()
+        .map(|row| {
+            let slice = slices[row.seg].as_ref()?;
+            if field.vocabulary.is_none() && !presences[row.seg].contains(row.local) {
+                return None;
+            }
+            slice_value(slice, row.local as usize)
+        })
+        .collect()
+}
+
+/// A field's stored values in the form its column carries: a category's codes resolved to keys.
+fn typed(field: &Named, values: Vec<Option<RV>>, generation: &Generation) -> Result<Values> {
+    let Some(vocabulary) = &field.vocabulary else {
+        return Ok(Values::Scalar {
+            ty: field.ty,
+            values,
+        });
+    };
+    let bindings = generation.vocabularies.get(vocabulary);
+    let keys = values
+        .into_iter()
+        .map(|value| {
+            let code = match value {
+                None => return Ok(None),
+                Some(RV::U8(code)) => u32::from(code),
+                Some(RV::U16(code)) => u32::from(code),
+                Some(RV::U32(code)) => code,
+                Some(_) => return Err(mismatch(&field.name, field.ty)),
+            };
+            Ok(bindings
+                .and_then(|b| b.key_of(code))
+                .map(str::to_string))
+        })
+        .collect::<Result<_>>()?;
+    Ok(Values::Category { keys })
+}
+
+fn mismatch(name: &str, ty: ScalarType) -> EngineError {
+    EngineError::Malformed(format!(
+        "field '{name}' holds a value of a type other than its declared {}, so the bundle and its \
+         declaration disagree",
+        ty.arrow_type_name()
+    ))
+}
+
+/// Each row's stored position converted back through the view's frame and projection: the centre
+/// of its grid step, so within half a step of the coordinate it was placed from.
+fn positions(
+    generation: &Generation,
+    open: &OpenView<'_>,
+    rows: &[Taken],
+) -> Result<Vec<(f64, f64)>> {
+    let view = open.served.name;
+    let descriptor = generation
+        .bundle
+        .manifest
+        .views
+        .iter()
+        .find(|v| v.id == view)
+        .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+    let q = descriptor.quantisation;
+    let segments = &open.served.segments;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let (segment, _) = segments[row.seg];
+            let local = row.local as usize;
+            let (qx, qy) = tessera_spatial::unsplit32(
+                MortonCode::new(segment.morton.u32()[local]),
+                segment.columns.residual()[local],
+            );
+            let x = q.x_min + (f64::from(qx) + 0.5) / GRID_SPAN * (q.x_max - q.x_min);
+            let y = q.y_min + (f64::from(qy) + 0.5) / GRID_SPAN * (q.y_max - q.y_min);
+            descriptor.projection.inverse(x, y)
+        })
+        .collect())
+}
+
+/// The bytes one value of a fixed-width type adds to its column.
+fn width(ty: ScalarType) -> usize {
+    match ty {
+        ScalarType::Bool | ScalarType::U8 | ScalarType::I8 => 1,
+        ScalarType::U16 | ScalarType::I16 => 2,
+        ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
+        ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 8,
+        // A string's offset; its bytes are counted per value.
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => 4,
+    }
+}
+
+impl PageValues {
+    /// How many leading rows fit in `max_bytes`, never fewer than one, and the bytes they come
+    /// to: every value and offset the row adds to its column, a bool as a byte, each distinct
+    /// category key once, and a byte per eight columns for validity.
+    fn fit(&self, max_bytes: usize) -> (usize, usize) {
+        let columns = 1
+            + self.named.len()
+            + self
+                .system
+                .iter()
+                .map(|s| match s {
+                    SystemValues::Position(_) => 2,
+                    _ => 1,
+                })
+                .sum::<usize>()
+            + usize::from(self.matched.is_some());
+        let validity = columns.div_ceil(8);
+        let mut seen: Vec<rustc_hash::FxHashSet<&str>> = vec![Default::default(); self.named.len()];
+        let mut total = 0usize;
+        for i in 0..self.tessera_ids.len() {
+            let mut row = 8 + validity + usize::from(self.matched.is_some());
+            for (slot, (_, values)) in self.named.iter().enumerate() {
+                row += match values {
+                    Values::Scalar { ty, values } => {
+                        width(*ty)
+                            + match &values[i] {
+                                Some(RV::Utf8(s)) => s.len(),
+                                _ => 0,
+                            }
+                    }
+                    Values::Category { keys } => {
+                        4 + match &keys[i] {
+                            Some(key) if seen[slot].insert(key.as_str()) => 4 + key.len(),
+                            _ => 0,
+                        }
+                    }
+                };
+            }
+            for values in &self.system {
+                row += match values {
+                    SystemValues::Position(_) => 16,
+                    SystemValues::ExternalId(ids) => 4 + ids[i].as_ref().map_or(0, Vec::len),
+                    SystemValues::Labels(labels) => {
+                        4 + labels[i].iter().map(|l| 4 + l.len()).sum::<usize>()
+                    }
+                };
+            }
+            if i > 0 && total + row > max_bytes {
+                return (i, total);
+            }
+            total += row;
+        }
+        (self.tessera_ids.len(), total)
+    }
+
+    /// The batch of the leading rows that fit in `max_bytes`, how many that is, and their bytes.
+    pub(crate) fn into_batch(mut self, max_bytes: usize) -> Result<(RecordBatch, usize, usize)> {
+        let (kept, bytes) = self.fit(max_bytes);
+        self.tessera_ids.truncate(kept);
+        let mut fields: Vec<Field> = vec![Field::new("tessera_id", DataType::UInt64, false)];
+        let mut arrays: Vec<ArrayRef> = vec![Arc::new(UInt64Array::from(self.tessera_ids))];
+        for (name, values) in self.named {
+            let array = match values {
+                Values::Scalar { ty, mut values } => {
+                    values.truncate(kept);
+                    scalar_array(&name, ty, values)?
+                }
+                Values::Category { mut keys } => {
+                    keys.truncate(kept);
+                    category_array(keys)?
+                }
+            };
+            fields.push(Field::new(name, array.data_type().clone(), true));
+            arrays.push(array);
+        }
+        for values in self.system {
+            match values {
+                SystemValues::Position(mut xy) => {
+                    xy.truncate(kept);
+                    for (name, axis) in [("tessera:x", 0), ("tessera:y", 1)] {
+                        fields.push(Field::new(name, DataType::Float64, false));
+                        arrays.push(Arc::new(Float64Array::from_iter_values(
+                            xy.iter().map(|p| if axis == 0 { p.0 } else { p.1 }),
+                        )));
+                    }
+                }
+                SystemValues::ExternalId(mut ids) => {
+                    ids.truncate(kept);
+                    fields.push(Field::new("tessera:external_id", DataType::Binary, true));
+                    arrays.push(Arc::new(BinaryArray::from_iter(ids)));
+                }
+                SystemValues::Labels(mut labels) => {
+                    labels.truncate(kept);
+                    let mut builder = ListBuilder::new(StringBuilder::new());
+                    for row in labels {
+                        for label in row {
+                            builder.values().append_value(label);
+                        }
+                        builder.append(true);
+                    }
+                    let array = builder.finish();
+                    fields.push(Field::new("tessera:labels", array.data_type().clone(), false));
+                    arrays.push(Arc::new(array));
+                }
+            }
+        }
+        if let Some(mut matched) = self.matched {
+            matched.truncate(kept);
+            fields.push(Field::new("tessera:matched", DataType::Boolean, false));
+            arrays.push(Arc::new(BooleanArray::from(matched)));
+        }
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
+            .map_err(|e| EngineError::Malformed(format!("a page did not assemble: {e}")))?;
+        Ok((batch, kept, bytes))
+    }
+}
+
+/// A category column whose dictionary holds only the keys its rows carry, in the order they
+/// first appear.
+fn category_array(keys: Vec<Option<String>>) -> Result<ArrayRef> {
+    let mut dictionary: Vec<String> = Vec::new();
+    let mut index: FxHashMap<String, i32> = FxHashMap::default();
+    let mut codes: Vec<Option<i32>> = Vec::with_capacity(keys.len());
+    for key in keys {
+        codes.push(key.map(|key| match index.get(&key) {
+            Some(&at) => at,
+            None => {
+                let at = i32::try_from(dictionary.len()).expect("a page's keys fit in i32");
+                index.insert(key.clone(), at);
+                dictionary.push(key);
+                at
+            }
+        }));
+    }
+    let array = DictionaryArray::<Int32Type>::try_new(
+        Int32Array::from(codes),
+        Arc::new(StringArray::from(dictionary)),
+    )
+    .map_err(|e| EngineError::Malformed(format!("a category column did not assemble: {e}")))?;
+    Ok(Arc::new(array))
+}
+
+/// A column of `ty`, each value in the storage form its home holds it in.
+fn scalar_array(name: &str, ty: ScalarType, values: Vec<Option<RV>>) -> Result<ArrayRef> {
+    macro_rules! number {
+        ($array:ty, $($variant:ident),+) => {{
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                out.push(match value {
+                    None => None,
+                    $(Some(RV::$variant(x)) => Some(x),)+
+                    Some(_) => return Err(mismatch(name, ty)),
+                });
+            }
+            <$array>::from(out)
+        }};
+    }
+    Ok(match ty {
+        ScalarType::Bool => {
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                out.push(match value {
+                    None => None,
+                    Some(RV::Bool(b)) => Some(b),
+                    Some(RV::U8(x)) => Some(x != 0),
+                    Some(_) => return Err(mismatch(name, ty)),
+                });
+            }
+            Arc::new(BooleanArray::from(out))
+        }
+        ScalarType::U8 => Arc::new(number!(UInt8Array, U8)),
+        ScalarType::U16 => Arc::new(number!(UInt16Array, U16)),
+        ScalarType::U32 => Arc::new(number!(UInt32Array, U32)),
+        ScalarType::U64 => Arc::new(number!(UInt64Array, U64)),
+        ScalarType::I8 => Arc::new(number!(Int8Array, I8)),
+        ScalarType::I16 => Arc::new(number!(Int16Array, I16)),
+        ScalarType::I32 => Arc::new(number!(Int32Array, I32)),
+        ScalarType::I64 => Arc::new(number!(Int64Array, I64)),
+        ScalarType::F32 => Arc::new(number!(Float32Array, F32)),
+        ScalarType::F64 => Arc::new(number!(Float64Array, F64)),
+        ScalarType::TimestampUs => Arc::new(
+            number!(TimestampMicrosecondArray, TimestampUs, I64).with_timezone("UTC"),
+        ),
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+            let mut out: Vec<Option<String>> = Vec::with_capacity(values.len());
+            for value in values {
+                out.push(match value {
+                    None => None,
+                    Some(RV::Utf8(s)) => Some(s),
+                    Some(_) => return Err(mismatch(name, ty)),
+                });
+            }
+            Arc::new(StringArray::from(out))
+        }
+    })
+}

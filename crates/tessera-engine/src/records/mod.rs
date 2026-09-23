@@ -15,8 +15,30 @@
 //! segments the next page's generation holds, so a flush, merge or fold between pages loses no
 //! row and repeats none.
 
+mod columns;
 mod cursor;
+mod plan;
 mod walk;
+
+use std::ops::Range;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use arrow::record_batch::RecordBatch;
+
+use crate::cancel::CancelToken;
+use crate::engine::Engine;
+use crate::error::{EngineError, Result};
+use crate::filter::{FilterExpr, RoutedFilter};
+use crate::region::RegionVerdict;
+use crate::session::Session;
+use crate::timing::Probe;
+use crate::viewport::{crossing_domain, meta_of, SinkClosed, SinkResult};
+use crate::Generation;
+
+use cursor::{Binding, CursorKey, ItemsCursor, Position, Route};
+use plan::FieldPlan;
+use walk::{Clock, Collected, Walk, Walked};
 
 /// The order a read returns its rows in. Both return the same rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +56,103 @@ impl RecordsOrder {
             RecordsOrder::Stored => "stored",
         }
     }
+}
+
+/// The ceilings and budgets one response runs under. The deployment's configuration supplies
+/// them.
+#[derive(Debug, Clone, Copy)]
+pub struct ItemsLimits {
+    /// Rows per page; a request asking for more is served this many.
+    pub max_page_rows: u32,
+    /// Arrow bytes per page, before compression. A single row larger than this is sent alone.
+    pub max_page_bytes: usize,
+    /// Arrow bytes a response carries. No page starts that could take it past this.
+    pub response_bytes: usize,
+    /// Time a response runs. Checked between pages, and while a page under way holds no row.
+    pub response_time: Duration,
+}
+
+/// One `POST /v1/items` response, as the engine sees it.
+#[derive(Debug, Clone)]
+pub struct ItemsRequest<'a> {
+    /// A view id from `/v1/meta`. One this session cannot reach is an unknown view.
+    pub view: &'a str,
+    /// Declared fields, by name, in the order their columns are wanted. A group-scoped field may
+    /// be pinned as `<field>@<key>`.
+    pub fields: &'a [String],
+    /// Any of `position`, `external_id` and `labels`, in the order their columns are wanted.
+    pub system_fields: &'a [String],
+    /// The viewport's filter, resolved as it resolves one. `None` is every visible item.
+    pub filter: Option<FilterExpr>,
+    /// Every visible item with a `tessera:matched` column, instead of the matching ones only.
+    pub keep_unmatched: bool,
+    /// Put the visible and matching counts in the head. Refused with a cursor.
+    pub count: bool,
+    /// `None` takes the cursor's order, or with no cursor the engine's choice.
+    pub order: Option<RecordsOrder>,
+    /// Rows per page; `None` is the ceiling.
+    pub page_rows: Option<u32>,
+    /// The most pages this response may carry; `None` is as many as the budgets allow.
+    pub pages: Option<u32>,
+    /// A previous response's `next`, unchanged.
+    pub cursor: Option<&'a str>,
+    /// The idset the caller holds `tessera_id`s under, checked as the item route checks it.
+    pub idset: Option<u32>,
+    pub limits: ItemsLimits,
+    /// Cancellation ends the response with a trailer whose `ended_by` is `deadline`, after the
+    /// last whole page.
+    pub cancel: Option<CancelToken>,
+}
+
+/// The visible and matching counts a head carries under `count`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemsCounts {
+    /// Visible items in the view: the count the viewport serves.
+    pub visible: u64,
+    /// Of those, the ones matching the filter; `visible` without one.
+    pub matched: u64,
+}
+
+/// What precedes a response's pages.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemsHead {
+    pub order: RecordsOrder,
+    /// The page size used, after the ceiling.
+    pub page_rows: u32,
+    pub counts: Option<ItemsCounts>,
+    /// The coarsest verdict a `region` leaf reached, for the response's header.
+    pub region: Option<RegionVerdict>,
+}
+
+/// Why a page ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageEndedBy {
+    /// It holds the page size.
+    Rows,
+    /// The next row would have taken it past the byte ceiling.
+    Bytes,
+    /// No row remains.
+    End,
+}
+
+impl PageEndedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PageEndedBy::Rows => "rows",
+            PageEndedBy::Bytes => "bytes",
+            PageEndedBy::End => "end",
+        }
+    }
+}
+
+/// What follows a page's batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemsPageEnd {
+    /// The cursor to resume after this page from, base64url; `None` where no row remains.
+    pub next: Option<String>,
+    pub ended_by: PageEndedBy,
+    /// The page's Arrow bytes, as counted against the ceilings.
+    pub bytes: usize,
 }
 
 /// Why a response ended.
@@ -56,5 +175,371 @@ impl ResponseEndedBy {
             ResponseEndedBy::BudgetTime => "budget_time",
             ResponseEndedBy::Deadline => "deadline",
         }
+    }
+}
+
+/// What closes a response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemsTrailer {
+    pub pages: u64,
+    pub rows: u64,
+    /// The cursor to resume from, `None` where no row remains. It can be past the last page end,
+    /// where the scan went on without finding a row.
+    pub next: Option<String>,
+    pub ended_by: ResponseEndedBy,
+}
+
+/// Where a response is delivered: the head once, first, then each page with its end. A refusal
+/// means the consumer has gone, and ends the response with [`EngineError::Cancelled`].
+pub trait ItemsSink {
+    fn head(&mut self, head: &ItemsHead) -> SinkResult;
+    fn page(&mut self, batch: &RecordBatch, end: &ItemsPageEnd) -> SinkResult;
+}
+
+/// A records request the caller can correct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordsRefused {
+    /// No declared field, or none this viewer's groups reach, has this name.
+    UnknownField(String),
+    RepeatedField(String),
+    /// A group-scoped field named bare under a view that decides none of its group's columns.
+    Unpinned { field: String, group: String },
+    /// A group-scoped `text` field, which has no stored value.
+    ScopedText(String),
+    /// A pin on a field that is not group-scoped.
+    PinOnUnscoped(String),
+    UnknownSystemField(String),
+    ZeroPageRows,
+    ZeroPages,
+    CountWithCursor,
+}
+
+impl std::fmt::Display for RecordsRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecordsRefused::UnknownField(name) => write!(
+                f,
+                "field '{name}' is not declared; name a field /v1/meta publishes"
+            ),
+            RecordsRefused::RepeatedField(name) => {
+                write!(f, "field '{name}' is named twice; name each field once")
+            }
+            RecordsRefused::Unpinned { field, group } => write!(
+                f,
+                "field '{field}' is declared per view of group '{group}', and this view decides \
+                 none of them; pin one as '{field}@<key>'"
+            ),
+            RecordsRefused::ScopedText(name) => write!(
+                f,
+                "field '{name}' is a group-scoped text field, which has no stored value to \
+                 return; leave it out of fields"
+            ),
+            RecordsRefused::PinOnUnscoped(name) => write!(
+                f,
+                "field '{name}' is not group-scoped, so it takes no pin; name it without '@'"
+            ),
+            RecordsRefused::UnknownSystemField(name) => write!(
+                f,
+                "system field '{name}' is none of position, external_id or labels; name one of \
+                 those"
+            ),
+            RecordsRefused::ZeroPageRows => write!(
+                f,
+                "page_rows is 0; ask for at least one row per page, or leave it out for the \
+                 ceiling"
+            ),
+            RecordsRefused::ZeroPages => write!(
+                f,
+                "pages is 0; ask for at least one page, or leave it out for as many as the \
+                 response allows"
+            ),
+            RecordsRefused::CountWithCursor => write!(
+                f,
+                "count is asked for with a cursor; ask for counts on a request without one"
+            ),
+        }
+    }
+}
+
+/// One page's outcome.
+enum Paged {
+    Rows {
+        batch: RecordBatch,
+        bytes: usize,
+        ended_by: PageEndedBy,
+    },
+    End,
+    Stopped(ResponseEndedBy),
+}
+
+impl Engine {
+    /// Serve one `POST /v1/items` response into `sink` and return its trailer. Every refusal is
+    /// decided before the head: the request's shape, the idset, the view, the cursor (before any
+    /// position in it is used), then the fields. An `Err` after the head leaves the response
+    /// without a trailer, which a client reads as incomplete and resumes from the last page end.
+    pub fn items_stream(
+        &self,
+        session: &Session,
+        req: ItemsRequest<'_>,
+        sink: &mut dyn ItemsSink,
+    ) -> Result<ItemsTrailer> {
+        let started = Instant::now();
+        let refused = |why| Err(EngineError::RecordsRefused(why));
+        if req.page_rows == Some(0) {
+            return refused(RecordsRefused::ZeroPageRows);
+        }
+        if req.pages == Some(0) {
+            return refused(RecordsRefused::ZeroPages);
+        }
+        if req.count && req.cursor.is_some() {
+            return refused(RecordsRefused::CountWithCursor);
+        }
+
+        let generation = self.generation.load_full();
+        let manifest = &generation.bundle.manifest;
+        let idset = manifest.identity.idset;
+        if req.idset.is_some_and(|presented| presented != idset) {
+            return Err(EngineError::StaleIdSet);
+        }
+        let unknown_view = || EngineError::UnknownView(req.view.to_string());
+        if !session.visible_views().contains_view(req.view) {
+            return Err(unknown_view());
+        }
+        let incarnation = manifest.incarnation_of(req.view).ok_or_else(unknown_view)?;
+        let key = CursorKey::of(&manifest.identity.key)?;
+        let binding = Binding {
+            route: Route::Items,
+            view: req.view,
+            incarnation,
+            auth_data_hash: session.auth_data_hash(),
+        };
+        let resumed = match req.cursor {
+            None => None,
+            Some(token) => Some(ItemsCursor::decode(&key.open(&binding, token)?)?),
+        };
+        if let Some(cursor) = &resumed {
+            if cursor.idset != idset {
+                return Err(EngineError::StaleIdSet);
+            }
+            if req
+                .order
+                .is_some_and(|order| order != cursor.position.order())
+            {
+                return Err(EngineError::CursorRefused);
+            }
+        }
+        let plan = FieldPlan::resolve(
+            &meta_of(&generation),
+            req.view,
+            session.visible_views(),
+            req.fields,
+            req.system_fields,
+        )?;
+        let order = resumed
+            .map(|cursor| cursor.position.order())
+            .or(req.order)
+            .unwrap_or_else(|| plan.preferred_order());
+        let page_rows = req
+            .page_rows
+            .unwrap_or(u32::MAX)
+            .min(req.limits.max_page_rows.max(1));
+        let (counts, counted_region) = match req.count {
+            true => {
+                let (counts, region) = self.items_counts(session, &generation, &req)?;
+                (Some(counts), region)
+            }
+            false => (None, None),
+        };
+
+        let mut walk = Walk::new(
+            req.filter.clone(),
+            req.keep_unmatched,
+            page_rows,
+            resumed.map_or(Position::start(order), |cursor| cursor.position),
+        );
+        let mut clock = Clock::new(started, req.limits.response_time, req.cancel.clone());
+        let cursor_at =
+            |position: Position| key.seal(&binding, &ItemsCursor { idset, position }.encode());
+        let mut head_sent = false;
+        let mut send_head = |walk: &Walk, sink: &mut dyn ItemsSink| -> Result<()> {
+            if head_sent {
+                return Ok(());
+            }
+            head_sent = true;
+            sink.head(&ItemsHead {
+                order,
+                page_rows,
+                counts,
+                region: counted_region.or(walk.region),
+            })
+            .map_err(|SinkClosed| EngineError::Cancelled)
+        };
+
+        let (mut pages, mut rows, mut bytes) = (0u64, 0u64, 0usize);
+        let ended_by = loop {
+            if pages > 0 {
+                if req.pages.is_some_and(|limit| pages >= u64::from(limit)) {
+                    break ResponseEndedBy::Pages;
+                }
+                if bytes.saturating_add(req.limits.max_page_bytes) > req.limits.response_bytes {
+                    break ResponseEndedBy::BudgetBytes;
+                }
+                if clock.out_of_time() {
+                    break ResponseEndedBy::BudgetTime;
+                }
+            }
+            if clock.cancelled() {
+                break ResponseEndedBy::Deadline;
+            }
+            let generation = self.generation.load_full();
+            let page = self.items_page(
+                session,
+                &req,
+                &plan,
+                &generation,
+                &mut walk,
+                page_rows as usize,
+                &mut clock,
+            )?;
+            send_head(&walk, sink)?;
+            match page {
+                Paged::Rows {
+                    batch,
+                    bytes: page_bytes,
+                    ended_by,
+                } => {
+                    pages += 1;
+                    rows += batch.num_rows() as u64;
+                    bytes += page_bytes;
+                    let end = ItemsPageEnd {
+                        next: (ended_by != PageEndedBy::End).then(|| cursor_at(walk.position)),
+                        ended_by,
+                        bytes: page_bytes,
+                    };
+                    sink.page(&batch, &end)
+                        .map_err(|SinkClosed| EngineError::Cancelled)?;
+                    if ended_by == PageEndedBy::End {
+                        break ResponseEndedBy::End;
+                    }
+                }
+                Paged::End => break ResponseEndedBy::End,
+                Paged::Stopped(reason) => break reason,
+            }
+        };
+        send_head(&walk, sink)?;
+        Ok(ItemsTrailer {
+            pages,
+            rows,
+            next: (ended_by != ResponseEndedBy::End).then(|| cursor_at(walk.position)),
+            ended_by,
+        })
+    }
+
+    /// One page from `generation`: the view's mask composed for it, the rows walked from the
+    /// position, their fields read and the batch cut to the byte ceiling. The walk's position
+    /// moves to the page's end, and not at all where a cancellation discards the page.
+    #[allow(clippy::too_many_arguments)]
+    fn items_page(
+        &self,
+        session: &Session,
+        req: &ItemsRequest<'_>,
+        plan: &FieldPlan,
+        generation: &Arc<Generation>,
+        walk: &mut Walk,
+        need: usize,
+        clock: &mut Clock,
+    ) -> Result<Paged> {
+        let open = self.open_view(session, generation, req.view, &req.cancel, &mut Probe::new())?;
+        let Collected {
+            rows,
+            walked,
+            position,
+        } = walk.collect(self, &open, generation, need, clock)?;
+        match walked {
+            Walked::Stopped(reason) => {
+                if rows.is_empty() {
+                    walk.position = position;
+                }
+                return Ok(Paged::Stopped(reason));
+            }
+            _ if rows.is_empty() => {
+                walk.position = position;
+                return Ok(Paged::End);
+            }
+            _ => {}
+        }
+        let values = self.read_page(session, generation, &open, plan, &rows, req.keep_unmatched)?;
+        let (batch, kept, bytes) = values.into_batch(req.limits.max_page_bytes)?;
+        let ended_by = if kept < rows.len() {
+            walk.position = walk.position_at(&open, &rows[kept - 1]);
+            PageEndedBy::Bytes
+        } else {
+            walk.position = position;
+            match walked {
+                Walked::End => PageEndedBy::End,
+                _ => PageEndedBy::Rows,
+            }
+        };
+        Ok(Paged::Rows {
+            batch,
+            bytes,
+            ended_by,
+        })
+    }
+
+    /// The head's counts: the view's visible items, and of them the ones the filter matches, by
+    /// one evaluation of the filter over the whole view on the route every page takes.
+    fn items_counts(
+        &self,
+        session: &Session,
+        generation: &Arc<Generation>,
+        req: &ItemsRequest<'_>,
+    ) -> Result<(ItemsCounts, Option<RegionVerdict>)> {
+        let open = self.open_view(session, generation, req.view, &req.cancel, &mut Probe::new())?;
+        let visible = open.mask.visible_total();
+        let Some(expr) = &req.filter else {
+            return Ok((
+                ItemsCounts {
+                    visible,
+                    matched: visible,
+                },
+                None,
+            ));
+        };
+        let served = &open.served;
+        let parts: Vec<(usize, Range<u32>)> = served
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, (segment, _))| segment.row_count > 0)
+            .map(|(s, (segment, _))| (s, 0..segment.row_count))
+            .collect();
+        let rows_in_ranges: u64 = parts.iter().map(|(_, r)| r.len() as u64).sum();
+        let ranges = [parts];
+        let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
+        let (rows, region) = self.route_filters(served, &open.mask, &req.cancel, |route| {
+            Ok(match route(expr, true)? {
+                RoutedFilter::Entity(matched) => (
+                    self.cross_filter_into_row_space(
+                        served,
+                        &matched,
+                        &ranges,
+                        rows_in_ranges,
+                        false,
+                    ),
+                    None,
+                ),
+                RoutedFilter::Row(tree) => {
+                    let domain = crossing_domain(&ranges, &row_bases);
+                    (
+                        self.evaluate_row_route(&tree, served, &domain, rows_in_ranges, false)?,
+                        tree.region_verdict(),
+                    )
+                }
+            })
+        })?;
+        let total = u32::try_from(rows_in_ranges).unwrap_or(u32::MAX);
+        let matched = open.mask.rows_in_range(0..total).and_cardinality(rows.rows());
+        Ok((ItemsCounts { visible, matched }, region))
     }
 }

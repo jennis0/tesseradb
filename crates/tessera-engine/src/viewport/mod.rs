@@ -80,8 +80,8 @@ pub use request::{
 pub use sweep::{segments_with_row_bases, SERIAL_FALLBACK_MAX_ROWS, TILE_PAR_MIN_TILES};
 
 pub(crate) use artifacts::response_rungs;
-pub(crate) use item::flushed_row_scalar;
-pub(crate) use meta::owning_key_of;
+pub(crate) use item::{flushed_row_scalar, slice_value};
+pub(crate) use meta::{meta_of, owning_key_of};
 pub(crate) use row_filter::{crossing_domain, predicate_source, predicate_vocabulary};
 pub(crate) use served::ServedView;
 pub(crate) use sweep::{scoped_render_families, segment_row_of};
