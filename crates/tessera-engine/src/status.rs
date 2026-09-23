@@ -131,6 +131,12 @@ impl Engine {
         self.counters.refreshes.load(Ordering::Relaxed)
     }
 
+    /// Whether the background refresh for the newest flush or merge is still running. Until it
+    /// ends, a resident session may be served the previous generation's rows.
+    pub fn refresh_in_flight(&self) -> bool {
+        self.refresh_in_flight.load(Ordering::SeqCst) != crate::refresh::NO_REFRESH
+    }
+
     /// Filtered viewports served by each crossing route, `(projected, per_tile)`. Unfiltered
     /// requests are counted in neither.
     pub fn filter_crossing_routes(&self) -> (u64, u64) {

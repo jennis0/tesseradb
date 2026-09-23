@@ -3163,6 +3163,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 // Session projections refreshed after a flush or merge. A live session serves
                 // its old projection until then, so a version bump alone does not show the rows.
                 "refreshes": state.engine.refreshes(),
+                // Whether the refresh for the newest flush or merge is still running; the rows it
+                // adds are not served to a resident session until it ends.
+                "refresh_in_flight": state.engine.refresh_in_flight(),
             },
             // A coalesce bumps no version, so this counter is the only sign one ran.
             "coalesces": executor.coalesces,
