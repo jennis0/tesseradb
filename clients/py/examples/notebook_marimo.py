@@ -179,9 +179,11 @@ def _(frame, td, topic_names):
 def _(mo):
     mo.md("""
     `map()` draws the database's map in the notebook, served by that local server.
-    `colour_by` names what the points are coloured by: a column, such as `"title"`, or
-    `cluster:` followed by a layer's name. `colour_by="cluster:kmeans"` colours each point by
-    its cluster in the `kmeans` layer.
+    Two settings decide what the map shows. `colour_by` is what the points are coloured by: a
+    column, or `cluster:` followed by a layer's name, so `"cluster:kmeans"` colours each point
+    by its cluster in the `kmeans` layer. `layers` is the layers drawn over the points: here the
+    `kmeans` clusters with their names. The two are independent, so a map can colour by one
+    layer and draw another, or colour by a layer and draw nothing over it.
     Hover over a point to see its title, and zoom in to see more points.
     """)
     return
@@ -189,7 +191,7 @@ def _(mo):
 
 @app.cell
 def _(mo, simple):
-    mo.ui.anywidget(simple.map(colour_by="cluster:kmeans", height=520))
+    mo.ui.anywidget(simple.map(colour_by="cluster:kmeans", layers=["kmeans"], height=520))
     return
 
 
@@ -408,7 +410,7 @@ def _(mo):
 
 @app.cell
 def _(db, mo):
-    mo.ui.anywidget(db.map(view="papers", colour_by="cluster:topics", height=520))
+    mo.ui.anywidget(db.map(view="papers", colour_by="cluster:topics", layers=["topics"], height=520))
     return
 
 
@@ -437,13 +439,13 @@ def _(db):
 
 @app.cell
 def _(astro, mo):
-    mo.ui.anywidget(astro.map(view="papers", colour_by="cluster:topics", height=380))
+    mo.ui.anywidget(astro.map(view="papers", colour_by="cluster:topics", layers=["topics"], height=380))
     return
 
 
 @app.cell
 def _(learning, mo):
-    mo.ui.anywidget(learning.map(view="papers", colour_by="cluster:topics", height=380))
+    mo.ui.anywidget(learning.map(view="papers", colour_by="cluster:topics", layers=["topics"], height=380))
     return
 
 
@@ -517,7 +519,7 @@ def _(mo):
 @app.cell
 def _(db, mo, recent_cs):
     mo.ui.anywidget(db.map(view="papers", filters=recent_cs,
-                           colour_by="cluster:topics", height=440))
+                           colour_by="cluster:topics", layers=["topics"], height=440))
     return
 
 
@@ -594,7 +596,7 @@ def _(mo, years):
 
 @app.cell
 def _(db, mo, years):
-    year_map = db.map(view=f"years:{years[-1]}", colour_by="cluster:topics",
+    year_map = db.map(view=f"years:{years[-1]}", colour_by="cluster:topics", layers=["topics"],
                       height=440)
     mo.ui.anywidget(year_map)
     return (year_map,)
@@ -750,7 +752,7 @@ def _(mo):
 
     ```python
     v = td.connect("https://tessera.example/viewer", token=my_token)
-    v.map(colour_by="cluster:topics")
+    v.map(colour_by="cluster:topics", layers=["topics"])
     ```
     """)
     return
