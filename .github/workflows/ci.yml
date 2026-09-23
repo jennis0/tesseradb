@@ -104,17 +104,37 @@ jobs:
       # regenerating them is a judgement call rather than maintenance.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      # The tests run once, instrumented, so the gate and Codacy's coverage come from one build.
+      # `show-env` instruments only the workspace's crates, so the cached dependencies still serve.
+      #
       # `--no-fail-fast` is load-bearing. Without it cargo stops at the first test
       # binary that fails and never runs the rest, so the summary reports the failures it reached
       # alongside a passing total that is quietly smaller than the run before it — which reads as
       # success at a glance. That has already been mistaken for a green gate here.
-      - run: cargo test --workspace --no-fail-fast
-      # Runs here rather than in `checks` so it reuses the build above: `--quick` asks the compiled
-      # harnesses what they would run, and would otherwise compile the workspace a second time. It
-      # counts what the gate executes against what exists, and refuses a bare `#[ignore]`.
-      - run: bash scripts/check-test-reachability.sh --quick
+      #
+      # The reachability check shares the step for the instrumented environment: `--quick` asks the
+      # compiled harnesses what they would run, and would otherwise compile the workspace a second
+      # time. It counts what the gate executes against what exists, and refuses a bare `#[ignore]`.
+      - name: tests, instrumented for coverage
+        run: |
+          source <(cargo llvm-cov show-env --sh)
+          cargo llvm-cov clean --workspace
+          cargo test --workspace --no-fail-fast
+          bash scripts/check-test-reachability.sh --quick
+      # Paths relative to the repository root, as Codacy matches them.
+      - name: coverage report
+        if: ${{ !cancelled() }}
+        run: |
+          cargo llvm-cov report --lcov --output-path rust.lcov
+          sed -i "s|^SF:$PWD/|SF:|" rust.lcov
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: coverage-rust
+          path: rust.lcov
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   checks:
@@ -210,3 +230,36 @@ jobs:
       # between `pip install tesseradb[widget]` and a widget with no JavaScript in it.
       - run: bash scripts/check-clients.sh
       - run: bash clients/py/check.sh
+        env:
+          PYTEST_ADDOPTS: --cov=tesseradb --cov-report=xml:coverage.xml
+      # coverage.py names files relative to the package; Codacy matches them from the repository root.
+      - name: coverage report
+        if: ${{ !cancelled() }}
+        run: sed -i 's|filename="|filename="clients/py/tesseradb/|' clients/py/coverage.xml
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: coverage-python
+          path: clients/py/coverage.xml
+
+  # Both jobs' coverage in one upload, whether or not their tests passed. The token is empty on a
+  # fork's pull request, which skips the upload.
+  coverage:
+    needs: [rust, clients]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+      - id: codacy
+        env:
+          TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
+        run: echo "token=${TOKEN:+yes}" >> "$GITHUB_OUTPUT"
+      - uses: codacy/codacy-coverage-reporter-action@v1
+        if: ${{ steps.codacy.outputs.token == 'yes' }}
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          coverage-reports: rust.lcov,coverage.xml
