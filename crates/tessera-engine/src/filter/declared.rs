@@ -275,6 +275,51 @@ pub(crate) fn blob_resident(
     !scalar.render && !owes_value_column(scalar, vocabularies)
 }
 
+/// Where a declared field's value is read from. A field may have more than one home: a rendered,
+/// indexed column is in the view's row tail and in its value column both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldHomes {
+    /// In the row tail of every view, read in the view a request names.
+    pub rendered: bool,
+    /// In a per-item column in stored order: [`owes_value_column`].
+    pub value_column: bool,
+    /// In the record store: [`blob_resident`].
+    pub record: bool,
+}
+
+impl FieldHomes {
+    /// One declared field's homes, by the rules the build writes them by.
+    pub fn of(
+        scalar: &tessera_store::manifest::DeclaredScalar,
+        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    ) -> FieldHomes {
+        FieldHomes {
+            rendered: scalar.render,
+            value_column: owes_value_column(scalar, vocabularies),
+            record: blob_resident(scalar, vocabularies),
+        }
+    }
+
+    /// The field's value is read from the record store and from nowhere else: every `text` field,
+    /// and every field with neither `render` nor `index` except a category over a `derived`
+    /// vocabulary.
+    pub fn record_only(self) -> bool {
+        self.record && !self.rendered && !self.value_column
+    }
+
+    /// The homes by the names `/v1/meta` publishes, in that order.
+    pub fn names(self) -> Vec<&'static str> {
+        [
+            (self.rendered, "rendered"),
+            (self.value_column, "value_column"),
+            (self.record, "record"),
+        ]
+        .into_iter()
+        .filter_map(|(held, name)| held.then_some(name))
+        .collect()
+    }
+}
+
 /// Does the build write derived postings for this column? Only a category earns them.
 pub(crate) fn owes_postings(
     scalar: &tessera_store::manifest::DeclaredScalar,

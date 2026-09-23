@@ -101,7 +101,7 @@ impl Engine {
     /// one, reachable only while a prefix predates the transpose. Not built: plugin routing
     /// beyond the built-in one. `present_terms` is answered by
     /// `builtin:passthrough`, whose descriptors are the caller's own label strings.
-    fn labels_for(
+    pub(crate) fn labels_for(
         &self,
         generation: &Generation,
         session: &Session,
@@ -441,8 +441,6 @@ pub(crate) fn flushed_row_scalar(
     entity: EntityId,
     declared_index: usize,
 ) -> Option<tessera_filter::RecordValue> {
-    use tessera_filter::RecordValue as RV;
-
     let manifest = &generation.bundle.manifest;
     // The slot in the render tail; a column that is not rendered has no hot-column home.
     let slot = manifest
@@ -481,32 +479,41 @@ pub(crate) fn flushed_row_scalar(
             let Some(Some(view_slice)) = resolved.get(slot) else {
                 continue;
             };
-            let read = match view_slice {
-                ScalarSlice::Bool(a) if local < arrow::array::Array::len(*a) => {
-                    Some(RV::Bool(a.value(local)))
-                }
-                ScalarSlice::Utf8(a) if local < arrow::array::Array::len(*a) => {
-                    Some(RV::Utf8(a.value(local).to_string()))
-                }
-                ScalarSlice::Bool(_) | ScalarSlice::Utf8(_) => None,
-                ScalarSlice::U8(s) => s.get(local).copied().map(RV::U8),
-                ScalarSlice::U16(s) => s.get(local).copied().map(RV::U16),
-                ScalarSlice::U32(s) => s.get(local).copied().map(RV::U32),
-                ScalarSlice::U64(s) => s.get(local).copied().map(RV::U64),
-                ScalarSlice::I8(s) => s.get(local).copied().map(RV::I8),
-                ScalarSlice::I16(s) => s.get(local).copied().map(RV::I16),
-                ScalarSlice::I32(s) => s.get(local).copied().map(RV::I32),
-                ScalarSlice::I64(s) => s.get(local).copied().map(RV::I64),
-                ScalarSlice::F32(s) => s.get(local).copied().map(RV::F32),
-                ScalarSlice::F64(s) => s.get(local).copied().map(RV::F64),
-                ScalarSlice::TimestampUs(s) => s.get(local).copied().map(RV::TimestampUs),
-            };
+            let read = slice_value(view_slice, local);
             if read.is_some() {
                 return read;
             }
         }
     }
     None
+}
+
+/// One row of a rendered column as the storage-typed value the entity-space homes hold, or `None`
+/// where `local` is past the slice. Presence is the caller's: this reads the slot whatever it
+/// holds.
+pub(crate) fn slice_value(
+    slice: &ScalarSlice<'_>,
+    local: usize,
+) -> Option<tessera_filter::RecordValue> {
+    use tessera_filter::RecordValue as RV;
+    match slice {
+        ScalarSlice::Bool(a) if local < arrow::array::Array::len(*a) => Some(RV::Bool(a.value(local))),
+        ScalarSlice::Utf8(a) if local < arrow::array::Array::len(*a) => {
+            Some(RV::Utf8(a.value(local).to_string()))
+        }
+        ScalarSlice::Bool(_) | ScalarSlice::Utf8(_) => None,
+        ScalarSlice::U8(s) => s.get(local).copied().map(RV::U8),
+        ScalarSlice::U16(s) => s.get(local).copied().map(RV::U16),
+        ScalarSlice::U32(s) => s.get(local).copied().map(RV::U32),
+        ScalarSlice::U64(s) => s.get(local).copied().map(RV::U64),
+        ScalarSlice::I8(s) => s.get(local).copied().map(RV::I8),
+        ScalarSlice::I16(s) => s.get(local).copied().map(RV::I16),
+        ScalarSlice::I32(s) => s.get(local).copied().map(RV::I32),
+        ScalarSlice::I64(s) => s.get(local).copied().map(RV::I64),
+        ScalarSlice::F32(s) => s.get(local).copied().map(RV::F32),
+        ScalarSlice::F64(s) => s.get(local).copied().map(RV::F64),
+        ScalarSlice::TimestampUs(s) => s.get(local).copied().map(RV::TimestampUs),
+    }
 }
 
 /// One stored value's drill-down form, for the entity-space and blob homes: the storage-typed

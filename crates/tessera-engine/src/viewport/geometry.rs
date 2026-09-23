@@ -4,15 +4,15 @@ use super::*;
 
 /// What a request resolves before it counts anything: the view it is served from, this session's
 /// geometry over it, the composed mask and the columns the response renders.
-pub(super) struct OpenView<'a> {
-    pub(super) served: ServedView<'a>,
+pub(crate) struct OpenView<'a> {
+    pub(crate) served: ServedView<'a>,
     /// The composed mask, before any filter narrows it.
-    pub(super) mask: EffectiveMask,
+    pub(crate) mask: EffectiveMask,
     /// Kept beside the mask for the background ladder fill, which takes the whole entry.
-    pub(super) geometry: Arc<SessionGeometry>,
-    pub(super) coordinates: ViewCoordinates,
+    pub(crate) geometry: Arc<SessionGeometry>,
+    pub(crate) coordinates: ViewCoordinates,
     /// The bundle-wide render columns and then this view's scoped ones, in that order.
-    pub(super) render_scalars: Vec<DeclaredScalar>,
+    pub(crate) render_scalars: Vec<DeclaredScalar>,
 }
 
 /// θ's inputs for one request: the composed visible cardinality the threshold is anchored on, and
@@ -25,7 +25,7 @@ pub(super) struct Theta {
 
 impl Engine {
     /// Resolve the view this request is served from, and everything fixed by that resolution.
-    pub(super) fn open_view<'a>(
+    pub(crate) fn open_view<'a>(
         &self,
         session: &'a Session,
         generation: &'a Generation,

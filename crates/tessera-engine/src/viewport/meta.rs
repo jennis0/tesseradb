@@ -78,6 +78,8 @@ pub struct EngineMeta {
     /// The view groups, in manifest order, each listing its views in creation order.
     pub groups: Vec<MetaGroup>,
     pub declared_scalars: Vec<DeclaredScalar>,
+    /// Where each of `declared_scalars`' values is read from, positionally.
+    pub homes: Vec<crate::filter::FieldHomes>,
     /// The group-scoped attribute column families, flattened over the groups in manifest order:
     /// one entry per family, naming the group whose views it has a column per and the view ids
     /// that have one.
@@ -193,10 +195,24 @@ impl EngineMeta {
                 },
             };
         }
+        self.resolve_scoped_column(name, pin, view, visible, crate::filter::scoped_is_filterable)
+    }
+
+    /// The group-scoped half of [`Self::resolve_filter_column`], over the families `admits`
+    /// accepts: the filter surface admits the filterable ones, and a records read every family.
+    /// `name` and `pin` are the leaf's spelling split at [`crate::filter::PIN`].
+    pub(crate) fn resolve_scoped_column(
+        &self,
+        name: &str,
+        pin: Option<&str>,
+        view: &str,
+        visible: &crate::gate::VisibleViews,
+        admits: impl Fn(&tessera_store::manifest::ScopedScalar) -> bool,
+    ) -> LeafColumn {
         let Some(family) = self
             .scoped_scalars
             .iter()
-            .find(|f| f.name == name && crate::filter::scoped_is_filterable(f))
+            .find(|f| f.name == name && admits(f))
         else {
             return LeafColumn::Unknown;
         };
@@ -345,87 +361,97 @@ impl Engine {
     /// `GET /v1/meta`: read-only bundle facts, no session or authorisation involved. Loads the
     /// generation once, like every other request path.
     pub fn meta(&self) -> EngineMeta {
-        let generation = self.generation.load_full();
-        let manifest = &generation.bundle.manifest;
-        // The tile scheme is a function of the view's projection and frame together, derived
-        // here rather than at the wire, so the ingest plane cannot come to a different answer
-        // about the same bundle.
-        let meta_view = |s: &tessera_store::manifest::ViewDescriptor,
-                         roster: Option<MetaRoster>| MetaView {
-            id: s.id.clone(),
-            display_name: s.display_name.clone(),
-            quantisation: s.quantisation,
-            projection: s.projection,
-            tile: tessera_spatial::frame::tile_scheme(
-                s.projection,
-                &Bounds {
-                    x_min: s.quantisation.x_min,
-                    x_max: s.quantisation.x_max,
-                    y_min: s.quantisation.y_min,
-                    y_max: s.quantisation.y_max,
-                },
-            )
-            .map(|(scheme, square)| TileAddress {
-                scheme,
-                z: square.z,
-                x: square.x,
-                y: square.y,
-            }),
-            roster,
-            point_default: s.point_default.clone(),
-        };
-        // Serving order is the roster's order: plain views in manifest order, then each group's
-        // views in creation order. Nothing is sorted here — the record order is the order.
-        let rostered: std::collections::HashSet<String> = manifest
-            .groups
-            .iter()
-            .flat_map(|g| g.views.iter().map(move |v| format!("{}:{}", g.name, v.key)))
-            .collect();
-        let mut views: Vec<MetaView> = manifest
-            .views
-            .iter()
-            .filter(|v| !rostered.contains(&v.id))
-            .map(|v| meta_view(v, None))
-            .collect();
-        let mut groups: Vec<MetaGroup> = Vec::with_capacity(manifest.groups.len());
-        for group in &manifest.groups {
-            let mut ids = Vec::with_capacity(group.views.len());
-            for entry in &group.views {
-                let id = format!("{}:{}", group.name, entry.key);
-                // A roster entry with no declared view is refused at open, so this cannot
-                // silently drop one.
-                let Some(descriptor) = manifest.views.iter().find(|v| v.id == id) else {
-                    continue;
-                };
-                ids.push(id);
-                views.push(meta_view(
-                    descriptor,
-                    Some(MetaRoster {
-                        group: group.name.clone(),
-                        key: entry.key.clone(),
-                        metadata: entry.metadata.clone(),
-                    }),
-                ));
-            }
-            groups.push(MetaGroup {
-                name: group.name.clone(),
-                title: group.title.clone(),
-                members_of: group.members_of.clone(),
-                views: ids,
-            });
+        meta_of(&self.generation.load_full())
+    }
+}
+
+/// [`Engine::meta`] over a generation the caller already loaded, so a request resolves names
+/// against the same generation it reads.
+pub(crate) fn meta_of(generation: &Generation) -> EngineMeta {
+    let manifest = &generation.bundle.manifest;
+    // The tile scheme is a function of the view's projection and frame together, derived
+    // here rather than at the wire, so the ingest plane cannot come to a different answer
+    // about the same bundle.
+    let meta_view = |s: &tessera_store::manifest::ViewDescriptor,
+                     roster: Option<MetaRoster>| MetaView {
+        id: s.id.clone(),
+        display_name: s.display_name.clone(),
+        quantisation: s.quantisation,
+        projection: s.projection,
+        tile: tessera_spatial::frame::tile_scheme(
+            s.projection,
+            &Bounds {
+                x_min: s.quantisation.x_min,
+                x_max: s.quantisation.x_max,
+                y_min: s.quantisation.y_min,
+                y_max: s.quantisation.y_max,
+            },
+        )
+        .map(|(scheme, square)| TileAddress {
+            scheme,
+            z: square.z,
+            x: square.x,
+            y: square.y,
+        }),
+        roster,
+        point_default: s.point_default.clone(),
+    };
+    // Serving order is the roster's order: plain views in manifest order, then each group's
+    // views in creation order. Nothing is sorted here — the record order is the order.
+    let rostered: std::collections::HashSet<String> = manifest
+        .groups
+        .iter()
+        .flat_map(|g| g.views.iter().map(move |v| format!("{}:{}", g.name, v.key)))
+        .collect();
+    let mut views: Vec<MetaView> = manifest
+        .views
+        .iter()
+        .filter(|v| !rostered.contains(&v.id))
+        .map(|v| meta_view(v, None))
+        .collect();
+    let mut groups: Vec<MetaGroup> = Vec::with_capacity(manifest.groups.len());
+    for group in &manifest.groups {
+        let mut ids = Vec::with_capacity(group.views.len());
+        for entry in &group.views {
+            let id = format!("{}:{}", group.name, entry.key);
+            // A roster entry with no declared view is refused at open, so this cannot
+            // silently drop one.
+            let Some(descriptor) = manifest.views.iter().find(|v| v.id == id) else {
+                continue;
+            };
+            ids.push(id);
+            views.push(meta_view(
+                descriptor,
+                Some(MetaRoster {
+                    group: group.name.clone(),
+                    key: entry.key.clone(),
+                    metadata: entry.metadata.clone(),
+                }),
+            ));
         }
-        EngineMeta {
-            api_version: API_VERSION,
-            bundle_format: manifest.bundle_format,
-            views,
-            groups,
-            // The full compiled schema, including `filter`-only columns: `/v1/meta` describes
-            // what a caller may declare, not what occupies a row. Segment-facing readers narrow
-            // to `render_scalars` at their own sites.
-            declared_scalars: manifest.declared_scalars.clone(),
-            scoped_scalars: manifest.scoped_scalars(),
-            vocabularies: Arc::clone(&generation.vocabularies),
-            idset: manifest.identity.idset,
-        }
+        groups.push(MetaGroup {
+            name: group.name.clone(),
+            title: group.title.clone(),
+            members_of: group.members_of.clone(),
+            views: ids,
+        });
+    }
+    EngineMeta {
+        api_version: API_VERSION,
+        bundle_format: manifest.bundle_format,
+        views,
+        groups,
+        // The full compiled schema, including `filter`-only columns: `/v1/meta` describes
+        // what a caller may declare, not what occupies a row. Segment-facing readers narrow
+        // to `render_scalars` at their own sites.
+        declared_scalars: manifest.declared_scalars.clone(),
+        homes: manifest
+            .declared_scalars
+            .iter()
+            .map(|d| crate::filter::FieldHomes::of(d, &manifest.vocabularies))
+            .collect(),
+        scoped_scalars: manifest.scoped_scalars(),
+        vocabularies: Arc::clone(&generation.vocabularies),
+        idset: manifest.identity.idset,
     }
 }

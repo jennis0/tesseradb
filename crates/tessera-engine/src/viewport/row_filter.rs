@@ -10,7 +10,7 @@ impl Engine {
     /// exactly over every range the request can ask about. A view with no `row-entity.u32` gets
     /// the projecting route regardless — also `per_tile_only`'s fallback, the highlight's route,
     /// since its answers are all inside the request's own tiles.
-    pub(super) fn cross_filter_into_row_space(
+    pub(crate) fn cross_filter_into_row_space(
         &self,
         served: &ServedView<'_>,
         entities: &croaring::Bitmap,
@@ -761,7 +761,7 @@ const CROSSING_CHUNK_MIN_ROWS: u32 = 4096;
 
 /// The view-space rows a request's tiles span: every tile part shifted into view row space by its
 /// segment's `row_base`, sorted, and merged where adjacent, so the domain is never widened.
-pub(super) fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Vec<Range<u32>> {
+pub(crate) fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Vec<Range<u32>> {
     let mut spans: Vec<Range<u32>> = ranges
         .iter()
         .flat_map(|parts| parts.iter())
@@ -976,13 +976,38 @@ impl Engine {
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
-        let fragment = self.fragment_for(served.session, served.generation)?;
-        let candidate = crate::filter::candidate(
+        let candidate = self.filter_candidate(served.session, served.generation)?;
+        self.route_filters_under(served, mask, &candidate, cancel, body)
+    }
+
+    /// The entity-space set a request's filter is evaluated under: the session's fragment brought
+    /// forward to `generation`, with the deny state and the passing buffered entities composed in.
+    pub(crate) fn filter_candidate(
+        &self,
+        session: &Session,
+        generation: &Generation,
+    ) -> Result<croaring::Bitmap> {
+        let fragment = self.fragment_for(session, generation)?;
+        Ok(crate::filter::candidate(
             &fragment,
-            served.session.satisfied(),
-            &served.generation.overlay,
-            &served.generation.buffer,
-        );
+            session.satisfied(),
+            &generation.overlay,
+            &generation.buffer,
+        ))
+    }
+
+    /// [`Self::route_filters`] under a candidate the caller composed: a subset of
+    /// [`Self::filter_candidate`]'s set, never wider, since every scan returns a subset of it.
+    pub(crate) fn route_filters_under<T>(
+        &self,
+        served: &ServedView<'_>,
+        mask: &EffectiveMask,
+        candidate: &croaring::Bitmap,
+        cancel: &Option<CancelToken>,
+        body: impl FnOnce(
+            &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
+        ) -> Result<T>,
+    ) -> Result<T> {
         let regions =
             |leaf: &crate::filter::RegionLeaf| self.resolve_region(leaf, served, mask, cancel);
         let members =
@@ -995,7 +1020,7 @@ impl Engine {
             served
                 .generation
                 .filter_columns
-                .evaluate_routed(expr, &candidate, prefer_row, &resolvers)
+                .evaluate_routed(expr, candidate, prefer_row, &resolvers)
                 .map_err(|e| {
                     // Caller's fault or the deployment's — `FilterError` decides, at the variants.
                     let detail = e.to_string();
