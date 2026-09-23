@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use tessera_engine::scalar_column::{self, ScalarColumn};
+use tessera_engine::utf8::{self, Utf8Column};
 use tessera_engine::{
     DeclaredScalar, Projection, ScalarType, ScalarValue, ScopedScalar, Vocabularies,
     VocabularyKind, ABSENT_CODE,
@@ -63,21 +64,15 @@ pub(crate) struct ParsedBatch {
 /// requests racing one novel key cannot draw two codes for it.
 fn category_code(
     body_name: &str,
-    col: &dyn Array,
+    keys: Utf8Column<'_>,
     row: usize,
     declared: &DeclaredScalar,
     vocabulary: &str,
     vocabularies: &Vocabularies,
 ) -> Result<WalScalar, DecodeError> {
-    use arrow::array::StringArray;
-    let keys = col
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("a category column was validated as utf8 above");
-    if keys.is_null(row) {
+    let Some(key) = keys.at(row) else {
         return Ok(code_at(declared.arrow_type, ABSENT_CODE));
-    }
-    let key = keys.value(row);
+    };
     if key.is_empty() {
         return Err(DecodeError(format!(
             "{body_name}: column '{}' carries the empty string, which is not a value key; send \
@@ -218,11 +213,11 @@ fn check_columns<'b>(
     Ok(memberships)
 }
 
-/// Whether a batch column of Arrow type `found` carries `declared`. A category's column is its
-/// keys as `utf8`; any other is read by the rule a build reads a points file by.
+/// Whether a batch column of Arrow type `found` carries `declared`, by the rule a build reads a
+/// points file by: a category's column is its keys as strings at either offset width.
 fn wire_carries(declared: &DeclaredScalar, found: &arrow::datatypes::DataType) -> bool {
     match declared.vocabulary {
-        Some(_) => *found == arrow::datatypes::DataType::Utf8,
+        Some(_) => utf8::is_utf8(found),
         None => scalar_column::carries(declared.arrow_type, found),
     }
 }
@@ -230,14 +225,16 @@ fn wire_carries(declared: &DeclaredScalar, found: &arrow::datatypes::DataType) -
 /// A column `check_columns` has passed, read once for all of one record batch's rows.
 enum Cells<'b> {
     /// A category's value keys, resolved per row against its vocabulary.
-    Keys(&'b dyn Array),
+    Keys(Utf8Column<'b>),
     Scalars(ScalarColumn),
 }
 
 impl<'b> Cells<'b> {
     fn new(col: &'b arrow::array::ArrayRef, declared: &DeclaredScalar) -> Self {
         match declared.vocabulary {
-            Some(_) => Cells::Keys(col.as_ref()),
+            Some(_) => Cells::Keys(
+                Utf8Column::new(col.as_ref()).expect("check_columns checked the column's type"),
+            ),
             None => Cells::Scalars(
                 ScalarColumn::new(col, declared.arrow_type)
                     .expect("check_columns checked the column's type"),

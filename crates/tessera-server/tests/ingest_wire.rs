@@ -1502,6 +1502,124 @@ async fn an_arrow_values_column_at_another_width_is_read_as_a_build_reads_it() {
     assert_eq!(fields_of(&server, tessera_id).await["level"], json!(42));
 }
 
+/// A closed vocabulary `venues` and a category column `venue` over it, both declared live.
+async fn declare_venue(server: &TestServer) {
+    let resp = server
+        .client
+        .put(server.control_url("/control/vocabularies/venues"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "value_set": "closed",
+            "visibility": "public",
+            "width": "u8",
+            "values": [{ "key": "arxiv" }, { "key": "acl" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201);
+    declare(
+        server,
+        json!({ "name": "venue", "type": "category", "vocabulary": "venues", "index": true }),
+    )
+    .await;
+}
+
+/// An ingest batch whose `venue` keys arrive as `large_utf8`, null where a row has none.
+fn venue_ingest_body(ids: &[u64], venues: &[Option<&str>]) -> Vec<u8> {
+    let access = access_column(ids.iter().map(|_| "0"));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        access_field(&access),
+        Field::new("venue", DataType::LargeUtf8, true),
+    ]));
+    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(
+                external.iter().map(|v| v.as_slice()),
+            )),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 10.0))),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 20.0))),
+            Arc::new(access),
+            Arc::new(arrow::array::LargeStringArray::from(venues.to_vec())),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// A values batch setting one entity's `venue`, its key as `large_utf8`.
+fn venue_values_body(external_id: u64, venue: &str) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("venue", DataType::LargeUtf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values([external_id_of(external_id)])),
+            Arc::new(arrow::array::LargeStringArray::from_iter_values([venue])),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// **A category's keys are read at either string offset width, as a build reads them**, at
+/// `/control/ingest` and at `/control/values`; a key the closed vocabulary does not list is still
+/// refused.
+#[tokio::test]
+async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
+    let (_tmp, server) = served_declared().await;
+    declare_venue(&server).await;
+    let arxiv = || Some(json!({ "venue": { "eq": "arxiv" } }));
+
+    let (status, answer) = ingest(
+        &server,
+        "venues",
+        Some(ARROW),
+        venue_ingest_body(&[1000, 1001], &[Some("arxiv"), None]),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    let first = tessera_id_at(&answer, 0);
+    let second = tessera_id_at(&answer, 1);
+    flush(&server).await;
+    let (matched, _) = viewport(&server, &["0"], arxiv()).await;
+    assert_eq!(matched, [first], "the ingested key is served");
+
+    let (status, answer) = post_values(&server, "venue-value", venue_values_body(1001, "arxiv")).await;
+    assert_eq!(status, 200, "{answer}");
+    flush(&server).await;
+    let (mut matched, _) = viewport(&server, &["0"], arxiv()).await;
+    matched.sort_unstable();
+    let mut expected = [first, second];
+    expected.sort_unstable();
+    assert_eq!(matched, expected, "the key filled through /control/values is served");
+
+    let (status, answer) = ingest(
+        &server,
+        "unknown-venue",
+        Some(ARROW),
+        venue_ingest_body(&[1002], &[Some("nature")]),
+    )
+    .await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract");
+    assert!(answer["detail"].as_str().unwrap().contains("'venue'"), "{answer}");
+    let (status, answer) = post_values(&server, "unknown-value", venue_values_body(1000, "nature")).await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract");
+}
+
 /// A `uint64` past `i64::MAX`, which an `i64` cannot hold.
 const PAST_I64: u64 = 1 << 63;
 
