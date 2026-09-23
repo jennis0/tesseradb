@@ -455,8 +455,12 @@ class Observation:
 def observe(server, plan: Plan) -> Observation:
     """Every principal's answers to `plan`, rekeyed so two deployments compare."""
     answers, codes = {}, {}
+    # Shared across principals, the widest first, so a narrower principal is also asked for the
+    # items and artifacts it may not see, and answers those as withheld.
+    fx_of: dict[int, int] = {}
+    artifact_of: dict[int, tuple[str, str]] = {}
     for name, terms in PRINCIPALS.items():
-        answers[name], codes[name] = _observe_one(server, terms, plan)
+        answers[name], codes[name] = _observe_one(server, terms, plan, fx_of, artifact_of)
     return Observation(answers, codes)
 
 
@@ -470,7 +474,9 @@ def _open_columns(meta: dict) -> set[str]:
     }
 
 
-def _observe_one(server, terms, plan: Plan) -> tuple[dict[str, object], dict]:
+def _observe_one(
+    server, terms, plan: Plan, fx_of: dict[int, int], artifact_of: dict[int, tuple[str, str]]
+) -> tuple[dict[str, object], dict]:
     token = server.authorise(list(terms))["token"]
     out: dict[str, object] = {}
     served_codes: dict[str, dict[str, int]] = {}
@@ -502,8 +508,6 @@ def _observe_one(server, terms, plan: Plan) -> tuple[dict[str, object], dict]:
         out[f"suggest {column} {q!r} counts={counts}"] = answer
 
     layers = _canon(list(plan.layers)) if plan.layers else None
-    fx_of: dict[int, int] = {}
-    artifact_of: dict[int, tuple[str, str]] = {}
     for view in plan.views:
         bbox = plan.bbox(view)
         asks = [
@@ -554,6 +558,13 @@ def _observe_one(server, terms, plan: Plan) -> tuple[dict[str, object], dict]:
             out[f"browse {layer} {view} roots"] = normalise_browse(roots, artifact_of)
             search = record_one(server, token, Browse(view, layer, q="a")).payload
             out[f"browse {layer} {view} q=a"] = normalise_browse(search, artifact_of)
+            for label, expr, on in plan.filters:
+                if on is None or view in on:
+                    browse = Browse(view, layer, filters=_canon(expr))
+                    filtered = record_one(server, token, browse).payload
+                    out[f"browse {layer} {view} filter {label}"] = normalise_browse(
+                        filtered, artifact_of
+                    )
             held = sorted((k, t) for t, (lay, k) in artifact_of.items() if lay == layer)
             for key, tessera in held:
                 children = record_one(server, token, Browse(view, layer, parent=tessera)).payload

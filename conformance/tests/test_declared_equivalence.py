@@ -188,9 +188,16 @@ VOCABULARY_COLUMNS = [
     Column("mood", "category", pa.string(),
            lambda i: None if i % 8 == 0 else MOOD.values[i % 5][0], index=True,
            vocabulary="mood_v"),
-    Column("topic", "category", pa.string(),
-           lambda i: None if i % 6 == 0 else f"topic-{(i * 7) % 9}", vocabulary="topic_v"),
+    Column("topic", "category", pa.string(), lambda i: _topic(i), vocabulary="topic_v"),
 ]
+
+
+def _topic(i: int) -> str | None:
+    """A value from the derived vocabulary; `topic-pa` is carried only by items labelled `pa`, so
+    the derived list withholds it from the principals who do not hold that label."""
+    if fx.access_of(i) == "pa" and i % 10 == 0:
+        return "topic-pa"
+    return None if i % 6 == 0 else f"topic-{(i * 7) % 9}"
 
 
 class LiveVocabularies(Case):
@@ -500,7 +507,11 @@ class Layers(Case):
     published with half its members and grown by the other half."""
 
     name = "layers"
-    plan = Plan(layers=("topics", "strict"), items=ITEMS)
+    plan = Plan(
+        layers=("topics", "strict"),
+        filters=(("fx", {"fx": {"range": {"lt": 600}}}, None),),
+        items=ITEMS,
+    )
 
     def built(self, work) -> Deployment:
         roster = pa.table(
@@ -811,11 +822,15 @@ def _assert_not_vacuous(case: Case, observed: dict) -> None:
         for layer in case.plan.layers:
             served = answers[f"viewport {fx.WORLD} z0"]["artifacts"]
             _require(any(a["layer"] == layer for a in served), f"{where}: {layer} serves nothing")
-        opened = [answers[f"item {i}"] for i in case.plan.items]
+        opened = [
+            isinstance(a, dict) and a["status"] == 200
+            for a in (answers[f"item {i}"] for i in case.plan.items)
+        ]
         if principal == "everyone":
-            _require(all(o != "not served" for o in opened), f"{where}: an item is not served")
+            _require(all(opened), f"{where}: an item is not served")
         else:
-            _require(any(o != "not served" for o in opened), f"{where}: no item is served")
+            _require(any(opened), f"{where}: no item is served")
+            _require(not all(opened), f"{where}: no item is withheld")
 
 
 @pytest.fixture(scope="module")
