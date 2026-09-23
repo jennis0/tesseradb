@@ -183,8 +183,11 @@ these under `shed` and percentiles the rest.
 An ingest cycle ingests every declared view, the anchor view first, then each other plain view
 and each view of every group. An entity is allocated on the first pass that holds it and joins
 on each later one. The hold-out is a set of entities, drawn from every view's points, so an
-entity's rows in every view are held back and ingested together. A group's views read either
-their own file or one file shared by the group, picked out by its `fields.view` column. An
+entity held back is held back from every view, and its rows are ingested in each view's own pass.
+A group's views read either their own file or one file shared by the group, picked out by its
+discriminator column (`view`, or the name its `fields.view` gives). A roster is read in any of the
+build's three forms: `[[view_group.view]]` blocks, a `[view_group.views]` table, or keys taken
+from the discriminator's distinct values. An
 attribute read from a file of its own is joined on entity id onto the batches of every view it
 applies to, picked by view key for a group-scoped one, as the build reads it beside the points.
 The fields below are the anchor view's figures; the driver's own result file also carries every
@@ -195,7 +198,7 @@ view's, under `ingest_by_view` (below, under "Beyond the schema").
 | `fraction` | fraction | entities held back, seeded and uniform |
 | `concurrency` | count | concurrent callers on `/control/ingest` |
 | `seed` | — | the split's seed |
-| `base_rows`, `holdout_rows` | count | the split |
+| `base_rows`, `holdout_rows` | count | entities in the base and in the hold-out: the cycle's own `base_entities` and `holdout_entities` |
 | `blocked` | object/absent | the cell did not run: where, and the refusal, verbatim |
 | `base_build`, `base_build_stages` | — | `tessera build` over the complement alone, on §1's fields |
 | `publish` | — | the publication, per layer — below |
@@ -268,9 +271,12 @@ same.
 Each view's census also asks, under the broadest and the narrowest principal, a filter or two per
 filter operand `/v1/meta` offers on that view, a group-scoped family on the views of its keys
 included: a numeric column's presence and upper half, a category or keyword column's three
-commonest values, a text column's two commonest words, each drawn from the head of the file the
-view's batches take the column from, and `/v1/categories` for each category column. A matched
-count or value list that differs counts under `filters`.
+commonest values, and a text column's two commonest words of four letters or more, and
+`/v1/categories` for each category column, followed through every page. Each value is drawn from
+up to 200,000 of the view's own rows in the file its batches take the column from, and a text
+column's words are the tokens `tessera tokenise` produces under the column's declared analyser. A
+matched count or value list that differs counts under `filters`, and a probe answer that did not
+arrive whole is a sentence under `incomplete`.
 
 `equivalence.views` holds each view's own comparison, keyed by name, with the five flags above,
 `frames`, `frames_equal`, `census_coverage`, `differences` and `differences_by_surface`.
@@ -280,8 +286,10 @@ each layer's `declared_levels` against the levels an artifact was served at, wit
 `levels_compared`, `levels_declared`, `levels_missing` and the layer's own parent edges. A level in
 `levels_missing` is a failure sentence, since a census that compares no artifact at a level proves
 nothing there. `census_coverage.visible` is the broadest principal's zoom-0 count and
-`census_coverage.filters` counts the probes compared, those matching something, and the category
-lists. `equivalence.views_compared_nowhere` names every view the all-in build serves that the
+`census_coverage.filters` counts the filter operands `/v1/meta` offers on the view (`offered`),
+the probes compared, those matching something, and the category lists, and names the probes whose
+answer on the all-in build matched nothing (`unmatched_on_all_in`). Operands offered with nothing
+compared, and each unmatched probe, are failure sentences. `equivalence.views_compared_nowhere` names every view the all-in build serves that the
 census did not reach or saw nothing in, each a failure sentence. The top-level `equal` is every view's `equal`, `incomplete` is a sentence per census
 request that did not arrive whole, and the other top-level fields are the views' own summed or
 concatenated.

@@ -181,8 +181,8 @@ class Cycle:
         base_ids, held = split_entities(
             declared_entities(self.rung), self.args.fraction, self.args.seed
         )
-        self.result["base_rows"] = int(len(base_ids))
-        self.result["holdout_rows"] = int(len(held))
+        self.result["base_entities"] = int(len(base_ids))
+        self.result["holdout_entities"] = int(len(held))
         self.held = held
         if self.args.reuse_base and (bundle / "CURRENT").exists():
             self.log(f"reusing {bundle}")
@@ -201,7 +201,7 @@ class Cycle:
         else:
             if base_dir.exists():
                 shutil.rmtree(base_dir)
-            self.log(f"splitting: base {len(base_ids):,} rows, hold-out {len(held):,} rows")
+            self.log(f"splitting: base {len(base_ids):,} entities, hold-out {len(held):,} entities")
             write_base_inputs(self.rung, base_dir, base_ids)
             # Release what the split left in the pool: the build runs beside this process.
             pa.default_memory_pool().release_unused()

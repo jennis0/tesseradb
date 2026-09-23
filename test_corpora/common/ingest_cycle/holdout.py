@@ -32,8 +32,9 @@ def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list
     default, read off the rung's own declaration: the view's `point_visibility.field`, and every
     `[[attribute]]` that travels with a point there. One read from a file of its own is joined
     on entity id, as the build reads it beside the points: each joined file is `(file, columns,
-    select)`. A group-scoped attribute travels only on a view of its group or of one sharing its
-    keys, its rows picked by the `fields.view` column where its file names one."""
+    select, fields)`. A group-scoped attribute travels only on a view of its group or of one
+    sharing its keys, its rows picked by its file's discriminator, `view` unless `fields.view`
+    renames it."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
     entity = declared.get("defaults", {}).get("entity_id_field", "entity_id")
