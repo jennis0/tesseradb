@@ -734,10 +734,36 @@ fn title_flushes(keyword: [bool; 3]) -> Fixture {
     fx
 }
 
-/// A keyword layer whose ordinals reach past its own dictionary fails the pass, which leaves
-/// nothing to publish.
+/// A keyword layer whose ordinals reach past its own dictionary fails its own window, which stays
+/// listed, and every other window still publishes.
 #[test]
-fn a_keyword_window_the_merge_refuses_fails_the_pass() {
+fn a_window_the_merge_refuses_fails_alone() {
+    let fx = Fixture::with_every_kind();
+    let faulted = fx.manifest.attr_extents.iter().find(|e| e.column == "title").unwrap();
+    let faulted = faulted.dict.clone().unwrap();
+    tessera_filter::write_sorted_dict(&fx.path(&faulted), ["a"]).unwrap();
+    let plan = fx.plan().expect("every kind qualifies");
+    let completed = fx.execute(plan).expect("the other windows write");
+    assert_eq!(completed.failures.len(), 1, "the title window failed");
+    let windows: BTreeSet<&str> =
+        completed.attrs.iter().map(|m| m.consumed.column.as_str()).collect();
+    assert_eq!(windows, BTreeSet::from(["year", "mood"]));
+    assert!(completed.tier.is_some() && completed.record.is_some() && completed.terms.is_some());
+
+    let after = rebased(&fx.manifest, &completed).expect("nothing moved under the pass");
+    let titles = |m: &SegmentsManifest| {
+        let listed = m.attr_extents.iter().filter(|e| e.column == "title");
+        listed.map(|e| e.values.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(titles(&after), titles(&fx.manifest), "the failed window stays listed");
+    for rel in completed.files.keys() {
+        assert!(!rel.contains("/attrs/title"), "{rel} is digested from the failed window");
+    }
+}
+
+/// A pass whose every window fails produces nothing.
+#[test]
+fn a_pass_whose_every_window_fails_is_an_error() {
     let fx = title_flushes([true; 3]);
     let faulted = fx.manifest.attr_extents[1].dict.clone().unwrap();
     tessera_filter::write_sorted_dict(&fx.path(&faulted), ["a"]).unwrap();

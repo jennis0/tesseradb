@@ -9,10 +9,9 @@
 //! # The blob's lifecycle merges, and the two removal rules
 //!
 //! [`coalesce_record_extents`] and [`fold_record_blob`] are the value-column pair's counterparts
-//! (`coalesce_attr_extents`, `fold_value_column`): the same linear merge under the same
-//! non-interleaving guard, streaming rows through [`RecordBlobWriter`] — which is what repacks
-//! small blocks toward the 256 KiB target as a side effect of re-blocking, rather than as a pass
-//! of its own. Each input layer streams through [`tessera_filter::RecordBlob::for_each_row`],
+//! (`coalesce_attr_extents`, `fold_value_column`): a merge by entity over layers whose entities
+//! may interleave, streaming rows through [`RecordBlobWriter`], which repacks small blocks toward
+//! the 256 KiB target as a side effect of re-blocking rather than as a pass of its own. Each input layer streams through [`tessera_filter::RecordBlob::for_each_row`],
 //! whose walk *is* the addressing self-check, so a defective input refuses the pass instead of
 //! being laundered into a clean-looking output.
 //!
@@ -478,9 +477,8 @@ impl RecordBlobWriter {
     }
 }
 
-/// A window of record-blob extents merged into one, for the entity-space coalesce (records §7:
-/// the record axis beside the attribute axis, merging by concatenation in ascending entity
-/// order).
+/// A window of record-blob extents merged into one by entity, for the entity-space coalesce.
+/// `inputs` are in manifest order, oldest first.
 ///
 /// **A coalesce retires nothing**, so there is no tombstone parameter to pass and no way to spell
 /// one: a suppressed or deleted-but-unfolded entity's row rides through untouched, because a
@@ -509,7 +507,6 @@ pub fn coalesce_record_extents(
         hasrow_path,
         directory_path,
         target,
-        "the record-blob coalesce",
     )
 }
 
@@ -519,8 +516,7 @@ pub fn coalesce_record_extents(
 /// Blanking is *remove, emit no bytes*: a blanked entity leaves the has-row bitmap and
 /// contributes nothing to any block, so its row is physically absent from the folded artefact
 /// rather than overwritten — the retention asymmetry records §7 states. `layers` is the base blob
-/// followed by every extent the fold consumes, in any order; the merge sorts them by their own
-/// entity ranges and refuses an interleaving, exactly as the attribute pass does.
+/// followed by every extent the fold consumes, in manifest order.
 pub fn fold_record_blob(
     layers: &[&RecordBlob],
     tombstones: &Bitmap,
@@ -542,17 +538,15 @@ pub fn fold_record_blob(
         hasrow_path,
         directory_path,
         target,
-        "the fold's record pass",
     )
 }
 
 /// Stream the layers' rows into one blob in entity order, skipping `tombstones`.
 ///
-/// The order and the two refusals are [`crate::ordered_disjoint`]'s — the same guard the value
-/// columns merge under, over the layers' has-row bitmaps. Each layer then streams through
-/// [`RecordBlob::for_each_row`], whose walk revalidates the input's addressing as the rows are
-/// read; [`RecordBlobWriter::push_row`]'s strictly-ascending check stands behind the guard as the
-/// second line.
+/// The layers' entities may interleave, and a values fill gives an entity a row in a second
+/// layer. Each merged row is what [`tessera_filter::RecordStack::fields_of`] answers over the
+/// layers in list order: the union of their fields, the earliest layer's value where two carry
+/// one tag. [`merge_record_rows`] lets the later stream win a tag, so the layers go in reversed.
 fn write_merged_rows(
     layers: &[&RecordBlob],
     tombstones: &Bitmap,
@@ -560,18 +554,8 @@ fn write_merged_rows(
     hasrow_path: &Path,
     directory_path: &Path,
     target: usize,
-    pass: &str,
 ) -> io::Result<()> {
-    let present: Vec<(usize, Bitmap)> = layers
-        .iter()
-        .enumerate()
-        .map(|(i, layer)| layer.hasrow().map(|hasrow| (i, hasrow.clone())))
-        .collect::<Result<_, _>>()?;
-    let (order, _) = crate::ordered_disjoint(present, pass)?;
-    let mut cursors: Vec<BlobRows> = order
-        .iter()
-        .map(|(layer, _)| BlobRows::over(layers[*layer]))
-        .collect();
+    let mut cursors: Vec<BlobRows> = layers.iter().rev().map(|l| BlobRows::over(l)).collect();
     let mut sources: Vec<&mut dyn RecordRows> = cursors
         .iter_mut()
         .map(|c| c as &mut dyn RecordRows)
@@ -654,8 +638,8 @@ impl RecordRows for BlobRows<'_> {
 /// with a later stream's value winning a tag two streams both carry. That is what a build needs:
 /// its prose lives in spilled extents, one per text column per join chunk, and the rest of the
 /// row lives in the entity-ordered columns, so an entity's row is assembled here and nowhere
-/// else. The fold and the coalesce pass streams their own guard has already proved disjoint, so
-/// for them the merge is a concatenation and the bytes are the ones a single stream wrote.
+/// else. The fold and the coalesce pass one stream per layer, whose entities may interleave and
+/// may repeat where a values fill wrote a second row.
 ///
 /// Held at once: a heap of the streams that have a row, a list of which stream holds which of the
 /// row's tags, and the writer's open block. The fields themselves are never collected — they are lent
@@ -696,9 +680,9 @@ pub fn merge_record_rows(
             for field in 0..sources[source].field_count() {
                 let tag = sources[source].field(field)?.tag;
                 match picks.iter_mut().find(|held| held.0 == tag) {
-                    // A later stream is the later write. The build's streams carry disjoint tags
-                    // for one entity, so this arm is the refusal's absence rather than a route
-                    // anything takes.
+                    // A later stream wins. The build's streams carry disjoint tags for one
+                    // entity; the fold and the coalesce pass their layers reversed, so the
+                    // earliest layer wins as it does in the reader.
                     Some(held) => {
                         held.1 = source;
                         held.2 = field;
@@ -1056,33 +1040,101 @@ mod tests {
         assert!(folded.fields_of(0).expect("read").is_some());
     }
 
-    /// The two refusals are this merge's own, exactly as they are the value columns': an overlap
-    /// or an interleaving would pair rows with the wrong ranks with no later symptom, and a single
-    /// input is not a window.
+    /// One layer whose rows each carry one utf8 field under `tag`.
+    fn tagged_layer(dir: &Path, name: &str, tag: u16, rows: &[(u32, &str)]) -> RecordBlob {
+        let (blocks, hasrow, directory) = paths_of(dir, name);
+        let mut writer =
+            RecordBlobWriter::create(&blocks, &hasrow, &directory, RECORD_BLOCK_TARGET)
+                .expect("create");
+        for (entity, value) in rows {
+            let field = RecordFieldRef {
+                tag,
+                value: tessera_filter::RecordValueRef::Utf8(value),
+            };
+            writer.push_row(*entity, &[field]).expect("push");
+        }
+        writer.finish().expect("finish");
+        RecordBlob::open(&blocks, &hasrow, &directory, Access::Read).expect("open")
+    }
+
+    /// What the reader's stack answers for `entity` over the layers named, oldest first, with the
+    /// fields in tag order.
+    fn stack_answer(dir: &Path, layers: &[&str], entity: u32) -> Option<Vec<RecordField>> {
+        let extents: Vec<tessera_filter::RecordExtentPaths> = layers
+            .iter()
+            .map(|name| {
+                let (blocks, hasrow, directory) = paths_of(dir, name);
+                tessera_filter::RecordExtentPaths {
+                    blocks,
+                    hasrow,
+                    directory,
+                }
+            })
+            .collect();
+        let stack =
+            tessera_filter::RecordStack::open(None, &extents, Access::Read).expect("the stack");
+        let mut fields = stack.fields_of(entity).expect("read")?;
+        fields.sort_by_key(|f| f.tag);
+        Some(fields)
+    }
+
+    /// Layers whose entities interleave, and layers holding a row for one entity, merge by entity.
+    /// Each merged row is what the reader's stack answers over the inputs: the union of the layers'
+    /// fields, and where two layers carry one tag, the earlier layer's value.
     #[test]
-    fn overlapping_or_interleaved_layers_are_refused() {
+    fn interleaved_and_shared_entities_merge_as_the_reader_answers() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let a = layer_at(
-            dir.path(),
-            "a",
-            RECORD_BLOCK_TARGET,
-            &[(1, "one"), (3, "three")],
-        );
-        let clash = layer_at(dir.path(), "clash", RECORD_BLOCK_TARGET, &[(3, "again")]);
-        let err = coalesce_to(dir.path(), "c1", &[&a, &clash], RECORD_BLOCK_TARGET)
-            .expect_err("an overlap is refused");
-        assert!(err.to_string().contains("twice"), "{err}");
+        tagged_layer(dir.path(), "a", 0, &[(1, "a1"), (3, "a3"), (4, "a4"), (6, "a6")]);
+        tagged_layer(dir.path(), "b", 0, &[(0, "b0"), (2, "b2"), (5, "b5"), (6, "b6")]);
+        tagged_layer(dir.path(), "c", 1, &[(3, "c3"), (7, "c7")]);
+        let open = |name: &str| {
+            let (blocks, hasrow, directory) = paths_of(dir.path(), name);
+            RecordBlob::open(&blocks, &hasrow, &directory, Access::Read).expect("open")
+        };
+        let (a, b, c) = (open("a"), open("b"), open("c"));
 
-        let interleaved = layer_at(
-            dir.path(),
-            "b",
-            RECORD_BLOCK_TARGET,
-            &[(0, "zero"), (2, "two")],
+        let out = coalesce_to(dir.path(), "merged", &[&a, &b, &c], RECORD_BLOCK_TARGET)
+            .expect("the coalesce");
+        out.self_check().expect("addressing");
+        for entity in 0..=8u32 {
+            assert_eq!(
+                out.fields_of(entity).expect("read"),
+                stack_answer(dir.path(), &["a", "b", "c"], entity),
+                "entity {entity}"
+            );
+        }
+        assert_eq!(
+            out.fields_of(6).expect("read").expect("a row")[0].value,
+            RecordValue::Utf8("a6".to_string()),
+            "the earlier layer's value for a tag two layers carry"
         );
-        let err = coalesce_to(dir.path(), "c2", &[&a, &interleaved], RECORD_BLOCK_TARGET)
-            .expect_err("interleaving is refused");
-        assert!(err.to_string().contains("interleaved"), "{err}");
+        assert_eq!(out.fields_of(3).expect("read").expect("a row").len(), 2);
 
-        assert!(coalesce_to(dir.path(), "c3", &[&a], RECORD_BLOCK_TARGET).is_err());
+        let (blocks, hasrow, directory) = paths_of(dir.path(), "folded");
+        fold_record_blob(
+            &[&a, &b, &c],
+            &Bitmap::from_iter([4u32]),
+            &blocks,
+            &hasrow,
+            &directory,
+            RECORD_BLOCK_TARGET,
+        )
+        .expect("the fold");
+        let folded = RecordBlob::open(&blocks, &hasrow, &directory, Access::Read).expect("open");
+        for entity in 0..=8u32 {
+            let expected = match entity {
+                4 => None,
+                _ => stack_answer(dir.path(), &["a", "b", "c"], entity),
+            };
+            assert_eq!(folded.fields_of(entity).expect("read"), expected, "entity {entity}");
+        }
+    }
+
+    /// A single input is not a window.
+    #[test]
+    fn a_single_extent_is_not_coalesced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = layer_at(dir.path(), "a", RECORD_BLOCK_TARGET, &[(1, "one")]);
+        assert!(coalesce_to(dir.path(), "c", &[&a], RECORD_BLOCK_TARGET).is_err());
     }
 }

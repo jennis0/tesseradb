@@ -790,3 +790,212 @@ fn a_folds_carried_tiers_and_runs_are_coalesced_and_every_answer_holds_through_a
         );
     }
 }
+
+fn declare(engine: &Engine, name: &str, ty: &str, index: bool) {
+    engine
+        .declare_attribute(tessera_engine::AttributeRequest {
+            name: name.to_string(),
+            title: None,
+            ty: ty.to_string(),
+            vocabulary: None,
+            analyser: None,
+            index,
+            render: false,
+            scope: tessera_types::layer::LayerScope::Entity,
+        })
+        .unwrap_or_else(|e| panic!("column '{name}' declares: {e}"));
+}
+
+/// Each item's drill-down fields, and the items each filter matches in each view.
+#[derive(Debug, PartialEq)]
+struct Interleaved {
+    fields: Vec<Vec<(String, tessera_engine::ScalarOut)>>,
+    matches: Vec<Vec<u64>>,
+}
+
+fn interleaved_answers(engine: &Engine, entities: &[EntityId]) -> Interleaved {
+    use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
+    let session = engine.authorise(&full_coverage_credential()).expect("the session authorises");
+    let fields = entities
+        .iter()
+        .map(|entity| {
+            let id = engine.tessera_id_of(*entity).expect("an opaque id");
+            let item = engine.item(&session, id, None).expect("the drill-down answers");
+            let mut fields: Vec<_> = item
+                .expect("the item is served")
+                .fields
+                .into_iter()
+                .map(|f| (f.name, f.value))
+                .collect();
+            fields.sort_by(|a, b| a.0.cmp(&b.0));
+            fields
+        })
+        .collect();
+    let leaf = |column: &str, operand| FilterExpr::Leaf {
+        column: column.to_string(),
+        operand,
+    };
+    let filters = [
+        leaf("tag", FilterOperand::TextEquals("tag-1".to_string())),
+        leaf(
+            "weight",
+            FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Float(6.0),
+                    inclusive: true,
+                }),
+                hi: None,
+            },
+        ),
+        leaf(
+            "prose",
+            FilterOperand::Match {
+                query: "shared".to_string(),
+                minimum: None,
+            },
+        ),
+        leaf(
+            "prose",
+            FilterOperand::Match {
+                query: "word5".to_string(),
+                minimum: None,
+            },
+        ),
+    ];
+    let mut matches = Vec::new();
+    for filter in filters {
+        for view in ["s0", "s1"] {
+            let mut request = ViewportRequest::new(view, 0, WHOLE_MAP, N_ITEMS as usize);
+            request.filter = Some(filter.clone());
+            let mut ids: Vec<u64> = engine
+                .viewport(&session, request)
+                .expect("the viewport answers")
+                .points
+                .iter()
+                .map(|(id, _)| id.raw())
+                .collect();
+            ids.sort_unstable();
+            matches.push(ids);
+        }
+    }
+    Interleaved { fields, matches }
+}
+
+/// **Extents from two views whose entities interleave coalesce, and every entity answers the
+/// same.** New items for two views in one commit window take interleaved entity ids, so the two
+/// views' flushes write entity-scoped attribute, record, text and entity-term extents whose entity
+/// sets interleave. The coalesce merges them by entity: every filter and drill-down answers as it
+/// did before, live and after a restart.
+#[test]
+fn interleaved_extents_from_two_views_coalesce_and_every_entity_answers_the_same() {
+    use tessera_lifecycle::wal::WalScalar;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let engine = engine_at(tmp.path(), &root);
+    engine.set_coalesce_for_test(false);
+    declare(&engine, "note", "keyword", false);
+    declare(&engine, "tag", "keyword", true);
+    declare(&engine, "prose", "text", true);
+    declare(&engine, "weight", "f32", true);
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the view is created");
+
+    // Each window's batch alternates views, so each view's flush holds every other id. Two
+    // flushes per window, so WIDTH / 2 windows give every axis a full window.
+    let mut entities: Vec<EntityId> = Vec::new();
+    let mut s0: Vec<u64> = Vec::new();
+    let mut s1: Vec<u64> = Vec::new();
+    for window in 0..WIDTH / 2 {
+        let rows: Vec<UnallocatedRow> = (0..4)
+            .map(|j| {
+                let i = window * 4 + j;
+                UnallocatedRow {
+                    external_id: Some(format!("mixed-{i}").into_bytes()),
+                    view: if j % 2 == 0 { "s0" } else { "s1" }.to_string(),
+                    join: None,
+                    descriptors: vec![b"0".to_vec()],
+                    x: 5.0 + i as f64,
+                    y: 5.0,
+                    scalars: vec![
+                        WalScalar::Utf8(format!("note-{i}")),
+                        WalScalar::Utf8(format!("tag-{}", i % 3)),
+                        WalScalar::Utf8(format!("word{i} shared")),
+                        WalScalar::F32(i as f32),
+                    ],
+                    terms: engine.resolve_terms(&[b"0".to_vec()]),
+                    scoped: Vec::new(),
+                }
+            })
+            .collect();
+        let allocated = engine
+            .accept_ingest(rows, format!("mixed-{window}"), [window as u8; 32])
+            .expect("the batch is accepted");
+        for (j, entity) in allocated.iter().enumerate() {
+            if j % 2 == 0 { &mut s0 } else { &mut s1 }.push(entity.raw());
+        }
+        entities.extend(allocated);
+        tick_until(&engine, "both views to flush", WAIT, || {
+            engine.generation().buffer.is_empty()
+        });
+    }
+    assert!(
+        s0.iter().min() < s1.iter().max() && s1.iter().min() < s0.iter().max(),
+        "the two views' entities interleave: {s0:?} and {s1:?}"
+    );
+
+    let manifest = manifest_of(&root);
+    let column_extents = |m: &tessera_store::manifest::SegmentsManifest, column: &str| {
+        m.attr_extents.iter().filter(|e| e.column == column).count()
+            + m.text_extents.iter().filter(|e| e.column == column).count()
+    };
+    let lists = |m: &tessera_store::manifest::SegmentsManifest| {
+        [
+            column_extents(m, "tag"),
+            column_extents(m, "prose"),
+            column_extents(m, "weight"),
+            m.record_extents.len(),
+            m.entity_terms_extents.len(),
+        ]
+    };
+    assert_eq!(lists(&manifest), [WIDTH; 5], "one extent per flush on every list");
+    let before = interleaved_answers(&engine, &entities);
+    for fields in &before.fields {
+        for name in ["note", "tag", "prose", "weight"] {
+            assert!(fields.iter().any(|f| f.0 == name), "'{name}' is served: {fields:?}");
+        }
+    }
+
+    engine.set_coalesce_for_test(true);
+    let stats = engine.write_executor_stats();
+    tick_until(&engine, "the coalesce to publish", WAIT, || {
+        let now = engine.write_executor_stats();
+        assert_eq!(now.coalesce_failures, stats.coalesce_failures, "a coalesce failed");
+        now.coalesces > stats.coalesces
+    });
+    let after = manifest_of(&root);
+    assert_eq!(lists(&after), [1; 5], "every list collapsed to one extent");
+    assert_eq!(interleaved_answers(&engine, &entities), before, "live, after the coalesce");
+
+    drop(engine);
+    let engine = engine_at(tmp.path(), &root);
+    assert_eq!(interleaved_answers(&engine, &entities), before, "after a restart");
+}
