@@ -92,7 +92,13 @@ def ask_probes(
             except requests.exceptions.RequestException as e:
                 incomplete.append(f"the census request at {where} was not answered: {e}")
                 continue
-            filters[probe["name"]] = (s["counts"] or {}).get("matched")
+            if s["shed"] or s["counts"] is None:
+                incomplete.append(
+                    f"the census request at {where} did not arrive whole: "
+                    f"{s['shed_error'] or 'no counts frame or no trailer'}"
+                )
+                continue
+            filters[probe["name"]] = s["counts"].get("matched")
         else:
             r = requests.get(
                 f"{viewer}/v1/categories/{probe['categories']}",
