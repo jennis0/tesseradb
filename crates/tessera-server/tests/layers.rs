@@ -271,20 +271,19 @@ async fn a_restart_after_a_drop_leaves_every_layer_version_where_it_was() {
     assert_versions_survive_restarts(server, &tmp).await;
 }
 
-/// A layer registered after a drop, once a fold has rotated the earlier registrations out of the
-/// log, keeps its version across a crash that comes before any side-manifest names it.
-///
-/// The crash is a copy of the bundle, log and cache taken while the executor is parked before the
-/// side-manifest that would carry the registration.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_layer_registered_after_a_drop_and_a_fold_keeps_its_version_across_a_crash() {
+/// Register a and b, drop b, optionally flush and fold so the log rotates past those records,
+/// then register c and crash before any side-manifest names it. Returns the layer versions served
+/// before the crash and after it.
+async fn crash_before_the_manifest_naming_a_new_layer(fold: bool) -> (Vec<(String, u64)>, Vec<(String, u64)>) {
     use tessera_lifecycle::faults::{PauseAction, PauseSite};
     let tmp = TempDir::new().unwrap();
     let (server, faults) = serve_with_faults(&tmp).await;
     register(&server, declaration("clusters/a", None)).await;
     register(&server, declaration("clusters/b", None)).await;
     assert_eq!(drop_layer(&server, "clusters%2Fb").await.0, 200);
-    flush_and_fold(&server, None).await;
+    if fold {
+        flush_and_fold(&server, None).await;
+    }
 
     faults.arm_pause(PauseSite::BeforeManifestPublish, PauseAction::Stall);
     register(&server, declaration("clusters/c", None)).await;
@@ -296,13 +295,47 @@ async fn a_layer_registered_after_a_drop_and_a_fold_keeps_its_version_across_a_c
     .await;
     let before = layer_versions(&server).await;
     assert_eq!(before.len(), 2);
-    let crashed = TempDir::new().unwrap();
-    copy_dir(tmp.path(), crashed.path());
+    let crashed = crash_copy(&tmp);
     faults.release();
     server.shutdown().await;
 
     let server = open(&crashed).await;
-    assert_eq!(layer_versions(&server).await, before);
+    (before, layer_versions(&server).await)
+}
+
+/// A layer registered after a drop, once a fold has rotated the earlier registrations out of the
+/// log, keeps its version across a crash that comes before any side-manifest names it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_layer_registered_after_a_drop_and_a_fold_keeps_its_version_across_a_crash() {
+    let (before, after) = crash_before_the_manifest_naming_a_new_layer(true).await;
+    assert_eq!(after, before);
+}
+
+/// The same with the earlier registrations still in the log beside the manifest that also counts
+/// them: replay does not count them twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_layer_registered_after_a_drop_keeps_its_version_across_a_crash() {
+    let (before, after) = crash_before_the_manifest_naming_a_new_layer(false).await;
+    assert_eq!(after, before);
+}
+
+/// After a restart that replays a drop the manifest already counts, the next registration takes
+/// the next version, the same one it would have taken without the restart.
+#[tokio::test]
+async fn a_registration_after_a_restart_takes_the_next_version() {
+    let versions_of_c = async |restart_first: bool| {
+        let tmp = TempDir::new().unwrap();
+        let mut server = serve_standard(&tmp).await;
+        register(&server, declaration("clusters/a", None)).await;
+        register(&server, declaration("clusters/b", None)).await;
+        assert_eq!(drop_layer(&server, "clusters%2Fb").await.0, 200);
+        if restart_first {
+            server = restart(server, &tmp).await;
+        }
+        register(&server, declaration("clusters/c", None)).await;
+        layer_versions(&server).await
+    };
+    assert_eq!(versions_of_c(true).await, versions_of_c(false).await);
 }
 
 // ---- publication -------------------------------------------------------------------------------
