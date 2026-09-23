@@ -195,6 +195,7 @@ class HoldOut:
         log=print,
         view: dict | None = None,
         members: bool = True,
+        record_order: bool = False,
     ):
         #: The view's own points file: its positions, its access column, and whichever declared
         #: attributes it holds; and the `(column, key)` picking the view's rows out of a file
@@ -228,6 +229,15 @@ class HoldOut:
         self.columns = [stream.name for stream in self.members]
         self.member_stats = {stream.name: stream.stats for stream in self.members}
         self.last_entity = -1
+        #: Each row's entity id in the order the batches send them, where asked for: what the row
+        #: index a body starts at is an index into.
+        self.order: list[int] | None = [] if record_order else None
+
+    def emit(self, table: pa.Table, start: int):
+        """[`bodies`] over one slice, its entity ids recorded first where `order` is kept."""
+        if self.order is not None:
+            self.order += table.column("entity_id").to_pylist()
+        yield from self.bodies(table, start)
 
     @staticmethod
     def new_body_stats() -> dict:
@@ -304,14 +314,14 @@ class HoldOut:
             pending_rows += table.num_rows
             while pending_rows >= rows:
                 whole = pa.concat_tables(pending)
-                yield from self.bodies(whole.slice(0, rows), emitted)
+                yield from self.emit(whole.slice(0, rows), emitted)
                 emitted += rows
                 rest = whole.slice(rows)
                 pending = [rest] if rest.num_rows else []
                 pending_rows = rest.num_rows
         if pending_rows:
             whole = pa.concat_tables(pending)
-            yield from self.bodies(whole, emitted)
+            yield from self.emit(whole, emitted)
         if head:
             self.head = pa.concat_tables(head)
 

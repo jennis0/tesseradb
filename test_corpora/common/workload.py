@@ -219,10 +219,8 @@ def correctness(result: dict) -> list[tuple[str, bool, str]]:
         rows.append(("ingest cycle ran", False, "no result"))
         return rows
     views = dig(cycle, "equivalence", "views", default={})
-    written, expected = (
-        dig(cycle, "write_cycle", "visible_after_cycle", default="n/a"),
-        dig(cycle, "write_cycle", "expected_after_cycle", default="n/a"),
-    )
+    counted = dig(cycle, "write_cycle", "by_view", default={})
+    recreate = cycle.get("view_recreate") or {}
     after, before = (
         dig(cycle, "restart", "visible", default="n/a"),
         dig(cycle, "restart", "visible_before", default="n/a"),
@@ -234,7 +232,22 @@ def correctness(result: dict) -> list[tuple[str, bool, str]]:
         ("filters and category lists equal per view", *per_view(views, "filters_equal")),
         ("artifact parents equal per view", *per_view(views, "parents_equal")),
         ("every declared layer level compared", *levels_compared(views)),
-        ("write cycle counts", written == expected, f"{written} visible against {expected} expected"),
+        (
+            "write cycle counts in every view",
+            bool(counted) and all(c.get("after") == c.get("expected") for c in counted.values()),
+            ", ".join(f"{name} {c.get('after')}/{c.get('expected')}" for name, c in counted.items())
+            or "no count",
+        ),
+        (
+            "view dropped and recreated equal",
+            bool(recreate.get("skipped")) or bool(recreate.get("equal")),
+            recreate.get("skipped")
+            or f"{recreate.get('group')}/{recreate.get('key')}: "
+            + ", ".join(
+                f"{name} {'equal' if compared.get('equal') else 'DIFFERS'}"
+                for name, compared in (recreate.get("census") or {}).items()
+            ),
+        ),
         (
             "restart equal",
             bool(dig(cycle, "restart", "census_equal")) and after == before,
