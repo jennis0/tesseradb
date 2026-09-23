@@ -230,7 +230,18 @@ impl Executor {
         let health = Arc::clone(&self.health);
         self.deps.pool.spawn(move || {
             match crate::coalesce::execute_coalesce(plan, ctx) {
-                Ok(completed) => unit.complete(completed),
+                Ok(completed) => {
+                    // A failed window stays listed and the rest of the pass publishes.
+                    for e in &completed.failures {
+                        health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            error = %e,
+                            "a coalesce window failed; its extents stay as they are and it is \
+                             retried at the next tick"
+                        );
+                    }
+                    unit.complete(completed)
+                }
                 Err(e) => {
                     // Nothing happened, retry next tick: the manifest is the only commit point,
                     // so a failure before it leaves orphan files nothing references and every

@@ -157,13 +157,24 @@ pub(crate) struct Merged<W, O> {
     pub(crate) output: O,
 }
 
-impl<W, O> Merged<W, O> {
-    fn of(
-        consumed: W,
-        merge: impl FnOnce(&W) -> Result<O, MaintenanceFailed>,
-    ) -> Result<Self, MaintenanceFailed> {
-        let output = merge(&consumed)?;
-        Ok(Merged { consumed, output })
+/// Runs one window's merge. A failure is recorded and leaves the window standing, so the other
+/// windows still publish; the files the merge digested join `files` only when it succeeds.
+fn attempt<W, O>(
+    consumed: W,
+    files: &mut BTreeMap<String, FileDigest>,
+    failures: &mut Vec<MaintenanceFailed>,
+    merge: impl FnOnce(&W, &mut BTreeMap<String, FileDigest>) -> Result<O, MaintenanceFailed>,
+) -> Option<Merged<W, O>> {
+    let mut written = BTreeMap::new();
+    match merge(&consumed, &mut written) {
+        Ok(output) => {
+            files.extend(written);
+            Some(Merged { consumed, output })
+        }
+        Err(e) => {
+            failures.push(e);
+            None
+        }
     }
 }
 
@@ -185,13 +196,16 @@ pub(crate) struct CompletedCoalesce {
     pub(crate) texts: Vec<Merged<ColumnWindow<TextExtent>, TextExtent>>,
     pub(crate) terms: Option<Merged<Vec<EntityTermsExtent>, EntityTermsExtent>>,
     pub(crate) files: BTreeMap<String, FileDigest>,
+    /// The windows whose merge failed. They stay in the manifest and are planned again.
+    pub(crate) failures: Vec<MaintenanceFailed>,
 }
 
 fn taken<E>(entries: Vec<E>) -> Option<Vec<E>> {
     (!entries.is_empty()).then_some(entries)
 }
 
-/// Writes a plan's merged files. Runs on the background pool.
+/// Writes a plan's merged files. Runs on the background pool. A window whose merge fails is left
+/// out and reported in `failures`; the pass fails only when every window did.
 pub(crate) fn execute_coalesce(
     plan: CoalescePlan,
     ctx: CoalesceContext,
@@ -199,33 +213,41 @@ pub(crate) fn execute_coalesce(
     std::fs::create_dir_all(ctx.prefix_dir.join(&ctx.out_rel))
         .map_err(failed("coalesce dir"))?;
     let mut files: BTreeMap<String, FileDigest> = BTreeMap::new();
+    let mut failures: Vec<MaintenanceFailed> = Vec::new();
+    let (f, e) = (&mut files, &mut failures);
 
     let tier = taken(plan.tiers)
-        .map(|w| Merged::of(w, |w| coalesce_tiers(w, &ctx, &mut files)))
-        .transpose()?;
+        .and_then(|w| attempt(w, f, e, |w, out| coalesce_tiers(w, &ctx, out)));
     let run = taken(plan.locators)
-        .map(|w| Merged::of(w, |w| coalesce_runs(w, &ctx, &mut files)))
-        .transpose()?;
+        .and_then(|w| attempt(w, f, e, |w, out| coalesce_runs(w, &ctx, out)));
     let dict = taken(plan.dicts)
-        .map(|w| Merged::of(w, |w| coalesce_dicts(w, &ctx, &mut files)))
-        .transpose()?;
-    let attrs = plan
+        .and_then(|w| attempt(w, f, e, |w, out| coalesce_dicts(w, &ctx, out)));
+    let attrs: Vec<_> = plan
         .attrs
         .into_iter()
-        .map(|w| Merged::of(w, |w| coalesce_attr_window(w, &ctx, &mut files)))
-        .collect::<Result<_, _>>()?;
+        .filter_map(|w| attempt(w, f, e, |w, out| coalesce_attr_window(w, &ctx, out)))
+        .collect();
     let record = taken(plan.records)
-        .map(|w| Merged::of(w, |w| coalesce_records(w, &ctx, &mut files)))
-        .transpose()?;
-    let texts = plan
+        .and_then(|w| attempt(w, f, e, |w, out| coalesce_records(w, &ctx, out)));
+    let texts: Vec<_> = plan
         .texts
         .into_iter()
-        .map(|w| Merged::of(w, |w| coalesce_text_window(w, &ctx, &mut files)))
-        .collect::<Result<_, _>>()?;
+        .filter_map(|w| attempt(w, f, e, |w, out| coalesce_text_window(w, &ctx, out)))
+        .collect();
     let terms = taken(plan.terms)
-        .map(|w| Merged::of(w, |w| coalesce_entity_terms(w, &ctx, &mut files)))
-        .transpose()?;
+        .and_then(|w| attempt(w, f, e, |w, out| coalesce_entity_terms(w, &ctx, out)));
 
+    let nothing = tier.is_none()
+        && run.is_none()
+        && dict.is_none()
+        && attrs.is_empty()
+        && record.is_none()
+        && texts.is_empty()
+        && terms.is_none();
+    if nothing {
+        let reasons: Vec<String> = failures.iter().map(|e| e.0.clone()).collect();
+        return Err(MaintenanceFailed(reasons.join("; ")));
+    }
     Ok(CompletedCoalesce {
         partition: plan.partition,
         prefix: ctx.prefix,
@@ -237,5 +259,6 @@ pub(crate) fn execute_coalesce(
         texts,
         terms,
         files,
+        failures,
     })
 }
