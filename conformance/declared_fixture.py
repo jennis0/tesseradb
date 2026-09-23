@@ -263,6 +263,18 @@ def world_view_toml() -> str:
     )
 
 
+class Refused(RuntimeError):
+    """A control-plane request answered with a status the caller did not expect."""
+
+    def __init__(self, method: str, path: str, status: int, text: str):
+        super().__init__(f"{method} {path} answered {status}: {text}")
+        self.status = status
+
+
+class NeverVisible(RuntimeError):
+    """A flush waited on with `wait=visible` did not publish."""
+
+
 class Deployment:
     """One bundle root, built once and served by its own harness.
 
@@ -348,7 +360,7 @@ class Deployment:
         then what a new session sees."""
         resp = self.control("POST", "/control/flush?wait=visible", expect=(202,))
         if resp.json().get("visible") is not True:
-            raise RuntimeError(f"the flush did not become visible: {resp.text}")
+            raise NeverVisible(f"the flush did not become visible: {resp.text}")
 
     def control(self, method: str, path: str, *, expect=(200, 201), view=None, **kwargs):
         headers = {"Authorization": f"Bearer {OPERATOR_CREDENTIAL}"}
@@ -359,7 +371,7 @@ class Deployment:
             method, f"{self.server.control_base}{path}", headers=headers, timeout=60, **kwargs
         )
         if resp.status_code not in expect:
-            raise RuntimeError(f"{method} {path} answered {resp.status_code}: {resp.text}")
+            raise Refused(method, path, resp.status_code, resp.text)
         return resp
 
     def rows(self, route: str, rows: list[dict], batch: str, view: str | None = None) -> dict:
@@ -760,8 +772,10 @@ __all__ = [
     "K",
     "N_BUILT",
     "N_ITEMS",
+    "NeverVisible",
     "PRINCIPALS",
     "Plan",
+    "Refused",
     "Vocabulary",
     "WORLD",
     "WORLD_EXTENT",

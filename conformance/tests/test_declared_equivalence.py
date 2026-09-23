@@ -121,6 +121,10 @@ class Case:
         raise NotImplementedError
 
 
+class RenderRefused(Exception):
+    """The control plane refused a column declared with `render = true`."""
+
+
 class EntityAttributes(Case):
     """Entity-scoped attributes declared live. The items the live build holds get their cells
     through `/control/values` and the rest arrive over `/control/ingest` carrying them; with
@@ -151,7 +155,12 @@ class EntityAttributes(Case):
         blocks = [fx.world_view_toml(), fx.fx_column().toml()]
         d = Deployment(work, Corpus(blocks, _world(BUILT), [DEPT, GRADE]))
         for column in self.columns:
-            d.control("PUT", "/control/attributes", json=column.payload(), expect=(201,))
+            try:
+                d.control("PUT", "/control/attributes", json=column.payload(), expect=(201,))
+            except fx.Refused as refused:
+                if column.render and refused.status == 422:
+                    raise RenderRefused(str(refused)) from refused
+                raise
         writes = [
             lambda: d.rows(
                 "/control/ingest",
@@ -605,8 +614,8 @@ GROUP_VIEW_RECREATED = (
 #: Cases and stages expected to fail as a whole, why, and the exception they fail with. Strict,
 #: so each flips when the cause is fixed.
 EXPECTED_FAILURES = {
-    **{("rendered-attributes", stage): (RENDER_REFUSED, RuntimeError) for stage in STAGES},
-    **{("open-category-values", stage): (VALUES_DO_NOT_MINT, RuntimeError) for stage in STAGES},
+    **{("rendered-attributes", stage): (RENDER_REFUSED, RenderRefused) for stage in STAGES},
+    **{("open-category-values", stage): (VALUES_DO_NOT_MINT, fx.NeverVisible) for stage in STAGES},
 }
 
 
