@@ -55,6 +55,9 @@ const META = {
   filterOperands: [] as FilterOperandSet[]
 };
 
+/** A layer points can be coloured by: it declares geometry and depends on nothing. */
+const clusters = (name: string) => ({name, title: name, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: [], depsOn: [], version: 1});
+
 const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400};
 
 /** A model initialised and one view rendered, so there is a store: the store is per view. */
@@ -262,7 +265,8 @@ describe('the down-sync', () => {
     expect(store.calls.map((c) => c.name)).toEqual(['setLayers', 'setColourBy']);
     // Only the active view syncs up; a settle on it after meta carries what the store applied.
     const operands: FilterOperandSet[] = [{column: 'year', family: 'numeric', operands: ['range']}];
-    store.set('meta', {...META, filterOperands: operands} as never);
+    store.set('meta', {...META, layers: [clusters('clusters/a')], filterOperands: operands} as never);
+    expect(model.sent).toEqual([]);
     model.set('filters', {year: {range: {gte: 2000}}});
     const applied = store.calls.filter((c) => c.name === 'setFilters');
     expect(applied).toHaveLength(1);
@@ -271,6 +275,22 @@ describe('the down-sync', () => {
     model.set('filters', {any_of: [{year: {range: {gte: 1}}}]});
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);
     expect(model.sent.at(-1)?.content).toMatchObject({type: 'error', what: 'filters'});
+  });
+
+  it('reports a colour_by naming no layer this view can colour by, once meta lists the layers', () => {
+    const {model, store} = setUp({colour_by: 'cluster:nope'});
+    // The store takes it as given; before meta there is nothing to check it against.
+    expect(store.calls.filter((c) => c.name === 'setColourBy').map((c) => c.args)).toEqual([['cluster:nope']]);
+    expect(model.sent).toEqual([]);
+    store.set('meta', {...META, layers: [clusters('topics'), {...clusters('topic_names'), computedContent: [], depsOn: ['topics']}]} as never);
+    expect(model.sent.map((s) => s.content)).toMatchObject([{type: 'error', what: 'colour_by'}]);
+    // A layer that can colour is not reported, drawn or not; a labels layer cannot colour.
+    model.set('colour_by', 'cluster:topics');
+    model.set('colour_by', 'archive');
+    expect(model.sent).toHaveLength(1);
+    model.set('colour_by', 'cluster:topic_names');
+    expect(model.sent.map((s) => s.content)).toMatchObject([{what: 'colour_by'}, {type: 'error', what: 'colour_by'}]);
+    expect(store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
   });
 
   it('a filters expression set before meta is applied at meta', () => {

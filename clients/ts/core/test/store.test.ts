@@ -4,7 +4,7 @@ import type {Clock} from '../src/driver.js';
 import type {FrameScheduler} from '../src/presented.js';
 import {createStore, type Store} from '../src/store.js';
 import {withVerb, type FilterDraft} from '../src/filters.js';
-import type {Meta, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {Artifact, Layer, MembershipColumn, Meta, ViewportResponse, ViewportResult} from '../src/types.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
@@ -1090,5 +1090,162 @@ describe('the subscriber fan-out', () => {
     expect(quiet).toHaveBeenCalledTimes(1);
     quiet.mockRestore();
     store.dispose();
+  });
+});
+
+describe('the layers drawn and the layer coloured by are two settings', () => {
+  const layer = (name: string, extra: Partial<Layer> = {}): Layer => ({
+    name,
+    title: name,
+    views: ['s0'],
+    membership: 'enumerated',
+    hierarchy: {kind: 'flat', pruneChildren: false},
+    levels: [],
+    computedContent: ['centroid', 'box'],
+    shape: null,
+    suppliedContent: [],
+    depsOn: [],
+    version: 1,
+    ...extra
+  });
+  const levels = [0, 1, 2, 3].map((level) => ({level, title: `level ${level}`, zoom: null}));
+  const LAYERED: Meta = {
+    ...META,
+    layers: [
+      layer('topics', {hierarchy: {kind: 'tiered', pruneChildren: false}, levels}),
+      layer('topic_names', {computedContent: [], suppliedContent: ['label'], depsOn: ['topics']}),
+      layer('kmeans'),
+      layer('mesh', {computedContent: []})
+    ]
+  };
+  const row = (layerName: string, id: bigint, target: bigint | null = null): Artifact => ({
+    layer: layerName,
+    tesseraId: id,
+    key: `${layerName}-${id}`,
+    maskedCount: 3n,
+    centroid: target === null ? [2 ** 30, 2 ** 30] : null,
+    box: null,
+    shape: null,
+    content: target === null ? [] : ['a name'],
+    parentIds: [],
+    rung: 0,
+    matched: null,
+    highlighted: null,
+    target
+  });
+  const ROWS: Record<string, Artifact[]> = {topics: [row('topics', 11n)], topic_names: [row('topic_names', 21n, 11n)], kmeans: [row('kmeans', 31n)]};
+
+  /**
+   * Answers as the server does: the artifacts of every layer named, and on a point request a
+   * membership column per named layer that has members, every point in its first artifact.
+   */
+  function answer(req: FakeRequest): ViewportResponse {
+    const r = response('ck');
+    const named = Array.isArray(req.layers) ? req.layers : [];
+    const membership: Record<string, MembershipColumn> = {};
+    if (req.k !== 0) {
+      for (const name of named) {
+        const first = ROWS[name]?.[0];
+        if (first && first.target === null) membership[name] = {index: Uint16Array.from(r.result.ids, () => 1), ids: BigUint64Array.of(first.tesseraId)};
+      }
+    }
+    return {...r, result: {...r.result, membership, artifacts: named.flatMap((n) => ROWS[n] ?? []), artifactsIdentity: null}};
+  }
+
+  async function open(traces: {kind: string; fields: Record<string, number | string>}[] = []) {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewport} = fakeClient(answer, LAYERED);
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, instruments: {onTrace: (kind, fields) => traces.push({kind, fields})}});
+    await clock.advance(1);
+    const settle = async () => {
+      await clock.advance(600);
+      scheduler.flush();
+      await clock.advance(600);
+      scheduler.flush();
+    };
+    const asked = () => viewport.mock.calls.map((c) => c[1] as FakeRequest & {levels?: number[]; artifactBudget?: number});
+    return {store, settle, asked};
+  }
+
+  const layersOf = (artifacts: readonly Artifact[]) => [...new Set(artifacts.map((a) => a.layer))];
+
+  it('colours by a layer with nothing drawn: the request names the layer alone, points carry it, and nothing of it is drawn', async () => {
+    const {store, settle, asked} = await open();
+    store.setColourBy('cluster:topics');
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+
+    const points = asked().filter((r) => r.k !== 0);
+    expect(points.length).toBeGreaterThan(0);
+    for (const r of points) {
+      // The colour layer alone: its labels layer would be drawn, and nothing of it is.
+      expect(r.layers).toEqual(['topics']);
+      expect(r.levels).toEqual([0, 1, 2, 3]);
+      expect(r.artifactBudget).toBeGreaterThan(0);
+    }
+    expect(asked().some((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.includes('topics'))).toBe(true);
+
+    const bands = store.get('marks').bands;
+    expect(bands.length).toBeGreaterThan(0);
+    const a = store.get('artifacts');
+    for (const band of bands) {
+      const m = band.membership['topics']!;
+      expect(m).toBeDefined();
+      for (const ordinal of m.distinct) expect(a.table.resolve(ordinal, a.colours)).not.toBe(0);
+    }
+    // Drawn: nothing. Coloured: the layer's rows.
+    expect(a.layers).toEqual([]);
+    expect(a.served).toEqual([]);
+    expect(a.lineage.roots).toEqual([]);
+    expect(layersOf(a.colourServed)).toEqual(['topics']);
+  });
+
+  it('draws a layer with its labels and colours by another, and each surface sees its own', async () => {
+    const {store, settle, asked} = await open();
+    store.setLayers(['topics']);
+    store.setColourBy('cluster:kmeans');
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+
+    for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'topic_names', 'kmeans']);
+    const a = store.get('artifacts');
+    expect(a.layers).toEqual(['topics', 'topic_names']);
+    expect(layersOf(a.served)).toEqual(['topics', 'topic_names']);
+    expect(layersOf(a.colourServed)).toEqual(['kmeans']);
+    expect(Object.keys(store.get('marks').bands[0]!.membership).sort()).toEqual(['kmeans', 'topics']);
+  });
+
+  it('asks for nothing when the colour layer is already drawn, and for the layer when it is not', async () => {
+    const {store, settle, asked} = await open();
+    store.setLayers(['topics']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+    const before = asked().length;
+
+    store.setColourBy('cluster:topics');
+    await settle();
+    expect(asked().length).toBe(before);
+    expect(layersOf(store.get('artifacts').colourServed)).toEqual(['topics']);
+
+    store.setColourBy('cluster:kmeans');
+    await settle();
+    const after = asked().slice(before);
+    expect(after.some((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.includes('kmeans'))).toBe(true);
+    expect(after.some((r) => r.k !== 0 && Array.isArray(r.layers) && r.layers.includes('kmeans'))).toBe(true);
+    expect(store.get('artifacts').layers).toEqual(['topics', 'topic_names']);
+  });
+
+  it('ignores and traces a colour layer meta does not list as one that can colour', async () => {
+    const traces: {kind: string; fields: Record<string, number | string>}[] = [];
+    const {store, settle, asked} = await open(traces);
+    store.setColourBy('cluster:nope');
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+    store.setColourBy('cluster:topic_names');
+    await settle();
+    expect(asked().every((r) => !Array.isArray(r.layers) || r.layers.length === 0)).toBe(true);
+    expect(traces.filter((t) => t.kind === 'colour-by').map((t) => t.fields.layer)).toEqual(['nope', 'topic_names']);
+    expect(store.get('legend').colourBy).toBe('cluster:topic_names');
   });
 });

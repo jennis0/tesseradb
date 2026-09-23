@@ -74,6 +74,15 @@ export function drawableLayers(layers: readonly Layer[]): Layer[] {
 }
 
 /**
+ * The layers whose clusters points may be coloured by (`colourBy = "cluster:<layer>"`): every
+ * drawable layer that is not a labels layer. A labels layer's artifacts have no members of their
+ * own to colour.
+ */
+export function colourLayers(layers: readonly Layer[]): Layer[] {
+  return layers.filter((l) => !isFilterLayer(l) && l.depsOn.length === 0);
+}
+
+/**
  * Whether a layer has a lineage to walk — anything but `flat`
  * (`highlight-and-hierarchy.md` §4, §5.1).
  *

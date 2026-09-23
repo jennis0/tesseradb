@@ -36,7 +36,7 @@ const projections = {
          highlighted: {value: 3_204, exact: true}, highlighting: true, served: {shown: 4_812, total: 181_900, exact: true}, provisional: 0},
   marks: {bands: [], standIn: [], count: NO_COUNT},
   tiles: {tiles: []},
-  artifacts: {layer: 'clusters/kmeans', layers: ['clusters/kmeans'], served: [], lineage: servedLineage([]), status: 'shown', refusal: null,
+  artifacts: {layer: 'clusters/kmeans', layers: ['clusters/kmeans'], served: [], colourServed: [], lineage: servedLineage([]), status: 'shown', refusal: null,
               version: 1, held: 0, table: new SessionArtifactTable(), servedOrdinals: new Set<number>(), shapes: new Map(), colours: new Map(),
               palette: 'positional', coverage: {current: 0, stale: 0}},
   selection: {item: null, itemRefusal: null,

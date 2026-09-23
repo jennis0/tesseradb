@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {drawableLayers, isFilterLayer, layerClosure, layerEntries} from '../src/layers.js';
+import {colourLayers, drawableLayers, isFilterLayer, layerClosure, layerEntries} from '../src/layers.js';
 import type {Layer} from '../src/types.js';
 
 const layer = (name: string, depsOn: string[] = []): Layer => ({
@@ -57,5 +57,14 @@ describe('a filter layer', () => {
     const labels = layer('labels', ['clusters']);
     expect(isFilterLayer(labels)).toBe(false);
     expect(drawableLayers([clusters, labels, layer('descriptors')]).map((l) => l.name)).toEqual(['clusters', 'labels']);
+  });
+});
+
+describe('the layers points may be coloured by', () => {
+  it('are the drawable layers that are not labels layers', () => {
+    const clusters = {...layer('clusters'), computedContent: ['centroid']};
+    const districts = {...layer('districts'), computedContent: ['box']};
+    const roster = [clusters, layer('labels', ['clusters']), layer('descriptors'), districts];
+    expect(colourLayers(roster).map((l) => l.name)).toEqual(['clusters', 'districts']);
   });
 });
