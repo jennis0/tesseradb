@@ -2044,51 +2044,30 @@ fn write_manifests(
         // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes
         // — which are under a digest.
         //
-        // A **closed** vocabulary's values are exactly what the config declared (`v.codes`,
-        // unchanged — pinned or assigned alike). An **open** one's values come from
-        // `minters[&v.name]` instead — the declaration's codes *plus* every code this build
-        // minted for a key the declaration lacked —
-        // because `v.codes` alone would silently omit everything minted during the scan. Either
-        // way the values are read back sorted by key ([`tessera_store::vocabulary::values_of`]),
-        // so the bytes here do not depend on a `BTreeMap`'s or a minter's internal order.
+        // An open vocabulary's values come from its minter in `minters`, which holds the
+        // declaration's codes and every code this build drew during the scan; a closed one's are
+        // the declaration's own. Either way they are read back sorted by key.
         vocabularies: {
             let mut compiled: Vec<ManifestVocabulary> = args
                 .schema
                 .vocabularies
                 .values()
                 .map(|v| {
-                    let values = match minters.get(&v.name) {
-                        Some(minter) => tessera_store::vocabulary::values_of(minter)
-                            .into_iter()
-                            .map(|value| ManifestVocabularyValue {
-                                title: v.titles.get(&value.key).cloned(),
-                                ..value
-                            })
-                            .collect(),
-                        None => v
-                            .codes
-                            .iter()
-                            .map(|(key, &code)| ManifestVocabularyValue {
-                                key: key.clone(),
-                                code,
-                                title: v.titles.get(key).cloned(),
-                            })
-                            .collect(),
-                    };
+                    let minter = minters.get(&v.name).unwrap_or(&v.values);
+                    let values = tessera_store::vocabulary::values_of(minter)
+                        .into_iter()
+                        .map(|value| ManifestVocabularyValue {
+                            title: minter.title_of(&value.key).map(str::to_string),
+                            ..value
+                        })
+                        .collect();
                     ManifestVocabulary {
                         name: v.name.clone(),
                         // The declaration's value set, carried verbatim: it is what ingest
                         // consults to decide whether a key nothing has bound is a typo or a new
                         // value. The manifest keeps its own two words for it.
-                        kind: match v.value_set {
-                            crate::config::ValueSet::Closed => {
-                                tessera_store::manifest::VocabularyKind::Declared
-                            }
-                            crate::config::ValueSet::Open => {
-                                tessera_store::manifest::VocabularyKind::Discovered
-                            }
-                        },
-                        visibility: v.visibility,
+                        kind: v.values.kind(),
+                        visibility: v.visibility(),
                         // The declared code space, carried so that a reader with no column over
                         // this vocabulary still knows what bounds a code drawn into it.
                         width: v.width,
