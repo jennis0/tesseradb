@@ -261,12 +261,30 @@ def test_a_memory_killed_run_reports_a_resource_outcome_not_a_correctness_failur
         k=K,
         profile=Profile("constrained", memory_max=OOM_CONTROL_LIMIT_BYTES),
     )
+    outcome = None
+    failure = None
     try:
-        with pytest.raises(OutOfMemory) as caught:
-            run_plan(h, [Build()])
+        run_plan(h, [Build()])
+    except OutOfMemory as exc:
+        outcome = exc
+    except Exception as exc:
+        failure = exc
     finally:
         h.stop()
-    outcome = caught.value
+    if outcome is None:
+        # The tail tells a server that thrashed without being killed (a spawn timeout with
+        # `oom_kill` 0) apart from one that ran within the limit.
+        log_path = getattr(h, "log_path", None)
+        tail = (
+            log_path.read_bytes()[-8192:].decode(errors="replace")
+            if log_path is not None and log_path.exists()
+            else "(no server log)"
+        )
+        ran = f"failed with {failure!r}" if failure is not None else "completed"
+        pytest.fail(
+            f"expected an out-of-memory kill, but the run {ran}; memory report "
+            f"{h.memory_report}\nserver log tail:\n{tail}"
+        )
     assert outcome.events.get("oom_kill", 0) >= 1, (
         "the outcome must carry the cgroup's own record of the kill, not an inference from "
         "the symptoms"
