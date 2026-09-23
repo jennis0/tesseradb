@@ -2881,15 +2881,29 @@ fn dropping_the_engine_returns_while_a_fold_is_held_in_flight() {
     );
 }
 
-/// **A fold lands while ingest continues into several views.**
+/// **A fold lands while ingest continues into several views, the feed joining its items into
+/// the other two.**
 ///
 /// Each round ingests new items into `s0` and joins the same items into `s1` and `s2`, as a
 /// multi-view deployment's feed does, and asks for a flush. Views flush one per tick, so whenever
 /// a fold is planned some view's rows for entities another view has already flushed are still
-/// buffered, and they publish during the fold's flight. A fold discarded for that is asked for
-/// again; one of a bounded number of attempts must publish while the feed keeps running.
+/// buffered, and they publish during the fold's flight.
 #[test]
 fn a_fold_lands_while_ingest_continues_into_several_views() {
+    a_fold_lands_while_the_feed_runs(|round, _view, i| format!("feed-{round}-{i}"));
+}
+
+/// **A fold lands while ingest continues into several views, each taking new items of its own.**
+/// One commit window then allocates interleaved ids to all three views, whose flushes overlap
+/// one another and, published during the fold's flight, the fold's base.
+#[test]
+fn a_fold_lands_while_ingest_of_new_items_continues_into_several_views() {
+    a_fold_lands_while_the_feed_runs(|round, view, i| format!("feed-{round}-{view}-{i}"));
+}
+
+/// Feed `s0`, `s1` and `s2` with eight rows each per round, keyed by `key(round, view, i)`, and
+/// ask for folds while it runs: one of a bounded number of attempts must publish.
+fn a_fold_lands_while_the_feed_runs(key: fn(u64, &str, u64) -> String) {
     const ATTEMPTS: u64 = 5;
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
@@ -2906,7 +2920,7 @@ fn a_fold_lands_while_ingest_continues_into_several_views() {
                 for view in ["s0", "s1", "s2"] {
                     let rows: Vec<UnallocatedRow> = (0..8u64)
                         .map(|i| UnallocatedRow {
-                            external_id: Some(format!("feed-{round}-{i}").into_bytes()),
+                            external_id: Some(key(round, view, i).into_bytes()),
                             view: view.to_string(),
                             join: None,
                             descriptors: vec![b"0".to_vec()],

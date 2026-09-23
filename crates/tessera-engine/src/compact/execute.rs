@@ -383,8 +383,7 @@ fn derive_term_images(
     Ok(term_images)
 }
 
-/// Pass 3: external-id run 0 and its locator, bounded at the snapshot's recorded bindings so
-/// later locator extents stay reachable. Tombstoned entities' keys are dropped, or a lawful re-ingest of
+/// Pass 3: external-id run 0 and its locator, over the snapshot's entity space. Tombstoned entities' keys are dropped, or a lawful re-ingest of
 /// that external id would be refused once retirement lifts the deletion.
 fn fold_external_ids(
     plan: &FoldPlan,
@@ -403,7 +402,7 @@ fn fold_external_ids(
         fold_external_id_runs(
             &run_paths,
             0,
-            plan.binding_bound.saturating_sub(1),
+            plan.entity_bound.saturating_sub(1),
             &plan.tombstones,
             entities_dir,
         )

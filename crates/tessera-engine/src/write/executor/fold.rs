@@ -875,9 +875,9 @@ impl Executor {
         }
         let forward = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
 
-        // Every carried-forward extent must begin at or above the fold's own base, per view, or
-        // the prefix will not open (or will answer "no external id" for an item that has one).
-        // Checked before anything is written, since both would surface only after `CURRENT` flips.
+        // Every carried-forward segment must begin at or above its view's base, or the prefix will
+        // not open. Checked before anything is written, since that would surface only after
+        // `CURRENT` flips. A carried locator extent may overlap the base: a lookup asks both.
         for descriptor in &forward.segments {
             let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
                 // A view created and flushed since the plan was taken has no base here; that is
@@ -889,15 +889,6 @@ impl Executor {
             if descriptor.entity_lo < view.permutation_bound {
                 return Err("a carried-forward segment begins below the fold's own base permutation".to_string());
             }
-        }
-        // Checked partition-wide: `ext-locator.u32` is one array per partition, and the sidecar
-        // asks it before any extent for an entity below its length.
-        if forward
-            .locators
-            .iter()
-            .any(|extent| extent.entity_lo < plan.binding_bound)
-        {
-            return Err("a carried-forward locator extent begins below the fold's own base locator".to_string());
         }
         // A run arriving during the flight would become `external_id_runs[0]`, and the sidecar
         // would then take a flush's entity-range extent for the full-length base locator.
@@ -1366,12 +1357,10 @@ impl Executor {
     /// The `MANIFEST.json` a fold's new prefix carries: the live one, with the schema wound back to
     /// what it was at the plan, every live vocabulary binding folded in, and the fold's own files.
     ///
-    /// `entity_id_high_water` here is where the base locator ends, the snapshot's recorded
-    /// bindings: it is what `ExternalIdSidecar::deferred_from_manifest` takes as the base locator's
-    /// declared length, and a higher value would make the base locator claim an entity whose
-    /// binding a later flush records and answer "no external id" for it. `Engine::open` seeds the
-    /// allocator's floor from the max of this and the side-manifest's live value, so the lower
-    /// value is safe for the allocator.
+    /// `entity_id_high_water` here is the snapshot's entity space, where the base locator ends:
+    /// `ExternalIdSidecar::deferred_from_manifest` takes it as the base locator's declared length.
+    /// `Engine::open` seeds the allocator's floor from the max of this and the side-manifest's
+    /// live value, so the lower value is safe for the allocator.
     ///
     /// The vocabulary bindings fold in verbatim, never re-derived, re-sorted or re-numbered: keys
     /// and codes are byte-identical everywhere, and `columns.arrow` stores the code alone, so
@@ -1409,7 +1398,7 @@ impl Executor {
                 .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
         }
         crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
-        bundle_manifest.entity_id_high_water = plan.binding_bound;
+        bundle_manifest.entity_id_high_water = plan.entity_bound;
         bundle_manifest.files = completed.files.clone();
         let carried_bindings: Vec<_> = live
             .bundle

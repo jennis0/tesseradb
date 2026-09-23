@@ -38,11 +38,6 @@ pub(crate) struct FoldPlan {
     pub(crate) tombstones: Bitmap,
     /// One past the highest entity with a row in this partition at the snapshot.
     pub(crate) entity_bound: u64,
-    /// One past the highest entity whose external-id binding a run records at the snapshot: where
-    /// the base run and locator end. A join can give an entity a row before its own row's flush
-    /// records the binding, so this can sit below [`Self::entity_bound`]. Publication checks that
-    /// every later locator extent begins at or above it.
-    pub(crate) binding_bound: u64,
     pub(crate) dict_len: u32,
     pub(crate) small_term_threshold: u32,
     /// A publication into a prefix other than this one is discarded.
@@ -294,11 +289,6 @@ pub(crate) fn plan_fold(
     }
 
     let tombstones = generation.overlay.deleted_set().clone();
-    let binding_bound = manifest
-        .locator_extents
-        .iter()
-        .map(|extent| extent.entity_hi + 1)
-        .fold(generation.bundle.manifest.entity_id_high_water, u64::max);
 
     Ok(FoldPlan {
         partition: partition.clone(),
@@ -316,7 +306,6 @@ pub(crate) fn plan_fold(
         text_extents: manifest.text_extents.clone(),
         tombstones,
         entity_bound,
-        binding_bound,
         dict_len,
         small_term_threshold: generation.bundle.manifest.small_term_threshold,
         prefix: generation.prefix.clone(),
