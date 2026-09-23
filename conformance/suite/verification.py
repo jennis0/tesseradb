@@ -300,26 +300,18 @@ def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
 
 
 def _value_codes(vocabulary: Mapping[str, object]) -> Mapping[str, int] | None:
-    """A vocabulary's `key -> code` map, in either spelling (configuration.md §1).
+    """A vocabulary's pinned `key -> code` table.
 
-    `values` is a table when the caller pinned codes and a bare array when it left them to the
-    build, which assigns from 1 in declaration order, skipping `reserved` and never reaching the
-    absent sentinel. The oracle has to mirror that assignment rather than refuse the spelling: it is
-    the second reader the conformance suite exists to differ against, and a reader that only speaks
-    one half of the surface silently narrows what the suite can cover.
+    A bare array of keys leaves the codes to the build, which draws them at random, so the
+    declaration cannot state them and a fixture checked here pins its codes.
     """
     values = vocabulary.get("values")
     if values is None or isinstance(values, Mapping):
         return values
-    reserved = set(vocabulary.get("reserved", ()))
-    codes: dict[str, int] = {}
-    code = 1
-    for key in values:
-        while code in reserved:
-            code += 1
-        codes[key] = code
-        code += 1
-    return codes
+    raise ValueError(
+        f"vocabulary {vocabulary.get('name')!r} lists bare keys, whose codes the build draws at "
+        "random; pin them as a `[vocabulary.values]` table of `key = code`"
+    )
 
 
 @dataclass(frozen=True)

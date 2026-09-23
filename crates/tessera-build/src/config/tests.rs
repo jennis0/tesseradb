@@ -457,35 +457,41 @@ fn a_closed_vocabulary_compiles_to_a_width_and_a_pinned_code_set() {
     assert_eq!(vocab.title.as_deref(), Some("Severity"));
 }
 
-/// **A bare key list assigns codes, and the assignment is recorded exactly as a pin is.** A caller
-/// who does not care which integer a value gets should not have to invent one.
+/// A bare key list draws each value a code at random over the width, as a running service does,
+/// and the draw is recorded exactly as a pin is.
 #[test]
-fn a_bare_key_list_assigns_codes_in_the_order_given() {
+fn a_bare_key_list_draws_codes_at_random() {
+    let keys: Vec<String> = (0..20).map(|i| format!("v{i}")).collect();
+    let list = keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
     let text = SEVERITY.replace(
         "  [vocabulary.values]\n  low = 1\n  high = 2\n",
-        "values     = [\"low\", \"medium\", \"high\"]\n",
+        &format!("values     = [{list}]\n"),
     );
     let config = parse_str(&text).expect("a bare key list is a legal value set");
     let vocab = &config.schema.vocabularies["severity"];
-    assert_eq!(vocab.code_of("low"), Some(1));
-    assert_eq!(vocab.code_of("medium"), Some(2));
-    assert_eq!(vocab.code_of("high"), Some(3));
-    // Code 0 is the *absent* sentinel and is never assigned, which is why the first value is 1.
-    assert!(!vocab.codes.values().any(|&c| c == ABSENT_CODE));
+    let codes: BTreeSet<u32> = keys.iter().map(|k| vocab.code_of(k).unwrap()).collect();
+    assert_eq!(codes.len(), keys.len(), "one code per value");
+    assert!(!codes.contains(&ABSENT_CODE));
+    // Twenty draws over 255 codes all landing in 1..=20 has a chance near 1e-22; numbering the
+    // values in order lands there every time.
+    assert!(codes.iter().any(|&c| c > 20), "{codes:?}");
 }
 
-/// Assignment steps over the codes a caller already spent — pinned or retired.
+/// A draw never lands on a retired code.
 #[test]
-fn assignment_skips_pinned_and_reserved_codes() {
+fn a_drawn_code_skips_reserved_codes() {
+    let reserved = (1..=250).map(|c| c.to_string()).collect::<Vec<_>>().join(", ");
     let text = SEVERITY.replace(
         "  [vocabulary.values]\n  low = 1\n  high = 2\n",
-        "values     = [\"low\", \"medium\", \"high\"]\nreserved   = [2]\n",
+        &format!("values     = [\"a\", \"b\", \"c\", \"d\", \"e\"]\nreserved   = [{reserved}]\n"),
     );
     let config = parse_str(&text).unwrap();
     let vocab = &config.schema.vocabularies["severity"];
-    assert_eq!(vocab.code_of("low"), Some(1));
-    assert_eq!(vocab.code_of("medium"), Some(3), "2 is retired");
-    assert_eq!(vocab.code_of("high"), Some(4));
+    let codes: BTreeSet<u32> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|k| vocab.code_of(k).unwrap())
+        .collect();
+    assert_eq!(codes, (251..=255).collect());
 }
 
 #[test]
@@ -3678,7 +3684,7 @@ fn the_multiview_fixture_parses() {
     );
 }
 
-/// A one-column vocabulary file: `key`, and the codes assigned in the order given.
+/// A one-column vocabulary file: `key`, each value drawn a code.
 fn write_keys(path: &Path, keys: &[&str]) {
     let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
         arrow::datatypes::Field::new("key", arrow::datatypes::DataType::Utf8, false),

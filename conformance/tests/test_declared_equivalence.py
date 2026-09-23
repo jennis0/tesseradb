@@ -631,13 +631,6 @@ KNOWN = (
         "before and after a fold; the artifacts frame's order is meant to be deterministic",
     ),
     Known(
-        "closed-codes",
-        "live-vocabularies",
-        STAGES,
-        ((r"(categories|suggest) mood.*", r".*\.code"),),
-        "closed vocabulary codes: dense at build, random live",
-    ),
-    Known(
         "scoped-views-order",
         "group-scoped",
         STAGES,

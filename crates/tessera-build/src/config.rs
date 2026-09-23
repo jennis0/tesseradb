@@ -50,20 +50,13 @@
 //!   otherwise takes a caller's label, so a layer gated on a real term called `inherited` and one
 //!   declaring *the container's gate is the whole of it* would be the same eight characters.
 //!
-//! ## Codes are pinned or assigned, and both are recorded
+//! ## Codes are pinned or drawn, and both are recorded
 //!
-//! A value set is *inline or sourced*, and its codes are *pinned or assigned* — two independent
-//! choices. `values = ["low", "high"]` assigns in the order given; `[vocabulary.values]` with
-//! `low = 1` pins. **A caller who does not care which integer a value gets should not have to
-//! invent one**: pinning exists so a rebuild preserves codes, not because choosing them is part of
-//! declaring a vocabulary. Assigned codes are recorded in the compiled vocabulary exactly as
-//! pinned ones are, so `MANIFEST.json` is the record either way.
-//!
-//! ⊘ **The carry rule is not built.** `configuration.md` §1 states that a rebuild replays the
-//! recorded codes — a value keeps its code, a new value takes the next free one, a removed value's
-//! code moves to `reserved` — so that reordering a list cannot recolour stored rows. Nothing reads
-//! a previous build's manifest yet, so **reordering a bare key list today reassigns its codes**.
-//! Pin the codes to hold them still.
+//! A value set is *inline or sourced*, and its codes are *pinned or drawn*: two independent
+//! choices. `values = ["low", "high"]` draws each value a code at random over the width, as a
+//! running service does; `[vocabulary.values]` with `low = 1` pins. A drawn code is recorded in
+//! `MANIFEST.json` exactly as a pinned one is. Every build draws afresh, so a rebuild gives an
+//! unpinned value a new code; pin the codes to hold them still.
 //!
 //! ## Acquisition: sources, defaults, fields and the override
 //!
@@ -2175,7 +2168,7 @@ pub struct Vocabulary {
 pub struct DeclaredValues {
     /// Value key → code, where the caller pinned one. A key with no entry here is assigned.
     pub codes: BTreeMap<String, u32>,
-    /// Declaration order, which is assignment order for the keys that pinned nothing.
+    /// Declaration order, in which the keys that pinned nothing are drawn codes.
     pub order: Vec<String>,
     /// Per-value presentation, keyed as `codes` is; absent for a value given no title.
     pub titles: BTreeMap<String, String>,
@@ -4251,8 +4244,8 @@ fn compile_vocabularies(
         };
         check_value_keys(name, declared.order.iter().map(String::as_str))
             .map_err(declaration_error)?;
-        assign_codes(&mut declared, &reserved, width, name)?;
         check_codes(&declared.codes, &reserved, width, name)?;
+        assign_codes(&mut declared, &reserved, width, name)?;
 
         compiled.insert(
             name.clone(),
@@ -4284,8 +4277,8 @@ fn compile_reserved(block: &VocabularyBlock) -> Result<Vec<u32>> {
     Ok(reserved)
 }
 
-/// An inline value set: either an array of keys, whose codes the build assigns in the order given,
-/// or a `key = code` table pinning them.
+/// An inline value set: either an array of keys, each drawn a code, or a `key = code` table
+/// pinning them.
 ///
 /// **Which one was written is the whole of the difference**, and it is not a mode: a caller who
 /// does not care which integer a value gets should not have to invent one.
@@ -4309,8 +4302,7 @@ fn parse_inline_values(values: &toml::Value, vocabulary: &str) -> Result<Declare
                 let raw = value.as_integer().ok_or_else(|| {
                     declaration_error(format!(
                         "vocabulary '{vocabulary}': value '{key}' must be an integer code, not \
-                         {value}. Write `values = [\"{key}\", …]` to have the build assign codes \
-                         in the order given"
+                         {value}. Write `values = [\"{key}\", …]` to have the build draw the codes"
                     ))
                 })?;
                 let code = u32::try_from(raw).map_err(|_| {
@@ -4326,52 +4318,47 @@ fn parse_inline_values(values: &toml::Value, vocabulary: &str) -> Result<Declare
         other => {
             return Err(declaration_error(format!(
                 "vocabulary '{vocabulary}': `values` is {other}, and it must be either an array of \
-                 keys — codes assigned by the build, in the order given — or a \
-                 `[vocabulary.values]` table of `key = code`"
+                 keys, each drawn a code, or a `[vocabulary.values]` table of \
+                 `key = code`"
             )));
         }
     }
     Ok(set)
 }
 
-/// Give a code to every declared value that pinned none: the lowest free one, in declaration
-/// order, skipping `reserved` and the *absent* sentinel.
-///
-/// **Assignment starts at 1 and never reaches 0**, which is the sentinel — see [`ABSENT_CODE`].
-///
-/// ⊘ It assigns from an empty slate every build. `configuration.md` §1's carry rule — a rebuild
-/// replays the recorded codes, a new value takes the next free one, a removed value's code moves
-/// to `reserved` — needs the previous manifest, which nothing reads here yet. So **reordering a
-/// bare key list reorders its codes today**; pinning is what holds them still.
+/// Draw a code for every declared value that pinned none, with the minter a running service
+/// declares a vocabulary through, so a build and a live declaration give codes alike. A rebuild
+/// draws afresh; pinning is what holds a code still.
 fn assign_codes(
     declared: &mut DeclaredValues,
     reserved: &[u32],
     width: ScalarType,
     vocabulary: &str,
 ) -> Result<()> {
-    let max = width
-        .max_code()
-        .expect("a category width always has a maximum code");
-    let mut taken: BTreeSet<u32> = declared.codes.values().copied().collect();
-    taken.extend(reserved.iter().copied());
-    let mut next = ABSENT_CODE + 1;
+    // The kind and visibility decide nothing about a draw.
+    let mut minter = VocabularyMinter::new(
+        vocabulary,
+        tessera_store::manifest::VocabularyKind::Declared,
+        Visibility::Public,
+        width,
+    );
+    for &code in reserved {
+        minter.seed_reserved(code);
+    }
+    for (key, &code) in &declared.codes {
+        minter
+            .seed_value(key, code)
+            .map_err(|e| declaration_error(e.to_string()))?;
+    }
     for key in &declared.order {
         if declared.codes.contains_key(key) {
             continue;
         }
-        while taken.contains(&next) {
-            next += 1;
-        }
-        if next > max {
-            return Err(declaration_error(format!(
-                "vocabulary '{vocabulary}': assigning a code to '{key}' would need {next}, past \
-                 `{}`'s maximum of {max}. Never widen and never wrap — the remedy is a rebuild at \
-                 a wider declared width (per-point-attributes §3.6)",
-                width.arrow_type_name()
-            )));
-        }
-        declared.codes.insert(key.clone(), next);
-        taken.insert(next);
+        let code = minter
+            .mint(key)
+            .map_err(|e| declaration_error(e.to_string()))?
+            .code();
+        declared.codes.insert(key.clone(), code);
     }
     Ok(())
 }
