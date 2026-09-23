@@ -50,10 +50,7 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
     engine
         .start_write_executor(64)
         .expect("the executor starts once");
-    // **The row-space merge is held off**, so these assertions are about the entity-space pass
-    // alone. A merge coalesces its consumed segments' runs and locator extents too, on the same
-    // tick, and the two would race for the same entries — safely, each discarding a plan that no
-    // longer rebases, but not deterministically enough to assert list lengths against.
+    // The row-space merge is held off so the geometry version moves only if a coalesce moves it.
     engine.set_merge_for_test(false);
     engine
 }
@@ -332,8 +329,6 @@ fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires
     engine
         .start_write_executor(64)
         .expect("the executor starts once");
-    // Held off for engine_at's reason: a merge coalesces runs and locator extents of its own.
-    engine.set_merge_for_test(false);
 
     let mut ingested: Vec<(EntityId, Vec<u8>)> = Vec::new();
     for i in 0..2 {

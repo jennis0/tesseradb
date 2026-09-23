@@ -295,8 +295,6 @@ impl Executor {
             shard_id: manifest.identity.shard_id,
             scalar_schema,
             absent_ok,
-            watermark: generation.watermark,
-            entity_id_high_water: partition_data.manifest.entity_id_high_water,
         };
 
         let unit = self.merge.start();
@@ -517,8 +515,7 @@ impl Executor {
 
         let mut manifest = partition_data.manifest.clone();
         if !crate::merge::rebase_into(&mut manifest, &completed) {
-            // Its inputs are gone, or their runs are no longer contiguous. Expected rather than
-            // exceptional, and the files are orphans nothing references.
+            // A consumed segment is no longer listed. The files are orphans nothing references.
             tracing::warn!("discarding a completed merge that no longer rebases");
             return;
         }
@@ -669,7 +666,7 @@ impl Executor {
     /// Publish an entity-space coalesce: a manifest edit, a sidecar swap and a tier-list swap, and
     /// no `segments_version` bump.
     ///
-    /// The half of merge that touches no row space: a delta tier is `(term, entity)` pairs, a run
+    /// It touches no row space: a delta tier is `(term, entity)` pairs, a run
     /// and its locator are `external_id ↔ entity`, a dictionary extent is descriptors, so no
     /// projection is invalidated and no session pays anything. It swaps the generation's tier list
     /// and the external-id sidecar, both content-preserving, so a request holding either version
@@ -710,8 +707,7 @@ impl Executor {
 
         let Some(mut manifest) = crate::coalesce::rebased(&partition_data.manifest, &completed)
         else {
-            // The window it planned against is gone: a merge that published while the pass ran
-            // consumed some of its external-id runs. The files are orphans nothing references.
+            // A consumed entry is no longer listed. The files are orphans nothing references.
             tracing::warn!("discarding a completed coalesce that no longer rebases");
             return;
         };

@@ -61,7 +61,7 @@ fn segment(root: &Path, seg_id: &str, entity_lo: u64, count: u64, stride: u64) -
     }
 }
 
-fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::flush::FlushOutput {
+fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::merge::MergeOutput {
     let schema: Vec<(String, ScalarType)> = vec![];
     execute_merge(
         &root.join("v00000"),
@@ -78,8 +78,6 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::flush::FlushOutpu
             row_base: 0,
             // The live values a publication would carry — deliberately *above* the inputs' own
             // range, so a merge that derived them from `entity_hi` would show up as a regression.
-            watermark: 10_000,
-            entity_id_high_water: 10_000,
         },
     )
     .expect("the merge executes")
@@ -211,39 +209,6 @@ fn the_extent_maps_every_entity_to_its_merged_row() {
     );
 }
 
-/// **Runs merge by caller key, because that is the only order a run has** (write-path §7). Unlike an
-/// extent, a run cannot be ordered against its neighbours, so coalescing is a merge-sort over the
-/// bytes — and the reader binary-searches the result.
-#[test]
-fn the_external_id_runs_coalesce_in_key_order() {
-    let dir = tempfile::TempDir::new().unwrap();
-    build_bundle(dir.path(), 10);
-    let a = segment(dir.path(), "in-a", 100, 8, 7);
-    let b = segment(dir.path(), "in-b", 200, 8, 31);
-
-    merge(dir.path(), &[a, b]);
-    let path = seg_dir(dir.path(), "merged-1").join("external-ids.arrow");
-    let file = std::fs::File::open(&path).unwrap();
-    let reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
-    let mut keys: Vec<Vec<u8>> = Vec::new();
-    for batch in reader {
-        let batch = batch.unwrap();
-        let ids = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::BinaryArray>()
-            .unwrap();
-        for i in 0..batch.num_rows() {
-            keys.push(ids.value(i).to_vec());
-        }
-    }
-    assert_eq!(keys.len(), 16, "every input key survives");
-    assert!(
-        keys.windows(2).all(|w| w[0] < w[1]),
-        "sorted bytewise, which is what the reader binary-searches"
-    );
-}
-
 /// Inputs must be in ascending, non-overlapping entity order: the merged extent is one contiguous
 /// span, and a window that interleaves with its neighbours is not one.
 #[test]
@@ -267,8 +232,6 @@ fn out_of_order_inputs_are_refused() {
             scalar_schema: &schema,
             absent_ok: &[],
             row_base: 0,
-            watermark: 10_000,
-            entity_id_high_water: 10_000,
         },
     );
     assert!(err.is_err());
@@ -306,8 +269,6 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
             scalar_schema: &schema,
             absent_ok: &[],
             row_base: 0,
-            watermark: 10_000,
-            entity_id_high_water: 10_000,
         },
     )
     .expect_err("a segment missing a declared column must not merge");
@@ -350,8 +311,6 @@ fn a_column_declared_since_the_inputs_is_absent_in_every_row_rather_than_shiftin
             scalar_schema: &schema,
             absent_ok: &lawful,
             row_base: 0,
-            watermark: 10_000,
-            entity_id_high_water: 10_000,
         },
     )
     .expect("a segment lacking a declared column merges, the column absent in its rows");
@@ -472,39 +431,7 @@ fn a_merged_segment_directory_holds_no_spool_files() {
     names.sort();
     assert_eq!(
         names,
-        vec![
-            "columns.arrow",
-            "cuts.u32",
-            "ext-locator.u32",
-            "external-ids.arrow",
-            "morton.u32"
-        ],
+        vec!["columns.arrow", "cuts.u32", "morton.u32"],
         "the segment directory must hold exactly what the manifest names"
-    );
-}
-
-/// **A merge must not move the watermark**, and deriving one from its inputs would.
-///
-/// The output shape is a flush's, where `entity_hi + 1` is right because a flush's entities are the
-/// newest in the partition. A merge's are not: merging an *interior* run and publishing
-/// `entity_hi + 1` moves the watermark **backwards** past entities that already have rows, and
-/// composition treats everything at or above it as buffer-resident — so those entities would be
-/// looked for in a buffer that no longer holds them.
-///
-/// **Mutation:** set `watermark: entity_hi + 1` in `execute_merge` and this fails, because the
-/// inputs here sit well below the live value.
-#[test]
-fn a_merge_carries_the_live_watermark_rather_than_deriving_one() {
-    let dir = tempfile::TempDir::new().unwrap();
-    build_bundle(dir.path(), 10);
-    let a = segment(dir.path(), "in-a", 100, 5, 7);
-    let b = segment(dir.path(), "in-b", 200, 5, 31);
-
-    let out = merge(dir.path(), &[a, b]);
-    assert_eq!(out.watermark, 10_000);
-    assert_eq!(out.entity_id_high_water, 10_000);
-    assert!(
-        out.watermark > out.segment.entity_hi + 1,
-        "the fixture must place the live watermark above the merged range, or this proves nothing"
     );
 }
