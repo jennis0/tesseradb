@@ -25,48 +25,16 @@ def _():
 
     import tesseradb as td
 
-    #: `whole` is the 2.4 million papers; `sample` is 200,000 of them, drawn at random.
-    SCALE = os.environ.get("TESSERA_NOTEBOOK_SCALE", "whole")
-    CORPORA = {"whole": "notebook-2m4-live", "sample": "notebook-sample"}
-
-    def corpus_directory():
-        """`data/<corpus>/` above this file or the working directory, or `TESSERA_NOTEBOOK_DATA`."""
-        named = os.environ.get("TESSERA_NOTEBOOK_DATA")
-        if named:
-            return pathlib.Path(named).expanduser()
-        starts = [pathlib.Path.cwd().resolve()]
-        here = globals().get("__file__")
-        if here:
-            starts.append(pathlib.Path(here).resolve().parent)
-        for start in starts:
-            for directory in [start, *start.parents]:
-                if (directory / "data" / CORPORA[SCALE] / "schema.toml").exists():
-                    return directory / "data" / CORPORA[SCALE]
-        raise FileNotFoundError(
-            f"data/{CORPORA[SCALE]}/ is above neither this file nor the working directory. "
-            "Set TESSERA_NOTEBOOK_DATA to the corpus directory"
-        )
-
-    DATA = corpus_directory()
-
     def counts(table):
         """A served table's `visible`, `matched`, `highlighted` and `served` counts."""
         return json.loads(table.schema.metadata[b"tessera.counts"])
 
-    return DATA, KMeans, SCALE, counts, datetime, mo, pa, pc, pd, pq, td, tempfile
+    return KMeans, counts, datetime, mo, os, pa, pathlib, pc, pd, pq, td, tempfile
 
 
 @app.cell
-def _(SCALE, mo):
-    _scale = {
-        "whole": "This run uses all 2.4 million papers, and the first build takes a few minutes. "
-                 "Set `TESSERA_NOTEBOOK_SCALE=sample` before starting the notebook to use a random "
-                 "200,000 of them instead.",
-        "sample": "This run uses a random sample of 200,000 papers. Set "
-                  "`TESSERA_NOTEBOOK_SCALE=whole` before starting the notebook to use all 2.4 "
-                  "million.",
-    }[SCALE]
-    mo.md(f"""
+def _(mo):
+    mo.md("""
     # TesseraDB in a notebook
 
     TesseraDB is an open-source engine for interactive maps of large datasets. You give it
@@ -84,9 +52,42 @@ def _(SCALE, mo):
     clustering. `insert` gives it data and names each column it reads. `commit` sends
     everything inserted since the last commit.
 
-    {_scale}
+    The notebook maps all 2.4 million papers, and the first build takes a few minutes. Set
+    `SCALE` below to `"sample"` to use a random 200,000 of them instead, which builds in
+    seconds.
     """)
     return
+
+
+@app.cell
+def _():
+    SCALE = "whole"  # or "sample"
+    return (SCALE,)
+
+
+@app.cell
+def _(SCALE, os, pathlib):
+    def corpus_directory():
+        """`data/<corpus>/` above this file or the working directory, or `TESSERA_NOTEBOOK_DATA`."""
+        named = os.environ.get("TESSERA_NOTEBOOK_DATA")
+        if named:
+            return pathlib.Path(named).expanduser()
+        corpus = {"whole": "notebook-2m4-live", "sample": "notebook-sample"}[SCALE]
+        starts = [pathlib.Path.cwd().resolve()]
+        here = globals().get("__file__")
+        if here:
+            starts.append(pathlib.Path(here).resolve().parent)
+        for start in starts:
+            for directory in [start, *start.parents]:
+                if (directory / "data" / corpus / "schema.toml").exists():
+                    return directory / "data" / corpus
+        raise FileNotFoundError(
+            f"data/{corpus}/ is above neither this file nor the working directory. "
+            "Set TESSERA_NOTEBOOK_DATA to the corpus directory"
+        )
+
+    DATA = corpus_directory()
+    return (DATA,)
 
 
 @app.cell
