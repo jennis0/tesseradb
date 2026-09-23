@@ -9,6 +9,7 @@ pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION,
 /// they are one database; the repository's working method is why they are one implementation). It
 /// carries no feature gate: the calls are platform-gated inside the module, and a crate that never
 /// asks about its own memory never names it.
+pub mod label;
 pub mod process;
 
 /// The annotation layer declaration, shared by the WAL record that makes a registration durable,
