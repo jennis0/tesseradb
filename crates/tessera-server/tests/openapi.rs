@@ -1107,13 +1107,14 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
         .as_object()
         .unwrap();
     for (name, spec) in headers {
-        // `x-tessera-region` is optional and this request has no region leaf.
-        assert_eq!(
-            resp.headers().contains_key(name.as_str()),
-            spec["required"].as_bool() == Some(true),
-            "{name}"
-        );
+        if spec["required"].as_bool() == Some(true) {
+            assert!(resp.headers().contains_key(name.as_str()), "{name}");
+        }
     }
+    // The optional headers: the identity coordinate is present whenever a page was walked, and
+    // the region verdict only with a region leaf, which this request has not.
+    assert!(resp.headers().contains_key("x-tessera-identity-key"));
+    assert!(!resp.headers().contains_key("x-tessera-region"));
     let decoded = decode_items(&resp.bytes().await.unwrap());
     assert_valid(&doc, "ItemsHead", &decoded.head);
     assert!(decoded.head["visible"].is_u64() && decoded.head["matched"].is_u64());

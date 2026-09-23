@@ -75,6 +75,7 @@ enum CompressionReq {
 
 /// What the handler needs to answer, sent when the engine delivers the head.
 struct Opening {
+    /// Absent only when the response was cancelled before its first page opened the view.
     identity_key: Option<[u8; 16]>,
     region: Option<RegionVerdict>,
     /// The head frame: the body's first bytes.

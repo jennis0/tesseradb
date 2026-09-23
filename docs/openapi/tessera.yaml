@@ -603,8 +603,8 @@ paths:
           description: The framed body. The headers are the viewport's, without its cache coordinates.
           headers:
             x-tessera-identity-key:
-              description: The viewport's identity coordinate for this principal and view, equal to the one a viewport over the same view returns.
-              required: true
+              description: The viewport's identity coordinate for this principal and view, equal to the one a viewport over the same view returns. Absent only from a response that was cancelled before its first page, which is a head and a trailer ending by `deadline`; the coordinate is taken from the view the first page opens.
+              required: false
               schema:
                 type: string
             x-tessera-region:
