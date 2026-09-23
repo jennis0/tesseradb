@@ -1,6 +1,6 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
-import {CLUSTER_PREFIX, NEUTRAL, layerEntries, type Rgba} from '@tesseradb/client';
+import {CLUSTER_PREFIX, NEUTRAL, colourLayers, layerEntries, type Rgba} from '@tesseradb/client';
 import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck';
 import {TesseraElement, UNNAMED, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -12,8 +12,9 @@ import {chrome, tokens} from './tokens.js';
  * carry, resolved per column and never per vocabulary; a numeric domain as a ramp, derived from
  * the marks served and never a corpus-wide range; under cluster colour, the served artifacts in
  * their colours. `selectable` renders the boards' *Colour by* select — the rendered columns and
- * *clusters* per layer that is on (exact only, decision 0099) — beside a *Layers · N of M on*
- * select that turns one layer on or off; the readout below is what the swatches say.
+ * the clusters of every layer that can colour, drawn or not (exact only, decision 0099) — beside a
+ * *Layers · N of M on* select that draws one layer or none. Colouring by a layer does not draw it.
+ * The readout below is what the swatches say.
  */
 export class TesseraLegend extends TesseraElement {
   static override styles = [
@@ -105,35 +106,6 @@ export class TesseraLegend extends TesseraElement {
     const colourBy = legend.colourBy;
     const entries = layerEntries(meta.layers);
     const on = entries.filter((e) => artifacts.layers.includes(e.root.name));
-    const selects = this.selectable
-      ? html`<div class="selects">
-          <div class="col"><span class="xs muted">Colour by</span>
-            <select part="select" aria-label="Colour by" @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}>
-              <option value="" ?selected=${colourBy === null}>none</option>
-              ${artifacts.layers.flatMap((l) => {
-                // **A levelled layer is offered level by level, by the titles the corpus declared** —
-                // Country, Admin 1 … Admin 4 — because that is what the colouring *is* on such a
-                // layer: membership at one level. "clusters" named the mechanism, not the data
-                // (the owner, 2026-08-28). A layer without levels is offered once, by its title.
-                const value = `${CLUSTER_PREFIX}${l}`;
-                const decl = meta.layers.find((x) => x.name === l);
-                if (!decl || decl.levels.length === 0) {
-                  return [html`<option part="cluster-option" value=${value} ?selected=${colourBy === value}>${decl?.title || l}</option>`];
-                }
-                return decl.levels.map(
-                  (lv) =>
-                    html`<option part="cluster-option" value=${`${value}@${lv.level}`} ?selected=${colourBy === value && this.level === lv.level}>${lv.title || `level ${lv.level}`}</option>`
-                );
-              })}
-              ${columns.map((c) => html`<option value=${c.name} ?selected=${colourBy === c.name}>${c.name}</option>`)}
-            </select></div>
-          <div class="col"><span class="xs muted">Layers</span>
-            <select part="layers-select" aria-label="Layers" @change=${(e: Event) => this.chooseLayers((e.target as HTMLSelectElement).value)}>
-              <option value="" ?selected=${on.length === 0}>${on.length} of ${entries.length} on</option>
-              ${entries.map((e) => html`<option value=${e.root.name} ?selected=${on.length === 1 && on[0]!.root.name === e.root.name}>${e.root.name}</option>`)}
-            </select></div>
-        </div>`
-      : nothing;
     // The level select follows what the cut served: the rungs present in the served set of the
     // colouring layer, titled from `meta.levels` where the layer is tiered, else *level N*.
     //
@@ -145,9 +117,40 @@ export class TesseraLegend extends TesseraElement {
     const clusterMeta = cluster ? meta.layers.find((l) => l.name === cluster) : null;
     const rungs = new Set<number>();
     if (cluster) {
-      for (const x of artifacts.served) if (x.layer === cluster) rungs.add(x.rung);
+      for (const x of artifacts.colourServed) rungs.add(x.rung);
     }
     const levelsServed = [...rungs].sort((x, y) => x - y);
+    // The level the colouring is drawn at, which a levelled layer's option shows as chosen: the
+    // one chosen, else the explorer's, else the deepest served.
+    const drawnLevel = this.level ?? this.autoLevel ?? levelsServed.at(-1) ?? null;
+    const selects = this.selectable
+      ? html`<div class="selects">
+          <div class="col"><span class="xs muted">Colour by</span>
+            <select part="select" aria-label="Colour by" @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}>
+              <option value="" ?selected=${colourBy === null}>none</option>
+              ${colourLayers(meta.layers).flatMap((decl) => {
+                // **A levelled layer is offered level by level, by the titles the corpus declared** —
+                // Country, Admin 1 … Admin 4 — because that is what the colouring *is* on such a
+                // layer: membership at one level. "clusters" named the mechanism, not the data
+                // (the owner, 2026-08-28). A layer without levels is offered once, by its title.
+                const value = `${CLUSTER_PREFIX}${decl.name}`;
+                if (decl.levels.length === 0) {
+                  return [html`<option part="cluster-option" value=${value} ?selected=${colourBy === value}>${decl.title || decl.name}</option>`];
+                }
+                return decl.levels.map(
+                  (lv) =>
+                    html`<option part="cluster-option" value=${`${value}@${lv.level}`} ?selected=${colourBy === value && (drawnLevel ?? decl.levels.at(-1)!.level) === lv.level}>${lv.title || `level ${lv.level}`}</option>`
+                );
+              })}
+              ${columns.map((c) => html`<option value=${c.name} ?selected=${colourBy === c.name}>${c.name}</option>`)}
+            </select></div>
+          <div class="col"><span class="xs muted">Layers</span>
+            <select part="layers-select" aria-label="Layers" @change=${(e: Event) => this.chooseLayers((e.target as HTMLSelectElement).value)}>
+              <option value="" ?selected=${on.length === 0}>${on.length} of ${entries.length} on</option>
+              ${entries.map((e) => html`<option value=${e.root.name} ?selected=${on.length === 1 && on[0]!.root.name === e.root.name}>${e.root.name}</option>`)}
+            </select></div>
+        </div>`
+      : nothing;
     const levelSelect =
       this.selectable && cluster && levelsServed.length > 1
         ? html`<div class="col" style="margin-top:8px"><span class="xs muted">Level</span>
@@ -165,7 +168,7 @@ export class TesseraLegend extends TesseraElement {
     if (colourBy === null) return wrap(html`<span part="state" data-state="shown"></span>`);
     const clusterLayer = clusterLayerOf(colourBy);
     if (clusterLayer) {
-      const named = artifacts.served.filter((a) => a.layer === clusterLayer);
+      const named = artifacts.colourServed;
       return wrap(html`<span part="state" data-state="shown"></span>
         <div part="swatches">
           ${named.slice(0, 40).map((a) => swatch(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, artifactName(a) ?? UNNAMED))}
