@@ -1587,11 +1587,6 @@ pub struct MortonSlice {
 }
 
 impl MortonSlice {
-    /// The mapped file's size in bytes.
-    pub fn byte_len(&self) -> u64 {
-        self.mmap.len() as u64
-    }
-
     /// `madvise(MADV_SEQUENTIAL)` on this mapping — compaction §6.1's mitigation, decision 0052.
     ///
     /// **Called by the streaming passes and never by the request path**, which is the whole of what
@@ -1795,11 +1790,6 @@ impl CutIndex {
         self.mmap.is_empty()
     }
 
-    /// This mapping's size in bytes.
-    pub fn byte_len(&self) -> u64 {
-        self.mmap.len() as u64
-    }
-
     /// The row at which each occupied cell begins, ascending.
     pub fn starts(&self) -> &[u32] {
         // SAFETY: as [`MortonSlice::u32`] — a checked multiple of 4 from a page-aligned base.
@@ -1895,7 +1885,7 @@ const FIXED_COLUMNS: [(&str, DataType); 2] = [
 ];
 
 impl ColumnsRef {
-    /// This segment's `columns.arrow` size in bytes — see [`MortonSlice::byte_len`].
+    /// This segment's `columns.arrow` batch size in memory, in bytes.
     pub fn byte_len(&self) -> u64 {
         self.batch.get_array_memory_size() as u64
     }
