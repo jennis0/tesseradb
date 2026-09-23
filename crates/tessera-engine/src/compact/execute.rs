@@ -11,7 +11,7 @@ use tessera_store::{
 };
 use tessera_types::IdentityKey;
 
-use crate::flush::MaintenanceFailed;
+use crate::flush::{failed, remove_spool_on_error, MaintenanceFailed};
 
 use super::attributes::{
     fold_entity_terms, fold_record_blob, fold_text_columns, fold_value_columns,
@@ -101,21 +101,9 @@ impl FoldOutput {
     }
 }
 
-pub(super) fn failed(what: &str, e: &dyn std::fmt::Display) -> MaintenanceFailed {
-    MaintenanceFailed(format!("{what}: {e}"))
-}
-
 /// Zero where the file cannot be read: the figure is only reported.
 fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-}
-
-/// Removes the spool if `outcome` failed. On success the writer's `finish` has removed it.
-pub(super) fn remove_spool_on_error<T, E>(outcome: Result<T, E>, spool: &Path) -> Result<T, E> {
-    if outcome.is_err() {
-        let _ = std::fs::remove_file(spool);
-    }
-    outcome
 }
 
 /// Runs the fold's passes into `ctx.to_prefix_dir` on one dedicated thread. A failure discards the
@@ -128,7 +116,7 @@ pub(crate) fn execute(
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
     for dir in [&terms_dir, &entities_dir] {
-        std::fs::create_dir_all(dir).map_err(|e| failed("creating the new prefix", &e))?;
+        std::fs::create_dir_all(dir).map_err(failed("creating the new prefix"))?;
     }
 
     let mut out = FoldOutput::default();
@@ -202,7 +190,7 @@ fn fold_row_spaces(
             tessera_store::view_rel(&view.view)
         );
         let view_dir = ctx.to_prefix_dir.join(&view_rel);
-        std::fs::create_dir_all(&view_dir).map_err(|e| failed("creating the view", &e))?;
+        std::fs::create_dir_all(&view_dir).map_err(failed("creating the view"))?;
         let segment_rel = format!("{view_rel}/segments/{}", ctx.seg_id);
         let segment_dir = ctx.to_prefix_dir.join(&segment_rel);
         let permutation_rel = format!("{view_rel}/permutation.bin");
@@ -232,7 +220,7 @@ fn fold_row_spaces(
                 permutation_bound: view.permutation_bound,
             },
         )
-        .map_err(|e| failed("pass 1 (row space)", &e))?;
+        .map_err(failed("pass 1 (row space)"))?;
 
         let mut view_bytes = 0u64;
         for name in [
@@ -242,7 +230,7 @@ fn fold_row_spaces(
         ] {
             let path = segment_dir.join(name);
             view_bytes += std::fs::metadata(&path)
-                .map_err(|e| failed("sizing the new base segment", &e))?
+                .map_err(failed("sizing the new base segment"))?
                 .len();
             output.push(format!("{segment_rel}/{name}"), path);
         }
@@ -286,9 +274,9 @@ fn fold_postings(
     let spool_path = terms_dir.join("postings.spool");
     {
         let mut spool =
-            PostingsSpool::create(&spool_path).map_err(|e| failed("pass 2 (spool)", &e))?;
+            PostingsSpool::create(&spool_path).map_err(failed("pass 2 (spool)"))?;
         let mut pairs =
-            PairsParquetWriter::create(&pairs_path).map_err(|e| failed("pass 2 (pairs)", &e))?;
+            PairsParquetWriter::create(&pairs_path).map_err(failed("pass 2 (pairs)"))?;
         let sweep = sweep_term_postings(
             plan.dict_len,
             &ctx.base_postings,
@@ -306,8 +294,8 @@ fn fold_postings(
             sweep.and_then(|()| spool.finish(&postings_path)),
             &spool_path,
         )
-        .map_err(|e| failed("pass 2 (postings)", &e))?;
-        pairs.finish().map_err(|e| failed("pass 2 (pairs)", &e))?;
+        .map_err(failed("pass 2 (postings)"))?;
+        pairs.finish().map_err(failed("pass 2 (pairs)"))?;
     }
     out.push(postings_rel, postings_path.clone());
     out.push(pairs_rel, pairs_path);
@@ -327,7 +315,7 @@ fn derive_term_images(
 ) -> Result<Vec<FoldedTermImages>, MaintenanceFailed> {
     let mut term_images: Vec<FoldedTermImages> = Vec::new();
     let postings = PostingsReader::open(postings_path, true)
-        .map_err(|e| failed("pass 2b (term images: the new postings)", &e))?;
+        .map_err(failed("pass 2b (term images: the new postings)"))?;
     let dict_len = postings.term_count();
     let mut index = tessera_store::derived::DerivedIndex::default();
     for segment in segments {
@@ -341,7 +329,7 @@ fn derive_term_images(
         ));
         // From pass 1's file, so the images match the permutation that is published.
         let permutation = tessera_store::Permutation::load(&permutation_path)
-            .map_err(|e| failed("pass 2b (term images: the new permutation)", &e))?;
+            .map_err(failed("pass 2b (term images: the new permutation)"))?;
         let space = tessera_store::RowSpace::new(Arc::new(permutation), segment.row_count);
         let stamp = tessera_store::term_images::TermImageStamp {
             prefix: ctx.to_prefix.clone(),
@@ -357,7 +345,7 @@ fn derive_term_images(
             TERM_IMAGE_MANIFEST_N,
             &mut index,
         )
-        .map_err(|e| failed("pass 2b (term images: naming the file)", &e))?;
+        .map_err(failed("pass 2b (term images: naming the file)"))?;
 
         // `tessera-store` cannot depend on `tessera-authz`, so the postings are adapted here.
         let walk = |term: u32,
@@ -385,7 +373,7 @@ fn derive_term_images(
                 threads: TERM_IMAGE_THREADS,
             },
         )
-        .map_err(|e| failed("pass 2b (term images: the derivation)", &e))?;
+        .map_err(failed("pass 2b (term images: the derivation)"))?;
 
         out.push(file.rel.clone(), file.path);
         term_images.push(FoldedTermImages {
@@ -428,7 +416,7 @@ fn fold_external_ids(
             &plan.tombstones,
             entities_dir,
         )
-        .map_err(|e| failed("pass 3 (external ids)", &e))?;
+        .map_err(failed("pass 3 (external ids)"))?;
         // Run 0 stays first: the sidecar finds the base locator from its directory.
         let run_rel = format!("partitions/{}/entities/external-ids.arrow", plan.partition);
         let locator_rel = format!("partitions/{}/entities/ext-locator.u32", plan.partition);
@@ -451,7 +439,7 @@ fn digest_and_sync(out: &FoldOutput) -> Result<BTreeMap<String, FileDigest>, Mai
         );
     }
     let paths: Vec<PathBuf> = out.written.iter().map(|(_, path)| path.clone()).collect();
-    tessera_store::fsync_written(&paths).map_err(|e| failed("pass 5 (durability)", &e))?;
+    tessera_store::fsync_written(&paths).map_err(failed("pass 5 (durability)"))?;
 
     Ok(files)
 }

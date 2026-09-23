@@ -960,6 +960,21 @@ impl std::fmt::Display for MaintenanceFailed {
     }
 }
 
+/// For `map_err`: an error from a step of a background pass, prefixed with what the step was.
+pub(crate) fn failed<E: std::fmt::Display>(
+    what: impl std::fmt::Display,
+) -> impl FnOnce(E) -> MaintenanceFailed {
+    move |e| MaintenanceFailed(format!("{what}: {e}"))
+}
+
+/// Removes the spool if `outcome` failed. On success the spool writer's `finish` has removed it.
+pub(crate) fn remove_spool_on_error<T, E>(outcome: Result<T, E>, spool: &Path) -> Result<T, E> {
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(spool);
+    }
+    outcome
+}
+
 /// What promotion produced: the dictionary to republish, the extent naming the new ordinals, and
 /// the tier's postings in those ordinals.
 struct Promotion {
