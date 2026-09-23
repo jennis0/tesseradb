@@ -8,6 +8,9 @@ use tessera_spatial::Bounds;
 use tessera_store::manifest::identity_key_fingerprint;
 use tessera_types::{IdentityKey, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
+#[cfg(test)]
+mod reference;
+
 #[derive(Parser)]
 #[command(
     name = "tessera",
