@@ -779,6 +779,17 @@ class Walk:
         return self.live
 
 
+class Vacuous(Exception):
+    """The built side does not show what a case tests, so an equal comparison would prove nothing.
+
+    Not an `AssertionError`, so no expected failure can absorb it."""
+
+
+def _require(held: bool, what: str) -> None:
+    if not held:
+        raise Vacuous(what)
+
+
 def _assert_not_vacuous(case: Case, observed: dict) -> None:
     """Every principal must see the thing under test on the built side, or an equal comparison
     proves nothing for that principal."""
@@ -787,20 +798,20 @@ def _assert_not_vacuous(case: Case, observed: dict) -> None:
         for label, _, views in case.plan.filters:
             for view in views or case.plan.views:
                 points = answers[f"viewport {view} z2 filter {label}"]["points"]
-                assert points, f"{where}: filter {label} matches nothing on {view}"
+                _require(bool(points), f"{where}: filter {label} matches nothing on {view}")
         for column in case.plan.categories:
             pages = answers[f"categories {column}"]
-            assert any(p["values"] for p in pages), f"{where}: {column} lists no value"
+            _require(any(p["values"] for p in pages), f"{where}: {column} lists no value")
         for view in case.plan.views:
-            assert answers[f"viewport {view} z0"]["points"], f"{where}: {view} is empty"
+            _require(bool(answers[f"viewport {view} z0"]["points"]), f"{where}: {view} is empty")
         for layer in case.plan.layers:
             served = answers[f"viewport {fx.WORLD} z0"]["artifacts"]
-            assert any(a["layer"] == layer for a in served), f"{where}: {layer} serves nothing"
+            _require(any(a["layer"] == layer for a in served), f"{where}: {layer} serves nothing")
         opened = [answers[f"item {i}"] for i in case.plan.items]
         if principal == "everyone":
-            assert all(o != "not served" for o in opened), f"{where}: an item is not served"
+            _require(all(o != "not served" for o in opened), f"{where}: an item is not served")
         else:
-            assert any(o != "not served" for o in opened), f"{where}: no item is served"
+            _require(any(o != "not served" for o in opened), f"{where}: no item is served")
 
 
 @pytest.fixture(scope="module")
