@@ -1032,3 +1032,99 @@ async fn a_warm_q1_form_takes_no_growth_of_q2() {
 async fn a_warm_q2_form_takes_no_growth_of_q1() {
     a_warm_form_takes_no_delta_of_another_view(1, Second::Grown).await;
 }
+
+/// A group view dropped and created again at a running service, fed as many rows as its
+/// predecessor held and none of them inside the level's shape, answers the same after a restart
+/// as before it; the untouched view answers the same throughout.
+///
+/// The level takes no publication after the fold, so its version is still the one the fold
+/// stamped the predecessor's row-major column with, and only the incarnation tells the two
+/// views' row spaces apart.
+#[tokio::test]
+async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut declaration = spatial_declaration(SHAPES);
+    declaration["layout"] = json!("row_major_label");
+    register(&server, declaration).await;
+    let (status, body) = put(
+        &server,
+        SHAPES,
+        json!([
+            { "key": "left", "view": "q1", "members": [], "bbox": [0.0, 0.0, 500.0, 1000.0] },
+            { "key": "left", "view": "q2", "members": [], "bbox": [0.0, 0.0, 500.0, 1000.0] },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    flush_and_fold(&server).await;
+    let untouched = served(&server, "quarter:q1", SHAPES).await;
+    assert!(!untouched.is_empty(), "the control view draws its shape");
+
+    let dropped = server
+        .client
+        .delete(server.control_url("/control/views/quarter/q2?delete_dangling=false"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dropped.status().as_u16(), 200);
+    let created = server
+        .client
+        .put(server.control_url("/control/views/quarter/q2"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status().as_u16(), 201);
+
+    // As many rows as the dropped view held, every one right of the shape.
+    let ids: Vec<Vec<u8>> = (0..IN_VIEW[1]).map(|i| external_id_of(20_000 + i)).collect();
+    let rows: Vec<(Option<&[u8]>, f32, f32, &str)> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (Some(&id[..]), 600.0 + (i % 300) as f32, (i * 3 % 1000) as f32, "0"))
+        .collect();
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "recreated-q2")
+        .header("x-tessera-view", "quarter:q2")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(build_ingest_batch_optional(&rows))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().await.unwrap());
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_until(&server, "the flush published", move |now| {
+        now.flushes > before.flushes
+    })
+    .await;
+
+    let recreated = served(&server, "quarter:q2", SHAPES).await;
+    assert!(
+        recreated.iter().all(|(_, count)| *count == 0),
+        "no row of the recreated view is inside the shape: {recreated:?}"
+    );
+    assert_eq!(served(&server, "quarter:q1", SHAPES).await, untouched);
+
+    server.shutdown().await;
+    let server = open(&tmp).await;
+    assert_eq!(
+        served(&server, "quarter:q2", SHAPES).await,
+        recreated,
+        "the recreated view answers as it did before the restart"
+    );
+    assert_eq!(served(&server, "quarter:q1", SHAPES).await, untouched);
+}
