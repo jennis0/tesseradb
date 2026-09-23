@@ -42,12 +42,7 @@ const EXPOSED: [&str; 7] = [
 
 /// Build a bundle and serve it, with the CORS lists as given.
 async fn server_with_cors(tmp: &TempDir, cors: CorsOrigins) -> TestServer {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     spawn_server_with_cors(
         &bundle_root,
         &tmp.path().join("cache"),

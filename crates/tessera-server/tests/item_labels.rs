@@ -13,7 +13,6 @@
 
 mod common;
 
-use base64::Engine as _;
 use tempfile::TempDir;
 
 use common::*;
@@ -32,18 +31,7 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // A principal holding both labels sees every item, and the `"1"`-only principal's viewport is
     // exactly the multiples of three — so an id in both is a two-label item and an id in the first
@@ -260,8 +248,7 @@ async fn a_suppressed_item_is_the_identical_404() {
     let changes: Vec<serde_json::Value> = (0..N_ITEMS)
         .map(|source| {
             serde_json::json!({
-                "external_id": base64::engine::general_purpose::STANDARD
-                    .encode(external_id_of(source)),
+                "external_id": member(source),
                 "op": "suppress"
             })
         })

@@ -28,20 +28,12 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::array::Float32Array;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
-use tempfile::TempDir;
-use tessera_build::config::{Attribute, Fields};
-use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
-    ViewArgs,
-};
+use tessera_build::config::Attribute;
+use tessera_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily};
 use tessera_spatial::tiler::ScalarType;
 
 const ENTITIES: u64 = 30;
@@ -68,16 +60,6 @@ const THRESHOLD: f64 = 0.5;
 /// column where Q3's was asked for is observable; and one entity in three carries **no value at
 /// all** in a given quarter, which is the presence bitmap's ordinary case (decision 0064) rather
 /// than a hole to fill.
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
-    }
-}
-
 fn sentiment(slot: usize, entity: u64) -> Option<f32> {
     if (entity + slot as u64).is_multiple_of(3) {
         return None;
@@ -137,53 +119,18 @@ fn position(view: &str, e: u64) -> (f64, f64) {
 }
 
 /// A points file, with this view's own `sentiment` column where the family reads one from it.
-fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option<usize>) {
-    let mut fields = vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ];
-    if slot.is_some() {
-        // Nullable: a null and a row this view does not carry are the same state, absent.
-        fields.push(Field::new("sentiment", DataType::Float32, true));
-        fields.push(Field::new("heat", DataType::Float32, true));
-    }
-    let schema = Arc::new(Schema::new(fields));
+fn write_view_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option<usize>) {
     let ids: Vec<u64> = ids.collect();
-    let mut columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(UInt64Array::from(ids.clone())),
-        Arc::new(Float64Array::from(
-            ids.iter().map(|&e| position(view, e).0).collect::<Vec<_>>(),
-        )),
-        Arc::new(Float64Array::from(
-            ids.iter().map(|&e| position(view, e).1).collect::<Vec<_>>(),
-        )),
-    ];
+    let mut extra = Vec::new();
     if let Some(slot) = slot {
-        columns.push(Arc::new(Float32Array::from(
-            ids.iter().map(|&e| sentiment(slot, e)).collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(Float32Array::from(
-            ids.iter().map(|&e| heat(slot, e)).collect::<Vec<_>>(),
-        )));
+        // Nullable: a null and a row this view does not carry are the same state, absent.
+        let family = |value: fn(usize, u64) -> Option<f32>| {
+            Float32Array::from(ids.iter().map(|&e| value(slot, e)).collect::<Vec<_>>())
+        };
+        extra.push(column("sentiment", true, family(sentiment)));
+        extra.push(column("heat", true, family(heat)));
     }
-    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
-    ViewArgs {
-        visibility: None,
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Fields::default(),
-        select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-    }
+    write_points(path, &ids, |e| position(view, e), extra);
 }
 
 /// The bundle: one plain view, a group of four quarters each carrying its own `sentiment` column,
@@ -193,8 +140,12 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
-    write_points(&world_points, "world", WORLD, None);
-    let mut views = vec![view_args("world", &world_points, &pairs)];
+    write_view_points(&world_points, "world", WORLD, None);
+    let mut views = vec![view_args(
+        "world",
+        &world_points,
+        AccessInput::relation(&pairs),
+    )];
     let mut family_views = Vec::new();
     for group in ["quarter", "quarter_alt"] {
         for (slot, (key, members)) in QUARTERS.iter().enumerate() {
@@ -203,11 +154,11 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
             // Only the owning group's files carry the values; `quarter_alt` is a second geometry
             // over the same keys and has no column family of its own.
             let carries = (group == "quarter").then_some(slot);
-            write_points(&points, &id, members.clone(), carries);
+            write_view_points(&points, &id, members.clone(), carries);
             if carries.is_some() {
                 family_views.push(views.len());
             }
-            views.push(view_args(&id, &points, &pairs));
+            views.push(view_args(&id, &points, AccessInput::relation(&pairs)));
         }
     }
     let roster = || {
@@ -222,8 +173,6 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
     };
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 title: None,
@@ -291,51 +240,10 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
                 source: None,
             },
         ],
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..build_args(&out, views)
     })
     .expect("a nine-view build with one scoped family succeeds");
     out
-}
-
-struct Served {
-    server: TestServer,
-    /// Every term, so the mask is the whole corpus and a count is the view's population rather
-    /// than a principal's slice of it. The narrower principal is authorised per test.
-    token: String,
-    _tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    let bundle = build_scoped(tmp.path());
-    let server = spawn_server(
-        &bundle,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let auth = authorise(&server, &["0", "1"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
-    Served {
-        server,
-        token,
-        _tmp: tmp,
-    }
 }
 
 async fn viewport(
@@ -386,7 +294,7 @@ fn range(leaf: &str) -> Value {
 /// of the family (or the last) would show.
 #[tokio::test]
 async fn a_bare_leaf_under_a_view_of_the_group_reads_that_views_column() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let view = format!("quarter:{key}");
         let matched = ids(&served, &view, Some(range("sentiment"))).await;
@@ -415,7 +323,7 @@ async fn a_bare_leaf_under_a_view_of_the_group_reads_that_views_column() {
 /// the same entities, drawn elsewhere.
 #[tokio::test]
 async fn a_bare_leaf_under_a_sharing_group_reads_the_owners_column() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     assert_eq!(
         ids(&served, "quarter:2026-Q3", Some(range("sentiment"))).await,
         ids(&served, "quarter_alt:2026-Q3", Some(range("sentiment"))).await,
@@ -429,7 +337,7 @@ async fn a_bare_leaf_under_a_sharing_group_reads_the_owners_column() {
 /// on a second reading of the fixture.
 #[tokio::test]
 async fn a_pin_projects_one_views_column_into_another_views_rows() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     let pinned = ids(&served, "world", Some(range("sentiment@2026-Q3"))).await;
     let world = ids(&served, "world", None).await;
     let q3 = ids(&served, "quarter:2026-Q3", Some(range("sentiment"))).await;
@@ -448,7 +356,7 @@ async fn a_pin_projects_one_views_column_into_another_views_rows() {
 /// by Q3's sentiment. It is not Q4's own answer, which is what makes it worth spelling.
 #[tokio::test]
 async fn a_pin_under_a_sibling_view_reads_the_pinned_column() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     let q4_by_q3 = ids(&served, "quarter:2026-Q4", Some(range("sentiment@2026-Q3"))).await;
     let q4_by_q4 = ids(&served, "quarter:2026-Q4", Some(range("sentiment"))).await;
     assert_ne!(
@@ -469,7 +377,7 @@ async fn a_pin_under_a_sibling_view_reads_the_pinned_column() {
 /// as an empty filter or ignored as an absent one.
 #[tokio::test]
 async fn a_bare_leaf_under_an_unrelated_view_is_a_422_naming_the_group() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     let resp = viewport(&served, &served.token, "world", Some(range("sentiment"))).await;
     assert_eq!(resp.status().as_u16(), 422);
     let body: Value = resp.json().await.unwrap();
@@ -489,7 +397,7 @@ async fn a_bare_leaf_under_an_unrelated_view_is_a_422_naming_the_group() {
 /// pin joins these here rather than earning a code of its own.
 #[tokio::test]
 async fn a_pin_naming_nothing_is_the_unknown_view_404() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     for pin in ["2099-Q9", "#3"] {
         let leaf = format!("sentiment@{pin}");
         let resp = viewport(&served, &served.token, "world", Some(range(&leaf))).await;
@@ -510,7 +418,7 @@ async fn a_pin_naming_nothing_is_the_unknown_view_404() {
 /// value" — which is the difference between a filter and a presence test.
 #[tokio::test]
 async fn an_entity_with_no_value_matches_no_predicate_of_that_view() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     let rows = ids(&served, "quarter:2026-Q3", None).await;
     let whole_domain = json!({"sentiment": {"range": {"gte": -1.0, "lte": 2.0}}});
     let present = ids(&served, "quarter:2026-Q3", Some(whole_domain.clone())).await;
@@ -545,7 +453,7 @@ async fn an_entity_with_no_value_matches_no_predicate_of_that_view() {
 /// and the narrower principal's is a subset of the wider one's.
 #[tokio::test]
 async fn a_filtered_count_never_exceeds_the_unfiltered_one_on_the_same_mask() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     // The narrower principal: `terms_of` gives term 1 to one entity in three.
     let narrow = authorise(&served.server, &["1"]).await;
     let narrow = narrow["token"].as_str().unwrap().to_string();
@@ -572,7 +480,7 @@ async fn a_filtered_count_never_exceeds_the_unfiltered_one_on_the_same_mask() {
 /// `422` on its first request from the whole-corpus map.
 #[tokio::test]
 async fn the_operand_list_carries_the_scope() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     let body: Value = served
         .server
         .client
@@ -606,7 +514,7 @@ async fn the_operand_list_carries_the_scope() {
 /// would be a different set rather than the same one.
 #[tokio::test]
 async fn a_render_only_family_resolves_exactly_as_the_indexed_one_does() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let view = format!("quarter:{key}");
         let rendered = ids(&served, &view, Some(range("heat"))).await;
@@ -632,7 +540,7 @@ async fn a_render_only_family_resolves_exactly_as_the_indexed_one_does() {
 /// of the fixture.
 #[tokio::test]
 async fn a_pin_of_a_render_only_family_projects_into_a_view_with_no_lane() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     let projected = ids(&served, "world", Some(range("heat@2026-Q3"))).await;
     let world_rows = ids(&served, "world", None).await;
     let q3 = ids(&served, "quarter:2026-Q3", Some(range("heat"))).await;
@@ -653,7 +561,7 @@ async fn a_pin_of_a_render_only_family_projects_into_a_view_with_no_lane() {
 /// decides the view names the group, and a pin naming no view of it is the unknown-view `404`.
 #[tokio::test]
 async fn a_render_only_familys_refusals_are_the_indexed_ones() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     let resp = viewport(&served, &served.token, "world", Some(range("heat"))).await;
     assert_eq!(resp.status().as_u16(), 422);
     let body: Value = resp.json().await.unwrap();
@@ -670,7 +578,7 @@ async fn a_render_only_familys_refusals_are_the_indexed_ones() {
 /// which is the point: `index` decides where the value is stored, not whether it is filterable.
 #[tokio::test]
 async fn meta_publishes_the_render_only_family_as_an_operand() {
-    let served = serve().await;
+    let served = Served::build(build_scoped).await;
     let body: Value = served
         .server
         .client

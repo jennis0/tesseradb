@@ -25,35 +25,22 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, UInt64Array};
+use arrow::array::{BinaryArray, Float64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
+use tessera_build::build;
 use tessera_build::config::Fields;
 use tessera_build::input::deinterleave;
-use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::{Wal, WalRecord};
 use tessera_plugin::Passthrough;
-use tessera_spatial::{Bounds, Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
+use tessera_spatial::{Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
 
 use common::*;
-
-/// The whole-world `web_mercator` frame, which **is** the unit square (`projections.md` §4): every
-/// projection's output is normalised to `[0, 1]` on both axes, x east and y south, so a 16-bit
-/// cell here is exactly an XYZ tile at zoom 16.
-fn world_frame() -> Bounds {
-    Bounds {
-        x_min: 0.0,
-        x_max: 1.0,
-        y_min: 0.0,
-        y_max: 1.0,
-    }
-}
 
 /// Places, in longitude and latitude — the order GeoJSON and WKT use, which is the whole reason
 /// this view's columns are named for what they hold.
@@ -82,33 +69,6 @@ fn places() -> Vec<(f64, f64)> {
 /// The one row `places()` clips.
 const POLAR: usize = 11;
 
-/// A points file under the names a projected view reads (`projections.md` §2).
-fn write_lon_lat_points(path: &Path, points: &[(f64, f64)]) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("lon", DataType::Float64, false),
-        Field::new("lat", DataType::Float64, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(UInt64Array::from(
-                (0..points.len() as u64).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                points.iter().map(|p| p.0).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                points.iter().map(|p| p.1).collect::<Vec<_>>(),
-            )),
-        ],
-    )
-    .expect("the fixture batch is well-formed");
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 /// A bundle whose one view is projected `web_mercator` against the whole world.
 ///
 /// `Fields::moved` is what a projected `[[view]]` compiles to — the geographic names carried on the
@@ -116,39 +76,17 @@ fn write_lon_lat_points(path: &Path, points: &[(f64, f64)]) {
 fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
     let points_path = tmp.join("points.parquet");
     let pairs_path = tmp.join("pairs.parquet");
-    write_lon_lat_points(&points_path, points);
+    write_lon_lat(&points_path, points);
     write_pairs_n(&pairs_path, points.len() as u64);
-    build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
+    build(&build_args(
+        out,
+        vec![tessera_build::ViewArgs {
             projection: Projection::WebMercator,
             extent: world_frame(),
-            points: points_path,
             point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path),
+            ..view_args("s0", &points_path, AccessInput::relation(pairs_path))
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
-    })
+    ))
     .expect("the projected fixture builds");
 }
 
@@ -207,32 +145,6 @@ async fn post_ingest(
     let status = resp.status();
     let json = resp.json::<serde_json::Value>().await.unwrap_or_default();
     (status, json)
-}
-
-/// `POST /control/flush`, waited out — a buffered row has no geometry until it is flushed, so
-/// nothing below can read a position without this.
-async fn flush(server: &TestServer) {
-    let before = server.state.engine.write_executor_stats().flushes;
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-    wait_for_flush(&server.state.engine, before);
-}
-
-fn wait_for_flush(engine: &Engine, before: u64) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// Every served point's 64-bit position, by `tessera_id`.
@@ -316,7 +228,7 @@ async fn a_build_and_an_ingest_place_a_projected_coordinate_in_one_cell() {
     let (status, body) = post_ingest(&server, "batch-1", ingest_batch(("lon", "lat"), &rows)).await;
     assert_eq!(status, 200, "the projected batch is accepted: {body}");
     assert_eq!(body["accepted"], points.len());
-    flush(&server).await;
+    tick(&server).await;
 
     let positions = served_positions(&server.state.engine, 400);
     assert_eq!(
@@ -392,7 +304,7 @@ async fn a_polar_row_is_clipped_counted_and_lands_on_the_frames_edge() {
         body["clipped"], 1,
         "the response carries the clip count beside the out-of-bound count it already returns"
     );
-    flush(&server).await;
+    tick(&server).await;
 
     let positions = served_positions(&server.state.engine, 400);
     let ingested = position_of(&server.state.engine, &positions, &ingested_id(POLAR));
@@ -453,12 +365,7 @@ async fn a_projected_view_refuses_the_cartesian_spelling() {
 #[tokio::test]
 async fn a_view_with_no_projection_refuses_the_geographic_spelling() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_config(
         &root,
         &tmp.path().join("cache"),
@@ -562,9 +469,14 @@ async fn replay_reproduces_the_stored_positions_without_re_running_the_transform
         .expect("the executor starts once");
     let before = replayed.write_executor_stats().flushes;
     replayed.request_flush();
-    wait_for_flush(&replayed, before);
+    wait_until(
+        "the flush published",
+        std::time::Duration::from_secs(60),
+        async || replayed.write_executor_stats().flushes > before,
+    )
+    .await;
 
-    flush(&server).await;
+    tick(&server).await;
     let live = served_positions(&server.state.engine, 400);
     let after_restart = served_positions(&replayed, 400);
     for (i, (lon, lat)) in points.iter().enumerate() {

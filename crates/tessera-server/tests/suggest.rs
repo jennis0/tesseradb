@@ -11,14 +11,10 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
+use arrow::array::StringArray;
 use tempfile::TempDir;
 
 use common::*;
-use tessera_build::{build, BuildArgs};
 
 const N: u64 = 64;
 
@@ -92,81 +88,27 @@ fn department_of(entity: u64) -> String {
     }
 }
 
-fn write_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("archive", DataType::Utf8, false),
-        Field::new("department", DataType::Utf8, false),
-        Field::new("score", DataType::Float32, true),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let archives: Vec<&str> = ids.iter().map(|&e| archive_of(e)).collect();
-    let departments: Vec<String> = ids.iter().map(|&e| department_of(e)).collect();
-    let scores: Vec<Option<f32>> = ids.iter().map(|&e| Some((e % 97) as f32 * 0.5)).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
+/// The suggestion fixture in `dir`: [`N`] items carrying the columns [`SCHEMA_TOML`] declares.
+fn build_categories(dir: &Path) {
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
+    let ids: Vec<u64> = (0..N).collect();
+    let archive = StringArray::from_iter_values(ids.iter().map(|&e| archive_of(e)));
+    let department = StringArray::from_iter_values(ids.iter().map(|&e| department_of(e)));
+    let score =
+        arrow::array::Float32Array::from_iter(ids.iter().map(|&e| Some((e % 97) as f32 * 0.5)));
+    write_points(
+        &points,
+        &ids,
+        scatter,
         vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(StringArray::from(archives)),
-            Arc::new(StringArray::from(departments)),
-            Arc::new(arrow::array::Float32Array::from(scores)),
+            column("archive", false, archive),
+            column("department", false, department),
+            column("score", true, score),
         ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
-    write_points(points, N);
-    write_pairs_n(pairs, N);
-    let schema_path = points.with_file_name("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.to_path_buf(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
-            points.to_path_buf(),
-            &schema,
-        ),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    };
-    build(&args).expect("fixture build should succeed");
+    );
+    write_pairs_n(&pairs, N);
+    build_declared(&dir.join("bundle"), &points, &pairs, SCHEMA_TOML);
 }
 
 /// A server over the suggestion fixture, plus a session token for a fully-granted principal.
@@ -174,20 +116,9 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
 /// enough that the fixture's five- and eleven-value vocabularies exercise `limit` and paging
 /// behaviour on an ordinary request rather than only on a contrived one.
 async fn serve(tmp: &TempDir) -> (TestServer, String) {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_with_categories(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    build_categories(tmp.path());
+    let server = open(tmp).await;
+    let token = token_for(&server, &["0"]).await;
     (server, token)
 }
 
@@ -242,26 +173,10 @@ async fn a_public_column_is_suggested_as_authored() {
 #[tokio::test]
 async fn a_derived_column_is_filtered_per_principal_exactly_as_the_enumeration_is() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_with_categories(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let full = authorise(&server, &["0"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let narrow = authorise(&server, &["1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    build_categories(tmp.path());
+    let server = open(&tmp).await;
+    let full = token_for(&server, &["0"]).await;
+    let narrow = token_for(&server, &["1"]).await;
 
     // The full principal, paged past the server's `max_suggestions = 4` in one call via a limit
     // above the ceiling — clamped, not refused, exactly as `/v1/categories` clamps.
@@ -297,26 +212,10 @@ async fn a_derived_column_is_filtered_per_principal_exactly_as_the_enumeration_i
 #[tokio::test]
 async fn a_narrow_principal_sees_an_empty_page_where_the_wide_one_does_not() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_with_categories(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let wide = authorise(&server, &["0"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let narrow = authorise(&server, &["1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    build_categories(tmp.path());
+    let server = open(&tmp).await;
+    let wide = token_for(&server, &["0"]).await;
+    let narrow = token_for(&server, &["1"]).await;
 
     let (status, body) = get(&server, &wide, "/v1/categories/department/suggest?q=d10").await;
     assert_eq!(status, 200, "{body}");
@@ -385,12 +284,8 @@ async fn counts_are_present_iff_asked_and_are_exact() {
 #[tokio::test]
 async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
     let tmp = TempDir::new().unwrap();
+    build_categories(tmp.path());
     let bundle_root = tmp.path().join("bundle");
-    build_fixture_with_categories(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
     let engine_config = default_engine_config();
     let max_k = engine_config.max_k;
     let engine = tessera_engine::Engine::open(
@@ -465,8 +360,7 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         serve_tasks,
     };
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let (status, body) = get(&server, &token, "/v1/categories/department/suggest?q=d").await;
     assert_eq!(status, 200, "{body}");

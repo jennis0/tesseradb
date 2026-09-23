@@ -9,17 +9,13 @@
 
 mod common;
 
-use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array, StringArray, UInt64Array};
+use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
-use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 
 const N: u64 = 40;
 
@@ -48,97 +44,10 @@ render = true
 index  = true
 "#;
 
-fn write_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("score", DataType::Float32, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let scores: Vec<f32> = ids.iter().map(|e| (*e % 7) as f32).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(Float32Array::from(scores)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
-    let points = dir.join("points.parquet");
-    let pairs = dir.join("pairs.parquet");
-    write_points(&points, N);
-    write_pairs_n(&pairs, N);
-    let schema_path = dir.join("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let out = dir.join("bundle");
-    build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    })
-    .expect("fixture build should succeed");
-    out
-}
-
-struct Served {
-    server: TestServer,
-    /// Held so the tempdir outlives the server it serves from.
-    #[allow(dead_code)]
-    tmp: TempDir,
-}
-
 /// A served fixture with two runtime columns declared: an indexed keyword and an indexed
 /// category, each of which a values batch can fill.
 async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    build_fixture_bundle(tmp.path());
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let served = Served { server, tmp };
+    let served = Served::build(|dir| build_scored(dir, N, SCHEMA_TOML)).await;
     declare(&served, json!({"name": "tag", "type": "keyword", "index": true})).await;
     declare(
         &served,
@@ -146,19 +55,6 @@ async fn serve() -> Served {
     )
     .await;
     served
-}
-
-/// Stop the server and open the same bundle and log again.
-async fn restart(served: Served) -> Served {
-    let Served { server, tmp } = served;
-    server.shutdown().await;
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    Served { server, tmp }
 }
 
 async fn declare(served: &Served, body: Value) {
@@ -269,33 +165,9 @@ fn arrow_values(external_id: &str, tag: &str) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-async fn flush(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().flushes;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while served.server.state.engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-}
-
 /// The drill-down's fields for one `tessera_id`, by name.
 async fn item_fields(served: &Served, id: u64) -> Value {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"][..]).await;
     let resp = served
         .server
         .client
@@ -333,7 +205,7 @@ async fn status(served: &Served) -> Value {
 async fn the_values_route_fills_restates_and_refuses() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
@@ -346,7 +218,7 @@ async fn the_values_route_fills_restates_and_refuses() {
     assert_eq!(answer["rows"], 1);
     assert_eq!(answer["filled"], 2, "one cell per column: {answer}");
     assert_eq!(answer["held"], 0);
-    flush(&served).await;
+    tick(&served.server).await;
 
     let fields = item_fields(&served, id).await;
     assert_eq!(fields["tag"], json!("alpha"), "{fields}");
@@ -398,10 +270,7 @@ async fn the_values_route_fills_restates_and_refuses() {
 
 /// The keys a viewer route that lists a column's values answers, on one page.
 async fn listed_keys(served: &Served, path: &str) -> Vec<String> {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     let resp = served
         .server
         .client
@@ -440,7 +309,7 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
     )
     .await;
     let id = ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
@@ -461,17 +330,17 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
     .await;
     assert_eq!(status, 422, "a closed vocabulary's unknown key is refused: {answer}");
 
-    flush(&served).await;
+    tick(&served.server).await;
     let fields = item_fields(&served, id).await;
     assert_eq!(fields["grade"], json!("g0"), "{fields}");
     assert!(fields["dept"].is_null(), "the refused batch wrote nothing: {fields}");
     assert_minted_key_is_listed(&served, "g0").await;
 
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(item_fields(&served, id).await["grade"], json!("g0"));
     assert_minted_key_is_listed(&served, "g0").await;
     let second = ingest_point(&served, "points-2", "second").await;
-    flush(&served).await;
+    tick(&served.server).await;
     assert!(
         item_fields(&served, second).await["grade"].is_null(),
         "a flush after the restart publishes"
@@ -480,10 +349,7 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
 
 /// The keys of the artifacts a viewport over the whole frame serves from `layer`.
 async fn served_keys(served: &Served, layer: &str) -> Vec<String> {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     let resp = served
         .server
         .client
@@ -518,32 +384,24 @@ async fn a_value_filled_by_a_values_batch_derives_its_artifact_as_ingest_does() 
         json!({"name": "grade", "type": "category", "vocabulary": "grade", "index": true}),
     )
     .await;
-    let resp = served
-        .server
-        .client
-        .put(served.server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
-            "name": "grades",
-            "title": "Grades",
-            "views": ["s0"],
-            "membership": { "attribute": "grade" },
-            "visibility": null,
-            "artifact_visibility": { "field": null, "default": "inherited" },
-            "require_member_visibility": null,
-            "hierarchy": { "kind": "flat", "prune_children": false },
-            "content": { "computed": [], "supplied": [] },
-            "depends_on": [],
-            "levels": []
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap_or_default());
+    let grades = json!({
+        "name": "grades",
+        "title": "Grades",
+        "views": ["s0"],
+        "membership": { "attribute": "grade" },
+        "visibility": null,
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": null,
+        "hierarchy": { "kind": "flat", "prune_children": false },
+        "content": { "computed": [], "supplied": [] },
+        "depends_on": [],
+        "levels": []
+    });
+    register(&served.server, grades).await;
 
     ingest_point_with(&served, "points-1", "by-ingest", json!({"grade": "g1"})).await;
     ingest_point(&served, "points-2", "by-values").await;
-    flush(&served).await;
+    tick(&served.server).await;
     let (status, answer) = values(
         &served,
         "values-1",
@@ -552,10 +410,10 @@ async fn a_value_filled_by_a_values_batch_derives_its_artifact_as_ingest_does() 
     )
     .await;
     assert_eq!(status, 200, "{answer}");
-    flush(&served).await;
+    tick(&served.server).await;
     assert_eq!(served_keys(&served, "grades").await, ["g1", "g2"]);
 
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(served_keys(&served, "grades").await, ["g1", "g2"]);
 }
 
@@ -566,7 +424,7 @@ async fn a_value_filled_by_a_values_batch_derives_its_artifact_as_ingest_does() 
 async fn the_two_encodings_land_identical_values() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     let resp = served
         .server
@@ -584,7 +442,7 @@ async fn the_two_encodings_land_identical_values() {
     let answer: Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "the Arrow batch is accepted: {answer}");
     assert_eq!(answer["filled"], 1);
-    flush(&served).await;
+    tick(&served.server).await;
     assert_eq!(item_fields(&served, id).await["tag"], json!("alpha"));
 
     // The JSON spelling of the same batch: the cell is held identically, so it is a no-op.
@@ -607,7 +465,7 @@ async fn the_two_encodings_land_identical_values() {
 async fn a_row_addressed_by_tessera_id_carries_its_idset() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
@@ -638,7 +496,7 @@ async fn a_row_addressed_by_tessera_id_carries_its_idset() {
 async fn an_undeclared_column_is_refused_and_names_the_view() {
     let served = serve().await;
     ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
@@ -678,7 +536,7 @@ async fn the_limits_are_published_and_enforced() {
     );
 
     ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     // One row over the published count, refused naming the unit before anything is appended.
     let rows: Vec<Value> = (0..=max_rows)
