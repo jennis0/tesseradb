@@ -766,7 +766,6 @@ class Planner:
         `PATCH` at the rank.
         """
         layer = block["name"]
-        scoped = _scoped_to(block) is not None
         publish_limits = self.limits.get("publish", {})
         grow_limits = self.limits.get("grow", {})
         cap = int(publish_limits.get("max_body_bytes", 64 << 20))
@@ -812,21 +811,12 @@ class Planner:
                     members=members,
                 )
                 for row in artifacts:
-                    if scoped and row.get("remainders"):
-                        self.findings.append(
-                            Finding(
-                                "a scoped membership over one publication",
-                                f"layer '{layer}', view '{row.get('view')}', artifact "
-                                f"'{row['key']}': its membership does not fit one publication, and "
-                                f"the growth route that pages the rest carries no view. Split the "
-                                f"artifact into keys whose memberships fit",
-                            )
-                        )
-                        continue
                     # The publication carries a first page of every set; what did not fit follows
-                    # as growths.
+                    # as growths, in the artifact's own view.
                     for rank, remainder in row.get("remainders", []):
-                        self._grow_pages(layer, level, row["key"], rank, remainder, grow_limits)
+                        self._grow_pages(
+                            layer, level, row["key"], rank, remainder, grow_limits, row.get("view")
+                        )
 
     def _artifact_page(
         self,
@@ -859,6 +849,7 @@ class Planner:
         rank: int | None,
         members: Sequence[Any],
         grow_limits: dict,
+        view: str | None = None,
     ) -> None:
         """The pages that join one set, in order."""
         if not members:
@@ -868,7 +859,7 @@ class Planner:
         per_page = max(1, min((cap - 512) // 16, most))
         for start in range(0, len(members), per_page):
             slice_ = list(members[start : start + per_page])
-            body = patch_body(level, key, joining=slice_, rank=rank)
+            body = patch_body(level, key, joining=slice_, rank=rank, view=view)
             what = "members" if rank is None else f"the generating set at rank {rank}"
             self._artifact_page(
                 "grow",
@@ -957,6 +948,8 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
             record[shape_field] = row[shape_field]
     if row.get("space") is not None:
         record["space"] = row["space"]
+    if row.get("access"):
+        record["access"] = list(row["access"])
     members = list(row.get("members", []))
     sets = [list(one) for one in row.get("sets", [])]
     contents = row.get("content") or []
@@ -1036,14 +1029,18 @@ def patch_body(
     joining: Sequence[Any] = (),
     leaving: Sequence[Any] = (),
     rank: int | None = None,
+    view: str | None = None,
 ) -> bytes:
     """One `PATCH` row: the set this page moves, and the members joining or leaving it.
 
     `rank` absent names the membership and present names the generating set of the content at that
     rank. Only a generating set may shrink, so `leaving` without a rank is a refusal
-    the route makes and this function does not pre-empt.
+    the route makes and this function does not pre-empt. `view` is the artifact's view on a layer
+    scoped to a group.
     """
     row: dict[str, Any] = {"key": key}
+    if view is not None:
+        row["view"] = view
     if rank is not None:
         row["rank"] = rank
     if joining:
@@ -1075,7 +1072,7 @@ def _identity(row: dict) -> tuple:
 
 def _blank(key: str, level: int, view: str | None = None) -> dict:
     return {"key": key, "level": level, "view": view, "members": [], "sets": [], "content": [],
-            "parent": [], "attached": None, "excluding": None, "space": None}
+            "parent": [], "attached": None, "excluding": None, "space": None, "access": None}
 
 
 def _artifact_rows(artifacts, members, inline=None) -> list[dict]:
@@ -1171,6 +1168,10 @@ def _artifact_parts(row: dict, record: dict) -> None:
         row["excluding"] = list(record["excluding"])
     if record.get("members") is not None:
         row["members"] = list(record["members"])
+    access = record.get("access")
+    if access is not None:
+        # A list column carries several labels, a scalar one; a null is no label.
+        row["access"] = [str(one) for one in access] if isinstance(access, list) else [str(access)]
 
 
 def _records(table: pa.Table, insert) -> list[dict]:
@@ -1356,6 +1357,6 @@ def changes(control: Control, items: Sequence[dict], op: str, limits: dict) -> l
 
 
 def leave(control: Control, layer: str, key: str, ids: Sequence[Any], rank: int,
-          level: int = 0) -> Answer:
+          level: int = 0, view: str | None = None) -> Answer:
     """`PATCH` a generating set at a rank, the one set that may shrink."""
-    return control.grow(layer, patch_body(level, key, leaving=ids, rank=rank))
+    return control.grow(layer, patch_body(level, key, leaving=ids, rank=rank, view=view))

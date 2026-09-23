@@ -906,7 +906,7 @@ def label_members(key: str = "l0", n: int = 5, ranked: bool = True) -> pa.Table:
     )
 
 
-def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
+def artifact_rows_of(db, view: str = "map", frame=None, terms=None) -> list[tuple]:
     """The kind-5 artifacts frame of a whole-extent viewport: layer, key, content, masked count."""
     import io
 
@@ -917,7 +917,7 @@ def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
     box = [-5.0, -5.0, 40.0, 40.0] if frame is None else list(frame)
     content = post(
         db.viewer_url + "/v1/viewport",
-        db.token().token,
+        db.token(terms).token,
         {"view": view, "zoom": 0, "bbox": box, "k": 16, "layers": "all"},
     )
     at = 0
@@ -1197,3 +1197,60 @@ def test_a_memberless_attached_record_omits_members_and_an_unattached_one_sends_
 
     # A record attaching to nothing has no membership to borrow, so the empty list still travels.
     assert json.loads(_artifact_block({"key": "c0"}, 4096)[0])["members"] == []
+
+
+def labelled_teams(db) -> None:
+    """Two teams over the clustering's twenty points, one labelled `red` and one unlabelled."""
+    db.declare_layer("teams", kind="flat")
+    db.insert(
+        "teams",
+        artifacts=pa.table(
+            {
+                "key": pa.array(["red-team", "open-team"], pa.string()),
+                "team": pa.array([["red"], None], pa.list_(pa.string())),
+            }
+        ),
+        key="key",
+        access="team",
+    )
+    db.insert(
+        "teams",
+        members=pa.table(
+            {
+                "key": pa.array(["red-team"] * 5 + ["open-team"] * 5, pa.string()),
+                "entity": pa.array([f"p{i}" for i in range(10)], pa.string()),
+            }
+        ),
+        id="entity",
+        key="key",
+    )
+
+
+def teams_seen(db, terms) -> list[str]:
+    return sorted(row[1] for row in artifact_rows_of(db, terms=terms) if row[0] == "teams")
+
+
+def test_an_artifacts_own_label_withholds_it_from_a_viewer_without_it_at_either_door(
+    served, corpus
+):
+    """`access=` on an artifacts insert: read by the build before the first commit and sent with
+    each record after it, and served to a viewer holding the label and no other."""
+    def built(db):
+        clustering(db)
+        labelled_teams(db)
+
+    for db in (served(built), served(clustering)):
+        if "teams" not in [row[0] for row in artifact_rows_of(db)]:
+            labelled_teams(db)
+            assert db.commit().ok
+        assert teams_seen(db, ["public"]) == ["open-team"]
+        assert teams_seen(db, ["public", "red"]) == ["open-team", "red-team"]
+
+
+def test_a_growth_page_names_the_view_of_a_group_scoped_artifact():
+    """A growth on a layer scoped to a group says which view's artifact it grows."""
+    import json
+
+    body = json.loads(commit_module.patch_body(0, "c1", joining=["p0"], view="q2"))
+    assert body["artifacts"][0]["view"] == "q2"
+    assert "view" not in json.loads(commit_module.patch_body(0, "c1", joining=["p0"]))["artifacts"][0]

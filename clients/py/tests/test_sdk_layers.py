@@ -159,14 +159,29 @@ def test_a_level_carries_its_own_zoom_range_and_a_layer_prunes_its_children(db, 
 def test_the_serving_layout_and_the_artifact_gate_reach_the_declaration(db, checked):
     db.declare_layer("a", kind="flat", layout="column", artifact_visibility="ir:analyst")
     db.declare_layer("b", kind="flat")
-    db.declare_layer("c", kind="flat",
-                     artifact_visibility={"field": "access", "default": "inherited"})
+    db.declare_layer("c", kind="flat")
     db.insert(
         "c",
-        artifacts=pd.DataFrame({"key": ["a"], "access": ["public"]}),
+        artifacts=pd.DataFrame({"key": ["a"], "team": ["public"]}),
         key="key",
+        access="team",
     )
+    import tomllib
+
+    layer = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "c")
+    assert layer["artifact_visibility"] == {"default": "inherited", "field": "team"}
     assert checked(db).ok
+
+
+def test_the_label_column_is_named_on_the_insert_and_not_on_the_layer(db):
+    with pytest.raises(Refusal):
+        db.declare_layer("d", kind="flat", artifact_visibility={"field": "team", "default": "inherited"})
+    db.declare_layer("e", kind="flat")
+    db.insert("e", artifacts=pd.DataFrame({"key": ["a"], "team": ["x"]}), key="key", access="team")
+    with pytest.raises(Refusal):
+        db.insert(
+            "e", artifacts=pd.DataFrame({"key": ["b"], "squad": ["x"]}), key="key", access="squad"
+        )
 
 
 # ---------------------------------------------------------------------------- vocabularies

@@ -310,6 +310,8 @@ class Database:
                 f"insert into {kind} {target!r}: a {kind} takes no {role} table"
             )
         self._refuse_an_insert_the_target_cannot_take(target, kind, role, block, named)
+        if kind == "layer" and role == "artifacts" and named.get("access"):
+            D.carry_labels(target, block, named["access"])
         projected = kind in ("view", "view_group") and block.get("projection", "none") != "none"
         metadata = D.metadata_names(block) if role == "roster" else ()
         if kind == "labels" and role == "text":
@@ -1092,14 +1094,15 @@ class Database:
         self._save_state()
 
     def _inserted_terms(self, document: dict) -> list[str]:
-        """Every access label inserted into a view, plus each view's default label."""
+        """Every access label inserted into a view or onto an artifact, plus each view's default
+        label."""
         terms: list[str] = []
         for block in document.get("view", []) + document.get("view_group", []):
             default = dict(block.get("point_visibility") or {}).get("default")
             if default:
                 terms.append(default)
         for insert in self.inserts + self.pending:
-            column = insert.columns.get("access") if insert.role == "rows" else None
+            column = insert.columns.get("access") if insert.role in ("rows", "artifacts") else None
             if column is None:
                 continue
             for value in insert.table()[column].to_pylist():
@@ -1158,16 +1161,18 @@ class Database:
         ids: Iterable[Hashable],
         rank: int = 0,
         level: int = 0,
+        view: str | None = None,
     ) -> ChangeReport:
         """Shrink a content's generating set, the one set that may.
 
         A page that empties a set withdraws the content: the record is removed and the caller
-        supplies it again rather than refilling the set.
+        supplies it again rather than refilling the set. `view` names the view the artifact belongs
+        to on a layer scoped to a group, where one key in two views is two artifacts.
         """
         self._refuse_before_the_first_commit("leave")
         wanted = list(ids)
         report = ChangeReport(op=f"leave {layer}/{key} rank {rank}", requested=len(wanted))
-        answer = C.leave(self.control, layer, key, wanted, rank, level)
+        answer = C.leave(self.control, layer, key, wanted, rank, level, view)
         if not answer.ok:
             report.refusals.append({"status": answer.status, "detail": answer.detail[:1000]})
         return report

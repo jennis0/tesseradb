@@ -554,9 +554,31 @@ def labels_block(
 
 
 def _artifact_visibility(value: Any) -> Any:
+    """The default an artifact with no label of its own takes. Which column carries each
+    artifact's own label is named on its insert, with `access=`."""
     if isinstance(value, dict):
+        if "field" in value:
+            raise Refusal(
+                "artifact_visibility: the column an artifact's own label is read from is named on "
+                "the artifacts insert with access=, not on the layer. Give the default here"
+            )
         return Inline(value)
     return Inline({"default": value})
+
+
+def carry_labels(layer: str, block: dict, column: str) -> None:
+    """An artifacts insert naming `access=`: the layer's artifacts carry their own labels, read
+    from that column at a build and sent as each record's `access` at a running service."""
+    visibility = dict(block.get("artifact_visibility") or {})
+    held = visibility.get("field")
+    if held is not None and held != column:
+        raise Refusal(
+            f"insert into layer {layer!r}: access={column!r}, and an earlier insert read this "
+            f"layer's labels from {held!r}. Every artifacts table of one layer carries its labels "
+            f"under one column name"
+        )
+    visibility["field"] = column
+    block["artifact_visibility"] = Inline(visibility)
 
 
 def _requirement(value: Any) -> Any:
