@@ -451,7 +451,7 @@ fn a_closed_vocabulary_compiles_to_a_width_and_a_pinned_code_set() {
     let vocab = &config.schema.vocabularies["severity"];
     assert_eq!(vocab.code_of("low"), Some(1));
     assert_eq!(vocab.code_of("nonesuch"), None);
-    assert_eq!(vocab.visibility, Visibility::Public);
+    assert_eq!(vocab.visibility(), Visibility::Public);
     assert_eq!(vocab.value_set, ValueSet::Closed);
     assert_eq!(vocab.width, ScalarType::U8);
     assert_eq!(vocab.title.as_deref(), Some("Severity"));
@@ -546,7 +546,7 @@ fn a_vocabularys_visibility_admits_exactly_two_words() {
     let derived = SEVERITY.replace("visibility = \"public\"", "visibility = \"derived\"");
     let config = parse_str(&derived).expect("`derived` is the other setting");
     assert_eq!(
-        config.schema.vocabularies["severity"].visibility,
+        config.schema.vocabularies["severity"].visibility(),
         Visibility::Derived
     );
 
@@ -573,7 +573,7 @@ fn an_open_vocabulary_with_no_values_starts_empty() {
     let config = parse_str(&text).unwrap();
     let vocab = &config.schema.vocabularies["severity"];
     assert_eq!(vocab.value_set, ValueSet::Open);
-    assert!(vocab.codes.is_empty());
+    assert!(vocab.values.bindings().next().is_none());
     assert_eq!(config.schema.open_minters().len(), 1);
 }
 
@@ -581,7 +581,11 @@ fn an_open_vocabulary_with_no_values_starts_empty() {
 fn a_closed_vocabulary_may_start_with_no_values() {
     let text = SEVERITY.replace("  [vocabulary.values]\n  low = 1\n  high = 2\n", "");
     let config = parse_str(&text).unwrap();
-    assert!(config.schema.vocabularies["severity"].codes.is_empty());
+    assert!(config.schema.vocabularies["severity"]
+        .values
+        .bindings()
+        .next()
+        .is_none());
 }
 
 /// A closed vocabulary mints nothing, so it must have no minter for a scan to reach.
@@ -1993,7 +1997,7 @@ fn an_override_is_never_a_fall_through_to_minting() {
     let config = bound_ok(ACQUIRED, &["severity_values"]);
     let severity = &config.schema.vocabularies["severity"];
     assert_eq!(severity.value_set, ValueSet::Closed);
-    assert_eq!(severity.codes.len(), 2, "still the two inline values");
+    assert_eq!(severity.values.bindings().count(), 2, "still the two inline values");
 
     // …and a name `[sources]` does not carry is a refusal listing the ones it does.
     let message = bound_err(ACQUIRED, &["vocabulary:severity"]);
@@ -2098,7 +2102,11 @@ fn defaults_reach_a_view_and_a_column_and_no_other_block() {
     );
     let config = parse_at(dir.path(), &open, &HashMap::new()).expect("a parse");
     assert!(
-        config.schema.vocabularies["severity"].codes.is_empty(),
+        config.schema.vocabularies["severity"]
+            .values
+            .bindings()
+            .next()
+            .is_none(),
         "an open vocabulary with no source starts empty rather than reading the default file"
     );
 

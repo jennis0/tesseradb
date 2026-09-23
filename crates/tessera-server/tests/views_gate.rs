@@ -453,14 +453,17 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                     name: "mood".to_string(),
                     title: None,
                     value_set: ValueSet::Closed,
-                    visibility: tessera_build::config::Visibility::Public,
                     width: ScalarType::U8,
-                    codes: MOODS
-                        .iter()
-                        .enumerate()
-                        .map(|(i, key)| (key.to_string(), i as u32 + 1))
-                        .collect(),
-                    titles: std::collections::BTreeMap::new(),
+                    values: tessera_build::config::VocabularyMinter::declared(
+                        "mood",
+                        tessera_build::config::VocabularyKind::Declared,
+                        tessera_build::config::Visibility::Public,
+                        ScalarType::U8,
+                        &[],
+                        MOODS.iter().zip(1..).map(|(key, code)| (*key, code)),
+                        [],
+                    )
+                    .expect("distinct pinned codes"),
                     reserved: Vec::new(),
                 },
             )]),

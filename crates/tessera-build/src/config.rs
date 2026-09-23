@@ -153,7 +153,8 @@ use tessera_spatial::{cell, Bounds, Projection};
 use tessera_store::declaration::{
     check_attribute, check_value_keys, check_vocabulary, AttributeSpec, DECLARABLE_TYPES,
 };
-use tessera_store::vocabulary::VocabularyMinter;
+pub use tessera_store::manifest::VocabularyKind;
+pub use tessera_store::vocabulary::VocabularyMinter;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
     LayerDeclaration, LevelDeclaration, MemberDefault, MembershipSource, ServingLayout,
@@ -2142,19 +2143,13 @@ pub struct Vocabulary {
     /// as `MANIFEST.vocabularies[..].values[..].title`.
     pub title: Option<String>,
     pub value_set: ValueSet,
-    /// `public` or `derived` (`per-point-attributes.md` §3.8). Recorded and published; **not yet
-    /// enforced anywhere**, there being no `/v1/categories` to filter.
-    pub visibility: Visibility,
     /// The **code space's** width, which is why it lives here and not on a column
     /// (`per-point-attributes.md` §3.9).
     pub width: ScalarType,
-    /// Value key → code, pinned by the caller or assigned by the build — the compiled form does
-    /// not distinguish them, because `MANIFEST.json` is the record either way. For an open
-    /// vocabulary this is what the declaration carried *before* the build; the codes minted during
-    /// the run live in the minter [`Schema::open_minters`] returns.
-    pub codes: BTreeMap<String, u32>,
-    /// Per-value presentation, keyed as `codes` is. Absent for a value the author gave no title.
-    pub titles: BTreeMap<String, String>,
+    /// Each value's code, pinned by the caller or drawn by the build, with its title and the
+    /// vocabulary's visibility. For an open vocabulary this is what the declaration carried; the
+    /// codes minted during the run live in the minter [`Schema::open_minters`] returns.
+    pub values: VocabularyMinter,
     /// Retired codes, never reassigned (Protobuf's `reserved`).
     pub reserved: Vec<u32>,
 }
@@ -2202,7 +2197,12 @@ impl Vocabulary {
     /// *absent*: the declare-then-use rule exists because a category carries properties and,
     /// through its postings, a visibility consequence, so a typo must not create one.
     pub fn code_of(&self, key: &str) -> Option<u32> {
-        self.codes.get(key).copied()
+        self.values.code_of(key)
+    }
+
+    /// `public` or `derived` (`per-point-attributes.md` §3.8).
+    pub fn visibility(&self) -> Visibility {
+        self.values.visibility()
     }
 }
 
@@ -2473,21 +2473,7 @@ impl Schema {
             if vocabulary.value_set != ValueSet::Open {
                 continue;
             }
-            let mut minter = VocabularyMinter::new(
-                vocabulary.name.clone(),
-                tessera_store::manifest::VocabularyKind::Discovered,
-                vocabulary.visibility,
-                vocabulary.width,
-            );
-            for (key, &code) in &vocabulary.codes {
-                minter
-                    .seed_value(key, code)
-                    .expect("check_codes already proved this vocabulary's codes are consistent");
-            }
-            for &code in &vocabulary.reserved {
-                minter.seed_reserved(code);
-            }
-            minters.insert(vocabulary.name.clone(), minter);
+            minters.insert(vocabulary.name.clone(), vocabulary.values.clone());
         }
         minters
     }
@@ -4232,7 +4218,7 @@ fn compile_vocabularies(
             block.fields.as_ref(),
             ENTITY_ID,
         )?;
-        let mut declared = match (&block.values, source.as_ref()) {
+        let declared = match (&block.values, source.as_ref()) {
             (Some(_), Some(_)) => {
                 return Err(declaration_error(format!(
                     "vocabulary '{name}' gives `values` and a `source`; give one"
@@ -4245,7 +4231,23 @@ fn compile_vocabularies(
         check_value_keys(name, declared.order.iter().map(String::as_str))
             .map_err(declaration_error)?;
         check_codes(&declared.codes, &reserved, width, name)?;
-        assign_codes(&mut declared, &reserved, width, name)?;
+        let kind = match value_set {
+            ValueSet::Closed => tessera_store::manifest::VocabularyKind::Declared,
+            ValueSet::Open => tessera_store::manifest::VocabularyKind::Discovered,
+        };
+        let mut values = VocabularyMinter::declared(
+            name.clone(),
+            kind,
+            visibility,
+            width,
+            &reserved,
+            declared.codes.iter().map(|(key, &code)| (key.as_str(), code)),
+            declared.order.iter().map(String::as_str),
+        )
+        .map_err(|e| declaration_error(e.to_string()))?;
+        for (key, title) in declared.titles {
+            values.set_title(&key, title);
+        }
 
         compiled.insert(
             name.clone(),
@@ -4253,10 +4255,8 @@ fn compile_vocabularies(
                 name: name.clone(),
                 title: block.title.clone(),
                 value_set,
-                visibility,
                 width,
-                codes: declared.codes,
-                titles: declared.titles,
+                values,
                 reserved,
             },
         );
@@ -4324,43 +4324,6 @@ fn parse_inline_values(values: &toml::Value, vocabulary: &str) -> Result<Declare
         }
     }
     Ok(set)
-}
-
-/// Draw a code for every declared value that pinned none, with the minter a running service
-/// declares a vocabulary through, so a build and a live declaration give codes alike. A rebuild
-/// draws afresh; pinning is what holds a code still.
-fn assign_codes(
-    declared: &mut DeclaredValues,
-    reserved: &[u32],
-    width: ScalarType,
-    vocabulary: &str,
-) -> Result<()> {
-    // The kind and visibility decide nothing about a draw.
-    let mut minter = VocabularyMinter::new(
-        vocabulary,
-        tessera_store::manifest::VocabularyKind::Declared,
-        Visibility::Public,
-        width,
-    );
-    for &code in reserved {
-        minter.seed_reserved(code);
-    }
-    for (key, &code) in &declared.codes {
-        minter
-            .seed_value(key, code)
-            .map_err(|e| declaration_error(e.to_string()))?;
-    }
-    for key in &declared.order {
-        if declared.codes.contains_key(key) {
-            continue;
-        }
-        let code = minter
-            .mint(key)
-            .map_err(|e| declaration_error(e.to_string()))?
-            .code();
-        declared.codes.insert(key.clone(), code);
-    }
-    Ok(())
 }
 
 /// The rules a compiled code set must satisfy, whatever spelling it arrived in.
@@ -6193,7 +6156,7 @@ fn vocabulary_payloads(config: &Config) -> Vec<serde_json::Value> {
         );
         body.insert(
             "visibility".to_string(),
-            serde_json::to_value(vocabulary.visibility).unwrap_or_default(),
+            serde_json::to_value(vocabulary.visibility()).unwrap_or_default(),
         );
         body.insert(
             "width".to_string(),
@@ -6215,18 +6178,19 @@ fn vocabulary_payloads(config: &Config) -> Vec<serde_json::Value> {
             Some(source) => {
                 entry.insert("values_source".to_string(), source.clone().into());
             }
-            None if !vocabulary.codes.is_empty() => {
+            None if vocabulary.values.bindings().next().is_some() => {
                 // **No `code` anywhere.** Codes are the server's to assign
                 // (`per-point-attributes.md` §3.1), and the route refuses a body that names one —
                 // so an inline `key = code` table reaches the wire as its keys and titles, and the
                 // running service draws the codes.
                 let values: Vec<serde_json::Value> = vocabulary
-                    .codes
-                    .keys()
-                    .map(|key| {
+                    .values
+                    .bindings()
+                    .map(|(key, _)| {
                         let mut row = serde_json::Map::new();
-                        row.insert("key".to_string(), key.clone().into());
-                        insert_some(&mut row, "title", vocabulary.titles.get(key).cloned());
+                        row.insert("key".to_string(), key.into());
+                        let title = vocabulary.values.title_of(key).map(str::to_string);
+                        insert_some(&mut row, "title", title);
                         serde_json::Value::Object(row)
                     })
                     .collect();
