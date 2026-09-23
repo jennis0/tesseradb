@@ -167,11 +167,12 @@ def per_view(views: dict, key: str) -> tuple[bool, str]:
 
 def levels_compared(views: dict) -> tuple[bool, str]:
     """Whether every declared level of every layer was compared with an artifact in it, and what
-    each layer's census reached."""
-    held, said = bool(views), []
+    each layer's census reached. A view no layer is drawn on is named but compares nothing."""
+    held, said, bare = True, [], []
     for name, view in views.items():
         layers = dig(view, "census_coverage", "layers", default={})
-        held = held and bool(layers)
+        if not layers:
+            bare.append(name)
         for layer, entry in sorted(layers.items()):
             compared, declared = entry.get("levels_compared", 0), entry.get("levels_declared", 0)
             held = held and compared == declared
@@ -179,7 +180,9 @@ def levels_compared(views: dict) -> tuple[bool, str]:
                 f"{f'{name}/' if len(views) > 1 else ''}{layer} {compared} of {declared} levels, "
                 f"{entry.get('parent_edges', 0):,} parent edges"
             )
-    return held, "; ".join(said) or "no layer"
+    if bare:
+        said.append(f"no layer on {', '.join(bare)}")
+    return held and len(bare) < len(views), "; ".join(said) or "no layer"
 
 
 def views_compared(equivalence: dict) -> tuple[bool, str]:
