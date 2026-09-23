@@ -772,6 +772,7 @@ fn check_access_column(object: &Object, field: &str, schema: &ArrowSchema, repor
                 DataType::List(inner) | DataType::LargeList(inner) => {
                     crate::utf8::is_utf8(inner.data_type())
                 }
+                DataType::Dictionary(_, values) => crate::utf8::is_utf8(values),
                 other => crate::utf8::is_utf8(other),
             };
             if !ok {

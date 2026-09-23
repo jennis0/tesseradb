@@ -605,11 +605,26 @@ const BUILT: [Built; 4] = [
     ("blue", 120..160, Some(&["blue"])),
 ];
 
-/// Write the artifact source, its label column spelled as `labels` says: a list of strings, or a
-/// plain string where each artifact carries at most one label.
-fn write_teams(path: &std::path::Path, list: bool) {
-    use arrow::array::{ArrayRef, ListBuilder, StringArray, StringBuilder, UInt64Builder};
-    use arrow::datatypes::{DataType, Field, Schema};
+/// How the artifact source spells its label column.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Spelling {
+    /// A list of strings.
+    List,
+    /// A plain string: each artifact's first label.
+    Plain,
+    /// A dictionary of strings: each artifact's first label.
+    Dictionary,
+    /// Numbers, which are not labels.
+    Numbers,
+}
+
+/// Write the artifact source, its label column spelled as `spelling` says.
+fn write_teams(path: &std::path::Path, spelling: Spelling) {
+    use arrow::array::{
+        ArrayRef, DictionaryArray, Int64Array, ListBuilder, StringArray, StringBuilder,
+        UInt64Builder,
+    };
+    use arrow::datatypes::{DataType, Field, Int32Type, Schema};
     let keys = StringArray::from(BUILT.iter().map(|(k, _, _)| *k).collect::<Vec<_>>());
     let mut members = ListBuilder::new(UInt64Builder::new());
     for (_, range, _) in &BUILT {
@@ -618,27 +633,30 @@ fn write_teams(path: &std::path::Path, list: bool) {
         }
         members.append(true);
     }
-    let team: ArrayRef = if list {
-        let mut team = ListBuilder::new(StringBuilder::new());
-        for (_, _, labels) in &BUILT {
-            match labels {
-                None => team.append(false),
-                Some(labels) => {
-                    for label in *labels {
-                        team.values().append_value(label);
+    let first: Vec<Option<&str>> = BUILT.iter().map(|(_, _, labels)| labels.map(|l| l[0])).collect();
+    let team: ArrayRef = match spelling {
+        Spelling::List => {
+            let mut team = ListBuilder::new(StringBuilder::new());
+            for (_, _, labels) in &BUILT {
+                match labels {
+                    None => team.append(false),
+                    Some(labels) => {
+                        for label in *labels {
+                            team.values().append_value(label);
+                        }
+                        team.append(true);
                     }
-                    team.append(true);
                 }
             }
+            std::sync::Arc::new(team.finish())
         }
-        std::sync::Arc::new(team.finish())
-    } else {
-        std::sync::Arc::new(StringArray::from(
-            BUILT
-                .iter()
-                .map(|(_, _, labels)| labels.map(|l| l[0]))
-                .collect::<Vec<_>>(),
-        ))
+        Spelling::Plain => std::sync::Arc::new(StringArray::from(first)),
+        Spelling::Dictionary => {
+            std::sync::Arc::new(first.into_iter().collect::<DictionaryArray<Int32Type>>())
+        }
+        Spelling::Numbers => {
+            std::sync::Arc::new(Int64Array::from(vec![Some(1i64); BUILT.len()]))
+        }
     };
     let members: ArrayRef = std::sync::Arc::new(members.finish());
     let schema = std::sync::Arc::new(Schema::new(vec![
@@ -700,12 +718,12 @@ artifacts = [
 }
 
 /// Build the fixture's points with the two layers above; the build's own answer.
-fn build_labelled(dir: &std::path::Path, list: bool, field: &str) -> Result<(), String> {
+fn build_labelled(dir: &std::path::Path, spelling: Spelling, field: &str) -> Result<(), String> {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points_n(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
-    write_teams(&dir.join("teams.parquet"), list);
+    write_teams(&dir.join("teams.parquet"), spelling);
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, built_config(field)).unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
@@ -762,9 +780,10 @@ async fn served_counts(server: &TestServer, terms: &[&str]) -> Vec<(String, Stri
 /// the build reads the label column as a list or as a plain string.
 #[tokio::test]
 async fn labels_built_and_labels_published_serve_alike() {
-    for list in [true, false] {
+    for spelling in [Spelling::List, Spelling::Plain, Spelling::Dictionary] {
+        let list = spelling == Spelling::List;
         let built = TempDir::new().unwrap();
-        build_labelled(built.path(), list, "team").expect("the labelled build succeeds");
+        build_labelled(built.path(), spelling, "team").expect("the labelled build succeeds");
         let built_server = open(&built).await;
 
         let live = TempDir::new().unwrap();
@@ -811,7 +830,7 @@ async fn labels_built_and_labels_published_serve_alike() {
             assert_eq!(
                 from_build,
                 served_counts(&live_server, terms).await,
-                "{terms:?}, list {list}"
+                "{terms:?}, {spelling:?}"
             );
             assert!(!from_build.is_empty());
         }
@@ -824,9 +843,32 @@ async fn labels_built_and_labels_published_serve_alike() {
 #[test]
 fn a_label_field_the_source_does_not_carry_is_refused() {
     let dir = TempDir::new().unwrap();
-    assert!(build_labelled(dir.path(), true, "squad").is_err());
+    assert!(build_labelled(dir.path(), Spelling::List, "squad").is_err());
     let dir = TempDir::new().unwrap();
-    assert!(build_labelled(dir.path(), true, "team").is_ok(), "the same build naming the column");
+    assert!(
+        build_labelled(dir.path(), Spelling::List, "team").is_ok(),
+        "the same build naming the column"
+    );
+}
+
+/// `tessera check` refuses a label column its source does not carry, and one that holds no
+/// strings, and passes each spelling the build reads.
+#[test]
+fn check_refuses_an_absent_or_non_text_label_column() {
+    let checked = |spelling: Spelling, field: &str| {
+        let dir = TempDir::new().unwrap();
+        write_points_n(&dir.path().join("points.parquet"), N_ITEMS);
+        write_teams(&dir.path().join("teams.parquet"), spelling);
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, built_config(field)).unwrap();
+        let config = tessera_build::config::Config::parse(&path, &Default::default()).unwrap();
+        tessera_build::check::check(&config).is_clean()
+    };
+    assert!(!checked(Spelling::List, "squad"));
+    assert!(!checked(Spelling::Numbers, "team"));
+    for spelling in [Spelling::List, Spelling::Plain, Spelling::Dictionary] {
+        assert!(checked(spelling, "team"), "{spelling:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
