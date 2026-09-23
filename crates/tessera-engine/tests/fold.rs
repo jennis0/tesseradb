@@ -3168,26 +3168,7 @@ fn a_join_keeps_its_key_when_the_binding_view_is_dropped_before_it_flushes() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
-    engine
-        .create_view_group(tessera_lifecycle::wal::ViewGroupDeclaration {
-            name: "quarter".to_string(),
-            title: None,
-            projection: "none".to_string(),
-            frame: tessera_engine::DeclaredFrame {
-                x_min: 0.0,
-                x_max: 1000.0,
-                y_min: 0.0,
-                y_max: 1000.0,
-            },
-            visibility: None,
-            point_default: None,
-            members: None,
-            metadata: Vec::new(),
-        })
-        .expect("the group is declared");
-    engine
-        .create_view("quarter".into(), "q2".into(), None, Default::default())
-        .expect("the view is created");
+    create_quarter_q2(&engine);
 
     let key = b"dropped-binding".to_vec();
     let row = |view: &str| UnallocatedRow {
@@ -3229,6 +3210,66 @@ fn a_join_keeps_its_key_when_the_binding_view_is_dropped_before_it_flushes() {
         engine.accepted_batch("join").is_none(),
         "the log rotated past the batches, so no live map answers for them"
     );
+    assert_eq!(engine.resolve_external_id(&key).unwrap(), Some(entity), "the key names its entity");
+    assert_eq!(engine.external_id_of(entity).unwrap(), Some(key), "the entity names its key");
+}
+
+/// A view group `quarter` with one view, `quarter:q2`, over a 1000 by 1000 frame.
+fn create_quarter_q2(engine: &Engine) {
+    engine
+        .create_view_group(tessera_lifecycle::wal::ViewGroupDeclaration {
+            name: "quarter".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+            members: None,
+            metadata: Vec::new(),
+        })
+        .expect("the group is declared");
+    engine
+        .create_view("quarter".into(), "q2".into(), None, Default::default())
+        .expect("the view is created");
+}
+
+/// **A fold publishes when a dropped view held the highest entity a run binds.** The surviving
+/// views' rows end below it, and the fold's base run must still hold its binding.
+#[test]
+fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    create_quarter_q2(&engine);
+    let key = b"dropped-view-item".to_vec();
+    let row = UnallocatedRow {
+        external_id: Some(key.clone()),
+        view: "quarter:q2".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let entity = engine
+        .accept_ingest(vec![row], "q2".to_string(), [0u8; 32])
+        .expect("the item is accepted")[0];
+    wait_ticking(&engine, "the item to flush", || {
+        engine.request_flush();
+        engine.generation().buffer.is_empty()
+    });
+    engine
+        .drop_view("quarter".into(), "q2".into(), false)
+        .expect("the view drops");
+
+    fold(&engine);
     assert_eq!(engine.resolve_external_id(&key).unwrap(), Some(entity), "the key names its entity");
     assert_eq!(engine.external_id_of(entity).unwrap(), Some(key), "the entity names its key");
 }

@@ -402,7 +402,7 @@ fn fold_external_ids(
         fold_external_id_runs(
             &run_paths,
             0,
-            plan.entity_bound.saturating_sub(1),
+            plan.external_id_bound.saturating_sub(1),
             &plan.tombstones,
             entities_dir,
         )

@@ -1353,8 +1353,9 @@ impl Executor {
     /// The `MANIFEST.json` a fold's new prefix carries: the live one, with the schema wound back to
     /// what it was at the plan, every live vocabulary binding folded in, and the fold's own files.
     ///
-    /// `entity_id_high_water` here is the snapshot's entity space, where the base locator ends:
-    /// `ExternalIdSidecar::deferred_from_manifest` takes it as the base locator's declared length.
+    /// `entity_id_high_water` here is where the base locator ends, the snapshot's external-id
+    /// bound: `ExternalIdSidecar::deferred_from_manifest` takes it as the base locator's declared
+    /// length.
     /// `Engine::open` seeds the allocator's floor from the max of this and the side-manifest's
     /// live value, so the lower value is safe for the allocator.
     ///
@@ -1394,7 +1395,7 @@ impl Executor {
                 .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
         }
         crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
-        bundle_manifest.entity_id_high_water = plan.entity_bound;
+        bundle_manifest.entity_id_high_water = plan.external_id_bound;
         bundle_manifest.files = completed.files.clone();
         let carried_bindings: Vec<_> = live
             .bundle

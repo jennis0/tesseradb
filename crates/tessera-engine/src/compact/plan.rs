@@ -38,6 +38,9 @@ pub(crate) struct FoldPlan {
     pub(crate) tombstones: Bitmap,
     /// One past the highest entity with a row in this partition at the snapshot.
     pub(crate) entity_bound: u64,
+    /// Where the base external-id run and locator end: the larger of [`Self::entity_bound`] and
+    /// one past the highest entity a snapshot run binds, which a dropped view's rows can hold.
+    pub(crate) external_id_bound: u64,
     pub(crate) dict_len: u32,
     pub(crate) small_term_threshold: u32,
     /// A publication into a prefix other than this one is discarded.
@@ -289,6 +292,11 @@ pub(crate) fn plan_fold(
     }
 
     let tombstones = generation.overlay.deleted_set().clone();
+    let external_id_bound = manifest
+        .locator_extents
+        .iter()
+        .map(|extent| extent.entity_hi + 1)
+        .fold(entity_bound.max(generation.bundle.manifest.entity_id_high_water), u64::max);
 
     Ok(FoldPlan {
         partition: partition.clone(),
@@ -306,6 +314,7 @@ pub(crate) fn plan_fold(
         text_extents: manifest.text_extents.clone(),
         tombstones,
         entity_bound,
+        external_id_bound,
         dict_len,
         small_term_threshold: generation.bundle.manifest.small_term_threshold,
         prefix: generation.prefix.clone(),
