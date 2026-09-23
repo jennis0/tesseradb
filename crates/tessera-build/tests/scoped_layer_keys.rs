@@ -423,3 +423,11 @@ fn one_key_twice_on_one_view_is_still_refused() {
         "the refusal names the view the collision is in: {message}"
     );
 }
+
+#[test]
+fn an_artifact_naming_a_view_the_group_lacks_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let error = build_fixture(tmp.path(), &[("c0", "a"), ("c1", "z")])
+        .expect_err("the group has no view 'z', so no artifact can belong to it");
+    assert!(matches!(error, tessera_build::BuildError::Invalid(_)), "{error:?}");
+}

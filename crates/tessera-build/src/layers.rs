@@ -1618,6 +1618,30 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
 /// the point region's mark — passed so the allocator refuses rather than letting the two regions
 /// meet unnoticed.
 #[allow(clippy::too_many_arguments)]
+/// The views this build writes, each at the incarnation a build gives it.
+struct DeclaredViews<'a>(&'a [String]);
+
+impl tessera_lifecycle::GroupViews for DeclaredViews<'_> {
+    fn incarnation_of(
+        &self,
+        group: &str,
+        key: &str,
+    ) -> Option<tessera_types::view::ViewIncarnation> {
+        let id = format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR);
+        self.0
+            .contains(&id)
+            .then_some(tessera_types::view::DECLARED_INCARNATION)
+    }
+    fn keys_of(&self, group: &str) -> Vec<String> {
+        self.0
+            .iter()
+            .filter_map(|id| id.split_once(tessera_store::GROUP_SEPARATOR))
+            .filter(|(held, _)| *held == group)
+            .map(|(_, key)| key.to_string())
+            .collect()
+    }
+}
+
 pub fn publish(
     plan: &mut LayerPlan,
     resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
@@ -1862,7 +1886,7 @@ pub fn publish(
                     &store,
                     &mut alloc,
                     &tessera_lifecycle::no_pending,
-                    &tessera_lifecycle::declared_incarnation,
+                    &DeclaredViews(views),
                 )
                 .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
             // The record carries its own copy of every membership, so the bitmaps this built are
@@ -4235,14 +4259,10 @@ pub(crate) fn key_at(key: &KeyColumn, row: usize) -> String {
     key.key_at(row).unwrap_or_else(|| format!("row {row}"))
 }
 
-/// The view one row of a group-scoped layer's source names, checked against the group's roster —
-/// and `None` on an unscoped layer, whose one artifact set is drawn on every view it names
-/// (`views.md` §3.5).
-///
-/// **Read by both of a layer's sources**, the artifacts and the members, because a key means
-/// nothing without it on such a layer: keys are unique per `(layer, view)`, so a member row naming
-/// a key alone could be either of two artifacts, and whichever it joined would be the file's
-/// column order rather than anything the caller wrote.
+/// The view one artifact row of a group-scoped layer names, and `None` on an unscoped layer,
+/// whose one artifact set is drawn on every view it names (`views.md` §3.5). A key means nothing
+/// without it on such a layer: keys are unique per `(layer, view)`. Whether the group has the view
+/// is the registry's rule, checked when the level is published.
 fn view_of_row<'a>(
     path: &Path,
     layer: &str,
@@ -4264,17 +4284,6 @@ fn view_of_row<'a>(
             scope.group
         )));
     };
-    if scope.keys.binary_search_by(|held| held.as_str().cmp(named)).is_err() {
-        return Err(BuildError::Invalid(format!(
-            "{}: {} names view '{named}', which group '{}' has no such key for. Its keys are: {}. \
-             An artifact belongs to one view and its keys are unique per (layer, view), so a key \
-             nobody declared is a refusal rather than an artifact drawn nowhere (views §3.5)",
-            path.display(),
-            key_at(key, row),
-            scope.group,
-            scope.keys.join(", ")
-        )));
-    }
     Ok(Some(named))
 }
 

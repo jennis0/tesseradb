@@ -245,6 +245,27 @@ impl From<SubmitError> for AcceptError {
     }
 }
 
+/// A generation's groups and their views, as a publication sees them.
+pub(crate) struct ServedViews<'a>(pub(crate) &'a tessera_store::manifest::Manifest);
+
+impl tessera_lifecycle::GroupViews for ServedViews<'_> {
+    fn incarnation_of(
+        &self,
+        group: &str,
+        key: &str,
+    ) -> Option<tessera_types::view::ViewIncarnation> {
+        self.0.incarnation_of_key(group, key)
+    }
+    fn keys_of(&self, group: &str) -> Vec<String> {
+        self.0
+            .groups
+            .iter()
+            .filter(|held| held.name == group)
+            .flat_map(|held| held.views.iter().map(|view| view.key.clone()))
+            .collect()
+    }
+}
+
 /// Remove every artifact of a group-scoped layer whose view is not at the incarnation it was
 /// published under, and return the levels that changed. A view drop calls this, and so does an
 /// open, over records packed before a drop or replayed from before it.

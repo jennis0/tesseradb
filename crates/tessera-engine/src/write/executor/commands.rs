@@ -418,10 +418,9 @@ impl Executor {
             return;
         }
         let served = self.generation.load_full();
-        let incarnation_of =
-            |group: &str, key: &str| served.bundle.manifest.incarnation_of_key(group, key);
+        let views = crate::write::ServedViews(&served.bundle.manifest);
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
-            registry.prepare_put(&layer, level, &incoming, store, alloc, &incarnation_of)
+            registry.prepare_put(&layer, level, &incoming, store, alloc, &views)
         });
         let prepared = match prepared {
             Ok(prepared) => prepared,
