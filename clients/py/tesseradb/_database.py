@@ -1139,7 +1139,7 @@ class Database:
         view: str | None = None,
         codes: Sequence[int] | None = None,
     ):
-        """The values of a category column, as a pandas DataFrame.
+        """The values of a category column, as a pyarrow table.
 
         This is `Viewer.categories` as this database's own reader, which sees every value.
         `prefix` lists only the values starting with it, with a count of items for each; `view`

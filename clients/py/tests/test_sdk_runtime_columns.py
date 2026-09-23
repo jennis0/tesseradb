@@ -131,7 +131,7 @@ def test_a_category_over_an_inline_closed_vocabulary_is_declared_filled_and_list
     assert declared(db, "venue")["category"]["kind"] == "declared"
 
     # `/v1/categories/{column}` is where the values are, codes and all.
-    assert sorted(db.categories("venue")["key"]) == sorted(keys)
+    assert sorted(db.categories("venue").column("key").to_pylist()) == sorted(keys)
     assert matched(db, {"venue": {"eq": "neurips"}}) == len(
         [i for i in range(len(HELD)) if keys[i % 3] == "neurips"]
     )
@@ -172,7 +172,7 @@ def test_a_category_over_a_sourced_closed_vocabulary_pages_the_tables_rows(serve
     assert report.values_bound == 3
 
     # The titles came from the table's own column, which is what a sourced set is for.
-    listed = db.categories("venue")
+    listed = db.categories("venue").to_pydict()
     assert dict(zip(listed["key"], listed["title"])) == {"neurips": "NeurIPS", "icml": "ICML", "iclr": "ICLR"}
     assert matched(db, {"venue": {"eq": "icml"}}) == len(
         [i for i in range(len(HELD)) if keys[i % 3] == "icml"]
@@ -227,7 +227,7 @@ def test_an_open_vocabulary_declared_after_the_first_commit_pages_its_titles(ser
     report = db.commit()
     assert report.ok, report
     assert report.values_bound == 2
-    listed = db.categories("venue")
+    listed = db.categories("venue").to_pydict()
     assert dict(zip(listed["key"], listed["title"])) == {
         "neurips": "NeurIPS",
         "icml": "ICML",
@@ -264,7 +264,7 @@ def test_a_value_set_over_the_bodys_cap_is_paged_by_bytes(served, corpus):
     report = db.commit()
     assert report.ok, report
     assert report.values_bound == len(keys)
-    assert len(db.categories("venue")) == len(keys)
+    assert db.categories("venue").num_rows == len(keys)
 
 
 def test_a_vocabulary_no_column_names_is_redeclared_and_answered_as_held(served, corpus):

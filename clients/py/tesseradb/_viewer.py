@@ -311,7 +311,7 @@ class Selection:
         Every option is sent only when given, so the server's own setting applies otherwise.
 
             sample = db.view("papers").sample(zoom=3, k=256)
-            sample.to_pandas()
+            sample.to_pandas()  # needs pandas installed
         """
         reader = self._reader()
         request: dict = {"view": self._view, "zoom": int(zoom)}
@@ -533,7 +533,7 @@ class Viewer:
         view: Optional[str] = None,
         codes: Optional[Sequence[int]] = None,
     ):
-        """The values of a category column that this reader may see, as a pandas DataFrame.
+        """The values of a category column that this reader may see, as a pyarrow table.
 
         A category column stores a small integer code for each value. This lists what each code
         stands for, one row per value, with the columns `key` (the value as inserted), `code`
@@ -543,8 +543,8 @@ class Viewer:
         - `prefix`: list only the values whose key or title, or a word in either, starts with
           this text, ignoring case. The rows then also have `count`, the number of
           items this reader may see that carry the value. The server returns at most its
-          `max_suggestions` setting of such values, and `frame.attrs["more"]` is `True` when
-          more matched than were returned.
+          `max_suggestions` setting of such values; the table's schema metadata
+          `tessera.more` is `"true"` when more matched than were returned.
         - `view`: the view to read the column in. A column declared for a view group holds
           different values in each of the group's views, so it needs this.
         - `codes`: list only these codes, such as the codes in a sample's category column. A
@@ -552,12 +552,23 @@ class Viewer:
           `prefix`.
 
         Without a prefix the rows are in key order; with one, in the order of the matched text.
+        `.to_pandas()` on the table gives a DataFrame, where pandas is installed.
 
             v.categories("venue")
             v.categories("venue", prefix="neur")
             v.categories("venue", codes=sample.column("venue").unique().to_pylist())
         """
-        import pandas as pd
+        import pyarrow as pa
+
+        def table(values: list, counted: bool = False):
+            columns = {
+                "key": pa.array([one["key"] for one in values], pa.string()),
+                "code": pa.array([one["code"] for one in values], pa.uint32()),
+                "title": pa.array([one.get("title") for one in values], pa.string()),
+            }
+            if counted:
+                columns["count"] = pa.array([one.get("count") for one in values], pa.uint64())
+            return pa.table(columns)
 
         if codes is not None and prefix is not None:
             raise Refusal(
@@ -573,30 +584,22 @@ class Viewer:
             if wanted:
                 query["codes"] = ",".join(wanted)
                 values = json.loads(self._request("GET", path + _query(query), None))["values"]
-            return pd.DataFrame(
-                [(one["key"], one["code"], one.get("title")) for one in values],
-                columns=["key", "code", "title"],
-            )
+            return table(values)
         if prefix is not None:
             query.update(q=prefix, counts="true")
             page = json.loads(self._request("GET", path + "/suggest" + _query(query), None))
-            frame = pd.DataFrame(
-                [
-                    (one["key"], one["code"], one.get("title"), one.get("count"))
-                    for one in page["values"]
-                ],
-                columns=["key", "code", "title", "count"],
+            more = "true" if page.get("more") else "false"
+            return table(page["values"], counted=True).replace_schema_metadata(
+                {"tessera.more": more}
             )
-            frame.attrs["more"] = bool(page.get("more"))
-            return frame
-        rows: list[tuple] = []
+        values: list = []
         while True:
             page = json.loads(self._request("GET", path + _query(query), None))
-            rows += [(one["key"], one["code"], one.get("title")) for one in page["values"]]
+            values += page["values"]
             if page.get("next") is None:
                 break
             query["after"] = page["next"]
-        return pd.DataFrame(rows, columns=["key", "code", "title"])
+        return table(values)
 
     def browse_artifacts(
         self,

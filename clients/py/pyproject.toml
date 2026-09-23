@@ -8,33 +8,30 @@ version = "0.1.0"
 description = "Read and map a Tessera database from Python, and make one from data frames."
 license = "Apache-2.0"
 requires-python = ">=3.10"
-# The base install has no JavaScript in it and no third-party Python in it: `authorise` is one
-# HTTPS call, made with `urllib`. The wheel stays `py3-none-any`.
+# Two dependencies. pyarrow carries every table the package reads or writes. The companion
+# platform wheel `tesseradb-native` carries the `tessera` binary and the `_tessera` extension
+# module, so `pip install tesseradb` can make and serve a database without a Rust toolchain. It is
+# pinned exactly, because the binary and this package change together and a stale database is
+# refused. On a platform the marker leaves out, the package installs without it, and making or
+# serving a database needs a `tessera` binary on `PATH` or named by `TESSERA_BIN`. The wheel itself
+# is pure Python, `py3-none-any`.
 #
-# The one dependency is the companion platform wheel, which carries the `tessera` binary and the
-# `_tessera` extension module, so `pip install tesseradb` reaches the server without a cargo
-# toolchain. It is pinned exactly: nothing is deployed and a format change refuses a stale bundle,
-# so the binary and the SDK move together. The marker keeps an unsupported platform installable —
-# there the base install is what it always was, pure Python with no binary.
-#
-# Opting out is `pip install tesseradb --no-deps`, which is exact because this is the only entry.
+# `pip install tesseradb --no-deps` skips both. Install `pyarrow>=14` by hand after it, and point
+# `TESSERA_BIN` at a `tessera` binary, or put one on `PATH`, to make or serve a database.
 dependencies = [
+  "pyarrow>=14",
   "tesseradb-native==0.1.0; platform_machine in 'x86_64 AMD64 aarch64 arm64'",
 ]
 
 [project.optional-dependencies]
-# The widget: anywidget plus the components' single-file bundle, which the wheel's build hook
-# (`hatch_build.py`) builds with Node at wheel-build time and packages under `tesseradb/static/`.
-# A user installing the wheel needs no Node; a developer installing from this checkout does.
+# The notebook map: anywidget plus the components' single-file bundle, which the wheel's build
+# hook (`hatch_build.py`) builds with Node and packages under `tesseradb/static/`. A user
+# installing the wheel needs no Node; a developer installing from this checkout does.
 widget = ["anywidget>=0.9"]
-# The SDK: a database in a directory, filled from frames and files. A pandas or polars frame
-# reaches pyarrow through `pa.table`; pandas is here because `categories()` answers with a
-# DataFrame.
-local = ["pyarrow>=14", "pandas"]
-# `tomli` is the TOML reader the corpus regeneration tests parse both documents with, on the
-# Pythons below 3.11 that carry no `tomllib`. It is a test dependency and reaches no other extra.
+# The tests. pandas is here because the tests compute expected answers with it; the package
+# never needs it. `tomli` reads TOML on Pythons below 3.11, which have no `tomllib`.
 dev = [
-  "anywidget>=0.9", "pyarrow>=14", "pandas", "pytest", "ruff",
+  "anywidget>=0.9", "pandas", "pytest", "ruff",
   "tomli>=2; python_version < '3.11'",
 ]
 

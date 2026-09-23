@@ -1,12 +1,12 @@
 """Tessera's Python package: read a Tessera database, map it in a notebook, and make one.
 
-`pip install tesseradb` gives `connect`, `authorise`, `revoke` and `Token`, which need nothing
-beyond the standard library. `Selection.sample` also needs pyarrow and `categories` needs pandas.
-`pip install tesseradb[widget]` adds the notebook map, `Map`. `pip install tesseradb[local]` adds
-`create` and `open`, which make a database in a directory from data frames and files.
+`connect` reads a database someone else runs; `create` and `open` make one in a directory from
+data frames and files. Every table the package returns is a pyarrow table, whose `.to_pandas()`
+gives a pandas DataFrame where pandas is installed. `pip install tesseradb[widget]` adds the
+notebook map, `Map`.
 
 `Map`, `create`, `open` and `Database` are loaded when first used, so `import tesseradb` works
-without the optional packages.
+without anywidget.
 """
 
 from __future__ import annotations
@@ -48,8 +48,6 @@ def __getattr__(name: str):
         try:
             from . import _database
         except ImportError as e:
-            raise ImportError(
-                "making a database needs the local extra: pip install 'tesseradb[local]'"
-            ) from e
+            raise ImportError("making a database needs pyarrow: pip install 'pyarrow>=14'") from e
         return getattr(_database, _SDK[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

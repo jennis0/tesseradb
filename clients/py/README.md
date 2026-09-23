@@ -5,10 +5,14 @@ both. The widget and the SDK are here; the in-process instance joins them later.
 code with `reference/`, the test-only oracle.
 
 ```
-pip install tesseradb            # authorise, Token — the standard library and nothing else
+pip install tesseradb            # read, create, declare, insert, commit; with pyarrow and the binary
 pip install 'tesseradb[widget]'  # + anywidget and the notebook widget, Map
-pip install 'tesseradb[local]'   # + pyarrow and the SDK: create, declare, insert, commit
 ```
+
+Every table the package returns is a pyarrow table; `.to_pandas()` on it gives a DataFrame where
+pandas is installed. `pip install tesseradb --no-deps` installs neither pyarrow nor the
+`tesseradb-native` wheel that carries the `tessera` binary: install `pyarrow>=14` by hand, and
+put a `tessera` binary on `PATH` or name it with `TESSERA_BIN` to make or serve a database.
 
 From this checkout, `pip install -e 'clients/py[widget]'` — the wheel's build hook
 (`hatch_build.py`) runs `npm ci` (when the install is stale) and `npm run build -w
@@ -32,7 +36,7 @@ categories; a week of new papers into the database while it serves; a second clu
 it already holds; one set of points under two projections; and the database saved, reopened and
 handed to `tessera serve --deployment`.
 
-They need `pip install -e 'clients/py[widget,local]'`, a `tessera` binary on `PATH` or named by
+They need `pip install -e 'clients/py[widget]'`, a `tessera` binary on `PATH` or named by
 `TESSERA_BIN`, and the corpus at `data/notebook/`, which `TESSERA_NOTEBOOK_DATA` names elsewhere.
 Three things are in no extra, because the package needs none of them: `pandas`, which the first
 section's frame is built with, and the front end you are running, `marimo` or `jupyterlab`. So
@@ -332,7 +336,7 @@ records route. Until then, `item(tessera_id)` returns one record at a time.
 ```python
 db.meta()                                     # the views, layers and columns, as a dictionary
 db.item(tessera_id)                           # one item's record: fields, labels, views
-db.categories("primary_category")             # every value of a category column, as a DataFrame
+db.categories("primary_category")             # every value of a category column, as a table
 db.categories("primary_category", prefix="cs")   # the values starting "cs", with item counts
 
 v = db.viewer(["cs.LG"])
@@ -342,12 +346,12 @@ v.artifact(tessera_id, "s0")                  # one annotation's record: its cou
 
 Each of these exists on `db` and on any reader, and answers as that reader.
 
-`categories(column, prefix=None, view=None, codes=None)` lists a category column's values that the reader
-may see, one row each, with `key`, `code` and `title`. Without a prefix it is every value. With
+`categories(column, prefix=None, view=None, codes=None)` returns a pyarrow table of a category
+column's values that the reader may see, one row each, with `key`, `code` and `title`. Without a prefix it is every value. With
 one it is the values whose key or title, or a word in either, starts with it, ignoring case, and
 each row adds `count`, the number of items the reader may see that carry the value; the server
-returns at most its `max_suggestions` setting of these, and `frame.attrs["more"]` says whether
-more matched. With `codes`, such as the codes in a sample's category column, it is the values of
+returns at most its `max_suggestions` setting of these, and the table's schema metadata
+`tessera.more` says whether more matched. With `codes`, such as the codes in a sample's category column, it is the values of
 those codes, and a code with no value the reader may see is left out; `codes` and `prefix` cannot
 be combined. A column declared for a view group holds different values in each view, so it
 takes `view=`.

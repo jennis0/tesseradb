@@ -8,6 +8,7 @@ matches, and the rows whose position lies inside a box.
 from __future__ import annotations
 
 import numpy as np
+import pyarrow as pa
 import pytest
 
 from tesseradb import Refusal
@@ -184,7 +185,9 @@ def test_categories_lists_every_value_of_a_vocabulary(db):
 
     vocabulary = pd.read_parquet(notebook_corpus() / "primary_category.parquet")
     listed = db.categories("primary_category")
-    assert list(listed.columns) == ["key", "code", "title"]
+    assert isinstance(listed, pa.Table)
+    assert listed.column_names == ["key", "code", "title"]
+    listed = listed.to_pandas()
     assert sorted(listed["key"]) == sorted(vocabulary["key"])
     assert dict(zip(listed["key"], listed["code"])) == dict(
         zip(vocabulary["key"], vocabulary["code"])
@@ -192,19 +195,21 @@ def test_categories_lists_every_value_of_a_vocabulary(db):
 
 
 def test_categories_resolves_the_codes_it_is_given(db):
-    listed = db.categories("primary_category")
+    listed = db.categories("primary_category").to_pandas()
     held = listed.iloc[[7, 0, 3]]
-    found = db.categories("primary_category", codes=list(held["code"]) + [65000])
-    assert list(found.columns) == ["key", "code", "title"]
-    assert found.to_dict("records") == held.sort_values("key").to_dict("records")
-    assert db.categories("primary_category", codes=[]).empty
+    found = db.categories("primary_category", codes=[int(c) for c in held["code"]] + [65000])
+    assert found.column_names == ["key", "code", "title"]
+    assert found.to_pylist() == held.sort_values("key").to_dict("records")
+    assert db.categories("primary_category", codes=[]).num_rows == 0
     with pytest.raises(Refusal):
         db.categories("primary_category", codes=[1], prefix="cs")
 
 
 def test_categories_with_a_prefix_counts_the_items_carrying_each_value(db, points):
     found = db.categories("archive", prefix="ma")
-    assert list(found.columns) == ["key", "code", "title", "count"]
+    assert found.column_names == ["key", "code", "title", "count"]
+    assert found.schema.metadata[b"tessera.more"] == b"false"
+    found = found.to_pandas()
     assert "math" in set(found["key"])
     carried = points["archive"].value_counts()
     for key, count in zip(found["key"], found["count"]):
@@ -212,7 +217,7 @@ def test_categories_with_a_prefix_counts_the_items_carrying_each_value(db, point
 
 
 def test_categories_with_a_prefix_counts_what_the_reader_may_see(db, points):
-    found = db.viewer(["cs.LG"]).categories("archive", prefix="c")
+    found = db.viewer(["cs.LG"]).categories("archive", prefix="c").to_pandas()
     seen = seen_by(points, ["cs.LG"])["archive"].value_counts()
     assert dict(zip(found["key"], found["count"])) == {
         key: seen.get(key, 0) for key in found["key"]
