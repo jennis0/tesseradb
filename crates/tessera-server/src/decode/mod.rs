@@ -12,7 +12,8 @@ use tessera_types::TesseraId;
 use self::arrow::code_at;
 pub(crate) use self::arrow::{parse_ingest_batch, parse_values_batch, ParsedBatch, ParsedValues};
 
-/// A body the decoder refuses: the caller's input, naming the row or column at fault.
+/// A body the decoder refuses. A refusal names a row by its index in the batch, never by the id
+/// the caller sent.
 #[derive(Debug)]
 pub(crate) struct DecodeError(pub(crate) String);
 
@@ -47,32 +48,19 @@ pub(crate) enum Address {
     Tessera { id: TesseraId, idset: u32 },
 }
 
-/// The two encodings a record-bearing route takes (ingest §1.2). JSON is the default and Arrow
-/// IPC is selected by content type; nothing about a route's semantics depends on which carried
-/// the batch, since both decode to one row form before the executor sees either.
+/// The two encodings a record-bearing route takes; both decode to one row form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BodyEncoding {
     Json,
     Arrow,
 }
 
-/// Contracts §1: external IDs are caller-supplied byte strings, capped at **≤ 64 bytes**.
-/// Over-length is a typed error here and at build, never a truncation — truncating two callers'
-/// keys down to a shared 64-byte prefix would silently merge two different items into one
-/// entity, and sidecar disk scales linearly with key length, so the cap is load-bearing, not
-/// cosmetic. `/control/ingest` is the only caller-supplied-bytes path in this workspace (the
-/// build's external-id representation is fixed at exactly 8 bytes — `tessera-build`'s
-/// `BuildError::ExternalIdTooLong` cannot be reached by any build input), so this is where the
-/// cap is actually enforced and tested.
+/// The longest external id, in bytes. A longer one is refused, never truncated: truncating
+/// would merge two items whose ids share a prefix.
 pub(crate) const EXTERNAL_ID_MAX_LEN: usize = 64;
 
-/// A group-scoped family as the declaration the row-level helpers take.
-///
-/// **The declaration is an ordinary attribute's** (`views.md` §5) — same types, same `index` and
-/// `render` — and what the scope changes is only which column file a value lands in. So a
-/// family's key check, wire type and code minting are the entity-scoped ones, asked of a borrowed
-/// declaration built here rather than restated as a second set of rules that could drift from
-/// [`DeclaredScalar`]'s.
+/// A group-scoped family as a [`DeclaredScalar`], so its key check, wire type and code minting
+/// are the entity-scoped ones; the scope changes only which column file a value lands in.
 pub(crate) fn scoped_as_declared(family: &ScopedScalar) -> DeclaredScalar {
     DeclaredScalar {
         name: family.name.clone(),
@@ -84,8 +72,7 @@ pub(crate) fn scoped_as_declared(family: &ScopedScalar) -> DeclaredScalar {
     }
 }
 
-/// A declared scalar as the family-shaped helpers take it — [`scoped_as_declared`]'s inverse,
-/// so an omitted declared column takes the same absence an omitted family does.
+/// [`scoped_as_declared`]'s inverse, so an omitted declared column takes a family's absence.
 pub(crate) fn declared_as_scoped(d: &DeclaredScalar) -> ScopedScalar {
     ScopedScalar {
         name: d.name.clone(),
@@ -99,20 +86,13 @@ pub(crate) fn declared_as_scoped(d: &DeclaredScalar) -> ScopedScalar {
     }
 }
 
-/// What a batch column of this family carries on the wire — [`DeclaredScalar::wire_type`]'s
-/// answer, so a scoped category arrives as its **key** exactly as an entity-scoped one does and a
-/// caller is never the minting authority for a code (per-point-attributes §3.1, §5).
+/// A family's wire type: a scoped category arrives as its key, as an entity-scoped one does.
 pub(crate) fn scoped_wire_type(family: &ScopedScalar) -> ScalarType {
     scoped_as_declared(family).wire_type()
 }
 
-/// The value a row carries for a family the batch does not mention at all.
-///
-/// A category spends its reserved code 0, which its vocabulary keeps out of the value space;
-/// every other family has no spare bit pattern and travels `Null`, which lands in the column's
-/// presence bitmap (decision 0064). The same split [`parse_ingest_batch`] makes per row, restated
-/// here for the whole-column case — which a family has and a declared scalar does not, a family
-/// having no slot in the positional tail to misalign.
+/// The value a row carries for a column the batch omits: a category's reserved code 0, which
+/// its vocabulary keeps out of the value space, and `Null` for every other type.
 pub(crate) fn scoped_absent(family: &ScopedScalar) -> WalScalar {
     match family.vocabulary {
         Some(_) => code_at(family.arrow_type, ABSENT_CODE),
