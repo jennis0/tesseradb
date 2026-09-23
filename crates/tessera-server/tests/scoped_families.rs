@@ -1712,3 +1712,106 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     let served = restart(served, config()).await;
     assert_written_answers(&served, "after a restart", &[q1, q3[0]], minted).await;
 }
+
+/// What one view answers for each family, asked for the values [`IN_Q9`] and [`IN_Q3`] carry.
+async fn family_answers(served: &Served, view: &str) -> Vec<BTreeSet<u64>> {
+    let mut answers = Vec::new();
+    for written in [IN_Q9, IN_Q3] {
+        for filter in [
+            json!({"mood": {"eq": written.mood}}),
+            json!({"sector": {"eq": written.sector}}),
+            json!({"note": {"match": written.word}}),
+        ] {
+            answers.push(ids(served, view, Some(filter)).await);
+        }
+    }
+    answers.push(ids(served, view, Some(json!({"score": {"range": {"gte": THRESHOLD}}}))).await);
+    answers
+}
+
+/// The recreated view against what it was given, and the untouched view against what it held.
+async fn check_recreated(
+    served: &Served,
+    stage: &str,
+    expected: &[BTreeSet<u64>],
+    untouched: &[BTreeSet<u64>],
+) {
+    assert_eq!(
+        family_answers(served, "quarter:2026-Q4").await,
+        expected,
+        "{stage}: the recreated view answers from its own values"
+    );
+    assert_eq!(
+        family_answers(served, "quarter:2026-Q3").await,
+        untouched,
+        "{stage}: a view never dropped answers as it did"
+    );
+}
+
+/// A built view dropped and created again at a running service holds the scoped values ingested
+/// into it after the create, before a restart, after one, and after a fold and another; a view
+/// never dropped answers as it did throughout.
+#[tokio::test]
+async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
+    let mut served = serve().await;
+    let untouched = family_answers(&served, "quarter:2026-Q3").await;
+
+    let dropped = served
+        .server
+        .client
+        .delete(
+            served
+                .server
+                .control_url("/control/views/quarter/2026-Q4?delete_dangling=false"),
+        )
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dropped.status().as_u16(), 200);
+    let created = served
+        .server
+        .client
+        .put(served.server.control_url("/control/views/quarter/2026-Q4"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status().as_u16(), 201);
+
+    // Two of the build's Q4 entities joining the new view, and one new entity.
+    let rows = ingest_scoped(
+        &served,
+        "recreated-q4",
+        "quarter:2026-Q4",
+        &[
+            (8, 250.0, 250.0, IN_Q9),
+            (10, 260.0, 260.0, IN_Q3),
+            (9_301, 270.0, 270.0, IN_Q9),
+        ],
+    )
+    .await;
+    flush(&served).await;
+    served.token = token(&served, &["0", "1"]).await;
+
+    let q9 = BTreeSet::from([rows[0], rows[2]]);
+    let q3 = BTreeSet::from([rows[1]]);
+    let expected = vec![
+        q9.clone(),
+        q9.clone(),
+        q9.clone(),
+        q3.clone(),
+        q3.clone(),
+        q3,
+        q9,
+    ];
+    check_recreated(&served, "before a restart", &expected, &untouched).await;
+
+    let served = restart(served, default_engine_config()).await;
+    check_recreated(&served, "after a restart", &expected, &untouched).await;
+
+    fold(&served).await;
+    let served = restart(served, default_engine_config()).await;
+    check_recreated(&served, "after a fold and a restart", &expected, &untouched).await;
+}
