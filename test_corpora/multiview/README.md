@@ -9,10 +9,11 @@ declaration builds: ten row spaces over one entity space of 21,300 — `world` a
 `quarter`'s four inline views and `quarter_alt`'s four selected out of one file by its `quarter`
 discriminator — with `sentiment`'s four entity-space columns under `attrs/sentiment/quarter/<key>/`,
 `collections` drawn on all five of the views it names, `quarter_clusters`' six clusters per quarter
-each resolved only in that quarter's two views (`quarter`'s and `quarter_alt`'s), and `regions`' three `wgs84` polygons canonicalised **twice**,
-once against each of the two frames it spans (decision 0111): the three decompose to
-26,031 interior tiles in `world` and 29,469 in `world_flat`, which is what per-view
-canonicalisation means and what one frame for both would have hidden. `tessera verify` and `tessera verify --deep` pass on the result.
+each resolved only in that quarter's two views (`quarter`'s and `quarter_alt`'s), and `regions`'
+three `wgs84` polygons canonicalised **twice**, once against each of the two frames it spans: the
+three decompose to 26,031 interior tiles in `world` and 29,469 in `world_flat`, which is what
+per-view canonicalisation means and what one frame for both would have hidden. `tessera verify` and
+`tessera verify --deep` pass on the result.
 
 **Two things in this fixture were wrong against the readers and were corrected** (2026-08-31),
 neither of them a views.md question: the `members` lists on both layer files were `int64` where an
