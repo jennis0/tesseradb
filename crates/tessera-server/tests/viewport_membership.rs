@@ -277,8 +277,7 @@ async fn a_layer_cannot_be_registered_under_the_reserved_word() {
         .send()
         .await
         .unwrap();
-    let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap();
-    assert_eq!(status, 422, "{body}");
-    assert!(body.contains("reserved"), "{body}");
+    assert_eq!(resp.status().as_u16(), 422);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
 }

@@ -270,7 +270,8 @@ async fn a_shape_layer_spanning_a_projected_and_an_unprojected_view_is_refused_a
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    let detail = body.to_string();
+    assert_eq!(body["error"], "contract", "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
     assert!(detail.contains("regions/mixed"), "{detail}");
     assert!(detail.contains("'world'"), "{detail}");
     assert!(detail.contains("'embedding'"), "{detail}");
@@ -306,7 +307,8 @@ async fn a_view_space_shape_over_two_frames_is_refused_at_the_row() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    let detail = body.to_string();
+    assert_eq!(body["error"], "contract", "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
     assert!(detail.contains("wgs84"), "{detail}");
     assert!(detail.contains("europe") || detail.contains("world"), "{detail}");
 }

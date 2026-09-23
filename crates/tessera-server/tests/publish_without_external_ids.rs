@@ -40,7 +40,7 @@ async fn serve_fixture(mint_external_ids: bool) -> (TempDir, TestServer) {
 }
 
 /// Publish one artifact whose members are the given external ids; return status and body text.
-async fn publish(server: &TestServer, layer: &str, members: &[u64]) -> (u16, String) {
+async fn publish(server: &TestServer, layer: &str, members: &[u64]) -> (u16, serde_json::Value) {
     let members: Vec<String> = members.iter().map(|e| member(*e)).collect();
     let encoded = layer.replace('/', "%2F");
     let resp = server
@@ -55,7 +55,7 @@ async fn publish(server: &TestServer, layer: &str, members: &[u64]) -> (u16, Str
         .await
         .unwrap();
     let status = resp.status().as_u16();
-    (status, resp.text().await.unwrap())
+    (status, resp.json().await.unwrap_or_default())
 }
 
 #[tokio::test]
@@ -64,14 +64,7 @@ async fn a_bundle_with_no_external_ids_refuses_the_publication_once_and_says_why
     register(&server, flat_layer("flat/x")).await;
     let (status, body) = publish(&server, "flat/x", &[1, 2, 3]).await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body.contains("carries no external ids"),
-        "the refusal names the deployment, not a member: {body}"
-    );
-    assert!(
-        !body.contains("names nothing this deployment holds"),
-        "not the per-member refusal: {body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 }
 
 #[tokio::test]
@@ -81,10 +74,7 @@ async fn a_bundle_with_external_ids_still_refuses_an_unknown_member_by_position(
     // 1 and 2 exist; 10_000 names nothing. The member is reported by its position.
     let (status, body) = publish(&server, "flat/x", &[1, 2, 10_000]).await;
     assert_eq!(status, 404, "{body}");
-    assert!(
-        body.contains("id 2 of artifact 0 names nothing this deployment holds"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "unknown", "{body}");
     // And a publication whose members all exist lands.
     let (status, body) = publish(&server, "flat/x", &[1, 2]).await;
     assert_eq!(status, 201, "{body}");

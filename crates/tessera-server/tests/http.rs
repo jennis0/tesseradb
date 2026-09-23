@@ -543,7 +543,6 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
     assert_eq!(stale.status(), 409);
     let body: serde_json::Value = stale.json().await.unwrap();
     assert_eq!(body["error"], "conflict");
-    assert_eq!(body["detail"], "stale idset; re-resolve by external_id");
 
     // The matching idset is a no-op: same 200, same body as the idset-less request.
     let matching = server

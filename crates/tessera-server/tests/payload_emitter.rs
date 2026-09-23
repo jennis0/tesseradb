@@ -255,8 +255,9 @@ render = true
     assert_eq!(body["render"], true, "emitted as declared: {body}");
     let (status, answer) = put(&served, "/control/attributes", body).await;
     assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
     assert!(
-        answer.to_string().contains("render"),
+        answer["detail"].as_str().unwrap_or_default().contains("render"),
         "the refusal names the key: {answer}"
     );
     served.server.shutdown().await;

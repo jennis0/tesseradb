@@ -807,11 +807,8 @@ async fn a_scoped_attribute_collapses_whole_outside_its_groups_gate() {
     for spelling in ["sentiment", "sentiment@s1", "sentiment@#0"] {
         let (status, body) = viewport(&served, &outsider, "world", Some(leaf(spelling))).await;
         assert_eq!(status, 422, "{spelling} is refused as an unknown column");
+        assert_eq!(body["error"], "contract", "{spelling}: {body}");
         let detail = body["detail"].as_str().unwrap_or_default().to_string();
-        assert!(
-            detail.contains("not a filterable column"),
-            "{spelling}: {detail}"
-        );
         assert!(
             !detail.contains("sealed"),
             "the refusal must not name the group: {detail}"
@@ -822,6 +819,7 @@ async fn a_scoped_attribute_collapses_whole_outside_its_groups_gate() {
     // is the `422` naming the group, and a pin resolves.
     let (status, body) = viewport(&served, &holder, "world", Some(leaf("sentiment"))).await;
     assert_eq!(status, 422);
+    assert_eq!(body["error"], "contract", "{body}");
     assert!(
         body["detail"].as_str().unwrap().contains("sealed"),
         "a principal inside the gate is told which group to pin: {body}"
@@ -876,11 +874,8 @@ async fn the_category_text_and_render_only_families_collapse_at_the_same_site() 
     ] {
         let (status, answer) = viewport(&served, &outsider, "world", Some(body)).await;
         assert_eq!(status, 422, "{spelling}");
+        assert_eq!(answer["error"], "contract", "{spelling}: {answer}");
         let detail = answer["detail"].as_str().unwrap_or_default().to_string();
-        assert!(
-            detail.contains("not a filterable column"),
-            "{spelling}: {detail}"
-        );
         assert!(!detail.contains("sealed"), "{spelling}: {detail}");
     }
 

@@ -428,13 +428,14 @@ async fn an_unknown_view_and_an_absent_key_are_the_same_404() {
     let served = Served::build(build_multiview).await;
     // A group is not a view either (`views.md` §3.1): naming one is the same 404 as naming
     // nothing, because it has no row space to answer from.
+    let mut shapes = std::collections::BTreeSet::new();
     for view in ["no_such_view", "quarter:2099-Q9", "quarter:#99", "quarter"] {
         let resp = viewport(&served, view).await;
         assert_eq!(resp.status().as_u16(), 404, "{view} is not a served view");
         let body: Value = resp.json().await.unwrap();
-        // One code and one detail shape, differing only in the caller's own words back — which is
-        // the same information the request carried, and so no oracle.
         assert_eq!(body["error"], "unknown", "{body}");
-        assert_eq!(body["detail"], format!("unknown view '{view}'"), "{body}");
+        // The detail differs only by the caller's own words back, which the request carried.
+        shapes.insert(body["detail"].as_str().unwrap().replace(view, ""));
     }
+    assert_eq!(shapes.len(), 1, "one detail for every unknown name: {shapes:?}");
 }

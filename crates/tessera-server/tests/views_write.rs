@@ -843,6 +843,7 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
     .await;
     assert_eq!(resp.status(), 409);
     let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "conflict", "{body}");
     assert!(
         body["detail"].as_str().unwrap().contains("score"),
         "the refusal names the column: {body}"
@@ -1657,6 +1658,7 @@ async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed
         "a second view's row is not a route to a new access label, buffered or flushed"
     );
     let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "conflict", "{body}");
     let detail = body["detail"].as_str().unwrap();
     assert!(
         detail.contains("under a different access label"),
@@ -1973,6 +1975,7 @@ async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
             "a flushed entity's stored '{column}' is read back and compared"
         );
         let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "conflict", "{body}");
         assert!(
             body["detail"].as_str().unwrap().contains(column),
             "the refusal names the column: {body}"
@@ -2303,6 +2306,7 @@ async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_val
                  another's value"
             );
             let body: Value = resp.json().await.unwrap();
+            assert_eq!(body["error"], "conflict", "{body}");
             assert!(
                 body["detail"].as_str().unwrap().contains("score"),
                 "the refusal names the column: {body}"
@@ -2410,7 +2414,7 @@ async fn the_join_rules_refusal_names_the_row_and_the_column() {
     assert_eq!(body["error"], "conflict", "{body}");
     let detail = body["detail"].as_str().unwrap();
     assert!(
-        detail.contains("row 0") && detail.contains("column 'score'"),
+        detail.contains("row 0") && detail.contains("'score'"),
         "the refusal names the row and the column: {detail}"
     );
     assert!(

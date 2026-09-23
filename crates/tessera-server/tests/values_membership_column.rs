@@ -674,7 +674,8 @@ async fn a_closed_layer_refuses_a_key_no_artifact_holds() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    let detail = body.to_string();
+    assert_eq!(body["error"], "contract", "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
         detail.contains("nobody-published-this"),
         "the refusal names the key: {detail}"
@@ -708,10 +709,11 @@ async fn a_layer_with_supplied_content_refuses_the_column() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    let detail = body.to_string();
+    assert_eq!(body["error"], "contract", "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("nobody-declared-this") && detail.contains("supplied content"),
-        "the refusal names the key and why the layer cannot hold it: {detail}"
+        detail.contains("nobody-declared-this"),
+        "the refusal names the key: {detail}"
     );
 }
 

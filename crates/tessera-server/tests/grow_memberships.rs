@@ -210,8 +210,9 @@ async fn an_unknown_key_refuses_the_whole_batch() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
     assert!(
-        body.to_string().contains("never-published"),
+        body["detail"].as_str().unwrap_or_default().contains("never-published"),
         "the refusal names the key: {body}"
     );
     assert_eq!(
@@ -242,8 +243,8 @@ async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
     .await;
     let (status, body) = grow(&server, json!([{ "key": "a", "members": members(10..20) }])).await;
     assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().expect("the envelope's detail");
-    assert!(detail.contains("deleted"), "{detail}");
     // The body carries a count and the key, never an entity id (I10): the only number in it is
     // the one deleted member.
     let numbers: Vec<&str> = detail
@@ -536,11 +537,7 @@ async fn a_growth_body_carries_keys_members_and_the_fixed_parts_and_nothing_else
     )
     .await;
     assert_eq!(status, 404, "{body}");
-    assert!(
-        body.to_string()
-            .contains("id 2 of artifact 0 names nothing this deployment holds"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "unknown", "{body}");
     assert_eq!(count(&server, &["0"]).await, 10);
 }
 

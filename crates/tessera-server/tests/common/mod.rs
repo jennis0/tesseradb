@@ -36,12 +36,11 @@ pub const N_ITEMS: u64 = 1_000;
 pub const SESSION_CREDENTIAL: &str = "session-secret";
 
 pub const OPERATOR_CREDENTIAL: &str = "operator-secret";
-/// Fixed test key, matching `tessera-build`'s own test fixtures — not sensitive, this repository
-/// contains no real deployment key.
+/// The identity key `tessera-build`'s own test fixtures use. It guards nothing.
 pub const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
-/// The fixture bundle's `identity.idset` — contracts §2.2's idset, which
-/// `/v1/meta` reports and `/v1/items` compares an optional `idset` against.
+/// The fixture bundle's idset, which `/v1/meta` reports and `/v1/items` compares a request's
+/// `idset` against.
 pub const FIXTURE_IDSET: u32 = 1;
 
 pub fn test_key() -> IdentityKey {
@@ -276,27 +275,11 @@ pub struct TestServer {
     pub session_addr: SocketAddr,
     pub control_addr: SocketAddr,
     pub client: reqwest::Client,
-    /// The same `AppState` the three routers are serving, so a test can assert on an engine-side
-    /// observable a handler was supposed to move — not just on the status code it returned.
-    ///
-    /// Without it, `revoke_prunes_the_token` could assert only a 204 and a survivor's 200 — which
-    /// covers nothing its name claims: deleting `state.engine.prune_token(...)` from the revoke
-    /// handler leaves every status code in this crate's tests unchanged. `/control/status` does
-    /// publish the cache gauges, but reading them costs the operator credential and a JSON parse;
-    /// this is the direct route from an HTTP test to a cache observable.
-    ///
-    /// **Not a licence to bypass HTTP.** A test that drives the engine through this field instead
-    /// of through a request has stopped being a server test; the point is to *observe* after
-    /// driving the request normally.
+    /// The state the three routers serve, so a test can observe what a request changed in the
+    /// engine. A test drives the server by HTTP and only reads through this.
     pub state: Arc<AppState>,
-    /// The three `axum::serve` tasks, so a test that reopens the bundle can stop them.
-    ///
-    /// **Each holds an `Arc<AppState>`, and so the engine and its write executor.** Dropping a
-    /// `TestServer` drops one `Arc` and leaves theirs, so a `restart` that only dropped the server
-    /// ran its new engine beside the old one — two executors over one bundle root, allocating the
-    /// same side-manifest numbers from the same seed. The engine now refuses to start over a
-    /// locked root (`write-path.md` §1.2), so a test that leaks its server fails at the reopen
-    /// rather than in a way only a counter records.
+    /// The three `axum::serve` tasks. Each holds the state, and so the engine and its lock on the
+    /// bundle root, until it is stopped.
     pub serve_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -311,14 +294,11 @@ impl TestServer {
         format!("http://{}{}", self.control_addr, path)
     }
 
-    /// **Stop serving and wait for the engine to be released** — what a restart puts between the
-    /// old server and the new one.
+    /// Stop serving and wait until the engine is dropped, so the bundle can be opened again.
     ///
-    /// Three things hold an `Arc<AppState>`: this value, the three accept loops, and one task per
-    /// live connection that `axum::serve` spawned. The client is dropped first so its keep-alive
-    /// connections close and those per-connection tasks end; then the accept loops are aborted and
-    /// awaited; then this waits for the last `Arc` to be this one before dropping it, which is what
-    /// runs `WritePath::drop` — the join of the executor thread and the release of the bundle lock.
+    /// The state is held by this value, the three accept loops and one task per live connection.
+    /// Replacing the client closes its connections, the accept loops are aborted, and this waits
+    /// to hold the last reference before dropping it.
     pub async fn shutdown(mut self) {
         // A fresh client in place of this one: dropping the old pool closes its keep-alive
         // connections, and with them the per-connection tasks holding the state.
@@ -343,9 +323,8 @@ impl TestServer {
 }
 
 impl Drop for TestServer {
-    /// The backstop for a test that drops its server without reopening the bundle. A `Drop` cannot
-    /// wait, so this only stops the accept loops; a test that reopens must call
-    /// [`TestServer::shutdown`] and wait.
+    /// Stops the accept loops. It cannot wait for the engine to drop; a test that reopens the
+    /// bundle calls [`TestServer::shutdown`].
     fn drop(&mut self) {
         for task in &self.serve_tasks {
             task.abort();
@@ -360,31 +339,26 @@ pub fn default_engine_config() -> EngineConfig {
         max_k: 200,
         k_min: 2,
         k_max_marks: 200,
-        // Saturate theta: these tests assert HTTP shape and masking, not density. See
-        // tessera-engine's tests/viewport.rs `config()` for the full reasoning.
+        // No density thinning: these tests assert what is served and masked, not density.
         theta_target_marks: u64::MAX,
         max_underlay_offset: 4,
         max_underlay_cells: 8192,
         max_tiles_per_request: 262_144,
         compute_threads: tessera_engine::default_compute_threads(),
-        // The shipped defaults for lifecycle §2.2's two pin bounds — see the same two lines in
-        // tessera-engine's `tests/common/mod.rs`.
+        // The shipped defaults for the two flush triggers.
         flush_max_age_secs: 90,
-        // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
-        // what bounds the window close's O(buffered) copy. Nothing here reaches it.
         flush_max_items: 40_000,
         max_merged_segment_bytes: None,
         tier_width: None,
         segment_floor_bytes: None,
         coalesce_width: None,
-        // Compaction §9's trigger is off unless a deployment configures one.
+        // No scheduled compaction.
         compaction: tessera_engine::CompactionSchedule::off(),
     }
 }
 
-/// [`spawn_server`], with a caller-chosen streamed-viewport flush threshold and write-stall
-/// budget — the two knobs the streaming tests pin (a tiny flush for the multi-frame path, a
-/// short stall for the shed path).
+/// [`spawn_server`], with the streamed viewport's flush threshold and write-stall budget chosen
+/// by the caller.
 pub async fn spawn_server_with_stream_flush(
     bundle_root: &Path,
     cache_dir: &Path,
@@ -514,11 +488,7 @@ pub fn generous_test_gate() -> ComputeGate {
     ComputeGate::new(64, 64, 250)
 }
 
-/// Like [`spawn_server`], but with a caller-supplied `EngineConfig` — the concurrency tests
-/// need a much wider underlay budget than every other test in this file to engineer a
-/// deterministic slow request (see `healthz_stays_prompt_while_a_long_viewport_runs`'s doc), and
-/// duplicating the whole engine-open-plus-three-listeners dance per test would be worse than one
-/// extra parameter.
+/// [`spawn_server`] under `config`.
 pub async fn spawn_server_with_config(
     bundle_root: &Path,
     cache_dir: &Path,
@@ -535,9 +505,7 @@ pub async fn spawn_server_with_config(
     .await
 }
 
-/// Like [`spawn_server_with_config`], but also with a caller-supplied [`ComputeGate`] — the
-/// admission-gate tests need a deliberately tiny gate (`compute_admission=1, compute_queue=0`) to
-/// hold saturated deterministically, which every other test in this file must not be affected by.
+/// [`spawn_server_with_config`] behind `compute_gate`.
 pub async fn spawn_server_with_config_and_gate(
     bundle_root: &Path,
     cache_dir: &Path,
@@ -551,23 +519,13 @@ pub async fn spawn_server_with_config_and_gate(
     spawn_server_from_engine(engine, max_k, compute_gate).await
 }
 
-/// The "wrap an already-constructed `Engine` into a running three-listener server" half of
-/// [`spawn_server_with_config_and_gate`], factored out so the byte-equality tests
-/// can construct their own `Engine` (to call `set_serial_fallback_max_rows_for_test` on it, which
-/// needs the owned `Engine` before it is moved into `AppState`) while still reusing the router/
-/// listener plumbing every other test goes through.
+/// Start `engine`'s write executor and serve it on three listeners.
 pub async fn spawn_server_from_engine(
     engine: Engine,
     max_k: usize,
     compute_gate: ComputeGate,
 ) -> TestServer {
-    // The WAL lives on its own executor thread, and `prepare` starts it for a real server. Every
-    // server test reaches its engine through this one function, so starting it here is what keeps
-    // `/control/ingest` and `/control/changes` working in the test harness.
-    //
-    // The bound is generous on purpose: no test reaching this helper means to exercise queue-full
-    // backpressure (`ingest_429s_when_the_queue_is_full` sets its own), and a small bound would turn
-    // an unrelated timing wobble into a spurious 429.
+    // A queue bound no test reaching this helper fills; the queue-full tests start their own.
     let mut engine = engine;
     engine
         .start_write_executor(1024)
@@ -575,13 +533,7 @@ pub async fn spawn_server_from_engine(
     mount_server(engine, max_k, compute_gate).await
 }
 
-/// The listener/router/`AppState` half of [`spawn_server_from_engine`], for an engine whose write
-/// executor the caller has already dealt with — started with its own bound, started with faults, or
-/// **deliberately not started at all**.
-///
-/// Split out for the readiness tests, which need the last of those: `/readyz` must answer 503 for an
-/// engine with no executor, and `spawn_server_from_engine` starts one unconditionally (and would
-/// panic on `AlreadyStarted` if a test started its own first).
+/// Serve `engine` as it is: its write executor started by the caller, or not started at all.
 pub async fn mount_server(engine: Engine, max_k: usize, compute_gate: ComputeGate) -> TestServer {
     mount_server_with(
         engine,
@@ -593,42 +545,31 @@ pub async fn mount_server(engine: Engine, max_k: usize, compute_gate: ComputeGat
     .await
 }
 
-/// The control-plane bounds, as a caller-supplied set.
-///
-/// `admission` bounds concurrent `/control/ingest` handlers (and therefore the blocking-pool
-/// threads ingest can hold); `max_batch_rows` and `max_batch_bytes` are the two 422 caps. They are
-/// *different quantities* from the write executor's `ingest_queue_bound`, which is chosen at
-/// `start_write_executor` — a handler holds a thread through a window in which it holds no queue
-/// slot at all — so a test that wants one of the two 429s must set both deliberately.
+/// The control plane's bounds. `admission` bounds concurrent `/control/ingest` handlers and is
+/// separate from the write executor's queue bound, which `start_write_executor` sets.
 pub struct IngestLimits {
     pub admission: usize,
     pub max_batch_rows: usize,
     pub max_batch_bytes: usize,
-    /// Buffer occupancy at which ingest is refused (§1.3).
+    /// The buffered rows at which ingest is refused.
     pub buffer_max_items: usize,
-    /// The artifact routes' pagination units (ingest §2.1): the byte cap on `PUT` and `PATCH
+    /// The artifact routes' bounds: the byte cap on `PUT` and `PATCH
     /// /control/layers/{name}/artifacts`, the artifacts per publication and the members per
     /// growth page.
     pub publish_max_body_bytes: usize,
     pub max_artifacts_per_request: usize,
     pub max_members_per_request: usize,
-    /// The entities one artifact's `excluding` list may name (ingest §2.3).
+    /// The entities one artifact's `excluding` list may name.
     pub max_excluded_per_request: usize,
 }
 
-/// Generous enough that no test which is not about these bounds can observe them — the same
-/// principle as [`generous_test_gate`]. Only the bound-specific tests set their own.
+/// Bounds no test that is not about them reaches.
 pub fn generous_ingest_limits() -> IngestLimits {
     IngestLimits {
         admission: 64,
-        // Above the *production* default of 10 000, deliberately:
-        // `concurrent_ingests_do_not_delay_a_control_changes_suppress` posts 40 000-row batches to
-        // make the ingest side genuinely heavy. A harness default that silently turned that test's
-        // premise into a 422 would be measuring the harness.
+        // Above the shipped 10 000: one test posts 40 000-row batches.
         max_batch_rows: 200_000,
-        // Above anything a test that is not about this bound could reach: without a flush the
-        // buffer only grows, so a modest ceiling would turn every long-running ingest test into a
-        // 429 about a bound it never meant to exercise.
+        // Without a flush the buffer only grows, so this is far above what any test ingests.
         buffer_max_items: 10_000_000,
         max_batch_bytes: 64 * 1024 * 1024,
         publish_max_body_bytes: 64 * 1024 * 1024,
@@ -655,20 +596,16 @@ pub async fn mount_server_with_ingest_limits(
     .await
 }
 
-/// `serve.visible_wait_max_secs`' shipped default, which every mount but the one that means to
-/// observe the bound takes.
+/// `serve.visible_wait_max_secs`' shipped default.
 pub const DEFAULT_VISIBLE_WAIT_MAX_SECS: u64 = 30;
 
-/// The two CORS origin lists, named rather than positional.
-///
-/// Two `Vec<String>` parameters side by side is exactly the shape a caller transposes, and
-/// transposing these two is the bug decision 0102 exists to prevent — the production list reaching
-/// the session plane. Naming them costs a struct and makes the mistake unwriteable.
+/// The CORS settings, by name, so the production list cannot be passed where the development
+/// list belongs.
 #[derive(Default, Clone)]
 pub struct CorsOrigins {
-    /// `serve.dev_cors_origins` — viewer *and* session planes.
+    /// `serve.dev_cors_origins`: the viewer and session planes.
     pub dev: Vec<String>,
-    /// `serve.cors_origins` — viewer plane only.
+    /// `serve.cors_origins`: the viewer plane only.
     pub production: Vec<String>,
     /// `serve.cors_loopback`: viewer plane only, and a rule instead of a list.
     pub loopback: bool,
@@ -705,8 +642,8 @@ impl CorsOrigins {
     }
 }
 
-/// Like [`spawn_server`], with `serve.visible_wait_max_secs` chosen by the caller: the bound a
-/// `wait=visible` answer is held for (contracts §3.4). `0` answers without waiting at all.
+/// [`spawn_server`] with `serve.visible_wait_max_secs`, how long a `wait=visible` answer is held,
+/// chosen by the caller. `0` answers without waiting.
 pub async fn spawn_server_with_visible_wait(
     bundle_root: &Path,
     cache_dir: &Path,
@@ -734,12 +671,7 @@ pub async fn spawn_server_with_visible_wait(
     .await
 }
 
-/// Like [`spawn_server`], but with the CORS origin lists set — `tests/cors.rs` only.
-///
-/// A separate entry point rather than a parameter on the existing ones: `Engine` is not `Clone`,
-/// so a test cannot re-mount an already-serving one, and widening `mount_server`'s signature would
-/// churn every call site in `tests/http.rs` and `tests/http_write.rs` for keys none of them care
-/// about.
+/// [`spawn_server`] with the CORS settings `cors`.
 pub async fn spawn_server_with_cors(
     bundle_root: &Path,
     cache_dir: &Path,
@@ -760,11 +692,7 @@ pub async fn spawn_server_with_cors(
     .await
 }
 
-/// The shared body of the three entry points above, with **both** parameter sets explicit.
-///
-/// The ingest bounds and the CORS origin lists each have a parameterised variant of
-/// `mount_server`. Rather than nest one inside the other, both delegate to this: each named entry
-/// point keeps its own defaults, and a test that needs both calls this directly.
+/// [`mount_server`] with the ingest bounds and the CORS settings given.
 async fn mount_server_with(
     engine: Engine,
     max_k: usize,
@@ -786,10 +714,9 @@ async fn mount_server_with(
     .await
 }
 
-/// As [`mount_server`], for an engine the caller started with
-/// `start_write_executor_with_faults` — the **same** `Arc` must be handed here, or
-/// `/control/faults/*` arms a board no thread ever consults. The one entry point behind the
-/// faults-surface tests; every other mount stores a fresh, disarmed board, which is inert.
+/// [`mount_server`] for an engine whose executor was started with
+/// `start_write_executor_with_faults(faults)`. Passing another board leaves `/control/faults/*`
+/// arming switches nothing reads.
 pub async fn mount_server_with_faults(
     engine: Engine,
     max_k: usize,
@@ -810,9 +737,7 @@ pub async fn mount_server_with_faults(
     .await
 }
 
-/// [`mount_server_with`], with the streamed viewport's flush threshold and write-stall budget
-/// explicit — the tests that pin the multi-frame and shed paths mount a threshold far below one
-/// response's bytes and a stall far below the default.
+/// [`mount_server_with`], with every setting given.
 #[allow(clippy::too_many_arguments)]
 async fn mount_server_with_flush(
     engine: Engine,
@@ -831,19 +756,13 @@ async fn mount_server_with_flush(
         heap: tessera_server::memory::HeapWatch::default(),
         limits: ServeLimits {
             max_k,
-            // Small enough that the fixtures' vocabularies page rather than arriving whole, so the
-            // cursor is exercised by an ordinary request rather than only by a contrived one.
+            // Small, so the fixtures' vocabularies arrive in pages.
             max_category_values: 4,
-            // Small enough that a suggestion fixture's page and walk-budget behaviour are exercised
-            // by an ordinary request rather than only by a contrived one — the same argument as
-            // `max_category_values` above.
+            // Small, so suggestions page and spend their walk budget on ordinary requests.
             max_suggestions: 4,
             max_suggestion_walk: 1_000,
-            // **The probe route, for every principal these tests use**, so a case asserting `more` on
-            // a spent budget cannot be raced by an async sweep landing first (`value-suggestion.md`
-            // §6.3). One is the schema's floor and every test principal sees more than one entity. The
-            // set route is exercised end to end by the engine's own tests and by the conformance
-            // differential, both at the shipped default.
+            // Every test principal sees more than one entity, so suggestions always take the
+            // probe route and no background sweep can race a test that reads `more`.
             max_suggest_set_entities: 1,
             ingest_max_batch_rows: ingest_limits.max_batch_rows,
             ingest_buffer_max_items: ingest_limits.buffer_max_items,
@@ -852,13 +771,10 @@ async fn mount_server_with_flush(
             max_artifacts_per_request: ingest_limits.max_artifacts_per_request,
             max_members_per_request: ingest_limits.max_members_per_request,
             max_excluded_per_request: ingest_limits.max_excluded_per_request,
-            // On, so the header assertions below exercise the emission path rather than only its
-            // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
+            // On; the `bench-timing` feature still decides whether anything is sent.
             stage_timing: true,
-            // The op-point default (1 MiB) leaves every fixture-sized response in one points frame,
-            // which is exactly the degenerate case contracts §3.2 requires readers to accept; the
-            // multi-frame path is exercised by the tests that mount a tiny threshold explicitly
-            // (`spawn_server_with_stream_flush`).
+            // At the 1 MiB default every fixture's points arrive in one frame; the tests of
+            // several frames mount a smaller threshold.
             stream_flush_bytes,
             stream_write_stall_ms,
             dev_cors_origins: cors.dev,
@@ -908,12 +824,8 @@ async fn mount_server_with_flush(
     }
 }
 
-/// Authorise a session, **retrying while the admission gate sheds**.
-///
-/// A `429` here is the server behaving as specified under machine load (contracts §3.1) and never
-/// the answer a caller of this helper is asking about — every one of them wants a token. So it is
-/// waited out rather than asserted against, exactly as `views_write.rs`' viewport helper waits out
-/// a shed read. A test that means to observe shedding calls the endpoint itself.
+/// Authorise a session for a principal holding `terms`, retrying while the admission gate sheds
+/// under machine load. A test about shedding calls the route itself.
 pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value {
     let auth_data = serde_json::json!({ "terms": terms }).to_string();
     let encoded = base64::engine::general_purpose::STANDARD.encode(auth_data);
@@ -1247,38 +1159,30 @@ pub async fn post_item(server: &TestServer, token: &str, tessera_id: u64) -> req
 pub type TileRow = (u64, u64, u64);
 pub type PointRow = (u64, u64);
 
-/// One decoded `/v1/viewport` response body, every frame kind (contracts §3.2 r26).
+/// One decoded `/v1/viewport` response body, every frame kind.
 pub struct DecodedViewport {
-    /// `(tile, visible, matched)` per row — `served` is asserted where a test needs it, via
-    /// [`decode_viewport_frames`]' `served` field.
+    /// `(tile, visible, matched)` per row.
     pub tiles: Vec<TileRow>,
     pub served: Vec<u64>,
     /// `(tessera_id, code)` per point, concatenated across every kind-3 frame in order.
     pub points: Vec<PointRow>,
-    /// `(cell, count)` — `None` when no kind-2 frame was present (underlay unrequested).
+    /// `(cell, count)`, or `None` where no underlay was asked for.
     pub sub_cells: Option<Vec<(u64, u64)>>,
-    /// The kind-5 artifacts frame in the full projection. `None` if the response carried no
-    /// artifacts channel at all — a served response always carries one, empty or not, so
-    /// `Some(vec![])` and `None` are different facts and a test may assert on either — and also
-    /// when the frame arrived in the identity projection, which lands in
-    /// [`DecodedViewport::artifacts_identity`] instead.
+    /// The artifacts frame in the full projection. `None` where the body carried no artifacts
+    /// frame or carried the identity projection, which is in
+    /// [`DecodedViewport::artifacts_identity`]; `Some(vec![])` is a frame with no rows.
     pub artifacts: Option<Vec<ArtifactRow>>,
-    /// The kind-5 frame in the identity projection (`artifact_rows: "identity"`) — four columns,
-    /// told apart from the full frame by its schema.
+    /// The artifacts frame in the identity projection (`artifact_rows: "identity"`).
     pub artifacts_identity: Option<Vec<ArtifactIdentityRow>>,
-    /// The kind-4 trailer, parsed. Its key set is asserted here — the one server-authored JSON
-    /// region of the body must not quietly acquire a field the comparator never sees
-    /// (`streamed-serving.md` §7).
+    /// The trailer, parsed. The decoder asserts its key set.
     pub trailer: serde_json::Value,
-    /// How many kind-3 frames the body carried — the chunking, which is NOT contract, but which
-    /// the multi-frame tests pin against their configured flush threshold.
+    /// How many points frames the body carried.
     pub point_frames: usize,
-    /// The body minus the trailer frame: the deterministic region, what byte-equality
-    /// assertions compare (`streamed-serving.md` §7).
+    /// The body without the trailer, which carries timings: the bytes two equal answers share.
     pub deterministic_bytes: Vec<u8>,
 }
 
-/// One row of the kind-5 artifacts frame, as a test reads it back — either projection.
+/// One row of the artifacts frame in the full projection.
 ///
 /// `PartialEq` and not `Eq`: a centroid is a mean and travels as `f64`.
 #[derive(Debug, Clone, PartialEq)]
@@ -1286,31 +1190,27 @@ pub struct ArtifactRow {
     pub layer: String,
     pub tessera_id: u64,
     pub key: Option<String>,
-    /// **How many members this principal can see** — never how many the artifact has.
+    /// How many members this principal can see, not how many the artifact has.
     pub masked_count: u64,
     /// Derived geometry, in grid units, computed over the members this principal can see. `None`
     /// is *the layer declares none* and never *withheld*.
     pub centroid: Option<[f64; 2]>,
     pub bbox: Option<[u32; 4]>,
-    /// The artifact's one drawn geometry — parts, then rings, then vertices. `None` both where
-    /// the trailing shape columns are absent (no served layer declares one) and where they carry
-    /// a per-row null.
+    /// The artifact's drawn geometry as parts, then rings, then vertices. `None` where no served
+    /// layer declares one or this row has none.
     pub shape: Option<Vec<Vec<Vec<[u32; 2]>>>>,
-    /// The artifact's supplied content at column 10, positional to its layer's declared kinds. An
-    /// empty list where the layer declares none. Never a null and never a short list: an artifact
-    /// whose content could not be served is absent whole (decision 0076).
+    /// The artifact's supplied content, one entry per kind its layer declares.
     pub content: Vec<String>,
-    /// The rung this artifact is drawn at — the declared level on a levelled layer, the
-    /// response-local parent-chain depth on a treed one, 0 on a flat one.
+    /// The rung this artifact is drawn at: its level on a levelled layer, its depth in this
+    /// response on a treed one, 0 on a flat one.
     pub rung: u32,
     /// Whether a member this principal may see, inside the requested tiles, matched the request's
     /// filter. `None` where the request carried none.
     pub matched: Option<bool>,
-    /// The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2).
+    /// The same bit for the filter and the highlight together.
     pub highlighted: Option<bool>,
-    /// **The artifact this row is attached to**, by the `tessera_id` this same response served it
-    /// under (owner ruling, 2026-09-18). `None` for an artifact attached to nothing, which is
-    /// every row of a layer declaring no dependency. It always names a row of the same frame.
+    /// The `tessera_id` of the artifact this row is attached to, a row of the same frame. `None`
+    /// for an artifact attached to nothing.
     pub target: Option<u64>,
 }
 
@@ -1321,7 +1221,7 @@ pub struct ArtifactIdentityRow {
     pub tessera_id: u64,
     pub rung: u32,
     pub matched: Option<bool>,
-    /// The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2).
+    /// The same bit for the filter and the highlight together.
     pub highlighted: Option<bool>,
 }
 
@@ -1343,10 +1243,8 @@ fn u64_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> UInt64Array {
         .clone()
 }
 
-/// Decode a complete streamed `/v1/viewport` body: walk the tagged length-prefixed frames
-/// (contracts §3.2 r26), decode each payload as the complete Arrow IPC stream (or trailer JSON)
-/// it is, and enforce the frame grammar — tiles first, exactly one trailer last, unknown kinds
-/// refused (`tessera_wire::split_frames`).
+/// Decode a complete streamed `/v1/viewport` body, failing the test unless the tiles frame is
+/// first, one trailer is last and every frame is of a known kind.
 pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     let frames = tessera_wire::split_frames(bytes).expect("well-formed frame sequence");
     assert!(
@@ -1361,7 +1259,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     assert_eq!(
         frames.last().unwrap().0,
         tessera_wire::FRAME_TRAILER,
-        "the trailer frame is last — its presence is the completeness signal"
+        "the trailer frame is last"
     );
 
     let mut tiles = Vec::new();
@@ -1415,9 +1313,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                     "exactly one artifacts frame"
                 );
                 let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
-                // The projection is read off the schema: the identity frame is exactly five
-                // columns, the full frame's fixed prefix is fifteen with the two hull columns
-                // trailing when any served layer declares one.
+                // The identity projection has five columns; the full one has more.
                 let identity = reader.schema().fields().len() == 5;
                 for batch in reader {
                     let batch = batch.unwrap();
@@ -1459,8 +1355,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                         column.is_valid(i).then(|| column.value(i))
                     };
                     if identity {
-                        // (layer, tessera_id, rung, matched, highlighted) — positional, the
-                        // positions being contract exactly as the full frame's fixed prefix is.
+                        // (layer, tessera_id, rung, matched, highlighted), by position.
                         let rows = artifacts_identity.get_or_insert_with(Vec::new);
                         let rung = u32_col_at(2, "rung");
                         for i in 0..batch.num_rows() {
@@ -1493,9 +1388,8 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                             .unwrap();
                         a.is_valid(i).then(|| a.value(i))
                     };
-                    // The two shape columns TRAIL the fixed prefix and are present only when a
-                    // served layer declares a drawn geometry — an absent column, distinguishable
-                    // from a null one, so 0076's null rule gains no third reading.
+                    // The two shape columns follow the fixed columns, present only where a served
+                    // layer declares a drawn geometry.
                     let shapes = batch.num_columns() > 16;
                     if shapes {
                         assert_eq!(
@@ -1506,9 +1400,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                         assert_eq!(batch.schema().field(16).name(), "shape_x");
                         assert_eq!(batch.schema().field(17).name(), "shape_y");
                     }
-                    // One axis of the shape, as **parts of rings**. The three levels are the
-                    // schema's, not a convention: a decoder written against the two-level hull
-                    // shape fails its downcast here rather than reading a part as a ring.
+                    // One axis of the shape, as parts of rings.
                     let shape_axis = |col: usize, i: usize| {
                         let a = batch
                             .column(col)
@@ -1605,17 +1497,11 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                                     .map(|k| values.value(k).to_string())
                                     .collect()
                             },
-                            // Column 12, after `content` at 10 and `parent_ids` at 11 — read
-                            // positionally here on purpose, because the fixed prefix's positions
-                            // are contract and a test that read by name would not notice a column
-                            // inserted ahead of it.
+                            // Read by position, so a column inserted ahead fails the test.
                             rung: u32_col_at(12, "rung").value(i),
-                            // Column 13, last of the fixed prefix — positionally for the same
-                            // reason, and nullable: null is *the request carried no filter*.
+                            // Null where the request carried no filter.
                             matched: bool_at(13, i, "matched"),
                             highlighted: bool_at(14, i, "highlighted"),
-                            // Column 15, sixteenth and last of the fixed prefix — positionally
-                            // for the same reason, and nullable: null is *attached to nothing*.
                             target: {
                                 let a = batch
                                     .column(15)
@@ -1645,8 +1531,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
             tessera_wire::FRAME_TRAILER => {
                 assert!(trailer.is_none(), "exactly one trailer");
                 let parsed: serde_json::Value = serde_json::from_slice(payload).unwrap();
-                // The closed key set (contracts §3.2 r26): `stage_ns` is the one optional key
-                // (double-gated); everything else is exact.
+                // `stage_ns` is the one optional key.
                 let object = parsed.as_object().expect("trailer is a JSON object");
                 let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
                 keys.retain(|k| *k != "stage_ns");
@@ -1664,7 +1549,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     }
 
     let trailer = trailer.expect("trailer asserted present above");
-    // Cross-check the counts the trailer claims against what the body actually carried.
+    // The trailer's counts agree with the body.
     assert_eq!(
         trailer["points"].as_u64().unwrap(),
         points.len() as u64,
@@ -1675,7 +1560,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
         point_frames as u64,
         "trailer flush count matches the body"
     );
-    // The r7 invariant, now asserted at the reader: served splits the concatenated points.
+    // The tiles' `served` counts partition the points.
     assert_eq!(
         served.iter().sum::<u64>(),
         points.len() as u64,
@@ -1695,16 +1580,13 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     }
 }
 
-/// The two-tuple view most tests want: `(tiles, points)` with tiles as `(tile, visible,
-/// matched)` and points as `(tessera_id, code)` — the same shape the pre-streaming decoder
-/// returned, over the framed body.
+/// A viewport body's tiles as `(tile, visible, matched)` and points as `(tessera_id, code)`.
 pub fn decode_viewport(bytes: &[u8]) -> (Vec<TileRow>, Vec<PointRow>) {
     let decoded = decode_viewport_frames(bytes);
     (decoded.tiles, decoded.points)
 }
 
-/// `GET /control/status`'s body, for asserting `entity_id_high_water` is unchanged across a
-/// rejected batch (contracts §3.1: a 409 batch has NO effect).
+/// `GET /control/status`'s body.
 pub async fn control_status(server: &TestServer) -> serde_json::Value {
     server
         .client
@@ -1718,10 +1600,8 @@ pub async fn control_status(server: &TestServer) -> serde_json::Value {
         .unwrap()
 }
 
-/// The wire's `access` column (contracts §3.4, decision 0129): one **list** of labels per row,
-/// each element one label taken verbatim. `rows` gives each row's labels; an empty slice is a row
-/// with no label. Declare the field with the array's own `data_type()`, which carries the list's
-/// element field.
+/// An ingest batch's `access` column: `rows` gives each row's labels, and an empty slice is a row
+/// with none. Declare the field with [`access_field`].
 pub fn access_lists(rows: &[&[&str]]) -> arrow::array::ListArray {
     let mut builder = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
     for labels in rows {
@@ -1748,11 +1628,8 @@ pub fn access_column<'a>(labels: impl IntoIterator<Item = &'a str>) -> arrow::ar
     builder.finish()
 }
 
-/// An Arrow ingest batch whose `external_id` column is nullable — contracts §3.4 r6 makes the
-/// external id optional, and an item ingested without one is addressable only by its `tessera_id`.
-///
-/// Shared rather than copied: two binaries build this body, and a schema that drifted between them
-/// would fail as a server-side parse error rather than as a test disagreement.
+/// An Arrow ingest batch of `(external_id, x, y, access label)` rows, where a row may carry no
+/// external id.
 pub fn build_ingest_batch_optional(rows: &[(Option<&[u8]>, f32, f32, &str)]) -> Vec<u8> {
     let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(Schema::new(vec![

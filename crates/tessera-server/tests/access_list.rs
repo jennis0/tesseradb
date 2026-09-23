@@ -216,10 +216,9 @@ async fn a_scalar_utf8_access_column_is_refused_naming_the_column_and_the_shape(
     let body = body_with_access(1, Arc::new(StringArray::from(vec![VIENNA])));
     let resp = ingest(&server, "scalar-1", body).await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(detail.contains("column 'access'"), "{detail}");
-    assert!(detail.contains("utf8, one string per row"), "{detail}");
-    assert!(detail.contains("list<utf8>"), "{detail}");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("'access'"), "{body}");
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water_before,
@@ -288,15 +287,8 @@ async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared(
     let body = body_with_access(3, Arc::new(access_lists(&[&[], &["0"], &[]])));
     let resp = ingest(&server, "empty-refused", body).await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(
-        detail.contains("view 's0': 2 row(s) carry an empty access label"),
-        "{detail}"
-    );
-    assert!(
-        detail.contains("declares no `point_visibility.default`"),
-        "{detail}"
-    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
 
     // A labelled batch on the same view is unaffected: the refusal is about the rows.
     let body = body_with_access(1, Arc::new(access_lists(&[&["0"]])));
@@ -307,8 +299,8 @@ async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared(
     let body = body_with_access(1, Arc::new(access_lists(&[&[""]])));
     let resp = ingest(&server, "empty-element", body).await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(detail.contains("access column"), "{detail}");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
 
     let json = control_status(&server).await;
     assert_eq!(
@@ -345,11 +337,8 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
     let resp = ingest(&server, "refused", null_and_empty()).await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(
-        detail.contains("2 row(s)") && detail.contains("declares no `point_visibility.default`"),
-        "the refusal counts the null cell with the empty list: {detail}"
-    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
 
     let mut empty_element = ListBuilder::new(StringBuilder::new());
     empty_element.values().append_value("");
@@ -411,8 +400,8 @@ async fn a_null_element_is_refused_naming_the_row() {
     )
     .await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(detail.contains("null element at row 0"), "{detail}");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
 
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],

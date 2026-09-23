@@ -608,8 +608,9 @@ async fn a_bare_scoped_leaf_off_the_group_names_the_group() {
     ] {
         let resp = viewport(&served, "world", Some(filters.clone())).await;
         assert_eq!(resp.status().as_u16(), 422, "{filters}");
-        let body = resp.text().await.unwrap();
-        assert!(body.contains("quarter"), "{body}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "contract", "{body}");
+        assert!(body["detail"].as_str().unwrap().contains("quarter"), "{body}");
     }
 }
 
@@ -923,8 +924,9 @@ async fn a_value_list_with_no_view_names_the_group() {
     let served = Served::build(build_families).await;
     let resp = categories(&served, "sector").await;
     assert_eq!(resp.status().as_u16(), 422);
-    let body = resp.text().await.unwrap();
-    assert!(body.contains("quarter"), "{body}");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("quarter"), "{body}");
 
     let resp = categories(&served, "sector@2027-Q9").await;
     assert_eq!(resp.status().as_u16(), 404);
