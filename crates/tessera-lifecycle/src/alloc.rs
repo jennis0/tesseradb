@@ -563,6 +563,7 @@ mod tests {
                 start: run_start,
                 end: run_start + RESERVED_BLOCK,
             }])],
+            version: 1,
         }
     }
 
@@ -594,7 +595,8 @@ mod tests {
             low_water_from(&[
                 a,
                 WalRecord::LayerDrop {
-                    name: "l4294901758".into()
+                    name: "l4294901758".into(),
+                    version: 2,
                 }
             ]),
             ROWLESS_CEILING - RESERVED_BLOCK

@@ -565,6 +565,10 @@ fn reconstruct_writes(
             ),
             layers: &manifest_layers,
             tombstones: &manifest_layer_tombstones,
+            registry_version: across_partitions(bundle, |m| [m.layer_registry_version])
+                .into_iter()
+                .max()
+                .unwrap_or(0),
             created_views: &manifest_created_views,
             dead_view_incarnations: &manifest_dead_incarnations,
             declared_views,

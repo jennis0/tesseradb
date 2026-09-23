@@ -312,8 +312,8 @@ impl std::fmt::Display for ManifestRegression {
 /// (caught by the endurance tier, 2026-08-15), and what contained it was an accident: the boot
 /// rebuilds the buffer by `has_row`, not by the watermark, so the under-report never miscounted.
 ///
-/// **What is compared: every ordered scalar the manifest carries** — `watermark` and
-/// `entity_id_high_water`; everything else in a `SegmentsManifest` is a list or map with
+/// **What is compared: every ordered scalar the manifest carries** — `watermark`,
+/// `entity_id_high_water` and `layer_registry_version`; everything else in a `SegmentsManifest` is a list or map with
 /// per-field replacement rules no total order describes. A new ordered scalar joins this
 /// comparison when it is added, or it inherits the silent version of the defect above.
 pub(crate) fn check_manifest_publishable(
@@ -332,6 +332,13 @@ pub(crate) fn check_manifest_publishable(
             field: "entity_id_high_water",
             live: live.entity_id_high_water,
             offered: next.entity_id_high_water,
+        });
+    }
+    if next.layer_registry_version < live.layer_registry_version {
+        return Err(ManifestRegression {
+            field: "layer_registry_version",
+            live: live.layer_registry_version,
+            offered: next.layer_registry_version,
         });
     }
     Ok(())

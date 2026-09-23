@@ -535,6 +535,8 @@ pub struct PublishedLayers {
     /// unscoped layer, whose one set is drawn on every view it names.
     pub artifact_views: BTreeMap<String, BTreeMap<(u32, u32), String>>,
     pub layers: Vec<RegisteredLayer>,
+    /// The registry's version counter as the build leaves it.
+    pub registry_version: u64,
     /// Edges whose child escapes its parent's membership — reported, never acted on.
     pub containment_violations: Vec<ContainmentViolation>,
     /// Per-parent coverage: how much of each split its children hold between them.
@@ -596,6 +598,7 @@ impl Default for PublishedLayers {
     fn default() -> Self {
         PublishedLayers {
             layers: Vec::new(),
+            registry_version: 0,
             artifact_views: BTreeMap::new(),
             containment_violations: Vec::new(),
             split_coverage: Vec::new(),
@@ -1943,6 +1946,7 @@ pub fn publish(
     let (layers, _tombstones) = registry.snapshot();
     let mut published = PublishedLayers {
         layers,
+        registry_version: registry.version(),
         artifact_views,
         containment_violations: violations,
         split_coverage: coverage,
