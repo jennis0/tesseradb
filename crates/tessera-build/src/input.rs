@@ -3018,41 +3018,49 @@ pub fn read_roster_table(
                             .collect::<Result<_>>()?
                     }
                     ty => {
-                        // Every integer width is held as an `i64`, so it is read as one.
-                        let held_as = match ty {
-                            ScalarType::TimestampUs => ScalarType::TimestampUs,
-                            _ => ScalarType::I64,
-                        };
-                        let read = ScalarColumn::new(column, held_as).ok_or_else(|| {
+                        let read = ScalarColumn::new(column, ty).ok_or_else(|| {
                             BuildError::Schema {
                                 path: path.to_path_buf(),
                                 detail: format!(
                                     "the roster column '{name}' has type {:?}, and this group \
                                      declares it '{}'. A `timestamp_us` reads a microsecond \
-                                     timestamp or an `i64`, and nothing else — a millisecond \
-                                     column read here would be a date a thousandfold wrong",
+                                     timestamp or an integer, and nothing else; cast a \
+                                     millisecond column to microseconds first",
                                     column.data_type(),
                                     ty.arrow_type_name()
                                 ),
                             }
                         })?;
+                        let unfit = |row: usize, value: &dyn std::fmt::Display| BuildError::Schema {
+                            path: path.to_path_buf(),
+                            detail: format!(
+                                "the roster column '{name}' at row {row} carries {value}; its \
+                                 declared '{}' cannot hold it, so write a value that fits or \
+                                 declare a wider type",
+                                ty.arrow_type_name()
+                            ),
+                        };
+                        // A roster value is carried as an `i64`, so a `u64` stops at `i64::MAX`.
                         (0..column.len())
                             .map(|row| match read.value(row) {
                                 Ok(ScalarValue::Null) => Err(missing(row)),
                                 Ok(ScalarValue::TimestampUs(value)) => {
                                     Ok(MetadataValue::TimestampUs(value))
                                 }
+                                Ok(ScalarValue::U8(value)) => Ok(MetadataValue::Int(value.into())),
+                                Ok(ScalarValue::U16(value)) => Ok(MetadataValue::Int(value.into())),
+                                Ok(ScalarValue::U32(value)) => Ok(MetadataValue::Int(value.into())),
+                                Ok(ScalarValue::U64(value)) => i64::try_from(value)
+                                    .map(MetadataValue::Int)
+                                    .map_err(|_| unfit(row, &value)),
+                                Ok(ScalarValue::I8(value)) => Ok(MetadataValue::Int(value.into())),
+                                Ok(ScalarValue::I16(value)) => Ok(MetadataValue::Int(value.into())),
+                                Ok(ScalarValue::I32(value)) => Ok(MetadataValue::Int(value.into())),
                                 Ok(ScalarValue::I64(value)) => Ok(MetadataValue::Int(value)),
                                 Ok(other) => {
-                                    unreachable!("read as an i64 or a timestamp: {other:?}")
+                                    unreachable!("read as an integer or a timestamp: {other:?}")
                                 }
-                                Err(e) => Err(BuildError::Schema {
-                                    path: path.to_path_buf(),
-                                    detail: format!(
-                                        "the roster column '{name}' carries {e} at row {row}; \
-                                         write a value in that range"
-                                    ),
-                                }),
+                                Err(e) => Err(unfit(row, &e)),
                             })
                             .collect::<Result<_>>()?
                     }

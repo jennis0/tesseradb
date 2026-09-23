@@ -458,6 +458,49 @@ async fn a_group_created_at_runtime_accepts_a_view_under_it() {
     );
 }
 
+/// **A roster integer that does not fit its declared width is refused** when a view is created at
+/// a running service, as a build refuses it in a roster table; one that fits is accepted and
+/// served as written.
+#[tokio::test]
+async fn a_roster_integer_past_its_declared_width_is_refused_at_a_create() {
+    let mut served = serve().await;
+    let group = json!({
+        "extent": frame(),
+        "point_visibility": { "default": "public" },
+        "metadata": [{ "name": "tier", "type": "u8" }]
+    });
+    assert_eq!(declare_group(&served, "tiers", group).await.0, 201);
+
+    let (status, body) = put(
+        &served,
+        "/control/views/tiers/wide",
+        json!({ "metadata": { "tier": 300 } }),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+
+    let (status, body) = put(
+        &served,
+        "/control/views/tiers/fits",
+        json!({ "metadata": { "tier": 255 } }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    reauthorise(&mut served).await;
+    let document = meta(&served).await;
+    let views = document["views"].as_array().unwrap();
+    assert!(
+        !views.iter().any(|v| v["id"] == "tiers:wide"),
+        "the refused view was not created"
+    );
+    let fits = views
+        .iter()
+        .find(|v| v["id"] == "tiers:fits")
+        .expect("the accepted view is served");
+    assert_eq!(fits["metadata"]["tier"]["value"], 255, "{fits}");
+}
+
 /// **A plain view created at runtime takes rows at its first flush and serves a viewport**
 /// (decision 0136, R9). Its answers are the group route's, and it shares a namespace with the
 /// groups.
