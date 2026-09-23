@@ -202,7 +202,7 @@ pub(super) fn growth_receipt(
         .enumerate()
         .map(|(index, (join, filled))| {
             let ordinal = registry
-                .resolve_growth_key(layer, level, None, &join.key, store)
+                .resolve_growth_key(layer, level, join.view.as_deref(), &join.key, store)
                 .expect("prepare_grow resolved every key before the receipt was read");
             let record = store
                 .get(layer, level, ordinal)

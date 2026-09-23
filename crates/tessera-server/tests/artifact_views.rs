@@ -1295,3 +1295,57 @@ async fn a_recreated_view_the_size_of_its_predecessor_serves_its_own_items_after
         "a restart masks the recreated view's rows by its own items"
     );
 }
+
+/// **A growth names the view its artifact belongs to**, as a publication does: on a group-scoped
+/// layer the same key in two views is two artifacts, and `PATCH` grows the one in the view it
+/// names. Naming none is refused, JSON and Arrow alike.
+#[tokio::test]
+async fn a_growth_grows_the_artifact_in_the_view_it_names() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([
+            { "key": "c1", "view": "q1", "members": members(0..10) },
+            { "key": "c1", "view": "q2", "members": members(0..10) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let patch = |body: serde_json::Value| {
+        server
+            .client
+            .patch(server.control_url(&format!(
+                "/control/layers/{}/artifacts",
+                SCOPED.replace('/', "%2F")
+            )))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+    };
+    let resp = patch(json!({ "addressing": "external", "artifacts": [
+        { "key": "c1", "members": members(10..20) }
+    ] }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 422);
+
+    let resp = patch(json!({ "addressing": "external", "artifacts": [
+        { "key": "c1", "view": "q2", "members": members(10..25) }
+    ] }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{:?}", resp.text().await);
+    ticked(&server).await;
+    assert_eq!(
+        served(&server, "quarter:q1", SCOPED).await,
+        vec![("c1".to_string(), 10)]
+    );
+    assert_eq!(
+        served(&server, "quarter:q2", SCOPED).await,
+        vec![("c1".to_string(), 25)]
+    );
+}
