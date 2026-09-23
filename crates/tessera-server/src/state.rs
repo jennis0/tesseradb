@@ -187,26 +187,20 @@ impl SessionRegistry {
     /// its inputs. It is a *wall-clock* second because `Session::expires_at` is one; a monotonic
     /// clock cannot be compared against a deadline minted from the system clock.
     ///
-    /// Returns the new entry and **the token ids the sweep removed**, which the caller passes to
-    /// `Engine::prune_token` once it has dropped this registry's lock. Returned rather than pruned
+    /// Returns **the token ids the sweep removed**, which the caller passes to
+    /// `Engine::prune_tokens` once it has dropped this registry's lock. Returned rather than pruned
     /// here for two reasons: the engine is not this type's to reach, and the prune cancels a stage
     /// and walks five caches, which is not work to do under the mutex every viewer request takes.
-    pub fn insert(
-        &mut self,
-        session: Session,
-        now_secs: u64,
-    ) -> (Arc<Session>, Vec<u64>) {
+    pub fn insert(&mut self, session: Session, now_secs: u64) -> Vec<u64> {
         let token = session.token().to_string();
         let token_id = session.token_id();
-        let entry = Arc::new(session);
-        self.by_token.insert(token.clone(), Arc::clone(&entry));
+        self.by_token.insert(token.clone(), Arc::new(session));
         self.token_id_to_token.insert(token_id, token);
-        let expired = if self.by_token.len() >= self.sweep_at {
+        if self.by_token.len() >= self.sweep_at {
             self.sweep_expired(now_secs)
         } else {
             Vec::new()
-        };
-        (entry, expired)
+        }
     }
 
     /// Drop every session whose deadline has passed.
@@ -267,17 +261,6 @@ impl SessionRegistry {
         if let Some(token) = self.token_id_to_token.remove(&token_id) {
             self.by_token.remove(&token);
         }
-    }
-
-    /// Sessions currently retained — **live and expired-but-not-yet-swept alike**.
-    pub fn len(&self) -> usize {
-        self.by_token.len()
-    }
-
-    /// Whether any session is retained. Present because clippy asks for it beside [`Self::len`];
-    /// `len() == 0` is the meaningful reading, not this.
-    pub fn is_empty(&self) -> bool {
-        self.by_token.is_empty()
     }
 
     pub fn stats(&self) -> SessionRegistryStats {

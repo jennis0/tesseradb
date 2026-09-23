@@ -80,7 +80,7 @@ async fn authorise(
     // that grows the registry, so it is where the growth is bounded. The clock is read here, once
     // per request, rather than inside the lock — see `SessionRegistry`'s doc for what the sweep
     // costs, what bounds the pause, and why it is deliberately not a timer.
-    let (_entry, expired) = state
+    let expired = state
         .sessions
         .lock()
         .insert(session, crate::state::now_secs());
