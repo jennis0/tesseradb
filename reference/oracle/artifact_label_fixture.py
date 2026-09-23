@@ -193,7 +193,7 @@ hierarchy                 = {{ kind = "flat", prune_children = false }}
 artifacts = [
 {chr(10).join(
     '  { key = "' + key + '", members = [' + ', '.join(str(m) for m in members) + ']'
-    + ('' if not labels else ', access = [' + ', '.join('"' + l + '"' for l in labels) + ']')
+    + ('' if not labels else ', access = [' + ', '.join('"' + label + '"' for label in labels) + ']')
     + ' },'
     for key, members, labels in SEALED_ROWS
 )}
