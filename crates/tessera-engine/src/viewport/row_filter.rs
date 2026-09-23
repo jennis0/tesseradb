@@ -1101,10 +1101,7 @@ impl Engine {
         mask: &EffectiveMask,
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
         use crate::filter::FilterError;
-        let reachable = self.write.live().resolve_layers(
-            |term| served.session.satisfied().contains(&term),
-            |label| served.generation.dict.lookup(label.as_bytes()),
-        );
+        let reachable = self.reachable_layers(served.session);
         if !reachable.contains(&leaf.layer) {
             return Err(FilterError::UnknownLayer(leaf.layer.clone()));
         }

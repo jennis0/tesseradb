@@ -242,10 +242,7 @@ impl crate::Engine {
         // gate-failed name and a never-registered one alike, so a `422` here confirms nothing this
         // principal was not already told by `/v1/meta`.
         let refuse_layer = || EngineError::BrowseRefused(BrowseRefused::UnknownLayer(req.layer.to_string()));
-        let reachable = self.write.live().resolve_layers(
-            |term| session.satisfied().contains(&term),
-            |label| generation.dict.lookup(label.as_bytes()),
-        );
+        let reachable = self.reachable_layers(session);
         if !reachable.contains(req.layer) {
             return Err(refuse_layer());
         }
@@ -400,7 +397,7 @@ impl crate::Engine {
             let view_of = crate::artifacts::ArtifactView {
                 declaration: &layer.declaration,
                 overlay: &generation.overlay,
-                satisfied: session.satisfied(),
+                labels: self.label_gate(session, &layer.declaration),
                 layer_reachable: true,
                 rows: &rows,
                 mask: &mask,
@@ -444,11 +441,8 @@ impl crate::Engine {
                 let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
                     continue;
                 };
-                // ⊘ **No artifact carries its own terms yet**, so a layer whose
-                // `artifact_visibility` names a field serves nothing here — the same fail-closed
-                // answer the viewport gives, reached by the same call.
                 let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-                    view_of.verdict(entity, ordinal, None)
+                    view_of.verdict(entity, ordinal)
                 else {
                     continue;
                 };

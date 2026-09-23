@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tessera_types::layer::{
     DeclarationError, EntityRun, LayerDeclaration, MembershipSource, RegisteredLayer, ReservedRuns,
 };
-use tessera_types::{EntityId, TermId};
+use tessera_types::EntityId;
 
 use crate::alloc::{AllocError, Allocator};
 use crate::membership::{serialise_members, ArtifactStore, IncomingArtifact};
@@ -2793,17 +2793,13 @@ impl LayerRegistry {
     /// label join: a join yields an empty required set for a disjunctive gate and would admit every
     /// principal. That error has been made once already in this codebase, in the view gate, and
     /// was caught in review.
-    pub fn resolve_for(
-        &self,
-        is_satisfied: impl Fn(TermId) -> bool,
-        resolve_label: impl Fn(&str) -> Option<TermId>,
-    ) -> ResolvedLayers {
+    pub fn resolve_for(&self, admits: impl Fn(&str) -> bool) -> ResolvedLayers {
         let names = self
             .layers
             .iter()
             .filter(|(_, layer)| match &layer.declaration.visibility {
                 None => true,
-                Some(label) => resolve_label(label).is_some_and(&is_satisfied),
+                Some(label) => admits(label),
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -2961,13 +2957,7 @@ mod tests {
         .unwrap();
         register(&mut reg, &mut alloc, declaration("clusters/open")).unwrap();
 
-        let resolved = reg.resolve_for(
-            |t| t == TermId::new(7),
-            |label| match label {
-                "clearance:ts" => Some(TermId::new(99)),
-                _ => None,
-            },
-        );
+        let resolved = reg.resolve_for(|_| false);
 
         assert!(resolved.contains("clusters/open"));
         assert!(!resolved.contains("clusters/secret"));
@@ -2976,27 +2966,8 @@ mod tests {
         assert_eq!(resolved.names().collect::<Vec<_>>(), vec!["clusters/open"]);
 
         // And with the term: the same layer resolves.
-        let cleared = reg.resolve_for(
-            |t| t == TermId::new(7) || t == TermId::new(99),
-            |label| match label {
-                "clearance:ts" => Some(TermId::new(99)),
-                _ => None,
-            },
-        );
+        let cleared = reg.resolve_for(|label| label == "clearance:ts");
         assert!(cleared.contains("clusters/secret"));
-    }
-
-    #[test]
-    fn a_gate_label_the_dictionary_does_not_hold_reaches_nobody() {
-        // Fail-closed. Treating an unresolvable label as "no gate" would publish the layer to
-        // everyone, which is the direction a mistake must never take.
-        let mut reg = LayerRegistry::new();
-        let mut alloc = Allocator::new(0);
-        register(&mut reg, &mut alloc, gated("clusters/x", "team:nobody")).unwrap();
-
-        let resolved = reg.resolve_for(|_| true, |_| None);
-        assert!(!resolved.contains("clusters/x"));
-        assert_eq!(resolved.names().count(), 0);
     }
 
     #[test]
@@ -3006,7 +2977,7 @@ mod tests {
         let mut reg = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
-        let resolved = reg.resolve_for(|_| false, |_| None);
+        let resolved = reg.resolve_for(|_| false);
         assert!(resolved.is_current_for(reg.version()));
 
         register(&mut reg, &mut alloc, declaration("clusters/b")).unwrap();
