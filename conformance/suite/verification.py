@@ -518,7 +518,7 @@ def subtract_denies(
 # ---------------------------------------------------------------------------------------------
 
 
-def _streams_table(concatenated: bytes) -> pa.Table | None:
+def streams_table(concatenated: bytes) -> pa.Table | None:
     """Zero or more complete Arrow IPC streams, concatenated — the canonical points/tiles/underlay
     encoding (§12.2). Each stream is self-delimiting, so repeated `open_stream` walks them all."""
     if not concatenated:
@@ -533,7 +533,7 @@ def _streams_table(concatenated: bytes) -> pa.Table | None:
 
 def tile_visible(canon: Streamed) -> dict[int, int]:
     """The tiles surface's masked count per tile — the served side of the census half."""
-    table = _streams_table(canon.tiles)
+    table = streams_table(canon.tiles)
     if table is None:
         return {}
     return dict(zip(table.column("tile").to_pylist(), table.column("visible").to_pylist()))
@@ -542,7 +542,7 @@ def tile_visible(canon: Streamed) -> dict[int, int]:
 def underlay_counts(canon: Streamed) -> dict[int, int]:
     """The underlay's masked count per cell — the same claim as the tiles surface at depth
     `zoom + underlay_offset`, and the only other derived aggregate in the system (§3)."""
-    table = _streams_table(canon.underlay)
+    table = streams_table(canon.underlay)
     if table is None:
         return {}
     return dict(zip(table.column("cell").to_pylist(), table.column("count").to_pylist()))
@@ -564,7 +564,7 @@ def check_points(
 ) -> int:
     """Every row of one points surface against its own item: the code, and the render tail
     positionally (module doc). Returns the number of rows verified."""
-    table = _streams_table(canon.points)
+    table = streams_table(canon.points)
     if table is None:
         return 0
     render = declaration.render_columns()
@@ -781,7 +781,7 @@ def verify_rows(
                 f"viewport(zoom={query.zoom}, "
                 f"filters={'yes' if query.filters else 'no'})"
             )
-            table = _streams_table(canon.points)
+            table = streams_table(canon.points)
             served_fx = table.column("fx_key").to_pylist() if table is not None else []
             expected = expected_items(seed, set(served_fx))
             rows += check_points(
@@ -864,6 +864,7 @@ __all__ = [
     "expected_items",
     "materialise_corpus",
     "subtract_denies",
+    "streams_table",
     "terms_of",
     "tile_visible",
     "underlay_counts",

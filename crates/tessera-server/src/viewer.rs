@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query as AxumQuery, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -34,7 +34,7 @@ use tessera_engine::{
 
 use crate::error::{map_engine_error, ApiError};
 use crate::health::{healthz, readyz};
-use crate::state::{AppState, GatePermits};
+use crate::state::{AppState, GatePermits, ViewerSession};
 
 pub fn router(state: Arc<AppState>) -> Router {
     // Both browser seams land here and only here: `serve.dev_cors_origins` (development) and
@@ -170,17 +170,12 @@ fn category_block(
     }))
 }
 
+/// `GET /v1/meta`. It needs a session like every other route on this plane: it discloses the
+/// bundle's extents, views and declared-scalar schema.
 async fn meta(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    ViewerSession(session): ViewerSession,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Authenticated like every other route on this plane (R5: bearer auth on every plane). It is
-    // not a public endpoint: it discloses the bundle's extents, views and declared-scalar schema,
-    // so an unauthenticated `/v1/meta` would hand the corpus shape to anyone who can reach the
-    // viewer listener. The bearer here is a session token, so a valid, unexpired session is
-    // required exactly as for `/v1/viewport`.
-    let session = state.viewer_session(&headers)?;
-
     let meta = state.engine.meta();
     let selection = state.engine.config();
     // **Gate-filtered per principal, and this document has three such surfaces.** Everything else
@@ -644,12 +639,10 @@ struct CategoriesQuery {
 /// not the `/v1/viewport` sweep the gate exists for.
 async fn categories(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    ViewerSession(session): ViewerSession,
     AxumPath(column): AxumPath<String>,
     AxumQuery(query): AxumQuery<CategoriesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let session = state.viewer_session(&headers)?;
-
     let meta = state.engine.meta();
     let visible = session.visible_views();
     let resolved =
@@ -819,12 +812,10 @@ struct SuggestQuery {
 /// client that does not debounce its keystrokes from turning a held key into a queue.
 async fn suggest(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    ViewerSession(session): ViewerSession,
     AxumPath(column): AxumPath<String>,
     query: Result<AxumQuery<SuggestQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let session = state.viewer_session(&headers)?;
-
     // An unknown query parameter is `deny_unknown_fields`'s rejection, which axum reports as an
     // extractor error rather than routing it through `SuggestQuery`'s `Deserialize` impl and back
     // out here — caught explicitly so the response is this route's own `422 contract` rather than
@@ -1803,11 +1794,9 @@ impl futures_core::Stream for StreamBody {
 
 async fn viewport(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    ViewerSession(session): ViewerSession,
     Json(req): Json<ViewportReq>,
 ) -> Result<Response, ApiError> {
-    let session = state.viewer_session(&headers)?;
-
     if req.zoom > 16 {
         return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
     }
@@ -2472,11 +2461,10 @@ fn browse_row(row: tessera_engine::browse::BrowseRow) -> BrowseRowResp {
 
 async fn browse(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    ViewerSession(session): ViewerSession,
     Json(req): Json<BrowseReq>,
 ) -> Result<Json<BrowseResp>, ApiError> {
     use tessera_engine::browse::{BrowseCursor, BrowseForm, BrowseRequest};
-    let session = state.viewer_session(&headers)?;
     // **`limit` clamps and `0` refuses** — the page bound is `/v1/categories`' shape exactly.
     if req.limit == Some(0) {
         return Err(ApiError::Contract(
@@ -2577,11 +2565,10 @@ async fn browse(
 /// intersection, both cached per session in the steady state, but neither is free on a cold one.
 async fn artifact(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    ViewerSession(session): ViewerSession,
     AxumPath(raw): AxumPath<u64>,
     Json(req): Json<ArtifactReq>,
 ) -> Result<Json<ArtifactResp>, ApiError> {
-    let session = state.viewer_session(&headers)?;
     let served = state
         .gated(move |state| {
             // **The same view resolution the viewport takes** (`views.md` §3.2, §6), gate included,
@@ -2626,12 +2613,10 @@ async fn artifact(
 
 async fn item(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    ViewerSession(session): ViewerSession,
     AxumPath(raw): AxumPath<u64>,
     Json(req): Json<ItemReq>,
 ) -> Result<Json<ItemResp>, ApiError> {
-    let session = state.viewer_session(&headers)?;
-
     // `engine.item` checks `req.idset` (if the caller sent one) against the ONE generation it
     // loads, inverts the id (pure, no IO), then reads the external-id sidecar for a visible item —
     // file IO, moved off the reactor.

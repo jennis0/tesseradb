@@ -4,8 +4,9 @@
 //! nothing: no posting is dropped and no tombstone applied.
 //!
 //! [`plan_coalesce`] runs on the executor, [`execute_coalesce`] writes on the background pool, and
-//! [`rebased`] applies the result to the manifest on the executor. That manifest edit is the only
-//! commit point: a pass discarded before it leaves orphan files and every consumed entry standing.
+//! [`rebased`] applies the result to a copy of the manifest on the executor. The commit point is
+//! the side-manifest write in `publish_coalesce`. A pass discarded before it leaves orphan files
+//! and every consumed entry standing.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ use tessera_store::manifest::{
     TextExtent,
 };
 
-use crate::flush::MaintenanceFailed;
+use crate::flush::{failed, MaintenanceFailed};
 
 mod execute;
 mod plan;
@@ -189,7 +190,7 @@ pub(crate) fn execute_coalesce(
     ctx: CoalesceContext,
 ) -> Result<CompletedCoalesce, MaintenanceFailed> {
     std::fs::create_dir_all(ctx.prefix_dir.join(&ctx.out_rel))
-        .map_err(|e| MaintenanceFailed(format!("coalesce dir: {e}")))?;
+        .map_err(failed("coalesce dir"))?;
     let mut files: BTreeMap<String, FileDigest> = BTreeMap::new();
 
     let tier = taken(plan.tiers)

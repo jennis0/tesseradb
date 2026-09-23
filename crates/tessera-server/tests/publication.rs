@@ -956,6 +956,46 @@ async fn the_wait_is_bounded_and_says_so() {
     await_publication(&server, body["publication"].as_u64().unwrap()).await;
 }
 
+/// A ceiling too large to add to the clock is no ceiling: the write is answered once it is
+/// visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_largest_wait_ceiling_waits_for_the_publication() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_visible_wait(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        u64::MAX,
+    )
+    .await;
+
+    let ext = external_id_of(N_ITEMS + 1);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest?wait=visible"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "unbounded")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(build_ingest_batch_optional(&[(
+            Some(&ext[..]),
+            10.0,
+            10.0,
+            "0",
+        )]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["visible"], json!(true), "{body}");
+}
+
 /// An unrecognised `wait` value is refused rather than read as no wait at all: a caller who typed
 /// `wait=true` and got an immediate answer would read it as published.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

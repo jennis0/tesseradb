@@ -359,11 +359,10 @@ pub fn router(state: Arc<AppState>) -> Router {
 ///    **What it does NOT close.** A caller holding a *valid* operator credential still buffers up
 ///    to `ingest_max_batch_bytes` per in-flight request, and `axum::serve` applies no connection or
 ///    concurrency cap, so the *count* of connections remains unbounded. What each one costs is
-///    bounded by `config::INGEST_MAX_BATCH_BYTES_CEILING`; how many there are is bounded by
-///    deployment posture — the control plane is a unix socket reachable only by admin systems, and
-///    where it is exposed more widely the connection bound is a reverse proxy's (SA §8). That
-///    constant records the two in-process mechanisms assessed for the count and why each was
-///    declined.
+///    `ingest_max_batch_bytes`, which the operator sets; how many there are is bounded by
+///    deployment posture: the control plane is a unix socket reachable only by admin systems, and
+///    where it is exposed more widely the connection bound is a reverse proxy's. [`ingest`]'s doc
+///    says why the two in-process bounds on the count were declined.
 /// 2. **A control route cannot be added unauthenticated by omission.** The layer wraps the whole
 ///    router, so a `.route(..)` added to [`router`] tomorrow is behind the credential the moment it
 ///    exists. There is no opt-out to reach for and no list to be added to by accident.
@@ -467,7 +466,7 @@ fn layer_frames(
 /// before the bearer check. Stating it here changes no behaviour except the answer: the limit is now
 /// a number this crate owns, so the 422 can name it, and a future decision to raise it is a decision
 /// rather than an inherited default. It is **not** sized against `ingest_max_batch_bytes`: a change
-/// item is order 200 B (see `config::RESERVED_DENY_HEADROOM_BYTES`), so this admits roughly ten
+/// item is order 200 B, so this admits roughly ten
 /// thousand suppressions in one request, and a caller with more than that has to split — which is
 /// a latency cost on a batch, not a refusal of any individual deny.
 const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -608,11 +607,12 @@ struct ValuesResp {
 /// its own, with its own entity, as the ingest door's are — what the route does not create is a
 /// *point*.
 ///
-/// **The view header decides which group-scoped families this batch may name.** A batch that gave
-/// none may name none, whatever the deployment's view count, so a scoped column on a viewless
-/// batch takes the undeclared-column refusal — and one that did gets the families whose owning
+/// **The view header decides which group-scoped families and layers this batch may name.** A batch
+/// that gave none may name none, whatever the deployment's view count, so a scoped column on a
+/// viewless batch takes the undeclared-column refusal, and its entity-scoped cells are written
+/// under the deployment's first view. One that gave a header gets the families whose owning
 /// group's key set holds that view's key, which is the same check the ingest route runs at the
-/// join (contracts §3.4 r68, decision 0116).
+/// join.
 async fn values(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
@@ -662,19 +662,18 @@ fn run_values(
 ) -> Result<ValuesResp, ApiError> {
     let body_hash: [u8; 32] = Sha256::digest(body).into();
     let meta = state.engine.meta();
-    // The view the fills belong to: the header where one was given, and the deployment's only
-    // view otherwise, on `/control/ingest`'s rule. It decides which flush pass writes the cells,
-    // so with no header and several views it is refused below only if the batch fills a cell.
-    let resolved = match resolve_view(view, &meta) {
-        Ok(resolved) => Ok(resolved.id.clone()),
-        Err(ambiguous) if view.is_none() => Err(ambiguous),
-        Err(unknown) => return Err(unknown),
+    // The view whose flush pass writes the cells: the header's, or the deployment's first view.
+    // A batch naming no view can name no group-scoped column or layer, so every cell it fills is
+    // the entity's own and any view's pass writes it.
+    let resolved = match view {
+        Some(_) => Some(resolve_view(view, &meta)?.id.clone()),
+        None => meta.views.first().map(|v| v.id.clone()),
     };
     // **The families and group-scoped layers this batch may name, and the header is half the
     // answer** (`views.md` §5, decision 0116). The key is what addresses a scoped cell or artifact,
     // so the check is `EngineMeta::owning_key` exactly as the ingest door's is — and the header is
     // required beside it, because a batch that named no view has not said which key it is writing.
-    let named = view.and(resolved.as_ref().ok());
+    let named = view.and(resolved.as_ref());
     let scoped: Vec<ScopedScalar> = match named {
         None => Vec::new(),
         Some(resolved) => meta
@@ -699,11 +698,11 @@ fn run_values(
         &view_in,
     )
     .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
-    let resolved = match resolved {
-        Ok(resolved) => Some(resolved),
-        Err(_) if columns.is_empty() => None,
-        Err(ambiguous) => return Err(ambiguous),
-    };
+    if resolved.is_none() && !columns.is_empty() {
+        return Err(ApiError::Contract(
+            "this deployment has no view to write the values under; create a view first".into(),
+        ));
+    }
 
     // The row cap, on `/control/ingest`'s rule and with its cost: the whole decode is spent
     // before the count is knowable, which is why the byte cap sits on the route.
@@ -1212,7 +1211,7 @@ fn run_ingest(
     // and cloning `external_id`, `descriptors`, `scalars` and `terms` out would leave `items`,
     // `descriptor_lists`, `terms_per_item` *and* `rows` live simultaneously while `accept_ingest`
     // blocks on its receipt with all four in scope — a doubling multiplied by `ingest_admission`
-    // concurrent handlers, which is the term `INGEST_RESIDENT_CEILING_BYTES`'s arithmetic is about.
+    // concurrent handlers.
     // Moving also deletes four per-row allocations on the path that must sustain 10⁹-scale ingest;
     // the three source vectors drop at the end of this statement.
     // Which rows join, by position. Empty for every batch of new items, which is most of them.
@@ -1313,18 +1312,14 @@ fn run_ingest(
 /// connection or concurrency cap, so N authenticated connections pin `N × ingest_max_batch_bytes`.
 /// The two factors are bounded by different things, and separating them is the whole of the answer:
 ///
-/// - **the per-connection factor** is bounded by `config::INGEST_MAX_BATCH_BYTES_CEILING`, a
-///   startup refusal on the key itself. Without it, small admission and queue bounds with a
-///   gigabyte batch cap satisfy every relation over the *admitted* window — which is what
-///   `INGEST_RESIDENT_CEILING_BYTES` weighs — and then die on the second concurrent upload, in
-///   front of it;
-/// - **the count** is bounded by deployment posture, not by this process. The constant's doc
-///   carries the argument, including why a `tower` concurrency limit and a listener-level
-///   connection cap were both declined: the first queues rather than sheds and, on the whole
-///   control router, would put `/control/changes` behind an in-flight bound shared with
-///   receipt-blocking ingest handlers — lifecycle §1.3's forbidden shape, the exact thing
-///   [`DENY_RUNTIME`] exists to prevent; the second refuses by not accepting, which leaves the
-///   caller in the kernel's accept backlog with no status code at all.
+/// - **the per-connection factor** is `ingest_max_batch_bytes`, which the operator sets and
+///   nothing caps;
+/// - **the count** is bounded by deployment posture, not by this process. A `tower` concurrency
+///   limit and a listener-level connection cap were both declined: the first queues rather than
+///   sheds and, on the whole control router, would put `/control/changes` behind an in-flight
+///   bound shared with receipt-blocking ingest handlers, the thing [`DENY_RUNTIME`] exists to
+///   prevent; the second refuses by not accepting, which leaves the caller in the kernel's accept
+///   backlog with no status code at all.
 ///
 /// **The shape is what makes this a bound rather than a fix.** This endpoint buffers the whole body
 /// because it decodes the whole Arrow batch at once; streaming it is a change to the write path
@@ -1923,14 +1918,15 @@ async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<Publicati
     Ok(await_publication(state, state.engine.request_flush_publication()).await)
 }
 
-/// Hold until the counter has reached `publication`, or until `serve.visible_wait_max_secs`.
+/// Hold until the counter has reached `publication`, or until `serve.visible_wait_max_secs`. A
+/// ceiling too large to add to the clock waits without one.
 ///
 /// Split out of [`publication_ack`] because [`flush`] arms its own cycle and then waits on the
 /// number that armed it: the request must be made once, not once by the route and again by the
 /// wait.
 async fn await_publication(state: &AppState, publication: u64) -> PublicationAck {
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(state.limits.visible_wait_max_secs);
+    let deadline = std::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(state.limits.visible_wait_max_secs));
     loop {
         if state.engine.publication() >= publication {
             return PublicationAck {
@@ -1938,7 +1934,7 @@ async fn await_publication(state: &AppState, publication: u64) -> PublicationAck
                 visible: Some(true),
             };
         }
-        if std::time::Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
             return PublicationAck {
                 publication,
                 visible: Some(false),
@@ -2053,8 +2049,9 @@ async fn register_layer(
     let name = declaration.name.clone();
     // A group's name is every view the group holds now, as it is at a build.
     let meta = state.engine.meta();
+    let declared_views = std::mem::take(&mut declaration.views);
     declaration.views = tessera_types::layer::expand_views(
-        &declaration.views,
+        &declared_views,
         |view| {
             meta.groups
                 .iter()
@@ -2075,6 +2072,29 @@ async fn register_layer(
                 .join(", ")
         ))
     })?;
+    if let Some(group) = declaration.scope.group() {
+        tessera_types::layer::check_scoped_views(
+            &declared_views,
+            group,
+            meta.groups
+                .iter()
+                .map(|g| (g.name.as_str(), g.members_of.as_deref())),
+            |view| {
+                meta.resolve_view(view)
+                    .and_then(|v| v.roster.as_ref())
+                    .map(|roster| roster.group.clone())
+            },
+        )
+        .map_err(|outside| {
+            ApiError::Contract(format!(
+                "layer '{name}' is scoped to group '{group}' and names view '{}', which holds no \
+                 key of it; name {} or a view of {}, or drop the scope",
+                outside.view,
+                outside.sharing.join(" or "),
+                if outside.sharing.len() == 1 { "it" } else { "them" }
+            ))
+        })?;
+    }
     // **Decision 0111's layer-level span rule, at the declaration.** A shape layer whose views are
     // a mix of projected and unprojected row spaces has no geometry that could span them, so it is
     // refused here — naming the layer and both sides — rather than at the first artifact, where
@@ -4265,9 +4285,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             // unbounded case: see `compaction.fold_refusals` below, the same alarm from the other
             // end.
             //
-            // **Nothing is compared against `wal_hard_limit_bytes`.** That key bounds a startup
-            // relation, and what a node should do at a runtime ceiling is undecided — refusing a
-            // deny for space would be fail-open. These report; they do not act.
+            // **These report; they do not act.** Nothing bounds the log's size, and what a node
+            // should do at a ceiling is undecided: refusing a deny for space would be fail-open.
             "wal": {
                 "members": executor.wal.members,
                 "bytes": executor.wal.bytes,
@@ -4613,12 +4632,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             },
         },
         // **`young_evictions` is an alarm, not an undifferentiated counter, and `thrashing` is the
-        // predicate spelled out.** `> 0` is the argued threshold, not an arbitrary one: `prepare`
-        // refuses at startup any bound below `expected_concurrent_sessions × the measured
-        // per-entry size (see `validate_cache_bounds`), so a young eviction means the collapsing
-        // regime was entered *another* way — a second view per session, a generation swap's
-        // transient duplicate, or entries larger than the measured figure. That is precisely what
-        // `validate_cache_bounds`' own doc says this counter is for.
+        // predicate spelled out.** An entry evicted before it was read again means the bound is
+        // smaller than what the sessions reading it hold at once: too many sessions for the
+        // bound, a second view per session, a generation swap's transient duplicate, or entries
+        // larger than expected.
         "row_projection_cache": {
             "entries": projection_cache.entries,
             "bytes": projection_cache.bytes,

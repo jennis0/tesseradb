@@ -38,7 +38,7 @@ pub mod shapes;
 pub(crate) mod spill;
 pub mod term_images_pass;
 pub mod unique_key;
-pub mod utf8;
+pub use tessera_store::utf8;
 
 /// The commit this binary was built from, or `"unknown"` where the source was not a git checkout.
 ///
