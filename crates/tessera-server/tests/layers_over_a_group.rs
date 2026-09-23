@@ -422,6 +422,33 @@ async fn a_layer_naming_neither_a_view_nor_a_group_is_refused_at_both_paths() {
     assert_eq!(status, 422, "{body}");
 }
 
+/// **A group-scoped layer is drawn on its group's views and no others, at both paths**: its
+/// artifacts are a set per view of the group, so a view outside the group would hold none.
+#[tokio::test]
+async fn a_group_scoped_layer_naming_a_view_outside_its_group_is_refused_at_both_paths() {
+    const LAYER: &str = "clusters/yearly";
+    let tmp = TempDir::new().unwrap();
+    write_sources(tmp.path(), &|_| true);
+    assert!(parse(
+        tmp.path(),
+        &layer_toml(LAYER, &["papers", "years"], "years", "yearly")
+    )
+    .is_err());
+
+    let built = build_side("", &|_| true);
+    let live = serve(&built).await;
+    let (status, body) = register(
+        &live,
+        layer_json(LAYER, &["papers", "years"], Some("years")),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
+    let (status, body) = register(&live, layer_json(LAYER, &["years"], Some("years"))).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(drawn_on(&live, LAYER).await.len(), YEARS.len());
+}
+
 fn counts(rows: impl Iterator<Item = u64>, key_of: &dyn Fn(u64) -> String) -> BTreeMap<String, u64> {
     let mut sizes = BTreeMap::new();
     for e in rows {

@@ -187,26 +187,20 @@ impl SessionRegistry {
     /// its inputs. It is a *wall-clock* second because `Session::expires_at` is one; a monotonic
     /// clock cannot be compared against a deadline minted from the system clock.
     ///
-    /// Returns the new entry and **the token ids the sweep removed**, which the caller passes to
-    /// `Engine::prune_token` once it has dropped this registry's lock. Returned rather than pruned
+    /// Returns **the token ids the sweep removed**, which the caller passes to
+    /// `Engine::prune_tokens` once it has dropped this registry's lock. Returned rather than pruned
     /// here for two reasons: the engine is not this type's to reach, and the prune cancels a stage
     /// and walks five caches, which is not work to do under the mutex every viewer request takes.
-    pub fn insert(
-        &mut self,
-        session: Session,
-        now_secs: u64,
-    ) -> (Arc<Session>, Vec<u64>) {
+    pub fn insert(&mut self, session: Session, now_secs: u64) -> Vec<u64> {
         let token = session.token().to_string();
         let token_id = session.token_id();
-        let entry = Arc::new(session);
-        self.by_token.insert(token.clone(), Arc::clone(&entry));
+        self.by_token.insert(token.clone(), Arc::new(session));
         self.token_id_to_token.insert(token_id, token);
-        let expired = if self.by_token.len() >= self.sweep_at {
+        if self.by_token.len() >= self.sweep_at {
             self.sweep_expired(now_secs)
         } else {
             Vec::new()
-        };
-        (entry, expired)
+        }
     }
 
     /// Drop every session whose deadline has passed.
@@ -267,17 +261,6 @@ impl SessionRegistry {
         if let Some(token) = self.token_id_to_token.remove(&token_id) {
             self.by_token.remove(&token);
         }
-    }
-
-    /// Sessions currently retained — **live and expired-but-not-yet-swept alike**.
-    pub fn len(&self) -> usize {
-        self.by_token.len()
-    }
-
-    /// Whether any session is retained. Present because clippy asks for it beside [`Self::len`];
-    /// `len() == 0` is the meaningful reading, not this.
-    pub fn is_empty(&self) -> bool {
-        self.by_token.is_empty()
     }
 
     pub fn stats(&self) -> SessionRegistryStats {
@@ -794,16 +777,46 @@ pub fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
-impl AppState {
-    /// The viewer plane's authentication: the request's bearer token, looked up by
-    /// [`Self::authenticated_session`]. A missing token is `bad-credential`.
-    pub fn viewer_session(
-        &self,
-        headers: &axum::http::HeaderMap,
-    ) -> Result<Arc<Session>, ApiError> {
-        self.authenticated_session(bearer_token(headers).ok_or(ApiError::BadCredential)?)
-    }
+/// The viewer plane's authentication, as an extractor: the request's bearer token, looked up by
+/// [`AppState::authenticated_session`]. A missing token is `bad-credential`.
+///
+/// Every viewer handler names it first after the state. axum runs extractors in argument order,
+/// so a caller without a valid token is refused before the path, the query string or the body is
+/// read.
+pub struct ViewerSession(pub Arc<Session>);
 
+impl axum::extract::FromRequestParts<Arc<AppState>> for ViewerSession {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, ApiError> {
+        let token = bearer_token(&parts.headers).ok_or(ApiError::BadCredential)?;
+        state.authenticated_session(token).map(ViewerSession)
+    }
+}
+
+/// The session plane's authentication, as an extractor: the request's bearer token checked against
+/// the session credential by [`AppState::check_bearer`].
+///
+/// Both session handlers name it first after the state, so a caller without the credential is
+/// refused before the body is read.
+pub struct SessionCredential;
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for SessionCredential {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, ApiError> {
+        state.check_bearer(bearer_token(&parts.headers), &state.session_credential)?;
+        Ok(SessionCredential)
+    }
+}
+
+impl AppState {
     /// Run `f` on the blocking pool behind the compute gate. The permits move into the closure, so
     /// they release when the work finishes, not when the caller stops waiting.
     pub async fn gated<T, F>(self: &Arc<Self>, f: F) -> Result<T, ApiError>

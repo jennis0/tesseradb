@@ -63,11 +63,17 @@ index = true
 const N: u64 = 20;
 
 fn write_points(path: &Path) {
+    let score = Int64Array::from_iter_values((0..N).map(|e| -(e as i64)));
+    write_points_scored(path, Arc::new(score));
+}
+
+/// The fixture's points file with `score`, declared `i64`, carried by `score` as written.
+fn write_points_scored(path: &Path, score: arrow::array::ArrayRef) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
-        Field::new("score", DataType::Int64, true),
+        Field::new("score", score.data_type().clone(), true),
         Field::new("weight", DataType::Float32, true),
         Field::new("big", DataType::UInt64, true),
         Field::new(
@@ -88,9 +94,7 @@ fn write_points(path: &Path) {
             Arc::new(Float64Array::from_iter_values(
                 ids.iter().map(|e| ((e * 53) % 1000) as f64),
             )),
-            Arc::new(Int64Array::from_iter_values(
-                ids.iter().map(|e| -(*e as i64)),
-            )),
+            score,
             Arc::new(Float32Array::from_iter_values(
                 ids.iter().map(|e| *e as f32 / 4.0),
             )),
@@ -111,8 +115,16 @@ fn write_points(path: &Path) {
 
 fn build_bundle(dir: &Path) -> std::path::PathBuf {
     let points = dir.join("points.parquet");
-    let pairs = dir.join("pairs.parquet");
     write_points(&points);
+    build_over(dir, points).expect("the build succeeds")
+}
+
+/// Build the fixture's declaration over `points`.
+fn build_over(
+    dir: &Path,
+    points: std::path::PathBuf,
+) -> Result<std::path::PathBuf, tessera_build::BuildError> {
+    let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, N);
     let schema_path = dir.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA).unwrap();
@@ -152,9 +164,8 @@ fn build_bundle(dir: &Path) -> std::path::PathBuf {
         memory_budget: None,
         band_rows: None,
         schema: config.schema,
-    })
-    .expect("the build succeeds");
-    out
+    })?;
+    Ok(out)
 }
 
 /// A server over the declared-tail bundle, at the harness's generous limits.
@@ -1303,4 +1314,297 @@ async fn a_null_coordinate_in_an_arrow_batch_is_refused() {
         high_water,
         "no refused batch allocated an entity"
     );
+}
+
+async fn declare(server: &TestServer, body: Value) {
+    let resp = server
+        .client
+        .put(server.control_url("/control/attributes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let answer: Value = resp.json().await.unwrap_or(Value::Null);
+    assert!(status == 200 || status == 201, "the declaration is accepted: {answer}");
+}
+
+/// Three attributes declared live whose Arrow columns below arrive at another width.
+async fn declare_widths(server: &TestServer) {
+    declare(server, json!({ "name": "level", "type": "u8", "index": true })).await;
+    declare(server, json!({ "name": "precise", "type": "f64", "index": true })).await;
+    declare(server, json!({ "name": "label", "type": "keyword", "index": true })).await;
+}
+
+/// An ingest batch whose declared columns are each at a width other than the declaration's:
+/// `level` (`u8`) as `int64`, `weight` (`f32`) as `float64`, `precise` (`f64`) as `float32` and
+/// `label` (`keyword`, a string on the wire) as `large_utf8`.
+fn widths_body(ids: &[u64], levels: &[Option<i64>]) -> Vec<u8> {
+    let access = access_column(ids.iter().map(|_| "0"));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        access_field(&access),
+        Field::new("level", DataType::Int64, true),
+        Field::new("weight", DataType::Float64, true),
+        Field::new("precise", DataType::Float32, true),
+        Field::new("label", DataType::LargeUtf8, true),
+    ]));
+    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(
+                external.iter().map(|v| v.as_slice()),
+            )),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 10.0))),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 20.0))),
+            Arc::new(access),
+            Arc::new(Int64Array::from(levels.to_vec())),
+            Arc::new(Float64Array::from_iter_values(ids.iter().map(|_| 0.5))),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 2.5))),
+            Arc::new(arrow::array::LargeStringArray::from_iter_values(
+                ids.iter().map(|id| format!("wide-{id}")),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// One item's drill-down fields.
+async fn fields_of(server: &TestServer, tessera_id: u64) -> Value {
+    let auth = authorise(server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let resp = post_item(server, token, tessera_id).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    body["fields"].clone()
+}
+
+fn tessera_id_at(answer: &Value, row: usize) -> u64 {
+    let id = &answer["tessera_ids"][row];
+    id.as_u64()
+        .or_else(|| id.as_str().and_then(|s| s.parse().ok()))
+        .expect("the ingest answers each row's tessera_id")
+}
+
+/// **An Arrow column is read by the rule a build reads a points file by**: any integer type
+/// carries an integer declaration whose range holds its values, either float width carries
+/// either float declaration, and a string at either offset width carries a string one. Each
+/// value is served at its declared type.
+#[tokio::test]
+async fn an_arrow_column_at_another_width_is_read_as_a_build_reads_it() {
+    let (_tmp, server) = served_declared().await;
+    declare_widths(&server).await;
+    let body = widths_body(&[600, 601], &[Some(7), Some(255)]);
+    let (status, answer) = ingest(&server, "widths", Some(ARROW), body).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["accepted"], 2);
+    flush(&server).await;
+
+    let (matched, _) = viewport(&server, &["0"], Some(json!({ "level": { "eq": 255 } }))).await;
+    assert_eq!(matched.len(), 1, "the u8 is filterable at its value");
+    let fields = fields_of(&server, tessera_id_at(&answer, 0)).await;
+    assert_eq!(fields["level"], json!(7));
+    assert_eq!(fields["weight"], json!(0.5));
+    assert_eq!(fields["precise"], json!(2.5));
+    assert_eq!(fields["label"], json!("wide-600"));
+}
+
+/// An integer that does not fit its declaration is refused naming its row, and the batch has
+/// no effect.
+#[tokio::test]
+async fn an_arrow_integer_outside_its_declaration_is_refused_naming_the_row() {
+    let (_tmp, server) = served_declared().await;
+    declare_widths(&server).await;
+    let high_water = control_status(&server).await["entity_id_high_water"].clone();
+    let (status, answer) = ingest(
+        &server,
+        "too-wide",
+        Some(ARROW),
+        widths_body(&[700, 701, 702], &[Some(7), Some(256), Some(9)]),
+    )
+    .await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract");
+    let detail = answer["detail"].as_str().unwrap();
+    assert!(detail.contains("row 1, column 'level'"), "{detail}");
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water,
+        "the refused batch allocated no entity"
+    );
+}
+
+/// A values batch over an existing entity, as Arrow, filling `level` from an `int64` column.
+fn level_values_body(external_id: u64, level: i64) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("level", DataType::Int64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values([external_id_of(external_id)])),
+            Arc::new(Int64Array::from(vec![level])),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+async fn post_values(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, Value) {
+    let resp = server
+        .client
+        .post(server.control_url("/control/values"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("content-type", ARROW)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// `/control/values` reads its Arrow columns by the same rule: an `int64` column fills a `u8`
+/// attribute where the value fits and is refused where it does not.
+#[tokio::test]
+async fn an_arrow_values_column_at_another_width_is_read_as_a_build_reads_it() {
+    let (_tmp, server) = served_declared().await;
+    declare_widths(&server).await;
+    let (status, answer) = ingest(&server, "rows", Some(ARROW), widths_body(&[800], &[None])).await;
+    assert_eq!(status, 200, "{answer}");
+    let tessera_id = tessera_id_at(&answer, 0);
+    flush(&server).await;
+
+    let (status, answer) = post_values(&server, "too-wide", level_values_body(800, 300)).await;
+    assert_eq!(status, 422, "{answer}");
+    let detail = answer["detail"].as_str().unwrap();
+    assert!(detail.contains("row 0, column 'level'"), "{detail}");
+
+    let (status, answer) = post_values(&server, "fits", level_values_body(800, 42)).await;
+    assert_eq!(status, 200, "{answer}");
+    flush(&server).await;
+    assert_eq!(fields_of(&server, tessera_id).await["level"], json!(42));
+}
+
+/// A `uint64` past `i64::MAX`, which an `i64` cannot hold.
+const PAST_I64: u64 = 1 << 63;
+
+/// **A `uint64` past `i64::MAX` is out of range for `i64`, at both paths**, and is never wrapped
+/// to a negative number: the service refuses the batch naming the row and the value as sent, and
+/// allocates nothing; the build refuses the same column in a points file.
+#[tokio::test]
+async fn a_uint64_past_i64_max_is_refused_for_an_i64_at_both_paths() {
+    let (_tmp, server) = served_declared().await;
+    let high_water = control_status(&server).await["entity_id_high_water"].clone();
+    let ids = [900u64, 901];
+    let access = access_column(ids.iter().map(|_| "0"));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        access_field(&access),
+        Field::new("score", DataType::UInt64, true),
+    ]));
+    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(
+                external.iter().map(|v| v.as_slice()),
+            )),
+            Arc::new(Float32Array::from(vec![10.0, 11.0])),
+            Arc::new(Float32Array::from(vec![20.0, 21.0])),
+            Arc::new(access),
+            Arc::new(UInt64Array::from(vec![7, PAST_I64])),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    let body = writer.into_inner().unwrap();
+    let (status, answer) = ingest(&server, "past-i64", Some(ARROW), body).await;
+    assert_eq!(status, 422, "{answer}");
+    let detail = answer["detail"].as_str().unwrap();
+    assert!(detail.contains("row 1, column 'score'"), "{detail}");
+    assert!(detail.contains(&PAST_I64.to_string()), "the value as sent: {detail}");
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water,
+        "the refused batch allocated no entity"
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let points = tmp.path().join("points.parquet");
+    write_points_scored(
+        &points,
+        Arc::new(UInt64Array::from_iter_values(
+            (0..N).map(|e| if e == 3 { PAST_I64 } else { e }),
+        )),
+    );
+    assert!(
+        build_over(tmp.path(), points).is_err(),
+        "the build refuses the same column"
+    );
+}
+
+/// **A column's type is checked on every record batch, an empty one included**, as the build
+/// checks it: a `utf8` column for the `f32` attribute `weight` is refused though no row carries a
+/// value, at both routes.
+#[tokio::test]
+async fn a_wrong_typed_column_in_an_empty_batch_is_refused() {
+    let (_tmp, server) = served_declared().await;
+    let access = access_column(std::iter::empty());
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        access_field(&access),
+        Field::new("weight", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(std::iter::empty::<&[u8]>())),
+            Arc::new(Float32Array::from(Vec::<f32>::new())),
+            Arc::new(Float32Array::from(Vec::<f32>::new())),
+            Arc::new(access),
+            Arc::new(StringArray::from(Vec::<&str>::new())),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    let (status, answer) =
+        ingest(&server, "empty", Some(ARROW), writer.into_inner().unwrap()).await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("weight", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(std::iter::empty::<&[u8]>())),
+            Arc::new(StringArray::from(Vec::<&str>::new())),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    let (status, answer) = post_values(&server, "empty", writer.into_inner().unwrap()).await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
 }

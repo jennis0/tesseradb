@@ -1027,9 +1027,6 @@ impl Engine {
             shapes: Arc::clone(&self.shapes),
             lineages: Arc::clone(&self.lineages),
             level_contents: Arc::clone(&self.level_contents),
-            // The configured value, not the resolved policy's: `tessera-server`'s loader checks
-            // only an explicitly set one.
-            configured_merge_bytes: self.config.max_merged_segment_bytes,
             suggest_dir: self.suggest_dir.clone(),
             compaction: self.config.compaction,
             switches: Arc::clone(&self.switches),
@@ -1128,8 +1125,7 @@ pub(crate) fn open_rotation(
     );
 
     // Rotated from the live one, never freshly constructed: `FragmentCache::rotate` carries the
-    // validated byte bound across, and `FragmentCache::new` here would silently unbound the cache
-    // a deployment's startup refusal exists to bound.
+    // configured byte bound across, and `FragmentCache::new` here would silently unbound it.
     let fragments = Arc::new(live_fragments.rotate(bundle_identity));
 
     // Opened over the new prefix, from its own manifests: cloning the live generation's would
