@@ -1018,29 +1018,39 @@ fn check_external_ids(
         }
     }
 
-    // Direction two: every run row is addressed back by its own entity's covering slot. This is
-    // what refuses a dangling binding (a row no locator can reach) and, with direction one, two
-    // slots claiming one row. A key bound in several runs passes both directions: each of its
-    // rows has its own entity, and each entity its own slot.
+    // Direction two: every run row is addressed back by a slot of its own entity, among the
+    // locators the sidecar asks for that entity. This is what refuses a dangling binding (a row
+    // no locator can reach) and, with direction one, two slots claiming one row. A key bound in
+    // several runs passes both directions: each of its rows has its own entity, and each entity a
+    // slot in the locator beside that row's run.
     for (r, run) in runs.iter().enumerate() {
         for i in 0..run.rows {
             let entity = bound.get((run.offset + i) as usize) as u64;
-            let agrees = if entity < base_len {
-                let slot = base.get(entity as usize);
-                slot != LOCATOR_NONE && slot as u64 == run.offset + i
-            } else if let Some(extent) = extents
-                .iter()
-                .find(|x| entity >= x.entity_lo && entity <= x.entity_hi)
-            {
-                extent.run == r
-                    && extent.slots.get((entity - extent.entity_lo) as usize) as u64 == i
-            } else {
+            let mut covered = false;
+            let agrees = tessera_store::locators_covering(entity, base_len, &extents, |x| {
+                (x.entity_lo, x.entity_hi)
+            })
+            .any(|locator| {
+                covered = true;
+                match locator {
+                    tessera_store::Locator::Base => {
+                        let slot = base.get(entity as usize);
+                        slot != LOCATOR_NONE && slot as u64 == run.offset + i
+                    }
+                    tessera_store::Locator::Extent(x) => {
+                        let extent = &extents[x];
+                        extent.run == r
+                            && extent.slots.get((entity - extent.entity_lo) as usize) as u64 == i
+                    }
+                }
+            });
+            if !covered {
                 return Err(BuildError::Invalid(format!(
                     "{}: row {i} binds entity {entity}, which no locator covers — the reverse \
                      direction could never answer for it",
                     run.rel
                 )));
-            };
+            }
             if !agrees {
                 return Err(BuildError::Invalid(format!(
                     "{}: row {i} binds entity {entity}, but the locator side does not point \

@@ -1,9 +1,10 @@
-//! What a flush writes into an existing bundle (§3.1).
+//! What a flush writes into an existing bundle.
 //!
-//! Per segment: `morton.u32`, `columns.arrow`, an `external-ids.arrow` extent and an
-//! `ext-locator.u32` extent, plus the descriptor, the row-space extent and the digests the new
-//! `SEGMENTS-<n+1>.json` names them by. **Never `MANIFEST.json`, never `CURRENT`** — a flush
-//! publishes inside the current prefix, which is what separates it from a compaction.
+//! Per segment: `morton.u32`, `columns.arrow`, and, where a row binds an entity rather than
+//! joining one, an `external-ids.arrow` run and an `ext-locator.u32` extent, plus the descriptor,
+//! the row-space extent and the digests the new `SEGMENTS-<n+1>.json` names them by. A flush
+//! never writes `MANIFEST.json` or `CURRENT`: it publishes inside the current prefix, which is
+//! what separates it from a compaction.
 //!
 //! ## What is deliberately not here
 //!
@@ -91,9 +92,9 @@ pub struct FlushInput<'a> {
 pub struct FlushOutput {
     pub segment: SegmentDescriptor,
     pub extent: SegmentExtent,
-    /// Prefix-relative path of the forward (external_id → entity) extent.
-    pub external_id_run: String,
-    pub locator_extent: LocatorExtent,
+    /// The locator extent over the rows that bind, naming the run it indexes; `None` where every
+    /// row is a join.
+    pub locator_extent: Option<LocatorExtent>,
     /// Every file written, prefix-relative, for the manifest's `files` map.
     pub files: BTreeMap<String, FileDigest>,
     /// `entity_hi + 1` — see this module's doc.
@@ -101,15 +102,18 @@ pub struct FlushOutput {
     pub entity_id_high_water: u64,
 }
 
-/// Write one flush segment under `prefix_dir`, for `(partition, view)`.
+/// Write one flush segment under `prefix_dir`, for `(partition, view)`. `joins` names the
+/// entities, ascending, whose rows join an entity an earlier row already bound: a join writes no
+/// external-id entry and no locator slot, and the locator extent spans the binding rows alone.
 ///
 /// Returns without fsyncing the directory: the caller's commit point is the side-manifest, and it
-/// is responsible for making every file here durable **before** writing it (§7.3).
+/// is responsible for making every file here durable before writing it.
 pub fn write_flush_segment(
     prefix_dir: &Path,
     partition: &str,
     view: &str,
     input: FlushInput<'_>,
+    joins: &[EntityId],
 ) -> Result<FlushOutput> {
     if input.rows.is_empty() {
         return Err(StoreError::MalformedBundle {
@@ -232,39 +236,51 @@ pub fn write_flush_segment(
     // ---- the external-id directions (§3.6) --------------------------------------------------
     //
     // Forward: external_id → entity, sorted by the id bytes, because the reader binary-searches
-    // it. Reverse: entity → this extent's ordinal, dense over the entity span. Both, because the
-    // reverse direction is served live-map-first and locator-second, and rotation empties the live
-    // map at restart — without a durable reverse path a visible flushed item would answer
-    // `/v1/items` with a typed error for ever.
-    let mut forward: Vec<(&[u8], u32)> = input
+    // it. Reverse: entity → this run's ordinal, dense over the binding rows' span, with the absent
+    // sentinel for an entity that has no external id. Both, because the reverse direction is
+    // served live-map-first and locator-second, and rotation empties the live map at restart.
+    let binding: Vec<&FlushRow> = input
         .rows
         .iter()
-        .filter_map(|r| {
-            let id = r.external_id.as_deref()?;
-            u32::try_from(r.entity_id.raw()).ok().map(|e| (id, e))
-        })
+        .filter(|r| joins.binary_search(&r.entity_id).is_err())
         .collect();
-    forward.sort_unstable_by(|a, b| a.0.cmp(b.0));
-
-    let external_id_rel = rel("external-ids.arrow");
-    write_external_id_run(&seg_dir.join("external-ids.arrow"), &forward)?;
-
-    let mut locator = vec![ROW_ABSENT; span];
-    for (ordinal, (_, entity)) in forward.iter().enumerate() {
-        locator[(*entity as u64 - entity_lo) as usize] = ordinal as u32;
-    }
-    let locator_rel = rel("ext-locator.u32");
-    write_u32_array(&seg_dir.join("ext-locator.u32"), &locator)?;
+    let bindings = match (binding.first(), binding.last()) {
+        (Some(first), Some(last)) => {
+            let (lo, hi) = (first.entity_id.raw(), last.entity_id.raw());
+            let mut forward: Vec<(&[u8], u32)> = binding
+                .iter()
+                .filter_map(|r| {
+                    let id = r.external_id.as_deref()?;
+                    u32::try_from(r.entity_id.raw()).ok().map(|e| (id, e))
+                })
+                .collect();
+            forward.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            write_external_id_run(&seg_dir.join("external-ids.arrow"), &forward)?;
+            let mut locator = vec![ROW_ABSENT; (hi - lo + 1) as usize];
+            for (ordinal, (_, entity)) in forward.iter().enumerate() {
+                locator[(*entity as u64 - lo) as usize] = ordinal as u32;
+            }
+            write_u32_array(&seg_dir.join("ext-locator.u32"), &locator)?;
+            Some(LocatorExtent {
+                path: rel("ext-locator.u32"),
+                entity_lo: lo,
+                entity_hi: hi,
+                external_id_run: rel("external-ids.arrow"),
+            })
+        }
+        _ => None,
+    };
 
     // ---- what the manifest must name --------------------------------------------------------
     let mut files = BTreeMap::new();
-    for name in [
-        "morton.u32",
-        crate::read::CutIndex::FILE,
-        "columns.arrow",
-        "external-ids.arrow",
-        "ext-locator.u32",
-    ] {
+    let binding_files: &[&str] = match bindings {
+        Some(_) => &["external-ids.arrow", "ext-locator.u32"],
+        None => &[],
+    };
+    for name in ["morton.u32", crate::read::CutIndex::FILE, "columns.arrow"]
+        .iter()
+        .chain(binding_files)
+    {
         files.insert(rel(name), digest_of(&seg_dir.join(name))?);
     }
     for column in presence_written {
@@ -288,13 +304,7 @@ pub fn write_flush_segment(
             row_base: input.row_base,
             rows: extent_rows,
         },
-        external_id_run: external_id_rel.clone(),
-        locator_extent: LocatorExtent {
-            path: locator_rel,
-            entity_lo,
-            entity_hi,
-            external_id_run: external_id_rel,
-        },
+        locator_extent: bindings,
         files,
         // Composition treats entities at or above the watermark as buffer-resident, so this is
         // `entity_hi + 1` and not `entity_hi`. See the module doc.
@@ -479,7 +489,7 @@ mod tests {
                 shard_id: 0,
                 scalar_schema: &schema,
                 row_base: 0,
-            },
+            }, &[],
         )
         .expect("flush");
         (out, dir.join("partitions/p/views/s/segments/seg-1"))

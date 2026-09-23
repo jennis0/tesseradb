@@ -18,9 +18,10 @@
 //!
 //! Every side-manifest still on disc after a tick is checked once against the ordering rules the
 //! readers rely on: the base run is `external_id_runs[0]`; the other runs are the runs the locator
-//! extents name, in the same order; the locator spans ascend without overlap; each view's segments
-//! ascend without overlap in entity order. At the end every ingested binding is looked up both
-//! ways through a sidecar opened from the bundle on disc.
+//! extents name, in the same order; each locator span is well formed (spans may overlap, since a
+//! lookup asks every extent covering an entity); each view's segments ascend without overlap in
+//! entity order. At the end every ingested binding is looked up both ways through a sidecar opened
+//! from the bundle on disc.
 //!
 //! ```text
 //! cargo run --release -p tessera-bench --bin maintenance_steady_state -- \
@@ -485,12 +486,9 @@ fn ordering_breaches(m: &SegmentsManifest, base_run: Option<&str>) -> Vec<String
             out.push(format!("locator extent names unlisted run {run}"));
         }
     }
-    for pair in m.locator_extents.windows(2) {
-        if pair[0].entity_hi >= pair[1].entity_lo || pair[0].entity_lo > pair[0].entity_hi {
-            out.push(format!(
-                "locator spans {}..={} then {}..={} do not ascend without overlap",
-                pair[0].entity_lo, pair[0].entity_hi, pair[1].entity_lo, pair[1].entity_hi
-            ));
+    for extent in &m.locator_extents {
+        if extent.entity_lo > extent.entity_hi {
+            out.push(format!("locator span {}..={} is empty", extent.entity_lo, extent.entity_hi));
         }
     }
     let views: BTreeSet<&str> = m.segments.iter().map(|s| s.view.as_str()).collect();

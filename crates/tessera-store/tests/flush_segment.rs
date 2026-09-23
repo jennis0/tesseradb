@@ -46,7 +46,7 @@ fn flush(prefix_dir: &Path, seg_id: &str, rows: Vec<FlushRow>, row_base: u32) ->
             shard_id: 0,
             scalar_schema: &[],
             row_base,
-        },
+        }, &[],
     )
     .unwrap()
 }
@@ -121,9 +121,10 @@ fn a_flushed_entity_resolves_in_both_external_id_directions() {
     // extent. That is the assertion worth making: the reader verifies the extent's digest and its
     // sortedness before answering, so a flush that wrote an unsorted or mis-digested extent is
     // refused there rather than silently resolving to the wrong entity here.
+    let extent = out.locator_extent.clone().expect("the rows bind, so the flush writes a locator");
     let bundle = open_bundle(dir.path()).unwrap();
     let mut manifest = bundle.partitions[PARTITION].manifest.clone();
-    manifest.external_id_runs = vec![out.external_id_run.clone()];
+    manifest.external_id_runs = vec![extent.external_id_run.clone()];
     manifest.files.extend(out.files.clone());
     let sidecar =
         ExternalIdSidecar::deferred_from_manifest(&bundle.manifest, &manifest, &prefix).unwrap();
@@ -136,15 +137,14 @@ fn a_flushed_entity_resolves_in_both_external_id_directions() {
 
     // Reverse, through the locator extent: entity → ordinal into that same extent, dense over the
     // segment's entity range, sentinel where an item carried no external id.
-    let locator = std::fs::read(prefix.join(&out.locator_extent.path)).unwrap();
+    let locator = std::fs::read(prefix.join(&extent.path)).unwrap();
     let slots: Vec<u32> = locator
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
         .collect();
     assert_eq!(slots.len(), 3, "dense over [entity_lo, entity_hi]");
-    assert_eq!(out.locator_extent.entity_lo, 50);
-    assert_eq!(out.locator_extent.entity_hi, 52);
-    assert_eq!(out.locator_extent.external_id_run, out.external_id_run);
+    assert_eq!(extent.entity_lo, 50);
+    assert_eq!(extent.entity_hi, 52);
 
     // "alpha" sorts before "zeta", so entity 52 is ordinal 0 and entity 50 is ordinal 1.
     assert_eq!(slots[0], 1, "entity 50 -> 'zeta', the second id");
@@ -235,7 +235,7 @@ fn unordered_rows_are_refused() {
             shard_id: 0,
             scalar_schema: &[],
             row_base: 50,
-        },
+        }, &[],
     );
     assert!(result.is_err());
 }

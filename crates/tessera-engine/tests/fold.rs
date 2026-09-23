@@ -2881,36 +2881,35 @@ fn dropping_the_engine_returns_while_a_fold_is_held_in_flight() {
     );
 }
 
-/// **A fold lands while ingest continues into several views.**
+/// **A fold lands while ingest continues into several views, the feed joining its items into
+/// the other two.**
 ///
 /// Each round ingests new items into `s0` and joins the same items into `s1` and `s2`, as a
 /// multi-view deployment's feed does, and asks for a flush. Views flush one per tick, so whenever
 /// a fold is planned some view's rows for entities another view has already flushed are still
-/// buffered, and they publish during the fold's flight. A fold discarded for that is asked for
-/// again; one of a bounded number of attempts must publish while the feed keeps running.
+/// buffered, and they publish during the fold's flight.
 #[test]
-#[ignore = "fails: most folds are discarded because a join flushed in their flight carries a locator extent below their base"]
 fn a_fold_lands_while_ingest_continues_into_several_views() {
+    a_fold_lands_while_the_feed_runs(|round, _view, i| format!("feed-{round}-{i}"));
+}
+
+/// **A fold lands while ingest continues into several views, each taking new items of its own.**
+/// One commit window then allocates interleaved ids to all three views, whose flushes overlap
+/// one another and, published during the fold's flight, the fold's base.
+#[test]
+fn a_fold_lands_while_ingest_of_new_items_continues_into_several_views() {
+    a_fold_lands_while_the_feed_runs(|round, view, i| format!("feed-{round}-{view}-{i}"));
+}
+
+/// Feed `s0`, `s1` and `s2` with eight rows each per round, keyed by `key(round, view, i)`, and
+/// ask for folds while it runs: one of a bounded number of attempts must publish.
+fn a_fold_lands_while_the_feed_runs(key: fn(u64, &str, u64) -> String) {
     const ATTEMPTS: u64 = 5;
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
     for name in ["s1", "s2"] {
-        engine
-            .create_plain_view(tessera_engine::PlainViewDeclaration {
-                name: name.to_string(),
-                title: None,
-                projection: "none".to_string(),
-                frame: tessera_engine::DeclaredFrame {
-                    x_min: 0.0,
-                    x_max: 1000.0,
-                    y_min: 0.0,
-                    y_max: 1000.0,
-                },
-                visibility: None,
-                point_default: None,
-            })
-            .expect("the view is created");
+        create_view(&engine, name);
     }
 
     let stop = std::sync::atomic::AtomicBool::new(false);
@@ -2921,7 +2920,7 @@ fn a_fold_lands_while_ingest_continues_into_several_views() {
                 for view in ["s0", "s1", "s2"] {
                     let rows: Vec<UnallocatedRow> = (0..8u64)
                         .map(|i| UnallocatedRow {
-                            external_id: Some(format!("feed-{round}-{i}").into_bytes()),
+                            external_id: Some(key(round, view, i).into_bytes()),
                             view: view.to_string(),
                             join: None,
                             descriptors: vec![b"0".to_vec()],
@@ -2987,4 +2986,290 @@ fn a_fold_lands_while_ingest_continues_into_several_views() {
         "no fold published in {ATTEMPTS} attempts; {discarded} were discarded over {rounds} \
          rounds of the feed"
     );
+}
+
+/// A plain view over a 1000 by 1000 frame.
+fn create_view(engine: &Engine, name: &str) {
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: name.to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the view is created");
+}
+
+/// **A flush of joins alone writes no external-id run and no locator extent, and the joined
+/// entity's external id still resolves both ways**: live, after a restart, and after a fold.
+#[test]
+fn a_flush_of_joins_binds_nothing_and_the_joined_key_resolves_both_ways() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    create_view(&engine, "s1");
+    let key = b"joined".to_vec();
+    let flush = |engine: &Engine| {
+        let flushes = engine.write_executor_stats().flushes;
+        engine.request_flush();
+        wait_for("a flush to publish", || {
+            engine.write_executor_stats().flushes > flushes
+        });
+    };
+
+    let entity = ingest(&engine, key.clone(), "own").expect("the item is accepted");
+    flush(&engine);
+    let bindings = |engine: &Engine| {
+        let generation = engine.generation();
+        let manifest = &generation.bundle.partitions["default"].manifest;
+        (manifest.external_id_runs.len(), manifest.locator_extents.len())
+    };
+    let before = bindings(&engine);
+
+    let join = UnallocatedRow {
+        external_id: Some(key.clone()),
+        view: "s1".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let joined = engine
+        .accept_ingest(vec![join], "join".to_string(), [0u8; 32])
+        .expect("the join is accepted");
+    assert_eq!(joined, vec![entity], "a known external id joins its entity");
+    flush(&engine);
+    assert!(
+        !engine.generation().bundle.partitions["default"].views["s1"]
+            .segments
+            .is_empty(),
+        "the join has a row in s1"
+    );
+    assert_eq!(
+        bindings(&engine),
+        before,
+        "a flush of joins alone adds no run and no locator extent"
+    );
+
+    let resolves_both_ways = |engine: &Engine, when: &str| {
+        assert_eq!(
+            engine.resolve_external_id(&key).unwrap(),
+            Some(entity),
+            "the key names its entity {when}"
+        );
+        assert_eq!(
+            engine.external_id_of(entity).unwrap(),
+            Some(key.clone()),
+            "the entity names its key {when}"
+        );
+    };
+    let reopen = |engine: Engine| {
+        drop(engine);
+        let mut engine = Engine::open(
+            &root,
+            &tmp.path().join("cache"),
+            &tmp.path().join("wal.log"),
+            tessera_plugin::Passthrough::new(),
+            config_uncapped(),
+        )
+        .expect("the bundle reopens");
+        engine.start_write_executor(8).expect("the executor starts");
+        engine
+    };
+
+    resolves_both_ways(&engine, "live");
+    let engine = reopen(engine);
+    resolves_both_ways(&engine, "after a restart");
+    fold(&engine);
+    resolves_both_ways(&engine, "after a fold");
+    let engine = reopen(engine);
+    resolves_both_ways(&engine, "after a fold and a restart");
+}
+
+/// **New items for two views in one commit window each keep their external id, both ways, once
+/// the answers come from the sidecar.** One batch allocates interleaved ids to `s0` and `s1`, so
+/// the two flushes' locator extents overlap; a restart past the log's rotation leaves the live map
+/// empty.
+#[test]
+fn interleaved_new_items_in_two_views_resolve_both_ways_from_the_sidecar() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    create_view(&engine, "s1");
+
+    let keys: Vec<Vec<u8>> = (0..6).map(|i| format!("mixed-{i}").into_bytes()).collect();
+    let rows: Vec<UnallocatedRow> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| UnallocatedRow {
+            external_id: Some(key.clone()),
+            view: if i % 2 == 0 { "s0" } else { "s1" }.to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x: 5.0,
+            y: 5.0,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        })
+        .collect();
+    let entities = engine
+        .accept_ingest(rows, "mixed".to_string(), [0u8; 32])
+        .expect("the batch is accepted");
+    wait_ticking(&engine, "both views to flush", || {
+        engine.request_flush();
+        engine.generation().buffer.is_empty()
+    });
+
+    drop(engine);
+    let engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        config_uncapped(),
+    )
+    .expect("the bundle reopens");
+    assert!(
+        engine.accepted_batch("mixed").is_none(),
+        "the log rotated past the batch, so no live map answers for it"
+    );
+    let mut wrong = Vec::new();
+    for (key, entity) in keys.iter().zip(&entities) {
+        let name = String::from_utf8_lossy(key).into_owned();
+        if engine.resolve_external_id(key).unwrap() != Some(*entity) {
+            wrong.push(format!("{name}: key to entity"));
+        }
+        if engine.external_id_of(*entity).unwrap() != Some(key.clone()) {
+            wrong.push(format!("{name}: entity to key"));
+        }
+    }
+    assert!(wrong.is_empty(), "answered wrong from the sidecar: {wrong:?}");
+    drop(engine);
+    tessera_build::verify_deep(&root, &Default::default())
+        .expect("the bundle's two external-id directions agree under the lookup the sidecar uses");
+}
+
+/// **A join keeps its entity's key when the view holding the entity's own row is dropped before
+/// that row flushes.** The drop discards the own row, so the join's flush is the only record of
+/// the binding; after a restart past the log's rotation the key still resolves both ways.
+#[test]
+fn a_join_keeps_its_key_when_the_binding_view_is_dropped_before_it_flushes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    create_quarter_q2(&engine);
+
+    let key = b"dropped-binding".to_vec();
+    let row = |view: &str| UnallocatedRow {
+        external_id: Some(key.clone()),
+        view: view.to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let entity = engine
+        .accept_ingest(vec![row("quarter:q2")], "own".to_string(), [0u8; 32])
+        .expect("the item is accepted")[0];
+    let joined = engine
+        .accept_ingest(vec![row("s0")], "join".to_string(), [0u8; 32])
+        .expect("the join is accepted");
+    assert_eq!(joined, vec![entity], "a known external id joins its entity");
+    engine
+        .drop_view("quarter".into(), "q2".into(), false)
+        .expect("the view drops");
+    wait_ticking(&engine, "the join to flush", || {
+        engine.request_flush();
+        engine.generation().buffer.is_empty()
+    });
+
+    drop(engine);
+    let engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        config_uncapped(),
+    )
+    .expect("the bundle reopens");
+    assert!(
+        engine.accepted_batch("join").is_none(),
+        "the log rotated past the batches, so no live map answers for them"
+    );
+    assert_eq!(engine.resolve_external_id(&key).unwrap(), Some(entity), "the key names its entity");
+    assert_eq!(engine.external_id_of(entity).unwrap(), Some(key), "the entity names its key");
+}
+
+/// A view group `quarter` with one view, `quarter:q2`, over a 1000 by 1000 frame.
+fn create_quarter_q2(engine: &Engine) {
+    engine
+        .create_view_group(tessera_lifecycle::wal::ViewGroupDeclaration {
+            name: "quarter".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+            members: None,
+            metadata: Vec::new(),
+        })
+        .expect("the group is declared");
+    engine
+        .create_view("quarter".into(), "q2".into(), None, Default::default())
+        .expect("the view is created");
+}
+
+/// **A fold publishes when a dropped view held the highest entity a run binds.** The surviving
+/// views' rows end below it, and the fold's base run must still hold its binding.
+#[test]
+fn a_fold_publishes_when_a_dropped_view_held_the_highest_bound_entity() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    create_quarter_q2(&engine);
+    let key = b"dropped-view-item".to_vec();
+    let row = UnallocatedRow {
+        external_id: Some(key.clone()),
+        view: "quarter:q2".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let entity = engine
+        .accept_ingest(vec![row], "q2".to_string(), [0u8; 32])
+        .expect("the item is accepted")[0];
+    wait_ticking(&engine, "the item to flush", || {
+        engine.request_flush();
+        engine.generation().buffer.is_empty()
+    });
+    engine
+        .drop_view("quarter".into(), "q2".into(), false)
+        .expect("the view drops");
+
+    fold(&engine);
+    assert_eq!(engine.resolve_external_id(&key).unwrap(), Some(entity), "the key names its entity");
+    assert_eq!(engine.external_id_of(entity).unwrap(), Some(key), "the entity names its key");
 }

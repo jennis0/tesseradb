@@ -320,7 +320,7 @@ impl Executor {
     /// Nothing waits on the rebuild: a value in the side map is suggested exactly as one in the
     /// base is, so a rebuild that never finishes costs residency, not a missing answer.
     pub(super) fn dispatch_suggest_rebuild(&mut self) {
-        if self.suggest.in_flight() {
+        if self.suggest.outstanding() {
             return;
         }
         let generation = self.generation.load_full();
@@ -2024,17 +2024,15 @@ impl Executor {
                 manifest.scoped_columns.push(entry);
             }
         }
-        // The segment's own four manifest lists, taken together or not at all: a values-only
-        // publication wrote none of the files they name.
+        // The segment's own manifest lists, taken together or not at all: a values-only
+        // publication wrote none of the files they name, and a flush of joins alone wrote no run.
         if let Some(segment) = &completed.segment {
             manifest.segments.push(segment.descriptor.clone());
             manifest.deltas.push(segment.tier_path.clone());
-            manifest
-                .external_id_runs
-                .push(segment.external_id_run.clone());
-            manifest
-                .locator_extents
-                .push(segment.locator_extent.clone());
+            if let Some(extent) = &segment.locator_extent {
+                manifest.external_id_runs.push(extent.external_id_run.clone());
+                manifest.locator_extents.push(extent.clone());
+            }
         }
         manifest.files.extend(completed.files);
         if let Some(extent) = completed.dict_extent {
@@ -2391,6 +2389,7 @@ mod dispatch_rules_tests {
             fills: Vec::new(),
             consumed_fills: Vec::new(),
             consumed_scoped_fills: Vec::new(),
+            recorded_joins: Vec::new(),
         }
     }
 

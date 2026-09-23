@@ -327,6 +327,8 @@ pub(crate) struct FlushPlan {
     pub(crate) consumed_fills: Vec<EntityId>,
     /// The same for the group-scoped fills, by the `(entity, owner view)` cell they address.
     pub(crate) consumed_scoped_fills: Vec<(EntityId, String)>,
+    /// The joins whose key a published run already records, ascending: they write no binding.
+    pub(crate) recorded_joins: Vec<EntityId>,
 }
 
 impl FlushPlan {
@@ -457,11 +459,29 @@ pub(crate) fn plan_flush(
     items.sort_unstable_by_key(|(entity, _)| entity.raw());
     fills.sort_by_key(|(entity, _)| entity.raw());
 
+    // The first flush to give an entity a row writes its binding, whether that row is the
+    // entity's own or a join: a dropped view can take the own row with it before it flushes. So
+    // a join whose entity already has a row in some view finds its key recorded.
+    let rowed = |entity: EntityId| {
+        generation.bundle.partitions.values().any(|partition| {
+            partition
+                .views
+                .values()
+                .any(|data| data.row_space.row_of(entity).is_some())
+        })
+    };
+    let recorded_joins = items
+        .iter()
+        .filter(|(entity, item)| item.join && rowed(*entity))
+        .map(|(entity, _)| *entity)
+        .collect();
+
     Ok(FlushPlan {
         items,
         fills,
         consumed_fills,
         consumed_scoped_fills,
+        recorded_joins,
     })
 }
 
@@ -631,8 +651,8 @@ pub(crate) struct SegmentFlush {
     pub(crate) descriptor: tessera_store::manifest::SegmentDescriptor,
     pub(crate) watermark: u64,
     pub(crate) entity_id_high_water: u64,
-    pub(crate) external_id_run: String,
-    pub(crate) locator_extent: tessera_store::manifest::LocatorExtent,
+    /// The locator extent over the rows that bind an entity, and the run it indexes; `None` where every row is a join.
+    pub(crate) locator_extent: Option<tessera_store::manifest::LocatorExtent>,
     pub(crate) tier: Arc<DeltaTier>,
     /// The tier's prefix-relative path; carried rather than re-derived, since a coalesce moves it.
     pub(crate) tier_path: String,
@@ -730,6 +750,7 @@ fn execute_flush_stages(
                     scalar_schema: &ctx.scalar_schema,
                     row_base: ctx.row_base,
                 },
+                &plan.recorded_joins,
             )
             .map_err(|e| MaintenanceFailed(format!("segment: {e}")))?,
         )
@@ -907,7 +928,6 @@ fn execute_flush_stages(
             descriptor: out.segment,
             watermark: out.watermark,
             entity_id_high_water: out.entity_id_high_water,
-            external_id_run: out.external_id_run,
             locator_extent: out.locator_extent,
             tier,
             tier_path,

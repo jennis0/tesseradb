@@ -72,7 +72,7 @@ fn run_of(root: &Path, seg_id: &str, bindings: &[(u64, &str)]) -> PathBuf {
             shard_id: 0,
             scalar_schema: &[],
             row_base: 0,
-        },
+        }, &[],
     )
     .expect("the input segment writes");
     root.join("v00000/partitions")
@@ -312,7 +312,7 @@ fn a_post_snapshot_entity_resolves_through_its_carried_forward_extent() {
             shard_id: 0,
             scalar_schema: &[],
             row_base: n as u32,
-        },
+        }, &[],
     )
     .expect("the post-snapshot flush writes");
 
@@ -320,11 +320,12 @@ fn a_post_snapshot_entity_resolves_through_its_carried_forward_extent() {
     let mut manifest = bundle.partitions[PARTITION].manifest.clone();
     // Run 0 (the fold's) listed first — oldest — with the flush's run after it, matching what a
     // real fold's publication carries forward (compaction §2, §4).
+    let extent = out.locator_extent.clone().expect("the rows bind, so the flush writes a locator");
     manifest.external_id_runs = vec![
         "entities/external-ids.arrow".to_string(),
-        out.external_id_run.clone(),
+        extent.external_id_run.clone(),
     ];
-    manifest.locator_extents = vec![out.locator_extent.clone()];
+    manifest.locator_extents = vec![extent];
     manifest.files.insert(
         "entities/external-ids.arrow".to_string(),
         file_digest(&entities_dir.join("external-ids.arrow")),

@@ -197,7 +197,7 @@ fn flushed_bundle(root: &Path) {
             shard_id: 0,
             scalar_schema: &[],
             row_base: n as u32,
-        },
+        }, &[],
     )
     .expect("the flush segment writes");
 
@@ -220,8 +220,9 @@ fn flushed_bundle(root: &Path) {
 
     let mut segments = seg0.segments.clone();
     segments.push(flush.segment.clone());
+    let locator = flush.locator_extent.clone().expect("the rows bind, so the flush writes a locator");
     let mut external_id_runs = seg0.external_id_runs.clone();
-    external_id_runs.push(flush.external_id_run.clone());
+    external_id_runs.push(locator.external_id_run.clone());
 
     let manifest_1 = SegmentsManifest {
         watermark: flush.watermark,
@@ -234,7 +235,7 @@ fn flushed_bundle(root: &Path) {
         deltas: vec![delta_rel],
         dict_extents: seg0.dict_extents.clone(),
         external_id_runs,
-        locator_extents: vec![flush.locator_extent.clone()],
+        locator_extents: vec![locator],
         tombstones: DenySet::of(&croaring::Bitmap::of(&[old_holder.raw() as u32])),
         files,
         ..SegmentsManifest::empty()
