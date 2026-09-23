@@ -35,14 +35,17 @@ const ITEMS: u64 = 400;
 /// A two-view group over one corpus: every entity of q2 has a row in q1 as well, so an artifact
 /// of one view could be projected into the other's row space — which is exactly the mistake
 /// `view` in the identity prevents.
-fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
+///
+/// `tally` adds a second group, `tally`, whose one view `q2` draws q2's points: a key the two
+/// groups share without sharing views.
+fn build_group(dir: &Path, gate_first_view: bool, tally: bool) -> std::path::PathBuf {
     // **`gate_first_view` puts q1 behind the label `1`** (`views.md` §6), which only the entities
     // divisible by three carry (`common::terms_of`). A principal holding `0` alone then reaches q2
     // and not q1, which is the visible-view set the identifier case below needs.
     let gate = |slot: usize| (gate_first_view && slot == 0).then(|| vec!["1".to_string()]);
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ITEMS);
-    let views: Vec<tessera_build::ViewArgs> = KEYS
+    let mut views: Vec<tessera_build::ViewArgs> = KEYS
         .iter()
         .enumerate()
         .map(|(slot, key)| {
@@ -62,21 +65,47 @@ fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
         })
         .collect();
     let e = extent();
+    let frame = Quantisation {
+        x_min: e.x_min,
+        x_max: e.x_max,
+        y_min: e.y_min,
+        y_max: e.y_max,
+    };
+    let mut groups = Vec::new();
+    if tally {
+        views.push(view_args(
+            "tally:q2",
+            &dir.join("q2.parquet"),
+            AccessInput::relation(&pairs),
+        ));
+        groups.push(GroupDescriptor {
+            title: None,
+            point_default: Some("public".to_string()),
+            visibility: None,
+            name: "tally".to_string(),
+            members_of: None,
+            scoped_scalars: Vec::new(),
+            quantisation: frame,
+            projection: tessera_spatial::Projection::None,
+            metadata: Vec::new(),
+            views: vec![GroupViewDescriptor {
+                key: "q2".to_string(),
+                visibility: None,
+                metadata: Default::default(),
+            }],
+        });
+    }
     let out = dir.join("bundle");
-    build(&BuildArgs {
-        groups: vec![GroupDescriptor {
+    groups.insert(
+        0,
+        GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
             visibility: None,
             name: "quarter".to_string(),
             members_of: None,
             scoped_scalars: Vec::new(),
-            quantisation: Quantisation {
-                x_min: e.x_min,
-                x_max: e.x_max,
-                y_min: e.y_min,
-                y_max: e.y_max,
-            },
+            quantisation: frame,
             projection: tessera_spatial::Projection::None,
             metadata: Vec::new(),
             views: KEYS
@@ -88,7 +117,10 @@ fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
                     metadata: Default::default(),
                 })
                 .collect(),
-        }],
+        },
+    );
+    build(&BuildArgs {
+        groups,
         ..build_args(&out, views)
     })
     .expect("the two-view group builds");
@@ -96,13 +128,13 @@ fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
 }
 
 async fn serve_group(tmp: &TempDir) -> TestServer {
-    build_group(tmp.path(), false);
+    build_group(tmp.path(), false, false);
     open(tmp).await
 }
 
 /// The same fixture with q1 behind a gate — see [`build_group`].
 async fn serve_gated_group(tmp: &TempDir) -> TestServer {
-    build_group(tmp.path(), true);
+    build_group(tmp.path(), true, false);
     open(tmp).await
 }
 
@@ -1376,4 +1408,51 @@ async fn a_recreated_view_serves_none_of_its_predecessors_artifacts() {
         republished
     );
     assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
+}
+
+/// A label of another group attached to an artifact of a dropped view is deleted with it, so
+/// after a fold its key is free to label the artifact the recreated view publishes. Such a label
+/// is never served, its target not being drawn on its view, so its key is what shows it.
+#[tokio::test]
+async fn a_label_of_another_group_goes_with_the_artifact_of_a_dropped_view() {
+    const LABELS: &str = "labels/tally";
+    let tmp = TempDir::new().unwrap();
+    build_group(tmp.path(), false, true);
+    let server = open(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+    let mut labels = declaration(LABELS, Some("tally"), "flat");
+    labels["views"] = json!(["tally:q2"]);
+    labels["depends_on"] = json!([SCOPED]);
+    register(&server, labels).await;
+    let label = json!([{ "key": "n1", "view": "q2", "members": members(0..10),
+                         "attached_to": { "layer": SCOPED, "key": "c1" } }]);
+
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": "c1", "view": "q2", "members": members(0..30) }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = put(&server, LABELS, label.clone()).await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = put(&server, LABELS, label.clone()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 0, "the key is held: {body}");
+
+    recreate(&server, "q2").await;
+    flush_and_fold(&server, Some("quarter:q1")).await;
+    let server = restart(server, &tmp).await;
+    ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
+    tick(&server).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": "c1", "view": "q2", "members": members(20_000..20_020) }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = put(&server, LABELS, label).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["created"], 1, "{body}");
 }

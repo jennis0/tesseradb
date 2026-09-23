@@ -45,7 +45,7 @@ pub use command::{
 pub use faults::WalMeter;
 pub use membership::{
     ArtifactRecord, ArtifactStore, FillOutcome, FixedParts, IncomingArtifact, IncomingGrowth,
-    Members,
+    Members, RetiredViews,
 };
 pub use overlay::{owner_id_only, replay, Overlay};
 pub use registry::{

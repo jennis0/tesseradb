@@ -868,6 +868,8 @@ impl Engine {
         );
 
         let bundle = served_bundle(bundle, &state, &vocabularies);
+        // The dependents are not deleted here: the drop deleted them, and one whose deletion did
+        // not reach the log is attached to a hole, which serves it to nobody.
         crate::write::retire_dead_view_artifacts(
             &state.registry,
             &mut state.artifacts,

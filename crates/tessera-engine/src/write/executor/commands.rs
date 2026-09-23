@@ -1551,7 +1551,7 @@ impl Executor {
         let retired = self.live.with_publication_state(|registry, store, _| {
             crate::write::retire_dead_view_artifacts(registry, store, &served.bundle.manifest)
         });
-        for (layer, _) in &retired {
+        for (layer, _) in &retired.levels {
             self.pending_forms.retain(|(held, _), _| held != layer);
             self.deps.artifact_projections.forget(layer);
             self.deps.lineages.forget(layer);
@@ -1563,10 +1563,13 @@ impl Executor {
         // else. A failure here is reported the way that lane reports one, in force and possibly
         // not durable, and does not un-drop the view, which is already acknowledged as far as the
         // log is concerned.
+        // An artifact of another view attached to a retired one is deleted with its own
+        // dependents, as a deletion of its target would delete it.
         let deleted = dangling.len() as u64;
-        if !dangling.is_empty() {
+        if !dangling.is_empty() || !retired.dependents.is_empty() {
             let mut entries: Vec<DenyEntry> = dangling
                 .into_iter()
+                .chain(retired.dependents)
                 .map(|entity| DenyEntry {
                     record: WalRecord::ChangeByEntity {
                         entity_id: entity,
