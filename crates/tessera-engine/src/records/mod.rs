@@ -272,6 +272,21 @@ enum Paged {
     Stopped(ResponseEndedBy),
 }
 
+/// Everything a response fixes before its head: the request, its fields and order, the binding
+/// its cursors are sealed under, and the head's counts.
+struct Planned<'r> {
+    session: &'r Session,
+    req: ItemsRequest<'r>,
+    plan: FieldPlan,
+    order: RecordsOrder,
+    page_rows: u32,
+    idset: u32,
+    binding: Binding<'r>,
+    counts: Option<ItemsCounts>,
+    /// The verdict the counting evaluation reached.
+    counted_region: Option<RegionVerdict>,
+}
+
 impl Engine {
     /// Serve one `POST /v1/items` response into `sink` and return its trailer. Every refusal is
     /// decided before the head: the request's shape, the idset, the view, the cursor (before any
@@ -284,17 +299,18 @@ impl Engine {
         sink: &mut dyn ItemsSink,
     ) -> Result<ItemsTrailer> {
         let started = Instant::now();
-        let refused = |why| Err(EngineError::RecordsRefused(why));
-        if req.page_rows == Some(0) {
-            return refused(RecordsRefused::ZeroPageRows);
-        }
-        if req.pages == Some(0) {
-            return refused(RecordsRefused::ZeroPages);
-        }
-        if req.count && req.cursor.is_some() {
-            return refused(RecordsRefused::CountWithCursor);
-        }
+        refuse_shape(&req)?;
+        let (planned, walk) = self.plan_items(session, req)?;
+        self.serve_pages(&planned, walk, started, sink)
+    }
 
+    /// The generation, the idset, the view, the cursor and the fields, in that order, then the
+    /// order, the page size and the counts.
+    fn plan_items<'r>(
+        &self,
+        session: &'r Session,
+        req: ItemsRequest<'r>,
+    ) -> Result<(Planned<'r>, Walk)> {
         let generation = self.generation.load_full();
         let manifest = &generation.bundle.manifest;
         let idset = manifest.identity.idset;
@@ -305,17 +321,15 @@ impl Engine {
         if !session.visible_views().contains_view(req.view) {
             return Err(unknown_view());
         }
-        let incarnation = manifest.incarnation_of(req.view).ok_or_else(unknown_view)?;
-        let key = self.cursor_key;
         let binding = Binding {
             route: Route::Items,
             view: req.view,
-            incarnation,
+            incarnation: manifest.incarnation_of(req.view).ok_or_else(unknown_view)?,
             auth_data_hash: session.auth_data_hash(),
         };
         let resumed = match req.cursor {
             None => None,
-            Some(token) => Some(ItemsCursor::decode(&key.open(&binding, token)?)?),
+            Some(token) => Some(ItemsCursor::decode(&self.cursor_key.open(&binding, token)?)?),
         };
         if let Some(cursor) = &resumed {
             if cursor.idset != idset {
@@ -347,38 +361,63 @@ impl Engine {
             }
             false => (None, None),
         };
-
-        let mut walk = Walk::new(
+        let walk = Walk::new(
             req.filter.clone(),
             req.keep_unmatched,
             page_rows,
             resumed.map_or(Position::start(order), |cursor| cursor.position),
         );
-        let mut clock = Clock::new(started, req.limits.response_time, req.cancel.clone());
-        let cursor_at =
-            |position: Position| key.seal(&binding, &ItemsCursor { idset, position }.encode());
-        let mut head_sent = false;
-        let mut send_head = |walk: &Walk, sink: &mut dyn ItemsSink| -> Result<()> {
-            if head_sent {
-                return Ok(());
-            }
-            head_sent = true;
-            sink.head(&ItemsHead {
+        Ok((
+            Planned {
+                session,
+                req,
+                plan,
                 order,
                 page_rows,
+                idset,
+                binding,
                 counts,
-                region: counted_region.or(walk.region),
-            })
-            .map_err(|SinkClosed| EngineError::Cancelled)
-        };
+                counted_region,
+            },
+            walk,
+        ))
+    }
 
+    /// The head, then pages until the response ends, then the trailer. The head follows the first
+    /// page's walk, so a failure there is a plain refusal and the head carries the first
+    /// stretch's region verdict.
+    fn serve_pages(
+        &self,
+        planned: &Planned<'_>,
+        mut walk: Walk,
+        started: Instant,
+        sink: &mut dyn ItemsSink,
+    ) -> Result<ItemsTrailer> {
+        let limits = &planned.req.limits;
+        let mut clock = Clock::new(started, limits.response_time, planned.req.cancel.clone());
+        let cursor_at = |position: Position| {
+            let cursor = ItemsCursor {
+                idset: planned.idset,
+                position,
+            };
+            self.cursor_key.seal(&planned.binding, &cursor.encode())
+        };
+        let mut head_sent = false;
+        let mut send_head = |walk: &Walk, sink: &mut dyn ItemsSink| -> Result<()> {
+            if !head_sent {
+                head_sent = true;
+                sink.head(&planned.head(walk))
+                    .map_err(|SinkClosed| EngineError::Cancelled)?;
+            }
+            Ok(())
+        };
         let (mut pages, mut rows, mut bytes) = (0u64, 0u64, 0usize);
         let ended_by = loop {
             if pages > 0 {
-                if req.pages.is_some_and(|limit| pages >= u64::from(limit)) {
+                if planned.req.pages.is_some_and(|limit| pages >= u64::from(limit)) {
                     break ResponseEndedBy::Pages;
                 }
-                if bytes.saturating_add(req.limits.max_page_bytes) > req.limits.response_bytes {
+                if bytes.saturating_add(limits.max_page_bytes) > limits.response_bytes {
                     break ResponseEndedBy::BudgetBytes;
                 }
                 if clock.out_of_time() {
@@ -388,16 +427,7 @@ impl Engine {
             if clock.cancelled() {
                 break ResponseEndedBy::Deadline;
             }
-            let generation = self.generation.load_full();
-            let page = self.items_page(
-                session,
-                &req,
-                &plan,
-                &generation,
-                &mut walk,
-                page_rows as usize,
-                &mut clock,
-            )?;
+            let page = self.items_page(planned, &mut walk, &mut clock)?;
             send_head(&walk, sink)?;
             match page {
                 Paged::Rows {
@@ -432,31 +462,34 @@ impl Engine {
         })
     }
 
-    /// One page from `generation`: the view's mask composed for it, the rows walked from the
-    /// position, their fields read and the batch cut to the byte ceiling. The walk's position
+    /// One page from the latest generation: the view's mask composed for it, the rows walked from
+    /// the position, their fields read and the batch cut to the byte ceiling. The walk's position
     /// moves to the page's end, and not at all where a cancellation discards the page.
-    #[allow(clippy::too_many_arguments)]
     fn items_page(
         &self,
-        session: &Session,
-        req: &ItemsRequest<'_>,
-        plan: &FieldPlan,
-        generation: &Arc<Generation>,
+        planned: &Planned<'_>,
         walk: &mut Walk,
-        need: usize,
         clock: &mut Clock,
     ) -> Result<Paged> {
-        let open = self.open_view(session, generation, req.view, &req.cancel, &mut Probe::new())?;
+        let req = &planned.req;
+        let generation = self.generation.load_full();
+        let open = self.open_view(
+            planned.session,
+            &generation,
+            req.view,
+            &req.cancel,
+            &mut Probe::new(),
+        )?;
         let cx = PageCx {
             engine: self,
             open: &open,
-            generation,
+            generation: &generation,
         };
         let Collected {
             rows,
             walked,
             position,
-        } = walk.collect(&cx, need, clock)?;
+        } = walk.collect(&cx, planned.page_rows as usize, clock)?;
         match walked {
             Walked::Stopped(reason) => {
                 if rows.is_empty() {
@@ -470,7 +503,14 @@ impl Engine {
             }
             _ => {}
         }
-        let values = self.read_page(session, generation, &open, plan, &rows, req.keep_unmatched)?;
+        let values = self.read_page(
+            planned.session,
+            &generation,
+            &open,
+            &planned.plan,
+            &rows,
+            req.keep_unmatched,
+        )?;
         let (batch, kept, bytes) = values.into_batch(req.limits.max_page_bytes)?;
         let ended_by = if kept < rows.len() {
             walk.position = walk.position_at(&cx, &rows[kept - 1]);
@@ -521,5 +561,31 @@ impl Engine {
             .rows_in_range(0..total)
             .and_cardinality(routed.rows.rows());
         Ok((ItemsCounts { visible, matched }, routed.region))
+    }
+}
+
+/// The refusals a request's own arguments decide, before anything is read.
+fn refuse_shape(req: &ItemsRequest<'_>) -> Result<()> {
+    let refused = |why| Err(EngineError::RecordsRefused(why));
+    if req.page_rows == Some(0) {
+        return refused(RecordsRefused::ZeroPageRows);
+    }
+    if req.pages == Some(0) {
+        return refused(RecordsRefused::ZeroPages);
+    }
+    if req.count && req.cursor.is_some() {
+        return refused(RecordsRefused::CountWithCursor);
+    }
+    Ok(())
+}
+
+impl Planned<'_> {
+    fn head(&self, walk: &Walk) -> ItemsHead {
+        ItemsHead {
+            order: self.order,
+            page_rows: self.page_rows,
+            counts: self.counts,
+            region: self.counted_region.or(walk.region),
+        }
     }
 }

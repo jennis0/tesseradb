@@ -35,9 +35,12 @@ enum Values {
         ty: ScalarType,
         values: Vec<Option<ScalarOut>>,
     },
-    /// A category's keys, resolved from its codes. An absent code, or one no binding explains, is
-    /// null.
-    Category { keys: Vec<Option<String>> },
+    /// A category: each row's position in `dictionary`, which holds each code's key once, in the
+    /// order rows first carry it. An absent code, or one no binding explains, is null.
+    Category {
+        dictionary: Vec<String>,
+        keys: Vec<Option<i32>>,
+    },
 }
 
 /// One system field's values over a page, in page order.
@@ -74,10 +77,9 @@ impl Engine {
         for (slot, field) in plan.named.iter().enumerate() {
             let values = match &field.home {
                 Home::Rendered => rendered_values(segments, field, rows),
-                Home::ValueColumn(column) => rows
-                    .iter()
-                    .map(|row| generation.filter_columns.stored_value(column, row.entity))
-                    .collect(),
+                Home::ValueColumn(column) => generation
+                    .filter_columns
+                    .stored_values(column, rows.iter().map(|row| row.entity)),
                 Home::Record(tag) => {
                     record_slot.insert(*tag, slot);
                     vec![None; rows.len()]
@@ -173,7 +175,8 @@ fn rendered_values(
 }
 
 /// A field's stored values in the form its column carries, by the conversions the item card
-/// uses: a category's codes resolved to keys, every other family through `stored_field_out`.
+/// uses: a category's codes resolved to keys, each code looked up once, and every other family
+/// through `stored_field_out`.
 fn typed(field: &Named, values: Vec<Option<RV>>, generation: &Generation) -> Result<Values> {
     let vocabularies = &generation.vocabularies;
     let Some(vocabulary) = &field.vocabulary else {
@@ -185,17 +188,22 @@ fn typed(field: &Named, values: Vec<Option<RV>>, generation: &Generation) -> Res
                 .collect(),
         });
     };
-    let keys = values
-        .into_iter()
-        .map(|value| {
-            let Some(value) = value else {
-                return Ok(None);
-            };
-            let code = category_code(&value).ok_or_else(|| mismatch(&field.name, field.ty))?;
-            Ok(category_key(code, Some(vocabulary), vocabularies).map(str::to_string))
-        })
-        .collect::<Result<_>>()?;
-    Ok(Values::Category { keys })
+    let mut dictionary: Vec<String> = Vec::new();
+    let mut position: FxHashMap<u32, Option<i32>> = FxHashMap::default();
+    let mut keys = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(value) = value else {
+            keys.push(None);
+            continue;
+        };
+        let code = category_code(&value).ok_or_else(|| mismatch(&field.name, field.ty))?;
+        keys.push(*position.entry(code).or_insert_with(|| {
+            let key = category_key(code, Some(vocabulary), vocabularies)?;
+            dictionary.push(key.to_string());
+            Some(i32::try_from(dictionary.len() - 1).expect("a page's keys fit in i32"))
+        }));
+    }
+    Ok(Values::Category { dictionary, keys })
 }
 
 fn mismatch(name: &str, ty: ScalarType) -> EngineError {
@@ -269,7 +277,10 @@ impl PageValues {
                 .sum::<usize>()
             + usize::from(self.matched.is_some());
         let validity = columns.div_ceil(8);
-        let mut seen: Vec<rustc_hash::FxHashSet<&str>> = vec![Default::default(); self.named.len()];
+        // Per category column, how many of its keys the rows so far have carried: keys are
+        // numbered in the order rows first carry them, so a row carries a new one exactly when its
+        // number is this count.
+        let mut carried: Vec<i32> = vec![0; self.named.len()];
         let mut total = 0usize;
         for i in 0..self.tessera_ids.len() {
             let mut row = 8 + validity + usize::from(self.matched.is_some());
@@ -282,9 +293,12 @@ impl PageValues {
                                 _ => 0,
                             }
                     }
-                    Values::Category { keys } => {
-                        4 + match &keys[i] {
-                            Some(key) if seen[slot].insert(key.as_str()) => 4 + key.len(),
+                    Values::Category { dictionary, keys } => {
+                        4 + match keys[i] {
+                            Some(at) if at == carried[slot] => {
+                                carried[slot] += 1;
+                                4 + dictionary[at as usize].len()
+                            }
                             _ => 0,
                         }
                     }
@@ -319,9 +333,14 @@ impl PageValues {
                     values.truncate(kept);
                     scalar_array(&name, ty, values)?
                 }
-                Values::Category { mut keys } => {
+                Values::Category {
+                    mut dictionary,
+                    mut keys,
+                } => {
                     keys.truncate(kept);
-                    category_array(keys)?
+                    let carried = keys.iter().flatten().max().map_or(0, |&at| at as usize + 1);
+                    dictionary.truncate(carried);
+                    category_array(dictionary, keys)?
                 }
             };
             fields.push(Field::new(name, array.data_type().clone(), true));
@@ -369,25 +388,10 @@ impl PageValues {
     }
 }
 
-/// A category column whose dictionary holds only the keys its rows carry, in the order they
-/// first appear.
-fn category_array(keys: Vec<Option<String>>) -> Result<ArrayRef> {
-    let mut dictionary: Vec<String> = Vec::new();
-    let mut index: FxHashMap<String, i32> = FxHashMap::default();
-    let mut codes: Vec<Option<i32>> = Vec::with_capacity(keys.len());
-    for key in keys {
-        codes.push(key.map(|key| match index.get(&key) {
-            Some(&at) => at,
-            None => {
-                let at = i32::try_from(dictionary.len()).expect("a page's keys fit in i32");
-                index.insert(key.clone(), at);
-                dictionary.push(key);
-                at
-            }
-        }));
-    }
+/// A category column over `dictionary`, which holds exactly the keys `keys` carries.
+fn category_array(dictionary: Vec<String>, keys: Vec<Option<i32>>) -> Result<ArrayRef> {
     let array = DictionaryArray::<Int32Type>::try_new(
-        Int32Array::from(codes),
+        Int32Array::from(keys),
         Arc::new(StringArray::from(dictionary)),
     )
     .map_err(|e| EngineError::Malformed(format!("a category column did not assemble: {e}")))?;

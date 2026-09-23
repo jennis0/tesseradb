@@ -12,6 +12,8 @@
 //! the two orders test each row by the same rule and return the same rows. A region past the
 //! cell budget is answered by the same cover in both, from the one decomposition cache.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -452,70 +454,105 @@ fn take_map(
     need: usize,
     rows: &mut Vec<Taken>,
 ) {
-    struct Run<'a> {
-        seg: usize,
-        segment: &'a SegmentData,
-        base: u32,
-        rows: Vec<u32>,
-        at: usize,
-        /// Where every row is served, which rows matched.
-        matched: Option<Bitmap>,
-    }
-    let mut runs: Vec<Run<'_>> = Vec::new();
-    for (seg, &(segment, base)) in cx.segments().iter().enumerate() {
-        let start = first_after(segment, scan);
-        let end = first_at_cell(segment, stretch.until);
-        if start >= end {
-            continue;
-        }
-        let visible = cx.open.mask.rows_in_range(base + start..base + end);
-        let (served, matched) = match (&stretch.filter, keep_unmatched) {
-            (None, _) => (visible, None),
-            (Some(filter), false) => (visible.and(filter.rows()), None),
-            (Some(filter), true) => {
-                let matched = visible.and(filter.rows());
-                (visible, Some(matched))
-            }
-        };
-        if served.is_empty() {
-            continue;
-        }
-        // No segment gives a page more rows than the page still needs.
-        runs.push(Run {
+    let mut runs: Vec<SegmentRun<'_>> = cx
+        .segments()
+        .iter()
+        .enumerate()
+        .map(|(seg, &(segment, base))| SegmentRun {
             seg,
             segment,
             base,
-            rows: served.iter().take(need - rows.len()).collect(),
+            next: first_after(segment, scan),
+            end: first_at_cell(segment, stretch.until),
+            chunk: u32::try_from(need - rows.len()).unwrap_or(u32::MAX).max(1),
+            buffered: Vec::new(),
             at: 0,
-            matched,
-        });
+        })
+        .collect();
+    let mut heads: BinaryHeap<Reverse<(Key, usize)>> = BinaryHeap::with_capacity(runs.len());
+    for (i, run) in runs.iter_mut().enumerate() {
+        if let Some(key) = run.head(cx, stretch, keep_unmatched) {
+            heads.push(Reverse((key, i)));
+        }
     }
-    let key = |run: &Run<'_>| {
-        let local = (run.rows[run.at] - run.base) as usize;
-        (run.segment.morton.u32()[local], run.segment.columns.tessera_id()[local])
-    };
     while rows.len() < need {
-        let Some(next) = runs
-            .iter()
-            .enumerate()
-            .filter(|(_, run)| run.at < run.rows.len())
-            .min_by_key(|(_, run)| key(run))
-            .map(|(i, _)| i)
-        else {
+        let Some(Reverse((_, i))) = heads.pop() else {
             return;
         };
-        let run = &mut runs[next];
-        let row = run.rows[run.at];
-        let local = row - run.base;
+        let run = &mut runs[i];
+        let (local, matched) = run.buffered[run.at];
         let tessera_id = run.segment.columns.tessera_id()[local as usize];
         rows.push(Taken {
             seg: run.seg,
             local,
             tessera_id,
             entity: cx.entity_of(tessera_id),
-            matched: run.matched.as_ref().is_none_or(|m| m.contains(row)),
+            matched,
         });
         run.at += 1;
+        if let Some(key) = run.head(cx, stretch, keep_unmatched) {
+            heads.push(Reverse((key, i)));
+        }
+    }
+}
+
+/// One segment's rows in a map stretch, gathered through the page's mask a chunk at a time: the
+/// first chunk is as long as the page still needs, and each after it twice the one before.
+struct SegmentRun<'a> {
+    seg: usize,
+    segment: &'a SegmentData,
+    base: u32,
+    /// The first local row not yet gathered, and the end of the stretch in this segment.
+    next: u32,
+    end: u32,
+    chunk: u32,
+    /// Gathered rows, local, each with whether it matched the filter.
+    buffered: Vec<(u32, bool)>,
+    at: usize,
+}
+
+impl SegmentRun<'_> {
+    /// The key of the next row this segment serves, gathering another chunk where the last is
+    /// spent; `None` where the stretch holds no more.
+    fn head(&mut self, cx: &PageCx<'_>, stretch: &Stretch, keep_unmatched: bool) -> Option<Key> {
+        while self.at == self.buffered.len() {
+            if self.next >= self.end {
+                return None;
+            }
+            let hi = self.end.min(self.next.saturating_add(self.chunk));
+            let visible = cx
+                .open
+                .mask
+                .rows_in_range(self.base + self.next..self.base + hi);
+            self.buffered.clear();
+            self.at = 0;
+            match &stretch.filter {
+                None => self
+                    .buffered
+                    .extend(visible.iter().map(|row| (row - self.base, true))),
+                Some(filter) if keep_unmatched => {
+                    let matched = visible.and(filter.rows());
+                    self.buffered.extend(
+                        visible
+                            .iter()
+                            .map(|row| (row - self.base, matched.contains(row))),
+                    );
+                }
+                Some(filter) => self.buffered.extend(
+                    visible
+                        .and(filter.rows())
+                        .iter()
+                        .map(|row| (row - self.base, true)),
+                ),
+            }
+            self.next = hi;
+            self.chunk = self.chunk.saturating_mul(2);
+        }
+        let local = self.buffered[self.at].0 as usize;
+        Some((
+            self.segment.morton.u32()[local],
+            self.segment.columns.tessera_id()[local],
+        ))
     }
 }
 
