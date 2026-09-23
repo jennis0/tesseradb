@@ -78,7 +78,8 @@ fn heat_on_the_wire(slot: usize, entity: u64) -> f32 {
     heat(slot, entity).unwrap_or(0.0)
 }
 
-fn members(slot: usize) -> std::ops::Range<u64> {
+/// The entities quarter `slot` holds.
+fn quarter_entities(slot: usize) -> std::ops::Range<u64> {
     QUARTERS[slot].1.clone()
 }
 
@@ -300,7 +301,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
 }
 
 /// The fixture with its scoped render families declared.
-fn build_declared(dir: &Path) -> std::path::PathBuf {
+fn build_with_families(dir: &Path) -> std::path::PathBuf {
     build_bundle(dir, true)
 }
 
@@ -576,7 +577,7 @@ async fn by_entity(
 /// bundle-wide column can do.
 #[tokio::test]
 async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_values() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let mut seen: Vec<BTreeMap<u64, f32>> = Vec::new();
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let view = format!("quarter:{key}");
@@ -590,7 +591,7 @@ async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_
         let by_entity = by_entity(&served, &served.token, &values).await;
         assert_eq!(
             by_entity.keys().copied().collect::<Vec<_>>(),
-            members(slot).collect::<Vec<_>>(),
+            quarter_entities(slot).collect::<Vec<_>>(),
             "{view} serves its own rows"
         );
         for (&entity, &value) in &by_entity {
@@ -603,7 +604,9 @@ async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_
         seen.push(by_entity);
     }
     // The overlap is the point: one entity, two views, two values.
-    let overlap: Vec<u64> = members(0).filter(|e| members(1).contains(e)).collect();
+    let overlap: Vec<u64> = quarter_entities(0)
+        .filter(|e| quarter_entities(1).contains(e))
+        .collect();
     assert!(!overlap.is_empty(), "the two quarters overlap");
     let differing = overlap.iter().filter(|e| seen[0][e] != seen[1][e]).count();
     assert!(
@@ -620,7 +623,7 @@ async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_
 /// declaration must not move a byte of a row space no scope reaches.
 #[tokio::test]
 async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_family() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let (status, body) = viewport_bytes(&served, &served.token, "world").await;
     assert_eq!(status, 200);
     let (names, values) = points_columns(&body);
@@ -691,14 +694,14 @@ async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_famil
 /// own row order and its own geometry.
 #[tokio::test]
 async fn a_sharing_group_renders_the_owners_family_under_its_own_views() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let view = format!("quarter_map:{key}");
         let (status, body) = viewport_bytes(&served, &served.token, &view).await;
         assert_eq!(status, 200, "{view}");
         let (names, values) = points_columns(&body);
         assert!(names.contains(&"heat".to_string()), "{view}: {names:?}");
-        assert_eq!(values.len(), members(slot).count(), "{view}");
+        assert_eq!(values.len(), quarter_entities(slot).count(), "{view}");
         for (entity, value) in by_entity(&served, &served.token, &values).await {
             assert_eq!(value, heat_on_the_wire(slot, entity), "{view}, {entity}");
         }
@@ -710,11 +713,13 @@ async fn a_sharing_group_renders_the_owners_family_under_its_own_views() {
 /// wire null — the same thing an entity-scoped render column's absence is.
 #[tokio::test]
 async fn an_entity_with_no_value_in_a_view_takes_the_render_placeholder() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let (status, body) = viewport_bytes(&served, &served.token, "quarter:2026-Q1").await;
     assert_eq!(status, 200);
     let (_, values) = points_columns(&body);
-    let absent: Vec<u64> = members(0).filter(|&e| heat(0, e).is_none()).collect();
+    let absent: Vec<u64> = quarter_entities(0)
+        .filter(|&e| heat(0, e).is_none())
+        .collect();
     assert!(!absent.is_empty(), "the fixture has absences to serve");
     for (entity, value) in by_entity(&served, &served.token, &values).await {
         if absent.contains(&entity) {
@@ -732,14 +737,16 @@ async fn an_entity_with_no_value_in_a_view_takes_the_render_placeholder() {
 /// selection returned — and is asserted rather than assumed.
 #[tokio::test]
 async fn a_row_the_mask_excludes_carries_no_scoped_value() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let narrow = token_for(&served.server, &["1"]).await;
     let (status, body) = viewport_bytes(&served, &narrow, "quarter:2026-Q1").await;
     assert_eq!(status, 200);
     let (names, values) = points_columns(&body);
     assert!(names.contains(&"heat".to_string()));
     let by_entity = by_entity(&served, &narrow, &values).await;
-    let expected: Vec<u64> = members(0).filter(|&e| terms_of(e).contains(&1)).collect();
+    let expected: Vec<u64> = quarter_entities(0)
+        .filter(|&e| terms_of(e).contains(&1))
+        .collect();
     assert_eq!(
         by_entity.keys().copied().collect::<Vec<_>>(),
         expected,
@@ -754,7 +761,7 @@ async fn a_row_the_mask_excludes_carries_no_scoped_value() {
 /// quarter's points batch and not in the plain view's.
 #[tokio::test]
 async fn meta_publishes_the_render_placement_and_the_views_that_have_a_column() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let body: Value = served
         .server
         .client
@@ -823,7 +830,7 @@ async fn meta_publishes_the_render_placement_and_the_views_that_have_a_column() 
 /// today draws with its own numbers without a rebuild.
 #[tokio::test]
 async fn a_view_created_at_runtime_gains_its_scoped_column_at_the_first_flush() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let resp = served
         .server
         .client
@@ -957,7 +964,7 @@ async fn settled_points(
 /// about the response's schema changes — the column is the manifest's, not the segment's.
 #[tokio::test]
 async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_carried() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     // An entity the corpus has never seen, ingested into a view of the group.
     const NEW: u64 = 9_001;
     ingest_with_heat(
@@ -970,7 +977,7 @@ async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_car
     .await;
     drain(&served.server).await;
 
-    let expected = members(0).count() + 1;
+    let expected = quarter_entities(0).count() + 1;
     let (names, values) = settled_points(&served, &served.token, "quarter:2026-Q1", expected).await;
     assert_eq!(values.len(), expected, "the flushed row is served");
     assert!(
@@ -984,7 +991,7 @@ async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_car
         by_entity[&NEW], 42.25,
         "the flush wrote the lane, and the value in it is the one the batch carried"
     );
-    for entity in members(0) {
+    for entity in quarter_entities(0) {
         assert_eq!(
             by_entity[&entity],
             heat_on_the_wire(0, entity),
@@ -1003,7 +1010,7 @@ async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_car
 /// key at all, so this path is the one it always was.
 #[tokio::test]
 async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let (status, body) = try_ingest_with_heat(
         &served,
         "heat-plain",
@@ -1027,7 +1034,7 @@ async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
 /// belongs to the `(entity, view)` pair the join is creating.
 #[tokio::test]
 async fn a_join_row_carries_this_views_scoped_value() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const NEW: u64 = 9_301;
     ingest_with_heat(
         &served,
@@ -1050,7 +1057,7 @@ async fn a_join_row_carries_this_views_scoped_value() {
 
     for (slot, value) in [(0usize, 11.0f32), (1, 22.0)] {
         let view = format!("quarter:{}", QUARTERS[slot].0);
-        let expected = members(slot).count() + 1;
+        let expected = quarter_entities(slot).count() + 1;
         let (_, values) = settled_points(&served, &served.token, &view, expected).await;
         let by_entity = by_entity(&served, &served.token, &values).await;
         assert_eq!(
@@ -1071,7 +1078,7 @@ async fn a_join_row_carries_this_views_scoped_value() {
 /// flushed row are read before the fold and again after, and both must be unchanged.
 #[tokio::test]
 async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const NEW: u64 = 9_401;
     ingest_with_heat(
         &served,
@@ -1083,7 +1090,7 @@ async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
     .await;
     drain(&served.server).await;
 
-    let expected = members(0).count() + 1;
+    let expected = quarter_entities(0).count() + 1;
     let (_, values) = settled_points(&served, &served.token, "quarter:2026-Q1", expected).await;
     let before = by_entity(&served, &served.token, &values).await;
     assert_eq!(before[&NEW], 33.5, "the flushed row's value is served");
@@ -1122,7 +1129,7 @@ async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
 /// family at all; its own value is checked, so the column is being read rather than missing.
 #[tokio::test]
 async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const REJOINS: u64 = 9_901;
     const FRESH: u64 = 9_902;
     /// Create the key, which is a `201` whether or not it has been held before.
@@ -1287,7 +1294,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
 /// and a restart of the same bundle answers where the live generation answered.
 #[tokio::test]
 async fn a_borrowing_views_scoped_values_survive_a_restart() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const OWNED_ENTITY: u64 = 9_801;
     const BORROWED_ENTITY: u64 = 9_802;
     let owner = format!("quarter:{BORROWED_KEY}");
@@ -1385,7 +1392,7 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
 /// names it.
 #[tokio::test]
 async fn a_sharing_groups_view_is_listed_where_the_owners_gated_one_is_not() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     // Term `0` alone: every entity carries it, so this principal's mask is the whole corpus and
     // what it cannot reach is a *view* rather than an item. `quarter:2026-Q2`'s gate names term
     // `1`, which it does not hold, and every `quarter_map` view is public.
@@ -1440,7 +1447,7 @@ const THRESHOLD: f64 = 30.0;
 /// The entities of a quarter whose `heat` clears the threshold — the expected answer, from the
 /// same function the parquet was written from rather than from a second reading of the rule.
 fn matching(slot: usize) -> BTreeSet<u64> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| heat(slot, e).is_some_and(|v| f64::from(v) >= THRESHOLD))
         .collect()
 }
@@ -1499,7 +1506,7 @@ async fn filtered_entities(
 /// leaf resolves would pass one assertion and fail the other.
 #[tokio::test]
 async fn a_render_only_family_answers_a_bare_leaf_under_a_view_of_its_group() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let mut answers = Vec::new();
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         // The gated quarter is reachable: this session holds both terms.
@@ -1507,7 +1514,7 @@ async fn a_render_only_family_answers_a_bare_leaf_under_a_view_of_its_group() {
         let answer = filtered_entities(&served, &served.token, &view, range("heat")).await;
         assert_eq!(answer, matching(slot), "{view} answers its own column");
         assert!(
-            answer.len() < members(slot).count(),
+            answer.len() < quarter_entities(slot).count(),
             "{view}: the threshold must exclude something, or the column is not being read"
         );
         answers.push(answer);
@@ -1532,7 +1539,7 @@ async fn a_render_only_family_answers_a_bare_leaf_under_a_view_of_its_group() {
 /// carry: `world` serves no points in this fixture.)
 #[tokio::test]
 async fn a_pin_of_a_render_only_family_reads_the_named_views_column() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let answer = filtered_entities(
         &served,
         &served.token,
@@ -1541,7 +1548,7 @@ async fn a_pin_of_a_render_only_family_reads_the_named_views_column() {
     )
     .await;
     let expected: BTreeSet<u64> = matching(0)
-        .intersection(&members(1).collect())
+        .intersection(&quarter_entities(1).collect())
         .copied()
         .collect();
     assert!(
@@ -1561,7 +1568,7 @@ async fn a_pin_of_a_render_only_family_reads_the_named_views_column() {
 /// the resolution is one site and the licence is all that changed.
 #[tokio::test]
 async fn a_render_only_familys_leaf_takes_the_same_refusals_an_indexed_ones_does() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let (status, body) = filtered_bytes(&served, &served.token, "world", range("heat")).await;
     assert_eq!(status, 422, "a bare leaf on a plain view decides nothing");
     let detail = String::from_utf8_lossy(&body).to_string();
@@ -1583,7 +1590,7 @@ async fn a_render_only_familys_leaf_takes_the_same_refusals_an_indexed_ones_does
 /// arrived by ingest answers the leaf that the build's rows answer, before and after the rewrite.
 #[tokio::test]
 async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_fold() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const NEW: u64 = 9_501;
     ingest_with_heat(
         &served,
@@ -1600,7 +1607,7 @@ async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_f
         &served,
         &served.token,
         "quarter:2026-Q1",
-        members(0).count() + 1,
+        quarter_entities(0).count() + 1,
     )
     .await;
 
@@ -1613,7 +1620,13 @@ async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_f
     // A fold rewrites the whole prefix, so a session authorised against the old one is asking
     // about a bundle that has gone.
     let token = token_for(&served.server, &["0", "1"]).await;
-    settled_points(&served, &token, "quarter:2026-Q1", members(0).count() + 1).await;
+    settled_points(
+        &served,
+        &token,
+        "quarter:2026-Q1",
+        quarter_entities(0).count() + 1,
+    )
+    .await;
     let after = filtered_entities(&served, &token, "quarter:2026-Q1", range("heat")).await;
     assert_eq!(
         after, expected,
@@ -1638,7 +1651,7 @@ async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_f
 /// row space entirely, and by one under `quarter_map:2026-Q1` beside it.
 #[tokio::test]
 async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const NEW: u64 = 9_401;
     // Above the fixture's threshold, so the leaf below separates it from the absent rows.
     const VALUE: f32 = 77.5;
@@ -1671,7 +1684,7 @@ async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
     }
     // And the lane the sharing door's own row carries is the value it supplied, not the absence a
     // view that could not write the family used to take.
-    let expected = members(0).count() + 1;
+    let expected = quarter_entities(0).count() + 1;
     let (_, values) = settled_points(&served, &served.token, "quarter_map:2026-Q1", expected).await;
     let by_entity = by_entity(&served, &served.token, &values).await;
     assert_eq!(
@@ -1693,7 +1706,7 @@ async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
 /// who owns the family.
 #[tokio::test]
 async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_different_one() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const AGREES: u64 = 9_501;
     const DISAGREES: u64 = 9_502;
     const VALUE: f32 = 88.25;
@@ -1754,7 +1767,7 @@ async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_diff
 #[tokio::test]
 async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
     use base64::Engine as _;
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const AGREES: u64 = 9_601;
     const DISAGREES: u64 = 9_602;
     const VALUE: f32 = 5.0;
@@ -1834,7 +1847,7 @@ async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
 /// refused before any cell is read.
 #[tokio::test]
 async fn a_written_cell_of_an_unflagged_family_dedupes_or_is_refused() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     // An entity the build placed in `2026-Q1`, whose `tag` the build wrote: slot 0, so `e * 2`.
     const CELL: u64 = 4;
     const HELD: f32 = (CELL * 2) as f32;
@@ -1897,7 +1910,7 @@ async fn fill(
 /// what cannot be established. Omitting the column passes, and leaves the cell as it stands.
 #[tokio::test]
 async fn a_flushed_text_cell_refuses_a_second_value_equal_or_not() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const A: u64 = 9_601;
     const B: u64 = 9_602;
     const C: u64 = 9_603;
@@ -1984,7 +1997,7 @@ async fn a_flushed_text_cell_refuses_a_second_value_equal_or_not() {
 /// the fail-closed arm above would read as the rule for text rather than as the cost of a flush.
 #[tokio::test]
 async fn a_same_window_text_cell_still_dedupes_and_refuses_exactly() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const AGREES: u64 = 9_701;
     const DISAGREES: u64 = 9_702;
     let prose = "prose still sitting in the buffer";
@@ -2054,7 +2067,7 @@ async fn a_same_window_text_cell_still_dedupes_and_refuses_exactly() {
 /// proved here is that the values are on disc, in the manifest, and survive a rewrite.
 #[tokio::test]
 async fn a_neither_flag_family_gains_its_column_from_a_flush_and_keeps_it_through_a_fold() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const NEW: u64 = 9_801;
     let (status, body) = try_ingest_families(
         &served,
@@ -2207,7 +2220,7 @@ fn views_of(e: u64) -> Vec<String> {
 /// projection being the view's own (decision 0040).
 #[tokio::test]
 async fn the_drill_down_names_every_view_the_point_is_in_with_its_position_there() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     // In the plain view and in both quarters, so the sharing group's two layouts hold it as well.
     const ENTITY: u64 = 10;
     let id = id_of(&served, &served.token, "world", ENTITY).await;
@@ -2253,7 +2266,7 @@ async fn the_drill_down_names_every_view_the_point_is_in_with_its_position_there
 /// serving the same number twice would be reading a bundle-wide column under a scoped name.
 #[tokio::test]
 async fn the_drill_down_serves_the_scoped_values_keyed_by_the_groups_key() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     const ENTITY: u64 = 10;
     let id = id_of(&served, &served.token, "world", ENTITY).await;
     let body = item(&served, &served.token, id).await;
@@ -2295,7 +2308,7 @@ async fn the_drill_down_serves_the_scoped_values_keyed_by_the_groups_key() {
 /// can.
 #[tokio::test]
 async fn a_gate_failed_view_is_absent_from_the_drill_down_and_its_key_is_not() {
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     let narrow = token_for(&served.server, &["0"]).await;
     const ENTITY: u64 = 10;
     let id = id_of(&served, &narrow, "world", ENTITY).await;
@@ -2338,7 +2351,7 @@ async fn a_gate_failed_view_is_absent_from_the_drill_down_and_its_key_is_not() {
 #[tokio::test]
 async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
     use base64::Engine as _;
-    let served = Served::build(build_declared).await;
+    let served = Served::build(build_with_families).await;
     // An entity ingested and published, so the cell this fills is empty and nothing else is
     // buffered. A built cell holds the build's own value, which the fill would be refused for.
     const FRESH: u64 = 9_801;
@@ -2440,7 +2453,7 @@ fn built_slot(view: &str) -> Option<usize> {
 
 /// The entities `view` serves once every row below has flushed.
 fn population(view: &str) -> BTreeSet<u64> {
-    let built = built_slot(view).into_iter().flat_map(members);
+    let built = built_slot(view).into_iter().flat_map(quarter_entities);
     built
         .chain(WRITTEN.iter().filter(|w| w.view == view).map(|w| w.entity))
         .collect()
@@ -2457,7 +2470,7 @@ fn scoped_heat(key: &str, entity: u64) -> Option<f32> {
         return Some(written.heat);
     }
     let slot = QUARTERS.iter().position(|(k, _)| *k == key)?;
-    members(slot)
+    quarter_entities(slot)
         .contains(&entity)
         .then(|| heat(slot, entity))
         .flatten()
@@ -2594,7 +2607,7 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
         coalesce_width: Some(2),
         ..default_engine_config()
     };
-    let served = Served::build_with(build_declared, config()).await;
+    let served = Served::build_with(build_with_families, config()).await;
     let resp = served
         .server
         .client

@@ -1561,7 +1561,6 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
     };
     let before = visible(token.to_string(), viewport_req.clone()).await;
 
-    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
     let _read_only = ReadOnlyWalDir::new(&wal_dir);
 
     let resp = server
@@ -1569,9 +1568,9 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "external_id": b64(5),  "op": "suppress" },
-            { "external_id": b64(9),  "op": "unsuppress" },
-            { "external_id": b64(11), "op": "suppress" },
+            { "external_id": member(5),  "op": "suppress" },
+            { "external_id": member(9),  "op": "unsuppress" },
+            { "external_id": member(11), "op": "suppress" },
         ]))
         .send()
         .await
@@ -3389,9 +3388,8 @@ async fn a_change_batch_of_n_costs_one_fsync() {
     let server = serve(&tmp).await;
 
     let before = control_status(&server).await;
-    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
     let items: Vec<serde_json::Value> = (0..N)
-        .map(|i| serde_json::json!({ "external_id": b64(i), "op": "suppress" }))
+        .map(|i| serde_json::json!({ "external_id": member(i), "op": "suppress" }))
         .collect();
 
     let resp = server
@@ -3494,14 +3492,12 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
     };
     let before = visible(token.clone(), viewport_req.clone()).await;
 
-    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
-
     // B, durably suppressed while the WAL still works.
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": b64(9), "op": "suppress" }]))
+        .json(&serde_json::json!([{ "external_id": member(9), "op": "suppress" }]))
         .send()
         .await
         .unwrap();
@@ -3519,9 +3515,9 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "external_id": b64(5),  "op": "suppress" },
-            { "external_id": b64(9),  "op": "unsuppress" },
-            { "external_id": b64(11), "op": "suppress" },
+            { "external_id": member(5),  "op": "suppress" },
+            { "external_id": member(9),  "op": "unsuppress" },
+            { "external_id": member(11), "op": "suppress" },
         ]))
         .send()
         .await
@@ -3903,13 +3899,12 @@ async fn the_predicate_op_is_refused_with_a_422() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
-    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "external_id": b64(3), "op": "predicate", "access": "0" },
+            { "external_id": member(3), "op": "predicate", "access": "0" },
         ]))
         .send()
         .await
@@ -3927,7 +3922,6 @@ async fn the_predicate_op_is_refused_with_a_422() {
 async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
     let ingest = |batch: &'static str, ids: Vec<u64>| {
         let client = server.client.clone();
         let url = server.control_url("/control/ingest");
@@ -3951,7 +3945,7 @@ async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
     let change = |op: &'static str, id: u64| {
         let client = server.client.clone();
         let url = server.control_url("/control/changes");
-        let ext = b64(id);
+        let ext = member(id);
         async move {
             client
                 .post(url)

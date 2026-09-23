@@ -92,7 +92,7 @@ const TONES: [&str; 4] = ["dawn", "noon", "dusk", "solitary"];
 /// of three by luck — which showed up here as a narrow list equal to the wide one rather than a
 /// proper subset of it.
 fn solitary_entity(slot: usize) -> u64 {
-    members(slot)
+    quarter_entities(slot)
         .find(|&e| !narrow_mask(e))
         .expect("every quarter holds an entity the narrow principal cannot see")
 }
@@ -161,28 +161,29 @@ fn score(slot: usize, entity: u64) -> Option<f32> {
 /// readily as the right one.
 const THRESHOLD: f64 = 0.5;
 
-fn members(slot: usize) -> std::ops::Range<u64> {
+/// The entities quarter `slot` holds.
+fn quarter_entities(slot: usize) -> std::ops::Range<u64> {
     QUARTERS[slot].1.clone()
 }
 
 /// The entities of a quarter whose `mood` is `value` — the expected answer, from the same function
 /// the parquet was written from.
 fn with_mood(slot: usize, value: &str) -> BTreeSet<u64> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| mood(slot, e) == Some(value))
         .collect()
 }
 
 /// The entities of a quarter whose prose carries `word`.
 fn with_word(slot: usize, word: &str) -> BTreeSet<u64> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| note(slot, e).is_some_and(|prose| prose.contains(word)))
         .collect()
 }
 
 /// The entities of a quarter whose `score` clears the threshold.
 fn over_threshold(slot: usize) -> BTreeSet<u64> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| score(slot, e).is_some_and(|v| f64::from(v) >= THRESHOLD))
         .collect()
 }
@@ -196,7 +197,7 @@ fn sectors_in(slot: usize) -> BTreeSet<&'static str> {
 /// The `sector` values a quarter's entities carry **that this principal can see** — §3.3's
 /// membership predicate, written from the fixture's own arrays.
 fn sectors_visible_to(slot: usize, visible: &dyn Fn(u64) -> bool) -> BTreeSet<&'static str> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| visible(e))
         .filter_map(|e| sector(slot, e))
         .collect()
@@ -205,7 +206,7 @@ fn sectors_visible_to(slot: usize, visible: &dyn Fn(u64) -> bool) -> BTreeSet<&'
 /// The `tone` values a quarter's entities carry **that this principal can see** —
 /// [`sectors_visible_to`]'s question of the render-only family.
 fn tones_visible_to(slot: usize, visible: &dyn Fn(u64) -> bool) -> BTreeSet<&'static str> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| visible(e))
         .filter_map(|e| tone(slot, e))
         .collect()
@@ -550,7 +551,7 @@ async fn a_scoped_category_answers_from_the_requests_own_view() {
             "{view} must answer from its own `mood` column"
         );
         assert!(
-            !matched.is_empty() && matched.len() < members(slot).count(),
+            !matched.is_empty() && matched.len() < quarter_entities(slot).count(),
             "{view}'s predicate is a proper subset, or this test proves nothing"
         );
     }
@@ -683,7 +684,7 @@ async fn a_scoped_family_reads_its_own_source_per_view() {
             "{view} must read its own rows of the shared source"
         );
         assert!(
-            !matched.is_empty() && matched.len() < members(slot).count(),
+            !matched.is_empty() && matched.len() < quarter_entities(slot).count(),
             "{view}'s predicate is a proper subset, or this test proves nothing"
         );
     }
