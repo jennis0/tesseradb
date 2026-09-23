@@ -64,12 +64,22 @@ export function layerEntries(layers: readonly Layer[]): LayerEntry[] {
  * The server changes nothing for it. This is a reading of a declaration, not a new field.
  */
 export function isFilterLayer(layer: Layer): boolean {
-  return layer.computedContent.length === 0;
+  // A labels layer declares no geometry either: its text is drawn at the artifact it depends on.
+  return layer.computedContent.length === 0 && layer.depsOn.length === 0;
 }
 
 /** The layers a client may draw — every layer that is not a filter layer. */
 export function drawableLayers(layers: readonly Layer[]): Layer[] {
   return layers.filter((l) => !isFilterLayer(l));
+}
+
+/**
+ * The layers whose clusters points may be coloured by (`colourBy = "cluster:<layer>"`): every
+ * drawable layer that is not a labels layer. A labels layer's artifacts have no members of their
+ * own to colour.
+ */
+export function colourLayers(layers: readonly Layer[]): Layer[] {
+  return layers.filter((l) => !isFilterLayer(l) && l.depsOn.length === 0);
 }
 
 /**

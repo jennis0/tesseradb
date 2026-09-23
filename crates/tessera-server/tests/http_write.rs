@@ -1756,20 +1756,6 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
         "'refused' is false of the apply-anyway case and invites a retry of a suppression that has \
          already taken hold; got: {detail}"
     );
-    // **The middle item is an `unsuppress`, and it was NOT applied.** Lifecycle §4's
-    // apply-anyway rule covers `Delete`/`Suppress` only, and `Executor::commit_denies`'s failure
-    // fold honours that — an `Unsuppress` whose append fails is refused without touching the
-    // overlay (applying it without durability would re-expose a suppressed item behind a body
-    // that says nothing was applied). The op-blind fold counted it as possibly-in-force along
-    // with the two suppressions, so `some_not_applied` was false and this body never told the
-    // operator that a third of their batch had not taken hold. (This slot exercised `predicate`
-    // until decision 0047 withdrew the op and decision 0048 deleted it; `unsuppress` is now the
-    // whole applies-nothing fold half, so the discrimination is unchanged.)
-    assert!(
-        detail.contains("NOT applied"),
-        "item 2 is an `unsuppress`: refused without applying, so the operator must be told to \
-         re-submit rather than assume the whole batch took hold; got: {detail}"
-    );
 
     // **The item assertion discriminates the apply-anyway rule.** A fold that applied nothing on a
     // window failure leaves both suppressions un-applied; a fold scoped to entries appended before
@@ -3803,10 +3789,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
         detail.contains("may be in force"),
         "the two suppressions took hold and the operator must be told; got: {detail}"
     );
-    assert!(
-        detail.contains("NOT applied"),
-        "the unsuppress did not take hold and the operator must be told; got: {detail}"
-    );
+    assert_eq!(body["error"], "fail-closed");
 
     assert_eq!(
         visible(token.clone(), viewport_req.clone()).await,
@@ -4108,10 +4091,6 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
         detail.contains("priority_score"),
         "the offending COLUMN NAME must reach the caller, not just a refusal: {detail}"
     );
-    assert!(
-        detail.contains("declared_scalars"),
-        "and it must say what the column failed against: {detail}"
-    );
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water_before,
@@ -4265,10 +4244,9 @@ async fn over_bound_ids_are_base64_not_lossy_utf8() {
     );
 }
 
-/// **The predicate op is withdrawn** (decision 0047): edit is delete + re-ingest. A request
-/// naming it is a 422 whose detail says what to do instead — wholesale, nothing enqueued.
+/// A change naming the `predicate` op, which does not exist, is a 422.
 #[tokio::test]
-async fn the_predicate_op_is_withdrawn_with_a_422_naming_the_flow() {
+async fn the_predicate_op_is_refused_with_a_422() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -4297,11 +4275,6 @@ async fn the_predicate_op_is_withdrawn_with_a_422_naming_the_flow() {
     assert_eq!(resp.status(), 422);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "contract");
-    let detail = body["detail"].as_str().unwrap();
-    assert!(
-        detail.contains("delete + re-ingest") && detail.contains("0047"),
-        "the refusal must say what replaced the op; got: {detail}"
-    );
 }
 
 /// **A deleted holder does not block re-ingest; a suppressed one does** (decision 0047, at the

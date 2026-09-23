@@ -72,8 +72,7 @@ pub(super) fn membership_column<'a>(
     if declaration.membership != tessera_types::layer::MembershipSource::Enumerated {
         return Err(DecodeError(format!(
             "{body_name}: column '{name}' names a layer whose membership is evaluated per \
-             request rather than enumerated — there is no stored membership for a point to join, \
-             and one written beside the predicate would diverge from it at the first write"
+             request, so it has no stored membership to write; leave the column out"
         )));
     }
 
@@ -82,9 +81,8 @@ pub(super) fn membership_column<'a>(
         None => None,
         Some(group) => Some(view_in(group).ok_or_else(|| {
             DecodeError(format!(
-                "{body_name}: column '{name}' names a layer scoped to group '{group}', whose keys \
-                 are a set per view, and this batch names no view of it; name one in \
-                 x-tessera-view"
+                "{body_name}: column '{name}' names a layer scoped to group '{group}' and this \
+                 batch names no view of it; name one in x-tessera-view"
             ))
         })?),
     };
@@ -101,19 +99,17 @@ pub(super) fn membership_column<'a>(
             match meaning {
                 tessera_types::layer::ListMeaning::Lineage => {
                     return Err(DecodeError(format!(
-                        "{body_name}: column '{name}' is a fixed-size list of {size} and that \
-                         layer is declared nested, whose lineage is as deep as each point's own \
-                         branch — a fixed arity is one entry per level, which is the stacked and \
-                         tiered shape"
+                        "{body_name}: column '{name}' is a fixed-size list of {size} but that \
+                         layer is declared nested; send each point's lineage as a variable-length \
+                         list"
                     )))
                 }
                 tessera_types::layer::ListMeaning::Levelled { levels, .. }
                     if *size as usize != levels =>
                 {
                     return Err(DecodeError(format!(
-                        "{body_name}: column '{name}' is a fixed-size list of {size} and that \
-                         layer declares {levels} levels. Entry k is the artifact at level k, so \
-                         the two counts are one number written twice"
+                        "{body_name}: column '{name}' is a fixed-size list of {size} but that \
+                         layer declares {levels} levels; send one entry per level"
                     )))
                 }
                 _ => {}
@@ -128,8 +124,8 @@ pub(super) fn membership_column<'a>(
     };
     let keys = KeyColumn::new(values).ok_or_else(|| {
         DecodeError(format!(
-            "{body_name}: column '{name}' names a layer and carries {:?}; a member key is {KEY_TYPES}, \
-             an integer key being read as its decimal spelling, so `3` and \"3\" name one artifact",
+            "{body_name}: column '{name}' names a layer and carries {:?}; send its keys as \
+             {KEY_TYPES}",
             values.data_type()
         ))
     })?;
@@ -169,9 +165,9 @@ impl MembershipTally {
         if let Some(levels) = column.meaning.arity().filter(|_| column.cells.is_list()) {
             if entries.len() != levels {
                 return Err(DecodeError(format!(
-                    "{body_name}: column '{}' names {} artifacts at row {row} and the layer \
-                     declares {levels} levels. A stacked or tiered layer's column is one entry \
-                     per level, nullable where the point is in no artifact at that resolution",
+                    "{body_name}: column '{}' names {} artifacts at row {row} but the layer \
+                     declares {levels} levels; send one entry per level, null where the point is \
+                     in no artifact at that level",
                     column.layer,
                     entries.len(),
                 )));

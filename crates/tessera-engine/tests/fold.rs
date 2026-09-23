@@ -2880,3 +2880,111 @@ fn dropping_the_engine_returns_while_a_fold_is_held_in_flight() {
         "the drop took {took:?}, so it waited on something rather than on the queues closing"
     );
 }
+
+/// **A fold lands while ingest continues into several views.**
+///
+/// Each round ingests new items into `s0` and joins the same items into `s1` and `s2`, as a
+/// multi-view deployment's feed does, and asks for a flush. Views flush one per tick, so whenever
+/// a fold is planned some view's rows for entities another view has already flushed are still
+/// buffered, and they publish during the fold's flight. A fold discarded for that is asked for
+/// again; one of a bounded number of attempts must publish while the feed keeps running.
+#[test]
+#[ignore = "fails: most folds are discarded because a join flushed in their flight carries a locator extent below their base"]
+fn a_fold_lands_while_ingest_continues_into_several_views() {
+    const ATTEMPTS: u64 = 5;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    for name in ["s1", "s2"] {
+        engine
+            .create_plain_view(tessera_engine::PlainViewDeclaration {
+                name: name.to_string(),
+                title: None,
+                projection: "none".to_string(),
+                frame: tessera_engine::DeclaredFrame {
+                    x_min: 0.0,
+                    x_max: 1000.0,
+                    y_min: 0.0,
+                    y_max: 1000.0,
+                },
+                visibility: None,
+                point_default: None,
+            })
+            .expect("the view is created");
+    }
+
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let outcome = std::thread::scope(|scope| {
+        let feed = scope.spawn(|| {
+            let mut round = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                for view in ["s0", "s1", "s2"] {
+                    let rows: Vec<UnallocatedRow> = (0..8u64)
+                        .map(|i| UnallocatedRow {
+                            external_id: Some(format!("feed-{round}-{i}").into_bytes()),
+                            view: view.to_string(),
+                            join: None,
+                            descriptors: vec![b"0".to_vec()],
+                            x: (10 + i * 100) as f64,
+                            y: (10 + round % 90 * 10) as f64,
+                            scalars: Vec::new(),
+                            terms: engine.resolve_terms(&[b"0".to_vec()]),
+                            scoped: Vec::new(),
+                        })
+                        .collect();
+                    engine
+                        .accept_ingest(rows, format!("feed-{round}-{view}"), [0u8; 32])
+                        .expect("the feed's batch is accepted");
+                }
+                engine.request_flush();
+                round += 1;
+            }
+            round
+        });
+
+        // Stops the feed on every way out of this closure, a failed wait included, or the scope
+        // would wait on it for ever.
+        struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let stopping = StopOnDrop(&stop);
+
+        wait_for("the feed to publish into every view", || {
+            let generation = engine.generation();
+            let views = &generation.bundle.partitions["default"].views;
+            ["s1", "s2"]
+                .iter()
+                .all(|v| views.get(*v).is_some_and(|d| !d.segments.is_empty()))
+        });
+        let before = engine.write_executor_stats();
+        let mut landed = false;
+        for _ in 0..ATTEMPTS {
+            let asked = engine.write_executor_stats();
+            engine.request_fold();
+            // A refusal at the plan answers a request as a discard does.
+            wait_for("the fold to publish or be discarded", || {
+                let now = engine.write_executor_stats();
+                now.folds > asked.folds
+                    || now.fold_failures > asked.fold_failures
+                    || now.fold_refusals > asked.fold_refusals
+            });
+            if engine.write_executor_stats().folds > asked.folds {
+                landed = true;
+                break;
+            }
+        }
+        drop(stopping);
+        let rounds = feed.join().expect("the feed ran to its stop");
+        let discarded = engine.write_executor_stats().fold_failures - before.fold_failures;
+        (landed, discarded, rounds)
+    });
+    let (landed, discarded, rounds) = outcome;
+    assert!(
+        landed,
+        "no fold published in {ATTEMPTS} attempts; {discarded} were discarded over {rounds} \
+         rounds of the feed"
+    );
+}
