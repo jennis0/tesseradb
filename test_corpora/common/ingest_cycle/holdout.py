@@ -36,6 +36,7 @@ def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list
     keys, its rows picked by the `fields.view` column where its file names one."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
+    entity = declared.get("defaults", {}).get("entity_id_field", "entity_id")
     view = view or declared_views(rung)[0]
     access = view["point_visibility"].get("field")
     held = set(pq.ParquetFile(view["points"]).schema_arrow.names)
@@ -52,7 +53,15 @@ def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list
             continue
         column = (attribute.get("fields") or {}).get("view")
         select = (column, view["key"]) if group is not None and column else None
-        entry = joined.setdefault((own, select), {"file": own, "columns": [], "select": select})
+        entry = joined.setdefault(
+            (own, select),
+            {
+                "file": own,
+                "columns": [],
+                "select": select,
+                "fields": {"entity_id": (attribute.get("fields") or {}).get("entity_id", entity)},
+            },
+        )
         entry["columns"].append(attribute["name"])
         attributes.append(attribute["name"])
     return access, attributes, list(joined.values())
@@ -203,13 +212,17 @@ class HoldOut:
         view = view or declared_views(rung)[0]
         self.points = view["points"]
         self.select = view["select"]
+        #: The file's spelling of each canonical column a batch reads by name.
+        self.renamed = {
+            spelt: name for name, spelt in view["fields"].items() if name != "view" and spelt != name
+        }
         self.batch_rows = batch_rows
         self.held = np.sort(held)
         self.access, self.attributes, joined = wire_columns(rung, view)
         #: Each joined file's rows for the hold-out, read once: small beside the points.
         self.joined = [
             read_view_rows(
-                {"points": entry["file"], "select": entry["select"]},
+                {"points": entry["file"], "select": entry["select"], "fields": entry["fields"]},
                 ["entity_id", *entry["columns"]],
                 self.held,
             )
@@ -287,6 +300,8 @@ class HoldOut:
             group = reader.read_row_group(index)
             if self.select is not None:
                 group = group.filter(pc.equal(group.column(self.select[0]), self.select[1]))
+            if self.renamed:
+                group = group.rename_columns([self.renamed.get(n, n) for n in group.column_names])
             table = group.filter(pa.array(in_sorted(group.column("entity_id").to_numpy(), self.held)))
             del group
             if table.num_rows == 0:

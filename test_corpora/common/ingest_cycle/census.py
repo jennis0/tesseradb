@@ -156,7 +156,11 @@ def column_sample(rung: Path, candidates: Sequence[dict], column: str) -> pa.Arr
         if column not in attributes:
             continue
         source = next(
-            ({"points": j["file"], "select": j["select"]} for j in joined if column in j["columns"]),
+            (
+                {"points": j["file"], "select": j["select"], "fields": j["fields"]}
+                for j in joined
+                if column in j["columns"]
+            ),
             view,
         )
         rows = read_view_rows(source, [column], limit=PROBE_SAMPLE_ROWS)
