@@ -739,10 +739,14 @@ paths:
         **Narrowing.** `level` reads one level of a levelled layer. `parent` reads the artifacts
         naming that artifact among their parents; a parent this principal is not served answers
         exactly as a parent with no children does. `q` keeps the artifacts whose key, or whose
-        first served text content, contains it case-insensitively. `filters` keeps the artifacts
-        with at least one visible member matching it, and adds a `matched_count` column; under
-        `keep_unmatched` every served artifact is returned, those with no matching member with a
-        zero. A request with `filters` evaluates the filter over the whole view once per response.
+        first served text content, contains it case-insensitively; an authored shape is not text
+        and is never searched. `filters` keeps the artifacts with at least one visible member
+        matching it, and adds a `matched_count` column; under `keep_unmatched` every served
+        artifact is returned, those with no matching member with a zero. An attached artifact,
+        such as a label, is counted by the artifact it is attached to: its `matched_count` is its
+        target's, it is kept or dropped as its target is, and the head's `matched` counts it so,
+        as the viewport gives it its target's matched bit. A request with `filters` evaluates the
+        filter over the whole view once per response.
 
         **Columns.** `tessera_id` (`uint64`) first, then the named properties in the order named,
         then `matched_count` (`uint64`) whenever the request carries `filters`. `key`: `utf8`, null
@@ -750,14 +754,18 @@ paths:
         without levels. `parents`: `list<uint64>`, the parents this principal is also served.
         `target`: `uint64`, the artifact this one is attached to, null where none. `masked_count`:
         `uint64`, how many members this principal can see. `content`: `list<utf8>`, the one set of
-        supplied content this principal is served, positional to the layer's `supplied_content`.
+        supplied content this principal is served, positional to the layer's `supplied_content`,
+        with an authored shape's slot empty: the shape is served as `shape`, for this view alone.
         `centroid`: `float64` columns `centroid_x`, `centroid_y`; `box`: `float64` columns
         `box_x_min`, `box_y_min`, `box_x_max`, `box_y_max`; both over the members this principal
         can see, in the view's coordinates as `POST /v1/items` converts `position`, null where it
-        sees none. `shape`: `binary`, a WKB `MultiPolygon` in the view's coordinates with every
-        ring closed, null on a layer that draws no geometry: a derived hull over the members this
-        principal can see, or a predicate or authored shape whole, as `POST
-        /v1/artifacts/{tessera_id}` serves it.
+        sees none. A centroid is the members' mean in the view's projected space, converted: on a
+        geographic view it is not the mean of their longitudes and latitudes. `shape`: `binary`,
+        a WKB `MultiPolygon` in the view's coordinates, null on a layer that draws no geometry: a
+        derived hull over the members this principal can see, or a predicate or authored shape
+        whole, as `POST /v1/artifacts/{tessera_id}` serves it. Every ring is closed and holds at
+        least four points: a hull over one or two members, or over members on one line, is a
+        zero-area polygon over their positions, repeated.
 
         **Cursor.** Bound to the route, the view and its incarnation, the layer, the `level`
         named and the credential that received it. A cursor that fails any of these is one `422`
@@ -1835,7 +1843,7 @@ components:
           description: The publisher's own key, where they supplied one.
         name:
           type: string
-          description: The artifact's first supplied text content, where this principal may read it. An artifact whose content cannot be served is absent from the page entirely rather than served with this field empty.
+          description: The artifact's first supplied text content, where this principal may read it; absent where the first content is an authored shape, which is not text. An artifact whose content cannot be served is absent from the page entirely rather than served with this field empty.
         masked_count:
           type: integer
           description: How many of this artifact's members this principal can see — never how many it has, and never moved by `filters`.

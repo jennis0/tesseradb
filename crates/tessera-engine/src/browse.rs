@@ -125,7 +125,8 @@ pub struct BrowseRow {
     pub key: Option<String>,
     /// The artifact's **first supplied text content**, where this principal may read it — the
     /// containment rule's own answer, so a viewer who holds no content's generating set entire is
-    /// served no artifact at all rather than this field empty.
+    /// served no artifact at all rather than this field empty. `None` where the first content is
+    /// an authored shape, which is not text.
     pub name: Option<String>,
     /// `|membership ∩ M_auth|`, computed per request and never precomputed (C8). **It never moves
     /// with the filter.**
@@ -363,7 +364,7 @@ impl crate::Engine {
                         level_read.matched_count(ordinal, &mask, filter_rows),
                     );
                 }
-                names.insert((walked, ordinal), content.values.into_iter().next());
+                names.insert((walked, ordinal), content.first_text().map(str::to_string));
                 keys.insert(
                     (walked, ordinal),
                     self.write

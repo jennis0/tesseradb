@@ -39,6 +39,8 @@ use tessera_types::{EntityId, TesseraId};
 const N: u64 = 900;
 const TREE: &str = "clusters/tree";
 const LABELS: &str = "labels/tree";
+/// Attached to the tree's roots like `labels/tree`, with no members of their own.
+const NAMES: &str = "names/tree";
 const TOPICS: &str = "topics/contained";
 const FLOOR: &str = "clusters/floor";
 const BOXES: &str = "regions/boxes";
@@ -175,7 +177,10 @@ impl Fx {
 /// - `clusters/tree`: nested, a supplied name; twelve roots and three children each, published
 ///   root then its children, so publication order interleaves the two depths. One root carries
 ///   a label only the subset viewer holds and one child a label nobody holds.
-/// - `labels/tree`: flat, attached to the tree's roots, one label per root.
+/// - `labels/tree`: flat, attached to the tree's roots, one label per root, each holding the next
+///   root's members.
+/// - `names/tree`: flat, attached to the tree's roots, with no members of its own, so each takes
+///   its root's.
 /// - `topics/contained`: flat, content served only to a viewer who sees everything it was
 ///   generated from.
 /// - `clusters/floor`: flat, served while [`FLOOR_COUNT`] members are visible, with a derived
@@ -233,9 +238,11 @@ fn fixture() -> Fx {
     engine.register_layer(labels).unwrap();
     let attached: Vec<IncomingArtifact> = (0..ROOTS)
         .map(|r| {
+            // Each label's own members are the next root's, so a count over them is not its
+            // target's.
             let mut label = IncomingArtifact::from_entities(
                 Some(format!("label-{}", root_key(r))),
-                fx.entities(root_members(r)),
+                fx.entities(root_members((r + 1) % ROOTS)),
             );
             label.attached_to = Some(IncomingAttachment {
                 layer: TREE.into(),
@@ -246,6 +253,22 @@ fn fixture() -> Fx {
         })
         .collect();
     engine.publish_artifacts(LABELS.into(), 0, attached).unwrap();
+
+    let mut empty_names = base_declaration(NAMES, HierarchyKind::Flat);
+    empty_names.depends_on = vec![TREE.into()];
+    engine.register_layer(empty_names).unwrap();
+    let named: Vec<IncomingArtifact> = (0..ROOTS)
+        .map(|r| {
+            let mut name = IncomingArtifact::from_entities(Some(format!("name-{}", root_key(r))), []);
+            name.attached_to = Some(IncomingAttachment {
+                layer: TREE.into(),
+                level: 0,
+                key: root_key(r),
+            });
+            name
+        })
+        .collect();
+    engine.publish_artifacts(NAMES.into(), 0, named).unwrap();
 
     let mut topics = base_declaration(TOPICS, HierarchyKind::Flat);
     topics.content = text_content("summary", SuppliedRequirement::All);
@@ -1535,6 +1558,7 @@ fn an_authored_shape_names_no_other_view_on_browse() {
     };
     let roots = browse(tessera_engine::browse::BrowseForm::Roots);
     assert_eq!(roots.artifacts.len(), 1, "the artifact is served");
+    assert_eq!(roots.artifacts[0].name, None, "a shape slot names nothing");
     a.assert_clean("browse", &format!("{roots:?}"));
     for secret in &a.secrets {
         let found = browse(tessera_engine::browse::BrowseForm::Search(secret.clone()));
@@ -1574,5 +1598,103 @@ fn an_authored_shape_names_no_other_view_on_the_artifacts_read() {
         let mut req = req.clone();
         req.q = Some(secret);
         assert!(read_all(&a.engine, &session, &req).is_empty(), "q read the slot for '{secret}'");
+    }
+}
+
+/// **Under a filter an attached artifact is counted by its target**: a name with no members of
+/// its own, and a label holding another root's members, each take their root's matched count,
+/// are kept where their root matches and dropped where it does not, and the head counts them the
+/// same way.
+#[test]
+fn an_attached_artifact_takes_its_targets_matched_count() {
+    let fx = fixture();
+    let engine = fx.engine();
+    let fields = names(&["key"]);
+    for (credential, broad) in [(full_coverage_credential(), true), (subset_credential(), false)] {
+        let session = engine.authorise(&credential).unwrap();
+        let roots = read_all(engine, &session, &request(TREE, &fields));
+        let root_ids: HashMap<String, u64> = keys(&roots).into_iter().zip(ids(&roots)).collect();
+        let filter = FilterExpr::MemberOf(tessera_engine::filter::MemberOfLeaf {
+            layer: TREE.into(),
+            artifact: TesseraId::new(root_ids[&root_key(2)]),
+        });
+        let served: Vec<u64> = (0..ROOTS).filter(|&r| r != LABELLED_ROOT || !broad).collect();
+        let count_of = |r: u64| {
+            if r == 2 {
+                root_members(2).filter(|&s| sees(broad, s)).count() as u64
+            } else {
+                0
+            }
+        };
+
+        for (layer, prefix) in [(NAMES, "name"), (LABELS, "label")] {
+            let mut req = request(layer, &fields);
+            req.filter = Some(filter.clone());
+            req.count = true;
+            req.page_rows = Some(3);
+            let (sink, _) = respond(engine, &session, req.clone()).unwrap();
+            let counts = sink.head.unwrap().counts.unwrap();
+            assert_eq!((counts.served, counts.matched), (served.len() as u64, 1), "{layer}");
+            let pages = read_all(engine, &session, &req);
+            assert_eq!(keys(&pages), vec![format!("{prefix}-{}", root_key(2))]);
+            assert_eq!(u64s(&pages, "matched_count"), vec![count_of(2)], "{layer}");
+
+            req.keep_unmatched = true;
+            let pages = read_all(engine, &session, &req);
+            let want: Vec<String> =
+                served.iter().map(|&r| format!("{prefix}-{}", root_key(r))).collect();
+            assert_eq!(keys(&pages), want);
+            let counts: Vec<u64> = served.iter().map(|&r| count_of(r)).collect();
+            assert_eq!(u64s(&pages, "matched_count"), counts, "{layer}");
+        }
+    }
+}
+
+/// **A derived hull over one member, two members or collinear members is written as a closed
+/// ring of at least four points over the members' own positions.**
+#[test]
+fn a_hull_over_few_members_is_a_closed_ring_of_four_points() {
+    let fx = fixture();
+    let engine = fx.engine();
+    let mut sparse = base_declaration("clusters/sparse", HierarchyKind::Flat);
+    sparse.content.computed = vec!["hull".into()];
+    engine.register_layer(sparse).unwrap();
+    let plants: [(&str, Vec<u64>); 3] = [
+        ("one", vec![500]),
+        ("two", vec![10, 20]),
+        // (37, 53), (74, 106), (111, 159): one line.
+        ("collinear", vec![1, 2, 3]),
+    ];
+    let artifacts = plants
+        .iter()
+        .map(|(key, members)| {
+            IncomingArtifact::from_entities(Some(key.to_string()), fx.entities(members.clone()))
+        })
+        .collect();
+    engine
+        .publish_artifacts("clusters/sparse".into(), 0, artifacts)
+        .unwrap();
+    tick(engine);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&["key", "shape"]);
+    let pages = read_all(engine, &session, &request("clusters/sparse", &fields));
+    assert_eq!(keys(&pages), vec!["one", "two", "collinear"]);
+    let shapes = column::<BinaryArray>(&pages[0], "shape");
+    for (i, (key, members)) in plants.iter().enumerate() {
+        let parts = tessera_spatial::shape::read_wkb(shapes.value(i)).expect("WKB");
+        assert!(!parts.is_empty(), "{key}: no hull");
+        let positions: Vec<(f64, f64)> = members.iter().map(|&s| position(s)).collect();
+        for ring in parts.iter().flatten() {
+            assert!(ring.len() >= 4, "{key}: a ring of {} points", ring.len());
+            assert_eq!(ring.first(), ring.last(), "{key}: an open ring");
+            for v in ring {
+                assert!(
+                    positions
+                        .iter()
+                        .any(|p| (p.0 - v.0).abs() < STEP && (p.1 - v.1).abs() < STEP),
+                    "{key}: a vertex {v:?} that is no member's"
+                );
+            }
+        }
     }
 }

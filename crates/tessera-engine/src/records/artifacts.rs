@@ -44,8 +44,9 @@ use crate::histogram::MaskIdentity;
 use crate::region::RegionVerdict;
 use crate::session::Session;
 use crate::shapes::DrawnShape;
+use crate::compose::EffectiveMask;
 use crate::viewport::{
-    authored_rings, filter_refusal, DependencyContext, OpenView,
+    authored_rings, filter_refusal, DependencyContext, OpenView, Supplied,
 };
 use crate::Generation;
 
@@ -133,7 +134,34 @@ struct HeldFilter {
     under: Arc<Generation>,
     mask: MaskIdentity,
     rows: Bitmap,
-    levels: Vec<Option<HeldCounts>>,
+    /// By layer and level.
+    levels: std::collections::HashMap<(String, u32), HeldCounts>,
+}
+
+impl HeldFilter {
+    /// Set `level`'s filtered counts, from those held while its row form is the one they were
+    /// counted over, and counted and held otherwise.
+    fn count(&mut self, engine: &Engine, mask: &EffectiveMask, layer: &str, level: &mut ReadLevel) {
+        let key = (layer.to_string(), level.level);
+        let held = self
+            .levels
+            .get(&key)
+            .filter(|counts| Arc::ptr_eq(&counts.rows, &level.rows));
+        level.filtered = match held {
+            Some(counts) => counts.counts.clone(),
+            None => {
+                let counts = level.filtered_counts(engine, mask, &self.rows);
+                self.levels.insert(
+                    key,
+                    HeldCounts {
+                        rows: Arc::clone(&level.rows),
+                        counts: counts.clone(),
+                    },
+                );
+                counts
+            }
+        };
+    }
 }
 
 /// One level's filtered counts, and the row form they count over.
@@ -176,14 +204,13 @@ struct Row {
     matched: Option<u64>,
 }
 
-/// What an artifact is when the verdict serves it: its entity and identifier, its count, its
-/// content with any authored shape taken out of it, and that shape.
+/// What an artifact is when the verdict serves it: its entity and identifier, its count, and its
+/// supplied content with any authored shape taken out of it.
 struct Served {
     entity: EntityId,
     tessera_id: u64,
     masked_count: u64,
-    content: Vec<String>,
-    authored: Option<tessera_lifecycle::membership::ArtifactShapes>,
+    supplied: Supplied,
 }
 
 /// The layer an attached layer's artifacts hang from, every level of it read under the page's
@@ -230,8 +257,7 @@ impl Scope<'_> {
             entity,
             tessera_id,
             masked_count,
-            content: supplied.values,
-            authored: supplied.authored,
+            supplied,
         })
     }
 
@@ -243,9 +269,12 @@ impl Scope<'_> {
             .map(|id| id.raw())
     }
 
-    /// The identifier of the artifact `attachment` names, where the verdict serves it and its
-    /// content can be read, as a served row's is.
-    fn target(&self, attachment: &tessera_lifecycle::membership::Attachment) -> Option<u64> {
+    /// The artifact `attachment` names, in its layer and level as this page read them, where the
+    /// verdict serves it and its content can be read, as a served row's is.
+    fn served_target(
+        &self,
+        attachment: &tessera_lifecycle::membership::Attachment,
+    ) -> Option<&ReadLevel> {
         let target = self
             .targets
             .iter()
@@ -266,6 +295,12 @@ impl Scope<'_> {
             attachment.entity,
             rank,
         )?;
+        Some(&target.levels[level])
+    }
+
+    /// The identifier of the artifact `attachment` names, where it is served.
+    fn target(&self, attachment: &tessera_lifecycle::membership::Attachment) -> Option<u64> {
+        self.served_target(attachment)?;
         self.tessera_id(attachment.entity)
     }
 
@@ -288,7 +323,7 @@ impl Scope<'_> {
         if let Some(q) = q {
             let needle = q.to_lowercase();
             let key = self.key(level, ordinal);
-            let found = [key.as_deref(), served.content.first().map(String::as_str)]
+            let found = [key.as_deref(), served.supplied.first_text()]
                 .into_iter()
                 .flatten()
                 .any(|text| text.to_lowercase().contains(&needle));
@@ -309,9 +344,17 @@ impl Scope<'_> {
     }
 
     /// The artifact's visible members matching the filter, where there is one.
+    /// An attached artifact takes its target's count, as the viewport gives it its target's
+    /// matched bit: a label's own membership says nothing about what matched.
     fn matched(&self, level: u32, ordinal: u32) -> Option<u64> {
         let filter_rows = self.filter_rows?;
-        Some(self.levels[level as usize].matched_count(ordinal, &self.open.mask, filter_rows))
+        let read = &self.levels[level as usize];
+        let Some(attachment) = read.rows.attachment(ordinal) else {
+            return Some(read.matched_count(ordinal, &self.open.mask, filter_rows));
+        };
+        Some(self.served_target(attachment).map_or(0, |target| {
+            target.matched_count(attachment.ordinal, &self.open.mask, filter_rows)
+        }))
     }
 }
 
@@ -460,7 +503,7 @@ impl ArtifactsPager<'_> {
                     under: Arc::clone(generation),
                     mask: served.mask_identity,
                     rows,
-                    levels: Vec::new(),
+                    levels: Default::default(),
                 });
             }
         }
@@ -472,27 +515,37 @@ impl ArtifactsPager<'_> {
             .map(|level| engine.read_level(served, &open.mask, &layer, level, geometry))
             .collect();
         if let Some(held) = &mut self.filter {
-            // Each level's filtered counts are held with the filter while the level's row form
-            // is the one they were counted over.
-            held.levels.resize_with(levels.len(), || None);
-            for (level, slot) in levels.iter_mut().zip(held.levels.iter_mut()) {
-                let current = slot
-                    .as_ref()
-                    .filter(|counts| Arc::ptr_eq(&counts.rows, &level.rows));
-                let counts = match current {
-                    Some(counts) => counts.counts.clone(),
-                    None => {
-                        let counts = level.filtered_counts(engine, &open.mask, &held.rows);
-                        *slot = Some(HeldCounts {
-                            rows: Arc::clone(&level.rows),
-                            counts: counts.clone(),
-                        });
-                        counts
-                    }
-                };
-                level.filtered = counts;
+            for level in &mut levels {
+                held.count(engine, &open.mask, &layer.declaration.name, level);
             }
         }
+        // The layers this one hangs from, read where a target is named or a filter counts an
+        // attached artifact by its target.
+        let target_layers: Vec<(RegisteredLayer, Vec<ReadLevel>)> =
+            if self.properties.contains(&Property::Target) || self.req.filter.is_some() {
+                layer
+                    .declaration
+                    .depends_on
+                    .iter()
+                    .filter_map(|name| engine.write.live().registered_layer(name))
+                    .map(|target| {
+                        let levels = (0..target.runs.len() as u32)
+                            .map(|level| {
+                                let mut level =
+                                    engine.read_level(served, &open.mask, &target, level, false);
+                                if let Some(held) = &mut self.filter {
+                                    let name = &target.declaration.name;
+                                    held.count(engine, &open.mask, name, &mut level);
+                                }
+                                level
+                            })
+                            .collect();
+                        (target, levels)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let filter_rows = self.filter.as_ref().map(|held| &held.rows);
         let reachable = engine.reachable_layers(served.session);
         let ctx = DependencyContext::new(served, &open.mask, &reachable);
@@ -502,25 +555,6 @@ impl ArtifactsPager<'_> {
             .map(|level| level.view(engine, served, &open.mask, &layer, &dependency_served))
             .collect();
         // The layers this one hangs from, read only where a target is to be named.
-        let target_layers: Vec<(RegisteredLayer, Vec<ReadLevel>)> =
-            if self.properties.contains(&Property::Target) {
-                layer
-                    .declaration
-                    .depends_on
-                    .iter()
-                    .filter_map(|name| engine.write.live().registered_layer(name))
-                    .map(|target| {
-                        let levels = (0..target.runs.len() as u32)
-                            .map(|level| {
-                                engine.read_level(served, &open.mask, &target, level, false)
-                            })
-                            .collect();
-                        (target, levels)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
         let targets: Vec<TargetLayer<'_>> = target_layers
             .iter()
             .map(|(target, levels)| TargetLayer {
@@ -592,7 +626,7 @@ impl ArtifactsPager<'_> {
                         .attachment(ordinal)
                         .and_then(|a| scope.target(a));
                 }
-                Property::Content => row.content = served.content.clone(),
+                Property::Content => row.content = served.supplied.values.clone(),
                 Property::Centroid | Property::Box => {
                     if row.centroid.is_none() && row.bbox.is_none() {
                         let derived = visible_geometry(scope, read, ordinal);
@@ -794,7 +828,7 @@ fn drawn_shape(
             crate::derived::compute(&[ComputedProperty::Hull], &visible, &locator).shape
         }
         DrawnShape::Authored => {
-            let shapes = served.authored.as_ref()?;
+            let shapes = served.supplied.authored.as_ref()?;
             Some(authored_rings(shapes, scope.open.served.name, None)?.0)
         }
         DrawnShape::Predicate => {

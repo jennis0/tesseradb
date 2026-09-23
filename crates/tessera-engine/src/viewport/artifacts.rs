@@ -56,6 +56,19 @@ fn take_authored_shapes(
 pub(crate) struct Supplied {
     pub(crate) values: Vec<String>,
     pub(crate) authored: Option<tessera_lifecycle::membership::ArtifactShapes>,
+    /// Where the layer's authored shape sits among the values, where it authors one.
+    shape_slot: Option<usize>,
+}
+
+impl Supplied {
+    /// The first text content, which names the artifact: `None` where there is none, or where
+    /// the first content is the authored shape's slot.
+    pub(crate) fn first_text(&self) -> Option<&str> {
+        if self.shape_slot == Some(0) {
+            return None;
+        }
+        self.values.first().map(String::as_str)
+    }
 }
 
 /// A drawn geometry as the wire carries it: parts, then rings, then vertices in grid units.
@@ -723,7 +736,11 @@ impl Engine {
             table,
         )?;
         let authored = take_authored_shapes(declaration, &mut values);
-        Some(Supplied { values, authored })
+        Some(Supplied {
+            values,
+            authored,
+            shape_slot: declaration.authored_shape().map(|(slot, _)| slot),
+        })
     }
 
     /// [`Engine::supplied_content`]'s values as the store holds them, the shape slot included.
