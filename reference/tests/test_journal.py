@@ -47,8 +47,8 @@ class _StubServer:
     def status(self):
         return {"entity_id_high_water": self.high_water}
 
-    def change(self, external_id_b64, op, access=None):
-        self.change_calls.append((external_id_b64, op, access))
+    def change(self, external_id_b64, op):
+        self.change_calls.append((external_id_b64, op))
         return self.next_change
 
     def changes(self, items):
@@ -100,7 +100,8 @@ def test_a_refused_batch_journals_nothing_at_all(stub):
 
 
 def test_an_acked_batch_journals_every_item_in_order(stub):
-    """The other arm, and the label grammar the batch path builds for a predicate change."""
+    """The other arm: every item is journalled, and each carries only the fields the server
+    defines."""
     server, journal = stub
 
     journal.changes([(7, "delete", None), (8, "suppress", None), (9, "predicate", {0, 1})])
@@ -115,10 +116,7 @@ def test_an_acked_batch_journals_every_item_in_order(stub):
 
     sent = server.batch_calls[0]
     assert sent[0]["external_id"] == base64.b64encode(b"ext-7").decode()
-    assert "access" not in sent[0], "only a predicate change carries an access label"
-    assert sent[2]["access"] == "term-zero,term-one", (
-        "the plugin's label is the comma-joined descriptors from the bundle's own dictionary"
-    )
+    assert all(set(item) == {"external_id", "op"} for item in sent)
 
     # `predicate` with an empty term set removes the item from any session's mask via `L`, which is
     # the `\\ L` arm — not a deny, and not the same code path.

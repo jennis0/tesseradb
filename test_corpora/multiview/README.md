@@ -9,10 +9,11 @@ declaration builds: ten row spaces over one entity space of 21,300 — `world` a
 `quarter`'s four inline views and `quarter_alt`'s four selected out of one file by its `quarter`
 discriminator — with `sentiment`'s four entity-space columns under `attrs/sentiment/quarter/<key>/`,
 `collections` drawn on all five of the views it names, `quarter_clusters`' six clusters per quarter
-each resolved only in its own view, and `regions`' three `wgs84` polygons canonicalised **twice**,
-once against each of the two frames it spans (decision 0111): the three decompose to
-26,031 interior tiles in `world` and 29,469 in `world_flat`, which is what per-view
-canonicalisation means and what one frame for both would have hidden. `tessera verify` and `tessera verify --deep` pass on the result.
+each resolved only in that quarter's two views (`quarter`'s and `quarter_alt`'s), and `regions`'
+three `wgs84` polygons canonicalised **twice**, once against each of the two frames it spans: the
+three decompose to 26,031 interior tiles in `world` and 29,469 in `world_flat`, which is what
+per-view canonicalisation means and what one frame for both would have hidden. `tessera verify` and
+`tessera verify --deep` pass on the result.
 
 **Two things in this fixture were wrong against the readers and were corrected** (2026-08-31),
 neither of them a views.md question: the `members` lists on both layer files were `int64` where an
@@ -106,7 +107,8 @@ This table is the fixture's point — read it as the implementation's checklist,
 | A group-scoped attribute read from each view's own file, no `source` declared (§5, Appendix A) | `sentiment` has no `source` key; it is a column of each `quarter-2026-Q*.parquet` |
 | Presence bitmap on a group-scoped attribute — some entities missing a value in some views (§5, decision 0064) | ~15% of each quarter's rows carry `sentiment = null` |
 | An unscoped layer over a view and a group at once (§3.5) | `collections`, `views = ["world", "quarter"]`, default `scope = "entity"` |
-| A scoped layer, a different artifact set per view of a group (§3.5) | `quarter_clusters`, `scope = { group = "quarter" }`, `views = ["quarter"]`, `fields.view = "quarter"` |
+| A scoped layer, a different artifact set per view of a group (§3.5) | `quarter_clusters`, `scope = { group = "quarter" }`, `views = ["quarter", "quarter_alt"]`, `fields.view = "quarter"` |
+| A layer on views selected out of one shared file by a discriminator (§3.1, §3.3) | `quarter_clusters` on `quarter_alt`: the same artifacts per key as on `quarter`, resolved against the second layout |
 | A shape layer over views whose **frames differ** ([decision 0111](../../docs/decisions/0111-a-shape-spans-projected-views-through-wgs84.md), `polygon-membership.md` §4.3) | `regions`, `views = ["world", "world_flat"]`, three `wgs84` polygons, `[layer.shape] kind = "polygon"` — one declaration, two canonical forms |
 | A second frame over one points file (§2's "the extent belongs to the view") | `world_flat`, equirectangular over the same `world.parquet` |
 | Two roster forms in one corpus | `quarter` (form A) and `quarter_alt` (form B), side by side |

@@ -220,7 +220,7 @@ def test_multiview(tmp_path):
     db.declare_layer(
         "quarter_clusters",
         kind="flat",
-        views=["quarter"],
+        views=["quarter", "quarter_alt"],
         scope={"group": "quarter"},
         require_member_visibility="any",
         computed=(),

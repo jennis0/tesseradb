@@ -222,7 +222,9 @@ fields = { view = "quarter" }
 # ---------------------------------------------------------------------------------------------
 # Two layers: one unscoped, drawn on the plain view and on every quarter alike (spec §3.5's
 # default `scope = "entity"`); one scoped to the group, a different artifact set per quarter
-# (`scope = { group = "quarter" }`), its rows carrying the `view` column via `fields.view`.
+# (`scope = { group = "quarter" }`), its rows carrying the `view` column via `fields.view`. The
+# scoped layer is also drawn on `quarter_alt`, whose views are `quarter`'s keys selected out of one
+# file, so each quarter's clusters resolve against both of that quarter's layouts.
 # ---------------------------------------------------------------------------------------------
 
 [[layer]]
@@ -252,7 +254,7 @@ require_member_visibility = "inherited"
 [[layer]]
 name                      = "quarter_clusters"
 title                     = "Clusters by quarter"
-views                     = ["quarter"]
+views                     = ["quarter", "quarter_alt"]
 scope                     = { group = "quarter" }
 source                    = "clusters_q"
 fields                    = { view = "quarter" }
