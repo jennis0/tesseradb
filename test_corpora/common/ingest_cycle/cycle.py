@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-try:  # 3.11+
-    import tomllib
-except ModuleNotFoundError:  # 3.10 on this box
-    import tomli as tomllib
 import base64
 import concurrent.futures
 import datetime
@@ -1227,18 +1223,23 @@ class Cycle:
 
     def roster_record(self, view: dict) -> dict:
         """A group view's roster record as `PUT /control/views/{group}/{key}` takes it: each
-        metadata name its group declares, a timestamp as microseconds since the epoch, and the
-        view's own visibility where it declares one."""
-        declared = tomllib.loads((self.rung / "corpus.toml").read_text())
-        owner = next(g for g in declared.get("view_group", []) if g["name"] == view["owner"])
+        metadata name its group declares and the record carries, a date or time as microseconds
+        since the epoch, and the view's own visibility where it declares one."""
         metadata = {}
-        for name in owner.get("metadata") or {}:
-            value = view["record"][name]
+        for name in view["metadata"]:
+            value = view["record"].get(name)
+            if value is None:
+                continue
+            if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+                value = datetime.datetime.combine(value, datetime.time())
             if isinstance(value, datetime.datetime):
+                # A time with no offset is read as UTC, as a timestamp column's raw value is.
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=datetime.timezone.utc)
                 value = (value - EPOCH) // datetime.timedelta(microseconds=1)
             metadata[name] = value
         record: dict = {"metadata": metadata}
-        if "visibility" in view["record"]:
+        if view["record"].get("visibility") is not None:
             record["visibility"] = view["record"]["visibility"]
         return record
 
