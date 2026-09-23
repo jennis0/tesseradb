@@ -884,7 +884,6 @@ pub fn read(
 /// artifact written twice, which is refused below: two rows for one key are two artifacts as far
 /// as the file is concerned, and taking either would be taking the file's row order for an answer.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn read_artifacts(
     layer: &str,
     path: &Path,

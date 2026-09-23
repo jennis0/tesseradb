@@ -600,8 +600,11 @@ async fn an_unlabelled_artifact_takes_a_named_default() {
 // A build is an ingest into an empty database
 // ---------------------------------------------------------------------------------------------
 
-/// The artifacts both sides hold: key, members, labels. `None` is no label.
-const BUILT: [(&str, std::ops::Range<u64>, Option<&[&str]>); 4] = [
+/// One artifact both sides hold: key, members, labels. `None` is no label.
+type Built = (&'static str, std::ops::Range<u64>, Option<&'static [&'static str]>);
+
+/// The artifacts both sides hold.
+const BUILT: [Built; 4] = [
     ("open", 0..40, None),
     ("red", 40..80, Some(&["red"])),
     ("either", 80..120, Some(&["blue", "red"])),
