@@ -68,7 +68,8 @@ pub struct ItemsLimits {
     pub max_page_bytes: usize,
     /// Arrow bytes a response carries. No page starts that could take it past this.
     pub response_bytes: usize,
-    /// Time a response runs. Checked between pages, and while a page under way holds no row.
+    /// Time a response runs, read between pages and between chunks of a page's scan. A page
+    /// holding rows when it runs out is sent short.
     pub response_time: Duration,
 }
 
@@ -99,8 +100,8 @@ pub struct ItemsRequest<'a> {
     /// The idset the caller holds `tessera_id`s under, checked as the item route checks it.
     pub idset: Option<u32>,
     pub limits: ItemsLimits,
-    /// Cancellation ends the response with a trailer whose `ended_by` is `deadline`, after the
-    /// last whole page.
+    /// Cancellation ends the response with a trailer whose `ended_by` is `deadline`, after a
+    /// page holding whatever rows the page under way had reached.
     pub cancel: Option<CancelToken>,
 }
 
@@ -132,6 +133,9 @@ pub enum PageEndedBy {
     Rows,
     /// The next row would have taken it past the byte ceiling.
     Bytes,
+    /// The response's time ran out, or it was cancelled, while the page held rows; the response
+    /// ends after it.
+    Time,
     /// No row remains.
     End,
 }
@@ -141,6 +145,7 @@ impl PageEndedBy {
         match self {
             PageEndedBy::Rows => "rows",
             PageEndedBy::Bytes => "bytes",
+            PageEndedBy::Time => "time",
             PageEndedBy::End => "end",
         }
     }
@@ -268,6 +273,8 @@ enum Paged {
         batch: RecordBatch,
         bytes: usize,
         ended_by: PageEndedBy,
+        /// Why the response ends after this page, where it does for time or cancellation.
+        then: Option<ResponseEndedBy>,
     },
     End,
     Stopped(ResponseEndedBy),
@@ -437,6 +444,7 @@ impl Engine {
                     batch,
                     bytes: page_bytes,
                     ended_by,
+                    then,
                 } => {
                     pages += 1;
                     rows += batch.num_rows() as u64;
@@ -450,6 +458,9 @@ impl Engine {
                         .map_err(|SinkClosed| EngineError::Cancelled)?;
                     if ended_by == PageEndedBy::End {
                         break ResponseEndedBy::End;
+                    }
+                    if let Some(reason) = then {
+                        break reason;
                     }
                 }
                 Paged::End => break ResponseEndedBy::End,
@@ -466,8 +477,9 @@ impl Engine {
     }
 
     /// One page from the latest generation: the view's mask composed for it, the rows walked from
-    /// the position, their fields read and the batch cut to the byte ceiling. The walk's position
-    /// moves to the page's end, and not at all where a cancellation discards the page.
+    /// the position, their fields read and the batch cut to the byte ceiling. A walk stopped for
+    /// time or cancellation while holding rows makes a short page of them. The walk's position
+    /// moves to the page's end, or where the page holds no row, to the scan position reached.
     fn items_page(
         &self,
         planned: &Planned<'_>,
@@ -493,18 +505,12 @@ impl Engine {
             walked,
             position,
         } = walk.collect(&cx, planned.page_rows as usize, clock)?;
-        match walked {
-            Walked::Stopped(reason) => {
-                if rows.is_empty() {
-                    walk.position = position;
-                }
-                return Ok(Paged::Stopped(reason));
-            }
-            _ if rows.is_empty() => {
-                walk.position = position;
-                return Ok(Paged::End);
-            }
-            _ => {}
+        if rows.is_empty() {
+            walk.position = position;
+            return Ok(match walked {
+                Walked::Stopped(reason) => Paged::Stopped(reason),
+                _ => Paged::End,
+            });
         }
         let (batch, kept, bytes) = read_page(
             &cx,
@@ -513,6 +519,10 @@ impl Engine {
             req.keep_unmatched,
             req.limits.max_page_bytes,
         )?;
+        let then = match walked {
+            Walked::Stopped(reason) => Some(reason),
+            _ => None,
+        };
         let ended_by = if kept < rows.len() {
             walk.position = walk.position_at(&cx, &rows[kept - 1]);
             PageEndedBy::Bytes
@@ -520,13 +530,15 @@ impl Engine {
             walk.position = position;
             match walked {
                 Walked::End => PageEndedBy::End,
-                _ => PageEndedBy::Rows,
+                Walked::Stopped(_) => PageEndedBy::Time,
+                Walked::Filled => PageEndedBy::Rows,
             }
         };
         Ok(Paged::Rows {
             batch,
             bytes,
             ended_by,
+            then,
         })
     }
 

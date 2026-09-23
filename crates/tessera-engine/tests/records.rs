@@ -2117,3 +2117,126 @@ fn the_stored_walk_serves_what_the_mask_admits_where_the_candidate_is_wider() {
         assert_eq!(ids.len() as u64, visible, "{order:?}: the viewport's count");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Time and cancellation inside a page
+// ---------------------------------------------------------------------------------------------
+
+/// The 30,000-item fixture of `common`, opened with its executor.
+fn thirty_thousand() -> (tempfile::TempDir, Engine) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        30_000,
+    );
+    let engine = engine_at(tmp.path(), &root, 3600);
+    engine.set_background_refresh_for_test(false);
+    (tmp, engine)
+}
+
+/// A region over `common`'s positions as a filter.
+fn region_of(shape: ShapeF64) -> FilterExpr {
+    let shape = shape.canonical(Space::View, &extent()).unwrap().0;
+    FilterExpr::Region(RegionLeaf::Shape(Arc::new(shape)))
+}
+
+/// **A time budget reached while a page holds rows ends that page short, by time, and the
+/// response after it**, whose cursor the next response resumes from with no row lost or
+/// repeated. A narrower viewer and a filter make the rows a page wants sparser than the rows it
+/// scans, so a page reaches the budget before it fills.
+#[test]
+fn a_page_cut_by_time_is_sent_short_and_the_read_resumes_after_it() {
+    let (_tmp, engine) = thirty_thousand();
+    let session = engine.authorise(&subset_credential()).unwrap();
+    let fields: Vec<String> = Vec::new();
+    let west = region_of(ShapeF64::Bbox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 499.0,
+        max_y: 1000.0,
+    });
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let mut req = request("s0", &fields);
+        req.order = Some(order);
+        req.filter = Some(west.clone());
+        req.page_rows = Some(3000);
+        let whole = read_all(&engine, &session, &req).ids();
+
+        req.limits.response_time = Duration::ZERO;
+        let (sink, trailer) = respond(&engine, &session, req.clone()).unwrap();
+        assert_eq!(sink.pages.len(), 1, "{order:?}: one page before the budget ends it");
+        let (batch, end) = &sink.pages[0];
+        assert_eq!(end.ended_by, PageEndedBy::Time, "{order:?}");
+        assert!(batch.num_rows() > 0 && batch.num_rows() < 3000, "{order:?}: a short page");
+        assert_eq!(trailer.ended_by, ResponseEndedBy::BudgetTime, "{order:?}");
+
+        let mut ids = ids_of(batch);
+        ids.extend(continue_read(&engine, &session, &req, trailer.next.unwrap()));
+        assert_eq!(ids, whole, "{order:?}: the read resumed with nothing lost or repeated");
+    }
+}
+
+/// **Responses cancelled at a third of a full scan's time still complete a read under a sparse
+/// filter**: each sends the rows its page held when it was cancelled, and the next resumes past
+/// everything it scanned. The filter is a thin band across the map, so its rows are spread
+/// through the scan in both orders, and a page is larger than the band, so it holds rows at
+/// every cancellation after its first.
+#[test]
+fn chained_responses_cancelled_mid_scan_complete_a_sparse_read() {
+    let (_tmp, engine) = thirty_thousand();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let fields: Vec<String> = Vec::new();
+    let band = region_of(ShapeF64::Bbox {
+        min_x: 0.0,
+        min_y: 500.0,
+        max_x: 1000.0,
+        max_y: 502.0,
+    });
+    let (_, matched) = viewport_counts(&engine, &session, "s0", Some(band.clone()));
+    assert!(matched > 20 && matched < 1000, "the band holds {matched} items");
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let mut req = request("s0", &fields);
+        req.order = Some(order);
+        req.filter = Some(band.clone());
+        // Larger than the band holds, so a page is still gathering rows whenever it is cut.
+        req.page_rows = Some(1000);
+        let started = std::time::Instant::now();
+        let whole = read_all(&engine, &session, &req).ids();
+        let cut = started.elapsed() / 3;
+        assert_eq!(whole.len() as u64, matched, "{order:?}");
+
+        let mut ids: Vec<u64> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut responses = 0;
+        loop {
+            responses += 1;
+            assert!(responses <= 200, "{order:?}: the read made no progress");
+            let token = tessera_engine::CancelToken::new();
+            let deadline = {
+                let token = token.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(cut);
+                    token.cancel();
+                })
+            };
+            let mut next = req.clone();
+            next.cursor = cursor.as_deref();
+            next.cancel = Some(token);
+            let (sink, trailer) = respond(&engine, &session, next).unwrap();
+            deadline.join().unwrap();
+            for (batch, end) in &sink.pages {
+                assert_ne!(end.ended_by, PageEndedBy::Bytes, "{order:?}");
+                ids.extend(ids_of(batch));
+            }
+            cursor = trailer.next;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert!(responses > 1, "{order:?}: the cut ended at least one response");
+        assert_eq!(ids, whole, "{order:?}: every row once, in order");
+    }
+}
