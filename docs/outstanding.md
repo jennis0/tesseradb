@@ -50,6 +50,7 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 - A `text` column declared with no `analyser` is given `unicode` by `tessera_store::declaration`. Decide whether the server may choose that or must refuse.
 ## Clients and tests
 
+- A map's colour is a string that is either a column's name or `cluster:` followed by a layer's name (`CLUSTER_PREFIX`, `clients/ts/core/src/store.ts:460`), and the Python widget passes it through. Columns and layers have separate names, so the prefix is what tells them apart, and a user has to learn it. Ruled by Joe 2026-09-23: name a layer by a separate argument or a structured value on every surface (the TypeScript client, the widget, the Python client), so no string format is needed.
 - Two rules about an inline artifact row are refused only when the build reads the artifacts — a row carrying a shape field on a layer that declares no shape (`crates/tessera-build/src/layers.rs:1117`) and a row carrying two shape fields (`crates/tessera-build/src/shapes.rs:373`). `check` does not reach either, so the Python SDK states both itself; they are the only declaration rules it still holds that are not below it. Moving them into the check would let the SDK drop them.
 
 - The Python oracle (`reference/oracle/wire.py`) does not decode the artifacts frame's `target` column, so no conformance case asserts it. `clients/py/tests/test_sdk_pages.py` checks it against a live server.
