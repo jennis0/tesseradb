@@ -7,19 +7,16 @@
 
 mod common;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use arrow::array::{Float32Array, Float64Array, Int32Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{Float32Array, Int32Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 use tessera_server::state::{ComputeGate, ServeLimits};
 
 const SCHEMA_TOML: &str = r#"
@@ -55,104 +52,56 @@ name = "note"
 type = "keyword"
 "#;
 
-/// The fixture's items: `archive` rendered, `score` rendered, `year` indexed and `note` held in
-/// the record store alone, `note_bytes` long.
-fn write_points(path: &Path, n: u64, note_bytes: usize) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("archive", DataType::Utf8, false),
-        Field::new("score", DataType::Float32, true),
-        Field::new("year", DataType::Int32, true),
-        Field::new("note", DataType::Utf8, true),
-    ]));
+/// The fixture in `dir`: `n` items with `archive` rendered, `score` rendered, `year` indexed and
+/// `note` held in the record store alone, `note_bytes` long.
+fn build_bundle(dir: &Path, n: u64, note_bytes: usize) {
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
     let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let archives: Vec<&str> = ids
-        .iter()
-        .map(|&e| ["astro", "cond", "hep"][(e % 3) as usize])
-        .collect();
-    let scores: Vec<Option<f32>> = ids.iter().map(|&e| Some((e % 97) as f32 * 0.5)).collect();
-    let years: Vec<Option<i32>> = ids
-        .iter()
-        .map(|&e| (e % 7 != 0).then_some(1990 + (e % 30) as i32))
-        .collect();
-    let notes: Vec<Option<String>> = ids
-        .iter()
-        .map(|&e| {
-            (e % 11 != 0).then(|| {
-                let mut note = format!("note-{e}-");
-                while note.len() < note_bytes {
-                    note.push((b'a' + (note.len() % 26) as u8) as char);
-                }
-                note
-            })
+    let archives = StringArray::from_iter_values(
+        ids.iter()
+            .map(|&e| ["astro", "cond", "hep"][(e % 3) as usize]),
+    );
+    let scores = Float32Array::from_iter(ids.iter().map(|&e| Some((e % 97) as f32 * 0.5)));
+    let years = Int32Array::from_iter(
+        ids.iter()
+            .map(|&e| (e % 7 != 0).then_some(1990 + (e % 30) as i32)),
+    );
+    let notes = StringArray::from_iter(ids.iter().map(|&e| {
+        (e % 11 != 0).then(|| {
+            let mut note = format!("note-{e}-");
+            while note.len() < note_bytes {
+                note.push((b'a' + (note.len() % 26) as u8) as char);
+            }
+            note
         })
-        .collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
+    }));
+    write_points(
+        &points,
+        &ids,
+        scatter,
         vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(StringArray::from(archives)),
-            Arc::new(Float32Array::from(scores)),
-            Arc::new(Int32Array::from(years)),
-            Arc::new(StringArray::from(notes)),
+            column("archive", false, archives),
+            column("score", true, scores),
+            column("year", true, years),
+            column("note", true, notes),
         ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    );
+    write_pairs_n(&pairs, n);
+    build_declared(&dir.join("bundle"), &points, &pairs, SCHEMA_TOML);
 }
 
-fn build_bundle(tmp: &TempDir, n: u64, note_bytes: usize) -> std::path::PathBuf {
-    let out = tmp.path().join("bundle");
-    let points = tmp.path().join("points.parquet");
-    let pairs = tmp.path().join("pairs.parquet");
-    write_points(&points, n, note_bytes);
-    write_pairs_n(&pairs, n);
-    let schema_path = tmp.path().join("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+/// A copy in `tmp` of [`build_bundle`]'s fixture, each `(n, note_bytes)` built once for this
+/// binary.
+fn copy_bundle(tmp: &TempDir, n: u64, note_bytes: usize) -> std::path::PathBuf {
+    type Built = &'static OnceLock<TempDir>;
+    static BUILT: Mutex<BTreeMap<(u64, usize), Built>> = Mutex::new(BTreeMap::new());
+    let once: Built = BUILT
+        .lock()
         .unwrap()
-        .schema;
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    };
-    build(&args).expect("fixture build should succeed");
-    out
+        .entry((n, note_bytes))
+        .or_insert_with(|| Box::leak(Box::default()));
+    copy_built(once, tmp.path(), |dir| build_bundle(dir, n, note_bytes))
 }
 
 const N: u64 = 3_000;
@@ -171,7 +120,7 @@ async fn fixture_with(
     tune: impl FnOnce(&mut ServeLimits),
 ) -> Fixture {
     let tmp = TempDir::new().unwrap();
-    let bundle = build_bundle(&tmp, n, note_bytes);
+    let bundle = copy_bundle(&tmp, n, note_bytes);
     let server = spawn_server_with_bulk_reads(
         &bundle,
         &tmp.path().join("cache"),
@@ -186,13 +135,6 @@ async fn fixture_with(
 
 async fn fixture() -> Fixture {
     fixture_with(N, 16, generous_test_gate(), generous_bulk_gate(), |_| {}).await
-}
-
-async fn token(server: &TestServer, terms: &[&str]) -> String {
-    authorise(server, terms).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string()
 }
 
 async fn post_items(server: &TestServer, token: &str, body: &Value) -> reqwest::Response {
@@ -292,7 +234,7 @@ async fn a_full_read_returns_every_visible_row_once_in_either_order() {
     let f = fixture().await;
     let filter = json!({ "score": { "range": { "gte": 30 } } });
     for terms in [&["0"][..], &["1"][..]] {
-        let token = token(&f.server, terms).await;
+        let token = token_for(&f.server, terms).await;
         for filters in [None, Some(&filter)] {
             let (visible, matched) = viewport_counts(&f.server, &token, filters).await;
             if filters.is_some() {
@@ -334,7 +276,7 @@ async fn a_full_read_returns_every_visible_row_once_in_either_order() {
 #[tokio::test]
 async fn the_page_schema_is_the_named_fields_then_the_system_fields() {
     let f = fixture().await;
-    let token = token(&f.server, &["1"]).await;
+    let token = token_for(&f.server, &["1"]).await;
     let (visible, matched) =
         viewport_counts(&f.server, &token, Some(&json!({ "archive": { "in": ["astro"] } }))).await;
     let responses = read_all(
@@ -395,7 +337,7 @@ async fn the_page_schema_is_the_named_fields_then_the_system_fields() {
 #[tokio::test]
 async fn count_puts_the_viewports_counts_in_the_head() {
     let f = fixture().await;
-    let token = token(&f.server, &["1"]).await;
+    let token = token_for(&f.server, &["1"]).await;
     let filter = json!({ "all_of": [
         { "archive": { "in": ["astro", "hep"] } },
         { "region": { "bbox": [100.0, 100.0, 800.0, 900.0] } },
@@ -444,7 +386,7 @@ async fn count_puts_the_viewports_counts_in_the_head() {
 #[tokio::test]
 async fn zstd_pages_decode_to_the_uncompressed_pages() {
     let f = fixture().await;
-    let token = token(&f.server, &["0"]).await;
+    let token = token_for(&f.server, &["0"]).await;
     let body = json!({
         "view": "s0", "fields": ["note", "archive", "score", "year"],
         "system_fields": ["position", "external_id", "labels"],
@@ -474,7 +416,7 @@ async fn zstd_pages_decode_to_the_uncompressed_pages() {
 #[tokio::test]
 async fn every_refusal_has_its_status() {
     let f = fixture().await;
-    let token = token(&f.server, &["0"]).await;
+    let token = token_for(&f.server, &["0"]).await;
     let first = items_ok(
         &f.server,
         &token,
@@ -538,7 +480,7 @@ async fn every_refusal_has_its_status() {
 #[tokio::test]
 async fn an_expired_session_is_refused() {
     let tmp = TempDir::new().unwrap();
-    let bundle = build_bundle(&tmp, 64, 16);
+    let bundle = copy_bundle(&tmp, 64, 16);
     let mut config = default_engine_config();
     config.token_max_lifetime_secs = 0;
     let server = spawn_server_with_config(
@@ -548,7 +490,7 @@ async fn an_expired_session_is_refused() {
         config,
     )
     .await;
-    let token = token(&server, &["0"]).await;
+    let token = token_for(&server, &["0"]).await;
     let resp = post_items(&server, &token, &json!({ "view": "s0", "fields": [] })).await;
     assert_eq!(refused(resp, 403).await, "expired-token");
 }
@@ -559,7 +501,7 @@ async fn an_expired_session_is_refused() {
 #[tokio::test]
 async fn a_cursor_does_not_open_for_another_credential() {
     let f = fixture().await;
-    let broad = token(&f.server, &["0"]).await;
+    let broad = token_for(&f.server, &["0"]).await;
     let first = items_ok(
         &f.server,
         &broad,
@@ -569,12 +511,12 @@ async fn a_cursor_does_not_open_for_another_credential() {
     let cursor = first.trailer["next"].as_str().unwrap().to_string();
     let body = json!({ "view": "s0", "fields": [], "cursor": cursor, "pages": 1 });
 
-    let same_credential = token(&f.server, &["0"]).await;
+    let same_credential = token_for(&f.server, &["0"]).await;
     assert_ne!(same_credential, broad);
     let resumed = items_ok(&f.server, &same_credential, &body).await;
     assert!(!resumed.pages.is_empty());
 
-    let narrow = token(&f.server, &["1"]).await;
+    let narrow = token_for(&f.server, &["1"]).await;
     let resp = post_items(&f.server, &narrow, &body).await;
     assert_eq!(refused(resp, 422).await, "contract");
 }
@@ -592,7 +534,7 @@ async fn the_bulk_lane_and_the_viewport_gate_do_not_hold_each_other() {
         |_| {},
     )
     .await;
-    let token = token(&f.server, &["0"]).await;
+    let token = token_for(&f.server, &["0"]).await;
     let items_body = json!({ "view": "s0", "fields": ["score"], "pages": 1 });
 
     let held = hold(&f.server.state.bulk_gate).await;
@@ -636,7 +578,7 @@ async fn a_bulk_read_holds_its_compute_for_the_whole_response() {
         },
     )
     .await;
-    let token = token(&f.server, &["0"]).await;
+    let token = token_for(&f.server, &["0"]).await;
     let mut reader = post_items(
         &f.server,
         &token,
@@ -668,7 +610,7 @@ async fn control_status_reports_the_bulk_read_limit() {
     assert_eq!(bulk["in_flight"], 0, "{bulk}");
     assert_eq!(bulk["shed_total"], 0, "{bulk}");
 
-    let token = token(&f.server, &["0"]).await;
+    let token = token_for(&f.server, &["0"]).await;
     let held: Vec<_> = [
         hold(&f.server.state.bulk_gate).await,
         hold(&f.server.state.bulk_gate).await,
@@ -700,7 +642,7 @@ async fn a_client_that_disconnects_frees_its_bulk_slot() {
         },
     )
     .await;
-    let token = token(&f.server, &["0"]).await;
+    let token = token_for(&f.server, &["0"]).await;
     let mut reader = post_items(
         &f.server,
         &token,
@@ -744,7 +686,7 @@ async fn the_byte_budget_ends_a_response_that_the_next_resumes() {
         limits.bulk_response_bytes = 3 * page_bytes;
     })
     .await;
-    let token = token(&f.server, &["1"]).await;
+    let token = token_for(&f.server, &["1"]).await;
     let (visible, _) = viewport_counts(&f.server, &token, None).await;
     let body = json!({ "view": "s0", "fields": ["note"], "page_rows": 1000 });
     let first = items_ok(&f.server, &token, &body).await;
@@ -767,7 +709,7 @@ async fn the_time_budget_ends_a_response_that_the_next_resumes() {
         limits.bulk_response_ms = 0;
     })
     .await;
-    let token = token(&f.server, &["1"]).await;
+    let token = token_for(&f.server, &["1"]).await;
     let (visible, _) = viewport_counts(&f.server, &token, None).await;
     let body = json!({ "view": "s0", "fields": ["score"], "page_rows": 200 });
     let responses = read_all(&f.server, &token, &body).await;
@@ -788,7 +730,7 @@ async fn the_stream_deadline_ends_a_response_with_a_trailer() {
         limits.stream_deadline_ms = 0;
     })
     .await;
-    let token = token(&f.server, &["0"]).await;
+    let token = token_for(&f.server, &["0"]).await;
     // The session's geometry is built by a viewport first, so the cancellation meets the read
     // and not that build. The same deadline cuts the viewport's own response after its first
     // flush, by which time the geometry is built, so how that response ends is not read.
@@ -818,7 +760,7 @@ async fn meta_publishes_homes_and_the_page_ceilings() {
         limits.max_page_bytes = 56_789;
     })
     .await;
-    let token = token(&f.server, &["0"]).await;
+    let token = token_for(&f.server, &["0"]).await;
     let meta: Value = f
         .server
         .client
