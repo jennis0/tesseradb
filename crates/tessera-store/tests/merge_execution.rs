@@ -76,8 +76,6 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::merge::MergeOutpu
             scalar_schema: &schema,
             absent_ok: &[],
             row_base: 0,
-            // The live values a publication would carry — deliberately *above* the inputs' own
-            // range, so a merge that derived them from `entity_hi` would show up as a regression.
         },
     )
     .expect("the merge executes")
