@@ -116,7 +116,13 @@ impl Executor {
         let Some(TickDue { due, period_due }) = self.tick_due() else {
             return;
         };
+        // A flush handed back after this loop's drain is not yet in the generation, and a plan
+        // taken now would carry its rows again at its `row_base`. It is not a tick behind a
+        // running flush either: the next loop drains it and ticks straight away.
         let flush_in_flight = self.flush.in_flight();
+        if !flush_in_flight && self.flush.completed_pending() {
+            return;
+        }
         if !flush_in_flight {
             self.health.open_publication_cycle();
         }

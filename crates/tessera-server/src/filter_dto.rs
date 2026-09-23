@@ -55,8 +55,7 @@ pub fn tessera_id(value: Option<&Value>, field: &str) -> Result<TesseraId, ApiEr
     .map(TesseraId::new)
     .ok_or_else(|| {
         bad(format!(
-            "`{field}` is a `tessera_id`: a JSON number, or a decimal string where the caller \
-             cannot carry one intact"
+            "`{field}` is not a `tessera_id`; send a JSON number or a decimal string"
         ))
     })
 }
@@ -68,20 +67,18 @@ fn resolve_leaf(leaf: &str, column: LeafColumn) -> Result<(String, Family), ApiE
     match column {
         LeafColumn::Resolved { column, family } => Ok((column, family)),
         LeafColumn::Unknown => Err(bad(format!(
-            "'{leaf}' is not a filterable column. `/v1/meta`'s `filter_operands` lists \
-             the columns and the operators each accepts"
+            "'{leaf}' is not a filterable column; name one that `/v1/meta`'s \
+             `filter_operands` lists"
         ))),
         LeafColumn::Unpinned { group } => Err(bad(format!(
             "'{leaf}' is scoped to view group '{group}' and this request's view is not one of \
-             its views, so the leaf names no column to read. Pin the view it means — \
-             '{leaf}@<key>' — as `/v1/meta`'s `filter_operands` entry for it says"
+             its views; pin the view it means as '{leaf}@<key>'"
         ))),
         LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
             "unknown view '{pin}' of group '{group}'"
         ))),
         LeafColumn::PinOnUnscoped { column } => Err(bad(format!(
-            "'{column}' is not scoped to a view group, so there is nothing for '@{}' to choose \
-             between: it is one column for the corpus and every view reads it",
+            "'{column}' is not scoped to a view group; leave out '@{}'",
             leaf.split_once(tessera_engine::filter::PIN).map_or("", |(_, pin)| pin)
         ))),
     }
@@ -105,9 +102,9 @@ pub fn parse(
         .ok_or_else(|| bad("a filter node must be an object"))?;
     if obj.len() != 1 {
         return Err(bad(format!(
-            "a filter node must carry exactly one key — a column name, or \
-             `all_of`/`any_of`/`none_of` — and this one carries {}. Two keys would need an \
-             implicit operator between them, and the expression says which it wants",
+            "a filter node must carry exactly one key, a column name or \
+             `all_of`/`any_of`/`none_of`, and this one carries {}; join several under `all_of` \
+             or `any_of`",
             obj.len()
         )));
     }
@@ -252,7 +249,7 @@ fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiErro
             if arr.len() as u64 > ctx.max_vertices {
                 return Err(bad(format!(
                     "`region.polygon` carries {} vertices; the deployment's `max_region_vertices` \
-                     is {} (`/v1/meta`'s selection block). Simplify the shape before sending it",
+                     is {}, so send a simpler shape",
                     arr.len(),
                     ctx.max_vertices
                 )));
@@ -305,9 +302,9 @@ fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiErro
             "`region.{kind}`: the radius and the axes must be positive"
         )),
         CanonError::NotACoordinate => bad(format!(
-            "`region.{kind}` is `space = \"wgs84\"` and carries a coordinate outside ±180 \
-             longitude or ±90 latitude; a value outside that is not a coordinate \
-             (`projections.md` §2)"
+            "`region.{kind}` is in `space = \"wgs84\"` and carries a value outside ±180 \
+             longitude or ±90 latitude, which is not a coordinate; send degrees within those \
+             bounds"
         )),
         // Unreachable: `ShapeSpace::resolve` refuses the pair above, naming the view.
         CanonError::NoProjection => bad(format!("`region.{kind}`: {e}")),
@@ -317,8 +314,8 @@ fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiErro
     if vertices > ctx.max_vertices {
         return Err(bad(format!(
             "`region.{kind}` is {vertices} vertices once its edges are densified for \
-             `space = \"wgs84\"`, and the deployment's `max_region_vertices` is {}. Simplify the \
-             shape, or send it in the view's own space",
+             `space = \"wgs84\"`, and the deployment's `max_region_vertices` is {}; send a \
+             simpler shape, or send it in the view's own space",
             ctx.max_vertices
         )));
     }
@@ -349,8 +346,8 @@ fn parse_operand(
         return Err(match op.as_str() {
             // Names the declaration that would give the caller word matching.
             "match" => bad(format!(
-                "column '{column}': `match` matches analysed words and needs a column declared \
-                 `type = \"text\"`. `/v1/meta` lists which columns are text"
+                "column '{column}': `match` needs a column declared `type = \"text\"`, which \
+                 `/v1/meta` lists"
             )),
             other => bad(format!(
                 "column '{column}' is a {} column, which takes {:?}; it does not take '{other}'",
@@ -445,8 +442,8 @@ fn parse_operand(
                 .as_str()
                 .ok_or_else(|| {
                     bad(format!(
-                        "column '{column}': `phrase` takes a string. There is no \
-                         `minimum_should_match` for a phrase — adjacency is not a count"
+                        "column '{column}': `phrase` takes a string, with no \
+                         `minimum_should_match`"
                     ))
                 })?
                 .to_string(),
@@ -491,8 +488,7 @@ fn parse_range(column: &str, value: &Value) -> Result<FilterOperand, ApiError> {
             "lt" => (&mut hi, endpoint(false)?),
             other => {
                 return Err(bad(format!(
-                    "column '{column}': unknown range bound '{other}'. A range takes gte, gt, lte \
-                     and lt"
+                    "column '{column}': unknown range bound '{other}'; use gte, gt, lte or lt"
                 )))
             }
         };
@@ -506,8 +502,8 @@ fn parse_range(column: &str, value: &Value) -> Result<FilterOperand, ApiError> {
     }
     if lo.is_none() && hi.is_none() {
         return Err(bad(format!(
-            "column '{column}': `range` needs at least one of gte, gt, lte, lt. A leaf with no \
-             constraint is an omitted leaf"
+            "column '{column}': `range` needs at least one of gte, gt, lte, lt; for no \
+             constraint, leave the leaf out"
         )));
     }
     Ok(FilterOperand::Range { lo, hi })

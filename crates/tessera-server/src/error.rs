@@ -71,20 +71,13 @@ impl ShedCause {
                 "the server is at its compute-admission bound; retry shortly".to_string()
             }
             ShedCause::WriteQueue => format!(
-                "the write queue is full; retry after {retry_after_s}s. Deny-disposition \
-                 changes are never shed for load and are unaffected"
+                "the write queue is full; retry after {retry_after_s}s"
             ),
             ShedCause::IngestAdmission => format!(
-                "the server is at its ingest-admission bound; retry after {retry_after_s}s. \
-                 Nothing in this request was decoded, queued or appended — the body was, \
-                 however, buffered in full before this refusal, since the extractor runs ahead \
-                 of every check in the handler. Deny-disposition changes are never shed for \
-                 load and are unaffected"
+                "the server is at its ingest-admission bound; retry after {retry_after_s}s"
             ),
             ShedCause::SingleFlight => "a concurrent request is already building this session's \
-                 row projection or mask fragment; retry shortly. This is not compute admission — \
-                 that gate admitted this request, and its shed counters do not move for this \
-                 refusal"
+                 row projection or mask fragment; retry shortly"
                 .to_string(),
             ShedCause::SuggestInFlight => "a suggestion request for this session is already in \
                  flight; retry shortly"
@@ -228,9 +221,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // Unreachable in practice, since cancellation fires only when the handler future is
         // dropped. A 500 with a fixed detail in case it ever arrives on a live connection.
         EngineError::Cancelled => ApiError::FailClosed(
-            "request cancelled before completion; the request was refused rather than answered \
-             partially"
-                .to_string(),
+            "the request was cancelled before it completed".to_string(),
         ),
         // A 500, not an empty 200: an empty value set is a real answer for a principal who may see
         // none of the values, and must stay distinct from one that could not be read.
@@ -251,9 +242,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
 pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
     tracing::error!(detail = %e, "bundle/sidecar read failed; answering fail-closed");
     ApiError::FailClosed(
-        "could not read this bundle's stored data; the request was refused rather than answered \
-         partially"
-            .to_string(),
+        "could not read this bundle's stored data".to_string(),
     )
 }
 
@@ -262,8 +251,7 @@ pub fn map_store_error<E: std::fmt::Display>(e: E) -> ApiError {
 pub fn map_wal_error<E: std::fmt::Display>(e: E) -> ApiError {
     tracing::error!(detail = %e, "wal append/fsync failed; answering fail-closed");
     ApiError::FailClosed(
-        "a durability write failed; the request was refused rather than answered partially"
-            .to_string(),
+        "a durability write failed".to_string(),
     )
 }
 
@@ -408,15 +396,12 @@ pub fn map_change_batch_error(
         // "May be": an applied item is durable, and a lost receipt may have completed in full; only
         // a deny applied after a failed WAL write is in force without being durable.
         detail.push_str(
-            "; a change in it may be in force — a deny-disposition change whose durability failed \
-             is applied anyway (lifecycle §4), and a command whose receipt was lost may have \
-             completed in full — so do not treat this as a no-op",
+            "; a change in it may be in force, so do not treat this as a no-op",
         );
     }
     if some_not_applied {
         detail.push_str(
-            ". At least one item was NOT applied — re-submit the whole request, and do not assume \
-             its deny-disposition changes took hold",
+            "; at least one item was not applied, so re-submit the whole request",
         );
     }
     Some(ApiError::FailClosed(detail))
@@ -514,9 +499,7 @@ fn exec_failure_may_be_in_force(
 pub fn map_join_error(e: tokio::task::JoinError) -> ApiError {
     tracing::error!(detail = %e, "spawn_blocking closure panicked; answering fail-closed");
     ApiError::FailClosed(
-        "an internal error occurred while handling this request; the request was refused rather \
-         than answered partially"
-            .to_string(),
+        "an internal error occurred while handling this request".to_string(),
     )
 }
 

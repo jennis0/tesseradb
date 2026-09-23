@@ -50,19 +50,15 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
 
     // `[serve]` is optional because a build reads this file too, but a server needs all three
     // addresses and gets no default. Port 0 is allowed; the announce line reports the real port.
-    for (what, declared) in [
-        ("viewer", config.viewer_addr.is_some()),
-        ("session", config.session_addr.is_some()),
-        ("control", config.control_listen.is_some()),
+    for (what, declared, example) in [
+        ("viewer", config.viewer_addr.is_some(), "127.0.0.1:8080"),
+        ("session", config.session_addr.is_some(), "127.0.0.1:8081"),
+        ("control", config.control_listen.is_some(), "unix:/run/tessera/control.sock"),
     ] {
         if !declared {
             return Err(format!(
-                "this deployment declares no `{what}` address. `tessera serve` needs all three — \
-                 add them under `[serve]` in the deployment file:\n\n    [serve]\n    \
-                 viewer  = \"127.0.0.1:8080\"\n    session = \"127.0.0.1:8081\"\n    \
-                 control = \"unix:/run/tessera/control.sock\"\n\n`[serve]` is optional because \
-                 `tessera build` reads this same file and has nothing to listen on; it is required \
-                 to serve, and there is no default because a default port is a socket nobody chose"
+                "this deployment declares no `{what}` address; add one under `[serve]`, such as \
+                 `{what} = \"{example}\"`"
             )
             .into());
         }
