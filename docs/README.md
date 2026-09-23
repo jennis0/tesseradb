@@ -9,4 +9,4 @@ This directory is the source of the documentation site, built by `mkdocs.yml` at
 - [developer/](developer/index.md): building, testing and changing Tessera.
 - [openapi/](openapi/): the HTTP contract, rendered into the reference.
 
-[writing.md](writing.md) is the style for prose. It, this file, [roadmap.md](roadmap.md), [outstanding.md](outstanding.md) and [ingest-campaign.md](ingest-campaign.md) are working notes and are not part of the site.
+[writing.md](writing.md) is the style for prose. It, this file and the other Markdown files beside it are working notes and are not part of the site.

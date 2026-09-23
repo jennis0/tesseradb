@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Flags the vocabulary docs/agents/writing.md's Register section forbids, in the files that have
+# Flags the vocabulary docs/writing.md's Register section forbids, in the files that have
 # been rewritten to that standard. Files not yet rewritten are counted but do not fail; add a path
 # to STRICT when its rewrite lands.
 #
@@ -8,11 +8,10 @@
 set -u
 cd "$(dirname "$0")/.."
 
-# docs/agents/writing.md is the source of the list and quotes it, so it is checked by neither set.
-# docs/decisions/README.md repeats the decisions' titles and is counted with them.
-STRICT=(CLAUDE.md docs/README.md docs/agents/README.md docs/system docs/guide docs/developer docs/reference)
-LOOSE=(README.md docs/design docs/decisions docs/evidence docs/roadmap.md docs/ingest-campaign.md docs/guides
-       docs/agents/design-process.md docs/agents/epic-lifecycle.md docs/agents/parallel-work.md)
+# docs/writing.md is the source of the list and quotes it, so it is checked by neither set.
+# docs/system belongs in STRICT and is counted here until its remaining hits are rewritten.
+STRICT=(CLAUDE.md docs/README.md docs/index.md docs/start docs/guides/index.md docs/reference docs/developer)
+LOOSE=(docs/system README.md docs/openapi docs/guides/views.md docs/roadmap.md docs/outstanding.md docs/ingest-campaign.md)
 
 PATTERNS=$(cat <<'EOF'
 —
@@ -50,6 +49,35 @@ PATTERNS=$(cat <<'EOF'
 \bcampaign\b
 \bepics?\b
 \bto measure\b
+\bin this (guide|tutorial|section|page)\b
+\blet['’]s\b
+\bwe will\b
+\bwe['’]ll\b
+\bseamless(ly)?\b
+\brobust\b
+\bpowerful\b
+\bleverag(e|es|ed|ing)\b
+\butili[sz](e|es|ed|ing)\b
+\bdelve
+\bsimply\b
+\bjust\b
+\beasily\b
+\beffortless(ly)?\b
+\bunder the hood\b
+\bout of the box\b
+\ba (wide|broad) range of\b
+\bwhether you(['’]re| are)\b
+\bit['’]s worth\b
+\bgame.chang
+\bstreamline
+\bempower
+\bunlock
+\bdive (in|into|deeper)\b
+\bin (summary|conclusion)\b
+\bto summari[sz]e\b
+\bkey takeaways?\b
+\bcomprehensive\b
+\bensure that\b
 EOF
 )
 
