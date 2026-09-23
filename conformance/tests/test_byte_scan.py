@@ -666,13 +666,13 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
 
 
 @pytest.fixture(scope="module")
-def byte_scan_server(tmp_path_factory, catalogue_bundle_root):
+def byte_scan_server(tmp_path_factory, private_catalogue_bundle):
     """A dedicated server instance for this module, logging to a file (not an unread pipe) so the
     full RUST_LOG=info output can be scanned after the run."""
     tmp_dir = tmp_path_factory.mktemp("byte-scan-server")
     log_path = tmp_dir / "server.log"
     srv, proc = spawn_server(
-        catalogue_bundle_root,
+        private_catalogue_bundle("byte-scan"),
         tmp_dir,
         log_path=log_path,
         env_extra={"RUST_LOG": "info"},

@@ -115,22 +115,15 @@ def catalogue_filter_columns(catalogue_bundle):
 
 @pytest.fixture(scope="session")
 def private_catalogue_bundle(tmp_path_factory, catalogue_bundle_root: Path):
-    """A factory for **private copies** of the catalogue bundle, one per server that will accept a
-    control operation.
+    """A factory for private copies of the catalogue bundle. Every server over the catalogue gets
+    its own.
 
-    An accepted deny is not server-local state. The overlay is published *into the bundle prefix*
-    as a new `SEGMENTS-<n>.json` carrying `deny` and `tombstones` (contracts §2.3; the loader
-    applies it to the initial overlay and WAL replay unions on top), so a private cache directory
-    and a private WAL isolate nothing — the deny lane does not go there. A server pointed at the
-    shared cached fixture therefore rewrites the fixture that every later module, and every later
-    run on this machine, reads. That is `(checkout, /tmp state)` deciding whether the suite is
-    green, arriving by a second route; the receipt closed the first.
+    A server writes into its bundle root: an accepted deny or ingest is published there, not only
+    into its WAL and cache. And the server holds an exclusive lock on the root while it runs, so a
+    second server over the same root refuses to start. A copy per server keeps each server's writes
+    to itself and lets any number run at once.
 
-    **One copy per server, not per module.** Two servers sharing a copy would compose each other's
-    denies, which is the same failure at a shorter range.
-
-    The *oracle* side keeps reading the pristine root: the copy is byte-identical at the moment it
-    is made, and comparing against a bundle the engine is free to mutate is the thing being fixed.
+    The oracle keeps reading the pristine root, which no server is given.
     """
     def make(label: str) -> Path:
         dest = tmp_path_factory.mktemp(f"bundle-{label}") / "bundle-catalogue"
@@ -141,7 +134,7 @@ def private_catalogue_bundle(tmp_path_factory, catalogue_bundle_root: Path):
 
 
 @pytest.fixture(scope="session")
-def catalogue_server(tmp_path_factory, catalogue_bundle_root: Path):
+def catalogue_server(tmp_path_factory, private_catalogue_bundle):
     """θ **saturated** — selection reduces to "serve every visible row up to the cap".
 
     Right for the clauses that are not θ: the floor, the cap, and the ordering. With θ live every
@@ -151,13 +144,13 @@ def catalogue_server(tmp_path_factory, catalogue_bundle_root: Path):
     from oracle.harness import spawn_server, stop_server  # noqa: PLC0415
 
     tmp_dir = tmp_path_factory.mktemp("catalogue-serve")
-    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir)
+    srv, proc = spawn_server(private_catalogue_bundle("serve"), tmp_dir)
     yield srv
     stop_server(proc)
 
 
 @pytest.fixture(scope="session")
-def catalogue_capped_server(tmp_path_factory, catalogue_bundle_root: Path):
+def catalogue_capped_server(tmp_path_factory, private_catalogue_bundle):
     """`k_max_marks = 128` — §7.2's *K*<sub>max</sub>, at the value the design actually names.
 
     Every other server in this suite defaults it to 1,000,000 (`harness.write_config`), which is
@@ -173,13 +166,13 @@ def catalogue_capped_server(tmp_path_factory, catalogue_bundle_root: Path):
     from oracle.harness import spawn_server, stop_server  # noqa: PLC0415
 
     tmp_dir = tmp_path_factory.mktemp("catalogue-serve-capped")
-    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, k_max_marks=128)
+    srv, proc = spawn_server(private_catalogue_bundle("capped"), tmp_dir, k_max_marks=128)
     yield srv
     stop_server(proc)
 
 
 @pytest.fixture(scope="session")
-def catalogue_density_server(tmp_path_factory, catalogue_bundle_root: Path):
+def catalogue_density_server(tmp_path_factory, private_catalogue_bundle):
     """θ **live** — the configuration §7.2's density rule actually ships in.
 
     `theta_target_marks = 16` against the 150,000-item catalogue puts `P_0` at 16/V_total for each
@@ -190,7 +183,7 @@ def catalogue_density_server(tmp_path_factory, catalogue_bundle_root: Path):
     from oracle.harness import spawn_server, stop_server  # noqa: PLC0415
 
     tmp_dir = tmp_path_factory.mktemp("catalogue-serve-density")
-    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, theta_target_marks=16)
+    srv, proc = spawn_server(private_catalogue_bundle("density"), tmp_dir, theta_target_marks=16)
     yield srv
     stop_server(proc)
 
