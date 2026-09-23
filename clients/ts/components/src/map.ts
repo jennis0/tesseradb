@@ -101,10 +101,10 @@ export type MapProbe = {
     decodeMs: number[];
   };
   /**
-   * Colour by cluster, for the harness: the layer coloured by, the coverage, and a sample of
-   * the ordinals the marks on screen carry with what each resolves to — a served artifact's id,
-   * or none — so *a coloured point's ordinal resolves to a served artifact* is checked rather
-   * than eyeballed.
+   * Colour by cluster, for the harness: the layer coloured by (else the first layer drawn), the
+   * coverage, that layer's served ids, and a sample of the ordinals the marks on screen carry with
+   * what each resolves to — one of those ids, or none — so *a coloured point's ordinal resolves to
+   * a served artifact* is checked rather than eyeballed. `layersOn` is the layers drawn.
    */
   cluster: {
     layer: string | null;
@@ -607,6 +607,8 @@ export class TesseraMap extends TesseraElement {
   private clusterProbe(clusterLayer: string | null, artifacts: ReturnType<Store['get']> & {layers: string[]}, bands: readonly {membership: Record<string, {distinct: Uint32Array}>}[]): MapProbe['cluster'] {
     const a = artifacts as unknown as import('@tesseradb/client').ArtifactsProjection;
     const layer = clusterLayer ?? a.layers[0] ?? null;
+    const rows = clusterLayer ? a.colourServed : a.served;
+    const rowOrdinals = clusterLayer ? new Set(rows.map((x) => a.table.ordinalOf(x.layer, x.tesseraId))) : a.servedOrdinals;
     const sample: {ordinal: number; resolvedId: string | null}[] = [];
     let coloured = 0;
     if (layer) {
@@ -615,7 +617,7 @@ export class TesseraMap extends TesseraElement {
         if (!m) continue;
         for (let i = 0; i < m.distinct.length && sample.length < 16; i++) {
           const ordinal = m.distinct[i]!;
-          const resolved = a.table.resolve(ordinal, a.servedOrdinals, this.clusterLevel ?? undefined);
+          const resolved = a.table.resolve(ordinal, rowOrdinals, this.clusterLevel ?? undefined);
           const entry = resolved === 0 ? null : a.table.entry(resolved);
           if (a.table.resolve(ordinal, a.colours, this.clusterLevel ?? undefined) !== 0) coloured += 1;
           sample.push({ordinal, resolvedId: entry ? idString(entry.tesseraId) : null});
@@ -623,7 +625,7 @@ export class TesseraMap extends TesseraElement {
         if (sample.length >= 16) break;
       }
     }
-    return {layer, layersOn: a.layers, coverage: a.coverage, servedIds: a.served.map((x) => idString(x.tesseraId)), sample, coloured};
+    return {layer, layersOn: a.layers, coverage: a.coverage, servedIds: rows.map((x) => idString(x.tesseraId)), sample, coloured};
   }
 
   /** Release the store this map built, and the `Deck`, now. */

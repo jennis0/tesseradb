@@ -1,10 +1,8 @@
-"""The session plane's ``authorise``, and the token it returns.
+"""Tokens: what a reader presents to read, and how an operator makes and ends them.
 
-**The entry point is a token.** ``Map(url, token=...)`` is the primary form: an analyst holds a
-per-principal token their deployment issued them, as any application's user does. This module's
-``authorise`` is the credential-holding form and is operator-only, the session credential being
-able to mint any principal. It exists for the local, single-principal case and for the demo, and
-it never lets the credential reach the browser: the token it mints does.
+A reader normally holds a token its deployment issued. `authorise` makes one from the session
+credential, which can make a token for any set of access terms, so only an operator should hold
+it. The credential stays in this process; only the token reaches a browser.
 """
 
 from __future__ import annotations
@@ -22,49 +20,42 @@ from ._refusal import Refusal
 
 @dataclass
 class Token:
-    """A viewer token and when it expires (seconds since the epoch, as the server reports it).
+    """A token for reading a Tessera database, and when it expires.
 
-    ``renew`` is set when the token came from ``authorise`` and can be minted again; a token handed
-    in as a string has no renewal, and a widget holding one reports ``expired`` when the server
-    refuses it rather than asking for another. ``terms`` is what it was minted for, where this
-    process minted it, and ``None`` for a token handed in as a string: the holder of one cannot
-    read what it grants.
+    - `token`: the token itself, a string to keep secret.
+    - `expires_at`: when it expires, in seconds since 1970, or `None` if not known.
+    - `token_id`: a handle that `revoke` takes to end it without sending the token again. It is
+      `None` for a token given as a string.
+    - `renew`: a function that makes a fresh token, set when `authorise` made this one.
+    - `terms`: the access terms it grants, where `authorise` made it, and `None` otherwise.
+
+    Printing a token shows its expiry and how many terms it grants, never the token.
     """
 
     token: str
     expires_at: Optional[float] = None
-    #: The non-capability handle ``revoke`` takes, and ``None`` for a token handed in as a string.
     token_id: Optional[int] = None
     renew: Optional[Callable[[], "Token"]] = field(default=None, repr=False, compare=False)
     terms: Optional[Sequence[str]] = field(default=None, repr=False, compare=False)
 
     @property
     def seconds_left(self) -> Optional[float]:
+        """Seconds until the token expires, or `None` if its expiry is not known."""
         return None if self.expires_at is None else self.expires_at - time.time()
 
     def __repr__(self) -> str:
-        """The expiry and how many terms, and never the token itself.
-
-        A repr is printed by a cell that returns one, by a traceback and by a logger, and a token
-        printed in a notebook is a token in the saved file.
-        """
+        # Never the token: a printed token ends up in saved notebooks and logs.
         left = "" if self.seconds_left is None else f", {self.seconds_left:.0f}s left"
         granting = "" if self.terms is None else f", {len(self.terms)} term(s)"
         return f"Token(expires_at={self.expires_at}{left}{granting})"
 
 
-#: What a token may be given as: the token itself, a `Token`, or a callable returning either. A
-#: callable is what an issuer with its own renewal looks like from here.
+#: What a token may be given as: the token itself, a `Token`, or a function returning either.
 TokenSource = Union[str, Token, Callable[[], Union[str, "Token"]]]
 
 
 def minted(source: TokenSource) -> Token:
-    """One token from a token source, whatever shape the source is.
-
-    The widget and the query verbs both take a source and both have to make a token of it, and a
-    second reading of what a source may be is a second set of shapes one of them accepts and the
-    other does not.
-    """
+    """A `Token` from any of the forms a token may be given in."""
     got = source() if callable(source) and not isinstance(source, Token) else source
     if isinstance(got, str):
         got = Token(got)
@@ -82,25 +73,22 @@ def authorise(
     *,
     timeout: float = 10.0,
 ) -> Token:
-    """**Operator-only.** Mint a viewer token for the principal whose visibility is ``terms``.
+    """Make a token that reads as someone holding the access terms given. For operators.
 
-    The session credential this takes can mint a token for *any* principal, so whoever holds it
-    holds every principal's view. That makes this the wrong entry point for an analyst's notebook:
-    the shape a practitioner writes when the SDK offers nothing else is one credential in one cell
-    filtering per user afterwards, a pooled service token under which every count and density a
-    user sees derives from the credential's mask rather than theirs. Hand an
-    analyst a token instead (``Map(url, token=...)``); use this for the local single-principal
-    case and for the demo, where the operator and the analyst are one person.
+    - `session_url`: the address of the database's session endpoint.
+    - `credential`: the session credential. It can make a token for any terms, so whoever holds
+      it can read everything. Give other people a token, never the credential.
+    - `terms`: the access terms the token grants.
+    - `timeout`: how long to wait for the server, in seconds.
 
-    ``terms`` is the principal's term list, passed to the server's passthrough auth plugin as bare
-    claims (``{"terms": [...]}``, base64 in ``auth_data``). The returned ``Token`` renews itself
-    on request — ``token.renew()`` — with the same credential, which stays in this process.
+    The token's `renew()` makes a fresh one with the same credential, which stays in this
+    process. A `Database` does this for you: `db.token(terms)` and `db.viewer(terms)`.
 
-    Refuses without a credential: an empty one would be sent and refused by the server, but the
-    refusal there reads as a bad deployment rather than a missing argument.
+        token = tesseradb.authorise(session_url, credential, ["cs.LG"])
+        tesseradb.connect(viewer_url, token).view("papers").count()
     """
     if not credential:
-        raise ValueError("authorise needs the session credential (operator-only; see the docstring)")
+        raise ValueError("authorise needs the session credential")
     if not session_url:
         raise ValueError("authorise needs the session plane's URL")
     auth_data = base64.b64encode(json.dumps({"terms": list(terms)}).encode()).decode()
@@ -136,18 +124,19 @@ def revoke(
     *,
     timeout: float = 10.0,
 ) -> None:
-    """**Operator-only.** End a session by the ``token_id`` its minting returned.
+    """End a token so it can no longer read. For operators.
 
-    It takes the ``token_id`` and never the token, so the capability itself never transits a
-    second time; a ``Token`` this process minted may be passed instead, and its handle is read off
-    it. A handle naming no live session is accepted in silence, there being nothing to say about
-    it that would not enumerate the sessions that are live.
+    - `session_url`, `credential`: as for `authorise`.
+    - `token_id`: the token's `token_id`, or the `Token` itself. Only the id is sent.
+    - `timeout`: how long to wait for the server, in seconds.
 
-    This is the session plane and takes the session credential, as ``authorise`` does. A viewer
-    holding only a token cannot revoke itself.
+    An id that names no live token is accepted without comment, so the answer says nothing
+    about which tokens exist.
+
+        tesseradb.revoke(session_url, credential, token)
     """
     if not credential:
-        raise ValueError("revoke needs the session credential (operator-only; see the docstring)")
+        raise ValueError("revoke needs the session credential")
     if not session_url:
         raise ValueError("revoke needs the session plane's URL")
     handle = token_id.token_id if isinstance(token_id, Token) else token_id

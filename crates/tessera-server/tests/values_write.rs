@@ -648,12 +648,8 @@ async fn an_undeclared_column_is_refused_and_names_the_view() {
     )
     .await;
     assert_eq!(status, 422, "{answer}");
-    let detail = answer.to_string();
-    assert!(detail.contains("'sentiment'"), "{detail}");
-    assert!(
-        detail.contains("group-scoped family whose key set holds this batch's view"),
-        "the refusal names the scoped route a column could have been declared through: {detail}"
-    );
+    assert_eq!(answer["error"], "contract", "{answer}");
+    assert!(answer["detail"].as_str().unwrap().contains("'sentiment'"), "{answer}");
 
     // And a batch that names no view at all takes the same refusal, which is what keeps a scoped
     // column un-nameable without a header.

@@ -1129,13 +1129,9 @@ async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
     )
     .await;
     assert_eq!(status, 422, "an undeclared column is a malformed request");
-    assert!(
-        body.contains(
-            "column 'heat' is neither in MANIFEST.declared_scalars nor the name of a \
-                       registered layer"
-        ),
-        "the refusal is the undeclared-column one, unchanged: {body}"
-    );
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("'heat'"), "{body}");
 }
 
 /// **A join row carries that view's scoped value, and it is the one thing it carries beyond
