@@ -152,8 +152,8 @@ pub(super) struct ItemsCursor {
     pub(super) stretch: u32,
 }
 
-/// `idset, order, flags, last (u32, u64), scan (u32, u64), stretch`, little-endian, where bit 0 of `flags`
-/// says `last` is present and bit 1 that `scan` is.
+/// `idset, order, flags, last (u32, u64), scan (u32, u64), stretch`, little-endian, where bit 0 of
+/// `flags` says `last` is present and bit 1 that `scan` is.
 const PAYLOAD_LEN: usize = 4 + 1 + 1 + 12 + 12 + 4;
 const HAS_LAST: u8 = 1;
 const HAS_SCAN: u8 = 2;

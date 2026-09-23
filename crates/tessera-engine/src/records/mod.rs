@@ -5,8 +5,7 @@
 //!
 //! Every page is built from the latest generation with the visible set composed again, exactly as
 //! a viewport composes it, so a deletion or suppression accepted during a read applies from the
-//! next page. A row is taken only from inside that mask, and a field is read only for a row
-//! already taken. Nothing is sampled and nothing is counted outside the visible set. Rows are
+//! next page. A page takes its rows from that mask and reads fields for those rows alone. Rows are
 //! addressed by `tessera_id`; an entity id or any other internal position reaches the caller only
 //! inside a sealed cursor.
 //!
@@ -59,8 +58,7 @@ impl RecordsOrder {
     }
 }
 
-/// The ceilings and budgets one response runs under. The deployment's configuration supplies
-/// them.
+/// A response's ceilings and budgets, from the deployment's configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct ItemsLimits {
     /// Rows per page; a request asking for more is served this many.

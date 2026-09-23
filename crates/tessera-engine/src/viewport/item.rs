@@ -395,9 +395,8 @@ fn record_fields(
 }
 
 /// One render column's drill-down value, read from the row: a category's code resolved to its
-/// key — code 0, the absent sentinel — and every other family as stored. A rendered number's
-/// absence is still stored as the type's zero, so a numeric zero here may be real or absent; this
-/// reports the stored value rather than inventing a rule.
+/// key, code 0 being the absent sentinel, and every other family as stored. A number's absence is
+/// the presence bitmap beside the column, which the caller reads before this.
 fn row_field_out(
     view: &ScalarSlice<'_>,
     idx: usize,

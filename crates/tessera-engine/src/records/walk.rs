@@ -4,8 +4,9 @@
 //! in map order, a range of item numbers in stored order. It starts at the scan position and
 //! spans a target number of rows, and when a page empties one before filling, the next is four
 //! times longer, so a sparse filter costs a few evaluations per read rather than one per page. The
-//! size reached travels in the cursor, so a resumed read continues at it. The filter's answer is held in the row positions of the publication it was evaluated
-//! under, so a stretch is evaluated again when the prefix, the segment set or the overlay moves.
+//! size reached travels in the cursor, so a resumed read continues at it. The filter's answer is
+//! held in the row positions of the publication it was evaluated under, so a stretch is evaluated
+//! again when the prefix, the segment set or the overlay moves.
 //! Visibility is never held: every page tests every row against the mask composed for that page.
 //!
 //! Every leaf is evaluated on the row route wherever the column affords one, in both orders, so
@@ -283,7 +284,9 @@ impl Walk {
             }
             let stretch = self.stretch.as_ref().expect("a stretch is open");
             match order {
-                RecordsOrder::Map => take_map(cx, stretch, self.keep_unmatched, scan, need, &mut rows),
+                RecordsOrder::Map => {
+                    take_map(cx, stretch, self.keep_unmatched, scan, need, &mut rows)
+                }
                 RecordsOrder::Stored => {
                     take_stored(cx, stretch, self.keep_unmatched, scan, need, &mut rows)
                 }
@@ -380,7 +383,11 @@ impl Walk {
                     let (segment, base) = segments[*s];
                     let ids = segment.columns.tessera_id();
                     let visible = cx.open.mask.rows_in_range(base + range.start..base + range.end);
-                    entities.extend(visible.iter().map(|row| cx.entity_of(ids[(row - base) as usize])));
+                    entities.extend(
+                        visible
+                            .iter()
+                            .map(|row| cx.entity_of(ids[(row - base) as usize])),
+                    );
                 }
                 entities.sort_unstable();
                 let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
