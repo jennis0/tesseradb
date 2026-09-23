@@ -124,16 +124,38 @@ def _(DATA, pq):
 @app.cell
 def _(mo):
     mo.md("""
-    `declare_columns` declares the frame's columns from their types, and `index=["title"]`
-    makes titles searchable. `declare_layer` declares the clustering, and `declare_labels` a
-    line of text for each cluster.
+    `td` is the `tesseradb` package, imported in the first cell. `td.create()` makes a new
+    database in a temporary directory, and everything after it is a call on that database.
 
-    Each `insert` names the columns it reads, and prints the ones it read and the ones it
-    ignored. The view reads the id and the position, and takes `title` because a column of that
-    name was declared. The clustering reads the id and `cluster`. The labels take a dictionary
-    from cluster to text.
+    The declarations say what the database will hold, before it holds anything:
 
-    The first commit builds the database and starts a local server for it.
+    - `declare_view("map")` declares a **view**: a set of points with 2D positions, drawn as
+      one map. A database can hold several views of the same records, as section 2 does.
+    - `declare_columns(frame, ...)` declares a column for each column of the frame, typed from
+      the frame. `skip` leaves out the columns that the view and the clustering use in their
+      own way. `index=["title"]` makes titles searchable and filterable. A column that is not
+      indexed is stored with each point and shown when you open it.
+    - `declare_layer("clusters", kind="flat")` declares a **layer**: a set of groups of points
+      drawn over the map, here a clustering. `kind="flat"` means one level of clusters with no
+      hierarchy. Section 2 has layers of the other kinds, whose clusters sit inside larger ones.
+    - `declare_labels("topics", of="clusters")` declares a line of text for each cluster of the
+      `clusters` layer.
+
+    The inserts then give it the data, and each names the frame's columns it uses:
+
+    - `insert("map", frame, id="entity_id", x="x", y="y")` makes each row a point. `id` names
+      the column that identifies each paper, and `x` and `y` the columns holding its position.
+      The view also takes `title`, because a column of that name was declared.
+    - `insert("clusters", frame, id="entity_id", key="cluster")` puts each paper in a cluster.
+      `key` names the column that says which cluster, and each distinct key becomes one
+      cluster.
+    - `insert("topics", topic_names)` takes a dictionary from cluster key to text.
+
+    Each insert prints the columns it read and the columns it ignored.
+
+    `commit()` sends everything inserted. The first commit checks the declarations against the
+    data, builds the database's files, starts a local server for the database and prints what it
+    did.
     """)
     return
 
@@ -156,6 +178,8 @@ def _(frame, td, topic_names):
 @app.cell
 def _(mo):
     mo.md("""
+    `map()` draws the database's map in the notebook, served by that local server.
+    `colour_by="cluster:clusters"` colours each point by its cluster in the `clusters` layer.
     Hover over a point to see its title, and zoom in to see more points.
     """)
     return
@@ -245,17 +269,30 @@ def _(DATA, datetime, pa, pc, pq):
 @app.cell
 def _(mo):
     mo.md("""
-    The declarations say what the database holds before any data arrives.
+    This time each column is declared on its own, with more control over each.
 
-    A **vocabulary** is the set of values a category column takes. An **attribute** is a
-    column: `render=True` keeps it with each point so the map can colour and filter by it, and
-    `index=True` makes it searchable or filterable. The other columns are stored with the paper
-    and shown when you open it.
+    `declare_view_group("years")` declares a **view group**: a set of views that share their
+    settings and differ by a key, here the year. Its views are listed in a roster when the data
+    is inserted.
 
-    Two settings on the clusterings decide what a reader is shown.
-    `require_member_visibility` shows a cluster to a reader only when they can see enough of its
-    papers. `content_requires="all"` shows a topic's name only to a reader who can see every
-    paper the name was written from.
+    A **vocabulary** is the set of values a category column takes, such as arXiv's archives.
+    `closed=True` means no other values are accepted, and `width` is how many bytes each value's
+    code takes.
+
+    An **attribute** is a column, and its `type` decides how it is stored and searched. A
+    `category` takes its values from a vocabulary. `text` is searched word by word. A `keyword`
+    is matched exactly, as an arXiv ID is. `render=True` keeps the value with each point, so the
+    map can colour and filter by it. `index=True` makes the column searchable or filterable. A
+    column with neither is stored with the paper and shown when you open it.
+
+    Each clustering is a layer. `views` says which views it is drawn on. `kind="tiered"` means
+    fixed levels, from coarse to fine, which `levels` names. `computed` is what the server works
+    out for each cluster for each reader, such as its centre and its bounding box. `scope` puts
+    `clusters/yearly` on every view of the `years` group, with separate clusters in each.
+
+    Two settings decide what a reader is shown. `require_member_visibility` shows a cluster to
+    a reader only when they can see enough of its papers. `content_requires="all"` shows a
+    topic's name only to a reader who can see every paper the name was written from.
     """)
     return
 
@@ -300,10 +337,18 @@ def _(SCALE, td):
 @app.cell
 def _(mo):
     mo.md("""
-    The inserts take tables or paths to Parquet files, and a path is read where it lies. The
-    `years` group takes a roster of its views, then the papers with a `year` column saying
-    which view each belongs to. A clustering takes two tables: `artifacts=` holds the clusters
-    and `members=` says which papers are in each.
+    The inserts take tables or paths to Parquet files, and a path is read where it lies.
+
+    `access="categories"` names the column holding each paper's access terms, a list of arXiv
+    categories. The `years` group takes a roster of its views, one row per year, and then the
+    papers, with `view="year"` naming the column that says which year's view each paper goes
+    in.
+
+    A clustering takes two tables. `artifacts=` holds the clusters, one row each, and
+    `members=` says which papers are in which cluster. Every column the call uses is named on
+    it, as before: `parent` is a cluster's parent in the hierarchy, `contents` is a label's
+    text, `attached_layer`, `attached_level` and `attached_key` name the cluster a label
+    belongs to, and `rank` in a members table marks the papers a topic name was written from.
     """)
     return
 
@@ -528,8 +573,10 @@ def _(mo):
     mo.md("""
     ## 4. A year at a time
 
-    Each year has its own view in the `years` group. The slider switches the map below between
-    them. The map keeps its position as you move, because every year uses the same coordinates.
+    Each year has its own view in the `years` group, named `years:<year>`. `map(view=...)`
+    draws one of them, and setting the map's `view` from Python switches it to another. The
+    slider below does that, and the map keeps its position as you move, because every year
+    uses the same coordinates.
     """)
     return
 
@@ -604,8 +651,11 @@ def _(mo):
 
     The week held back in section 2 goes into the running database with the same calls as
     before: `insert` into `papers`, into the `years` group, and into the k-means clusters the
-    papers belong to. The commit waits until the new papers are visible, so the counts after it
-    include them.
+    papers belong to.
+
+    After the first commit, a commit sends its inserts to the running server, which takes them
+    while it goes on answering readers. There is no rebuild. The commit waits until the new
+    papers are visible, so the counts after it include them.
     """)
     return
 
