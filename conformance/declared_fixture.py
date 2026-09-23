@@ -12,8 +12,12 @@ live ingest appends), so anything carrying an identifier is rekeyed here, and on
 - a point by its `fx` column, which holds the source id;
 - an item card by the `fx` it was asked for;
 - an artifact by `(layer, key)`, and its parents by their keys;
-- a category value by its key. A code is drawn at random when a running service mints it and
-  counted from 1 when a build assigns it, so codes differ between the two by design.
+- a rendered category's code on a point by its key. Codes themselves are compared on the
+  category lists and the typeahead. An open vocabulary's codes are drawn at random by both
+  deployments, which is what `data-model.md` describes, so they are not compared. A build numbers
+  a closed vocabulary 1, 2, 3 and so on where a running service draws its codes at random; that
+  is pinned as a known difference awaiting a ruling. Whatever the live side serves is held to one
+  code per key across every principal and every stage.
 
 Rows whose order is set by `tessera_id` (points within a tile, browse rows with equal counts,
 artifacts within a level) are sorted by the rekeyed identity instead.
@@ -431,17 +435,46 @@ def _canon(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def observe(server, plan: Plan) -> dict[str, dict[str, object]]:
+@dataclass
+class Observation:
+    """What one deployment answered: `principal -> label -> answer`, ready to compare, and beside
+    it `principal -> column -> {key: code}` as served, which is not compared across deployments."""
+
+    answers: dict[str, dict[str, object]]
+    codes: dict[str, dict[str, dict[str, int]]]
+
+
+def observe(server, plan: Plan) -> Observation:
     """Every principal's answers to `plan`, rekeyed so two deployments compare."""
-    return {name: _observe_one(server, terms, plan) for name, terms in PRINCIPALS.items()}
+    answers, codes = {}, {}
+    for name, terms in PRINCIPALS.items():
+        answers[name], codes[name] = _observe_one(server, terms, plan)
+    return Observation(answers, codes)
 
 
-def _observe_one(server, terms, plan: Plan) -> dict[str, object]:
+def _open_columns(meta: dict) -> set[str]:
+    """Category columns over an open vocabulary, whose codes both deployments draw at random."""
+    families = meta.get("declared_scalars", []) + meta.get("scoped_scalars", [])
+    return {
+        d["name"]
+        for d in families
+        if (d.get("category") or {}).get("kind") == "discovered"
+    }
+
+
+def _observe_one(server, terms, plan: Plan) -> tuple[dict[str, object], dict]:
     token = server.authorise(list(terms))["token"]
     out: dict[str, object] = {}
+    served_codes: dict[str, dict[str, int]] = {}
     meta = record_one(server, token, Meta()).payload
     out["meta"] = normalise_meta(meta)
     keys_of = _code_maps(server, token, meta)
+    drawn = _open_columns(meta)
+
+    def without_drawn_codes(column: str, values: list[dict]) -> None:
+        if column.split("@")[0] in drawn:
+            for value in values:
+                value["code"] = "drawn at random"
 
     for column in plan.categories:
         try:
@@ -450,13 +483,15 @@ def _observe_one(server, terms, plan: Plan) -> dict[str, object]:
             # A column or pinned view the deployment does not hold is a real answer here.
             out[f"categories {column}"] = {"status": refused.response.status_code}
             continue
-        out[f"categories {column}"] = [_decode_values(page) for page in pages]
+        served_codes[column] = {v["key"]: v["code"] for page in pages for v in page["values"]}
+        for page in pages:
+            without_drawn_codes(column, page["values"])
+        out[f"categories {column}"] = pages
     for column, q, counts in plan.suggest:
         answer = record_one(server, token, Suggest(column, q, counts=counts)).payload
-        body = answer["body"]
         if answer["status"] == 200:
-            body = _decode_values(body)
-        out[f"suggest {column} {q!r} counts={counts}"] = {"status": answer["status"], "body": body}
+            without_drawn_codes(column, answer["body"]["values"])
+        out[f"suggest {column} {q!r} counts={counts}"] = answer
 
     layers = _canon(list(plan.layers)) if plan.layers else None
     fx_of: dict[int, int] = {}
@@ -519,7 +554,7 @@ def _observe_one(server, terms, plan: Plan) -> dict[str, object]:
                 )
                 card = record_one(server, token, ArtifactCard(tessera, view)).payload
                 out[f"artifact {layer} {key} on {view}"] = card
-    return out
+    return out, served_codes
 
 
 def normalise_meta(meta: dict) -> dict:
@@ -538,14 +573,6 @@ def _code_maps(server, token: str, meta: dict) -> dict[str, dict[int, str]]:
         pages = record_one(server, token, Categories(d["name"])).payload["pages"]
         out[d["name"]] = {v["code"]: v["key"] for page in pages for v in page["values"]}
     return out
-
-
-def _decode_values(page: dict) -> dict:
-    """A categories or suggest page with each value's code taken out."""
-    page = json.loads(json.dumps(page))
-    for value in page.get("values", []):
-        value.pop("code", None)
-    return page
 
 
 def normalise_viewport(
@@ -713,6 +740,7 @@ __all__ = [
     "WORLD",
     "WORLD_EXTENT",
     "access_of",
+    "Observation",
     "Difference",
     "differences",
     "split",

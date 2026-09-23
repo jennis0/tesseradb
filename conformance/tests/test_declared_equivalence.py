@@ -623,6 +623,13 @@ KNOWN = (
         "a restart moves the version of each layer registered live, with no gate edit",
     ),
     Known(
+        "closed-codes",
+        "live-vocabularies",
+        STAGES,
+        ((r"(categories|suggest) mood.*", r".*\.code"),),
+        "closed vocabulary codes: dense at build, random live",
+    ),
+    Known(
         "text-index",
         "text-attributes",
         ("restart",),
@@ -677,21 +684,38 @@ class Walk:
         self.work = work
         built = case.built(work / "built")
         try:
-            self.expected = fx.observe(built.server, case.plan)
+            self.expected = fx.observe(built.server, case.plan).answers
         finally:
             built.stop()
         _assert_not_vacuous(case, self.expected)
         self.live: Deployment | None = None
         self.stage: str | None = None
         self.found: dict[str, list[fx.Difference]] = {}
+        #: `(stage, principal, column, key, code)` wherever the live side served a key under a code
+        #: other than the one it served first.
+        self.moved_codes: dict[str, list[tuple]] = {}
+        self._first_codes: dict[tuple[str, str], int] = {}
         self.broken: Exception | None = None
 
     def differences(self, stage: str) -> list[fx.Difference]:
         """What the live side answers differently from the built side at `stage`."""
         if stage not in self.found:
             live = self.at(stage)
-            self.found[stage] = fx.differences(self.expected, fx.observe(live.server, self.case.plan))
+            observed = fx.observe(live.server, self.case.plan)
+            self.found[stage] = fx.differences(self.expected, observed.answers)
+            self.moved_codes[stage] = self._hold_codes(stage, observed.codes)
         return self.found[stage]
+
+    def _hold_codes(self, stage: str, served) -> list[tuple]:
+        """One code per key, whichever principal or stage served it."""
+        moved = []
+        for principal, columns in served.items():
+            for column, keys in columns.items():
+                for key, code in keys.items():
+                    first = self._first_codes.setdefault((column.split("@")[0], key), code)
+                    if code != first:
+                        moved.append((stage, principal, column, key, code, first))
+        return moved
 
     def at(self, stage: str) -> Deployment:
         if self.broken is not None:
@@ -758,6 +782,8 @@ def test_a_live_declaration_serves_what_a_build_serves(walks, case, stage, known
             found, _ = fx.split(found, k.places)
         shown = "\n".join(map(str, found[:12]))
         assert not found, f"{case} at {stage}: {len(found)} answers differ\n{shown}"
+        moved = walks(case).moved_codes[stage]
+        assert not moved, f"{case} at {stage}: the live side moved a code: {moved[:6]}"
     else:
         k = KNOWN[known]
         _, matching = fx.split(found, k.places)
