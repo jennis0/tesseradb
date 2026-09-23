@@ -627,10 +627,8 @@ class Server:
             timeout=10,
         )
 
-    def change(self, external_id_b64: str, op: str, access: str | None = None) -> requests.Response:
+    def change(self, external_id_b64: str, op: str) -> requests.Response:
         item = {"external_id": external_id_b64, "op": op}
-        if access is not None:
-            item["access"] = access
         return requests.post(
             f"{self.control_base}/control/changes",
             headers={"Authorization": f"Bearer {self.operator_credential}"},

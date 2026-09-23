@@ -859,6 +859,7 @@ fn tessera_ids_of(state: &AppState, entity_ids: &[EntityId]) -> Result<Vec<u64>,
 
 /// One `/control/changes` item as sent.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChangeItem {
     /// Base64, since external ids are arbitrary bytes. Exactly one of this and `tessera_id`.
     #[serde(default)]
@@ -3039,6 +3040,7 @@ async fn faults_release(State(state): State<Arc<AppState>>) -> StatusCode {
 /// A pause site by its switchboard name.
 #[cfg(feature = "fault-injection")]
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FaultSiteRequest {
     site: String,
 }

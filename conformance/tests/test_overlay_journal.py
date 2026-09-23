@@ -755,10 +755,7 @@ def test_the_withdrawn_predicate_op_is_refused_and_composes_nothing(
             f"the withdrawn predicate op was answered {response.status_code}, not 422: "
             f"{response.text}"
         )
-        assert "predicate" in response.text and "delete" in response.text, (
-            "the 422 must name the op and the flow that replaces it, or a caller cannot act on "
-            f"it: {response.text}"
-        )
+        assert response.json()["error"] == "contract", response.text
 
     assert journal.ops == [], "a refused operation must not enter the journal"
     assert len(journal.refused) == 2

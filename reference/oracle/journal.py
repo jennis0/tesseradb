@@ -66,8 +66,8 @@ import requests
 from .bundle import Bundle
 from .mask import ChangeSet
 
-# The four `/control/changes` operations (contracts §3.4). `predicate` additionally carries an
-# `access` label, which the plugin turns back into descriptors.
+# The four `/control/changes` operations. The server refuses `predicate`; it is kept so a test
+# can submit it and see the refusal.
 CHANGE_OPS = ("delete", "suppress", "unsuppress", "predicate")
 
 
@@ -142,10 +142,8 @@ class AckedJournal:
     ) -> requests.Response:
         """Submit one `/control/changes` item, journalling it **iff** the service returns 200.
 
-        `predicate` takes `term_ids`, the item's *new* term set; the `access` label is rebuilt from
-        the bundle's own dictionary, because `builtin:passthrough`'s label is the comma-joined
-        descriptors and the descriptors are what the dictionary holds. Deriving it here rather than
-        at every call site keeps one place that knows the plugin's label grammar.
+        `predicate` takes `term_ids`, the item's *new* term set, which the journal records if the
+        service accepts it; the request carries only the fields the server defines.
 
         `external_id_b64` overrides the bundle lookup, for the one case a test needs it: naming an
         external ID the deployment has never seen, which must be refused. A refusal has no entity
@@ -157,15 +155,10 @@ class AckedJournal:
         if op == "predicate" and term_ids is None:
             raise ValueError("a predicate change must state the item's new term set")
 
-        access = None
-        if op == "predicate":
-            access = ",".join(
-                self.bundle.dictionary[t].decode("ascii") for t in sorted(term_ids or set())
-            )
         supplied = external_id_b64
         if supplied is None:
             supplied = base64.b64encode(self.bundle.external_id_of(entity_id)).decode()
-        response = self.server.change(supplied, op, access)
+        response = self.server.change(supplied, op)
 
         if response.status_code == 200 and external_id_b64 is not None:
             raise AssertionError(
@@ -207,16 +200,13 @@ class AckedJournal:
         exact fail-open this type exists to prevent.
         """
         payload = []
-        for entity_id, op, term_ids in items:
-            item: dict = {
-                "external_id": base64.b64encode(self.bundle.external_id_of(entity_id)).decode(),
-                "op": op,
-            }
-            if op == "predicate":
-                item["access"] = ",".join(
-                    self.bundle.dictionary[t].decode("ascii") for t in sorted(term_ids or set())
-                )
-            payload.append(item)
+        for entity_id, op, _term_ids in items:
+            payload.append(
+                {
+                    "external_id": base64.b64encode(self.bundle.external_id_of(entity_id)).decode(),
+                    "op": op,
+                }
+            )
 
         response = self.server.changes(payload)
         if response.status_code == 200:
