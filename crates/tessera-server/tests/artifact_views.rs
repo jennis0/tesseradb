@@ -12,7 +12,10 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::json;
 use tempfile::TempDir;
@@ -1121,7 +1124,7 @@ async fn a_recreated_view_the_size_of_its_predecessor_serves_its_own_items_after
 #[tokio::test]
 async fn a_growth_grows_the_artifact_in_the_view_it_names() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
     let (status, body) = put(
         &server,
@@ -1255,7 +1258,7 @@ fn arrow_growth(key: &str, members: Vec<String>, view: Option<(DataType, Option<
 #[tokio::test]
 async fn an_arrow_growth_grows_the_artifact_in_the_view_its_view_column_names() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
     let (status, body) = put(
         &server,

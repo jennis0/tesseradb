@@ -1512,7 +1512,7 @@ async fn a_sealed_familys_values_need_the_groups_gate_and_not_only_a_reachable_v
 /// layer's and an artifact's are, not with the terms the dictionary happens to hold.
 #[tokio::test]
 async fn a_view_labelled_with_a_term_no_point_carries_is_reached_by_its_holder_alone() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     assert_eq!(
         create_view(&served, "quarter", "2026-Q6", json!({ "visibility": ["team-x"] }))
             .await

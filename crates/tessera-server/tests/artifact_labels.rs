@@ -17,33 +17,11 @@ const LAYER: &str = "teams";
 const NAMES: &str = "teams/names";
 const WHOLE: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
-fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
-}
-
 fn artifacts_url(server: &TestServer, layer: &str) -> String {
     server.control_url(&format!(
         "/control/layers/{}/artifacts",
         layer.replace('/', "%2F")
     ))
-}
-
-async fn declare(server: &TestServer, body: serde_json::Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    assert_eq!(status, 201, "{}", resp.text().await.unwrap());
 }
 
 fn teams_declaration(default: &str) -> serde_json::Value {
@@ -118,26 +96,12 @@ struct Deployment {
     ids: Vec<(String, String)>,
 }
 
-async fn open(tmp: &TempDir) -> TestServer {
-    spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
 /// One deployment. `red` adds the labelled artifacts, after everything the two share.
 async fn deployment(red: bool) -> Deployment {
     let tmp = TempDir::new().unwrap();
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = open(&tmp).await;
-    declare(&server, teams_declaration("inherited")).await;
-    declare(
+    let server = serve(&tmp).await;
+    register(&server, teams_declaration("inherited")).await;
+    register(
         &server,
         json!({
             "name": NAMES,
@@ -217,13 +181,6 @@ async fn deployment(red: bool) -> Deployment {
     }
 }
 
-async fn token(server: &TestServer, terms: &[&str]) -> String {
-    authorise(server, terms).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string()
-}
-
 async fn viewport_bytes(server: &TestServer, token: &str, body: serde_json::Value) -> Vec<u8> {
     let resp = server
         .client
@@ -300,8 +257,8 @@ async fn viewport_raw(server: &TestServer, token: &str, body: serde_json::Value)
 /// Every viewer route, asked of both deployments by a principal lacking `red`, must answer alike.
 /// Returns how many comparisons were made, so a caller can see the loop did not come up empty.
 async fn assert_indistinguishable(a: &Deployment, b: &Deployment) -> usize {
-    let blue_a = token(&a.server, &["0", "blue"]).await;
-    let blue_b = token(&b.server, &["0", "blue"]).await;
+    let blue_a = token_for(&a.server, &["0", "blue"]).await;
+    let blue_b = token_for(&b.server, &["0", "blue"]).await;
     let red_ids: Vec<&(String, String)> = a
         .ids
         .iter()
@@ -418,8 +375,8 @@ async fn assert_indistinguishable(a: &Deployment, b: &Deployment) -> usize {
 /// The control: a principal holding `red` is served what the other is not, in the same kind of
 /// request, so the equalities above are about the label and not about an empty layer.
 async fn assert_red_is_served(a: &Deployment) {
-    let red = token(&a.server, &["0", "red"]).await;
-    let blue = token(&a.server, &["0", "blue"]).await;
+    let red = token_for(&a.server, &["0", "red"]).await;
+    let blue = token_for(&a.server, &["0", "blue"]).await;
     let for_red = keys_served(&viewport_raw(&a.server, &red, viewport(0, json!({}))).await);
     let for_blue = keys_served(&viewport_raw(&a.server, &blue, viewport(0, json!({}))).await);
     for key in ["p-red", "c-red", "list-red", "n-red"] {
@@ -432,7 +389,7 @@ async fn assert_red_is_served(a: &Deployment) {
         assert!(for_red.contains(&key.to_string()) && for_blue.contains(&key.to_string()));
     }
     // A label list admits a viewer holding any one of its labels.
-    let green = token(&a.server, &["0", "green"]).await;
+    let green = token_for(&a.server, &["0", "green"]).await;
     let for_green = keys_served(&viewport_raw(&a.server, &green, viewport(0, json!({}))).await);
     assert!(for_green.contains(&"list-red".to_string()));
     assert!(!for_green.contains(&"p-red".to_string()));
@@ -448,72 +405,28 @@ async fn an_artifact_withheld_by_its_own_label_is_indistinguishable_from_one_nev
     assert!(assert_indistinguishable(&a, &b).await > 50);
 
     // Restart, both alike: the labels come back from the log.
-    let (a, b) = (restart(a).await, restart(b).await);
+    let (a, b) = (a.restart().await, b.restart().await);
     assert_red_is_served(&a).await;
     assert_indistinguishable(&a, &b).await;
 
     // A fold rewrites every level into extents; the labels are carried with the records.
-    fold(&a.server).await;
-    fold(&b.server).await;
-    let (a, b) = (restart(a).await, restart(b).await);
+    flush_and_fold(&a.server, None).await;
+    flush_and_fold(&b.server, None).await;
+    let (a, b) = (a.restart().await, b.restart().await);
     assert_red_is_served(&a).await;
     assert_indistinguishable(&a, &b).await;
 }
 
-async fn restart(d: Deployment) -> Deployment {
-    let Deployment { tmp, server, ids } = d;
-    server.shutdown().await;
-    Deployment {
-        server: open(&tmp).await,
-        tmp,
-        ids,
-    }
-}
-
-async fn wait_until(
-    server: &TestServer,
-    what: &str,
-    done: impl Fn(&tessera_engine::ExecutorStats) -> bool,
-) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        if done(&server.state.engine.write_executor_stats()) {
-            return;
+impl Deployment {
+    /// Stop the server and serve the same bundle, cache and log again.
+    async fn restart(self) -> Deployment {
+        let Deployment { tmp, server, ids } = self;
+        Deployment {
+            server: restart(server, &tmp).await,
+            tmp,
+            ids,
         }
-        assert!(std::time::Instant::now() < deadline, "{what}: never happened");
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-}
-
-/// Ingest one point, flush, then fold: a flush with nothing buffered publishes nothing.
-async fn fold(server: &TestServer) {
-    let ingested = external_id_of(9_001);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "labels-fold")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(Some(&ingested[..]), 10.0, 10.0, "0")]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().await.unwrap());
-    tick(server).await;
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_until(server, "the fold published", move |now| {
-        assert_eq!(now.fold_failures, before.fold_failures);
-        now.folds > before.folds
-    })
-    .await;
 }
 
 /// A label is set once: filled on an artifact that has none, accepted again unchanged, and a
@@ -522,7 +435,7 @@ async fn fold(server: &TestServer) {
 async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
     let d = deployment(false).await;
     let server = &d.server;
-    let blue = token(server, &["0", "blue"]).await;
+    let blue = token_for(server, &["0", "blue"]).await;
     let served = |bytes: Vec<u8>| keys_served(&bytes);
 
     assert!(served(viewport_raw(server, &blue, viewport(0, json!({}))).await)
@@ -556,11 +469,11 @@ async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
 
     // The held label is compared after a restart, read from the log, and after a fold, read from
     // a packed record: the same label is accepted and a different one refused.
-    let mut d = restart(d).await;
+    let mut d = d.restart().await;
     for stage in ["restart", "fold"] {
         if stage == "fold" {
-            fold(&d.server).await;
-            d = restart(d).await;
+            flush_and_fold(&d.server, None).await;
+            d = d.restart().await;
         }
         let server = &d.server;
         let (status, _) = patch(server, LAYER, json!([{ "key": "open", "access": ["red"] }])).await;
@@ -568,7 +481,7 @@ async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
         let (status, _) =
             patch(server, LAYER, json!([{ "key": "open", "access": ["blue"] }])).await;
         assert_eq!(status, 409, "{stage}");
-        let blue = token(server, &["0", "blue"]).await;
+        let blue = token_for(server, &["0", "blue"]).await;
         assert!(!keys_served(&viewport_raw(server, &blue, viewport(0, json!({}))).await)
             .contains(&"open".to_string()), "{stage}");
     }
@@ -579,13 +492,8 @@ async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
 #[tokio::test]
 async fn an_unlabelled_artifact_takes_a_named_default() {
     let tmp = TempDir::new().unwrap();
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = open(&tmp).await;
-    declare(&server, teams_declaration("red")).await;
+    let server = serve(&tmp).await;
+    register(&server, teams_declaration("red")).await;
     publish(
         &server,
         LAYER,
@@ -596,8 +504,8 @@ async fn an_unlabelled_artifact_takes_a_named_default() {
     )
     .await;
     tick(&server).await;
-    let red = token(&server, &["0", "red"]).await;
-    let blue = token(&server, &["0", "blue"]).await;
+    let red = token_for(&server, &["0", "red"]).await;
+    let blue = token_for(&server, &["0", "blue"]).await;
     assert_eq!(
         keys_served(&viewport_raw(&server, &red, viewport(0, json!({}))).await),
         vec!["bare".to_string()]
@@ -748,42 +656,24 @@ fn build_labelled(dir: &std::path::Path, spelling: Spelling, field: &str) -> Res
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .map_err(|e| e.to_string())?;
     let args = tessera_build::BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),
-        out: dir.join("bundle"),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.clone(),
+            &config.schema,
+        ),
         layers: config.layers,
         layer_inputs: config.layer_sources,
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(
+            &dir.join("bundle"),
+            vec![view_args("s0", &points, AccessInput::relation(pairs))],
+        )
     };
     tessera_build::build(&args).map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Keys and masked counts served to one principal, per layer.
 async fn served_counts(server: &TestServer, terms: &[&str]) -> Vec<(String, String, u64)> {
-    let token = token(server, terms).await;
+    let token = token_for(server, terms).await;
     let mut rows: Vec<(String, String, u64)> =
         decode_viewport_frames(&viewport_raw(server, &token, viewport(0, json!({}))).await)
             .artifacts
@@ -806,19 +696,14 @@ async fn labels_built_and_labels_published_serve_alike() {
         let built_server = open(&built).await;
 
         let live = TempDir::new().unwrap();
-        build_fixture(
-            &live.path().join("bundle"),
-            &live.path().join("points.parquet"),
-            &live.path().join("pairs.parquet"),
-        );
-        let live_server = open(&live).await;
-        declare(&live_server, teams_declaration("inherited")).await;
+        let live_server = serve(&live).await;
+        register(&live_server, teams_declaration("inherited")).await;
         let mut inline = teams_declaration("inherited");
         inline["name"] = json!("inline");
         inline["title"] = json!("inline");
         inline["hierarchy"]["kind"] = json!("flat");
         inline["content"]["computed"] = json!([]);
-        declare(&live_server, inline).await;
+        register(&live_server, inline).await;
         publish(
             &live_server,
             LAYER,
@@ -934,11 +819,7 @@ impl tessera_plugin::Plugin for Forgetful {
 #[tokio::test]
 async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_none() {
     let tmp = TempDir::new().unwrap();
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    build_fixture(tmp.path(), N_ITEMS);
     let config = default_engine_config();
     let max_k = config.max_k;
     let engine = tessera_engine::Engine::open(
@@ -950,7 +831,7 @@ async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_non
     )
     .unwrap();
     let server = spawn_server_from_engine(engine, max_k, generous_test_gate()).await;
-    declare(&server, teams_declaration("inherited")).await;
+    register(&server, teams_declaration("inherited")).await;
 
     let resp = server
         .client
@@ -969,7 +850,14 @@ async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_non
     assert_eq!(status, 422);
     tick(&server).await;
     assert_eq!(
-        keys_served(&viewport_raw(&server, &token(&server, &["0"]).await, viewport(0, json!({}))).await),
+        keys_served(
+            &viewport_raw(
+                &server,
+                &token_for(&server, &["0"]).await,
+                viewport(0, json!({}))
+            )
+            .await
+        ),
         vec!["bare".to_string()],
         "nothing named `hidden` was stored"
     );
