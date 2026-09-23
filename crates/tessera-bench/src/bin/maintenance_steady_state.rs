@@ -6,14 +6,13 @@
 //! policies; no fold runs.
 //!
 //! `--hold-merge` ticks run first with the merge unable to select anything, then the engine
-//! reopens with the default policy, which is the state a restart after a backlog leaves. A text
-//! column declared at a running service reopens without its published layers, and every coalesce
-//! after that is discarded, so `--no-text` leaves the column out when the run crosses a reopen.
+//! reopens with the default policy, which is the state a restart after a backlog leaves.
 //!
 //! After every tick, once nothing under the prefix and no maintenance counter has changed for
 //! `QUIET`, it prints one row: segments listed for the view, the entries in each entity-space
-//! list, files and bytes under the live prefix, the merge and coalesce output directories on disc,
-//! and the executor's published and failed counts. Each attempt writes its own directory, and one
+//! list, files and bytes under the live prefix, bytes of the view's row-space files and of every
+//! external-id run and locator, the merge and coalesce output directories on disc, and the
+//! executor's published and failed counts. Each attempt writes its own directory, and one
 //! that neither published nor failed was discarded at its rebase, so `abandoned` is directories
 //! less published less failed.
 //!
@@ -25,7 +24,7 @@
 //!
 //! ```text
 //! cargo run --release -p tessera-bench --bin maintenance_steady_state -- \
-//!     --ticks 200 --rows 2000 [--hold-merge 9 --no-text] [--scratch DIR]
+//!     --ticks 200 --rows 2000 [--hold-merge 9] [--scratch DIR]
 //! ```
 
 use std::collections::BTreeSet;
@@ -68,9 +67,6 @@ struct Args {
     /// Idle ticks after the last ingest, before the final row.
     #[arg(long, default_value_t = 6)]
     idle: usize,
-    /// Leave out the text column.
-    #[arg(long)]
-    no_text: bool,
     #[arg(long)]
     scratch: Option<PathBuf>,
 }
@@ -88,9 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     build_fixture(tmp.path(), &root)?;
 
     let mut engine = open(tmp.path(), &root, args.hold_merge > 0)?;
-    let columns = [("note", "keyword", false), ("tag", "keyword", true), ("prose", "text", true)];
-    let columns = &columns[..if args.no_text { 2 } else { 3 }];
-    for &(name, ty, index) in columns {
+    for (name, ty, index) in [("note", "keyword", false), ("tag", "keyword", true), ("prose", "text", true)] {
         engine.declare_attribute(AttributeRequest {
             name: name.to_string(),
             title: None,
@@ -135,12 +129,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         descriptors,
                         x: rng.gen_range(0.0..1000.0),
                         y: rng.gen_range(0.0..1000.0),
-                        scalars: [
+                        scalars: vec![
                             WalScalar::Utf8(format!("note {i}")),
                             WalScalar::Utf8(format!("tag-{}", i % 17)),
                             WalScalar::Utf8(format!("word{} word{}", i % 31, tick % 13)),
-                        ][..columns.len()]
-                            .to_vec(),
+                        ],
                         scoped: Vec::new(),
                         terms,
                     }
@@ -323,6 +316,8 @@ struct Row {
     terms: u64,
     files: u64,
     mib: u64,
+    geometry_mib: u64,
+    runs_mib: u64,
     merge_dirs: u64,
     merges: u64,
     merge_failures: u64,
@@ -349,6 +344,8 @@ impl Row {
             ("entity_terms", |r| r.terms),
             ("files", |r| r.files),
             ("MiB", |r| r.mib),
+            ("geometry_MiB", |r| r.geometry_mib),
+            ("runs_MiB", |r| r.runs_mib),
             ("merge_dirs", |r| r.merge_dirs),
             ("merges", |r| r.merges),
             ("merge_failed", |r| r.merge_failures),
@@ -414,7 +411,7 @@ impl Probe {
         let coalesces = coalesces + stats.coalesces;
         let coalesce_failures = coalesce_failures + stats.coalesce_failures;
 
-        let (files, bytes) = walk(&prefix_dir);
+        let (files, bytes) = walk(&prefix_dir, |_| true);
         let segments_dir = tessera_store::view_path(&prefix_dir.join("partitions").join(partition), VIEW).join("segments");
         let merge_dirs = count_dirs(&segments_dir, "merge-");
         let coalesce_dirs = count_dirs(&prefix_dir.join("partitions").join(partition).join("coalesced"), "coalesce-");
@@ -434,6 +431,8 @@ impl Probe {
             terms: m.entity_terms_extents.len() as u64,
             files,
             mib: bytes >> 20,
+            geometry_mib: walk(&segments_dir, |name| !is_run(name)).1 >> 20,
+            runs_mib: walk(&prefix_dir, is_run).1 >> 20,
             merge_dirs,
             merges,
             merge_failures,
@@ -534,7 +533,7 @@ fn check_bindings(root: &Path, bindings: &[(EntityId, Vec<u8>)], high_water: u64
 fn settle(root: &Path, engine: &Engine) -> Result<(), Box<dyn std::error::Error>> {
     let state = || {
         let s = engine.write_executor_stats();
-        (walk(root), s.merges, s.merge_failures, s.coalesces, s.coalesce_failures)
+        (walk(root, |_| true), s.merges, s.merge_failures, s.coalesces, s.coalesce_failures)
     };
     let deadline = Instant::now() + WAIT;
     let mut last = state();
@@ -553,7 +552,12 @@ fn settle(root: &Path, engine: &Engine) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn walk(dir: &Path) -> (u64, u64) {
+fn is_run(name: &str) -> bool {
+    name == "external-ids.arrow" || name == "ext-locator.u32"
+}
+
+/// Files and bytes under `dir`, counting the files whose names `keep` accepts.
+fn walk(dir: &Path, keep: impl Fn(&str) -> bool) -> (u64, u64) {
     let mut files = 0;
     let mut bytes = 0;
     let mut stack = vec![dir.to_path_buf()];
@@ -563,7 +567,7 @@ fn walk(dir: &Path) -> (u64, u64) {
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
                 stack.push(entry.path());
-            } else {
+            } else if keep(&entry.file_name().to_string_lossy()) {
                 files += 1;
                 bytes += meta.len();
             }
