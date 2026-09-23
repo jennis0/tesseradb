@@ -745,7 +745,7 @@ def test_a_rendered_column_filled_after_the_first_commit_refuses_the_commit(serv
     assert plan.plan == []
 
 
-def test_a_column_no_target_reads_is_ignored_and_printed_as_ignored(served, corpus, capsys):
+def test_a_column_no_target_reads_is_ignored_and_reported_as_ignored(served, corpus):
     """§3: a frame with more columns than the target reads is the ordinary case."""
     db = served(small)
     insert = db.insert(
@@ -761,7 +761,6 @@ def test_a_column_no_target_reads_is_ignored_and_printed_as_ignored(served, corp
         value="score",
     )
     assert insert.ignored == ["sentiment"]
-    assert "ignored: sentiment" in capsys.readouterr().out
     report = db.commit()
     assert report.ok, report
     assert report.values_filled == 1

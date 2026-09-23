@@ -30,22 +30,26 @@ marimo edit clients/py/examples/notebook_marimo.py
 jupyter lab clients/py/examples/notebook.ipynb
 ```
 
-Six sections: a DataFrame with a cluster column, mapped; the 50,000-paper arXiv corpus from files,
-with terms, three clusterings and their topic lines, mapped as its own principal and as two arXiv
-categories; a week of new papers into the database while it serves; a second clustering over rows
-it already holds; one set of points under two projections; and the database saved, reopened and
-handed to `tessera serve --deployment`.
+Six sections: a DataFrame with a cluster column, mapped; the arXiv corpus from files, with access
+terms, a hierarchy of topics and their titles, mapped as the database's own reader and as two
+narrower readers; filters and counts; one view per year with a clustering of each year; a week of
+new papers into the database while it serves, with a suppression; and the database saved and
+reopened.
 
 They need `pip install -e 'clients/py[widget]'`, a `tessera` binary on `PATH` or named by
-`TESSERA_BIN`, and the corpus at `data/notebook/`, which `TESSERA_NOTEBOOK_DATA` names elsewhere.
+`TESSERA_BIN`, and the corpus at `data/notebook-2m4-live/`, or `data/notebook-sample/` with
+`SCALE = "sample"`, which `TESSERA_NOTEBOOK_DATA` names elsewhere.
 Three things are in no extra, because the package needs none of them: `pandas`, which the first
 section's frame is built with, and the front end you are running, `marimo` or `jupyterlab`. So
 `pip install pandas marimo` for the first notebook, `pip install pandas jupyterlab` for the
 second.
 
-`tests/test_sdk_examples.py` executes the marimo notebook's cells with no browser, asserts the
-counts each section prints and that every map it draws is served the layer it colours by, and
-compares the Jupyter twin cell for cell. A notebook that drifts from the package fails the gate.
+`notebook.ipynb` is generated from the marimo file with `marimo export ipynb`.
+The Jupyter copy needs marimo installed, and its year slider does not drive the map there.
+`tests/test_sdk_examples.py` executes the marimo notebook's cells with no browser at the sample
+scale, asserts the counts each section shows and that every map it draws is served the layers it
+draws and colours by, and checks that `notebook.ipynb` is what a fresh export makes. A notebook
+that drifts from the package fails the gate.
 
 ## A database in a directory
 
@@ -64,9 +68,16 @@ db.declare_columns(df, skip=["paper", "x", "y", "cluster"], index=["title"])
 db.declare_layer("clusters", kind="flat")
 db.insert("map", df, id="paper", x="x", y="y")     # title is read by name
 db.insert("clusters", df, id="paper", key="cluster")
-print(db.check())                                  # what the declaration reads, and what refuses it
-print(db.commit())                                 # tessera check, tessera build, tessera serve
+db.check()                                         # what the declaration reads, and what refuses it
+db.commit()                                        # tessera check, tessera build, tessera serve
 ```
+
+No call prints. Each returns a report that shows as a short summary of what happened, in numbers,
+with every refusal and finding in full; a notebook cell that ends in one shows it. The detail is
+on the report's attributes: an insert's `read` and `ignored` columns, a check's or a first
+commit's `findings` and `log` (the declaration check's and the build's text), a later commit's
+`plan`, `rows_accepted` and `refusals`. `db.path` is where the database is and `db.binary` the
+`tessera` program it runs.
 
 `db.declaration` is the TOML the SDK wrote, and the declaration check reads that file: the
 mapping from verb to block is checked below the SDK rather than mirrored in Python. `check()` and
@@ -94,9 +105,10 @@ database already holds takes no second exclusion.
 ## Inserting: what is named, and what is ignored
 
 Every column a target needs is named on the call, as the notebook-widget libraries name `x=` and
-`y=`, and a column the call does not name is ignored. Every insert prints two lists, the columns it
-read and the columns it ignored, so a frame with more columns than the target reads is the ordinary
-case rather than a surprise.
+`y=`, and a column the call does not name is ignored. Every insert returns a record whose summary
+names the columns it read and counts the ones it ignored, and whose `read` and `ignored` list
+them, so a frame with more columns than the target reads is the ordinary case rather than a
+surprise.
 
 | Target | Columns named on the call |
 |---|---|
@@ -114,8 +126,8 @@ names, since both carry `key` and `level`. Several inserts on one target before 
 accumulate, so a corpus in parts is loaded by the same calls as one file; a second part whose
 schema differs from the first is refused naming the two types, and where the first part was a path
 read in place it is copied, a block reading one file. A path is accepted wherever a table is and is
-read where it lies, with two exceptions the call prints: a label set given a mapping or a `text=`
-column, where the SDK writes the table the publication takes, with the attachment its `of` names.
+read where it lies, with two exceptions, whose record's `in_place` is false: a label set given a
+mapping or a `text=` column, where the SDK writes the table the publication takes, with the attachment its `of` names.
 
 A table in Tessera's own shape (an artifacts table, a members table, a roster, a value set) is no
 exception to the rule that every column a target reads is named on the call. A canonical column the
@@ -194,8 +206,8 @@ that makes it visible.
 db.insert("s0", new_papers, id="entity_id", x="x", y="y", access="categories")
 db.insert("clusters/kmeans", artifacts=new_clusters, key="key", level="level")
 db.insert("clusters/kmeans", members=new_members, id="entity", key="key", level="level")
-print(db.check())                              # the plan and the pre-flight, with nothing sent
-print(db.commit())                             # the report
+db.check()                                     # the plan and the pre-flight, with nothing sent
+db.commit()                                    # the report
 ```
 
 `check()` returns the plan and the pre-flight and sends nothing; `commit()` runs the same plan and
@@ -223,8 +235,8 @@ blocks once, not once per page, and the next cell sees the rows. Past the server
 durable and reaches the served forms at the next cycle either way.
 
 A page the server answers as a replay — the same bytes under the batch id they were first sent
-under — says so, and the report prints "replayed, nothing landed" for it rather than counting rows
-it did not land. That is what a retry inside one commit gets.
+under — says so, and the report lists it under `replayed` and counts it in its summary rather than
+counting rows it did not land. That is what a retry inside one commit gets.
 
 A page carries a fresh random batch id, made once when the request is built, and a retry of that
 request carries it again: a `429` is backpressure and is retried after its `Retry-After` with the

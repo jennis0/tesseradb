@@ -10,9 +10,10 @@
 # `check-clients.sh` already needs — and a cargo toolchain for the companion wheel below.
 #
 # The demo notebooks are in the pytest step: `tests/test_sdk_examples.py` executes the cells of
-# `examples/notebook_marimo.py` against a real build and a real server, and checks the Jupyter twin
-# beside it, so the walk a reader is pointed at cannot drift from the package. It skips, naming
-# what is missing, where `data/notebook/` or the `tessera` binary is absent.
+# `examples/notebook_marimo.py` against a real build and a real server, and checks that the
+# Jupyter notebook beside it is the marimo file's export, so the walk a reader is pointed at cannot
+# drift from the package. It skips, naming what is missing, where `data/notebook-sample/` or the
+# `tessera` binary is absent.
 #
 # The venv is `clients/py/.venv` (gitignored); it is made on the first run and reused after. Set
 # TESSERADB_CHECK_FRESH=1 to rebuild it.

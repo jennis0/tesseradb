@@ -69,7 +69,7 @@ def test_a_spatial_layer_published_after_the_first_commit_carries_its_wkt_and_it
         space="space",
     )
     plan = db.check()
-    assert plan.ok, plan.output
+    assert plan.ok, plan
     assert any("declare layer 'regions'" in line for line in plan.plan), plan.plan
     # A spatial layer's members are never paged: the plan carries the publication and no growth.
     assert not any(line.startswith("grow") for line in plan.plan), plan.plan

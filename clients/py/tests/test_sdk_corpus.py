@@ -205,7 +205,7 @@ def test_the_notebook_declaration_regenerated_discloses_what_the_committed_one_d
     db = create(tmp_path / "db")
     declare_notebook(db, corpus)
     report = db.check()
-    assert report.ok, report.output
+    assert report.ok, report.log
     committed = check_committed(tessera, corpus / "schema.toml", tmp_path / "committed")
     generated = check_committed(tessera, db.path / "schema.toml", tmp_path / "generated")
     assert page_without_sources(generated) == page_without_sources(committed)
@@ -337,10 +337,10 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
             level="level",
         )
     report = db.check()
-    assert report.ok, report.output
+    assert report.ok, report.log
     committed = check_committed(tessera, declaration, tmp_path / "committed")
-    assert page_without_sources(report.output) == page_without_sources(committed)
-    assert read_schema_lines(report.output) == read_schema_lines(committed)
+    assert page_without_sources(report.log) == page_without_sources(committed)
+    assert read_schema_lines(report.log) == read_schema_lines(committed)
 
 
 def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
@@ -350,7 +350,7 @@ def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
     declare_notebook(db, corpus)
     try:
         report = db.commit()
-        assert report.ok, report.output
+        assert report.ok, report.log
     finally:
         db.close()
     bundle = db.path / "bundle"
@@ -396,7 +396,7 @@ def test_the_committed_database_is_served_and_close_stops_the_child(tmp_path):
     declare_notebook(db, corpus)
     report = db.commit()
     try:
-        assert report.ok, report.output
+        assert report.ok, report.log
         # The addresses are the child's own, read from the line it printed: the SDK declared port
         # 0 on each plane, so nothing here was guessed.
         for address in (report.viewer, report.session, report.control):

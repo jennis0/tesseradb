@@ -14,9 +14,11 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Hashable, Iterable, Sequence
 
@@ -106,6 +108,20 @@ class Database:
         self._loaded_text: str | None = None
         #: Category keys looked up by `sample()`, per reader: by server address and terms.
         self._keys: dict = {}
+
+    @property
+    def binary(self) -> str:
+        """The `tessera` program this database runs.
+
+        `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else the one the
+        `tesseradb-native` wheel installed, else a checkout's own build.
+        """
+        return _instance.find_binary()[0]
+
+    def __repr__(self) -> str:
+        kind = "a temporary database" if self.temporary else "a database"
+        state = "committed" if self.built else "not yet committed"
+        return f"{kind} at {self.path}, {state}"
 
     # ------------------------------------------------------------------ declarations
 
@@ -230,7 +246,7 @@ class Database:
         """Declare every column of a data frame from its data type, and return what was declared.
 
         Each column is declared as a detail: stored, and shown when an item is opened, but neither
-        drawn nor filterable unless named below. The table of what was declared is also printed.
+        drawn nor filterable unless named below. The report returned lists what was declared.
 
         - `frame`: a pandas or polars data frame or a pyarrow table. Only its column types are read.
         - `skip`: columns to leave out, such as the id and the coordinates.
@@ -264,11 +280,7 @@ class Database:
                 self.declare("vocabulary", block)
         for block in attributes:
             self.declare("attribute", block)
-        report = Declared(
-            columns=rows, vocabularies=[block["name"] for block in vocabularies]
-        )
-        print(report)
-        return report
+        return Declared(columns=rows, vocabularies=[block["name"] for block in vocabularies])
 
     def declare_layer(self, name: str, kind: str, **kwargs) -> dict:
         """Declare an annotation layer, and return its block.
@@ -419,8 +431,8 @@ class Database:
 
         A categorical column (a pandas `Categorical` or an Arrow dictionary column) is read as the
         values it holds, wherever a column of those values is read. A column the call does not
-        name is ignored, and the call prints what it read and what it ignored. On the anchor view, a column named like a declared attribute fills that
-        attribute. Several inserts into one target add up. Nothing is sent until `commit()`.
+        name is ignored, and the record returned says what was read and what was ignored. On the
+        anchor view, a column named like a declared attribute fills that attribute. Several inserts into one target add up. Nothing is sent until `commit()`.
 
             db.insert("papers", frame, id="paper_id", x="x", y="y", access="labels")
             db.insert("clusters", frame, id="paper_id", key="cluster")
@@ -457,7 +469,6 @@ class Database:
         insert = self._accumulated(insert)
         (self.pending if self.built else self.inserts).append(insert)
         self._save_state()
-        print(insert)
         return insert
 
     def _target(
@@ -870,7 +881,7 @@ class Database:
         each problem it finds, reading the files' column types only. After it, the report lists the
         requests the commit would send and any problem found before sending.
 
-            print(db.check())
+            db.check()
         """
         if self.built:
             return self._paged(sent=False)
@@ -883,8 +894,9 @@ class Database:
             frames=self._frames(document),
             render_columns=render_columns_of(document.get("attribute", [])),
             notes=self._notes(),
+            rows=self._inserted_rows(),
             findings=findings,
-            output=page,
+            log=page,
         )
 
     def _checked(self) -> tuple[bool, str]:
@@ -917,7 +929,7 @@ class Database:
         before anything was sent, a build that failed, or every request refused. A commit in which
         some requests succeeded returns its report, with the refusals listed.
 
-            print(db.commit())
+            db.commit()
         """
         if self.built:
             return self._paged(sent=True)
@@ -929,6 +941,7 @@ class Database:
                 "commit: the pre-flight found what follows, and nothing was sent or built\n"
                 + "\n".join(f"  {finding}" for finding in findings)
             )
+        started = time.monotonic()
         ok, page = self._checked()
         if not ok:
             raise Refusal("commit: the declaration did not check\n" + page)
@@ -948,20 +961,43 @@ class Database:
             frames=self._frames(document),
             render_columns=render_columns_of(document.get("attribute", [])),
             notes=self._notes(),
-            output=page + "\n" + build.stdout + build.stderr,
+            rows=self._inserted_rows(),
+            log=page + "\n" + build.stdout + build.stderr,
             identity=self._identity_in_words(),
         )
         if build.returncode != 0:
-            raise Refusal("commit: the build failed\n" + report.output, report)
+            raise Refusal("commit: the build failed\n" + report.log, report)
         self.built = True
         self._record_label_columns(document.get("layer", []))
         self._record_terms(document)
         self.serve()
+        report.seconds = time.monotonic() - started
         if self.listening is not None:
             report.viewer = self.listening.viewer
             report.session = self.listening.session
             report.control = self.listening.control
+        for view in self.meta().get("views", []):
+            name = view.get("group") or view["id"]
+            report.views[name] = report.views.get(name, 0) + 1
+        # From the declaration: a layer gated on a label no row carries is in no reader's meta.
+        for block in document.get("layer", []):
+            report.layers.append(block["name"])
+            if "labels" in block:
+                report.layers.append(block["labels"]["name"])
+        built = _BUILT.search(build.stdout + build.stderr)
+        if built is not None:
+            report.items = int(built.group("items"))
+            report.minted = int(built.group("minted"))
+            report.unclustered = int(built.group("unclustered"))
         return report
+
+    def _inserted_rows(self) -> dict:
+        """The rows inserted before the first commit, by view or view group."""
+        rows: dict = {}
+        for insert in self.inserts:
+            if insert.role == "rows":
+                rows[insert.target] = rows.get(insert.target, 0) + insert.rows
+        return rows
 
     def _preflight(self, document: dict) -> list[C.Finding]:
         """The findings the build's own inserts can raise, before a byte is read."""
@@ -1559,6 +1595,15 @@ def _extent_in_words(extent: Any) -> str:
     return str(extent)
 
 
+#: The build's closing line: `built <bundle> (v…): N items, …, M artifact(s) minted, K
+#: unclustered member row(s)`.
+_BUILT = re.compile(
+    r"^built .*: (?P<items>\d+) items, .* (?P<minted>\d+) artifact\(s\) minted, "
+    r"(?P<unclustered>\d+) unclustered member row\(s\)$",
+    re.MULTILINE,
+)
+
+
 # ---------------------------------------------------------------------- create and open
 
 
@@ -1571,7 +1616,7 @@ def create(path: str | os.PathLike | None = None, replace: bool = False) -> Data
     - `replace`: `True` deletes a Tessera database already at `path` first. A directory that holds
       anything else is refused.
 
-    The call prints where the database is and which `tessera` program it will use.
+    `db.path` is where the database is, and `db.binary` the `tessera` program it runs.
 
         db = tesseradb.create()
         db = tesseradb.create("~/maps/papers", replace=True)
@@ -1579,8 +1624,6 @@ def create(path: str | os.PathLike | None = None, replace: bool = False) -> Data
     if path is None:
         parent = RAM_BACKED if RAM_BACKED.is_dir() else None
         directory = Path(tempfile.mkdtemp(prefix="tesseradb-", dir=parent))
-        where = "a RAM-backed filesystem" if parent is not None else "disk"
-        print(f"tesseradb: a temporary database at {directory}, on {where}")
         database = Database(directory, temporary=True)
     else:
         directory = Path(path).expanduser()
@@ -1601,16 +1644,7 @@ def create(path: str | os.PathLike | None = None, replace: bool = False) -> Data
         database = Database(directory)
     (database.path / "sources").mkdir(parents=True, exist_ok=True)
     (database.path / ".tessera").mkdir(parents=True, exist_ok=True)
-    print(f"tesseradb: {_binary_in_words()}")
     return database
-
-
-def _binary_in_words() -> str:
-    try:
-        binary, where = _instance.find_binary()
-    except Refusal as why:
-        return str(why)
-    return f"the binary is {binary} (from {where})"
 
 
 def open(path: str | os.PathLike) -> Database:  # noqa: A001
