@@ -60,8 +60,14 @@ def published(tmp_path_factory):
     bundle = fx.build_bundle(work, with_layers=False)
     state = tmp_path_factory.mktemp("labels-published-serve")
     server, proc = spawn_server(bundle, state)
-    fx.publish(server)
-    yield server, bundle, state, proc
+    started = [proc]
+    try:
+        fx.publish(server)
+        yield server, bundle, state, started
+    finally:
+        for one in started:
+            if one.poll() is None:
+                stop_server(one)
 
 
 def test_the_fixture_separates_two_principals_by_one_label():
@@ -132,13 +138,11 @@ def test_a_built_bundle_serves_each_principal_what_the_oracle_says(built):
 def test_a_published_service_serves_each_principal_what_the_oracle_says_across_a_restart_and_a_fold(
     published,
 ):
-    server, bundle, state, proc = published
+    server, bundle, state, started = published
     check(server)
-    stop_server(proc)
+    stop_server(started[0])
     server, proc = spawn_server(bundle, state)
-    try:
-        check(server)
-        server.compact()
-        check(server)
-    finally:
-        stop_server(proc)
+    started.append(proc)
+    check(server)
+    server.compact()
+    check(server)
