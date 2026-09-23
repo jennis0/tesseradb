@@ -1,20 +1,9 @@
-//! `/control/ingest`'s JSON encoding (ingest §1.2): an array of objects or newline-delimited
-//! objects, one object per row, coerced against the declared column types into one Arrow
-//! `RecordBatch`.
+//! The JSON encoding of a record-bearing body: an array of objects or one object per line,
+//! coerced against the declared column types into one Arrow `RecordBatch`, which the Arrow decode
+//! then reads. This module owns only the coercion of one JSON value into one cell.
 //!
-//! **The batch is then decoded by the Arrow path and by nothing else.** Every rule the Arrow decode
-//! applies per column (the scalar tail against the manifest, the label list, the membership
-//! column's arity, the projection) runs on what this module built, so a batch sent as JSON and the
-//! same batch sent as Arrow reach the executor as one row form. What this module owns is the
-//! coercion of one JSON value into one Arrow cell, and its refusals name the row and the column.
-//!
-//! An integer is parsed exactly from its digits, as a JSON number or as a string of digits, never
-//! through a double: a 64-bit identifier or value survives the door. A timestamp is microseconds
-//! since the epoch as an integer, the spelling the view roster's `timestamp_us` already takes. A
-//! float column takes any JSON number and narrows to the declared width. An external id is base64,
-//! as every external id on this plane is. A null is absence for every column that has one; a null
-//! or absent `access` is a row with no label, which the view's declared default fills or refuses
-//! (decision 0133), and a null element of it is refused.
+//! An integer is parsed exactly from its digits (a JSON number or a string), never through a
+//! double. A null or absent `access` is a row with no label, which the view's default decides.
 
 use std::sync::Arc;
 
@@ -32,8 +21,7 @@ use tessera_types::layer::LayerDeclaration;
 
 use super::{DecodeError, Fixed};
 
-/// What the batch's columns may be, resolved once per batch from the manifest and the layer
-/// registry by the caller, in the same order the Arrow decode resolves them.
+/// What the batch's columns may be, resolved by the caller in the order the Arrow decode uses.
 pub(crate) struct JsonColumns<'a> {
     /// The route's own columns, in the order the batch carries them.
     pub fixed: &'a [Fixed<'a>],
@@ -44,10 +32,9 @@ pub(crate) struct JsonColumns<'a> {
     pub layer_of: &'a dyn Fn(&str) -> Option<LayerDeclaration>,
 }
 
-/// One JSON body as one record batch. The route's fixed columns come first, in the order it lists
-/// them: a coordinate and `access` always, the others where any row carries them. Then the
-/// declared scalars in declared order, the scoped families any row names, and the layer columns
-/// in first-appearance order.
+/// One JSON body as one record batch: the route's fixed columns in its order (a coordinate and
+/// `access` always, the others where any row carries them), then declared scalars, the scoped
+/// families any row names, and layer columns in first-appearance order.
 pub(crate) fn record_batch(
     body_name: &str,
     body: &[u8],
@@ -70,12 +57,9 @@ pub(crate) fn record_batch(
         arrays.push(column);
     }
 
-    // **A declared column no row names is omitted from the batch**, which the Arrow decode reads
-    // as the column padded with its absence in every row and reports on the receipt
-    // (`ingest.md` §7.1). A column some rows name is carried by every row of the batch, null
-    // where a row has no value, and a row omitting it is a `422` naming the row and the column
-    // (contracts §3.4). The two doors then agree about what a batch that stopped carrying a
-    // column looks like, and about what a half-carried column is.
+    // A declared column no row names is left out, which the Arrow decode reads as absent on
+    // every row. One some rows name is carried on every row, null where a row has no value; with
+    // `declared_on_every_row`, a row omitting it is refused.
     for declared in columns.declared {
         if !has(&declared.name) {
             continue;
@@ -196,8 +180,7 @@ fn fixed_column(
             let mut builder = ListBuilder::new(StringBuilder::new());
             for (row, record) in rows.iter().enumerate() {
                 match record.get("access") {
-                    // A row with no label (ingest §1.2, decision 0133): the view's declaration
-                    // decides.
+                    // A row with no label; the view's declaration decides.
                     None | Some(Value::Null) => builder.append(true),
                     Some(Value::Array(labels)) => {
                         for label in labels {
@@ -239,8 +222,7 @@ fn fixed_column(
             }
             Arc::new(builder.finish())
         }
-        // **String-encoded, as it is on `/control/changes`**: a bare JSON number loses a `u64` past
-        // 2⁵³ in every JavaScript client, and a mis-parsed identifier fills the wrong entity.
+        // A string, as on `/control/changes`: a JSON number loses a `u64` past 2^53 in JavaScript.
         Fixed::TesseraId => {
             let mut builder = StringBuilder::new();
             for (row, record) in rows.iter().enumerate() {
@@ -336,11 +318,7 @@ fn refusal(body_name: &str, row: usize, column: &str, what: &str) -> DecodeError
     DecodeError(format!("{body_name}: row {row}, column '{column}' {what}"))
 }
 
-/// One scalar column at its wire type. A declared scalar is `required`: a batch that carries the
-/// name at all carries it on every row, null for absence, as every Arrow batch carries the
-/// column on every row (contracts §3.4). A batch no row names it in does not reach here, the
-/// caller having omitted the column (`ingest.md` §7.1). A scoped family's column is absent on the
-/// rows that omit it.
+/// One scalar column at its wire type. Where `required`, a row omitting the name is refused.
 fn scalar_column(
     body_name: &str,
     rows: &[Map<String, Value>],
@@ -458,8 +436,7 @@ fn scalar_column(
     })
 }
 
-/// An integer, exactly: a JSON integer or a string of digits; a number with a fraction or
-/// exponent is refused rather than rounded.
+/// An integer, exactly: a number with a fraction or exponent is refused rather than rounded.
 fn integer(
     body_name: &str,
     value: &Value,
@@ -511,13 +488,9 @@ fn float(
     }
 }
 
-/// A column named for a layer: a key, or a list of keys, per row, at the values a member table
-/// carries (contracts §3.4). An integer key is its decimal spelling and `-1` names no artifact,
-/// through the same `integer_key` the Arrow decode and the build read by, so the cell reaches the
-/// decoder as the key it names. The column is one shape: every row a key or null, or every row
-/// a list or null; a row of the other shape is refused, since a scalar names the artifact at
-/// level 0 and a list's positions mean what the layer's hierarchy says, and guessing which the
-/// caller meant would store a membership they did not write.
+/// A column named for a layer: a key or a list of keys per row. An integer key is its decimal
+/// spelling, as at the build, and `-1` names no artifact. Every row is a key or null, or every
+/// row a list or null; a row of the other shape is refused rather than guessed.
 fn membership_column(
     body_name: &str,
     rows: &[Map<String, Value>],
