@@ -22,7 +22,7 @@ use arrow::record_batch::RecordBatch;
 use rustc_hash::FxHashMap;
 use tessera_filter::RecordValue as RV;
 use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::unfixed32;
+use tessera_spatial::unfixed;
 use tessera_types::{EntityId, MortonCode};
 
 use super::plan::{FieldPlan, Home, Named, SystemField};
@@ -273,22 +273,46 @@ fn mismatch(name: &str, ty: ScalarType) -> EngineError {
     ))
 }
 
-/// Each row's stored position converted back through the view's frame and projection: the centre
-/// of its grid step, so within half a step of the coordinate it was placed from.
+/// A view's 32-bit grid converted back through its frame and projection: longitude and latitude
+/// in degrees for a geographic view, the view's own coordinates otherwise.
+pub(super) struct ViewFrame {
+    quantisation: tessera_store::manifest::Quantisation,
+    projection: tessera_spatial::Projection,
+}
+
+impl ViewFrame {
+    pub(super) fn of(generation: &Generation, view: &str) -> Result<ViewFrame> {
+        let descriptor = generation
+            .bundle
+            .manifest
+            .views
+            .iter()
+            .find(|v| v.id == view)
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+        Ok(ViewFrame {
+            quantisation: descriptor.quantisation,
+            projection: descriptor.projection,
+        })
+    }
+
+    /// The coordinate at grid position `(qx, qy)`, which may lie between steps: the centre of its
+    /// step for a stored position, so within half a step of the coordinate it was placed from.
+    pub(super) fn point(&self, qx: f64, qy: f64) -> (f64, f64) {
+        let q = &self.quantisation;
+        self.projection.inverse(
+            unfixed(qx, q.x_min, q.x_max),
+            unfixed(qy, q.y_min, q.y_max),
+        )
+    }
+}
+
+/// Each row's stored position converted back through the view's frame and projection.
 fn positions(
     generation: &Generation,
     open: &OpenView<'_>,
     rows: &[Taken],
 ) -> Result<Vec<(f64, f64)>> {
-    let view = open.served.name;
-    let descriptor = generation
-        .bundle
-        .manifest
-        .views
-        .iter()
-        .find(|v| v.id == view)
-        .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
-    let q = descriptor.quantisation;
+    let frame = ViewFrame::of(generation, open.served.name)?;
     let segments = &open.served.segments;
     Ok(rows
         .iter()
@@ -299,10 +323,7 @@ fn positions(
                 MortonCode::new(segment.morton.u32()[local]),
                 segment.columns.residual()[local],
             );
-            descriptor.projection.inverse(
-                unfixed32(qx, q.x_min, q.x_max),
-                unfixed32(qy, q.y_min, q.y_max),
-            )
+            frame.point(f64::from(qx), f64::from(qy))
         })
         .collect())
 }

@@ -1871,7 +1871,7 @@ pub fn build_ingest_batch_optional(rows: &[(Option<&[u8]>, f32, f32, &str)]) -> 
 }
 
 /// One decoded `POST /v1/items` body.
-pub struct DecodedItems {
+pub struct DecodedRecords {
     /// The kind-6 head.
     pub head: serde_json::Value,
     /// Each kind-7 records frame's batch, with the kind-8 page end that follows it.
@@ -1882,7 +1882,7 @@ pub struct DecodedItems {
     pub records_payloads: Vec<Vec<u8>>,
 }
 
-impl DecodedItems {
+impl DecodedRecords {
     /// Every page's `tessera_id` column, in order.
     pub fn tessera_ids(&self) -> Vec<u64> {
         self.pages
@@ -1903,15 +1903,15 @@ impl DecodedItems {
 
 /// Decodes an items body strictly: one head first, a page end after every records frame and
 /// nowhere else, one trailer last, and one batch in every records frame.
-pub fn decode_items(bytes: &[u8]) -> DecodedItems {
-    use tessera_wire::{FRAME_ITEMS_HEAD, FRAME_PAGE_END, FRAME_RECORDS, FRAME_TRAILER};
+pub fn decode_records(bytes: &[u8]) -> DecodedRecords {
+    use tessera_wire::{FRAME_RECORDS_HEAD, FRAME_PAGE_END, FRAME_RECORDS, FRAME_TRAILER};
     let frames = tessera_wire::split_frames(bytes).expect("an items body splits into frames");
     assert!(frames.len() >= 2, "a head and a trailer at least");
     let json = |payload: &[u8]| -> serde_json::Value {
         serde_json::from_slice(payload).expect("a JSON frame parses")
     };
     let (first_kind, first) = frames[0];
-    assert_eq!(first_kind, FRAME_ITEMS_HEAD, "the head is first");
+    assert_eq!(first_kind, FRAME_RECORDS_HEAD, "the head is first");
     let (last_kind, last) = frames[frames.len() - 1];
     assert_eq!(last_kind, FRAME_TRAILER, "the trailer is last");
     let mut pages = Vec::new();
@@ -1929,7 +1929,7 @@ pub fn decode_items(bytes: &[u8]) -> DecodedItems {
         pages.push((batches.remove(0), json(pair[1].1)));
         records_payloads.push(pair[0].1.to_vec());
     }
-    DecodedItems {
+    DecodedRecords {
         head: json(first),
         pages,
         trailer: json(last),

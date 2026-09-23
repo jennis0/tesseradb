@@ -616,6 +616,15 @@ class Server:
             timeout=60,
         )
 
+    def artifacts(self, token: str, **body) -> requests.Response:
+        """`POST /v1/artifacts` with `body` as given: the raw response."""
+        return requests.post(
+            f"{self.viewer_base}/v1/artifacts",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=60,
+        )
+
     def item(self, token: str, handle: int, pin: str | None = None) -> requests.Response:
         body: dict = {}
         if pin is not None:

@@ -64,16 +64,16 @@ def split_frames(body: bytes) -> list[tuple[int, bytes]]:
     return frames
 
 
-#: The frame kinds of a `POST /v1/items` body: a head, records frames each followed by a page
-#: end, and the trailer, whose kind is the viewport's.
-FRAME_ITEMS_HEAD = 6
+#: The frame kinds of a `POST /v1/items` or `POST /v1/artifacts` body: a head, records frames
+#: each followed by a page end, and the trailer, whose kind is the viewport's.
+FRAME_RECORDS_HEAD = 6
 FRAME_RECORDS = 7
 FRAME_PAGE_END = 8
-_ITEMS_KINDS = {FRAME_ITEMS_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER}
+_RECORDS_KINDS = {FRAME_RECORDS_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER}
 
 
-def _items_pages(body: bytes):
-    """The record batches and the trailer of a `POST /v1/items` body.
+def _records_pages(route: str, body: bytes):
+    """The record batches and the trailer of a `POST /v1/items` or `POST /v1/artifacts` body.
 
     A body cut short is refused, naming the cursor of the last page end it holds, from which the
     read resumes without repeating a row; a records frame with no page end after it is dropped.
@@ -86,8 +86,8 @@ def _items_pages(body: bytes):
         if len(body) - at < 5:
             break
         kind = body[at]
-        if kind not in _ITEMS_KINDS:
-            raise Refusal(f"items: unknown frame kind {kind} at byte {at}")
+        if kind not in _RECORDS_KINDS:
+            raise Refusal(f"{route}: unknown frame kind {kind} at byte {at}")
         (length,) = struct.unpack_from("<I", body, at + 1)
         payload = body[at + 5 : at + 5 + length]
         if len(payload) != length:
@@ -103,7 +103,7 @@ def _items_pages(body: bytes):
         at += 5 + length
     if trailer is None:
         raise Refusal(
-            "items: the response ended before its trailer; pass cursor="
+            f"{route}: the response ended before its trailer; pass cursor="
             f"{cursor!r} to resume after the last whole page"
         )
     return batches, trailer
@@ -646,8 +646,6 @@ class Viewer:
             while next is not None:
                 more, next = v.items("papers", ["title"], cursor=next)
         """
-        import pyarrow as pa
-
         request: dict = {"view": view, "fields": list(fields)}
         given = {
             "system_fields": None if system_fields is None else list(system_fields),
@@ -661,8 +659,58 @@ class Viewer:
             "compression": compression,
             "idset": idset,
         }
+        return self._bulk_read("items", request, given)
+
+    def artifacts(
+        self,
+        view: str,
+        layer: str,
+        fields: Sequence[str],
+        *,
+        level: Optional[int] = None,
+        parent: Optional[int] = None,
+        q: Optional[str] = None,
+        filters: Optional[dict] = None,
+        keep_unmatched: Optional[bool] = None,
+        count: Optional[bool] = None,
+        page_rows: Optional[int] = None,
+        pages: Optional[int] = None,
+        cursor: Optional[str] = None,
+        compression: Optional[str] = None,
+        idset: Optional[int] = None,
+    ):
+        """One response of `POST /v1/artifacts`: rows of every artifact of `layer` this reader is
+        served.
+
+        Every argument is the request field of the same name, sent only when given; the server's
+        contract says what each does. Returns `(table, next)` as `items` does.
+
+            table, next = v.artifacts("papers", "clusters/topics", ["key", "masked_count"])
+        """
+        request: dict = {"view": view, "layer": layer, "fields": list(fields)}
+        given = {
+            "level": level,
+            "parent": None if parent is None else str(parent),
+            "q": q,
+            "filters": filters,
+            "keep_unmatched": keep_unmatched,
+            "count": count,
+            "page_rows": page_rows,
+            "pages": pages,
+            "cursor": cursor,
+            "compression": compression,
+            "idset": idset,
+        }
+        return self._bulk_read("artifacts", request, given)
+
+    def _bulk_read(self, route: str, request: dict, given: dict):
+        """One response of `POST /v1/<route>`: `request` with every `given` field that is not
+        `None`, answered as `(table, next)`; a response with no row is a table of `tessera_id`
+        alone."""
+        import pyarrow as pa
+
         request.update({key: value for key, value in given.items() if value is not None})
-        batches, trailer = _items_pages(self._request("POST", "/v1/items", request))
+        batches, trailer = _records_pages(route, self._request("POST", f"/v1/{route}", request))
         if batches:
             table = pa.Table.from_batches(batches)
         else:

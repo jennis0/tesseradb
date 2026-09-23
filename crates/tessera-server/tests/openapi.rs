@@ -344,6 +344,7 @@ fn the_description_names_every_route_on_the_two_planes_and_no_other() {
             "/readyz",
             "/session/authorise",
             "/session/revoke",
+            "/v1/artifacts",
             "/v1/artifacts/browse",
             "/v1/artifacts/{tessera_id}",
             "/v1/categories/{column}",
@@ -376,8 +377,10 @@ fn every_closed_dto_is_declared_closed() {
         "ViewportRequest",
         "ItemsRequest",
         "ItemsHead",
-        "ItemsPageEnd",
-        "ItemsTrailer",
+        "ArtifactsRequest",
+        "ArtifactsHead",
+        "PageEnd",
+        "RecordsTrailer",
         "ItemRequest",
         "ItemResponse",
         "ArtifactRequest",
@@ -995,6 +998,105 @@ async fn items_match_the_description_with_every_refusal() {
     assert_invalid(&doc, "ItemRequest", &json!({ "external_id": "x" }));
 }
 
+/// `POST /v1/artifacts`: the request shape, the described headers, the three JSON frames against
+/// their schemas, and the refusals.
+#[tokio::test]
+async fn the_artifacts_read_matches_the_description_with_its_refusals() {
+    let doc = description();
+    let f = fixture().await;
+    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let post = |body: Value, tok: &str| {
+        f.server
+            .client
+            .post(f.server.viewer_url("/v1/artifacts"))
+            .bearer_auth(tok)
+            .json(&body)
+            .send()
+    };
+
+    let body = json!({
+        "view": "s0",
+        "layer": LAYER,
+        "fields": ["key", "level", "parents", "target", "masked_count", "content", "centroid",
+                   "box", "shape"],
+        "filters": { "score": { "range": { "gte": 1 } } },
+        "keep_unmatched": true,
+        "count": true,
+        "page_rows": 1,
+        "pages": 1,
+        "compression": "zstd",
+        "idset": FIXTURE_IDSET,
+    });
+    assert_valid(&doc, "ArtifactsRequest", &body);
+    let resp = post(body, token).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let headers = doc["paths"]["/v1/artifacts"]["post"]["responses"]["200"]["headers"]
+        .as_object()
+        .unwrap();
+    for (name, spec) in headers {
+        if spec["required"].as_bool() == Some(true) {
+            assert!(resp.headers().contains_key(name.as_str()), "{name}");
+        }
+    }
+    let decoded = decode_records(&resp.bytes().await.unwrap());
+    assert_valid(&doc, "ArtifactsHead", &decoded.head);
+    assert!(decoded.head["served"].is_u64() && decoded.head["matched"].is_u64());
+    assert_eq!(decoded.pages.len(), 1);
+    for (_, end) in &decoded.pages {
+        assert_valid(&doc, "PageEnd", end);
+    }
+    assert_valid(&doc, "RecordsTrailer", &decoded.trailer);
+    let cursor = decoded.trailer["next"].as_str().unwrap().to_string();
+
+    let resp = post(
+        json!({ "view": "s0", "layer": LAYER, "fields": ["key"], "parent": f.artifacts[0],
+                "cursor": cursor }),
+        token,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let decoded = decode_records(&resp.bytes().await.unwrap());
+    assert_valid(&doc, "ArtifactsHead", &decoded.head);
+    assert_valid(&doc, "RecordsTrailer", &decoded.trailer);
+    assert!(decoded.trailer["next"].is_null());
+
+    for body in [
+        json!({ "view": "s0", "layer": LAYER, "fields": [], "page_rows": 0 }),
+        json!({ "view": "s0", "layer": LAYER, "fields": [], "unknown": 1 }),
+        json!({ "view": "s0", "layer": LAYER, "fields": ["size"] }),
+        json!({ "view": "s0", "layer": "clusters/none", "fields": [] }),
+        json!({ "view": "s0", "layer": LAYER, "fields": [], "level": 0 }),
+        json!({ "view": "s0", "layer": LAYER, "fields": [], "parent": "1", "q": "c" }),
+        json!({ "view": "s0", "layer": LAYER, "fields": [], "cursor": "not-a-cursor" }),
+    ] {
+        let resp = post(body, token).await.unwrap();
+        assert_refusal(&doc, resp, 422, "contract").await;
+    }
+    let resp = post(json!({ "view": "no-such-view", "layer": LAYER, "fields": [] }), token)
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 404, "unknown").await;
+    let resp = post(
+        json!({ "view": "s0", "layer": LAYER, "fields": [], "idset": FIXTURE_IDSET + 1 }),
+        token,
+    )
+    .await
+    .unwrap();
+    assert_refusal(&doc, resp, 409, "conflict").await;
+
+    for body in [
+        json!({ "view": "s0", "layer": LAYER, "fields": [], "unknown": 1 }),
+        json!({ "view": "s0", "fields": [] }),
+        json!({ "view": "s0", "layer": LAYER, "fields": ["size"] }),
+        json!({ "view": "s0", "layer": LAYER, "fields": [], "pages": 0 }),
+        json!({ "view": "s0", "layer": LAYER, "fields": [], "compression": "gzip" }),
+    ] {
+        assert_invalid(&doc, "ArtifactsRequest", &body);
+    }
+}
+
 /// `POST /v1/items`: the request shape, the described headers, the three JSON frames against
 /// their schemas, and the refusals.
 #[tokio::test]
@@ -1044,14 +1146,14 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
     // the region verdict only with a region leaf, which this request has not.
     assert!(resp.headers().contains_key("x-tessera-identity-key"));
     assert!(!resp.headers().contains_key("x-tessera-region"));
-    let decoded = decode_items(&resp.bytes().await.unwrap());
+    let decoded = decode_records(&resp.bytes().await.unwrap());
     assert_valid(&doc, "ItemsHead", &decoded.head);
     assert!(decoded.head["visible"].is_u64() && decoded.head["matched"].is_u64());
     assert_eq!(decoded.pages.len(), 3);
     for (_, end) in &decoded.pages {
-        assert_valid(&doc, "ItemsPageEnd", end);
+        assert_valid(&doc, "PageEnd", end);
     }
-    assert_valid(&doc, "ItemsTrailer", &decoded.trailer);
+    assert_valid(&doc, "RecordsTrailer", &decoded.trailer);
     let cursor = decoded.trailer["next"].as_str().unwrap().to_string();
 
     // The rest of the read, from the cursor, to its end.
@@ -1059,9 +1161,9 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
-    let decoded = decode_items(&resp.bytes().await.unwrap());
+    let decoded = decode_records(&resp.bytes().await.unwrap());
     assert_valid(&doc, "ItemsHead", &decoded.head);
-    assert_valid(&doc, "ItemsTrailer", &decoded.trailer);
+    assert_valid(&doc, "RecordsTrailer", &decoded.trailer);
     assert!(decoded.trailer["next"].is_null());
     assert_eq!(decoded.trailer["ended_by"], "end");
 
@@ -1280,10 +1382,10 @@ async fn every_viewer_route_requires_a_session_token() {
     // Non-vacuity, both halves: the loop must have found the seven gated routes and the two
     // probes, or it enumerated nothing and proved nothing.
     assert_eq!(
-        gated, 8,
+        gated, 9,
         "the viewer plane's gated routes are meta, categories, suggest, viewport, the items read, \
-         items, artifacts and artifacts/browse; a change to that set belongs in this test's \
-         reasoning, not silently in its count"
+         items, the artifacts read, artifacts and artifacts/browse; a change to that set belongs \
+         in this test's reasoning, not silently in its count"
     );
     assert_eq!(
         probes, 2,
@@ -1462,6 +1564,7 @@ fn viewer_body(path: &str) -> Value {
         "/v1/viewport" => viewport_body(json!({})),
         "/v1/items" => json!({ "view": "s0", "fields": [] }),
         "/v1/items/{tessera_id}" => json!({}),
+        "/v1/artifacts" => json!({ "view": "s0", "layer": LAYER, "fields": [] }),
         "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
         "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),
         other => panic!(
