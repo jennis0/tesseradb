@@ -1814,14 +1814,8 @@ fn access_descriptors(
         .into_iter()
         .map(String::into_bytes)
         .collect();
-    if labels.is_empty() {
-        return Ok(Vec::new());
-    }
-    state
-        .engine
-        .plugin()
-        .terms_of_labels(&labels)
-        .map_err(|e| ApiError::Contract(format!("access: {e}")))
+    tessera_plugin::artifact_access(state.engine.plugin().as_ref(), &labels)
+        .map_err(ApiError::Contract)
 }
 
 /// Turns a flat member offset back into `(artifact index, member index)` for a refusal to name.

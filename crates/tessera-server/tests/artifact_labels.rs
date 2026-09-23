@@ -828,3 +828,88 @@ fn a_label_field_the_source_does_not_carry_is_refused() {
     let dir = TempDir::new().unwrap();
     assert!(build_labelled(dir.path(), true, "team").is_ok(), "the same build naming the column");
 }
+
+// ---------------------------------------------------------------------------------------------
+// A label the plugin maps to nothing
+// ---------------------------------------------------------------------------------------------
+
+/// `builtin:passthrough` in every respect but one: the label `nothing` maps to no descriptor.
+struct Forgetful;
+
+impl tessera_plugin::Plugin for Forgetful {
+    fn terms_of_labels(
+        &self,
+        labels: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        let kept: Vec<_> = labels.iter().filter(|l| l.as_slice() != b"nothing").cloned().collect();
+        tessera_plugin::Passthrough::new().terms_of_labels(&kept)
+    }
+    fn terms_of_auth(
+        &self,
+        auth_data: &[u8],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        tessera_plugin::Passthrough::new().terms_of_auth(auth_data)
+    }
+    fn present_terms(
+        &self,
+        descriptors: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<String>, tessera_plugin::PluginError> {
+        tessera_plugin::Passthrough::new().present_terms(descriptors)
+    }
+    fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
+        tessera_plugin::Passthrough::new().declared_bounds()
+    }
+    fn data_plugin_hash(&self) -> String {
+        tessera_plugin::Passthrough::new().data_plugin_hash()
+    }
+    fn auth_plugin_hash(&self) -> String {
+        tessera_plugin::Passthrough::new().auth_plugin_hash()
+    }
+}
+
+/// **A label the plugin maps to no term is refused**, at publication and at a fill, rather than
+/// stored as no label: on an `inherited` layer that would serve the artifact to everyone the layer
+/// admits.
+#[tokio::test]
+async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_none() {
+    let tmp = TempDir::new().unwrap();
+    build_fixture(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let config = default_engine_config();
+    let max_k = config.max_k;
+    let engine = tessera_engine::Engine::open(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Forgetful,
+        config,
+    )
+    .unwrap();
+    let server = spawn_server_from_engine(engine, max_k, generous_test_gate()).await;
+    declare(&server, teams_declaration("inherited")).await;
+
+    let resp = server
+        .client
+        .put(artifacts_url(&server, LAYER))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({ "addressing": "external", "artifacts": [
+            { "key": "hidden", "members": members(0..40), "access": ["nothing"] }
+        ] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 422);
+
+    publish(&server, LAYER, json!([{ "key": "bare", "members": members(0..40) }])).await;
+    let (status, _) = patch(&server, LAYER, json!([{ "key": "bare", "access": ["nothing"] }])).await;
+    assert_eq!(status, 422);
+    tick(&server).await;
+    assert_eq!(
+        keys_served(&viewport_raw(&server, &token(&server, &["0"]).await, viewport(0, json!({}))).await),
+        vec!["bare".to_string()],
+        "nothing named `hidden` was stored"
+    );
+}
