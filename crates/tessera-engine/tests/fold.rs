@@ -3094,7 +3094,6 @@ fn a_flush_of_joins_binds_nothing_and_the_joined_key_resolves_both_ways() {
 /// the two flushes' locator extents overlap; a restart past the log's rotation leaves the live map
 /// empty.
 #[test]
-#[ignore = "fails: the two views' locator extents overlap, and the first one listed answers no external id for the other view's entities inside its span"]
 fn interleaved_new_items_in_two_views_resolve_both_ways_from_the_sidecar() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");

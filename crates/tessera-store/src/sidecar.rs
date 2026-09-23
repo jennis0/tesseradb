@@ -821,21 +821,20 @@ impl ExternalIdSidecar {
         if entity.raw() < self.locator_len() {
             return self.external_id_of(entity);
         }
-        // **Past the build locator's end is where a flushed entity lives**, and a flush publishes a
-        // locator extent for exactly its own entity range. Without this the drill-down answered a
-        // typed error for ever once rotation reclaimed the WAL record the live map was rebuilt
-        // from — an item visible on the map that `/v1/items` refuses to name.
-        //
-        // A hit here is authoritative either way: `LOCATOR_NONE` means the item was ingested with
-        // no external id (contracts §2.4 r6's ordinary case) and `Ok(None)` is the right answer,
-        // never the inconsistency below.
-        if let Some(slot) = self
+        // Past the build locator's end, the flushed extents. Two views' extents can overlap, and
+        // each holds the absent marker for the other's entities, so every extent containing the
+        // entity is asked, newest first, until one holds a slot for it. Covered with no slot
+        // anywhere is an entity ingested without an external id.
+        let mut covered = false;
+        for slot in self
             .locator_runs
             .iter()
-            .find(|s| entity.raw() >= s.desc.entity_lo && entity.raw() <= s.desc.entity_hi)
+            .rev()
+            .filter(|s| entity.raw() >= s.desc.entity_lo && entity.raw() <= s.desc.entity_hi)
         {
+            covered = true;
             let Some(ordinal) = slot.ordinal_of(entity)? else {
-                return Ok(None);
+                continue;
             };
             let run = self
                 .runs
@@ -844,9 +843,7 @@ impl ExternalIdSidecar {
                 .ok_or_else(|| StoreError::InvalidSidecar {
                     path: slot.desc.path.clone(),
                     detail: format!(
-                        "this locator extent indexes run '{}', which the manifest does not list — \
-                         the ordinal cannot be resolved and an absent external id would be the \
-                         wrong answer",
+                        "this locator extent indexes run '{}', which the manifest does not list",
                         slot.desc.run_rel
                     ),
                 })?;
@@ -862,6 +859,9 @@ impl ExternalIdSidecar {
                 });
             }
             return Ok(Some(validated.key(ordinal as usize).to_vec()));
+        }
+        if covered {
+            return Ok(None);
         }
         if entity.raw() < high_water {
             let path = self
