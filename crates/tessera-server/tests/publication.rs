@@ -380,15 +380,17 @@ async fn rows_buffered_into_two_views_are_both_served_at_the_number() {
     // **The first of the two publications does not reach the number.** One plan is dispatched per
     // tick, so the cycle is still holding a view's rows when the first swaps; the counter moves at
     // the one that leaves nothing over.
-    wait_until("the first view published", DEADLINE, async || {
+    // Polled every 2 ms: each poll is also a sample of the counter racing the first swap.
+    let every = std::time::Duration::from_millis(2);
+    poll("the first view published", DEADLINE, every, async || {
         if server.state.engine.write_executor_stats().flushes >= 1 {
-            return true;
+            return Some(());
         }
         assert!(
             publication(&server).await < n,
             "the counter reached the number before either view had published"
         );
-        false
+        None
     })
     .await;
 

@@ -1022,10 +1022,12 @@ pub fn flat_layer(name: &str) -> serde_json::Value {
     })
 }
 
-/// Poll `attempt` until it gives a value, failing the test if it has not within `within`.
-pub async fn wait_for<T>(
+/// Poll `attempt` every `every` until it gives a value, failing the test if it has not within
+/// `within`.
+pub async fn poll<T>(
     what: &str,
     within: std::time::Duration,
+    every: std::time::Duration,
     mut attempt: impl AsyncFnMut() -> Option<T>,
 ) -> T {
     let deadline = std::time::Instant::now() + within;
@@ -1037,8 +1039,17 @@ pub async fn wait_for<T>(
             std::time::Instant::now() < deadline,
             "{what}: not within {within:?}"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(every).await;
     }
+}
+
+/// [`poll`] every ten milliseconds.
+pub async fn wait_for<T>(
+    what: &str,
+    within: std::time::Duration,
+    attempt: impl AsyncFnMut() -> Option<T>,
+) -> T {
+    poll(what, within, std::time::Duration::from_millis(10), attempt).await
 }
 
 /// Poll `done` until it holds, failing the test if it has not within `within`.
