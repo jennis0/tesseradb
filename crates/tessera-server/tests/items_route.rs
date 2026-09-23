@@ -219,13 +219,6 @@ async fn hold(gate: &ComputeGate) -> tessera_server::state::GatePermits {
     }
 }
 
-/// The error envelope's code, after the status.
-async fn refused(resp: reqwest::Response, status: u16) -> String {
-    assert_eq!(resp.status().as_u16(), status);
-    let body: Value = resp.json().await.expect("a refusal carries the envelope");
-    body["error"].as_str().unwrap().to_string()
-}
-
 /// **Every visible row once, in either order, filtered or not.** A read carried across many
 /// responses, three pages of 97 rows each, returns as many rows as the viewport counts, none
 /// twice, and the two orders return the same set.

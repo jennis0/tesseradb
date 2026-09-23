@@ -1019,6 +1019,19 @@ pub fn mentions(text: &str, token: &str) -> bool {
     })
 }
 
+/// The `error` code of a refusal's body.
+pub fn error_code(body: &str) -> String {
+    let body: serde_json::Value = serde_json::from_str(body)
+        .unwrap_or_else(|_| panic!("a refusal carries the error envelope: {body}"));
+    body["error"].as_str().unwrap_or_default().to_string()
+}
+
+/// Assert `resp` has `status`, and return its [`error_code`].
+pub async fn refused(resp: reqwest::Response, status: u16) -> String {
+    assert_eq!(resp.status().as_u16(), status);
+    error_code(&resp.text().await.unwrap())
+}
+
 /// `bytes` in standard base64, the way the wire carries an external id.
 pub fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)

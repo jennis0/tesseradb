@@ -295,14 +295,6 @@ fn minted_of(body: &str) -> u64 {
         .expect("every accepted ingest reports what it minted")
 }
 
-/// The error code of a refused ingest's body.
-fn error_of(body: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(body).unwrap()["error"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string()
-}
-
 /// Register a layer over the control plane, for the cases a build cannot express — a closed layer
 /// binding members with no artifact source of its own, and a layer whose artifacts arrive by
 /// publication rather than from a file.
@@ -810,7 +802,7 @@ async fn a_closed_layer_refuses_an_unknown_key_and_ingests_nothing() {
     )
     .await;
     assert_eq!(status, 422, "{detail}");
-    assert_eq!(error_of(&detail), "contract", "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
     assert!(
         detail.contains("4242"),
         "the refusal names the key the caller can act on: {detail}"
@@ -1202,7 +1194,7 @@ async fn a_layer_declaring_supplied_content_refuses_to_mint() {
     )
     .await;
     assert_eq!(status, 422, "{detail}");
-    assert_eq!(error_of(&detail), "contract", "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
     assert!(
         detail.contains("nobody-declared-this"),
         "the refusal names the key: {detail}"
@@ -1227,7 +1219,7 @@ async fn a_column_naming_neither_an_attribute_nor_a_layer_is_refused() {
     )
     .await;
     assert_eq!(status, 422, "{detail}");
-    assert_eq!(error_of(&detail), "contract", "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
     assert!(detail.contains("clusters/typo"), "{detail}");
 }
 
@@ -1247,7 +1239,7 @@ async fn the_build_time_field_name_is_not_a_wire_column() {
     let (status, detail) =
         post_ingest(&server, "by-field", ingest_batch(&[SEED], "cluster", keys)).await;
     assert_eq!(status, 422, "{detail}");
-    assert_eq!(error_of(&detail), "contract", "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
     assert!(detail.contains("'cluster'"), "{detail}");
 }
 
@@ -1271,7 +1263,7 @@ async fn a_row_whose_list_is_not_one_entry_per_level_is_refused() {
     let (status, detail) =
         post_ingest(&server, "short-list", ingest_batch(&[SEED], LAYER, keys)).await;
     assert_eq!(status, 422, "{detail}");
-    assert_eq!(error_of(&detail), "contract", "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
 }
 
 /// **A layer whose membership is evaluated has nothing for a column to say.** A predicate layer
@@ -1320,7 +1312,7 @@ async fn a_column_naming_a_predicate_layer_is_refused() {
     )
     .await;
     assert_eq!(status, 422, "{detail}");
-    assert_eq!(error_of(&detail), "contract", "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
 }
 
 /// **An edge the artifact does not yet hold is recorded, as a build records it.**
@@ -1453,7 +1445,7 @@ async fn a_lineage_contradicting_the_stored_edge_refuses_the_batch() {
     let (status, detail) =
         post_ingest(&server, "two-parents", ingest_batch(&[SEED], LAYER, keys)).await;
     assert_eq!(status, 422, "{detail}");
-    assert_eq!(error_of(&detail), "contract", "{detail}");
+    assert_eq!(error_code(&detail), "contract", "{detail}");
     assert!(
         detail.contains("100") && detail.contains("11"),
         "the refusal names the child and the parent claimed: {detail}"

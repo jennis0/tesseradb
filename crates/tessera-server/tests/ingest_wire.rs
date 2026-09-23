@@ -30,7 +30,7 @@ use tessera_plugin::Passthrough;
 
 /// Whether a refusal's detail names the row index and the column the caller sent.
 fn names_cell(detail: &str, row: usize, column: &str) -> bool {
-    detail.contains(&format!("row {row}")) && detail.contains(&format!("'{column}'"))
+    mentions(detail, &format!("row {row}")) && detail.contains(&format!("'{column}'"))
 }
 
 const ARROW: &str = "application/vnd.apache.arrow.stream";
