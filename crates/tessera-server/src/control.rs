@@ -315,8 +315,8 @@ struct ValuesResp {
     filled: u64,
     /// Cells that already held the identical value, which the fill rule accepts with no effect.
     held: u64,
-    /// Members added to artifacts that already existed and did not hold them. Members of an
-    /// artifact this batch created are counted under `minted` alone.
+    /// Memberships this batch's layer columns added: every row placed in an artifact the batch
+    /// created, and every row an artifact already held did not yet hold.
     joined: u64,
     /// Artifacts this batch created, for keys no artifact held on a layer whose value set is open.
     minted: u64,
@@ -2760,8 +2760,9 @@ async fn publish_artifacts(
         .zip(keys)
         .map(|(id, key)| serde_json::json!({ "key": key, "tessera_id": id.raw().to_string() }))
         .collect();
-    // `shapes` is the build's shape report, present only when a shape was canonicalised. The
-    // status is 201 if anything was created, 200 if every key was held.
+    // `shapes` is the build's shape report, present only when a shape was canonicalised.
+    // `joined` counts memberships added to created and held artifacts alike. The status is 201
+    // if anything was created, 200 if every key was held.
     let mut body = serde_json::json!({
         "artifacts": published,
         "created": batch.created,

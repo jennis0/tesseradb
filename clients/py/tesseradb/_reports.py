@@ -128,6 +128,7 @@ class PagedReport(Printed):
     findings: list = field(default_factory=list)
     rows_accepted: dict = field(default_factory=dict)
     artifacts_minted: int = 0
+    #: Memberships the pages added, to artifacts this commit minted and to artifacts already held.
     memberships_joined: int = 0
     values_filled: int = 0
     #: Vocabulary values this commit's declarations and value pages drew a code for.

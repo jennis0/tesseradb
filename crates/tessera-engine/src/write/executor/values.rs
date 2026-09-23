@@ -364,32 +364,6 @@ fn row_entity_of(
     |_, row| rows.get(row as usize).map(|row| row.entity)
 }
 
-/// How many of one growth record's joining members the artifacts do not already hold, read before
-/// the record is applied, which is the only time the difference exists.
-pub(super) fn new_members_of(record: &WalRecord, store: &tessera_lifecycle::ArtifactStore) -> u64 {
-    let WalRecord::ArtifactGrow {
-        layer,
-        level,
-        growth,
-    } = record
-    else {
-        return 0;
-    };
-    growth
-        .iter()
-        .map(|delta| {
-            let Some(joining) = tessera_lifecycle::membership::deserialise_members(&delta.joining)
-            else {
-                return 0;
-            };
-            match store.get(layer, *level, delta.ordinal) {
-                Some(record) => joining.andnot_cardinality(&record.members),
-                None => 0,
-            }
-        })
-        .sum()
-}
-
 /// Settle every joining row of one batch, whose join-ness `established_collisions` has just
 /// decided: the **join rule**'s three arms (label, entity-scoped attribute, scoped cell), then the
 /// completion an accepted join owes: descriptors dropped, omitted `render` values backfilled. A
