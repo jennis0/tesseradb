@@ -2040,26 +2040,32 @@ fn read_u64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
 }
 
 /// An integer column at `uint64`, `uint32`, `int64` or `int32` as `uint64`, a null staying null
-/// and a negative value refused.
+/// and a negative value refused. For a list column this is its items, every row's together.
 pub(crate) fn u64_values(path: &Path, column: &dyn Array, name: &str) -> Result<UInt64Array> {
-    match column.data_type() {
-        DataType::UInt64 | DataType::UInt32 | DataType::Int64 | DataType::Int32 => {}
-        other => {
-            return Err(BuildError::Schema {
-                path: path.to_path_buf(),
-                detail: format!("column '{name}' has unsupported type {other:?}"),
-            })
-        }
+    let list = column.as_any().downcast_ref::<arrow::array::ListArray>();
+    let values = list.map_or(column, |list| list.values().as_ref());
+    let refuse = |detail: String| BuildError::Schema {
+        path: path.to_path_buf(),
+        detail,
+    };
+    if !matches!(
+        values.data_type(),
+        DataType::UInt64 | DataType::UInt32 | DataType::Int64 | DataType::Int32
+    ) {
+        let shape = if list.is_some() { "a list of " } else { "" };
+        return Err(refuse(format!(
+            "column '{name}' is {}; write it as {shape}uint64, uint32, int64 or int32",
+            column.data_type()
+        )));
     }
     // Arrow's safe cast turns a negative value into a null, so more nulls after it than before
-    // means a negative id, and reading the value under that null would be an arbitrary id.
+    // means a negative value, and reading under that null would be an arbitrary one.
     let cast =
-        arrow::compute::cast(column, &DataType::UInt64).map_err(|e| BuildError::arrow(path, e))?;
-    if cast.null_count() > column.null_count() {
-        return Err(BuildError::Schema {
-            path: path.to_path_buf(),
-            detail: format!("column '{name}' contains negative values"),
-        });
+        arrow::compute::cast(values, &DataType::UInt64).map_err(|e| BuildError::arrow(path, e))?;
+    if cast.null_count() > values.null_count() {
+        return Err(refuse(format!(
+            "column '{name}' holds a negative value; write every value in it as zero or more"
+        )));
     }
     Ok(cast
         .as_any()

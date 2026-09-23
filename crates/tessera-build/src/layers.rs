@@ -936,8 +936,8 @@ fn read_artifacts(
         let spaces = space_column(path, &batch, fields)?;
         let level = optional_u32(path, &batch, LEVEL)?;
         let contents = optional_ranked_values(path, &batch, fields, "contents")?;
-        let members = optional_u64_list(path, &batch, fields, "members")?;
-        let excluding = optional_u64_list(path, &batch, fields, "excluding")?;
+        let members = optional_u64_list(path, &batch, fields, "members", ids)?;
+        let excluding = optional_u64_list(path, &batch, fields, "excluding", ids)?;
         let target_layer = optional_utf8(path, &batch, fields, "attached_layer")?;
         let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
@@ -1033,10 +1033,10 @@ fn read_artifacts(
             // carried.
             let membership = match (&members, &excluding) {
                 (Some(column), _) => {
-                    PlannedMembership::Included(u64s_at(path, column, row, &address.2, ids)?)
+                    PlannedMembership::Included(u64s_at(path, column, row, &address.2)?)
                 }
                 (_, Some(column)) => {
-                    PlannedMembership::Excluded(u64s_at(path, column, row, &address.2, ids)?)
+                    PlannedMembership::Excluded(u64s_at(path, column, row, &address.2)?)
                 }
                 (None, None) => PlannedMembership::default(),
             };
@@ -3502,9 +3502,9 @@ fn optional_utf8<'a>(
 /// One member table batch's `entity` column, at whichever type the declaration spells identity.
 ///
 /// The integer route reads the column as `uint64` from any integer type a points file's ids may
-/// have. A supplied id column is resolved to the source ids the build joins on, one per row; a key no points file carries
-/// becomes [`crate::ids::NO_SOURCE_ID`], which is the refusal an unknown integer earns where the
-/// member is attached.
+/// have. A supplied id column is resolved to the source ids the build joins on, one per row; a key
+/// no points file carries becomes [`crate::ids::NO_SOURCE_ID`], which is the refusal an unknown
+/// integer earns where the member is attached.
 enum MemberEntities {
     Integer(UInt64Array),
     Supplied(Vec<Option<u64>>),
@@ -3595,14 +3595,33 @@ fn optional_list<'a>(
     }
 }
 
-/// The membership list on an artifact row, included or excluded.
+/// The membership lists on a batch's artifact rows, included or excluded. On the integer route
+/// every row's items are read as `uint64` together; a supplied id column's are resolved row by row.
+struct MembershipLists<'a> {
+    lists: &'a ListArray,
+    items: ListItems<'a>,
+}
+
+enum ListItems<'a> {
+    Integers(UInt64Array),
+    Keys(&'a crate::ids::SuppliedIds),
+}
+
 fn optional_u64_list<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
     fields: &Fields,
     canonical: &str,
-) -> Result<Option<&'a ListArray>> {
-    optional_list(path, batch, fields, canonical)
+    ids: &'a crate::ids::IdSpace,
+) -> Result<Option<MembershipLists<'a>>> {
+    let Some(lists) = optional_list(path, batch, fields, canonical)? else {
+        return Ok(None);
+    };
+    let items = match ids.supplied() {
+        Some(keys) => ListItems::Keys(keys),
+        None => ListItems::Integers(crate::input::u64_values(path, lists, fields.of(canonical))?),
+    };
+    Ok(Some(MembershipLists { lists, items }))
 }
 
 /// The ranked `contents` on an artifact row: a list of entries, each a list of values.
@@ -3636,43 +3655,40 @@ fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
 /// **A null element is a refusal rather than entity zero**, on the member source's own rule: Arrow
 /// reads the values buffer whatever the validity bitmap says, so a producer whose join missed a row
 /// would otherwise publish the corpus's lowest-numbered document into the artifact.
-fn u64s_at(
-    path: &Path,
-    column: &ListArray,
-    row: usize,
-    key: &str,
-    ids: &crate::ids::IdSpace,
-) -> Result<Vec<u64>> {
-    if column.is_null(row) {
+fn u64s_at(path: &Path, column: &MembershipLists<'_>, row: usize, key: &str) -> Result<Vec<u64>> {
+    if column.lists.is_null(row) {
         return Ok(Vec::new());
     }
-    let values = column.value(row);
     // **Named the way the declaration names a row** (`crate::ids`): the integer route takes a
-    // list of any integer type a points file's ids may have, and a supplied id column makes this a list of keys, each
-    // resolved to the source id the build joins on.
-    if let Some(keys) = ids.supplied() {
-        keys.require_same_family(path, key, "members", values.data_type())?;
-        return (0..values.len())
-            .map(|i| {
-                let member =
-                    crate::ids::key_at(values.as_ref(), i).ok_or_else(|| null_member(path, key))?;
-                match keys.rank(&member) {
-                    crate::ids::NO_SOURCE_ID => Err(unknown_member(path, &member)),
-                    source_id => Ok(source_id),
-                }
-            })
-            .collect();
+    // list of any integer type a points file's ids may have, and a supplied id column makes this
+    // a list of keys, each resolved to the source id the build joins on.
+    match &column.items {
+        ListItems::Integers(integers) => {
+            let offsets = column.lists.value_offsets();
+            (offsets[row] as usize..offsets[row + 1] as usize)
+                .map(|i| {
+                    if integers.is_null(i) {
+                        return Err(null_member(path, key));
+                    }
+                    Ok(integers.value(i))
+                })
+                .collect()
+        }
+        ListItems::Keys(keys) => {
+            let values = column.lists.value(row);
+            keys.require_same_family(path, key, "members", values.data_type())?;
+            (0..values.len())
+                .map(|i| {
+                    let member = crate::ids::key_at(values.as_ref(), i)
+                        .ok_or_else(|| null_member(path, key))?;
+                    match keys.rank(&member) {
+                        crate::ids::NO_SOURCE_ID => Err(unknown_member(path, &member)),
+                        source_id => Ok(source_id),
+                    }
+                })
+                .collect()
+        }
     }
-    let ids =
-        crate::input::u64_values(path, values.as_ref(), &format!("the membership of {key}"))?;
-    (0..ids.len())
-        .map(|i| {
-            if ids.is_null(i) {
-                return Err(null_member(path, key));
-            }
-            Ok(ids.value(i))
-        })
-        .collect()
 }
 
 /// **A member naming a row no points file carries is refused**, exactly as an integer naming an
