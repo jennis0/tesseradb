@@ -51,11 +51,6 @@ pub enum ConfigError {
         response_bytes: usize,
         page_bytes: usize,
     },
-    /// The stream deadline would cut a response before its own time budget ends it.
-    ResponseTimeNotBelowDeadline {
-        response_ms: u64,
-        deadline_ms: u64,
-    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -177,15 +172,6 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "serve.bulk_response_bytes = {response_bytes} is below serve.max_page_bytes = \
                  {page_bytes}, so no page could start; write at least {page_bytes}"
-            ),
-            ConfigError::ResponseTimeNotBelowDeadline {
-                response_ms,
-                deadline_ms,
-            } => write!(
-                f,
-                "serve.bulk_response_ms = {response_ms} is not below serve.stream_deadline_ms = \
-                 {deadline_ms}, so the deadline would cut a bulk read before its own budget \
-                 ends it; write less than {deadline_ms}"
             ),
         }
     }

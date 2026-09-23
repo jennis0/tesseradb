@@ -196,7 +196,8 @@ pub struct Config {
     pub bulk_queue: usize,
     /// Bytes one bulk-read response may carry; at least `max_page_bytes`.
     pub bulk_response_bytes: usize,
-    /// Time one bulk-read response may run; below `stream_deadline_ms`.
+    /// Time one bulk-read response may run. `stream_deadline_ms` also ends one, whichever comes
+    /// first, and either way the response ends with a cursor to resume from.
     pub bulk_response_ms: u64,
     pub region_cache_bytes: u64,
     /// Emit `x-tessera-stage-ns`; does nothing in a binary built without `bench-timing`.
@@ -468,12 +469,6 @@ fn parse(text: &str) -> Result<Config> {
         .stream_deadline_ms
         .unwrap_or(DEFAULT_STREAM_DEADLINE_MS);
     let bulk_response_ms = serve.bulk_response_ms.unwrap_or(DEFAULT_BULK_RESPONSE_MS);
-    if bulk_response_ms >= stream_deadline_ms {
-        return Err(ConfigError::ResponseTimeNotBelowDeadline {
-            response_ms: bulk_response_ms,
-            deadline_ms: stream_deadline_ms,
-        });
-    }
 
     let ingest = raw.ingest;
     let ingest_admission = ingest
@@ -1152,17 +1147,9 @@ mod tests {
                 page_bytes: 4096
             })
         ));
-        assert!(matches!(
-            parse(&valid_toml("bulk_response_ms = 60000")),
-            Err(ConfigError::ResponseTimeNotBelowDeadline {
-                response_ms: 60_000,
-                deadline_ms: 60_000
-            })
-        ));
-        assert!(matches!(
-            parse(&valid_toml("bulk_response_ms = 10\nstream_deadline_ms = 10")),
-            Err(ConfigError::ResponseTimeNotBelowDeadline { .. })
-        ));
+        // A response time at or past the stream deadline loads: the deadline ends such a read
+        // with a trailer to resume from.
+        assert!(parse(&valid_toml("bulk_response_ms = 60000\nstream_deadline_ms = 1")).is_ok());
         assert!(matches!(
             parse(&valid_toml(&format!("bulk_admission = {}", usize::MAX / 2))),
             Err(ConfigError::AdmissionTooLarge {
