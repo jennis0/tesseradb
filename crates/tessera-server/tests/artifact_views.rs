@@ -1085,6 +1085,12 @@ async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_re
 
 /// Drop a view of the group and create it again under the same key.
 async fn recreate(server: &TestServer, key: &str) {
+    drop_key(server, key).await;
+    create_key(server, key).await;
+}
+
+/// Drop a view of the group, leaving its items undeleted.
+async fn drop_key(server: &TestServer, key: &str) {
     let dropped = server
         .client
         .delete(server.control_url(&format!(
@@ -1095,6 +1101,10 @@ async fn recreate(server: &TestServer, key: &str) {
         .await
         .unwrap();
     assert_eq!(dropped.status().as_u16(), 200);
+}
+
+/// Create a view of the group under `key`.
+async fn create_key(server: &TestServer, key: &str) {
     let created = server
         .client
         .put(server.control_url(&format!("/control/views/quarter/{key}")))
@@ -1294,4 +1304,50 @@ async fn a_recreated_view_the_size_of_its_predecessor_serves_its_own_items_after
         points_as(&server, &["1"], "quarter:q2").await.is_empty(),
         "a restart masks the recreated view's rows by its own items"
     );
+}
+
+/// A view dropped while its first flush is in flight takes none of that flush's rows, whether its
+/// key is created again during the flight or only after it, live and after a restart.
+#[tokio::test]
+async fn a_view_dropped_during_its_first_flush_takes_none_of_its_rows() {
+    for recreated_in_flight in [true, false] {
+        let tmp = TempDir::new().unwrap();
+        let server = serve(&tmp).await;
+        create_key(&server, "q3").await;
+        ingest_right_of_the_shape(&server, "quarter:q3", "into-q3").await;
+
+        server.state.engine.set_flush_paused_for_test(true);
+        ticked(&server).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !server.state.engine.flush_is_holding_for_test() {
+            assert!(std::time::Instant::now() < deadline, "the flush never reached its hold");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        if recreated_in_flight {
+            recreate(&server, "q3").await;
+        } else {
+            drop_key(&server, "q3").await;
+        }
+        server.state.engine.set_flush_paused_for_test(false);
+        wait_until(&server, "the held flush left the pool", |now| !now.flush_in_flight).await;
+        // Two ticks: the first drains the handed-back flush, the second follows its publication.
+        ticked(&server).await;
+        ticked(&server).await;
+        if !recreated_in_flight {
+            create_key(&server, "q3").await;
+        }
+        assert!(
+            points_of(&server, "quarter:q3").await.is_empty(),
+            "the view created again holds none of its predecessor's in-flight rows \
+             (recreated in flight: {recreated_in_flight})"
+        );
+
+        server.shutdown().await;
+        let server = open(&tmp).await;
+        assert!(
+            points_of(&server, "quarter:q3").await.is_empty(),
+            "nor after a restart (recreated in flight: {recreated_in_flight})"
+        );
+        server.shutdown().await;
+    }
 }
