@@ -1,7 +1,8 @@
 # Guides
 
-Each guide covers one task for a user who already has a working deployment.
+Each guide covers one task for a user who has finished a tutorial.
 
+- [Run a standalone deployment](deployment.md): one Linux server under systemd, with nginx in front for TLS; credentials, the identity key, memory, health and readiness, and compaction.
 - Declaring a corpus: views, attributes, vocabularies and access labels. Not written yet.
 - Declaring several layouts over one corpus with views and view groups. Not written yet.
 - Deciding who may see what: terms, labels and the session plane. Not written yet.
@@ -11,6 +12,5 @@ Each guide covers one task for a user who already has a working deployment.
 - Ingesting into a running service. Not written yet.
 - Deleting and suppressing items. Not written yet.
 - Reading records page by page. Not written yet.
-- Configuring and operating a deployment: planes, credentials, compaction, health and readiness. Not written yet.
 - Theming and composing the web components. Not written yet.
 - Writing a client against the HTTP API alone. Not written yet.

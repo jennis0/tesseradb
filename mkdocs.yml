@@ -83,6 +83,7 @@ nav:
       - Your first map from files: start/first-map.md
   - Guides:
       - guides/index.md
+      - Run a standalone deployment: guides/deployment.md
   - Reference:
       - reference/index.md
       - HTTP API: reference/http.md
