@@ -449,7 +449,8 @@ impl Engine {
         self.write.create_view(group, key, visibility, metadata)
     }
 
-    /// Drop a view. Its key is tombstoned and refused on recreation for ever.
+    /// Drop a view. Its key may be created again, as a new incarnation with none of the dropped
+    /// view's rows or artifacts.
     pub fn drop_view(
         &self,
         group: String,

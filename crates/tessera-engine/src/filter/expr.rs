@@ -315,8 +315,10 @@ pub type RegionResolver<'a> =
 /// artifact this principal would not be served is the empty bitmap, never an error.
 pub type MemberResolver<'a> = dyn Fn(&MemberOfLeaf) -> Result<Bitmap, FilterError> + 'a;
 
-/// The two row-space leaves' resolvers, together: one argument rather than two.
+/// The two row-space leaves' resolvers, and whether this principal reaches a layer a `member_of`
+/// names, which is refused before either resolver runs.
 pub struct RowLeafResolvers<'a> {
     pub regions: &'a RegionResolver<'a>,
     pub members: &'a MemberResolver<'a>,
+    pub layers: &'a dyn Fn(&str) -> bool,
 }
