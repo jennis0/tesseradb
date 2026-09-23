@@ -1331,6 +1331,132 @@ fn a_row_membership_and_a_member_source_build_the_same_bundle() {
     assert_bundles_identical(&from_row, &from_source, "a member source against a row");
 }
 
+/// A curated layer's memberships with every id written at `ty`, as a list on each artifact row or,
+/// with `member_table`, as a `[layer.members]` table beside rows carrying only their keys.
+fn write_curated_ids_at(
+    inputs: &Inputs,
+    member_table: bool,
+    ty: &DataType,
+    artifacts: &[(&str, Vec<i64>)],
+) {
+    let ids = |values: Vec<i64>| -> ArrayRef {
+        arrow::compute::cast(&Int64Array::from(values), ty).expect("the ids fit the type")
+    };
+    let keys: ArrayRef = Arc::new(StringArray::from(
+        artifacts.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+    ));
+    if !member_table {
+        let item = Arc::new(Field::new("item", ty.clone(), true));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("members", DataType::List(item.clone()), true),
+        ]));
+        let lists = ListArray::new(
+            item,
+            OffsetBuffer::from_lengths(artifacts.iter().map(|(_, members)| members.len())),
+            ids(artifacts.iter().flat_map(|(_, m)| m.clone()).collect()),
+            None,
+        );
+        write(
+            &inputs.at("curated.parquet"),
+            schema.clone(),
+            RecordBatch::try_new(schema, vec![keys, Arc::new(lists)]).unwrap(),
+        );
+        return;
+    }
+    let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
+    write(
+        &inputs.at("curated.parquet"),
+        schema.clone(),
+        RecordBatch::try_new(schema, vec![keys]).unwrap(),
+    );
+
+    let (member_keys, member_ids): (Vec<&str>, Vec<i64>) = artifacts
+        .iter()
+        .flat_map(|(key, members)| members.iter().map(move |&m| (*key, m)))
+        .unzip();
+    let table_schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("entity", ty.clone(), false),
+    ]));
+    write(
+        &inputs.at("curated_members.parquet"),
+        table_schema.clone(),
+        RecordBatch::try_new(
+            table_schema,
+            vec![Arc::new(StringArray::from(member_keys)), ids(member_ids)],
+        )
+        .unwrap(),
+    );
+}
+
+/// The curated layer read from its rows' lists, or from its member table.
+fn curated_from(member_table: bool) -> String {
+    if member_table {
+        format!(
+            "{CURATED_LAYER}source = \"curated\"\n  [layer.members]\n  source = \"curated_members\"\n"
+        )
+    } else {
+        format!("{CURATED_LAYER}source = \"curated\"\n")
+    }
+}
+
+fn curated_signed() -> Vec<(&'static str, Vec<i64>)> {
+    CURATED
+        .iter()
+        .map(|(key, members)| (*key, members.iter().map(|&m| m as i64).collect()))
+        .collect()
+}
+
+/// **A member id at any integer type a points file's id may have builds the same bundle as at
+/// `uint64`**, on the artifact row and in a member table alike.
+#[test]
+fn a_member_id_at_any_integer_type_builds_the_same_bundle_as_at_uint64() {
+    for member_table in [false, true] {
+        let layer = curated_from(member_table);
+        let (unsigned, _a) = build_spelling(&layer, |inputs| {
+            write_curated_ids_at(inputs, member_table, &DataType::UInt64, &curated_signed())
+        });
+        for ty in [DataType::Int64, DataType::Int32, DataType::UInt32] {
+            let (other, _b) = build_spelling(&layer, |inputs| {
+                write_curated_ids_at(inputs, member_table, &ty, &curated_signed())
+            });
+            assert_bundles_identical(
+                &unsigned,
+                &other,
+                &format!("{ty:?} against UInt64, member table {member_table}"),
+            );
+        }
+    }
+}
+
+/// **A negative member id is refused**, as a negative id in a points file is, rather than read as
+/// some other entity.
+#[test]
+fn a_negative_member_id_is_refused() {
+    for member_table in [false, true] {
+        for ty in [DataType::Int64, DataType::Int32] {
+            let inputs = inputs();
+            std::fs::write(
+                &inputs.config,
+                format!("{VIEW_TOML}{}", curated_from(member_table)),
+            )
+            .unwrap();
+            write_curated_ids_at(
+                &inputs,
+                member_table,
+                &ty,
+                &[("c-0", vec![0, -1]), ("c-1", vec![3])],
+            );
+            let out = inputs.dir.join("bundle");
+            assert!(
+                run(&inputs, &out).is_err(),
+                "a negative {ty:?} id, member table {member_table}, built"
+            );
+        }
+    }
+}
+
 /// **An excluded id this build did not assign refuses the build**, where an unknown *member*
 /// refuses it for the mirror-image reason: an exclusion that resolves to nothing silently widens
 /// the membership by the item it was written to keep out.

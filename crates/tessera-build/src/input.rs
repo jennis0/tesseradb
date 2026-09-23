@@ -30,7 +30,7 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::mpsc;
 
-use arrow::array::{Array, Float32Array, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, Float32Array, Float64Array, UInt64Array};
 use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -2036,48 +2036,36 @@ fn read_u64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
             detail: format!("column '{name}' contains nulls"),
         });
     }
-    let values: Vec<u64> = match column.data_type() {
-        DataType::UInt64 => column
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .expect("checked data type")
-            .values()
-            .to_vec(),
-        DataType::UInt32 => column
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .expect("checked data type")
-            .values()
-            .iter()
-            .map(|v| *v as u64)
-            .collect(),
-        DataType::Int64 | DataType::Int32 => {
-            let cast = arrow::compute::cast(column, &DataType::UInt64)
-                .map_err(|e| BuildError::arrow(path, e))?;
-            // Arrow's default cast is *safe*: a negative value becomes a null, and reading
-            // `.values()` underneath a null yields an arbitrary id silently. Nulls were checked
-            // on the source column above; check again after the cast so a negative id is a
-            // schema error, never a wrong id.
-            if cast.null_count() > 0 {
-                return Err(BuildError::Schema {
-                    path: path.to_path_buf(),
-                    detail: format!("column '{name}' contains negative values"),
-                });
-            }
-            cast.as_any()
-                .downcast_ref::<UInt64Array>()
-                .expect("cast to UInt64")
-                .values()
-                .to_vec()
-        }
+    Ok(u64_values(path, column.as_ref(), name)?.values().to_vec())
+}
+
+/// An integer column at `uint64`, `uint32`, `int64` or `int32` as `uint64`, a null staying null
+/// and a negative value refused.
+pub(crate) fn u64_values(path: &Path, column: &dyn Array, name: &str) -> Result<UInt64Array> {
+    match column.data_type() {
+        DataType::UInt64 | DataType::UInt32 | DataType::Int64 | DataType::Int32 => {}
         other => {
             return Err(BuildError::Schema {
                 path: path.to_path_buf(),
                 detail: format!("column '{name}' has unsupported type {other:?}"),
             })
         }
-    };
-    Ok(values)
+    }
+    // Arrow's safe cast turns a negative value into a null, so more nulls after it than before
+    // means a negative id, and reading the value under that null would be an arbitrary id.
+    let cast =
+        arrow::compute::cast(column, &DataType::UInt64).map_err(|e| BuildError::arrow(path, e))?;
+    if cast.null_count() > column.null_count() {
+        return Err(BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!("column '{name}' contains negative values"),
+        });
+    }
+    Ok(cast
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("cast to UInt64")
+        .clone())
 }
 
 /// Read a coordinate column as `f64`, **accepting both float widths and widening the narrower**.

@@ -3501,16 +3501,16 @@ fn optional_utf8<'a>(
 
 /// One member table batch's `entity` column, at whichever type the declaration spells identity.
 ///
-/// The integer route hands back the `uint64` column itself, with no copy. A supplied id column is
-/// resolved to the source ids the build joins on, one per row; a key no points file carries
+/// The integer route reads the column as `uint64` from any integer type a points file's ids may
+/// have. A supplied id column is resolved to the source ids the build joins on, one per row; a key no points file carries
 /// becomes [`crate::ids::NO_SOURCE_ID`], which is the refusal an unknown integer earns where the
 /// member is attached.
-enum MemberEntities<'a> {
-    Integer(&'a UInt64Array),
+enum MemberEntities {
+    Integer(UInt64Array),
     Supplied(Vec<Option<u64>>),
 }
 
-impl MemberEntities<'_> {
+impl MemberEntities {
     fn is_null(&self, row: usize) -> bool {
         match self {
             MemberEntities::Integer(column) => column.is_null(row),
@@ -3526,12 +3526,12 @@ impl MemberEntities<'_> {
     }
 }
 
-fn member_entities<'a>(
+fn member_entities(
     path: &Path,
-    batch: &'a arrow::record_batch::RecordBatch,
+    batch: &arrow::record_batch::RecordBatch,
     fields: &Fields,
     ids: &crate::ids::IdSpace,
-) -> Result<MemberEntities<'a>> {
+) -> Result<MemberEntities> {
     let column = required(path, batch, fields, "entity")?;
     if let Some(keys) = ids.supplied() {
         keys.require_same_family(
@@ -3552,9 +3552,9 @@ fn member_entities<'a>(
         }
         return Ok(MemberEntities::Supplied(rows));
     }
-    Ok(MemberEntities::Integer(typed(
+    Ok(MemberEntities::Integer(crate::input::u64_values(
         path,
-        column,
+        column.as_ref(),
         fields.of("entity"),
     )?))
 }
@@ -3647,8 +3647,8 @@ fn u64s_at(
         return Ok(Vec::new());
     }
     let values = column.value(row);
-    // **Named the way the declaration names a row** (`crate::ids`): the integer route takes the
-    // list of uint64 it always did, and a supplied id column makes this a list of keys, each
+    // **Named the way the declaration names a row** (`crate::ids`): the integer route takes a
+    // list of any integer type a points file's ids may have, and a supplied id column makes this a list of keys, each
     // resolved to the source id the build joins on.
     if let Some(keys) = ids.supplied() {
         keys.require_same_family(path, key, "members", values.data_type())?;
@@ -3663,16 +3663,8 @@ fn u64s_at(
             })
             .collect();
     }
-    let ids = values
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| {
-            BuildError::Invalid(format!(
-            "{}: the membership of {key} is a list of {:?}, and this reader takes a list of uint64",
-            path.display(),
-            values.data_type()
-        ))
-        })?;
+    let ids =
+        crate::input::u64_values(path, values.as_ref(), &format!("the membership of {key}"))?;
     (0..ids.len())
         .map(|i| {
             if ids.is_null(i) {
