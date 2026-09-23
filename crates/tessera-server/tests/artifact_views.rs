@@ -362,36 +362,8 @@ async fn flush_and_fold(server: &TestServer) {
         "{}",
         resp.text().await.unwrap()
     );
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_for_executor(server, "the flush published", move |now| {
-        now.flushes > before.flushes
-    })
-    .await;
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_for_executor(server, "the fold published", move |now| {
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        now.folds > before.folds
-    })
-    .await;
+    tick(server).await;
+    fold(server).await;
 }
 
 /// **The view survives the fold and the reopen** (`bundle_format` 8): the fold packs each record
@@ -952,7 +924,7 @@ async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_re
 
     recreate(&server, "q2").await;
     ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
-    flush(&server).await;
+    tick(&server).await;
 
     let recreated = served(&server, "quarter:q2", SHAPES).await;
     assert!(
@@ -1033,22 +1005,6 @@ async fn ingest_right_of_the_shape(server: &TestServer, view: &str, batch_id: &s
         .collect()
 }
 
-async fn flush(server: &TestServer) {
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_for_executor(server, "the flush published", move |now| {
-        now.flushes > before.flushes
-    })
-    .await;
-}
-
 /// Request a fold and wait until it has either published or been discarded, returning whether
 /// it published.
 async fn fold_settled(server: &TestServer) -> bool {
@@ -1097,7 +1053,7 @@ async fn a_view_recreated_during_a_fold_takes_none_of_its_predecessors_rows() {
     let server = serve_group(&tmp).await;
     // Something for the fold to fold.
     ingest_right_of_the_shape(&server, "quarter:q1", "into-q1").await;
-    flush(&server).await;
+    tick(&server).await;
 
     server.state.engine.set_fold_paused_for_test(true);
     let before = server.state.engine.write_executor_stats();
@@ -1109,11 +1065,12 @@ async fn a_view_recreated_during_a_fold_takes_none_of_its_predecessors_rows() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    while !server.state.engine.fold_is_holding_for_test() {
-        assert!(std::time::Instant::now() < deadline, "the fold never reached its hold");
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    wait_until(
+        "the fold reached its hold",
+        std::time::Duration::from_secs(120),
+        async || server.state.engine.fold_is_holding_for_test(),
+    )
+    .await;
 
     recreate(&server, "q2").await;
     assert!(points_of(&server, "quarter:q2").await.is_empty());
@@ -1129,7 +1086,7 @@ async fn a_view_recreated_during_a_fold_takes_none_of_its_predecessors_rows() {
     );
 
     let own = ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
-    flush(&server).await;
+    tick(&server).await;
     assert_eq!(points_of(&server, "quarter:q2").await, own);
 
     let server = restart(server, &tmp).await;
@@ -1159,7 +1116,7 @@ async fn a_flushed_segment_the_size_of_the_base_is_not_read_off_the_base_column(
     flush_and_fold(&server).await;
 
     ingest_right_of_the_shape(&server, "quarter:q2", "outside").await;
-    flush(&server).await;
+    tick(&server).await;
     let before = served(&server, "quarter:q2", SHAPES).await;
     assert_eq!(before.len(), 1, "the shape is drawn: {before:?}");
 
@@ -1175,7 +1132,7 @@ async fn a_recreated_view_the_size_of_its_predecessor_serves_its_own_items_after
     let server = serve_group(&tmp).await;
     recreate(&server, "q2").await;
     let own = ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
-    flush(&server).await;
+    tick(&server).await;
     assert_eq!(points_of(&server, "quarter:q2").await, own);
 
     // The new items carry `0` alone, so a principal holding `1` alone sees none of them. The
@@ -1202,11 +1159,12 @@ async fn a_view_dropped_during_its_first_flush_takes_none_of_its_rows() {
 
         server.state.engine.set_flush_paused_for_test(true);
         ticked(&server).await;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !server.state.engine.flush_is_holding_for_test() {
-            assert!(std::time::Instant::now() < deadline, "the flush never reached its hold");
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_until(
+            "the flush reached its hold",
+            std::time::Duration::from_secs(120),
+            async || server.state.engine.flush_is_holding_for_test(),
+        )
+        .await;
         if recreated_in_flight {
             recreate(&server, "q3").await;
         } else {

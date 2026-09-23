@@ -1166,34 +1166,6 @@ async fn ingest_scoped(
         .collect()
 }
 
-/// Flush until the buffer is empty — a flush unit is one view, so rows in two views need two
-/// ticks.
-async fn flush(served: &Served) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = served.server.state.engine.write_executor_stats().flushes;
-        let resp = served
-            .server
-            .client
-            .post(served.server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while served.server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if served.server.state.engine.buffered_items() == 0 {
-            return;
-        }
-    }
-}
-
 /// Request a compaction fold and block until it has published (`POST /control/compact`).
 /// Where one view's column of a group-scoped family lives under a partition directory.
 ///
@@ -1220,35 +1192,6 @@ fn scoped_dir(partition: &std::path::Path, family: &str, key: &str) -> std::path
                 .is_some_and(|n| n.starts_with(&suffixed))
         })
         .unwrap_or(exact)
-}
-
-async fn fold(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().folds;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202, "a fold is accepted at any time");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
-    loop {
-        let stats = served.server.state.engine.write_executor_stats();
-        assert_eq!(
-            stats.fold_failures, 0,
-            "the fold failed rather than publishing"
-        );
-        if stats.folds > before {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 }
 
 /// The newest side-manifest of the live prefix's only partition.
@@ -1447,7 +1390,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
         q1, q3[0],
         "a join lands on the entity it names rather than allocating a second"
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     // ---- a view created while the service runs, and its first flush --------------------------
     let created = served
@@ -1472,7 +1415,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
         &[(IN_MINTED, 280.0, 280.0, IN_Q9)],
     )
     .await[0];
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The visible-view set is fixed per session (`views.md` §6), so reading the new view needs a
     // new one — exactly as a client would.
@@ -1527,7 +1470,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
             &[(9_100 + round, 300.0 + round as f64, 300.0, FILLER)],
         )
         .await;
-        flush(&served).await;
+        drain(&served.server).await;
     }
     let manifest = side_manifest(&served);
     let layers = |column: &str, view: &str| {
@@ -1552,7 +1495,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     served.server.state.engine.set_coalesce_for_test(true);
 
     // ---- the fold -----------------------------------------------------------------------------
-    fold(&served).await;
+    fold(&served.server).await;
     let root = served.tmp.path().join("bundle");
     let current: Value =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
@@ -1668,7 +1611,7 @@ async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
         ],
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
     served.token = token(&served, &["0", "1"]).await;
 
     let q9 = BTreeSet::from([rows[0], rows[2]]);
@@ -1701,7 +1644,7 @@ async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
     let served = served.restart().await;
     check_recreated(&served, "after a restart", &expected, &untouched).await;
 
-    fold(&served).await;
+    fold(&served.server).await;
     let served = served.restart().await;
     check_recreated(&served, "after a fold and a restart", &expected, &untouched).await;
 }
@@ -1783,7 +1726,7 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
         &[(FILLED, 250.0, 250.0, IN_Q3)],
     )
     .await[0];
-    flush(&served).await;
+    drain(&served.server).await;
 
     let (status, answer) =
         values_without_view(&served, "grade", true, json!({ "grade": "gold" })).await;
@@ -1803,7 +1746,7 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
         values_without_view(&served, "tier", false, json!({ "tier": "upper" })).await;
     assert_eq!(status, 200, "{answer}");
     let served = served.restart().await;
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(
         filled_answer(&served, id, "grade", "gold").await,
         (true, json!("gold"))
@@ -1813,7 +1756,7 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
         (true, json!("upper"))
     );
 
-    fold(&served).await;
+    fold(&served.server).await;
     assert_eq!(
         filled_answer(&served, id, "grade", "gold").await,
         (true, json!("gold"))

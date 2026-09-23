@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 
-use common::{build_fixture, OPERATOR_CREDENTIAL, SESSION_CREDENTIAL};
+use common::{build_fixture, wait_for, OPERATOR_CREDENTIAL, SESSION_CREDENTIAL};
 
 /// The announce stream, readable from the test while the server holds it.
 #[derive(Clone)]
@@ -87,18 +87,15 @@ fn write_deployment(tmp: &Path, control: &str) -> std::path::PathBuf {
 
 /// The first complete line on the stream, waited for rather than raced against.
 async fn announce_line(stream: &SharedStream) -> String {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let text = stream.text();
-        if let Some(line) = text.split_once('\n') {
-            return line.0.to_string();
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the server must announce its addresses; the stream holds {text:?}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    wait_for(
+        "the server announcing its addresses",
+        std::time::Duration::from_secs(60),
+        async || {
+            let text = stream.text();
+            text.split_once('\n').map(|(line, _)| line.to_string())
+        },
+    )
+    .await
 }
 
 /// Port 0 on all three planes: each is bound to a port the kernel chose, the line names the ports

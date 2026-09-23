@@ -2220,19 +2220,13 @@ async fn status_stage_barriers_move_when_their_stages_run() {
 
         // Barrier on the round's own publication, exactly as a harness would: the flush counter,
         // not a sleep. The bound is generous for `poll_until_in_flight`'s reason.
-        let mut published = false;
-        for _ in 0..10_000 {
-            status = control_status(&server).await;
-            if status["write_executor"]["flush"]["flushes"].as_u64() == Some(round) {
-                published = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
-        assert!(
-            published,
-            "round {round}'s flush did not publish within the poll bound: {status}"
-        );
+        let what = format!("round {round}'s flush publishing");
+        status = wait_for(&what, std::time::Duration::from_secs(60), async || {
+            let status = control_status(&server).await;
+            let flushes = status["write_executor"]["flush"]["flushes"].as_u64();
+            (flushes == Some(round)).then_some(status)
+        })
+        .await;
 
         if status["write_executor"]["merges"].as_u64() > Some(0)
             && status["write_executor"]["coalesces"].as_u64() > Some(0)
@@ -2268,20 +2262,15 @@ async fn status_stage_barriers_move_when_their_stages_run() {
 
     // The refresh barrier: the resident projection was replaced. Asynchronous behind the
     // publication, so polled rather than read once.
-    let mut refreshed = false;
-    for _ in 0..10_000 {
-        let now = control_status(&server).await;
-        if now["write_executor"]["flush"]["refreshes"].as_u64() > Some(0) {
-            refreshed = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
-    assert!(
-        refreshed,
-        "the background refresh never replaced the resident projection, so a harness waiting on \
-         this barrier would wait for ever"
-    );
+    wait_until(
+        "the background refresh replacing the resident projection",
+        std::time::Duration::from_secs(60),
+        async || {
+            let now = control_status(&server).await;
+            now["write_executor"]["flush"]["refreshes"].as_u64() > Some(0)
+        },
+    )
+    .await;
 }
 
 /// **Unbounded ingest hangs the viewer plane rather than shedding it, and this closes that.**
@@ -3621,28 +3610,12 @@ async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishe
 
     // `POST /control/flush` pulls the tick forward, so the tier figure is testable without
     // waiting out a flush period.
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let frag = loop {
-        let now = control_status(&server).await;
-        if now["fragmentation"]["tiers"].as_u64().unwrap() > 0 {
-            break now["fragmentation"].clone();
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for the requested flush to publish a tier; last: {}",
-            now["fragmentation"]
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    };
+    tick(&server).await;
+    let frag = control_status(&server).await["fragmentation"].clone();
+    assert!(
+        frag["tiers"].as_u64().unwrap() > 0,
+        "the flush published a tier: {frag}"
+    );
     assert_eq!(frag["rows"], 3, "the tier covers the flushed rows");
     assert!(
         frag["run_ratio"].as_f64().is_some() && frag["postings_per_container"].as_f64().is_some(),
@@ -3714,28 +3687,8 @@ async fn control_status_publishes_the_live_segment_count_per_view() {
          something other than the set a viewport sweeps"
     );
 
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let after = loop {
-        let now = control_status(&server).await;
-        if now["segments"][0]["count"].as_u64().unwrap() > 1 {
-            break now;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for the requested flush to publish a segment; last: {}",
-            now["segments"]
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    };
+    tick(&server).await;
+    let after = control_status(&server).await;
     assert_eq!(after["segments"][0]["count"], 2);
 
     // The gauge is the generation's own set, not a counter that happens to agree with it today.
@@ -4253,16 +4206,14 @@ async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
-    let mut published = false;
-    for _ in 0..10_000 {
-        let status = control_status(&server).await;
-        if status["write_executor"]["flush"]["flushes"].as_u64() == Some(1) {
-            published = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
-    assert!(published, "the flush never published");
+    wait_until(
+        "the flush publishing",
+        std::time::Duration::from_secs(60),
+        async || {
+            control_status(&server).await["write_executor"]["flush"]["flushes"].as_u64() == Some(1)
+        },
+    )
+    .await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();

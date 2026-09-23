@@ -96,32 +96,6 @@ async fn visible_to(server: &TestServer, terms: &[&str]) -> u64 {
     tiles.iter().map(|t| t.1).sum()
 }
 
-/// `POST /control/flush`, waited for: an ingested row is served once its flush has published.
-async fn flush(server: &TestServer) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = server.state.engine.write_executor_stats().flushes;
-        let resp = server
-            .client
-            .post(server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
 async fn served() -> (TempDir, TestServer) {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
@@ -212,7 +186,7 @@ async fn a_field_sourced_view_fills_a_null_label_and_an_empty_list_alike() {
     let body = body_with_access(1, Arc::new(access_lists(&[&[]])));
     let resp = ingest(&server, "field-empty", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    flush(&server).await;
+    drain(&server).await;
 
     // The ingest door's fill: the same term now reaches both rows, and no other principal
     // gained one.
@@ -238,7 +212,7 @@ async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["accepted"], 3);
     assert_eq!(json["over_bound"], 0);
-    flush(&server).await;
+    drain(&server).await;
 
     assert_eq!(
         visible_to(&server, &[VIENNA]).await,
@@ -291,7 +265,7 @@ async fn an_empty_list_takes_the_views_declared_default() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["accepted"], 2);
-    flush(&server).await;
+    drain(&server).await;
 
     assert_eq!(
         visible_to(&server, &["ir:sealed"]).await,
@@ -320,7 +294,7 @@ async fn an_empty_list_under_a_public_default_is_public() {
     let body = body_with_access(1, Arc::new(access_lists(&[&[]])));
     let resp = ingest(&server, "empty-public", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    flush(&server).await;
+    drain(&server).await;
 
     assert_eq!(visible_to(&server, &[]).await, before + 1);
 }
@@ -382,7 +356,7 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     let before = visible_to(&server, &["ir:sealed"]).await;
     let resp = ingest(&server, "filled", null_and_empty()).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    flush(&server).await;
+    drain(&server).await;
     assert_eq!(
         visible_to(&server, &["ir:sealed"]).await,
         before + 2,

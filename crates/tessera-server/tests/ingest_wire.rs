@@ -302,32 +302,6 @@ fn artifacts_url(server: &TestServer) -> String {
     ))
 }
 
-/// Pull one tick and wait until the buffer is empty and the flush has published.
-async fn flush(server: &TestServer) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = server.state.engine.write_executor_stats().flushes;
-        let resp = server
-            .client
-            .post(server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
 /// The full viewport for `terms`, with an optional filter and the layer selected: its point
 /// identifiers and the layer's artifact rows, waited past any refresh.
 async fn viewport(
@@ -337,42 +311,27 @@ async fn viewport(
 ) -> (Vec<u64>, Vec<ArtifactRow>) {
     let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let mut request = json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
-            "layers": [LAYER],
-        });
-        if let Some(filter) = &filter {
-            request["filters"] = filter.clone();
-        }
-        let resp = server
+    let mut request = json!({
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+        "layers": [LAYER],
+    });
+    if let Some(filter) = &filter {
+        request["filters"] = filter.clone();
+    }
+    let resp = settled(async || {
+        server
             .client
             .post(server.viewer_url("/v1/viewport"))
             .bearer_auth(token)
             .json(&request)
             .send()
             .await
-            .unwrap();
-        let unsettled = std::time::Instant::now() < deadline;
-        if resp.status().as_u16() == 429 && unsettled {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            continue;
-        }
-        assert_eq!(resp.status().as_u16(), 200, "the viewport answers");
-        if resp
-            .headers()
-            .get("x-tessera-stale")
-            .is_some_and(|v| v == "1")
-            && unsettled
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            continue;
-        }
-        let frames = decode_viewport_frames(&resp.bytes().await.unwrap());
-        let ids = frames.points.iter().map(|(id, _)| *id).collect();
-        return (ids, frames.artifacts.unwrap_or_default());
-    }
+            .unwrap()
+    })
+    .await;
+    let frames = decode_viewport_frames(&resp.bytes().await.unwrap());
+    let ids = frames.points.iter().map(|(id, _)| *id).collect();
+    (ids, frames.artifacts.unwrap_or_default())
 }
 
 /// The drill-down of one item, with the two identifiers that differ by construction removed,
@@ -423,7 +382,7 @@ async fn the_same_batch_as_json_and_as_arrow_lands_identical_rows() {
     let (status, body) = ingest(&server, "ndjson", None, ndjson_body(&rows(300..310))).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["accepted"], 10);
-    flush(&server).await;
+    drain(&server).await;
 
     let (ids, artifacts) = viewport(&server, &["0"], None).await;
     assert_eq!(
@@ -634,7 +593,7 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
     let (status, resp) = ingest(&server, "filled", Some("application/json"), body()).await;
     assert_eq!(status, 200, "{resp}");
     assert_eq!(resp["accepted"], 4);
-    flush(&server).await;
+    drain(&server).await;
     assert_eq!(
         visible_to(&server, &["ir:sealed"]).await,
         before + 3,
@@ -1325,7 +1284,7 @@ async fn an_arrow_column_at_another_width_is_read_as_a_build_reads_it() {
     let (status, answer) = ingest(&server, "widths", Some(ARROW), body).await;
     assert_eq!(status, 200, "{answer}");
     assert_eq!(answer["accepted"], 2);
-    flush(&server).await;
+    drain(&server).await;
 
     let (matched, _) = viewport(&server, &["0"], Some(json!({ "level": { "eq": 255 } }))).await;
     assert_eq!(matched.len(), 1, "the u8 is filterable at its value");
@@ -1404,7 +1363,7 @@ async fn an_arrow_values_column_at_another_width_is_read_as_a_build_reads_it() {
     let (status, answer) = ingest(&server, "rows", Some(ARROW), widths_body(&[800], &[None])).await;
     assert_eq!(status, 200, "{answer}");
     let tessera_id = tessera_id_at(&answer, 0);
-    flush(&server).await;
+    drain(&server).await;
 
     let (status, answer) = post_values(&server, "too-wide", level_values_body(800, 300)).await;
     assert_eq!(status, 422, "{answer}");
@@ -1413,7 +1372,7 @@ async fn an_arrow_values_column_at_another_width_is_read_as_a_build_reads_it() {
 
     let (status, answer) = post_values(&server, "fits", level_values_body(800, 42)).await;
     assert_eq!(status, 200, "{answer}");
-    flush(&server).await;
+    drain(&server).await;
     assert_eq!(fields_of(&server, tessera_id).await["level"], json!(42));
 }
 
@@ -1507,13 +1466,13 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
     assert_eq!(status, 200, "{answer}");
     let first = tessera_id_at(&answer, 0);
     let second = tessera_id_at(&answer, 1);
-    flush(&server).await;
+    drain(&server).await;
     let (matched, _) = viewport(&server, &["0"], arxiv()).await;
     assert_eq!(matched, [first], "the ingested key is served");
 
     let (status, answer) = post_values(&server, "venue-value", venue_values_body(1001, "arxiv")).await;
     assert_eq!(status, 200, "{answer}");
-    flush(&server).await;
+    drain(&server).await;
     let (mut matched, _) = viewport(&server, &["0"], arxiv()).await;
     matched.sort_unstable();
     let mut expected = [first, second];

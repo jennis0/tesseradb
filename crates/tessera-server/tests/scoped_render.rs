@@ -483,34 +483,6 @@ fn batch_with_heat(rows: &[(Vec<u8>, f32, f32, &str)], heat: &[Option<f32>]) -> 
     w.into_inner().unwrap()
 }
 
-/// Flush until the buffer is empty — a flush unit is one view, so a batch that landed in two needs
-/// two ticks (`views_write.rs` carries the same helper and the same argument).
-async fn flush(served: &Served) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = served.server.state.engine.write_executor_stats().flushes;
-        let resp = served
-            .server
-            .client
-            .post(served.server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while served.server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if served.server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
 /// The points frames' column names, and `heat` per `tessera_id` where the frame carries it.
 ///
 /// Read **by name**, which is what contracts §3.2 requires of a client: the scoped columns follow
@@ -908,7 +880,7 @@ async fn a_view_created_at_runtime_gains_its_scoped_column_at_the_first_flush() 
         &[Some(7.5), None],
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
 
     let token = token_for(&served.server, &["0", "1"]).await;
     let (names, values) = settled_points(&served, &token, "quarter:2026-Q3", 2).await;
@@ -955,22 +927,25 @@ async fn settled_points(
     view: &str,
     expected: usize,
 ) -> (Vec<String>, BTreeMap<u64, f32>) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while std::time::Instant::now() < deadline {
+    let what = format!("{view} settling at {expected} rows");
+    wait_for(&what, std::time::Duration::from_secs(60), async || {
         // A `429` is the admission gate shedding under machine load (contracts §3.1) and is not
         // the answer under test — ask again, as every other polling test here does.
         let (status, body) = viewport_bytes(served, token, view).await;
-        if status == 200 {
-            let read = points_columns(&body);
-            if read.1.len() == expected {
-                return read;
-            }
-        } else {
+        if status != 200 {
             assert_eq!(status, 429, "a served view answers or sheds");
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            return None;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("{view} never settled at {expected} rows");
+        let read = points_columns(&body);
+        if read.1.len() != expected {
+            // Each poll is a viewport, which competes with the refresh it waits for.
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            return None;
+        }
+        Some(read)
+    })
+    .await
 }
 
 /// **A segment the write path produced carries the lane, and its rows carry the values the batch
@@ -993,7 +968,7 @@ async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_car
         &[Some(42.25)],
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
 
     let expected = members(0).count() + 1;
     let (names, values) = settled_points(&served, &served.token, "quarter:2026-Q1", expected).await;
@@ -1062,7 +1037,7 @@ async fn a_join_row_carries_this_views_scoped_value() {
         &[Some(11.0)],
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
     ingest_with_heat(
         &served,
         "join-second",
@@ -1071,7 +1046,7 @@ async fn a_join_row_carries_this_views_scoped_value() {
         &[Some(22.0)],
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
 
     for (slot, value) in [(0usize, 11.0f32), (1, 22.0)] {
         let view = format!("quarter:{}", QUARTERS[slot].0);
@@ -1106,14 +1081,14 @@ async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
         &[Some(33.5)],
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
 
     let expected = members(0).count() + 1;
     let (_, values) = settled_points(&served, &served.token, "quarter:2026-Q1", expected).await;
     let before = by_entity(&served, &served.token, &values).await;
     assert_eq!(before[&NEW], 33.5, "the flushed row's value is served");
 
-    fold(&served).await;
+    fold(&served.server).await;
 
     // A fold rewrites the whole prefix, so a session that authorised against the old one is asking
     // about a bundle that has gone; a fresh session is what a client would have.
@@ -1128,41 +1103,6 @@ async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
         after, before,
         "every value survives the rewrite — the build's rows and the flushed one alike"
     );
-}
-
-/// Request a compaction fold and block until it has published (`POST /control/compact`,
-/// contracts §3.4). The counter is the only "done" there is: the fold runs on its own thread and
-/// publishes at the executor's next loop iteration, so the acceptance code says nothing about
-/// completion.
-async fn fold(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().folds;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202, "a fold is accepted at any time");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let stats = served.server.state.engine.write_executor_stats();
-        assert_eq!(
-            stats.fold_failures, 0,
-            "the fold failed rather than publishing"
-        );
-        if stats.folds > before {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published: {} folds, {} discarded",
-            stats.folds,
-            stats.fold_failures
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 }
 
 /// **A key created again carries none of its predecessor's scoped values** (`views.md` §5,
@@ -1213,7 +1153,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
     )
     .await;
     assert_eq!(status, 200, "the batch is accepted: {body}");
-    flush(&served).await;
+    drain(&served.server).await;
     let (_, values) = settled_points(&served, &token, "quarter:2026-Q3", 1).await;
     assert_eq!(
         by_entity(&served, &token, &values).await[&REJOINS],
@@ -1246,7 +1186,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
     )
     .await;
     assert_eq!(status, 200, "the batch is accepted: {body}");
-    flush(&served).await;
+    drain(&served.server).await;
 
     /// The rendered rows of the new incarnation: the rejoining entity's placeholder and the
     /// fresh entity's own value.
@@ -1324,7 +1264,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
     rendered(&served, &token, REJOINS, FRESH).await;
     adopts_nothing(&served, &token, REJOINS, FRESH, "after a restart").await;
 
-    fold(&served).await;
+    fold(&served.server).await;
     // A fold rewrites the whole prefix, so a session authorised against the old one is asking
     // about a bundle that has gone.
     let token = token_for(&served.server, &["0", "1"]).await;
@@ -1383,7 +1323,7 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
     )
     .await;
     assert_eq!(status, 200, "the owner's batch is accepted: {body}");
-    flush(&served).await;
+    drain(&served.server).await;
     let (status, body) = try_ingest_families(
         &served,
         "borrowed-sharing",
@@ -1395,7 +1335,7 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
     )
     .await;
     assert_eq!(status, 200, "the borrowing view's batch is accepted: {body}");
-    flush(&served).await;
+    drain(&served.server).await;
 
     /// What the borrowing view owes about the value its own batch carried: the leaf, the text
     /// match and the drill-down, each over the column the owner's view names.
@@ -1654,7 +1594,7 @@ async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_f
         &[Some(90.0)],
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
     // Let the flushed row settle into the served generation before the set is compared.
     settled_points(
         &served,
@@ -1669,7 +1609,7 @@ async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_f
     let answer = filtered_entities(&served, &served.token, "quarter:2026-Q1", range("heat")).await;
     assert_eq!(answer, expected, "the flushed extent answers the leaf");
 
-    fold(&served).await;
+    fold(&served.server).await;
     // A fold rewrites the whole prefix, so a session authorised against the old one is asking
     // about a bundle that has gone.
     let token = token_for(&served.server, &["0", "1"]).await;
@@ -1720,7 +1660,7 @@ async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
         &[None],
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
 
     for view in ["quarter:2026-Q1", "quarter_map:2026-Q1"] {
         let answer = filtered_entities(&served, &served.token, view, range("heat")).await;
@@ -1798,7 +1738,7 @@ async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_diff
         "and names no group: {body}"
     );
 
-    flush(&served).await;
+    drain(&served.server).await;
     // The deduped write left one value behind, and both views answer with it.
     for view in ["quarter:2026-Q1", "quarter_map:2026-Q1"] {
         let answer = filtered_entities(&served, &served.token, view, range("heat")).await;
@@ -1829,7 +1769,7 @@ async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
         &[None, None],
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
 
     let id = |e: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(e));
     let resp = served
@@ -1872,7 +1812,7 @@ async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
     assert_eq!(status, 409, "one cell holds one value: {body}");
 
     let failures = served.server.state.engine.write_executor_stats().flush_failures;
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(
         served.server.state.engine.write_executor_stats().flush_failures,
         failures,
@@ -1979,7 +1919,7 @@ async fn a_flushed_text_cell_refuses_a_second_value_equal_or_not() {
     )
     .await;
     assert_eq!(status, 200, "the first door writes the cell: {body}");
-    flush(&served).await;
+    drain(&served.server).await;
 
     // Door two, differing prose: refused.
     let (status, body) = try_ingest_families(
@@ -2127,7 +2067,7 @@ async fn a_neither_flag_family_gains_its_column_from_a_flush_and_keeps_it_throug
     )
     .await;
     assert_eq!(status, 200, "a neither-flag column is nameable: {body}");
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The view is on the family's list, which is what the opener and the drill-down walk.
     let document: Value = served
@@ -2162,7 +2102,7 @@ async fn a_neither_flag_family_gains_its_column_from_a_flush_and_keeps_it_throug
 
     // And the fold rewrites it rather than leaving the layers behind. A fold that did not know
     // about this column would refuse, which is exactly how the missing half of this fix surfaced.
-    fold(&served).await;
+    fold(&served.server).await;
     assert!(
         views_of("tag").contains(&"quarter:2026-Q1".to_string()),
         "and the fold keeps it"
@@ -2410,7 +2350,7 @@ async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
         &[None],
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
     let id = base64::engine::general_purpose::STANDARD.encode(external_id_of(FRESH));
     let resp = served
         .server
@@ -2681,7 +2621,7 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
         )
         .await;
         assert_eq!(status, 200, "round {round} is accepted: {body}");
-        flush(&served).await;
+        drain(&served.server).await;
     }
 
     let token = session(&served).await;
@@ -2699,14 +2639,12 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
         .await
         .unwrap();
     assert_eq!(resp.status(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while served.server.state.engine.write_executor_stats().coalesces == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no coalesce published over three extents per column at width two"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    wait_for_executor(
+        &served.server,
+        "a coalesce over three extents per column at width two",
+        move |now| now.coalesces > before,
+    )
+    .await;
     let token = session(&served).await;
     serves_everything(&served, &token, "after a coalesce").await;
 
@@ -2715,7 +2653,7 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
     serves_everything(&served, &served.token, "after a restart").await;
 
     // ---- the fold, which rewrites every column the manifest names -----------------------------
-    fold(&served).await;
+    fold(&served.server).await;
     let token = session(&served).await;
     serves_everything(&served, &token, "after a fold").await;
 

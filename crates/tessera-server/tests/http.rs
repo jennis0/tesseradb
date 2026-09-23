@@ -739,14 +739,11 @@ const GATE_POLL_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 /// `want > 0` — waiting for the gate to *drain* is indifferent to sheds, and one caller
 /// deliberately sheds a request before waiting for 0.
 async fn poll_until_in_flight(server: &TestServer, want: u64) {
-    let deadline = std::time::Instant::now() + GATE_POLL_BOUND;
     let shed_at_entry = compute_status(server).await["shed_total"].as_u64().unwrap();
-    loop {
+    let what = format!("compute.in_flight reaching {want}");
+    wait_until(&what, GATE_POLL_BOUND, async || {
         let compute = compute_status(server).await;
-        if compute["in_flight"].as_u64() == Some(want) {
-            return;
-        }
-        if want > 0 {
+        if want > 0 && compute["in_flight"].as_u64() != Some(want) {
             let shed_now = compute["shed_total"].as_u64().unwrap();
             assert_eq!(
                 shed_now, shed_at_entry,
@@ -755,16 +752,9 @@ async fn poll_until_in_flight(server: &TestServer, want: u64) {
                  when it arrived. Gate state: {compute}"
             );
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "compute.in_flight did not reach {want} within {GATE_POLL_BOUND:?} -- this is \
-             poll_until_in_flight's own generous-but-finite timeout firing, not necessarily the \
-             calling test's real assertion; check whether the gate is genuinely stuck before \
-             assuming a regression in the mechanism the calling test targets. Gate state: \
-             {compute}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
+        compute["in_flight"].as_u64() == Some(want)
+    })
+    .await;
 }
 
 /// Poll until the gate holds **no slot permit at all** — nothing running compute, nothing queued,
@@ -785,23 +775,18 @@ async fn poll_until_in_flight(server: &TestServer, want: u64) {
 /// still has to observe the stream end and drop the permit. This closes the gap by waiting for
 /// the gate itself to say it is empty, which is the condition the caller actually depends on.
 async fn poll_until_gate_idle(server: &TestServer) {
-    let deadline = std::time::Instant::now() + GATE_POLL_BOUND;
-    loop {
-        let compute = compute_status(server).await;
-        let held = compute["in_flight"].as_u64().unwrap()
-            + compute["waiting"].as_u64().unwrap()
-            + compute["streaming"].as_u64().unwrap();
-        if held == 0 {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the compute gate still held a permit {GATE_POLL_BOUND:?} after the last response \
-             completed -- a permit has leaked past the request that took it. Gate state: \
-             {compute}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
+    wait_until(
+        "the compute gate holding no permit",
+        GATE_POLL_BOUND,
+        async || {
+            let compute = compute_status(server).await;
+            let held = compute["in_flight"].as_u64().unwrap()
+                + compute["waiting"].as_u64().unwrap()
+                + compute["streaming"].as_u64().unwrap();
+            held == 0
+        },
+    )
+    .await;
 }
 
 async fn compute_status(server: &TestServer) -> serde_json::Value {
@@ -2018,20 +2003,12 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     let wait_for_streaming = |state: std::sync::Arc<tessera_server::state::AppState>,
                               want: usize,
                               patience_ms: u64| async move {
-        let started = std::time::Instant::now();
-        let deadline = started + std::time::Duration::from_millis(patience_ms);
-        loop {
-            let now = state.compute_gate.status().streaming;
-            if now == want {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "streaming gauge stuck at {now}, wanted {want}, after {:?}",
-                started.elapsed()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        let what = format!("the streaming gauge reaching {want}");
+        let patience = std::time::Duration::from_millis(patience_ms);
+        wait_until(&what, patience, async || {
+            state.compute_gate.status().streaming == want
+        })
+        .await
     };
 
     // 1. The stalled reader: take the headers, then stop reading, holding the socket open. The

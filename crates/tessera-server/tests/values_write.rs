@@ -145,27 +145,6 @@ fn arrow_values(external_id: &str, tag: &str) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-async fn flush(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().flushes;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while served.server.state.engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-}
-
 /// The drill-down's fields for one `tessera_id`, by name.
 async fn item_fields(served: &Served, id: u64) -> Value {
     let token = token_for(&served.server, &["0", "1"][..]).await;
@@ -206,7 +185,7 @@ async fn status(served: &Served) -> Value {
 async fn the_values_route_fills_restates_and_refuses() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
@@ -219,7 +198,7 @@ async fn the_values_route_fills_restates_and_refuses() {
     assert_eq!(answer["rows"], 1);
     assert_eq!(answer["filled"], 2, "one cell per column: {answer}");
     assert_eq!(answer["held"], 0);
-    flush(&served).await;
+    tick(&served.server).await;
 
     let fields = item_fields(&served, id).await;
     assert_eq!(fields["tag"], json!("alpha"), "{fields}");
@@ -276,7 +255,7 @@ async fn the_values_route_fills_restates_and_refuses() {
 async fn the_two_encodings_land_identical_values() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     let resp = served
         .server
@@ -294,7 +273,7 @@ async fn the_two_encodings_land_identical_values() {
     let answer: Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "the Arrow batch is accepted: {answer}");
     assert_eq!(answer["filled"], 1);
-    flush(&served).await;
+    tick(&served.server).await;
     assert_eq!(item_fields(&served, id).await["tag"], json!("alpha"));
 
     // The JSON spelling of the same batch: the cell is held identically, so it is a no-op.
@@ -317,7 +296,7 @@ async fn the_two_encodings_land_identical_values() {
 async fn a_row_addressed_by_tessera_id_carries_its_idset() {
     let served = serve().await;
     let id = ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
@@ -348,7 +327,7 @@ async fn a_row_addressed_by_tessera_id_carries_its_idset() {
 async fn an_undeclared_column_is_refused_and_names_the_view() {
     let served = serve().await;
     ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
@@ -388,7 +367,7 @@ async fn the_limits_are_published_and_enforced() {
     );
 
     ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     // One row over the published count, refused naming the unit before anything is appended.
     let rows: Vec<Value> = (0..=max_rows)

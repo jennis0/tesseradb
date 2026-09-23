@@ -147,32 +147,6 @@ async fn post_ingest(
     (status, json)
 }
 
-/// `POST /control/flush`, waited out — a buffered row has no geometry until it is flushed, so
-/// nothing below can read a position without this.
-async fn flush(server: &TestServer) {
-    let before = server.state.engine.write_executor_stats().flushes;
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-    wait_for_flush(&server.state.engine, before);
-}
-
-fn wait_for_flush(engine: &Engine, before: u64) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// Every served point's 64-bit position, by `tessera_id`.
 fn served_positions(engine: &Engine, k: usize) -> BTreeMap<u64, u64> {
     let session = engine
@@ -254,7 +228,7 @@ async fn a_build_and_an_ingest_place_a_projected_coordinate_in_one_cell() {
     let (status, body) = post_ingest(&server, "batch-1", ingest_batch(("lon", "lat"), &rows)).await;
     assert_eq!(status, 200, "the projected batch is accepted: {body}");
     assert_eq!(body["accepted"], points.len());
-    flush(&server).await;
+    tick(&server).await;
 
     let positions = served_positions(&server.state.engine, 400);
     assert_eq!(
@@ -330,7 +304,7 @@ async fn a_polar_row_is_clipped_counted_and_lands_on_the_frames_edge() {
         body["clipped"], 1,
         "the response carries the clip count beside the out-of-bound count it already returns"
     );
-    flush(&server).await;
+    tick(&server).await;
 
     let positions = served_positions(&server.state.engine, 400);
     let ingested = position_of(&server.state.engine, &positions, &ingested_id(POLAR));
@@ -500,9 +474,14 @@ async fn replay_reproduces_the_stored_positions_without_re_running_the_transform
         .expect("the executor starts once");
     let before = replayed.write_executor_stats().flushes;
     replayed.request_flush();
-    wait_for_flush(&replayed, before);
+    wait_until(
+        "the flush published",
+        std::time::Duration::from_secs(60),
+        async || replayed.write_executor_stats().flushes > before,
+    )
+    .await;
 
-    flush(&server).await;
+    tick(&server).await;
     let live = served_positions(&server.state.engine, 400);
     let after_restart = served_positions(&replayed, 400);
     for (i, (lon, lat)) in points.iter().enumerate() {

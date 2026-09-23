@@ -245,37 +245,11 @@ async fn viewport(served: &Served, view: &str) -> reqwest::Response {
 }
 
 async fn points(served: &Served, view: &str) -> Vec<PointRow> {
-    // Two responses here are the server behaving as specified under machine load, and neither is
-    // the answer under test. A 429 is the admission gate shedding (contracts §3.1) — honour
-    // `Retry-After` and ask again. `x-tessera-stale: 1` says the client's *presented* stamp was
-    // not the generation answered from (`geometry-pinning.md` §7) — so wait for a fresh one.
-    // **It is not a signal that a session's projection is one publication behind**: a session
-    // whose cache entry predates the last flush is served from that entry while the refresh runs
-    // on the pool, with no header, since this helper presents no stamp. A test that reads rows
-    // published since its session was authorised must re-authorise first (a fresh session builds
-    // at the live generation), or poll for the count it expects, as `scoped_render.rs` does.
-    // Anything else is asserted as the real response.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let resp = viewport(served, view).await;
-        let unsettled = std::time::Instant::now() < deadline;
-        if resp.status().as_u16() == 429 && unsettled {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        }
-        assert_eq!(resp.status().as_u16(), 200, "a served view answers: {view}");
-        if resp
-            .headers()
-            .get("x-tessera-stale")
-            .is_some_and(|v| v == "1")
-            && unsettled
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            continue;
-        }
-        let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
-        return points;
-    }
+    // A session whose cache entry predates the last flush is served from that entry while the
+    // refresh runs, with no header, so a test that reads rows published since its session was
+    // authorised re-authorises first or polls for the count it expects.
+    let resp = settled(async || viewport(served, view).await).await;
+    decode_viewport(&resp.bytes().await.unwrap()).1
 }
 
 /// One ingest batch of `(external id, x, y, access)` rows into `view`.
@@ -337,41 +311,6 @@ async fn ingest(
         .send()
         .await
         .unwrap()
-}
-
-/// Flush until the buffer is empty — **a flush unit is one view**, and a tick publishes one of
-/// them, so a batch that landed in two views needs two ticks (write path's `dispatch_flushes`).
-async fn flush(served: &Served) {
-    // Always drive at least one flush: `buffered_items()` lags by up to one apply — its own doc
-    // says so, deliberately — so an acked batch can still read as 0 here, and gating the first
-    // flush on it skips the flush entirely under load. Every caller flushes straight after an
-    // acked ingest, so the buffer is genuinely non-empty on the first iteration and the flush
-    // counter is guaranteed to move.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = served.server.state.engine.write_executor_stats().flushes;
-        let resp = served
-            .server
-            .client
-            .post(served.server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while served.server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published: {} rows buffered, {} flushes",
-                served.server.state.engine.buffered_items(),
-                served.server.state.engine.write_executor_stats().flushes
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if served.server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
 }
 
 /// The roster entry `/v1/meta` publishes for one view id, or `None` where the document does not
@@ -459,23 +398,24 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
         .collect();
     let resp = ingest(&served, "q5-batch", "quarter:2026-Q5", &rows).await;
     assert_eq!(resp.status(), 200, "a created view accepts rows");
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The flush's publication and a live session's sight of the entities it minted are two
     // events, and the second follows the first by an asynchronous refresh with no wire signal on
     // the interim response — a viewport between them is a fresh 200 serving the pre-flush answer.
     // So wait for the settled count rather than asserting the first response.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let mut served_points = points(&served, "quarter:2026-Q5").await;
-    while served_points.len() != 4 && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        served_points = points(&served, "quarter:2026-Q5").await;
-    }
-    assert_eq!(
-        served_points.len(),
-        4,
-        "the first flush gives a created view its row space"
-    );
+    wait_until(
+        "the first flush gives a created view its row space",
+        std::time::Duration::from_secs(60),
+        async || {
+            let settled = points(&served, "quarter:2026-Q5").await.len() == 4;
+            if !settled {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            }
+            settled
+        },
+    )
+    .await;
 
     // The restart: the roster comes back from the segments manifest, and the rows from the
     // segment the flush published.
@@ -547,7 +487,7 @@ async fn a_created_view_with_no_rows_survives_a_flush_and_is_listed_once() {
     )
     .await;
     assert_eq!(resp.status(), 200);
-    flush(&served).await;
+    drain(&served.server).await;
     served.reauthorise().await;
 
     let document = meta(&served).await;
@@ -801,7 +741,7 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
         "a known external id naming a view the entity is not in is a join: {:?}",
         resp.text().await
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     let in_world = points(&served, "world").await;
     let in_q5 = points(&served, "quarter:2026-Q5").await;
@@ -954,7 +894,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
     let tessera_id: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
         .expect("the 200 returns one identifier per accepted row");
-    flush(&served).await;
+    drain(&served.server).await;
     assert!(
         points(&served, "world")
             .await
@@ -996,7 +936,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
         200,
         "a suppressed holder takes the same arms as a live one"
     );
-    flush(&served).await;
+    drain(&served.server).await;
     assert!(
         !points(&served, "quarter:2026-Q5")
             .await
@@ -1078,7 +1018,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         200,
         "one new entity and one join"
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     // A third entity, still in the buffer when the drop runs: the probe counts the buffer as this
     // view's rows, or it would call an entity dangling that a caller was told had landed.
@@ -1190,7 +1130,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         buffered_before + 1,
         "the dropped view's buffered row went with it, and the other stayed"
     );
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(
         ingest(
             &served,
@@ -1223,7 +1163,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
     let before: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
         .unwrap();
-    flush(&served).await;
+    drain(&served.server).await;
     let body = drop_view(&served, "quarter", "2026-Q6", false).await;
     assert_eq!(body["deleted"], 0);
 
@@ -1394,7 +1334,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     let joined = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
         .unwrap();
-    flush(&served).await;
+    drain(&served.server).await;
     served.reauthorise().await;
     let in_q2 = points(&served, "quarter:2026-Q2").await;
     assert_eq!(in_q2.len(), 1, "the joined row, and only it");
@@ -1430,41 +1370,6 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
         201,
         "a dropped key is reusable (decision 0115)"
     );
-}
-
-/// Request a compaction fold and block until it has published (`POST /control/compact`,
-/// contracts §3.4). The counter is the only "done" there is: the fold runs on its own thread and
-/// publishes at the executor's next loop iteration, so the acceptance code says nothing about
-/// completion.
-async fn fold(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().folds;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202, "a fold is accepted at any time");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let stats = served.server.state.engine.write_executor_stats();
-        assert_eq!(
-            stats.fold_failures, 0,
-            "the fold failed rather than publishing"
-        );
-        if stats.folds > before {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published: {} folds, {} discarded",
-            stats.folds,
-            stats.fold_failures
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 }
 
 /// The prefix `CURRENT` names, and the directory it is.
@@ -1580,7 +1485,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
             .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     let (_, base_dir) = live_prefix(&served);
     assert_eq!(
@@ -1597,7 +1502,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
     let body = drop_view(&served, "quarter", "2026-Q1", false).await;
     assert_eq!(body["deleted"], 0, "a drop by itself deletes no entity");
 
-    fold(&served).await;
+    fold(&served.server).await;
     let (folded, folded_dir) = live_prefix(&served);
     assert_ne!(folded, "v00000", "the fold published a new prefix");
 
@@ -1693,7 +1598,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
         "the dangling entities are ordinary deletions and enter the overlay"
     );
 
-    fold(&served).await;
+    fold(&served.server).await;
     assert_eq!(
         served.server.state.engine.retirable_deletions(),
         0,
@@ -1737,7 +1642,7 @@ async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed
         .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     let resp = ingest(
         &served,
@@ -2000,7 +1905,7 @@ async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
     );
     // **The flush is the whole point**: past it the entity's own row is out of the buffer, and
     // every comparison below is made against the bundle.
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(served.server.state.engine.buffered_items(), 0);
 
     // (a) The same values, in a view the entity is not in: a join.
@@ -2136,7 +2041,7 @@ async fn a_join_may_carry_a_value_for_a_column_the_entity_never_held() {
             .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     assert_eq!(
         families_ingest(
@@ -2186,7 +2091,7 @@ async fn the_buffered_and_flushed_attribute_arms_refuse_identically() {
             .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The second entity is ingested *after* the flush, so its own row is still in the buffer.
     let buffered = b"arm-buffered".to_vec();
@@ -2228,11 +2133,8 @@ async fn the_buffered_and_flushed_attribute_arms_refuse_identically() {
 /// test here; a `render` column is filterable through the row route (decision 0068), and a filter
 /// evaluated against one view's rows is that view's tail and no other's.
 async fn filtered_points(served: &Served, view: &str, filter: Value) -> Vec<PointRow> {
-    // A 429 is the admission gate shedding under machine load and a stale hint is
-    // serve-stale-not-block — neither is the answer under test; retry both, as points() does.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let resp = served
+    let resp = settled(async || {
+        served
             .server
             .client
             .post(served.server.viewer_url("/v1/viewport"))
@@ -2243,28 +2145,10 @@ async fn filtered_points(served: &Served, view: &str, filter: Value) -> Vec<Poin
             }))
             .send()
             .await
-            .unwrap();
-        let unsettled = std::time::Instant::now() < deadline;
-        if resp.status().as_u16() == 429 && unsettled {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        }
-        assert_eq!(
-            resp.status().as_u16(),
-            200,
-            "a filtered view answers: {view}"
-        );
-        if resp
-            .headers()
-            .get("x-tessera-stale")
-            .is_some_and(|v| v == "1")
-            && unsettled
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            continue;
-        }
-        return decode_viewport(&resp.bytes().await.unwrap()).1;
-    }
+            .unwrap()
+    })
+    .await;
+    decode_viewport(&resp.bytes().await.unwrap()).1
 }
 
 /// **An omitted render value is backfilled into the joined view's tail** (`views.md` §4, owner
@@ -2291,7 +2175,7 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
     let tessera_id: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
         .unwrap();
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The join omits every value, which the rule permits — and which is what would otherwise put
     // an absence in this view's tail.
@@ -2315,7 +2199,7 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
         .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     let score_is_one = json!({ "score": { "eq": 1 } });
     for view in ["world", "quarter:2026-Q5"] {
@@ -2371,7 +2255,7 @@ async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_val
                 .status(),
             200
         );
-        flush(&served).await;
+        drain(&served.server).await;
 
         // Accepted: an entity holding nothing for a column has nothing a joining row contradicts.
         // The joined view's tail now carries `4` where `world`'s carries an absence — the one
@@ -2394,7 +2278,7 @@ async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_val
             .status(),
             200
         );
-        flush(&served).await;
+        drain(&served.server).await;
 
         // A third view, a differing value: `409`, every time, whichever view the scan reaches
         // first. Reading `world`'s absence as the answer would accept it.
@@ -2565,7 +2449,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
     let first: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
         .unwrap();
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The holder is deleted, so the binding is dead bookkeeping: decision 0047 makes the
     // re-ingest below allocate rather than 409, and it is no longer a join.
@@ -2594,7 +2478,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         .as_u64()
         .unwrap();
     assert_ne!(second, first, "a fresh entity, not the dead binding's");
-    flush(&served).await;
+    drain(&served.server).await;
     served.reauthorise().await;
 
     // The whole point: the fresh entity carries the label the batch named, so a principal that
@@ -2664,7 +2548,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
             other => panic!("round {round}: unexpected {other}: {text}"),
         }
     }
-    flush(&served).await;
+    drain(&served.server).await;
     // A fresh session, as the first half takes one: the session authorised before the race holds
     // a projection built at the previous generation, and until the pool's refresh lands it is
     // served from that entry — every pre-race row, none of the flush's — with no header to say
@@ -2741,7 +2625,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
             .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(points(&served, "quarter:2026-Q5").await.len(), 6);
 
     // **And rows that never flushed**, so the drop below meets them in the buffer and the restart
@@ -2815,7 +2699,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
     );
     // The rows are in the buffer and nowhere else, so the flush is what gives them geometry —
     // and what makes the count below a statement about *which* rows replay kept.
-    flush(&served).await;
+    drain(&served.server).await;
     let after_replay = points(&served, "quarter:2026-Q5").await;
     assert_eq!(
         after_replay.len(),
@@ -2825,7 +2709,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
     );
 
     // ---- the fold --------------------------------------------------------------------------
-    fold(&served).await;
+    fold(&served.server).await;
     let (_, folded_dir) = live_prefix(&served);
     assert!(
         segment_views(&folded_dir).contains(&"quarter:2026-Q5".to_string()),
@@ -2918,7 +2802,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
         .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     for id in ["quarter:2026-Q5", "quarter_map:2026-Q5"] {
         assert_eq!(
             points(&served, id).await.len(),
@@ -2981,7 +2865,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
         .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     for id in ["quarter:2026-Q6", "quarter_map:2026-Q6"] {
         assert_eq!(
             points(&served, id).await.len(),
@@ -3167,12 +3051,12 @@ async fn an_entity_value_filled_through_a_view_dropped_before_the_tick_is_still_
             .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     fill_depth(&served, "fill", "quarter:2026-Q5", &id, DEPTH).await;
     drop_view(&served, "quarter", "2026-Q5", false).await;
     served.reauthorise().await;
-    flush(&served).await;
+    drain(&served.server).await;
 
     let holds_depth = json!({ "depth": { "eq": DEPTH } });
     assert_eq!(

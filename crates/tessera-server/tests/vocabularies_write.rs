@@ -224,67 +224,6 @@ async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> (u16, Value) 
     (status, resp.json().await.unwrap_or(Value::Null))
 }
 
-async fn flush(served: &Served) {
-    // 120 s, the fold helper's patience below, rather than the 60 s the older files use: a tick
-    // is 90 s by default and this box runs several test binaries at once, so the shorter deadline
-    // fails on load rather than on an answer.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let before = served.server.state.engine.write_executor_stats().flushes;
-        let resp = served
-            .server
-            .client
-            .post(served.server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while served.server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if served.server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
-/// Request a compaction fold and block until it has published (contracts §3.4). The counter is
-/// the only "done" there is: the fold runs on its own thread and publishes at the executor's next
-/// loop iteration.
-async fn fold(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().folds;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202, "a fold is accepted at any time");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let stats = served.server.state.engine.write_executor_stats();
-        assert_eq!(
-            stats.fold_failures, 0,
-            "the fold failed rather than publishing"
-        );
-        if stats.folds > before {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
 /// The `tessera_id`s a filtered viewport answers, from a fresh session so the rows flushed since
 /// the last one are in the answer.
 async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
@@ -531,7 +470,7 @@ async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
                 .unwrap()
         })
         .collect();
-    flush(&served).await;
+    drain(&served.server).await;
 
     let high = filtered(
         &served,
@@ -592,8 +531,8 @@ async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() 
     // A row, so the flush has something to publish and the fold something to fold.
     let (status, body) = ingest(&served, "rows", batch(&[("b1", 1.0, None)], false)).await;
     assert_eq!(status, 200, "{body}");
-    flush(&served).await;
-    fold(&served).await;
+    drain(&served.server).await;
+    fold(&served.server).await;
     assert_eq!(
         titled(&served, "built").await,
         before,
@@ -704,7 +643,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
             .0,
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(
         title_of(titled(&served, "built").await, "seed"),
         built_before
@@ -714,7 +653,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
         severity_before
     );
 
-    fold(&served).await;
+    fold(&served.server).await;
     assert_eq!(
         title_of(titled(&served, "built").await, "seed"),
         built_before,
@@ -752,7 +691,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
             .0,
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     let served = served.restart().await;
     assert_eq!(
         title_of(titled(&served, "built").await, "seed"),
@@ -817,7 +756,7 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
             .0,
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     let served = served.restart().await;
     assert_eq!(
         titled(&served, "severity").await,
@@ -828,7 +767,7 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
     // Folded into `MANIFEST.json`, then replayed from it. **The fold is the step a title is lost
     // at if any home drops it**: the log rotates, so `MANIFEST.vocabularies` is the only copy
     // left, and it is written from the live minters and from `vocabulary_extensions`.
-    fold(&served).await;
+    fold(&served.server).await;
     assert_eq!(
         titled(&served, "severity").await,
         before,

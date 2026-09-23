@@ -109,33 +109,6 @@ async fn served(server: &TestServer, layer: &str, terms: &[&str]) -> Vec<(String
     rows
 }
 
-/// `POST /control/flush`, waited for — the tick is what publishes an ingested row, and the route
-/// answers `202` before it runs (`access_list.rs` takes the same wait).
-async fn flush(server: &TestServer) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = server.state.engine.write_executor_stats().flushes;
-        let resp = server
-            .client
-            .post(server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
 /// **The two spellings are one membership** (`ingest.md` §2.3): an artifact published by
 /// exclusion and one published by inclusion over the same set serve the same masked count to each
 /// principal, and both come back from a restart — the complement being what the log carries.
@@ -307,7 +280,7 @@ async fn the_complement_holds_a_point_that_is_buffered_and_not_yet_flushed() {
     );
 
     // And it is counted once its row is published.
-    flush(&server).await;
+    drain(&server).await;
     assert_eq!(
         served(&server, LAYER, &["0"]).await,
         vec![("everything".to_string(), N_ITEMS + 1)]

@@ -157,36 +157,8 @@ async fn flush_and_fold(server: &TestServer) {
         "{}",
         resp.text().await.unwrap()
     );
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_for_executor(server, "the flush published", move |now| {
-        now.flushes > before.flushes
-    })
-    .await;
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_for_executor(server, "the fold published", move |now| {
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        now.folds > before.folds
-    })
-    .await;
+    tick(server).await;
+    fold(server).await;
 }
 
 /// The receipt says what joined and nothing else.

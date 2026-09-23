@@ -98,32 +98,10 @@ async fn ingest(server: &TestServer, batch_id: &str, tag: &str, i: usize) {
     assert_eq!(resp.status(), 200, "{batch_id} lands");
 }
 
-/// Pull one tick and wait for the flush it publishes.
-async fn flush(server: &TestServer) {
-    let before = server.state.engine.write_executor_stats().flushes;
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while server.state.engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-}
-
 /// The `tessera_id`s a filtered full viewport serves.
 async fn matched(server: &TestServer, token: &str, filter: Value) -> BTreeSet<u64> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let resp = server
+    let resp = settled(async || {
+        server
             .client
             .post(server.viewer_url("/v1/viewport"))
             .bearer_auth(token)
@@ -133,28 +111,14 @@ async fn matched(server: &TestServer, token: &str, filter: Value) -> BTreeSet<u6
             }))
             .send()
             .await
-            .unwrap();
-        let unsettled = std::time::Instant::now() < deadline;
-        if resp.status().as_u16() == 429 && unsettled {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        }
-        assert_eq!(resp.status().as_u16(), 200, "a filtered viewport answers");
-        if resp
-            .headers()
-            .get("x-tessera-stale")
-            .is_some_and(|v| v == "1")
-            && unsettled
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            continue;
-        }
-        return decode_viewport(&resp.bytes().await.unwrap())
-            .1
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-    }
+            .unwrap()
+    })
+    .await;
+    decode_viewport(&resp.bytes().await.unwrap())
+        .1
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
 }
 
 /// Every keyword operator over `tag`, each with the set it serves.
@@ -227,7 +191,7 @@ async fn a_keyword_filter_serves_the_same_set_before_and_after_the_coalesce() {
 
     for (i, key) in KEYS.iter().enumerate() {
         ingest(&server, &format!("kw-{i}"), key, i).await;
-        flush(&server).await;
+        tick(&server).await;
     }
     let extents = tag_extents(&root);
     assert_eq!(
@@ -258,15 +222,10 @@ async fn a_keyword_filter_serves_the_same_set_before_and_after_the_coalesce() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while server.state.engine.write_executor_stats().coalesces == coalesces {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the coalesce never published: {:?}",
-            server.state.engine.write_executor_stats()
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    wait_for_executor(&server, "the coalesce published", move |now| {
+        now.coalesces > coalesces
+    })
+    .await;
     let extents = tag_extents(&root);
     assert_eq!(extents.len(), 1, "the window collapsed to one: {extents:?}");
     assert!(

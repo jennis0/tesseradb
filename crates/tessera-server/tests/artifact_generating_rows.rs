@@ -433,45 +433,26 @@ async fn a_merge_leaves_every_answer_where_it_was() {
     assert_matrix(&server, "after the flush").await;
 
     // Flush further segments until a merge has published.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     let mut filler = 0;
-    while server.state.engine.write_executor_stats().merges == 0 {
-        assert!(std::time::Instant::now() < deadline, "no merge published");
-        filler += 1;
-        let name = format!("merge-filler-{filler}");
-        ingest(
-            &server,
-            &name,
-            &[(&name, 30.0 + filler as f32, 30.0, &["0", "1"])],
-        )
-        .await;
-        tick(&server).await;
-    }
+    wait_until(
+        "a merge published",
+        std::time::Duration::from_secs(120),
+        async || {
+            if server.state.engine.write_executor_stats().merges > 0 {
+                return true;
+            }
+            filler += 1;
+            let name = format!("merge-filler-{filler}");
+            ingest(
+                &server,
+                &name,
+                &[(&name, 30.0 + filler as f32, 30.0, &["0", "1"])],
+            )
+            .await;
+            tick(&server).await;
+            false
+        },
+    )
+    .await;
     assert_matrix(&server, "after the merge").await;
-}
-
-/// Fold every extent into the base.
-async fn fold(server: &TestServer) {
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let now = server.state.engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(std::time::Instant::now() < deadline, "the fold never ran");
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 }

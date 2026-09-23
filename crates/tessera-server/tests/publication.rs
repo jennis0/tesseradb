@@ -71,17 +71,8 @@ async fn request_flush(server: &TestServer) -> u64 {
 /// Read `/control/status` until its counter has reached `n`, which is the whole of what a
 /// client does.
 async fn await_publication(server: &TestServer, n: u64) {
-    let deadline = std::time::Instant::now() + DEADLINE;
-    loop {
-        if publication(server).await >= n {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the publication counter never reached {n}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    let what = format!("the publication counter reaching {n}");
+    wait_until(&what, DEADLINE, async || publication(server).await >= n).await;
 }
 
 async fn declare_attribute(server: &TestServer, body: Value) {
@@ -389,17 +380,17 @@ async fn rows_buffered_into_two_views_are_both_served_at_the_number() {
     // **The first of the two publications does not reach the number.** One plan is dispatched per
     // tick, so the cycle is still holding a view's rows when the first swaps; the counter moves at
     // the one that leaves nothing over.
-    let deadline = std::time::Instant::now() + DEADLINE;
-    while server.state.engine.write_executor_stats().flushes < 1 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the first view never published"
-        );
-        if publication(&server).await >= n {
-            panic!("the counter reached the number before either view had published");
+    wait_until("the first view published", DEADLINE, async || {
+        if server.state.engine.write_executor_stats().flushes >= 1 {
+            return true;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    }
+        assert!(
+            publication(&server).await < n,
+            "the counter reached the number before either view had published"
+        );
+        false
+    })
+    .await;
 
     await_publication(&server, n).await;
     assert!(
@@ -548,14 +539,12 @@ async fn serve_with_faults(tmp: &TempDir) -> (TestServer, Arc<FaultSwitchboard>)
 
 /// Wait until the executor is parked at the publication seam, so a cycle is open as a fact.
 async fn await_seam(faults: &Arc<FaultSwitchboard>) {
-    let deadline = std::time::Instant::now() + DEADLINE;
-    while faults.arrivals(tessera_lifecycle::faults::PauseSite::BeforeManifestPublish) < 1 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the executor never reached the publication seam"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    wait_until(
+        "the executor reached the publication seam",
+        DEADLINE,
+        async || faults.arrivals(tessera_lifecycle::faults::PauseSite::BeforeManifestPublish) >= 1,
+    )
+    .await;
 }
 
 /// One row into `s0`, accepted.
@@ -714,14 +703,7 @@ async fn a_publication_that_has_not_swapped_does_not_move_the_counter() {
     ingest_one(&server, "swap-1", &ext).await;
     let n = request_flush(&server).await;
 
-    let deadline = std::time::Instant::now() + DEADLINE;
-    while faults.arrivals(tessera_lifecycle::faults::PauseSite::BeforeManifestPublish) < 1 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the executor never reached the publication seam"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    await_seam(&faults).await;
 
     let executor = server.state.engine.write_executor_stats();
     assert_eq!(

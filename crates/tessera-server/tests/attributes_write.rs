@@ -160,32 +160,6 @@ async fn ingest_with_receipt(served: &Served, batch_id: &str, body: Vec<u8>) -> 
     (ids, body["padded_columns"].as_u64().unwrap())
 }
 
-async fn flush(served: &Served) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = served.server.state.engine.write_executor_stats().flushes;
-        let resp = served
-            .server
-            .client
-            .post(served.server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while served.server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if served.server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
 /// The `tessera_id`s a filtered viewport answers, from a fresh session so the rows flushed since
 /// the last one are in the answer (`views_write.rs`'s note on `points`).
 async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
@@ -373,7 +347,7 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
     let receipt: Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "{receipt}");
     assert_eq!(receipt["padded_columns"], json!(1), "{receipt}");
-    flush(&served).await;
+    drain(&served.server).await;
 
     assert_eq!(
         filtered(&served, json!({ "sentiment": { "range": { "gte": 0.5 } } })).await,
@@ -477,7 +451,7 @@ async fn a_declaration_survives_a_restart_before_and_after_a_publication() {
         ),
     )
     .await;
-    flush(&served).await;
+    drain(&served.server).await;
     let served = served.restart().await;
     assert_eq!(
         declared_names(&meta(&served).await),

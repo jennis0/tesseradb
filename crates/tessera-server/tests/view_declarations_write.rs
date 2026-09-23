@@ -149,65 +149,6 @@ async fn ingest(served: &Served, batch_id: &str, view: &str, rows: &[(&str, f32,
         .as_u16()
 }
 
-async fn flush(served: &Served) {
-    // 120 s, the fold helper's patience below, rather than the 60 s the older files use: a tick
-    // is 90 s by default and this box runs several test binaries at once, so the shorter deadline
-    // fails on load rather than on an answer.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let before = served.server.state.engine.write_executor_stats().flushes;
-        let resp = served
-            .server
-            .client
-            .post(served.server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while served.server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published: {} rows buffered, {} flushes, {} failures, {} flushable",
-                served.server.state.engine.buffered_items(),
-                served.server.state.engine.write_executor_stats().flushes,
-                served.server.state.engine.write_executor_stats().flush_failures,
-                served.server.state.engine.write_executor_stats().flushable_items,
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if served.server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
-async fn fold(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().folds;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let stats = served.server.state.engine.write_executor_stats();
-        assert_eq!(stats.fold_failures, 0, "the fold failed rather than publishing");
-        if stats.folds > before {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
 /// The rows a viewport answers for `view`, by `tessera_id`.
 async fn points(served: &Served, view: &str) -> Vec<u64> {
     let resp = served
@@ -343,7 +284,7 @@ async fn a_group_created_at_runtime_accepts_a_view_under_it() {
         ingest(&served, "q1", "quarter:2026-Q1", &[("a", 100.0, 100.0)]).await,
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     served.reauthorise().await;
     assert_eq!(
         points(&served, "quarter:2026-Q1").await.len(),
@@ -455,7 +396,7 @@ async fn a_plain_view_created_at_runtime_takes_rows_at_its_first_flush() {
         .await,
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     served.reauthorise().await;
     assert_eq!(points(&served, "embedding").await.len(), 2);
     assert_eq!(
@@ -636,14 +577,14 @@ async fn the_declarations_survive_a_restart_and_a_fold() {
         ingest(&served, "rows", "embedding", &[("e1", 100.0, 100.0)]).await,
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     let mut served = served.restart().await;
     served.reauthorise().await;
     assert_eq!(group_names(&served).await, ["quarter"]);
     assert_eq!(points(&served, "embedding").await.len(), 1);
 
     // Folded into `MANIFEST.json`, then replayed from it.
-    fold(&served).await;
+    fold(&served.server).await;
     let mut served = served.restart().await;
     served.reauthorise().await;
     assert_eq!(group_names(&served).await, ["quarter"]);

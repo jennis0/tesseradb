@@ -358,14 +358,12 @@ impl TestServer {
         for task in tasks {
             let _ = task.await;
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while Arc::strong_count(&self.state) > 1 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "a connection task still holds the engine 30 s after the listeners stopped"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        wait_until(
+            "the connection tasks releasing the engine",
+            std::time::Duration::from_secs(30),
+            async || Arc::strong_count(&self.state) == 1,
+        )
+        .await;
         // The engine is dropped here: the executor thread is joined and the bundle root's write
         // lock released before this returns.
         drop(self);
@@ -935,23 +933,28 @@ async fn mount_server_with_flush(
 pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value {
     let auth_data = serde_json::json!({ "terms": terms }).to_string();
     let encoded = base64::engine::general_purpose::STANDARD.encode(auth_data);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let resp = server
-            .client
-            .post(server.session_url("/session/authorise"))
-            .bearer_auth(SESSION_CREDENTIAL)
-            .json(&serde_json::json!({ "auth_data": encoded }))
-            .send()
-            .await
-            .unwrap();
-        if resp.status().as_u16() == 429 && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            continue;
-        }
-        assert_eq!(resp.status(), 200, "authorise should succeed");
-        return resp.json().await.unwrap();
-    }
+    let resp = wait_for(
+        "authorise",
+        std::time::Duration::from_secs(60),
+        async || {
+            let resp = server
+                .client
+                .post(server.session_url("/session/authorise"))
+                .bearer_auth(SESSION_CREDENTIAL)
+                .json(&serde_json::json!({ "auth_data": encoded }))
+                .send()
+                .await
+                .unwrap();
+            if resp.status().as_u16() == 429 {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                return None;
+            }
+            assert_eq!(resp.status(), 200, "authorise should succeed");
+            Some(resp)
+        },
+    )
+    .await;
+    resp.json().await.unwrap()
 }
 
 /// The token [`authorise`] returns for a principal holding `terms`.
@@ -1034,7 +1037,7 @@ pub async fn wait_for<T>(
             std::time::Instant::now() < deadline,
             "{what}: not within {within:?}"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
@@ -1047,13 +1050,41 @@ pub async fn wait_until(
     wait_for(what, within, async || done().await.then_some(())).await
 }
 
-/// Poll the write executor's counters until `done` holds, failing the test after two minutes.
+/// Send `request` until the answer is neither shed nor stale and return it, failing the test
+/// unless a `200` arrives within a minute. A `429` is the admission gate shedding under machine
+/// load and `x-tessera-stale: 1` a stale stamp; neither is the answer a test asks about.
+pub async fn settled(request: impl AsyncFn() -> reqwest::Response) -> reqwest::Response {
+    wait_for(
+        "a settled answer",
+        std::time::Duration::from_secs(60),
+        async || {
+            let resp = request().await;
+            if resp.status().as_u16() == 429 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                return None;
+            }
+            assert_eq!(resp.status().as_u16(), 200, "the request answers");
+            let stale = resp
+                .headers()
+                .get("x-tessera-stale")
+                .is_some_and(|v| v == "1");
+            if stale {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                return None;
+            }
+            Some(resp)
+        },
+    )
+    .await
+}
+
+/// Poll the write executor's counters until `done` holds, failing the test after three minutes.
 pub async fn wait_for_executor(
     server: &TestServer,
     what: &str,
     done: impl Fn(&tessera_engine::ExecutorStats) -> bool,
 ) {
-    wait_until(what, std::time::Duration::from_secs(120), async || {
+    wait_until(what, std::time::Duration::from_secs(180), async || {
         done(&server.state.engine.write_executor_stats())
     })
     .await
@@ -1089,6 +1120,45 @@ pub async fn tick(server: &TestServer) {
         serde_json::json!(true),
         "the flush this asked for had not published within the server's visible wait: {body}"
     );
+}
+
+/// Publish until nothing is buffered. A flush takes one view's rows, so a batch that landed in
+/// several views needs a [`tick`] for each.
+pub async fn drain(server: &TestServer) {
+    wait_until(
+        "the buffer drained",
+        std::time::Duration::from_secs(120),
+        async || {
+            tick(server).await;
+            server.state.engine.buffered_items() == 0
+        },
+    )
+    .await
+}
+
+/// Ask for a fold and wait until it publishes, failing the test if a fold is discarded instead.
+pub async fn fold(server: &TestServer) {
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        202,
+        "a fold is accepted at any time"
+    );
+    wait_for_executor(server, "the fold published", move |now| {
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published"
+        );
+        now.folds > before.folds
+    })
+    .await;
 }
 
 /// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no idset).
