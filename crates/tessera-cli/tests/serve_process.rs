@@ -24,7 +24,15 @@ fn free_port() -> u16 {
 /// to reach it on loopback.
 fn deployment(dir: &Path) {
     let materialised = tessera()
-        .args(["corpus", "materialise", "--seed", "1", "--n", "2000", "--out"])
+        .args([
+            "corpus",
+            "materialise",
+            "--seed",
+            "1",
+            "--n",
+            "2000",
+            "--out",
+        ])
         .arg(dir)
         .output()
         .unwrap();
