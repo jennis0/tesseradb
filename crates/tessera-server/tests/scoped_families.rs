@@ -20,7 +20,7 @@
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -281,15 +281,18 @@ fn vocabulary(name: &str, values: &[&str], visibility: Visibility) -> Vocabulary
         name: name.to_string(),
         title: None,
         value_set: ValueSet::Closed,
-        visibility,
         width: ScalarType::U8,
-        // Codes pinned from one, code 0 being the reserved *absent* one (§3.6).
-        codes: values
-            .iter()
-            .enumerate()
-            .map(|(i, key)| (key.to_string(), i as u32 + 1))
-            .collect(),
-        titles: BTreeMap::new(),
+        // Codes pinned from one, code 0 being the reserved absent one.
+        values: tessera_build::config::VocabularyMinter::declared(
+            name,
+            tessera_build::config::VocabularyKind::Declared,
+            visibility,
+            ScalarType::U8,
+            &[],
+            values.iter().zip(1..).map(|(key, code)| (*key, code)),
+            [],
+        )
+        .expect("distinct pinned codes"),
         reserved: Vec::new(),
     }
 }

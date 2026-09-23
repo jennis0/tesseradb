@@ -50,20 +50,13 @@
 //!   otherwise takes a caller's label, so a layer gated on a real term called `inherited` and one
 //!   declaring *the container's gate is the whole of it* would be the same eight characters.
 //!
-//! ## Codes are pinned or assigned, and both are recorded
+//! ## Codes are pinned or drawn, and both are recorded
 //!
-//! A value set is *inline or sourced*, and its codes are *pinned or assigned* — two independent
-//! choices. `values = ["low", "high"]` assigns in the order given; `[vocabulary.values]` with
-//! `low = 1` pins. **A caller who does not care which integer a value gets should not have to
-//! invent one**: pinning exists so a rebuild preserves codes, not because choosing them is part of
-//! declaring a vocabulary. Assigned codes are recorded in the compiled vocabulary exactly as
-//! pinned ones are, so `MANIFEST.json` is the record either way.
-//!
-//! ⊘ **The carry rule is not built.** `configuration.md` §1 states that a rebuild replays the
-//! recorded codes — a value keeps its code, a new value takes the next free one, a removed value's
-//! code moves to `reserved` — so that reordering a list cannot recolour stored rows. Nothing reads
-//! a previous build's manifest yet, so **reordering a bare key list today reassigns its codes**.
-//! Pin the codes to hold them still.
+//! A value set is *inline or sourced*, and its codes are *pinned or drawn*: two independent
+//! choices. `values = ["low", "high"]` draws each value a code at random over the width, as a
+//! running service does; `[vocabulary.values]` with `low = 1` pins. A drawn code is recorded in
+//! `MANIFEST.json` exactly as a pinned one is. Every build draws afresh, so a rebuild gives an
+//! unpinned value a new code; pin the codes to hold them still.
 //!
 //! ## Acquisition: sources, defaults, fields and the override
 //!
@@ -160,7 +153,8 @@ use tessera_spatial::{cell, Bounds, Projection};
 use tessera_store::declaration::{
     check_attribute, check_value_keys, check_vocabulary, AttributeSpec, DECLARABLE_TYPES,
 };
-use tessera_store::vocabulary::VocabularyMinter;
+pub use tessera_store::manifest::VocabularyKind;
+pub use tessera_store::vocabulary::VocabularyMinter;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
     LayerDeclaration, LevelDeclaration, MemberDefault, MembershipSource, ServingLayout,
@@ -2139,7 +2133,7 @@ pub struct Attribute {
 ///
 /// On a **vocabulary** open means an unknown key is minted a fresh code, drawn at random from the
 /// declared width's unused space by [`tessera_store::vocabulary::VocabularyMinter`] — the same
-/// routine ingest uses, so exhaustion is one predicate. Declared values still pin or assign codes
+/// routine ingest uses, so exhaustion is one predicate. Declared values still pin or draw codes
 /// exactly as a closed vocabulary's do; the build mints only for keys the declaration does not
 /// carry, and an open vocabulary given no values at all is legal and starts empty. On a **layer**
 /// it means an unknown member key mints an artifact (`artifacts-from-points.md` §3).
@@ -2153,19 +2147,13 @@ pub struct Vocabulary {
     /// as `MANIFEST.vocabularies[..].values[..].title`.
     pub title: Option<String>,
     pub value_set: ValueSet,
-    /// `public` or `derived` (`per-point-attributes.md` §3.8). Recorded and published; **not yet
-    /// enforced anywhere**, there being no `/v1/categories` to filter.
-    pub visibility: Visibility,
     /// The **code space's** width, which is why it lives here and not on a column
     /// (`per-point-attributes.md` §3.9).
     pub width: ScalarType,
-    /// Value key → code, pinned by the caller or assigned by the build — the compiled form does
-    /// not distinguish them, because `MANIFEST.json` is the record either way. For an open
-    /// vocabulary this is what the declaration carried *before* the build; the codes minted during
-    /// the run live in the minter [`Schema::open_minters`] returns.
-    pub codes: BTreeMap<String, u32>,
-    /// Per-value presentation, keyed as `codes` is. Absent for a value the author gave no title.
-    pub titles: BTreeMap<String, String>,
+    /// Each value's code, pinned by the caller or drawn by the build, with its title and the
+    /// vocabulary's visibility. For an open vocabulary this is what the declaration carried; the
+    /// codes minted during the run live in the minter [`Schema::open_minters`] returns.
+    pub values: VocabularyMinter,
     /// Retired codes, never reassigned (Protobuf's `reserved`).
     pub reserved: Vec<u32>,
 }
@@ -2177,9 +2165,9 @@ pub struct Vocabulary {
 /// converge, so no spelling can acquire a rule the others lack.
 #[derive(Debug, Clone, Default)]
 pub struct DeclaredValues {
-    /// Value key → code, where the caller pinned one. A key with no entry here is assigned.
+    /// Value key → code, where the caller pinned one. A key with no entry here is drawn a code.
     pub codes: BTreeMap<String, u32>,
-    /// Declaration order, which is assignment order for the keys that pinned nothing.
+    /// Declaration order, in which the keys that pinned nothing are drawn codes.
     pub order: Vec<String>,
     /// Per-value presentation, keyed as `codes` is; absent for a value given no title.
     pub titles: BTreeMap<String, String>,
@@ -2213,7 +2201,12 @@ impl Vocabulary {
     /// *absent*: the declare-then-use rule exists because a category carries properties and,
     /// through its postings, a visibility consequence, so a typo must not create one.
     pub fn code_of(&self, key: &str) -> Option<u32> {
-        self.codes.get(key).copied()
+        self.values.code_of(key)
+    }
+
+    /// `public` or `derived` (`per-point-attributes.md` §3.8).
+    pub fn visibility(&self) -> Visibility {
+        self.values.visibility()
     }
 }
 
@@ -2471,7 +2464,7 @@ impl Schema {
     }
 
     /// One live [`VocabularyMinter`] per **open** vocabulary, seeded from whatever it already
-    /// carries — the declaration's codes, pinned or assigned, plus `reserved`. A closed vocabulary
+    /// carries — the declaration's codes, pinned or drawn, plus `reserved`. A closed vocabulary
     /// mints nothing and has no entry here at all, so `input::scan_attributes`'s batch-level mint
     /// pre-pass can never reach one.
     ///
@@ -2484,21 +2477,7 @@ impl Schema {
             if vocabulary.value_set != ValueSet::Open {
                 continue;
             }
-            let mut minter = VocabularyMinter::new(
-                vocabulary.name.clone(),
-                tessera_store::manifest::VocabularyKind::Discovered,
-                vocabulary.visibility,
-                vocabulary.width,
-            );
-            for (key, &code) in &vocabulary.codes {
-                minter
-                    .seed_value(key, code)
-                    .expect("check_codes already proved this vocabulary's codes are consistent");
-            }
-            for &code in &vocabulary.reserved {
-                minter.seed_reserved(code);
-            }
-            minters.insert(vocabulary.name.clone(), minter);
+            minters.insert(vocabulary.name.clone(), vocabulary.values.clone());
         }
         minters
     }
@@ -4231,7 +4210,7 @@ fn compile_vocabularies(
             Some(declared) => Some(sources.path(&object, declared)?),
             None => None,
         };
-        // A `code` field pins the codes; without one the build assigns them.
+        // A `code` field pins the codes; without one the build draws them.
         let fields = check_fields(
             &object,
             source.as_ref(),
@@ -4243,7 +4222,7 @@ fn compile_vocabularies(
             block.fields.as_ref(),
             ENTITY_ID,
         )?;
-        let mut declared = match (&block.values, source.as_ref()) {
+        let declared = match (&block.values, source.as_ref()) {
             (Some(_), Some(_)) => {
                 return Err(declaration_error(format!(
                     "vocabulary '{name}' gives `values` and a `source`; give one"
@@ -4255,8 +4234,24 @@ fn compile_vocabularies(
         };
         check_value_keys(name, declared.order.iter().map(String::as_str))
             .map_err(declaration_error)?;
-        assign_codes(&mut declared, &reserved, width, name)?;
         check_codes(&declared.codes, &reserved, width, name)?;
+        let kind = match value_set {
+            ValueSet::Closed => tessera_store::manifest::VocabularyKind::Declared,
+            ValueSet::Open => tessera_store::manifest::VocabularyKind::Discovered,
+        };
+        let mut values = VocabularyMinter::declared(
+            name.clone(),
+            kind,
+            visibility,
+            width,
+            &reserved,
+            declared.codes.iter().map(|(key, &code)| (key.as_str(), code)),
+            declared.order.iter().map(String::as_str),
+        )
+        .map_err(|e| declaration_error(e.to_string()))?;
+        for (key, title) in declared.titles {
+            values.set_title(&key, title);
+        }
 
         compiled.insert(
             name.clone(),
@@ -4264,10 +4259,8 @@ fn compile_vocabularies(
                 name: name.clone(),
                 title: block.title.clone(),
                 value_set,
-                visibility,
                 width,
-                codes: declared.codes,
-                titles: declared.titles,
+                values,
                 reserved,
             },
         );
@@ -4288,8 +4281,8 @@ fn compile_reserved(block: &VocabularyBlock) -> Result<Vec<u32>> {
     Ok(reserved)
 }
 
-/// An inline value set: either an array of keys, whose codes the build assigns in the order given,
-/// or a `key = code` table pinning them.
+/// An inline value set: either an array of keys, each drawn a code, or a `key = code` table
+/// pinning them.
 ///
 /// **Which one was written is the whole of the difference**, and it is not a mode: a caller who
 /// does not care which integer a value gets should not have to invent one.
@@ -4313,8 +4306,7 @@ fn parse_inline_values(values: &toml::Value, vocabulary: &str) -> Result<Declare
                 let raw = value.as_integer().ok_or_else(|| {
                     declaration_error(format!(
                         "vocabulary '{vocabulary}': value '{key}' must be an integer code, not \
-                         {value}. Write `values = [\"{key}\", …]` to have the build assign codes \
-                         in the order given"
+                         {value}. Write `values = [\"{key}\", …]` to have the build draw the codes"
                     ))
                 })?;
                 let code = u32::try_from(raw).map_err(|_| {
@@ -4330,54 +4322,12 @@ fn parse_inline_values(values: &toml::Value, vocabulary: &str) -> Result<Declare
         other => {
             return Err(declaration_error(format!(
                 "vocabulary '{vocabulary}': `values` is {other}, and it must be either an array of \
-                 keys — codes assigned by the build, in the order given — or a \
-                 `[vocabulary.values]` table of `key = code`"
+                 keys, each drawn a code, or a `[vocabulary.values]` table of \
+                 `key = code`"
             )));
         }
     }
     Ok(set)
-}
-
-/// Give a code to every declared value that pinned none: the lowest free one, in declaration
-/// order, skipping `reserved` and the *absent* sentinel.
-///
-/// **Assignment starts at 1 and never reaches 0**, which is the sentinel — see [`ABSENT_CODE`].
-///
-/// ⊘ It assigns from an empty slate every build. `configuration.md` §1's carry rule — a rebuild
-/// replays the recorded codes, a new value takes the next free one, a removed value's code moves
-/// to `reserved` — needs the previous manifest, which nothing reads here yet. So **reordering a
-/// bare key list reorders its codes today**; pinning is what holds them still.
-fn assign_codes(
-    declared: &mut DeclaredValues,
-    reserved: &[u32],
-    width: ScalarType,
-    vocabulary: &str,
-) -> Result<()> {
-    let max = width
-        .max_code()
-        .expect("a category width always has a maximum code");
-    let mut taken: BTreeSet<u32> = declared.codes.values().copied().collect();
-    taken.extend(reserved.iter().copied());
-    let mut next = ABSENT_CODE + 1;
-    for key in &declared.order {
-        if declared.codes.contains_key(key) {
-            continue;
-        }
-        while taken.contains(&next) {
-            next += 1;
-        }
-        if next > max {
-            return Err(declaration_error(format!(
-                "vocabulary '{vocabulary}': assigning a code to '{key}' would need {next}, past \
-                 `{}`'s maximum of {max}. Never widen and never wrap — the remedy is a rebuild at \
-                 a wider declared width (per-point-attributes §3.6)",
-                width.arrow_type_name()
-            )));
-        }
-        declared.codes.insert(key.clone(), next);
-        taken.insert(next);
-    }
-    Ok(())
 }
 
 /// The rules a compiled code set must satisfy, whatever spelling it arrived in.
@@ -6210,7 +6160,7 @@ fn vocabulary_payloads(config: &Config) -> Vec<serde_json::Value> {
         );
         body.insert(
             "visibility".to_string(),
-            serde_json::to_value(vocabulary.visibility).unwrap_or_default(),
+            serde_json::to_value(vocabulary.visibility()).unwrap_or_default(),
         );
         body.insert(
             "width".to_string(),
@@ -6232,18 +6182,19 @@ fn vocabulary_payloads(config: &Config) -> Vec<serde_json::Value> {
             Some(source) => {
                 entry.insert("values_source".to_string(), source.clone().into());
             }
-            None if !vocabulary.codes.is_empty() => {
+            None if vocabulary.values.bindings().next().is_some() => {
                 // **No `code` anywhere.** Codes are the server's to assign
                 // (`per-point-attributes.md` §3.1), and the route refuses a body that names one —
                 // so an inline `key = code` table reaches the wire as its keys and titles, and the
                 // running service draws the codes.
                 let values: Vec<serde_json::Value> = vocabulary
-                    .codes
-                    .keys()
-                    .map(|key| {
+                    .values
+                    .bindings()
+                    .map(|(key, _)| {
                         let mut row = serde_json::Map::new();
-                        row.insert("key".to_string(), key.clone().into());
-                        insert_some(&mut row, "title", vocabulary.titles.get(key).cloned());
+                        row.insert("key".to_string(), key.into());
+                        let title = vocabulary.values.title_of(key).map(str::to_string);
+                        insert_some(&mut row, "title", title);
                         serde_json::Value::Object(row)
                     })
                     .collect();
