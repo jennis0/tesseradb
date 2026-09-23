@@ -30,14 +30,15 @@ marimo edit clients/py/examples/notebook_marimo.py
 jupyter lab clients/py/examples/notebook.ipynb
 ```
 
-Six sections: a DataFrame with a cluster column, mapped; the 50,000-paper arXiv corpus from files,
-with terms, three clusterings and their topic lines, mapped as its own principal and as two arXiv
-categories; a week of new papers into the database while it serves; a second clustering over rows
-it already holds; one set of points under two projections; and the database saved, reopened and
-handed to `tessera serve --deployment`.
+Six sections: a DataFrame with a cluster column, mapped; the arXiv corpus from files, with access
+terms, a hierarchy of topics and their titles, mapped as the database's own reader and as two
+narrower readers; filters and counts; one view per year with a clustering of each year; a week of
+new papers into the database while it serves, with a suppression; and the database saved and
+reopened.
 
 They need `pip install -e 'clients/py[widget]'`, a `tessera` binary on `PATH` or named by
-`TESSERA_BIN`, and the corpus at `data/notebook/`, which `TESSERA_NOTEBOOK_DATA` names elsewhere.
+`TESSERA_BIN`, and the corpus at `data/notebook-2m4-live/`, or `data/notebook-sample/` with
+`SCALE = "sample"`, which `TESSERA_NOTEBOOK_DATA` names elsewhere.
 Three things are in no extra, because the package needs none of them: `pandas`, which the first
 section's frame is built with, and the front end you are running, `marimo` or `jupyterlab`. So
 `pip install pandas marimo` for the first notebook, `pip install pandas jupyterlab` for the
@@ -46,7 +47,7 @@ second.
 `notebook.ipynb` is generated from the marimo file with `marimo export ipynb`.
 The Jupyter copy needs marimo installed, and its year slider does not drive the map there.
 `tests/test_sdk_examples.py` executes the marimo notebook's cells with no browser at the sample
-scale, asserts the counts each section prints and that every map it draws is served the layers it
+scale, asserts the counts each section shows and that every map it draws is served the layers it
 draws and colours by, and checks that `notebook.ipynb` is what a fresh export makes. A notebook
 that drifts from the package fails the gate.
 

@@ -16,7 +16,7 @@ JavaScript bundle: there is no browser here, and nothing reads its text.
 
 What is asserted is what each section prints, with the expected numbers read from the sample's
 own files; that every map is served each layer it draws or colours by; and that a reader is
-served, for each topic name, the first text whose every source paper it may see.
+served each topic's title exactly when it may see every paper the title was written from.
 
 `examples/notebook.ipynb` is generated from the marimo file by `marimo export ipynb`, and the last
 test checks that it is what a fresh export makes.
@@ -187,25 +187,21 @@ def expected(data: Path, years: list[str]) -> dict:
 
 
 def names_seen(data: Path, terms: set[str] | None = None) -> dict[str, list[str]]:
-    """The topic name text a reader holding `terms` should be shown, by the name's key.
+    """The topic titles a reader holding `terms` should be shown, by the name's key.
 
-    A name has a text per rank, rank 0 its title and rank 1 its keywords, and each was written
-    from its own source papers. The reader is shown the text of the lowest rank whose every
-    source paper it may see, and a name with no such rank not at all. `terms=None` is a reader
-    who sees every paper.
+    The notebook inserts each name's title, rank 0 of its contents, with the papers the title was
+    written from. A reader is shown the title when it may see every one of those papers.
+    `terms=None` is a reader who sees every paper.
     """
     papers = pd.read_parquet(data / "points.parquet", columns=["entity_id", "categories"])
     if terms is not None:
         papers = papers[papers["categories"].map(lambda held: bool(terms & set(held)))]
     seen = set(papers["entity_id"])
-    sources = pd.read_parquet(data / "topics-toponymy-members.parquet").dropna(subset=["rank"])
-    shown = sources.groupby(["key", "rank"])["entity"].agg(lambda ids: set(ids) <= seen)
+    sources = pd.read_parquet(data / "topics-toponymy-members.parquet")
+    sources = sources[sources["rank"] == 0]
+    shown = sources.groupby("key")["entity"].agg(lambda ids: set(ids) <= seen)
     contents = pd.read_parquet(data / "topics-toponymy.parquet").set_index("key")["contents"]
-    text: dict[str, list[str]] = {}
-    for (key, rank), visible in sorted(shown.items()):
-        if visible and key not in text:
-            text[key] = list(contents[key][int(rank)])
-    return text
+    return {key: list(contents[key][0]) for key, visible in shown.items() if visible}
 
 
 def served_names(reader) -> dict[str, list[str]]:
@@ -268,14 +264,15 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk, maps):
     assert walk["saved_at"].joinpath("tessera.toml").exists()
     assert walk["reopened"].view("papers").count() == want["papers"]
 
-    # A topic name's text reaches a reader only where it may see every paper that text was
-    # written from. After section 5 the database holds every name in the sample, the week's
-    # included, and its own reader is served all of them.
+    # A topic's title reaches a reader only where it may see every paper the title was written
+    # from. After section 5 the database holds every name in the sample, the week's included,
+    # and its own reader is served all of them.
     database_names = served_names(walk["db"])
-    astro_names = served_names(walk["astro"])
     assert database_names == names_seen(walk["DATA"])
-    assert astro_names == names_seen(walk["DATA"], ASTRO_PH)
-    assert 0 < len(astro_names) < len(database_names)
+    for reader, terms in (("astro", ASTRO_PH), ("learning", LEARNING)):
+        names = served_names(walk[reader])
+        assert names == names_seen(walk["DATA"], terms), reader
+        assert 0 < len(names) < len(database_names), reader
 
     # Every map, as the reader it was drawn for, over its view and filter, is served each layer
     # it draws or colours by.
