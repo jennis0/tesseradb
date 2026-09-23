@@ -1237,3 +1237,32 @@ async fn a_view_recreated_during_a_fold_takes_none_of_its_predecessors_rows() {
     assert!(fold_settled(&server).await, "a later fold lands");
     assert_eq!(points_of(&server, "quarter:q2").await, own, "after a later fold");
 }
+
+/// A row-major spatial level's folded column covers the view's base alone: a flushed segment with
+/// as many rows as the base is resolved from its own geometry after a restart, not read off the
+/// column.
+#[tokio::test]
+async fn a_flushed_segment_the_size_of_the_base_is_not_read_off_the_base_column() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut declaration = spatial_declaration(SHAPES);
+    declaration["layout"] = json!("row_major_label");
+    register(&server, declaration).await;
+    let (status, body) = put(
+        &server,
+        SHAPES,
+        json!([{ "key": "left", "view": "q2", "members": [], "bbox": [0.0, 0.0, 500.0, 1000.0] }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    flush_and_fold(&server).await;
+
+    ingest_right_of_the_shape(&server, "quarter:q2", "outside").await;
+    flush(&server).await;
+    let before = served(&server, "quarter:q2", SHAPES).await;
+    assert_eq!(before.len(), 1, "the shape is drawn: {before:?}");
+
+    server.shutdown().await;
+    let server = open(&tmp).await;
+    assert_eq!(served(&server, "quarter:q2", SHAPES).await, before);
+}
