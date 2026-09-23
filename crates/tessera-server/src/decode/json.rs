@@ -27,7 +27,7 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use serde_json::{Map, Value};
-use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar};
+use tessera_engine::{scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
 use tessera_types::layer::LayerDeclaration;
 
 use super::{DecodeError, Fixed};
@@ -417,20 +417,19 @@ fn scalar_column(
             for row in 0..rows.len() {
                 match float(body_name, cell(row)?, row, name)? {
                     None => builder.append_null(),
-                    // Narrowed to the declared width, and refused where the narrowing would
-                    // store an infinity for a finite number.
-                    Some(value) => {
-                        let narrowed = value as f32;
-                        if !narrowed.is_finite() {
-                            return Err(refusal(
+                    Some(value) => builder.append_value(
+                        scalar_column::narrow_to_f32(value).ok_or_else(|| {
+                            refusal(
                                 body_name,
                                 row,
                                 name,
-                                "is outside f32's finite range",
-                            ));
-                        }
-                        builder.append_value(narrowed);
-                    }
+                                &format!(
+                                    "carries {value:?}, past f32's finite range; send a smaller \
+                                     value or declare the column f64"
+                                ),
+                            )
+                        })?,
+                    ),
                 }
             }
             Arc::new(builder.finish())

@@ -5,13 +5,16 @@
 //!
 //! Every integer type carries every integer declaration, and a row whose value does not fit the
 //! declaration is refused rather than truncated. Either float width carries either float
-//! declaration, and `f64` into `f32` rounds to the nearest `f32`. A string at either offset width
-//! carries `utf8`, `keyword` and `text`. A timestamp carries an integer declaration only in
-//! microseconds, because nothing records a unit and two units under one declaration would store
-//! incomparable numbers.
+//! declaration, and `f64` into `f32` rounds to the nearest `f32`; a finite `f64` past `f32`'s range
+//! is refused rather than stored as an infinity, while an infinity or a NaN is kept. A string at
+//! either offset width carries `utf8`, `keyword` and `text`. A timestamp carries an integer
+//! declaration only in microseconds, because nothing records a unit and two units under one
+//! declaration would store incomparable numbers.
 //!
 //! A category's column carries value keys, which only its vocabulary can resolve, so a category is
 //! not read here.
+
+use std::fmt;
 
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
@@ -71,17 +74,37 @@ enum Values {
     /// A `u64` column, kept unwidened: a value above `i64::MAX` has no `i64` spelling.
     U64(Vec<u64>),
     F32(Vec<f32>),
+    /// A `float64` column under an `f32` declaration, narrowed per row.
+    F64AsF32(Vec<f64>),
     F64(Vec<f64>),
     Text(Utf8Values),
 }
 
-/// A row whose integer does not fit its declared type, which accepts `min..=max`. The value is
-/// the one the column holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OutOfRange {
-    pub value: i128,
-    pub min: i128,
-    pub max: i128,
+/// A row whose value does not fit its declared type, holding the value as the column holds it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OutOfRange {
+    /// An integer outside the declared type's `min..=max`.
+    Integer { value: i128, min: i128, max: i128 },
+    /// A finite `f64` whose magnitude no finite `f32` reaches.
+    F32(f64),
+}
+
+impl fmt::Display for OutOfRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OutOfRange::Integer { value, min, max } => {
+                write!(f, "{value}, outside {min}..={max}")
+            }
+            OutOfRange::F32(value) => write!(f, "{value:?}, past f32's finite range"),
+        }
+    }
+}
+
+/// `value` as an `f32`, rounded to the nearest, or `None` where it is finite and past `f32`'s
+/// range. An infinity or a NaN narrows to itself.
+pub fn narrow_to_f32(value: f64) -> Option<f32> {
+    let narrowed = value as f32;
+    (narrowed.is_finite() || !value.is_finite()).then_some(narrowed)
 }
 
 impl ScalarColumn {
@@ -90,12 +113,10 @@ impl ScalarColumn {
         let any = column.as_any();
         let values = match ty {
             ScalarType::Bool => Values::Bool(any.downcast_ref::<BooleanArray>()?.clone()),
-            ScalarType::F32 => Values::F32(if let Some(a) = any.downcast_ref::<Float32Array>() {
-                a.values().to_vec()
-            } else {
-                let a = any.downcast_ref::<Float64Array>()?;
-                a.values().iter().map(|v| *v as f32).collect()
-            }),
+            ScalarType::F32 => match any.downcast_ref::<Float32Array>() {
+                Some(a) => Values::F32(a.values().to_vec()),
+                None => Values::F64AsF32(any.downcast_ref::<Float64Array>()?.values().to_vec()),
+            },
             ScalarType::F64 => Values::F64(if let Some(a) = any.downcast_ref::<Float64Array>() {
                 a.values().to_vec()
             } else {
@@ -126,7 +147,7 @@ impl ScalarColumn {
     }
 
     /// Row `row`'s value at the declared type: [`ScalarValue::Null`] where the row carries a null,
-    /// and [`OutOfRange`] where its integer does not fit.
+    /// and [`OutOfRange`] where its value does not fit.
     pub fn value(&self, row: usize) -> Result<ScalarValue, OutOfRange> {
         // A null slot's value buffer holds an arbitrary number, usually 0, so it is never read.
         if self.nulls.as_ref().is_some_and(|n| n.is_null(row)) {
@@ -135,6 +156,9 @@ impl ScalarColumn {
         Ok(match &self.values {
             Values::Bool(values) => ScalarValue::Bool(values.value(row)),
             Values::F32(values) => ScalarValue::F32(values[row]),
+            Values::F64AsF32(values) => ScalarValue::F32(
+                narrow_to_f32(values[row]).ok_or(OutOfRange::F32(values[row]))?,
+            ),
             Values::F64(values) => ScalarValue::F64(values[row]),
             Values::Text(values) => ScalarValue::Utf8(values.value(row).to_string()),
             Values::Ints(values) => self.integer(values[row].into())?,
@@ -163,7 +187,7 @@ impl ScalarColumn {
             }
         };
         if !(min..=max).contains(&value) {
-            return Err(OutOfRange { value, min, max });
+            return Err(OutOfRange::Integer { value, min, max });
         }
         // In range, so every narrowing below is exact.
         Ok(match self.ty {
@@ -273,7 +297,7 @@ mod tests {
         assert_eq!(read.value(0), Ok(ScalarValue::U8(255)));
         assert_eq!(
             read.value(1),
-            Err(OutOfRange {
+            Err(OutOfRange::Integer {
                 value: 256,
                 min: 0,
                 max: 255
@@ -300,9 +324,11 @@ mod tests {
         ] {
             let read = ScalarColumn::new(&column, ty).unwrap();
             assert!(read.value(0).is_ok(), "{ty:?}");
-            assert_eq!(
-                read.value(1).map_err(|e| e.value),
-                Err(1i128 << 63),
+            assert!(
+                matches!(
+                    read.value(1),
+                    Err(OutOfRange::Integer { value, .. }) if value == 1i128 << 63
+                ),
                 "{ty:?} refuses the value as the column holds it"
             );
         }
@@ -332,5 +358,28 @@ mod tests {
             ScalarColumn::new(&narrow, ScalarType::F64).unwrap().value(0),
             Ok(ScalarValue::F64(0.5))
         );
+    }
+
+    #[test]
+    fn a_finite_f64_past_f32_is_refused_and_an_infinity_or_nan_is_kept() {
+        assert_eq!(narrow_to_f32(0.1), Some(0.1f32));
+        assert_eq!(narrow_to_f32(f64::from(f32::MAX)), Some(f32::MAX));
+        assert_eq!(narrow_to_f32(1e300), None);
+        assert_eq!(narrow_to_f32(-1e300), None);
+        assert_eq!(narrow_to_f32(f64::INFINITY), Some(f32::INFINITY));
+        assert_eq!(narrow_to_f32(f64::NEG_INFINITY), Some(f32::NEG_INFINITY));
+        assert!(narrow_to_f32(f64::NAN).is_some_and(f32::is_nan));
+
+        let column: ArrayRef = Arc::new(Float64Array::from(vec![
+            Some(1e300),
+            None,
+            Some(f64::INFINITY),
+        ]));
+        let read = ScalarColumn::new(&column, ScalarType::F32).unwrap();
+        assert_eq!(read.value(0), Err(OutOfRange::F32(1e300)));
+        assert_eq!(read.value(1), Ok(ScalarValue::Null));
+        assert_eq!(read.value(2), Ok(ScalarValue::F32(f32::INFINITY)));
+        let read = ScalarColumn::new(&column, ScalarType::F64).unwrap();
+        assert_eq!(read.value(0), Ok(ScalarValue::F64(1e300)));
     }
 }

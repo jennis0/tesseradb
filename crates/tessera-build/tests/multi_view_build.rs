@@ -654,6 +654,77 @@ fields = { key = "quarter" }
     assert_eq!(config.anchor_view(&registry).expect("the anchor"), 0);
 }
 
+/// **A roster table's integer that does not fit its declared width is refused**, naming the row
+/// and the column, and one that fits is read as written. The column is `int64` both times, so the
+/// width checked is the declaration's rather than the file's.
+#[test]
+fn a_roster_tables_integer_past_its_declared_width_is_refused() {
+    use arrow::array::{Int64Array, StringArray};
+
+    for (tier, fits) in [(300i64, false), (255, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        write_discriminated(
+            &dir.path().join("quarter-alt.parquet"),
+            &[("2026-Q2", WORLD), ("2026-Q3", QUARTER)],
+        );
+        let roster = dir.path().join("roster.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("quarter", DataType::Utf8, false),
+            Field::new("tier", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["2026-Q2", "2026-Q3"])),
+                Arc::new(Int64Array::from(vec![1, tier])),
+            ],
+        )
+        .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(File::create(&roster).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let config = dir.path().join("corpus.toml");
+        std::fs::write(
+            &config,
+            r#"
+[sources]
+alt    = "quarter-alt.parquet"
+roster = "roster.parquet"
+
+[defaults]
+allocation_view = "quarter:2026-Q2"
+
+[[view_group]]
+name             = "quarter"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "alt"
+fields           = { view = "quarter" }
+point_visibility = { field = "access", default = "public" }
+metadata         = { tier = "u8" }
+
+[view_group.views]
+source = "roster"
+fields = { key = "quarter" }
+"#,
+        )
+        .unwrap();
+        let config = tessera_build::config::Config::parse(&config, &Default::default())
+            .expect("the declaration parses");
+        let registry = config.build_views();
+        if !fits {
+            assert!(registry.is_err(), "{tier} does not fit a u8 and is refused");
+            continue;
+        }
+        let registry = registry.expect("a value that fits is read");
+        assert_eq!(
+            registry[1].group.as_ref().unwrap().metadata.get("tier"),
+            Some(&tessera_build::config::MetadataValue::Int(tier))
+        );
+    }
+}
+
 /// **A roster table's `visibility` column may be a list, at either width** (`views.md` §6,
 /// decision 0132): each element is one label taken verbatim, a comma included, and the list
 /// width and the string width are the writer's choice. `large_list<large_utf8>` is the widest

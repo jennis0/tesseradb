@@ -305,13 +305,10 @@ fn cell(
         }
         Cells::Scalars(column) => column.value(row).map(wal_scalar).map_err(|e| {
             DecodeError(format!(
-                "{body_name}: row {request_row}, column '{}' carries {}, which is outside {}'s \
-                 range {}..={}",
+                "{body_name}: row {request_row}, column '{}' (declared {}) carries {e}; send a \
+                 value that fits or declare a wider type",
                 declared.name,
-                e.value,
                 declared.arrow_type.arrow_type_name(),
-                e.min,
-                e.max
             ))
         }),
     }
