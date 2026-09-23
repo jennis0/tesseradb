@@ -56,7 +56,8 @@ def test_an_insert_reports_its_rows_and_columns_and_prints_nothing(tmp_path, cap
     summary = str(insert)
     assert insert.rows == 1500 and f"{insert.rows:,}" in summary
     assert all(column in summary for column in insert.read)
-    assert insert.ignored == ["labels", "note"] and str(len(insert.ignored)) in summary
+    assert insert.ignored == ["labels", "note"]
+    assert all(column in summary for column in insert.ignored)
     assert repr(insert) == summary
     assert capsys.readouterr().out == ""
 
@@ -70,7 +71,26 @@ def test_a_check_before_the_first_commit_reports_its_rows_and_every_finding(tmp_
     summary = str(report)
     assert not report.ok and report.findings
     assert all(str(finding) in summary for finding in report.findings)
-    assert report.rows == {"map": 2} and "2" in summary
+    assert report.rows == {"map": 2} and "2 rows" in summary
+    assert capsys.readouterr().out == ""
+
+
+def test_a_check_names_a_declared_column_nothing_fills_and_the_commit_shows_its_failure(
+    tmp_path, capsys
+):
+    db = create(tmp_path / "db")
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.declare_attribute("score", type="f64", index=True)
+    db.insert("map", papers(["p0", "p1"]), id="id", x="x", y="y", access="labels")
+    report = db.check()
+    empty = [note for note in report.notes if "score" in note and "empty" in note]
+    assert empty and all(note in str(report) for note in empty)
+    with pytest.raises(Refusal) as raised:
+        db.commit()
+    failed = raised.value.report
+    assert not failed.ok
+    refused = [line for line in failed.log.splitlines() if "refused" in line]
+    assert refused and all(line in str(failed) for line in refused)
     assert capsys.readouterr().out == ""
 
 
@@ -81,8 +101,10 @@ def test_the_first_commit_reports_what_it_built_and_prints_nothing(tmp_path, cor
         report = db.commit()
         summary = str(report)
         assert report.ok, report.log
-        assert report.rows == {"map": 20} and "20" in summary
+        assert report.rows == {"map": 20} and "20 rows" in summary
+        assert report.items == 20 and "20 items" in summary
         assert report.views == {"map": 1} and "map" in summary
+        assert report.layers == []
         assert report.seconds is not None and f"{report.seconds:.1f}" in summary
         assert report.viewer in summary
         # The build's log stays on the report.
@@ -118,7 +140,7 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
     db.insert("map", papers(["q0", "q1"], x=[1.5, 2.5]), id="id", x="x", y="y", access="labels")
     report = db.commit()
     summary = str(report)
-    assert report.rows_accepted == {"map": 2} and "2" in summary
+    assert report.rows_accepted == {"map": 2} and "2 rows to map" in summary
     assert report.refusals and all(
         str(refusal["status"]) in summary and refusal["detail"] in summary
         for refusal in report.refusals
@@ -131,5 +153,5 @@ def test_a_change_reports_how_many_ids_it_was_given(served, corpus, capsys):
     db = served(small)
     capsys.readouterr()
     for report in (db.suppress(["p1", "p2", "p3"]), db.unsuppress(["p1", "p2", "p3"])):
-        assert report.ok and report.requested == 3 and "3" in str(report)
+        assert report.ok and report.requested == 3 and "3 ids" in str(report)
     assert capsys.readouterr().out == ""

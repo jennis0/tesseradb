@@ -216,7 +216,7 @@ class Insert(Summarised):
         )
         if self.view_key is not None:
             into += f", view {self.view_key}"
-        ignored = f"; ignored {_count(len(self.ignored), 'column')}" if self.ignored else ""
+        ignored = f"; ignored {', '.join(self.ignored)}" if self.ignored else ""
         return [
             f"{into}: {_count(self.rows, 'row')} "
             f"(read {', '.join(self.read) or 'nothing'}{ignored})"

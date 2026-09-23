@@ -9,6 +9,7 @@ detail is on the report's attributes, which each class's docstring lists.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Sequence
 
 from ._columns import DeclaredColumn
@@ -25,6 +26,10 @@ class Summarised:
 
     def __repr__(self) -> str:
         return str(self)
+
+
+#: The check page's closing line, which counts the warnings above it.
+_WARNINGS = re.compile(r"^check OK:.* (\d+) warning\(s\)$")
 
 
 def _count(n: int, one: str, many: str | None = None) -> str:
@@ -54,8 +59,8 @@ class Declared(Summarised):
         ]
         if self.vocabularies:
             out.append(
-                f"and {_count(len(self.vocabularies), 'open vocabulary', 'open vocabularies')}: "
-                + ", ".join(self.vocabularies)
+                f"and {_count(len(self.vocabularies), 'open vocabulary', 'open vocabularies')}, "
+                "public, so every reader may list their values: " + ", ".join(self.vocabularies)
             )
         return out
 
@@ -70,10 +75,11 @@ class Report(Summarised):
     - `frames`: each view's name and the extent it gets.
     - `render_columns`: the columns sent with every point drawn.
     - `notes`: what each insert read and ignored, and each declared column no insert fills.
+      Each is in the summary, since a declared column with nothing to fill it fails the build.
     - `findings`: problems found before anything was built. Each is in the summary.
     - `log`: the text the declaration check printed, and on a commit the build's log after it.
-      A check or build that failed is refused somewhere in it, so the summary of a report that
-      is not `ok` carries the whole log.
+      Its warnings are in the summary. A check or build that failed is refused somewhere in it,
+      so the summary of a report that is not `ok` carries the whole log.
     """
 
     what: str
@@ -90,15 +96,24 @@ class Report(Summarised):
 
     def summary(self) -> list[str]:
         out = [
-            f"check: {'ok' if self.ok else 'FAILED'}, "
-            f"{self._rows_in_words() or 'no rows inserted'}"
+            f"check: {'ok' if self.ok else 'FAILED'}, inserted "
+            f"{self._rows_in_words() or 'no rows'}"
         ]
         return out + self._problems()
 
     def _problems(self) -> list[str]:
-        out = [str(finding) for finding in self.findings]
-        if not self.ok and self.log:
-            out.append(self.log.rstrip())
+        """The notes, the findings, and the log's warnings, or the whole log where not `ok`."""
+        out = [f"  {note}" for note in self.notes]
+        out += [str(finding) for finding in self.findings]
+        if not self.ok:
+            if self.log:
+                out.append(self.log.rstrip())
+            return out
+        for line in self.log.splitlines():
+            stripped = line.strip()
+            counted = _WARNINGS.search(stripped)
+            if stripped.startswith("WARNING") or (counted and int(counted.group(1)) > 0):
+                out.append(f"  {stripped}")
         return out
 
 
@@ -107,7 +122,10 @@ class CommitReport(Report):
     """What the first `commit()` did: a `Report`, and the database it built and started.
 
     - `views`: the views the database serves, each group's views counted under the group.
-    - `layers`: the annotation layers it holds.
+    - `layers`: the annotation layers and label sets it declares.
+    - `items`, `minted`, `unclustered`: the build's own figures, read from its log: the items
+      it built, the annotations it made from key columns, and the member rows in no annotation
+      (a null key). Each is `None` where the log does not give it.
     - `seconds`: how long the check, the build and the server's start took.
     - `viewer`, `session`, `control`: the addresses readers read from, tokens are made at, and
       the operator writes to.
@@ -116,6 +134,9 @@ class CommitReport(Report):
 
     views: dict = field(default_factory=dict)
     layers: list[str] = field(default_factory=list)
+    items: int | None = None
+    minted: int | None = None
+    unclustered: int | None = None
     seconds: float | None = None
     viewer: str | None = None
     session: str | None = None
@@ -128,7 +149,14 @@ class CommitReport(Report):
         views = [
             name if n == 1 else f"{name} ({_count(n, 'view')})" for name, n in self.views.items()
         ]
-        out = [f"built {self._rows_in_words() or 'no rows'}"]
+        if self.items is None:
+            out = [f"inserted {self._rows_in_words() or 'no rows'}"]
+        else:
+            out = [f"built {_count(self.items, 'item')} from {self._rows_in_words() or 'no rows'}"]
+        if self.minted:
+            out.append(f"  {_count(self.minted, 'annotation')} made from key columns")
+        if self.unclustered:
+            out.append(f"  {_count(self.unclustered, 'member row')} in no annotation")
         if views:
             out.append(f"  {_count(len(views), 'view')}: {', '.join(views)}")
         if self.layers:

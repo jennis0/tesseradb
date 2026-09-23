@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -959,11 +960,19 @@ class Database:
             report.viewer = self.listening.viewer
             report.session = self.listening.session
             report.control = self.listening.control
-        meta = self.meta()
-        for view in meta.get("views", []):
-            group = view["id"].split(":")[0]
-            report.views[group] = report.views.get(group, 0) + 1
-        report.layers = [layer["name"] for layer in meta.get("layers", [])]
+        for view in self.meta().get("views", []):
+            name = view.get("group") or view["id"]
+            report.views[name] = report.views.get(name, 0) + 1
+        # From the declaration: a layer gated on a label no row carries is in no reader's meta.
+        for block in document.get("layer", []):
+            report.layers.append(block["name"])
+            if "labels" in block:
+                report.layers.append(block["labels"]["name"])
+        built = _BUILT.search(build.stdout + build.stderr)
+        if built is not None:
+            report.items = int(built.group("items"))
+            report.minted = int(built.group("minted"))
+            report.unclustered = int(built.group("unclustered"))
         return report
 
     def _inserted_rows(self) -> dict:
@@ -1551,6 +1560,15 @@ def _extent_in_words(extent: Any) -> str:
     if extent == "auto":
         return "fitted to the inserted rows, squared, with the build's own margin"
     return str(extent)
+
+
+#: The build's closing line: `built <bundle> (v…): N items, …, M artifact(s) minted, K
+#: unclustered member row(s)`.
+_BUILT = re.compile(
+    r"^built .*: (?P<items>\d+) items, .* (?P<minted>\d+) artifact\(s\) minted, "
+    r"(?P<unclustered>\d+) unclustered member row\(s\)$",
+    re.MULTILINE,
+)
 
 
 # ---------------------------------------------------------------------- create and open
