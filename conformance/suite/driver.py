@@ -23,10 +23,13 @@ at the executor's tick. The driver therefore sequences by eligibility (§12.3):
   a broken plan, not quietly as a mis-attributed delta.
 
 ``serve.tier_width``, ``serve.segment_floor_bytes`` and ``serve.coalesce_width`` reach the
-engine's merge and coalesce policies, and the config written below sets none of them, so the
-defaults hold (4, 16 MiB and 8): merge eligibility is four same-tier segments, coalesce
-eligibility is eight same-tier delta-axis entries. The base segment is in no merge window
-whatever ``max_merged_segment_bytes`` says: a merge selects from the flushed segments only.
+engine's merge and coalesce policies, and the config written below sets none of them unless a
+harness asks for a merge width, so the defaults hold (4, 16 MiB and 8): merge eligibility is four
+same-tier segments, coalesce eligibility is eight same-tier delta-axis entries. The coalesce also
+takes external-id runs four at a time under a 16 MiB floor, a cadence no config reaches, so at
+fixture size a merge tick at the default width also dispatches that coalesce. The base segment is
+in no merge window whatever ``max_merged_segment_bytes`` says: a merge selects from the flushed
+segments only.
 
 ## Barriers
 
@@ -294,6 +297,7 @@ def _suite_config(
     compute_threads: int | None = None,
     big_batches: bool = False,
     automatic_folds: bool = True,
+    tier_width: int | None = None,
 ) -> str:
     # θ and both caps above any *fixture* total, so at fixture size every tile is saturated and
     # the diff compares exact membership. No cap clears every corpus — saturation is observed per
@@ -303,6 +307,7 @@ def _suite_config(
     # from selection (module doc); the config loader refuses the value if the base ever shrinks
     # under it, which is the loud failure this suite wants.
     threads_line = "" if compute_threads is None else f"compute_threads = {compute_threads}\n"
+    tier_line = "" if tier_width is None else f"tier_width = {tier_width}\n"
     # The window being off leaves the schedule's gauge triggers armed; these turn them off too.
     fold_lines = (
         ""
@@ -348,7 +353,7 @@ k_min = 2
 k_max_marks = 1000000
 theta_target_marks = 1099511627776
 max_merged_segment_bytes = 1048576
-{threads_line}
+{threads_line}{tier_line}
 [ingest]
 flush_max_age_secs = 86400
 compaction_window_start = "off"
@@ -550,6 +555,8 @@ class SuiteHarness:
     #: Whether the schedule may dispatch a fold on its own; False leaves `/control/compact` as the
     #: only way one runs.
     automatic_folds: bool = True
+    #: Segments a merge takes; None leaves the engine's default of four.
+    merge_tier_width: int | None = None
 
     server: Server | None = None
     proc: subprocess.Popen | None = None
@@ -605,6 +612,7 @@ class SuiteHarness:
                 compute_threads=self.profile.compute_threads,
                 big_batches=os.environ.get("TESSERA_SUITE_BIG_BATCHES") == "1",
                 automatic_folds=self.automatic_folds,
+                tier_width=self.merge_tier_width,
             )
         )
         env = os.environ.copy()
@@ -1075,7 +1083,7 @@ class Merge(_TickStage):
         poll(
             lambda: h.executor()["merges"] > self._snap["merges"],
             f"{self.label}: no merge published — either the ladder was not eligible "
-            f"(four same-tier segments) or the tick never dispatched it",
+            f"(tier_width same-tier segments) or the tick never dispatched it",
         )
         version = h.status()["partitions"][0]["segments_version"]
         if version <= self._snap["segments_version"]:
