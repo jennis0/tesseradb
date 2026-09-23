@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path as AxumPath, Query as AxumQuery, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -27,7 +27,7 @@ use tessera_engine::{
 
 use crate::error::{map_engine_error, ApiError};
 use crate::health::{healthz, readyz};
-use crate::state::{ApiJson, AppState, GatePermits, ViewerSession};
+use crate::state::{ApiJson, ApiQuery, AppState, GatePermits, ViewerSession};
 use crate::stream::{CancelGuard, Producer};
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -335,7 +335,7 @@ async fn categories(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
     AxumPath(column): AxumPath<String>,
-    AxumQuery(query): AxumQuery<CategoriesQuery>,
+    ApiQuery(query): ApiQuery<CategoriesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let meta = state.engine.meta();
     let visible = session.visible_views();
@@ -467,18 +467,8 @@ async fn suggest(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
     AxumPath(column): AxumPath<String>,
-    query: Result<AxumQuery<SuggestQuery>, axum::extract::rejection::QueryRejection>,
+    ApiQuery(query): ApiQuery<SuggestQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // An unknown parameter fails extraction; answer with this route's 422 and a fixed detail
-    // rather than axum's plain-text rejection or the caller-supplied serde error.
-    let AxumQuery(query) = query.map_err(|_| {
-        ApiError::Contract(
-            "the query string is malformed, or carries a parameter this route does not define; \
-             send only `q`, `limit`, `counts` and `view`"
-                .to_string(),
-        )
-    })?;
-
     if query.q.len() > 256 {
         return Err(ApiError::Contract(format!(
             "q must be at most 256 bytes, got {}",
