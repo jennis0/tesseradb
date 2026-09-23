@@ -37,6 +37,7 @@ use crate::Generation;
 
 pub(crate) use cursor::CursorKey;
 use cursor::{Binding, ItemsCursor, Position, Route};
+use columns::read_page;
 use plan::FieldPlan;
 use walk::{filter_rows, Clock, Collected, PageCx, Walk, Walked};
 
@@ -505,15 +506,13 @@ impl Engine {
             }
             _ => {}
         }
-        let values = self.read_page(
-            planned.session,
-            &generation,
-            &open,
+        let (batch, kept, bytes) = read_page(
+            &cx,
             &planned.plan,
             &rows,
             req.keep_unmatched,
+            req.limits.max_page_bytes,
         )?;
-        let (batch, kept, bytes) = values.into_batch(req.limits.max_page_bytes)?;
         let ended_by = if kept < rows.len() {
             walk.position = walk.position_at(&cx, &rows[kept - 1]);
             PageEndedBy::Bytes
