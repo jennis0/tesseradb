@@ -136,7 +136,7 @@ pub(super) struct Walk {
     ceiling: u32,
     stretch: Option<Stretch>,
     pub(super) position: Position,
-    /// The first region verdict an evaluation reached, for the response's header.
+    /// The coarsest verdict the walk's evaluations have reached, for the response's header.
     pub(super) region: Option<RegionVerdict>,
 }
 
@@ -387,7 +387,7 @@ impl Walk {
                 let domain = crossing_domain(&[parts], &row_bases);
                 let routed =
                     filter_rows(cx, expr, Some(&Bitmap::of(&entities)), &domain, true, cancel)?;
-                self.region = self.region.or(routed.region);
+                self.region = RegionVerdict::coarsest(self.region, routed.region);
                 Some(routed.rows)
             }
         };
@@ -449,7 +449,7 @@ impl Walk {
                 let total = u32::try_from(row_space.total_rows()).unwrap_or(u32::MAX);
                 for_each_run_in(&rows, 0..total, &mut |run| domain.push(run));
                 let routed = filter_rows(cx, expr, Some(&range), &domain, true, cancel)?;
-                self.region = self.region.or(routed.region);
+                self.region = RegionVerdict::coarsest(self.region, routed.region);
                 Some(routed.rows)
             }
         };

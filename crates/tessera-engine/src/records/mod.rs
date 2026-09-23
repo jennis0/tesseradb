@@ -122,7 +122,8 @@ pub struct ItemsHead {
     /// The page size used, after the ceiling.
     pub page_rows: u32,
     pub counts: Option<ItemsCounts>,
-    /// The coarsest verdict a `region` leaf reached, for the response's header.
+    /// The coarsest verdict the response's region leaves reached before the head was sent: in
+    /// the count's evaluation and the first page's, for the response's header.
     pub region: Option<RegionVerdict>,
 }
 
@@ -587,7 +588,7 @@ impl Planned<'_> {
             order: self.order,
             page_rows: self.page_rows,
             counts: self.counts,
-            region: self.counted_region.or(walk.region),
+            region: RegionVerdict::coarsest(self.counted_region, walk.region),
         }
     }
 }

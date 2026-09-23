@@ -963,10 +963,8 @@ impl Engine {
                         let (rows, verdict) = evaluate(expr, true, false)?;
                         // The coarsest of the two: a cover anywhere makes the response's verdict
                         // a cover.
-                        region_verdict = match (region_verdict, verdict) {
-                            (Some(a), Some(b)) => Some(a.coarser(b)),
-                            (a, b) => a.or(b),
-                        };
+                        region_verdict =
+                            crate::region::RegionVerdict::coarsest(region_verdict, verdict);
                         Some(rows)
                     }
                 };
