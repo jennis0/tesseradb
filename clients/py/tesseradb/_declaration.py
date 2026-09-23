@@ -570,8 +570,9 @@ def carry_labels(layer: str, block: dict, column: str) -> None:
     """Write `column` as the field of the layer's `artifact_visibility`, refusing a different
     column where one is already written.
 
-    `block` is the TOML block the build reads or the body a layer new to the server is sent
-    with, never the SDK's own block.
+    `block` is anything holding an `artifact_visibility`: the TOML block the build reads, the
+    body a new layer is sent with, the SDK's own block once a commit sending the column is
+    accepted, or a copy made only to check an insert.
     """
     visibility = dict(block.get("artifact_visibility") or {})
     held = visibility.get("field")

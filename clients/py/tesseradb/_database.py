@@ -300,7 +300,7 @@ class Database:
           or `{"field": column, "default": label}`. The field names the column each annotation's
           own labels are read from; an artifacts insert names that column with `access=`, and an
           insert naming another column is refused. Without a field, the first artifacts insert
-          naming `access=` sets it before the first commit.
+          naming `access=` sets it.
         - `computed`: which properties the server computes per reader: `"centroid"`, `"box"` and
           `"hull"`.
         - `supplied`: content you provide per annotation, such as text, as
@@ -537,7 +537,7 @@ class Database:
     def _refuse_an_insert_the_target_cannot_take(
         self, target: str, kind: str, role: str, block: dict, named: dict
     ) -> None:
-        """What this target cannot be given: the scope's own column, and the rule not built yet."""
+        """Refuse rows for a scoped layer that do not name their view."""
         scope = block.get("scope")
         group = scope.get("group") if isinstance(scope, dict) else None
         if group is not None and role in ("artifacts", "members", "key") and "view" not in named:
