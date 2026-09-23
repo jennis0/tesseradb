@@ -3,8 +3,8 @@
 //! A stretch is the part of the view a walk has evaluated the filter over: a range of map cells
 //! in map order, a range of item numbers in stored order. It starts at the scan position and
 //! spans a target number of rows, and when a page empties one before filling, the next is four
-//! times longer, so a sparse filter costs a few evaluations per response rather than one per
-//! page. The filter's answer is held in the row positions of the publication it was evaluated
+//! times longer, so a sparse filter costs a few evaluations per read rather than one per page. The
+//! size reached travels in the cursor, so a resumed read continues at it. The filter's answer is held in the row positions of the publication it was evaluated
 //! under, so a stretch is evaluated again when the prefix, the segment set or the overlay moves.
 //! Visibility is never held: every page tests every row against the mask composed for that page.
 //!
@@ -131,7 +131,7 @@ pub(super) struct Walk {
     filter: Option<FilterExpr>,
     keep_unmatched: bool,
     /// The rows the next stretch spans, across every segment.
-    target: u32,
+    pub(super) target: u32,
     /// The rows a stretch may span, from the byte ceiling a stretch is held to.
     ceiling: u32,
     stretch: Option<Stretch>,
@@ -223,11 +223,13 @@ pub(super) fn filter_rows(
 }
 
 impl Walk {
-    /// A walk from `position` whose stretches hold no more than `stretch_bytes`.
+    /// A walk from `position` whose stretches hold no more than `stretch_bytes`. The first
+    /// stretch spans `stretch` rows where a resumed read carries the size it reached, and the
+    /// page size otherwise.
     pub(super) fn new(
         filter: Option<FilterExpr>,
         keep_unmatched: bool,
-        page_rows: u32,
+        stretch: u32,
         stretch_bytes: usize,
         position: Position,
     ) -> Walk {
@@ -237,7 +239,7 @@ impl Walk {
         Walk {
             filter,
             keep_unmatched,
-            target: page_rows.clamp(STRETCH_MIN, ceiling),
+            target: stretch.clamp(STRETCH_MIN, ceiling),
             ceiling,
             stretch: None,
             position,

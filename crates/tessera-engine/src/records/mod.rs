@@ -366,7 +366,7 @@ impl Engine {
         let walk = Walk::new(
             req.filter.clone(),
             req.keep_unmatched,
-            page_rows,
+            resumed.map_or(page_rows, |cursor| cursor.stretch),
             req.limits.max_page_bytes,
             resumed.map_or(Position::start(order), |cursor| cursor.position),
         );
@@ -398,10 +398,11 @@ impl Engine {
     ) -> Result<ItemsTrailer> {
         let limits = &planned.req.limits;
         let mut clock = Clock::new(started, limits.response_time, planned.req.cancel.clone());
-        let cursor_at = |position: Position| {
+        let cursor_at = |walk: &Walk| {
             let cursor = ItemsCursor {
                 idset: planned.idset,
-                position,
+                position: walk.position,
+                stretch: walk.target,
             };
             self.cursor_key.seal(&planned.binding, &cursor.encode())
         };
@@ -442,7 +443,7 @@ impl Engine {
                     rows += batch.num_rows() as u64;
                     bytes += page_bytes;
                     let end = ItemsPageEnd {
-                        next: (ended_by != PageEndedBy::End).then(|| cursor_at(walk.position)),
+                        next: (ended_by != PageEndedBy::End).then(|| cursor_at(&walk)),
                         ended_by,
                         bytes: page_bytes,
                     };
@@ -460,7 +461,7 @@ impl Engine {
         Ok(ItemsTrailer {
             pages,
             rows,
-            next: (ended_by != ResponseEndedBy::End).then(|| cursor_at(walk.position)),
+            next: (ended_by != ResponseEndedBy::End).then(|| cursor_at(&walk)),
             ended_by,
         })
     }

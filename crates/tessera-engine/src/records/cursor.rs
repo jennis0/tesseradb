@@ -20,7 +20,7 @@ use crate::error::{EngineError, Result};
 const KEY_DOMAIN: &[u8] = b"tessera-records-cursor-key-v1";
 const AAD_DOMAIN: &[u8] = b"tessera-records-cursor-v1";
 /// The sealed payload's layout. A cursor of another format does not open.
-const FORMAT: u8 = 1;
+const FORMAT: u8 = 2;
 const NONCE_LEN: usize = 24;
 
 /// The route a cursor was issued on, bound into its associated data.
@@ -147,11 +147,14 @@ impl Position {
 pub(super) struct ItemsCursor {
     pub(super) idset: u32,
     pub(super) position: Position,
+    /// The rows the read's next stretch spans, so a resumed read continues at the size it had
+    /// grown to.
+    pub(super) stretch: u32,
 }
 
-/// `idset, order, flags, last (u32, u64), scan (u32, u64)`, little-endian, where bit 0 of `flags`
+/// `idset, order, flags, last (u32, u64), scan (u32, u64), stretch`, little-endian, where bit 0 of `flags`
 /// says `last` is present and bit 1 that `scan` is.
-const PAYLOAD_LEN: usize = 4 + 1 + 1 + 12 + 12;
+const PAYLOAD_LEN: usize = 4 + 1 + 1 + 12 + 12 + 4;
 const HAS_LAST: u8 = 1;
 const HAS_SCAN: u8 = 2;
 
@@ -172,6 +175,7 @@ impl ItemsCursor {
             out.extend_from_slice(&a.to_le_bytes());
             out.extend_from_slice(&b.to_le_bytes());
         }
+        out.extend_from_slice(&self.stretch.to_le_bytes());
         out
     }
 
@@ -195,6 +199,7 @@ impl ItemsCursor {
         Ok(ItemsCursor {
             idset,
             position: Position { order, last, scan },
+            stretch: u32_at(30),
         })
     }
 }
@@ -224,6 +229,7 @@ mod tests {
                 last: Some((3, 99)),
                 scan: Some((4, u64::MAX)),
             },
+            stretch: 16_384,
         };
         let token = key.seal(&binding("s0", 0, 1), &cursor.encode());
         let opened = key.open(&binding("s0", 0, 1), &token).unwrap();
@@ -252,6 +258,7 @@ mod tests {
                 last: None,
                 scan: Some((12, 0)),
             },
+            stretch: 4096,
         }
         .encode();
         let a = key.seal(&binding("s0", 0, 1), &payload);
