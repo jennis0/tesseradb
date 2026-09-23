@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-import re
+try:  # 3.11+
+    import tomllib
+except ModuleNotFoundError:  # 3.10 on this box
+    import tomli as tomllib
+import subprocess
 from collections import Counter
 from pathlib import Path
 from typing import Sequence
@@ -8,14 +12,15 @@ from typing import Sequence
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
 import requests
 from pyarrow import ipc
 
 from .. import serve_battery
+from .control import quote
 from .holdout import wire_columns
+from .split import read_view_rows
 
-#: Rows read from the head of a file to draw a probe's values from.
+#: A view's rows read to draw a probe's values from.
 PROBE_SAMPLE_ROWS = 200_000
 
 # ---------------------------------------------------------------------------------------------
@@ -92,28 +97,70 @@ def ask_probes(
             except requests.exceptions.RequestException as e:
                 incomplete.append(f"the census request at {where} was not answered: {e}")
                 continue
-            filters[probe["name"]] = (s["counts"] or {}).get("matched")
-        else:
-            r = requests.get(
-                f"{viewer}/v1/categories/{probe['categories']}",
-                headers={"Authorization": f"Bearer {token}"},
-                params={"view": view},
-                timeout=60,
-            )
-            if r.status_code != 200:
-                incomplete.append(f"the census request at {where} answered {r.status_code}: {r.text[:200]}")
+            if s["shed"] or s["counts"] is None:
+                incomplete.append(
+                    f"the census request at {where} did not arrive whole: "
+                    f"{s['shed_error'] or 'no counts frame or no trailer'}"
+                )
                 continue
-            categories[probe["categories"]] = sorted(value["key"] for value in r.json()["values"])
+            filters[probe["name"]] = s["counts"].get("matched")
+        else:
+            keys = category_keys(viewer, token, view, probe["categories"], where, incomplete)
+            if keys is not None:
+                categories[probe["categories"]] = sorted(keys)
     return filters, categories
 
 
-def filter_probes(rung: Path, views: Sequence[dict], view: dict, meta: dict) -> list[dict]:
-    """What a view's census asks beyond counts and layers: for each filter operand `/v1/meta`
-    offers on the view, a filter or two whose values are drawn from the column where the view's
-    batches take it, and a category column's value list. A group-scoped column is read from a
-    view holding the same key and an entity-scoped one from any view carrying it."""
+def category_keys(
+    viewer: str, token: str, view: str, column: str, where: str, incomplete: list[str]
+) -> list[str] | None:
+    """Every value key `/v1/categories` lists for `column` in this view, following `next` to the
+    last page; None, with a sentence in `incomplete`, where a page was refused or a cursor came
+    back a second time."""
+    keys: list[str] = []
+    cursors: set[str] = set()
+    params = {"view": view}
+    while True:
+        r = requests.get(
+            f"{viewer}/v1/categories/{quote(column)}",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=60,
+        )
+        if r.status_code != 200:
+            incomplete.append(f"the census request at {where} answered {r.status_code}: {r.text[:200]}")
+            return None
+        page = r.json()
+        keys += [value["key"] for value in page["values"]]
+        cursor = page.get("next")
+        if cursor is None:
+            return keys
+        if cursor in cursors:
+            incomplete.append(f"the census request at {where} answered the cursor {cursor!r} twice")
+            return None
+        cursors.add(cursor)
+        params = {"view": view, "after": cursor}
+
+
+def filter_probes(
+    rung: Path, views: Sequence[dict], view: dict, meta: dict, binary: Path
+) -> tuple[list[dict], dict[str, int]]:
+    """What a view's census asks beyond counts and layers, and how many probes each filter operand
+    `/v1/meta` offers on the view produced, by column. For each operand, a filter or two whose values are drawn from the rows the
+    view's batches take the column from, and a category column's value list. A group-scoped column
+    is read from a view holding the same key and an entity-scoped one from any view carrying it."""
     scoped = {family["name"]: set(family["views"]) for family in meta.get("scoped_scalars") or []}
+    declared = tomllib.loads((rung / "corpus.toml").read_text())
+    analysers = {a["name"]: a.get("analyser") for a in declared.get("attribute", [])}
     probes: list[dict] = []
+    offered: dict[str, int] = {}
+    held: list[np.ndarray] = []
+
+    def entities() -> np.ndarray:
+        if not held:
+            held.append(np.unique(read_view_rows(view, ["entity_id"]).column("entity_id").to_numpy()))
+        return held[0]
+
     for operand in meta.get("filter_operands") or []:
         column = operand["column"]
         if operand.get("scope"):
@@ -123,37 +170,48 @@ def filter_probes(rung: Path, views: Sequence[dict], view: dict, meta: dict) -> 
         else:
             candidates = list(views)
         candidates.sort(key=lambda v: v["id"] != view["id"])
-        values = column_sample(rung, candidates, column)
-        if values is not None:
-            probes += family_probes(column, operand["family"], operand["operands"], values)
-    return probes
+        values = column_sample(rung, view, candidates, column, entities)
+        asked = [] if values is None else family_probes(
+            column, operand["family"], operand["operands"], values, binary, analysers.get(column)
+        )
+        offered[column] = len(asked)
+        probes += asked
+    return probes, offered
 
 
-def column_sample(rung: Path, candidates: Sequence[dict], column: str) -> pa.Array | None:
-    """The first rows' non-null values of `column`, from the first of `candidates` whose batches
-    carry it: its points file, or the file the column is joined from."""
-    for view in candidates:
-        _, attributes, joined = wire_columns(rung, view)
+def column_sample(
+    rung: Path, view: dict, candidates: Sequence[dict], column: str, entities
+) -> pa.Array | None:
+    """Up to `PROBE_SAMPLE_ROWS` non-null values of `column`, from the first of `candidates` whose
+    batches carry it: its points file, or the file the column is joined from. Read from any file
+    other than `view`'s own points file, only the rows of the entities `view` holds, `entities()`,
+    are kept, so every value is one `view` has."""
+    for candidate in candidates:
+        _, attributes, joined = wire_columns(rung, candidate)
         if column not in attributes:
             continue
         source = next(
-            ({"points": j["file"], "select": j["select"]} for j in joined if column in j["columns"]),
-            view,
+            (
+                {"points": j["file"], "select": j["select"], "fields": j["fields"]}
+                for j in joined
+                if column in j["columns"]
+            ),
+            candidate,
         )
-        select = source["select"]
-        wanted = [column] + ([select[0]] if select else [])
-        head = next(
-            pq.ParquetFile(source["points"]).iter_batches(PROBE_SAMPLE_ROWS, columns=wanted), None
-        )
-        if head is None:
-            return None
-        if select is not None:
-            head = head.filter(pc.equal(head.column(select[0]), select[1]))
-        return head.column(column).drop_null()
+        keep = None if source is candidate and candidate["id"] == view["id"] else entities()
+        rows = read_view_rows(source, [column], keep=keep, limit=PROBE_SAMPLE_ROWS)
+        return rows.column(column).combine_chunks().drop_null()
     return None
 
 
-def family_probes(column: str, family: str, operators: Sequence[str], values: pa.Array) -> list[dict]:
+def family_probes(
+    column: str,
+    family: str,
+    operators: Sequence[str],
+    values: pa.Array,
+    binary: Path,
+    analyser: str | None,
+) -> list[dict]:
     """A numeric column's presence and upper half, a category or keyword column's three commonest
     values and a category's value list, and a text column's two commonest words."""
     if len(values) == 0:
@@ -179,15 +237,30 @@ def family_probes(column: str, family: str, operators: Sequence[str], values: pa
         return probes
     if family == "text" and "match" in operators:
         words = Counter(
-            word
-            for text in values.slice(0, 2000).to_pylist()
-            for word in re.findall(r"[^\W\d_]{4,}", str(text).lower())
+            token
+            for token in tokens(binary, analyser, values.slice(0, 2000).to_pylist())
+            if len(token) >= 4 and token.isalpha()
         )
         return [
             {"name": f"{column} matches {word}", "filters": {column: {"match": word}}}
             for word, _ in sorted(words.items(), key=lambda item: (-item[1], item[0]))[:2]
         ]
     return []
+
+
+def tokens(binary: Path, analyser: str | None, texts: Sequence) -> list[str]:
+    """Every token of `texts` as the column's own analyser produces it, through `tessera
+    tokenise`, so a probe's word is a term the index holds. Words of four letters or more are
+    kept by the caller, which leaves out the short and numeric tokens every text has."""
+    lines = "".join(" ".join(str(text).split()) + "\n" for text in texts)
+    proc = subprocess.run(
+        [str(binary), "tokenise", *(["--analyser", analyser] if analyser else [])],
+        input=lines,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [token for line in proc.stdout.splitlines() for token in line.split("\t") if token]
 
 
 def layered(
@@ -391,11 +464,15 @@ def compare_census(folded: dict, all_in: dict) -> dict:
     }
 
 
-def census_coverage(one_view: dict, declared: dict) -> dict:
+def census_coverage(
+    one_view: dict, declared: dict, offered: dict | None = None, all_in: dict | None = None
+) -> dict:
     """What a census actually compared, read from the principal that sees the most: artifacts and
-    parent edges per census zoom, and per layer the levels an artifact was served at against the
-    levels the layer declares. `declared` is each layer's declared levels, empty for a layer that
-    declares none, which sits wholly at level 0.
+    parent edges per census zoom, per layer the levels an artifact was served at against the
+    levels the layer declares, and the filter probes against `offered`, the probes each operand
+    produced by column. `declared` is
+    each layer's declared levels, empty for a layer that declares none, which sits wholly at level
+    0. `all_in` is the same view's census on the all-in build, whose probes must match something.
     """
     if not one_view:
         return {}
@@ -440,15 +517,21 @@ def census_coverage(one_view: dict, declared: dict) -> dict:
             level for level in entry["declared_levels"] if level not in compared
         ]
     filters = row.get("filters") or {}
+    reference = (all_in or {}).get(principal) or {}
     return {
         "principal": principal,
         "zooms": zooms,
         "layers": layers,
         "visible": row["zoom0_visible"],
         "filters": {
+            "offered": len(offered or {}),
+            "unprobed": sorted(column for column, n in (offered or {}).items() if not n),
             "compared": len(filters),
             "matching": sum(1 for matched in filters.values() if matched),
             "category_columns": len(row.get("categories") or {}),
+            "unmatched_on_all_in": sorted(
+                name for name, matched in (reference.get("filters") or {}).items() if not matched
+            ),
         },
     }
 
@@ -462,6 +545,22 @@ def coverage_failures(coverage: dict) -> list[str]:
         for layer, entry in sorted((coverage.get("layers") or {}).items())
         if entry.get("levels_missing")
     ]
+
+
+def probe_failures(coverage: dict) -> list[str]:
+    """A sentence where the filter comparison proved nothing: an operand `/v1/meta` offers that
+    produced no probe, or a probe that matched nothing on the all-in build, where its values came
+    from."""
+    filters = coverage.get("filters") or {}
+    out = [
+        f"asked no probe of {column}, a filter operand /v1/meta offers"
+        for column in filters.get("unprobed") or []
+    ]
+    out += [
+        f"asked the probe {name}, which matched nothing on the all-in build"
+        for name in filters.get("unmatched_on_all_in") or []
+    ]
+    return out
 
 
 def incomplete_sentences(views: dict) -> list[str]:

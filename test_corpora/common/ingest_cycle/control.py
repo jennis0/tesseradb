@@ -7,7 +7,9 @@ import requests
 
 
 def quote(segment: str) -> str:
+    """One URL path segment, every reserved character percent-encoded."""
     return urllib.parse.quote(segment, safe="")
+
 
 # ---------------------------------------------------------------------------------------------
 # The control plane
@@ -77,7 +79,7 @@ class Control:
         """`PATCH /control/layers/{name}/artifacts`: more members for artifacts already held."""
         t0 = time.perf_counter()
         r = session.patch(
-            f"{self.base}/control/layers/{urllib.parse.quote(layer, safe='')}/artifacts",
+            f"{self.base}/control/layers/{quote(layer)}/artifacts",
             headers=self.headers | {"Content-Type": "application/json"},
             data=body,
             timeout=timeout,
@@ -86,12 +88,12 @@ class Control:
 
     def publish(self, layer: str, body: bytes, session: requests.Session, timeout=1800):
         """`PUT /control/layers/{name}/artifacts`, with the body already serialised as bytes by
-        [`Publication`] rather than through `json=`. The layer name is percent-encoded, since
-        this rung's names are path-shaped and would otherwise 404 at the router.
+        [`Publication`] rather than through `json=`. The layer name is percent-encoded, since a
+        path-shaped name would otherwise 404 at the router.
         """
         t0 = time.perf_counter()
         r = session.put(
-            f"{self.base}/control/layers/{urllib.parse.quote(layer, safe='')}/artifacts",
+            f"{self.base}/control/layers/{quote(layer)}/artifacts",
             headers=self.headers | {"Content-Type": "application/json"},
             data=body,
             timeout=timeout,

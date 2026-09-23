@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
+use tessera_engine::scalar_column::{self, ScalarColumn};
 use tessera_engine::{
-    DeclaredScalar, Projection, ScalarType, ScopedScalar, Vocabularies, VocabularyKind, ABSENT_CODE,
+    DeclaredScalar, Projection, ScalarType, ScalarValue, ScopedScalar, Vocabularies,
+    VocabularyKind, ABSENT_CODE,
 };
 use tessera_lifecycle::{BatchArtifacts, WalScalar};
 use tessera_types::layer::LayerDeclaration;
@@ -68,56 +70,6 @@ pub(crate) struct ParsedBatch {
     /// frame's edge (`projections.md` §7). Always `0` under `projection = "none"`, which has no
     /// domain.
     pub(crate) clipped: u64,
-}
-
-/// One value out of an ingest batch's column, read **at the column's declared wire type**
-/// ([`DeclaredScalar::wire_type`]) — `None` when the Arrow column is not that type, which the
-/// caller refuses naming both types rather than by dropping the column.
-///
-/// # The declaration drives the decode, and the match is exhaustive over `ScalarType`
-///
-/// Two constructions have failed here, and this shape exists against both:
-///
-/// * **A second type table.** An earlier form carried its own type spellings — `uint64` where the
-///   flush path parsed `u64` — so a manifest one path accepted was one the other refused. The
-///   spellings are gone entirely: the expected type arrives as a [`ScalarType`], and the one
-///   spelling in any refusal is [`ScalarType::arrow_type_name`]'s.
-/// * **Inferring the type from the array.** The successor answered "which type is this column?"
-///   by a chain of downcasts, and a chain holds exactly the types its author remembered — the
-///   compiler has nothing to check it against. Six declarable types (`bool`, `i8`, `i16`, `i32`,
-///   `f64`, `timestamp_us`) were declarable, buildable and un-ingestable that way,
-///   `timestamp_us` invisibly so: Arrow's `TimestampMicrosecondArray` is a distinct type that no
-///   `Int64Array` downcast reaches.
-///
-/// Matching on [`ScalarType`] makes the completeness structural rather than remembered: a type
-/// added to the declarable set fails to compile here until this function says what an ingest
-/// batch carries for it. `Keyword` and `Text` never arrive — `wire_type` maps both to `Utf8` —
-/// but decode identically rather than panicking, because a string *is* their wire form.
-fn scalar_at(col: &dyn Array, row: usize, ty: ScalarType) -> Option<WalScalar> {
-    use arrow::array::{
-        BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
-        StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
-    };
-    let any = col.as_any();
-    Some(match ty {
-        ScalarType::Bool => WalScalar::Bool(any.downcast_ref::<BooleanArray>()?.value(row)),
-        ScalarType::U8 => WalScalar::U8(any.downcast_ref::<UInt8Array>()?.value(row)),
-        ScalarType::U16 => WalScalar::U16(any.downcast_ref::<UInt16Array>()?.value(row)),
-        ScalarType::U32 => WalScalar::U32(any.downcast_ref::<UInt32Array>()?.value(row)),
-        ScalarType::U64 => WalScalar::U64(any.downcast_ref::<UInt64Array>()?.value(row)),
-        ScalarType::I8 => WalScalar::I8(any.downcast_ref::<Int8Array>()?.value(row)),
-        ScalarType::I16 => WalScalar::I16(any.downcast_ref::<Int16Array>()?.value(row)),
-        ScalarType::I32 => WalScalar::I32(any.downcast_ref::<Int32Array>()?.value(row)),
-        ScalarType::I64 => WalScalar::I64(any.downcast_ref::<Int64Array>()?.value(row)),
-        ScalarType::F32 => WalScalar::F32(any.downcast_ref::<Float32Array>()?.value(row)),
-        ScalarType::F64 => WalScalar::F64(any.downcast_ref::<Float64Array>()?.value(row)),
-        ScalarType::TimestampUs => {
-            WalScalar::TimestampUs(any.downcast_ref::<TimestampMicrosecondArray>()?.value(row))
-        }
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-            WalScalar::Utf8(any.downcast_ref::<StringArray>()?.value(row).to_string())
-        }
-    })
 }
 
 /// One category cell: its value key resolved to the pinned code, at the column's declared width.
@@ -274,18 +226,13 @@ fn check_columns<'b>(
         let Some(col) = batch.column_by_name(&d.name) else {
             continue;
         };
-        // One row's worth is enough to identify the column's type, and a batch with no rows has
-        // no scalar to mistype. The decode is keyed by the declaration (see `scalar_at`), so
-        // "wrong type" and "a type this build cannot store" are one refusal: either way the
-        // column is not what the manifest says an ingest batch carries for it.
-        let expected = d.wire_type();
-        if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
+        if !wire_carries(d, col.data_type()) {
             return Err(DecodeError(format!(
                 "{body_name}: column '{}' is {:?}, but MANIFEST.declared_scalars declares it {} \
                  (contracts §2.6); refused rather than dropped",
                 d.name,
                 col.data_type(),
-                expected.arrow_type_name()
+                d.wire_type().arrow_type_name()
             )));
         }
     }
@@ -295,44 +242,89 @@ fn check_columns<'b>(
         let Some(col) = batch.column_by_name(&f.name) else {
             continue;
         };
-        let expected = scoped_wire_type(f);
-        if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
+        if !wire_carries(&scoped_as_declared(f), col.data_type()) {
             return Err(DecodeError(format!(
                 "{body_name}: column '{}' is {:?}, but it is a group-scoped attribute declared {} \
                  (views §5); refused rather than dropped",
                 f.name,
                 col.data_type(),
-                expected.arrow_type_name()
+                scoped_wire_type(f).arrow_type_name()
             )));
         }
     }
     Ok(memberships)
 }
 
-/// One row's value of a column `check_columns` has passed, read against `declared`: a scoped
-/// family's column is read against [`scoped_as_declared`]'s declaration.
+/// Whether a batch column of Arrow type `found` carries `declared`. A category's column is its
+/// value keys as `utf8`; every other declaration is read by the rule a build reads a points file
+/// by.
+fn wire_carries(declared: &DeclaredScalar, found: &arrow::datatypes::DataType) -> bool {
+    match declared.vocabulary {
+        Some(_) => *found == arrow::datatypes::DataType::Utf8,
+        None => scalar_column::carries(declared.arrow_type, found),
+    }
+}
+
+/// A column `check_columns` has passed, read once for all of one record batch's rows.
+enum Cells<'b> {
+    /// A category's value keys, resolved per row against its vocabulary.
+    Keys(&'b dyn Array),
+    Scalars(ScalarColumn),
+}
+
+impl<'b> Cells<'b> {
+    fn new(col: &'b arrow::array::ArrayRef, declared: &DeclaredScalar) -> Self {
+        match declared.vocabulary {
+            Some(_) => Cells::Keys(col.as_ref()),
+            None => Cells::Scalars(
+                ScalarColumn::new(col, declared.arrow_type)
+                    .expect("check_columns checked the column's type"),
+            ),
+        }
+    }
+}
+
+/// One row's value of a column, read against `declared`: a scoped family's column is read against
+/// [`scoped_as_declared`]'s declaration. `request_row` is the row's number in the request, for a
+/// refusal to name.
 fn cell(
     body_name: &str,
-    col: &dyn Array,
+    cells: &Cells<'_>,
     row: usize,
+    request_row: usize,
     declared: &DeclaredScalar,
     vocabularies: &Vocabularies,
 ) -> Result<WalScalar, DecodeError> {
-    Ok(match declared.vocabulary.as_deref() {
-        // A category's absence is in band and `category_code` already spends it: null resolves to
-        // the reserved code 0, which its vocabulary keeps out of the value space.
-        Some(vocabulary) => category_code(body_name, col, row, declared, vocabulary, vocabularies)?,
-        // **Null is absence, and it must be carried rather than read through.** `a.value(row)` on
-        // a null slot returns whatever the values buffer holds there — 0 for every numeric width —
-        // so reading without this check stores an item with no score as one scoring zero, present
-        // and indistinguishable. It then matches `{gte: -10, lte: 10}`, which is a wrong answer
-        // rather than a missing feature (decision 0064). Every other family has somewhere in band
-        // to put absence; a number has no spare bit pattern, so it travels beside the value as
-        // `WalScalar::Null`.
-        None if col.is_null(row) => WalScalar::Null,
-        None => scalar_at(col, row, declared.wire_type())
-            .expect("every column's type was checked before a row was read"),
-    })
+    match cells {
+        Cells::Keys(col) => {
+            let vocabulary = declared
+                .vocabulary
+                .as_deref()
+                .expect("a column of keys is a category's");
+            category_code(body_name, *col, row, declared, vocabulary, vocabularies)
+        }
+        Cells::Scalars(column) => column.value(row).map(wal_scalar).map_err(|e| {
+            DecodeError(format!(
+                "{body_name}: row {request_row}, column '{}' (declared {}) carries {e}; send a \
+                 value that fits or declare a wider type",
+                declared.name,
+                declared.arrow_type.arrow_type_name(),
+            ))
+        }),
+    }
+}
+
+/// The build's value type as the write-ahead log's, variant for variant.
+fn wal_scalar(value: ScalarValue) -> WalScalar {
+    macro_rules! same {
+        ($($v:ident),* $(,)?) => {
+            match value {
+                $(ScalarValue::$v(x) => WalScalar::$v(x),)*
+                ScalarValue::Null => WalScalar::Null,
+            }
+        };
+    }
+    same!(Bool, U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, TimestampUs, Utf8)
 }
 
 /// Contracts §1: a typed error, never a truncation -- see `EXTERNAL_ID_MAX_LEN`'s doc.
@@ -496,6 +488,14 @@ pub(crate) fn parse_ingest_batch(
 
         let memberships =
             check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
+        let declared_cells: Vec<Option<Cells<'_>>> = declared
+            .iter()
+            .map(|d| batch.column_by_name(&d.name).map(|col| Cells::new(col, d)))
+            .collect();
+        let scoped_cells: Vec<Option<Cells<'_>>> = scoped_declared
+            .iter()
+            .map(|d| batch.column_by_name(&d.name).map(|col| Cells::new(col, d)))
+            .collect();
 
         for i in 0..batch.num_rows() {
             // The artifacts this row names, read before its scalars so a malformed membership
@@ -509,14 +509,14 @@ pub(crate) fn parse_ingest_batch(
             // every row** (`ingest.md` §7.1): an omission misaligns nothing, and a column declared
             // at a running service is one an older client's batches do not carry.
             let mut scalars = Vec::with_capacity(declared.len());
-            for d in declared {
-                let Some(col) = batch.column_by_name(&d.name) else {
+            for (d, cells) in declared.iter().zip(&declared_cells) {
+                let Some(cells) = cells else {
                     // The batch omits the column: this row's absence, on the family's own
                     // spelling (`scoped_absent`'s rule, for a declared scalar).
                     scalars.push(scoped_absent(&declared_as_scoped(d)));
                     continue;
                 };
-                scalars.push(cell(body_name, col.as_ref(), i, d, vocabularies)?);
+                scalars.push(cell(body_name, cells, i, offset + i, d, vocabularies)?);
             }
             // **The scoped tail, in the families' own order** — a second positional list rather
             // than more slots in the one above, because the two are indexed against different
@@ -524,14 +524,17 @@ pub(crate) fn parse_ingest_batch(
             // reserved code 0 for a category, `WalScalar::Null` for everything else, which is
             // decision 0064's presence bitmap.
             let mut scoped_values = Vec::with_capacity(scoped.len());
-            for (f, as_declared) in scoped.iter().zip(&scoped_declared) {
-                let value = match batch.column_by_name(&f.name) {
+            let families = scoped.iter().zip(&scoped_declared).zip(&scoped_cells);
+            for ((f, as_declared), cells) in families {
+                let value = match cells {
                     // A family the batch does not mention: every row is absent in it, which is
                     // an ordinary state and not the omission a declared scalar's would be. A
                     // family has no bundle-wide column, so nothing downstream is misaligned by a
                     // batch that carries none of them.
                     None => scoped_absent(f),
-                    Some(col) => cell(body_name, col.as_ref(), i, as_declared, vocabularies)?,
+                    Some(cells) => {
+                        cell(body_name, cells, i, offset + i, as_declared, vocabularies)?
+                    }
                 };
                 scoped_values.push(value);
             }
@@ -679,6 +682,16 @@ pub(crate) fn parse_values_batch(
             ),
         };
 
+        let cells: Vec<Cells<'_>> = carried
+            .iter()
+            .map(|d| {
+                let col = batch
+                    .column_by_name(&d.name)
+                    .expect("`carried` holds only the batch's own columns");
+                Cells::new(col, d)
+            })
+            .collect();
+
         for i in 0..batch.num_rows() {
             for column in &memberships {
                 tally.read(body_name, column, i, offset)?;
@@ -736,11 +749,8 @@ pub(crate) fn parse_values_batch(
             };
 
             let mut values = Vec::with_capacity(carried.len());
-            for d in &carried {
-                let col = batch
-                    .column_by_name(&d.name)
-                    .expect("the column was found above");
-                values.push(cell(body_name, col.as_ref(), i, d, vocabularies)?);
+            for (d, cells) in carried.iter().zip(&cells) {
+                values.push(cell(body_name, cells, i, offset + i, d, vocabularies)?);
             }
             rows.push(ParsedValuesRow { address, values });
         }

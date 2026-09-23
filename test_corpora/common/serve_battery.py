@@ -178,6 +178,32 @@ def drain(r: requests.Response) -> tuple[bytes, str | None]:
     return bytes(content), shed_error
 
 
+def viewport_request(
+    viewer_base: str,
+    token: str,
+    view_id: str,
+    zoom: int,
+    bbox: Sequence[float],
+    k: int,
+    filters: dict | None = None,
+    layers: str | None = "all",
+    timeout: float = 300.0,
+) -> requests.Response:
+    """`POST /v1/viewport`, answered as a stream whose body the caller reads."""
+    body: dict = {"view": view_id, "zoom": zoom, "bbox": list(bbox), "k": k}
+    if layers is not None:
+        body["layers"] = layers
+    if filters is not None:
+        body["filters"] = filters
+    return requests.post(
+        f"{viewer_base}/v1/viewport",
+        headers={"Authorization": f"Bearer {token}"},
+        json=body,
+        timeout=timeout,
+        stream=True,
+    )
+
+
 def viewport(
     viewer_base: str,
     token: str,
@@ -195,19 +221,8 @@ def viewport(
     returned with `shed` set; a shed sample still carries exact counts. `keep_body` adds the
     frames as they arrived under `body`, for a caller reading a frame this module does not
     summarise; a sample that is written to a result file asks for figures only."""
-    body: dict = {"view": view_id, "zoom": zoom, "bbox": list(bbox), "k": k}
-    if layers is not None:
-        body["layers"] = layers
-    if filters is not None:
-        body["filters"] = filters
     t0 = time.perf_counter()
-    r = requests.post(
-        f"{viewer_base}/v1/viewport",
-        headers={"Authorization": f"Bearer {token}"},
-        json=body,
-        timeout=timeout,
-        stream=True,
-    )
+    r = viewport_request(viewer_base, token, view_id, zoom, bbox, k, filters, layers, timeout)
     content, shed_error = drain(r)
     wall = time.perf_counter() - t0
     out = {

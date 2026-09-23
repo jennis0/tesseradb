@@ -27,9 +27,8 @@ and ``serve.segment_floor_bytes`` are parsed by the server's config and **never 
 engine** — `tessera_engine::session::merge_policy` hard-codes 4 and 16 MiB — and the coalesce's
 width is a `CoalescePolicy` default (8) with no config key at all. So the driver takes the ladder
 as found: merge eligibility is four same-tier segments, coalesce eligibility is eight same-tier
-delta-axis entries, and the one knob that *does* reach selection — ``max_merged_segment_bytes``,
-set here below the base segment's size — is what keeps the base segment out of every merge window
-(its own size bound is the exclusion; `tessera-store::merge`'s module doc).
+delta-axis entries. The base segment is in no merge window whatever ``max_merged_segment_bytes``
+says: a merge selects from the flushed segments only.
 
 ## Barriers
 
@@ -296,6 +295,7 @@ def _suite_config(
     control_port: int,
     compute_threads: int | None = None,
     big_batches: bool = False,
+    automatic_folds: bool = True,
 ) -> str:
     # θ and both caps above any *fixture* total, so at fixture size every tile is saturated and
     # the diff compares exact membership. No cap clears every corpus — saturation is observed per
@@ -305,6 +305,20 @@ def _suite_config(
     # from selection (module doc); the config loader refuses the value if the base ever shrinks
     # under it, which is the loud failure this suite wants.
     threads_line = "" if compute_threads is None else f"compute_threads = {compute_threads}\n"
+    # The window being off leaves the schedule's gauge triggers armed; these turn them off too.
+    fold_lines = (
+        ""
+        if automatic_folds
+        else "\n".join(
+            f'{key} = "off"'
+            for key in (
+                "compaction_max_segments",
+                "compaction_after_deletions",
+                "compaction_dead_rows_fraction",
+                "compaction_dead_bytes_ratio",
+            )
+        )
+    )
     # A plan asking for large batches raises both ceilings together: rows alone would leave the
     # byte ceiling binding first, and the pair is what the WAL-headroom relation is stated over.
     batch_lines = (
@@ -340,30 +354,25 @@ max_merged_segment_bytes = 1048576
 [ingest]
 flush_max_age_secs = 86400
 compaction_window_start = "off"
+{fold_lines}
 {batch_lines}
 """
 
 #: How large a single `/control/ingest` batch may be, when a plan asks for one.
 #:
-#: **Two ceilings bound this, and the tighter one is not the obvious one.** The WAL-headroom
-#: relation — `ingest_queue_bound × ingest_max_batch_bytes` plus the reserved deny headroom under
-#: `wal_hard_limit_bytes` — allows about 224 MiB at the shipped defaults. It is not what binds. A
-#: **64 MiB per-connection ceiling** is, and its argument is sharper: an ingest body is buffered in
-#: full before any handler runs, so this key is what *one* credentialed connection costs, and
-#: nothing bounds how many arrive — the resident relation bounds the admitted window, not the queue
-#: of uploads in front of it. Measured, not read: 200 MiB was refused at startup by that ceiling
-#: while satisfying the WAL relation comfortably.
+#: An ingest body is buffered in full before any handler runs, so this key is what *one*
+#: credentialed connection costs, and nothing bounds how many arrive.
 #:
 #: **What a plan may then pose is bounded by the row's width on the wire, not by the row count**,
 #: and the refusal is a 422 at the door — before decoding, so it costs no queue slot and no WAL
 #: append. Measured against this corpus: 500,000 rows overflow 32 MiB, so a row exceeds 67 B
-#: encoded. The byte cap therefore sits at the ceiling and the row count is chosen to fit under it
-#: with margin, which is the order these two must be reasoned in.
+#: encoded. The byte cap is therefore set first and the row count is chosen to fit under it with
+#: margin, which is the order these two must be reasoned in.
 BIG_BATCH_ROWS = 250_000
 BIG_BATCH_BYTES = 64 * 1024 * 1024
 
 
-def _poll(predicate: Callable[[], bool], what: str, timeout: float = 60.0) -> None:
+def poll(predicate: Callable[[], bool], what: str, timeout: float = 60.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -540,6 +549,9 @@ class SuiteHarness:
     underlay_offset: int = 2
     #: The resource regime this walk runs in (§7, §12.5). The default is no regime at all.
     profile: Profile = Profile()
+    #: Whether the schedule may dispatch a fold on its own; False leaves `/control/compact` as the
+    #: only way one runs.
+    automatic_folds: bool = True
 
     server: Server | None = None
     proc: subprocess.Popen | None = None
@@ -594,6 +606,7 @@ class SuiteHarness:
                 control_port,
                 compute_threads=self.profile.compute_threads,
                 big_batches=os.environ.get("TESSERA_SUITE_BIG_BATCHES") == "1",
+                automatic_folds=self.automatic_folds,
             )
         )
         env = os.environ.copy()
@@ -703,7 +716,7 @@ class SuiteHarness:
         _advise_out_of_page_cache(self.bundle_root, self.run_dir)
         self.spawn()
         self.authorise()
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in self.status()["partitions"]),
             "the cold-booted bundle never became ready",
             timeout=30.0,
@@ -853,7 +866,7 @@ class SuiteHarness:
             timeout=10,
         )
         resp.raise_for_status()
-        _poll(
+        poll(
             lambda: self.executor()["flush"]["ticks"] > before,
             "the pulled tick was never consumed",
             timeout=30.0,
@@ -930,7 +943,7 @@ class Build(Stage):
         h.authorise()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             "the built bundle never became ready",
             timeout=30.0,
@@ -953,7 +966,7 @@ class Load(Stage):
         h.authorise()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             "the reopened bundle never became ready",
             timeout=30.0,
@@ -1003,11 +1016,11 @@ class Write(Stage):
         _post_flush(h.server)
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: h.executor()["flush"]["flushes"] > self._snap["flushes"],
             f"{self.label}: the flush never published",
         )
-        _poll(
+        poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             f"{self.label}: the background refresh never replaced the resident projection — "
             f"a recording now would be short by exactly this batch (decision 0044 D1)",
@@ -1061,7 +1074,7 @@ class Merge(_TickStage):
     tick, published with its own `segments_version` bump — and entitled to change nothing."""
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: h.executor()["merges"] > self._snap["merges"],
             f"{self.label}: no merge published — either the ladder was not eligible "
             f"(four same-tier segments) or the tick never dispatched it",
@@ -1074,7 +1087,7 @@ class Merge(_TickStage):
             )
         # A merge's publication runs the refresh pass; without this wait the after-recording
         # would compare the *old* projection with itself and the stage would test nothing.
-        _poll(
+        poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             f"{self.label}: the post-merge refresh never replaced the resident projection",
         )
@@ -1086,7 +1099,7 @@ class Coalesce(_TickStage):
     which is why its barrier must be the counter — and why the version is asserted still."""
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: h.executor()["coalesces"] > self._snap["coalesces"],
             f"{self.label}: no coalesce published — either no axis reached its width "
             f"(eight same-tier entries) or the tick never dispatched it",
@@ -1171,8 +1184,8 @@ class Fold(Stage):
                 raise RuntimeError(f"the fold failed rather than landed: {compaction}")
             return compaction["folds"] > self._snap["folds"]
 
-        _poll(landed, "no compaction fold landed", timeout=300.0)
-        _poll(
+        poll(landed, "no compaction fold landed", timeout=300.0)
+        poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             "the post-fold refresh never carried the resident session across the flip",
         )
@@ -1213,7 +1226,7 @@ class Rotate(Stage):
         h.pull_tick()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: _wal_member_index(h.wal_path) > self._snap["member"],
             "the WAL never rotated — was there growth since the last rotation for the tick "
             "to see?",
@@ -1310,7 +1323,7 @@ class Killed(Stage):
     def apply(self, h: SuiteHarness) -> None:
         h.stop()
         h.spawn(faults=True)
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             f"{self.label}: the faults build never became ready",
             timeout=30.0,
@@ -1319,7 +1332,7 @@ class Killed(Stage):
         self._snap = self._published_counters(h)
         h.arm(self.kill_at)
         self.stage.provoke(h)
-        _poll(
+        poll(
             lambda: h.arrivals(self.kill_at) >= 1,
             f"{self.label}: the executor never reached {self.kill_at}",
             timeout=300.0,
@@ -1341,7 +1354,7 @@ class Killed(Stage):
         h.authorise()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             f"{self.label}: the restarted bundle never became ready",
             timeout=30.0,
@@ -1443,6 +1456,7 @@ __all__ = [
     "SuiteHarness",
     "Write",
     "check",
+    "poll",
     "ensure_faults_cli_built",
     "run_plan",
     "scope_runner_unavailable",
