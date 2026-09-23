@@ -9,9 +9,12 @@ set -u
 cd "$(dirname "$0")/.."
 
 # docs/writing.md is the source of the list and quotes it, so it is checked by neither set.
-# docs/system belongs in STRICT and is counted here until its remaining hits are rewritten.
-STRICT=(CLAUDE.md docs/README.md docs/index.md docs/start docs/guides/index.md docs/reference docs/developer)
-LOOSE=(docs/system README.md docs/openapi docs/guides/views.md docs/roadmap.md docs/outstanding.md docs/ingest-campaign.md)
+STRICT=(CLAUDE.md docs/README.md docs/index.md docs/system docs/start docs/guides docs/reference docs/developer)
+# Files under a STRICT directory that are counted with LOOSE until they are rewritten.
+NOT_STRICT=(docs/guides/views.md)
+LOOSE=(README.md docs/openapi docs/guides/views.md docs/roadmap.md docs/outstanding.md docs/ingest-campaign.md)
+# The pages a user of Tessera reads, which USER_PATTERNS also apply to.
+USER_PAGES=(docs/index.md docs/start docs/guides docs/reference)
 
 PATTERNS=$(cat <<'EOF'
 —
@@ -49,6 +52,10 @@ PATTERNS=$(cat <<'EOF'
 \bcampaign\b
 \bepics?\b
 \bto measure\b
+EOF
+)
+
+USER_PATTERNS=$(cat <<'EOF'
 \bin this (guide|tutorial|section|page)\b
 \blet['’]s\b
 \bwe will\b
@@ -82,18 +89,34 @@ EOF
 )
 
 REGEX=$(printf '%s\n' "$PATTERNS" | paste -sd'|')
+USER_REGEX="$REGEX|$(printf '%s\n' "$USER_PATTERNS" | paste -sd'|')"
 
-hits() {  # hits <path>...: every matching line as file:line:text; backticked spans and link targets are not checked
-  local p f
+listed() {  # listed <file> <path>...: whether the file is one of the paths or under one
+  local f=$1 p
+  shift
+  for p in "$@"; do
+    case "$f" in "$p" | "$p"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+# Every matching line as file:line:text. Fenced blocks, backticked spans and link targets are not
+# checked; a fenced line is blanked so the line numbers still match the file.
+hits() {  # hits <path>...
+  local p f regex
   for p in "$@"; do
     [ -e "$p" ] || continue
     find "$p" -name '*.md' -type f | sort | while read -r f; do
-      sed -e 's/`[^`]*`//g' -e 's/\](\([^)]*\))/]/g' "$f" | grep -niE -e "$REGEX" | sed "s|^|$f:|"
+      if [ "${SKIP_NOT_STRICT:-}" = 1 ] && listed "$f" "${NOT_STRICT[@]}"; then continue; fi
+      regex=$REGEX
+      listed "$f" "${USER_PAGES[@]}" && regex=$USER_REGEX
+      awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; print ""; next } fenced { print ""; next } { print }' "$f" |
+        sed -e 's/`[^`]*`//g' -e 's/\](\([^)]*\))/]/g' | grep -niE -e "$regex" | sed "s|^|$f:|"
     done
   done
 }
 
-strict=$(hits "${STRICT[@]}")
+strict=$(SKIP_NOT_STRICT=1 hits "${STRICT[@]}")
 if [ -n "$strict" ]; then
   echo "$strict"
   echo "check-register: hits in files held to the register (above)"
