@@ -561,7 +561,7 @@ pub struct AppState {
     pub suggest_admission: SuggestAdmission,
     /// The viewer/session admission gate. Never touched by the control plane.
     pub compute_gate: ComputeGate,
-    /// `POST /v1/items` only. Runs under its own admission limit, `serve.bulk_admission`, so a
+    /// `POST /v1/items` and `POST /v1/artifacts` only. Runs under its own admission limit, `serve.bulk_admission`, so a
     /// long read takes no slot from the viewport and item routes. The compute threads and the
     /// memory cap are shared.
     pub bulk_gate: ComputeGate,
