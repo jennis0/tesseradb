@@ -1262,12 +1262,10 @@ class Cycle:
     def viewport_status(self, view: str) -> int:
         """The status a fresh session's zoom-0 viewport on `view` answers."""
         token, _ = serve_battery.authorise(self.served.session, self.session_cred, self.all_terms)
-        r = requests.post(
-            f"{self.served.viewer}/v1/viewport",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"view": view, "zoom": 0, "bbox": full_box(self.frames[view]), "k": 0},
-            timeout=60,
+        r = serve_battery.viewport_request(
+            self.served.viewer, token, view, 0, full_box(self.frames[view]), 0, layers=None, timeout=60
         )
+        r.close()
         return r.status_code
 
     # -- what did not hold -----------------------------------------------------------------
@@ -1394,44 +1392,7 @@ class Cycle:
                         f"the write cycle ended at {counts.get('after')} visible on {name}, "
                         f"expecting {counts.get('expected')}"
                     )
-        recreate = result.get("view_recreate") or {}
-        if isinstance(recreate, dict) and recreate.get("views") and not recreate.get("failed"):
-            where = f"{recreate['group']}/{recreate['key']}"
-            if recreate["drop"]["status"] != 200:
-                out.append(f"dropping view {where} answered {recreate['drop']['status']}")
-            if recreate["create"]["status"] != 201:
-                out.append(f"creating view {where} again answered {recreate['create']['status']}")
-            if recreate.get("flushed") is False:
-                out.append(f"the flush after recreating view {where} did not reach its publication")
-            out += [
-                f"view {name} answered {status} after it was dropped, not 404"
-                for name, status in recreate["answers_after_drop"].items()
-                if status != 404
-            ]
-            for name, figures in recreate["ingest_by_view"].items():
-                if figures.get("accepted") != figures.get("rows_offered"):
-                    out.append(
-                        f"the recreated view {name} accepted {figures.get('accepted')} of "
-                        f"{figures.get('rows_offered')} rows offered"
-                    )
-            if recreate.get("items_with_several_ids"):
-                out.append(
-                    f"the recreated views answered {recreate['items_with_several_ids']} item(s) "
-                    f"with a different tessera_id in each"
-                )
-            for step in ("publish_rosters", "publish"):
-                for layer, entry in (recreate.get(step) or {}).items():
-                    if entry.get("refusals"):
-                        out.append(
-                            f"republishing {layer} for {where} was refused {entry['refusals']} time(s)"
-                        )
-            out += [
-                f"the census on the recreated view {name} is not the all-in build's: "
-                f"{compared['differences_by_surface']}"
-                for name, compared in (recreate.get("census") or {}).items()
-                if not compared["equal"]
-            ]
-            out += list(recreate.get("incomplete") or [])
+        out += recreate_failures(result.get("view_recreate") or {})
         restart = result.get("restart") or {}
         if isinstance(restart, dict) and restart and not restart.get("failed"):
             if restart.get("visible") != restart.get("visible_before"):
@@ -1442,6 +1403,50 @@ class Cycle:
             if not restart.get("census_equal"):
                 out.append("the census after the restart is not the census before it")
         return out
+
+
+def recreate_failures(recreate: dict) -> list[str]:
+    """A sentence per way the dropped and recreated view did not hold."""
+    if not isinstance(recreate, dict) or not recreate.get("views") or recreate.get("failed"):
+        return []
+    out: list[str] = []
+    where = f"{recreate['group']}/{recreate['key']}"
+    if recreate["drop"]["status"] != 200:
+        out.append(f"dropping view {where} answered {recreate['drop']['status']}")
+    if recreate["create"]["status"] != 201:
+        out.append(f"creating view {where} again answered {recreate['create']['status']}")
+    if recreate.get("flushed") is False:
+        out.append(f"the flush after recreating view {where} did not reach its publication")
+    out += [
+        f"view {name} answered {status} after it was dropped, not 404"
+        for name, status in recreate["answers_after_drop"].items()
+        if status != 404
+    ]
+    for name, figures in recreate["ingest_by_view"].items():
+        if figures.get("accepted") != figures.get("rows_offered"):
+            out.append(
+                f"the recreated view {name} accepted {figures.get('accepted')} of "
+                f"{figures.get('rows_offered')} rows offered"
+            )
+    if recreate.get("items_with_several_ids"):
+        out.append(
+            f"the recreated views answered {recreate['items_with_several_ids']} item(s) "
+            f"with a different tessera_id in each"
+        )
+    for step in ("publish_rosters", "publish"):
+        for layer, entry in (recreate.get(step) or {}).items():
+            if entry.get("refusals"):
+                out.append(
+                    f"republishing {layer} for {where} was refused {entry['refusals']} time(s)"
+                )
+    out += [
+        f"the census on the recreated view {name} is not the all-in build's: "
+        f"{compared['differences_by_surface']}"
+        for name, compared in (recreate.get("census") or {}).items()
+        if not compared["equal"]
+    ]
+    out += list(recreate.get("incomplete") or [])
+    return out
 
 
 def driver_rss() -> dict:

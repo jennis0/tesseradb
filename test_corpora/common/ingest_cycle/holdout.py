@@ -116,14 +116,7 @@ def encode_batch(
     for name in columns:
         arrays.append(table.column(name).combine_chunks())
         names.append(name)
-    return stream_bytes(arrays, names)
-
-
-def stream_bytes(arrays: Sequence, names: Sequence[str]) -> bytes:
-    """One record batch as a whole Arrow IPC stream."""
-    batch = pa.RecordBatch.from_arrays(
-        [pa.array(a) if not isinstance(a, pa.Array) else a for a in arrays], names=list(names)
-    )
+    batch = pa.RecordBatch.from_arrays(arrays, names=names)
     sink = pa.BufferOutputStream()
     with ipc.new_stream(sink, batch.schema) as writer:
         writer.write_batch(batch)
