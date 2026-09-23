@@ -794,16 +794,27 @@ pub fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
-impl AppState {
-    /// The viewer plane's authentication: the request's bearer token, looked up by
-    /// [`Self::authenticated_session`]. A missing token is `bad-credential`.
-    pub fn viewer_session(
-        &self,
-        headers: &axum::http::HeaderMap,
-    ) -> Result<Arc<Session>, ApiError> {
-        self.authenticated_session(bearer_token(headers).ok_or(ApiError::BadCredential)?)
-    }
+/// The viewer plane's authentication, as an extractor: the request's bearer token, looked up by
+/// [`AppState::authenticated_session`]. A missing token is `bad-credential`.
+///
+/// Every viewer handler names it first after the state. axum runs extractors in argument order,
+/// so a caller without a valid token is refused before the path, the query string or the body is
+/// read.
+pub struct ViewerSession(pub Arc<Session>);
 
+impl axum::extract::FromRequestParts<Arc<AppState>> for ViewerSession {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, ApiError> {
+        let token = bearer_token(&parts.headers).ok_or(ApiError::BadCredential)?;
+        state.authenticated_session(token).map(ViewerSession)
+    }
+}
+
+impl AppState {
     /// Run `f` on the blocking pool behind the compute gate. The permits move into the closure, so
     /// they release when the work finishes, not when the caller stops waiting.
     pub async fn gated<T, F>(self: &Arc<Self>, f: F) -> Result<T, ApiError>

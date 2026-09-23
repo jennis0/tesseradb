@@ -1104,70 +1104,43 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
 }
 
 /// **Every viewer-plane route refuses a caller with no session credential, and one whose
-/// credential is not a token — enumerated from the description, not listed by hand.**
+/// credential is not a token, whatever else is wrong with the request. The routes are enumerated
+/// from the description, not listed by hand.**
 ///
 /// This is the viewer-plane counterpart of
-/// `every_path_on_the_control_listener_needs_the_credential` (`tests/http_write.rs`), and it exists
-/// for the same reason that test names: a per-route 401 test stays green forever while a sixth
-/// route ships wide open. The control plane also has structural cover —
-/// `require_operator_credential` wraps its whole router — and **the viewer plane has none**.
-/// `viewer::router` mounts no credential layer at all; each handler opens with its own
-/// `bearer_token(&headers).ok_or(ApiError::BadCredential)?`. A route written without that line is
-/// caught by nothing but this test.
+/// `every_path_on_the_control_listener_needs_the_credential` (`tests/http_write.rs`): a per-route
+/// 401 test stays green while a new route ships open. The control plane checks its credential in
+/// a layer over the whole router; the viewer plane checks it in the `ViewerSession` extractor,
+/// which each handler names as its first argument after the state. A handler written without it
+/// is caught by nothing but this test.
 ///
-/// **What is enumerated, and why that is the router's own list.** axum 0.8 exposes no route
-/// enumeration, so there is no way to ask the mounted router what it serves. The next-best source
-/// is not a list in this file but `docs/openapi/tessera.yaml`, and the enumeration here is over the
-/// description's operations and their declared `security` — so the assertion made is the
-/// description's own claim, checked against the running server. The chain that makes it bite on a
-/// *new* route is three links, all inside this crate:
-/// [`the_description_names_every_route_on_the_two_planes_and_no_other`] fails if a route is mounted
-/// and not described; describing it means declaring its `security`; and declaring `sessionToken`
-/// puts it in this loop with no exemption to skip it. A route deliberately declared `security: []`
-/// is skipped here — but that is an explicit published claim that it is unauthenticated, which is
-/// a different thing from an oversight, and the two probes are asserted below to be the only ones.
+/// **What is enumerated.** axum exposes no route enumeration, so the loop runs over
+/// `docs/openapi/tessera.yaml`'s operations and their declared `security`.
+/// [`the_description_names_every_route_on_the_two_planes_and_no_other`] fails if a route is
+/// mounted and not described; describing it means declaring its `security`; declaring
+/// `sessionToken` puts it in this loop. A route declared `security: []` is skipped, and the two
+/// probes are asserted below to be the only ones.
 ///
-/// **The requests carry well-formed bodies on purpose.** The `Json` extractor runs ahead of the
-/// handler, so a POST with no body is refused during extraction and never reaches the credential
-/// check — such a request would prove nothing about authentication. Each POST route therefore has
-/// a body known to deserialise, and a route with no entry in that table is a panic naming the
-/// path rather than a silent skip.
+/// **Each route is probed twice over.** Once with a request the route accepts, and once with each
+/// way it can be malformed: a query string that does not parse, a body that is not JSON, a body
+/// with the wrong content type, JSON of the wrong shape, an identifier that is not a number.
+/// Without a valid token every one of them answers 401: the token is checked before the query
+/// string, the path or the body is read, so an unauthenticated caller learns nothing about what
+/// the route would have accepted and no body is buffered for them. With a valid token the same
+/// malformed requests answer the refusal the route gives them, so the 401s are not the route
+/// refusing everything.
 ///
-/// **Mutations this kills:** deleting the `bearer_token` line from any viewer handler (each is
-/// followed by `authenticated_session`, so the pair must go, which is exactly the shape of a
-/// handler written without either); mounting a new viewer route with no credential check;
-/// answering a bare `StatusCode::UNAUTHORIZED` instead of `ApiError::BadCredential`'s body; and,
-/// on the probe half, putting `/healthz` or `/readyz` behind the credential
-/// (docs/decisions/0011-health-probes-off-control-plane.md).
+/// **Mutations this kills:** dropping the `ViewerSession` argument from any viewer handler;
+/// moving it after a `Query`, `Path` or `Json` argument; mounting a new viewer route with no
+/// credential check; answering a bare `StatusCode::UNAUTHORIZED` instead of
+/// `ApiError::BadCredential`'s envelope; and, on the probe half, putting `/healthz` or `/readyz`
+/// behind the credential.
 #[tokio::test]
 async fn every_viewer_route_requires_a_session_token() {
     let doc = description();
     let f = fixture().await;
-
-    // A body each POST route deserialises, consulted only for POST. A described POST route with
-    // no entry here is a panic naming the path, not a silent skip: without a body it accepts, the
-    // request would be refused during extraction and would say nothing about its credential.
-    let body_for = |path: &str| -> Value {
-        match path {
-            "/v1/viewport" => viewport_body(json!({})),
-            "/v1/items/{tessera_id}" => json!({}),
-            "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
-            "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),
-            other => panic!(
-                "{other} is a described POST route and this test has no request body for it; add \
-                 one rather than letting a new viewer route go unchecked"
-            ),
-        }
-    };
-
-    // `{tessera_id}` is an `AxumPath<u64>` and `{column}` a `String`; `1` satisfies both, and the
-    // credential check precedes any resolution of either, so the value need not exist.
-    let concrete = |path: &str| -> String {
-        path.split('/')
-            .map(|s| if s.starts_with('{') { "1" } else { s })
-            .collect::<Vec<_>>()
-            .join("/")
-    };
+    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
 
     let mut gated = 0usize;
     let mut probes = 0usize;
@@ -1182,26 +1155,19 @@ async fn every_viewer_route_requires_a_session_token() {
                 .first()
                 .map(|s| s.as_object().unwrap().keys().next().unwrap().clone());
             let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes()).unwrap();
-            let url = f.server.viewer_url(&concrete(path));
 
             match scheme.as_deref() {
-                // The session plane's own credential, on its own listener — not this plane's
-                // claim and not this test's (contracts §3.3).
+                // The session plane's own credential, on its own listener.
                 Some("sessionCredential") => {
                     session_plane += 1;
                     continue;
                 }
-                // Decision 0011: the probes answer without a credential, and they are the only
-                // two routes on this plane that do.
+                // The probes answer without a credential, and they are the only two routes on
+                // this plane that do.
                 None => {
                     probes += 1;
-                    let resp = f
-                        .server
-                        .client
-                        .request(method.clone(), url.clone())
-                        .send()
-                        .await
-                        .unwrap();
+                    let resp =
+                        send_viewer_probe(&f.server, &method, path, Malformed::No, None).await;
                     assert_ne!(
                         resp.status().as_u16(),
                         401,
@@ -1214,28 +1180,29 @@ async fn every_viewer_route_requires_a_session_token() {
                 Some(other) => panic!("{method} {path} declares an unknown scheme {other}"),
             }
 
-            for credential in [None, Some("not-a-session-token")] {
-                let mut req = f.server.client.request(method.clone(), url.clone());
-                if let Some(credential) = credential {
-                    req = req.bearer_auth(credential);
+            let mut kinds = vec![(Malformed::No, 0)];
+            kinds.extend(malformed_viewer_requests(&method, path));
+            for (kind, with_token) in kinds {
+                for credential in [None, Some("not-a-session-token")] {
+                    let resp = send_viewer_probe(&f.server, &method, path, kind, credential).await;
+                    assert_eq!(
+                        resp.status().as_u16(),
+                        401,
+                        "{method} {path} ({kind:?}) answered {} for credential {credential:?}; \
+                         every viewer route requires a session token before it reads the request",
+                        resp.status()
+                    );
+                    assert_refusal(&doc, resp, 401, "bad-credential").await;
                 }
-                if method == reqwest::Method::POST {
-                    req = req.json(&body_for(path));
+                if kind != Malformed::No {
+                    let resp =
+                        send_viewer_probe(&f.server, &method, path, kind, Some(token)).await;
+                    assert_eq!(
+                        resp.status().as_u16(),
+                        with_token,
+                        "{method} {path} ({kind:?}) with a valid token"
+                    );
                 }
-                let resp = req.send().await.unwrap();
-                assert_eq!(
-                    resp.status().as_u16(),
-                    401,
-                    "{method} {path} answered {} for credential {credential:?}; every viewer \
-                     route, without exception, requires a session token",
-                    resp.status()
-                );
-                let body = assert_refusal(&doc, resp, 401, "bad-credential").await;
-                assert_eq!(
-                    body["detail"], "missing or invalid bearer credential",
-                    "{method} {path} must answer ApiError::BadCredential's own body, unchanged: \
-                     {body}"
-                );
             }
         }
     }
@@ -1256,6 +1223,105 @@ async fn every_viewer_route_requires_a_session_token() {
         session_plane, 2,
         "/session/authorise and /session/revoke are the session plane's"
     );
+}
+
+/// One way a viewer request can be wrong before its handler runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Malformed {
+    /// A request the route accepts.
+    No,
+    /// A query string whose `limit` is not a number.
+    Query,
+    /// A body that is not JSON.
+    Syntax,
+    /// A JSON body sent as `text/plain`.
+    ContentType,
+    /// JSON that is not the request object.
+    Shape,
+    /// `{tessera_id}` that is not a number.
+    Identifier,
+}
+
+/// The ways `method path` can be malformed, each with the status a caller holding a valid token
+/// gets for it. `/v1/meta` reads no query string, so its malformed query is served; `suggest`
+/// refuses its own query string with 422.
+fn malformed_viewer_requests(method: &reqwest::Method, path: &str) -> Vec<(Malformed, u16)> {
+    let mut kinds = Vec::new();
+    if *method == reqwest::Method::GET {
+        let status = match path {
+            "/v1/meta" => 200,
+            "/v1/categories/{column}/suggest" => 422,
+            _ => 400,
+        };
+        kinds.push((Malformed::Query, status));
+    } else {
+        kinds.extend([
+            (Malformed::Syntax, 400),
+            (Malformed::ContentType, 415),
+            (Malformed::Shape, 422),
+        ]);
+    }
+    if path.contains("{tessera_id}") {
+        kinds.push((Malformed::Identifier, 400));
+    }
+    kinds
+}
+
+/// Send `method path` to the viewer listener, malformed as `kind`, with `credential` as its bearer.
+/// A path parameter is `1`, which satisfies both `{tessera_id}` and `{column}` and need not name
+/// anything.
+async fn send_viewer_probe(
+    server: &TestServer,
+    method: &reqwest::Method,
+    path: &str,
+    kind: Malformed,
+    credential: Option<&str>,
+) -> reqwest::Response {
+    let concrete = path
+        .split('/')
+        .map(|s| match s {
+            "{tessera_id}" if kind == Malformed::Identifier => "not-a-number",
+            s if s.starts_with('{') => "1",
+            s => s,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    let url = match kind {
+        Malformed::Query => server.viewer_url(&format!("{concrete}?limit=not-a-number")),
+        _ => server.viewer_url(&concrete),
+    };
+    let mut req = server.client.request(method.clone(), url);
+    if let Some(credential) = credential {
+        req = req.bearer_auth(credential);
+    }
+    if *method == reqwest::Method::POST {
+        req = match kind {
+            Malformed::Syntax => req
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body("{"),
+            Malformed::ContentType => req
+                .header(reqwest::header::CONTENT_TYPE, "text/plain")
+                .body(viewer_body(path).to_string()),
+            Malformed::Shape => req.json(&json!("not a request object")),
+            _ => req.json(&viewer_body(path)),
+        };
+    }
+    req.send().await.unwrap()
+}
+
+/// A body each POST route on the viewer plane accepts. A described POST route with no entry here
+/// is a panic naming the path, so a new route is not probed with a body it would refuse anyway.
+fn viewer_body(path: &str) -> Value {
+    match path {
+        "/v1/viewport" => viewport_body(json!({})),
+        "/v1/items/{tessera_id}" => json!({}),
+        "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
+        "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),
+        other => panic!(
+            "{other} is a described POST route and this test has no request body for it; add \
+             one rather than letting a new viewer route go unchecked"
+        ),
+    }
 }
 
 /// **An underlay request that yields no cells carries a present, zero-row kind-2 frame — never no
