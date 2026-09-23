@@ -588,7 +588,7 @@ async fn the_bulk_lane_and_the_viewport_gate_do_not_hold_each_other() {
         N,
         16,
         ComputeGate::new(1, 0, 250),
-        ComputeGate::for_bulk_reads(1, 0, 250),
+        ComputeGate::for_bulk_reads(1),
         |_| {},
     )
     .await;
@@ -622,6 +622,41 @@ async fn the_bulk_lane_and_the_viewport_gate_do_not_hold_each_other() {
     drop(held);
 }
 
+/// **A bulk read holds its compute permit for its whole response**, not only until its head: a
+/// read whose reader has stopped still counts as running, and a second read is refused at once.
+#[tokio::test]
+async fn a_bulk_read_holds_its_compute_for_the_whole_response() {
+    let f = fixture_with(
+        2_000,
+        12 * 1024,
+        generous_test_gate(),
+        ComputeGate::for_bulk_reads(1),
+        |limits| {
+            limits.stream_write_stall_ms = 120_000;
+        },
+    )
+    .await;
+    let token = token(&f.server, &["0"]).await;
+    let mut reader = post_items(
+        &f.server,
+        &token,
+        &json!({ "view": "s0", "fields": ["note"], "order": "stored", "page_rows": 10 }),
+    )
+    .await;
+    assert_eq!(reader.status().as_u16(), 200);
+    assert!(reader.chunk().await.unwrap().is_some());
+
+    let bulk = control_status(&f.server).await["bulk"].clone();
+    assert_eq!(bulk["in_flight"], 1, "the unread read holds its compute: {bulk}");
+    assert_eq!(bulk["waiting"], 0, "{bulk}");
+    let started = Instant::now();
+    let resp = post_items(&f.server, &token, &json!({ "view": "s0", "fields": [], "pages": 1 })).await;
+    assert!(resp.headers().contains_key("retry-after"));
+    assert_eq!(refused(resp, 429).await, "backpressure");
+    assert!(started.elapsed() < Duration::from_secs(5), "the refusal waited for admission");
+    drop(reader);
+}
+
 /// **A client that disconnects mid-read frees its bulk slot.** The response is far larger than
 /// the sockets buffer, so its producer is blocked on the reader while the slot is held, and a
 /// second read is shed; once the reader goes, a read is served well inside the stall budget the
@@ -632,7 +667,7 @@ async fn a_client_that_disconnects_frees_its_bulk_slot() {
         2_000,
         12 * 1024,
         generous_test_gate(),
-        ComputeGate::for_bulk_reads(1, 0, 250),
+        ComputeGate::for_bulk_reads(1),
         |limits| {
             limits.stream_write_stall_ms = 120_000;
         },

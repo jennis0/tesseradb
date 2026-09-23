@@ -587,8 +587,9 @@ paths:
         cursor issued under another idset is the `409` below. A cursor survives flushes, merges,
         compactions and restarts, and stops opening when the identity key is rotated.
 
-        On the bulk-read admission gate (`serve.bulk_admission`), whose queue is shed as `429`
-        like the viewport's, so a long read never holds a slot the viewport and item routes use.
+        Runs under its own admission limit, `serve.bulk_admission`, so a long read takes no slot
+        from the viewport and item routes. A read past the limit is refused at once with `429`;
+        none waits.
       security:
         - sessionToken: []
       requestBody:
@@ -619,7 +620,7 @@ paths:
                 type: string
                 pattern: "^[0-9]+$"
             x-tessera-admission-us:
-              description: Time spent in the bulk-read admission gate, microseconds.
+              description: Time spent being admitted, microseconds. Near zero, since a bulk read waits for no slot.
               required: true
               schema:
                 type: string

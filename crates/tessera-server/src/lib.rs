@@ -142,12 +142,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
             config.compute_queue,
             config.admission_timeout_ms,
         ),
-        // `POST /v1/items` only, with the viewport's admission timeout.
-        bulk_gate: ComputeGate::for_bulk_reads(
-            config.bulk_admission,
-            config.bulk_queue,
-            config.admission_timeout_ms,
-        ),
+        // `POST /v1/items` only.
+        bulk_gate: ComputeGate::for_bulk_reads(config.bulk_admission),
         // The viewer gate never covers the control plane, so writes have a limiter of their own.
         ingest_admission: state::IngestAdmission::new(config.ingest_admission),
         session_credential,

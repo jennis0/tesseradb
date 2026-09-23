@@ -189,11 +189,9 @@ pub struct Config {
     pub max_page_rows: u32,
     /// A bulk read's Arrow bytes per page, before compression.
     pub max_page_bytes: usize,
-    /// Bulk reads running at once, on an admission gate of their own.
+    /// Bulk reads running at once. One past it is refused with a 429 at once, never queued, and
+    /// `0` refuses every bulk read.
     pub bulk_admission: usize,
-    /// Bulk reads waiting for one of those: twice `bulk_admission`, as `compute_queue` defaults
-    /// to twice `compute_admission`. Not a key.
-    pub bulk_queue: usize,
     /// Bytes one bulk-read response may carry; at least `max_page_bytes`.
     pub bulk_response_bytes: usize,
     /// Time one bulk-read response may run. `stream_deadline_ms` also ends one, whichever comes
@@ -430,11 +428,7 @@ fn parse(text: &str) -> Result<Config> {
         });
     }
     let bulk_admission = serve.bulk_admission.unwrap_or(DEFAULT_BULK_ADMISSION);
-    let bulk_queue = bulk_admission.saturating_mul(2);
-    if bulk_admission
-        .checked_add(bulk_queue)
-        .is_none_or(|slots| slots > Semaphore::MAX_PERMITS)
-    {
+    if bulk_admission > Semaphore::MAX_PERMITS {
         return Err(ConfigError::AdmissionTooLarge {
             key: "serve.bulk_admission",
         });
@@ -569,7 +563,6 @@ fn parse(text: &str) -> Result<Config> {
         max_page_rows,
         max_page_bytes,
         bulk_admission,
-        bulk_queue,
         bulk_response_bytes,
         bulk_response_ms,
         region_cache_bytes: serve
@@ -1104,7 +1097,6 @@ mod tests {
         assert_eq!(config.max_page_rows, DEFAULT_MAX_PAGE_ROWS);
         assert_eq!(config.max_page_bytes, DEFAULT_MAX_PAGE_BYTES);
         assert_eq!(config.bulk_admission, DEFAULT_BULK_ADMISSION);
-        assert_eq!(config.bulk_queue, 2 * DEFAULT_BULK_ADMISSION);
         assert_eq!(config.bulk_response_bytes, DEFAULT_BULK_RESPONSE_BYTES);
         assert_eq!(config.bulk_response_ms, DEFAULT_BULK_RESPONSE_MS);
         assert_eq!(bulk_read_memory_bytes(&config), 640 * 1024 * 1024);

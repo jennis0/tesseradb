@@ -223,14 +223,11 @@ impl ComputeGate {
         )
     }
 
-    /// The bulk-read lane: `admission` reads at once and `queue` waiting, shed as this gate's own.
-    pub fn for_bulk_reads(admission: usize, queue: usize, admission_timeout_ms: u64) -> Self {
-        Self::with_cause(
-            admission,
-            queue,
-            admission_timeout_ms,
-            crate::error::ShedCause::BulkGate,
-        )
+    /// The limit on bulk reads: `admission` at once and none waiting, so one past it is shed with
+    /// a 429 at once. A bulk read never releases its compute permit early, so taking the slot
+    /// is taking the permit and nothing waits for one.
+    pub fn for_bulk_reads(admission: usize) -> Self {
+        Self::with_cause(admission, 0, 0, crate::error::ShedCause::BulkGate)
     }
 
     fn with_cause(

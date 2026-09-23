@@ -343,7 +343,7 @@ pub fn generous_test_gate() -> ComputeGate {
 
 /// The bulk-read lane every mount takes but the lane's own tests, generous for the same reason.
 pub fn generous_bulk_gate() -> ComputeGate {
-    ComputeGate::for_bulk_reads(16, 16, 250)
+    ComputeGate::for_bulk_reads(16)
 }
 
 /// A server whose two admission gates and `[serve]` limits the caller chooses: the bulk-read tests
