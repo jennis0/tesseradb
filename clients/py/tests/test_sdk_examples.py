@@ -10,12 +10,13 @@ The one cell that assigns `SCALE` has its value replaced with `"sample"` before 
 walk builds `data/notebook-sample/`, which the notebook finds above its own directory. The test
 skips, naming what is missing, where that directory or the `tessera` binary is absent.
 
-`marimo` is stubbed while the cells run: `mo.md` returns its text, `mo.ui.anywidget` records the
-widget it is given, and `mo.ui.slider` holds its starting value. The widget is built for real,
-against a stub bundle: there is no browser here, and nothing reads its text.
+`marimo` is stubbed while the cells run: `mo.md` returns its text, `mo.ui.anywidget` returns a
+holder, and `mo.ui.slider` holds its starting value. The widget is built for real, against a stub
+JavaScript bundle: there is no browser here, and nothing reads its text.
 
 What is asserted is what each section prints, with the expected numbers read from the sample's
-own files, and that every map is served each layer it draws or colours by.
+own files; that every map is served each layer it draws or colours by; and that a reader is
+served, for each topic name, the first text whose every source paper it may see.
 
 `examples/notebook.ipynb` is generated from the marimo file by `marimo export ipynb`, and the last
 test checks that it is what a fresh export makes.
@@ -34,6 +35,7 @@ from pathlib import Path
 import pytest
 
 from conftest import binary
+from tesseradb import Viewer
 
 pytest.importorskip("pyarrow")
 pd = pytest.importorskip("pandas")
@@ -79,21 +81,11 @@ class Held:
 
 
 @pytest.fixture
-def maps() -> list:
-    """Every widget a cell hands to `mo.ui.anywidget`, in the order the cells ran."""
-    return []
-
-
-@pytest.fixture
-def stub_marimo(monkeypatch, maps):
-    def anywidget(widget):
-        maps.append(widget)
-        return Held(widget)
-
+def stub_marimo(monkeypatch):
     marimo = types.ModuleType("marimo")
     marimo.md = lambda text: text
     marimo.ui = types.SimpleNamespace(
-        anywidget=anywidget,
+        anywidget=Held,
         slider=lambda *, value, **_: types.SimpleNamespace(value=value),
     )
     monkeypatch.setitem(sys.modules, "marimo", marimo)
@@ -101,7 +93,25 @@ def stub_marimo(monkeypatch, maps):
 
 
 @pytest.fixture
-def walk(monkeypatch, tmp_path, stub_marimo, stub_bundle):
+def maps(monkeypatch) -> list:
+    """Every map the notebook draws, as `(reader, widget)`, in the order the cells ran.
+
+    Every map, whether from a database, a reader or a selection, is made by `Viewer.map`.
+    """
+    drawn = []
+    make = Viewer.map
+
+    def recorded(reader, *args, **kwargs):
+        widget = make(reader, *args, **kwargs)
+        drawn.append((reader, widget))
+        return widget
+
+    monkeypatch.setattr(Viewer, "map", recorded)
+    return drawn
+
+
+@pytest.fixture
+def walk(monkeypatch, tmp_path, stub_marimo, stub_bundle, maps):
     """The notebook's cells, executed in order, with every database it opened closed after."""
     binary()
     monkeypatch.delenv("TESSERA_NOTEBOOK_DATA", raising=False)
@@ -125,10 +135,25 @@ def walk(monkeypatch, tmp_path, stub_marimo, stub_bundle):
                 value.close()
 
 
+def tokens(texts) -> list[list[str]]:
+    """Each text's tokens, from `tessera tokenise`, the analyser the server indexes text with.
+
+    The count of a `match` or `phrase` filter is computed from these in pandas. A regular
+    expression places word boundaries differently from the analyser, and its counts on the
+    sample differ from the server's.
+    """
+    lines = "\n".join(" ".join(str(text).split()) if text is not None else "" for text in texts)
+    out = subprocess.run(
+        [binary(), "tokenise"], input=lines, capture_output=True, text=True, check=True
+    ).stdout.split("\n")[: len(texts)]
+    return [line.split("\t") if line else [] for line in out]
+
+
 def expected(data: Path, years: list[str]) -> dict:
     """The counts the notebook should print, read from the sample's files as pandas reads them."""
     papers = pd.read_parquet(
-        data / "points.parquet", columns=["entity_id", "submitted_at", "categories", "archive"]
+        data / "points.parquet",
+        columns=["entity_id", "submitted_at", "categories", "archive", "title", "abstract"],
     )
     in_week = papers["submitted_at"] > papers["submitted_at"].max() - pd.Timedelta(days=7)
     built = papers[~in_week]
@@ -137,19 +162,57 @@ def expected(data: Path, years: list[str]) -> dict:
     def holding(frame, terms):
         return int(frame["categories"].map(lambda held: bool(terms & set(held))).sum())
 
+    cs_since_2020 = (built["archive"] == "cs") & (
+        built["submitted_at"] >= pd.Timestamp("2020-01-01")
+    )
+    transformer = pd.Series(["transformer" in words for words in tokens(built["title"])],
+                            index=built.index)
+    black_hole = [
+        any(pair == ("black", "hole") for pair in zip(words, words[1:]))
+        for words in tokens(built["abstract"])
+    ]
+
     return {
         "papers": len(papers),
         "built": len(built),
         "astro": holding(built, ASTRO_PH),
         "learning": holding(built, LEARNING),
         "learning after the week": holding(papers, LEARNING),
-        "cs since 2020": int(
-            ((built["archive"] == "cs") & (built["submitted_at"] >= pd.Timestamp("2020-01-01")))
-            .sum()
-        ),
+        "cs since 2020": int(cs_since_2020.sum()),
+        "black hole": sum(black_hole),
+        "transformer since 2020": int((cs_since_2020 & transformer).sum()),
         "last year before the week": int((last_year & ~in_week).sum()),
         "last year": int(last_year.sum()),
     }
+
+
+def names_seen(data: Path, terms: set[str] | None = None) -> dict[str, list[str]]:
+    """The topic name text a reader holding `terms` should be shown, by the name's key.
+
+    A name has a text per rank, rank 0 its title and rank 1 its keywords, and each was written
+    from its own source papers. The reader is shown the text of the lowest rank whose every
+    source paper it may see, and a name with no such rank not at all. `terms=None` is a reader
+    who sees every paper.
+    """
+    papers = pd.read_parquet(data / "points.parquet", columns=["entity_id", "categories"])
+    if terms is not None:
+        papers = papers[papers["categories"].map(lambda held: bool(terms & set(held)))]
+    seen = set(papers["entity_id"])
+    sources = pd.read_parquet(data / "topics-toponymy-members.parquet").dropna(subset=["rank"])
+    shown = sources.groupby(["key", "rank"])["entity"].agg(lambda ids: set(ids) <= seen)
+    contents = pd.read_parquet(data / "topics-toponymy.parquet").set_index("key")["contents"]
+    text: dict[str, list[str]] = {}
+    for (key, rank), visible in sorted(shown.items()):
+        if visible and key not in text:
+            text[key] = list(contents[key][int(rank)])
+    return text
+
+
+def served_names(reader) -> dict[str, list[str]]:
+    artifacts = reader.view("papers").sample(layers=["topic_names"]).artifacts
+    if artifacts is None:
+        return {}
+    return dict(zip(artifacts.column("key").to_pylist(), artifacts.column("content").to_pylist()))
 
 
 def drawn_layers(widget) -> set[str]:
@@ -166,7 +229,6 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk, maps):
     One test rather than six: the sections share a database and a server, and splitting them
     would build the sample six times.
     """
-    import tesseradb as td
 
     want = expected(walk["DATA"], walk["years"])
 
@@ -183,9 +245,11 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk, maps):
 
     # Section 3: the filters narrow the count, and combining two narrows it further.
     counts = walk["filter_counts"]
-    assert counts["cs since 2020"] == want["cs since 2020"]
-    assert 0 < counts["'black hole' in the abstract"] < want["built"]
-    assert 0 < counts["cs since 2020, 'transformer' in the title"] < counts["cs since 2020"]
+    assert counts == {
+        "cs since 2020": want["cs since 2020"],
+        "'black hole' in the abstract": want["black hole"],
+        "cs since 2020, 'transformer' in the title": want["transformer since 2020"],
+    }
 
     # Section 5: the week arrives in both views it was inserted into.
     last = f"years:{walk['years'][-1]}"
@@ -204,11 +268,19 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk, maps):
     assert walk["saved_at"].joinpath("tessera.toml").exists()
     assert walk["reopened"].view("papers").count() == want["papers"]
 
+    # A topic name's text reaches a reader only where it may see every paper that text was
+    # written from. After section 5 the database holds every name in the sample, the week's
+    # included, and its own reader is served all of them.
+    database_names = served_names(walk["db"])
+    astro_names = served_names(walk["astro"])
+    assert database_names == names_seen(walk["DATA"])
+    assert astro_names == names_seen(walk["DATA"], ASTRO_PH)
+    assert 0 < len(astro_names) < len(database_names)
+
     # Every map, as the reader it was drawn for, over its view and filter, is served each layer
     # it draws or colours by.
     assert len(maps) == 7
-    for widget in maps:
-        reader = td.connect(widget.url, token=widget._token_source)
+    for reader, widget in maps:
         # A map given no view opens on the first one.
         selection = reader.view(widget.view or reader.meta()["views"][0]["id"])
         if widget.filters:

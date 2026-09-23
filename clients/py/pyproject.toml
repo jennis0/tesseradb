@@ -57,7 +57,3 @@ extend-exclude = [".venv"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
-
-[tool.ruff.lint.per-file-ignores]
-# A notebook cell ending in a semicolon shows no value, in marimo and in Jupyter.
-"examples/*.py" = ["E703"]

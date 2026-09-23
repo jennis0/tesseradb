@@ -6,8 +6,7 @@
 #
 # The Jupyter copy needs marimo installed, and its year slider does not drive the map there.
 #
-# Marimo re-runs a cell that reads a map widget's `.value` whenever the map settles, so the cells
-# that draw maps are kept apart from the cells that build.
+# Each map is drawn in a cell of its own, so running a map's cell again rebuilds nothing.
 import marimo
 
 __generated_with = "0.24.2"
@@ -135,7 +134,7 @@ def _(mo):
     - `declare_columns(frame, ...)` declares a column for each column of the frame, typed from
       the frame. `skip` leaves out the columns that the view and the clustering use in their
       own way. `index=["title"]` makes titles searchable and filterable. A column that is not
-      indexed is stored with each point and shown when you open it.
+      indexed is stored with the paper and shown when you open it.
     - `declare_layer("kmeans", kind="flat")` declares a **layer**: a set of groups of points
       drawn over the map, here a clustering. `kind="flat"` means one level of clusters with no
       hierarchy. Section 2 has layers of the other kinds, whose clusters sit inside larger ones.
@@ -229,7 +228,7 @@ def _(mo):
     papers filed under `cs.LG` and no others.
 
     There are three clusterings. **Topics** is a hierarchy of clusters in four levels, each named
-    by a language model from the papers in it. **arXiv classification** is arXiv's own archives
+    by a language model from a few of the papers in it. **arXiv classification** is arXiv's own archives
     and subject classes. **k-means** is a flat clustering of the layout.
 
     The last seven days of submissions are held back from the build, so that section 5 can add
@@ -259,24 +258,34 @@ def _(DATA, datetime, pa, pc, pq):
     for _name in ["clusters-toponymy", "topics-toponymy", "taxonomy-arxiv", "clusters-kmeans"]:
         members[_name], week_members[_name] = _split(_name)
 
-    # A topic name written only from papers in the held-back week has none of them to be written
-    # from yet, so it is left out.
-    _written = members["topics-toponymy"].filter(pc.is_valid(members["topics-toponymy"]["rank"]))
-    named_topics = pq.read_table(DATA / "topics-toponymy.parquet")
-    named_topics = named_topics.filter(pc.is_in(named_topics["key"], _written["key"]))
+    # A build refuses a topic name if one of its content ranks has no source paper. So a name
+    # that has a rank written only from papers in the week is held back with the week, and every
+    # member row of it goes in with the week in section 5.
+    def _ranks(table):
+        written = table.filter(pc.is_valid(table["rank"]))
+        return set(zip(written["key"].to_pylist(), written["rank"].to_pylist()))
+
+    _topic_rows = members["topics-toponymy"]
+    _all_ranks = _ranks(pa.concat_tables([_topic_rows, week_members["topics-toponymy"]]))
+    _waiting = pa.array(sorted({key for key, _ in _all_ranks - _ranks(_topic_rows)}), pa.string())
+    _names = pq.read_table(DATA / "topics-toponymy.parquet")
     # The corpus's files call the clustering `clusters/toponymy`, and this database `topics`.
-    named_topics = named_topics.set_column(
-        named_topics.schema.get_field_index("attached_layer"), "attached_layer",
-        pa.array(["topics"] * named_topics.num_rows),
+    _names = _names.set_column(
+        _names.schema.get_field_index("attached_layer"), "attached_layer",
+        pa.array(["topics"] * _names.num_rows),
     )
-    members["topics-toponymy"] = members["topics-toponymy"].filter(
-        pc.is_in(members["topics-toponymy"]["key"], named_topics["key"])
+    named_topics = _names.filter(pc.invert(pc.is_in(_names["key"], _waiting)))
+    week_topics = _names.filter(pc.is_in(_names["key"], _waiting))
+    _held_back = pc.is_in(_topic_rows["key"], _waiting)
+    members["topics-toponymy"] = _topic_rows.filter(pc.invert(_held_back))
+    week_members["topics-toponymy"] = pa.concat_tables(
+        [week_members["topics-toponymy"], _topic_rows.filter(_held_back)]
     )
 
     years = sorted(set(points["year"].to_pylist()))
     {"papers built": points.num_rows, "papers held back": week.num_rows,
      "years": f"{years[0]}-{years[-1]}"}
-    return members, points, named_topics, week, week_members, years
+    return members, named_topics, points, week, week_members, week_topics, years
 
 
 @app.cell
@@ -338,15 +347,15 @@ def _(SCALE, td):
                      levels=[(0, "archive"), (1, "subject class")],
                      require_member_visibility={"count": 1}, computed=("centroid", "box"),
                      title="arXiv classification")
-    db.declare_layer("kmeans", kind="flat", views=["papers"],
-                     require_member_visibility={"count": 50}, title="k-means clusters");
+    _ = db.declare_layer("kmeans", kind="flat", views=["papers"],
+                     require_member_visibility={"count": 50}, title="k-means clusters")
     return (db,)
 
 
 @app.cell
 def _(mo):
     mo.md("""
-    The inserts take tables or paths to Parquet files, and a path is read where it lies.
+    The inserts take tables or paths to Parquet files, and a path is read from disk without being copied.
 
     `access="categories"` names the column holding each paper's access terms, a list of arXiv
     categories. The `years` group takes a roster of its views, one row per year, and then the
@@ -383,8 +392,8 @@ def _(DATA, db, members, pa, points, named_topics, years):
         db.insert(_layer, members=members[_name], id="entity", key="key", level="level",
                   rank="rank")
     db.insert("topic_names", named_topics, **_columns)
-    db.insert("topic_names", members=members["topics-toponymy"], id="entity", key="key",
-              level="level", rank="rank");
+    _ = db.insert("topic_names", members=members["topics-toponymy"], id="entity", key="key",
+                  level="level", rank="rank")
     return
 
 
@@ -392,7 +401,8 @@ def _(DATA, db, members, pa, points, named_topics, years):
 def _(mo):
     mo.md("""
     The commit checks the declaration against the tables, builds the database and starts its
-    server. At the whole scale this took about three minutes on a 12-core machine.
+    server. At the whole scale this took 158 seconds on a 12-core AMD Ryzen 9 5900X that was
+    also running other work.
     """)
     return
 
@@ -479,12 +489,10 @@ def _(mo):
 
     A filter is a dictionary. A condition names one column and one operator: `eq` or `in` for
     a category, `range` for a number or a date, `match` or `phrase` for text. `all_of`,
-    `any_of` and `none_of` combine conditions. A highlight takes the same form and lights up
-    the points that match it without hiding the others.
+    `any_of` and `none_of` combine conditions.
 
     `filter()` narrows a view to the papers that match, and filters added one after another
-    must all match. A highlight changes only how a map draws its points, so the last count
-    below uses both conditions as filters.
+    must all match.
     """)
     return
 
@@ -545,7 +553,7 @@ def _(mo):
 
 @app.cell
 def _(black_holes, db, papers):
-    _drawn = papers.filter(black_holes).sample(k=16)
+    _drawn = papers.filter(black_holes).sample(k=1)
     db.item(_drawn["tessera_id"][0].as_py())
     return
 
@@ -631,8 +639,8 @@ def _(mo):
     in section 1, and the year column with `view`. Each year numbers its clusters from `"00"`,
     and the same key in two years names two different clusters.
 
-    The clusters are computed from each paper's position on the map. They group papers that
-    sit together in that year, which is not the same as clustering the papers' text.
+    The clusters are computed from each paper's position on the map, so they group papers that
+    sit together in that year.
     """)
     return
 
@@ -656,9 +664,9 @@ def _(KMeans, db, pd, points):
 
 
 @app.cell
-def _(db, mo, yearly_report):
-    _ = yearly_report
-    mo.ui.anywidget(db.map(view="years:2010", colour_by="cluster:yearly", height=440))
+def _(db, mo, yearly_report, years):
+    _ = yearly_report  # draws after the commit that adds the layer
+    mo.ui.anywidget(db.map(view=f"years:{years[-1]}", colour_by="cluster:yearly", height=440))
     return
 
 
@@ -668,9 +676,11 @@ def _(mo):
     ## 5. Changes while it serves
 
     The week held back in section 2 goes into the running database with the same calls as
-    before: `insert` into `papers`, into the `years` group, and into the k-means clusters the
-    papers belong to. The k-means insert takes a table of the week's papers and their clusters,
-    with `key` naming the cluster column, as in section 1.
+    before. Its papers go into `papers` and into the `years` group. Its memberships go into the
+    three clusterings, and the topic names held back with it go into `topic_names`, with the
+    rows that say which of the week's papers each name was written from. The k-means insert
+    takes a table of the week's papers and their clusters, with `key` naming the cluster column,
+    as in section 1.
 
     After the first commit, a commit sends its inserts to the running server, which takes them
     while it goes on answering readers. There is no rebuild. The commit waits until the new
@@ -689,11 +699,19 @@ def _(db, years):
 
 
 @app.cell
-def _(before_week, db, pd, visible, week, week_members):
+def _(before_week, db, pd, visible, week, week_members, week_topics):
     db.insert("papers", week, id="entity_id", x="x", y="y", access="categories")
     db.insert("years", week.select(["entity_id", "x", "y", "categories", "year"]),
               id="entity_id", x="x", y="y", access="categories", view="year")
     db.insert("kmeans", week_members["clusters-kmeans"], id="entity", key="key")
+    for _layer, _name in [("topics", "clusters-toponymy"), ("arxiv", "taxonomy-arxiv")]:
+        db.insert(_layer, members=week_members[_name], id="entity", key="key", level="level",
+                  rank="rank")
+    db.insert("topic_names", week_topics, key="key", level="level", parent="parent",
+              contents="contents", attached_layer="attached_layer",
+              attached_level="attached_level", attached_key="attached_key")
+    db.insert("topic_names", members=week_members["topics-toponymy"], id="entity", key="key",
+              level="level", rank="rank")
     print(db.commit())
     after_week = visible(db)
     pd.DataFrame({"before": before_week, "after": after_week})

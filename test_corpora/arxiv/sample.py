@@ -10,7 +10,7 @@ refuses.
 
 ```bash
 python -m test_corpora.arxiv.sample --source data/notebook-2m4-live --out data/notebook-sample \
-    --papers 50000 --seed 0
+    --papers 200000 --seed 0
 ```
 """
 
@@ -42,8 +42,8 @@ def filter_file(source: Path, out: Path, column: str, keep: pa.Array) -> None:
 
 
 def drop_labels_with_no_generating_set(artifacts: Path, members: Path, source: Path) -> None:
-    """Drop the rows of `artifacts`, and their members, whose generating set for some content rank
-    is in the unfiltered `source` members file and not in the filtered `members` file."""
+    """Drop each label, and its member rows, that has a content rank with no generating paper left
+    in `members`."""
     def ranked(path):
         table = pq.read_table(path, columns=["key", "rank"]).to_pandas().dropna()
         return set(zip(table["key"], table["rank"]))
