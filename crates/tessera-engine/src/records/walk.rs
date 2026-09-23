@@ -753,3 +753,23 @@ impl Take<'_> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A resumed read carries the stretch it grew to under the ceiling of the response that
+    /// issued its cursor; a response with a smaller page ceiling holds it to its own.
+    #[test]
+    fn a_carried_stretch_is_held_to_the_resuming_responses_ceiling() {
+        let start = Position::start(RecordsOrder::Map);
+        let bytes = 8 << 20;
+        let ceiling = u32::try_from(bytes / STRETCH_BYTES_PER_ROW).unwrap();
+        let walk = Walk::new(None, false, 64 << 20, bytes, start);
+        assert_eq!(walk.target, ceiling);
+        let walk = Walk::new(None, false, 1, bytes, start);
+        assert_eq!(walk.target, STRETCH_MIN);
+        let walk = Walk::new(None, false, 64 << 20, 1024, start);
+        assert_eq!(walk.target, STRETCH_MIN);
+    }
+}

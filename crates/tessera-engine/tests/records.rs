@@ -1089,14 +1089,40 @@ fn a_suppression_and_a_deletion_accepted_between_responses_are_absent_from_the_n
 }
 
 /// **A viewer who sees a subset reads that subset and nothing else**, and the head's counts are
-/// the viewport's.
+/// the viewport's and the rows the read returns, for a filter answered from an index and for ones
+/// evaluated row by row.
 #[test]
 fn a_narrower_viewer_reads_only_what_they_see_and_counts_as_the_viewport_does() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&subset_credential()).unwrap();
     let visible: Vec<u64> = (0..N).filter(|&s| subset_sees(s)).collect();
     let fields = names(&["score", "note", "tag"]);
-    let filter = leaf("band", FilterOperand::Equals(AttrLocalId::new(band_code("low"))));
+    let hot = FilterExpr::Leaf {
+        column: "heat".into(),
+        operand: FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Float(2.0),
+                inclusive: true,
+            }),
+            hi: None,
+        },
+    };
+    let visible_where = |keep: fn(u64) -> bool| visible.iter().filter(|&&s| keep(s)).count();
+    // Each filter, and the visible sources it admits where the generator can say. The region and
+    // the rendered-only column are evaluated row by row, so their rows are the mask's to narrow.
+    let filters = [
+        (
+            "category",
+            leaf("band", FilterOperand::Equals(AttrLocalId::new(band_code("low")))),
+            Some(visible_where(|s| band_of(s) == Some("low"))),
+        ),
+        ("region", lasso(), None),
+        (
+            "rendered-only range",
+            hot,
+            Some(visible_where(|s| heat_of(s).is_some_and(|v| v >= 2.0))),
+        ),
+    ];
     for order in [RecordsOrder::Map, RecordsOrder::Stored] {
         let mut base = request("s0", &fields);
         base.order = Some(order);
@@ -1108,19 +1134,23 @@ fn a_narrower_viewer_reads_only_what_they_see_and_counts_as_the_viewport_does() 
         };
         assert_eq!(read.ids(), fx.tids(&expected), "{order:?}");
 
-        base.filter = Some(filter.clone());
-        base.count = true;
-        base.pages = Some(1);
-        let (sink, _) = respond(&fx.engine, &session, base).unwrap();
-        let counts = sink.head.unwrap().counts.expect("counts asked for");
-        let (viewport_visible, viewport_matched) =
-            viewport_counts(&fx.engine, &session, "s0", Some(filter.clone()));
-        assert_eq!(counts.visible, viewport_visible);
-        assert_eq!(counts.matched, viewport_matched);
-        assert_eq!(
-            counts.matched,
-            visible.iter().filter(|&&s| band_of(s) == Some("low")).count() as u64
-        );
+        for (name, filter, admitted) in &filters {
+            let mut req = base.clone();
+            req.filter = Some(filter.clone());
+            let rows = read_all(&fx.engine, &session, &req).ids().len() as u64;
+            req.count = true;
+            req.pages = Some(1);
+            let (sink, _) = respond(&fx.engine, &session, req).unwrap();
+            let counts = sink.head.unwrap().counts.expect("counts asked for");
+            let (viewport_visible, viewport_matched) =
+                viewport_counts(&fx.engine, &session, "s0", Some(filter.clone()));
+            assert_eq!(counts.visible, viewport_visible, "{order:?} {name}");
+            assert_eq!(counts.matched, viewport_matched, "{order:?} {name}");
+            assert_eq!(counts.matched, rows, "{order:?} {name}: the rows read");
+            if let Some(admitted) = admitted {
+                assert_eq!(counts.matched, *admitted as u64, "{order:?} {name}");
+            }
+        }
     }
 }
 
