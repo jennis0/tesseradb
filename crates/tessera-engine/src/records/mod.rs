@@ -65,6 +65,7 @@ pub struct ItemsLimits {
     /// Rows per page; a request asking for more is served this many.
     pub max_page_rows: u32,
     /// Arrow bytes per page, before compression. A single row larger than this is sent alone.
+    /// A stretch the filter is evaluated over holds no more than this either.
     pub max_page_bytes: usize,
     /// Arrow bytes a response carries. No page starts that could take it past this.
     pub response_bytes: usize,
@@ -365,6 +366,7 @@ impl Engine {
             req.filter.clone(),
             req.keep_unmatched,
             page_rows,
+            req.limits.max_page_bytes,
             resumed.map_or(Position::start(order), |cursor| cursor.position),
         );
         Ok((

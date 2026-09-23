@@ -33,12 +33,14 @@ use crate::region::RegionVerdict;
 use crate::viewport::{crossing_domain, segment_holding, OpenView, RoutedRows};
 use crate::Generation;
 
-/// The first stretch spans at least this many rows per segment, or candidate items in stored
-/// order, whatever the page size.
+/// The first stretch spans at least this many rows, or candidate items in stored order, whatever
+/// the page size.
 const STRETCH_MIN: u32 = 4096;
-/// A stretch never spans more than this: the bitmaps a stretch holds are bounded by it.
-const STRETCH_MAX: u32 = 1 << 24;
 const STRETCH_GROWTH: u32 = 4;
+/// The most a stretch holds per row it spans: a stored stretch keeps each candidate item with its
+/// row, two `u32`s, and a map stretch one `u32` item per visible row while it is evaluated. The
+/// bitmaps beside them hold at most as much again.
+const STRETCH_BYTES_PER_ROW: usize = 8;
 
 /// What one page is walked in: the engine, the view resolved and its mask composed for the page,
 /// and the generation that resolution came from.
@@ -128,7 +130,10 @@ impl Clock {
 pub(super) struct Walk {
     filter: Option<FilterExpr>,
     keep_unmatched: bool,
+    /// The rows the next stretch spans, across every segment.
     target: u32,
+    /// The rows a stretch may span, from the byte ceiling a stretch is held to.
+    ceiling: u32,
     stretch: Option<Stretch>,
     pub(super) position: Position,
     /// The first region verdict an evaluation reached, for the response's header.
@@ -218,16 +223,22 @@ pub(super) fn filter_rows(
 }
 
 impl Walk {
+    /// A walk from `position` whose stretches hold no more than `stretch_bytes`.
     pub(super) fn new(
         filter: Option<FilterExpr>,
         keep_unmatched: bool,
         page_rows: u32,
+        stretch_bytes: usize,
         position: Position,
     ) -> Walk {
+        let ceiling = u32::try_from(stretch_bytes / STRETCH_BYTES_PER_ROW)
+            .unwrap_or(u32::MAX)
+            .max(STRETCH_MIN);
         Walk {
             filter,
             keep_unmatched,
-            target: page_rows.clamp(STRETCH_MIN, STRETCH_MAX),
+            target: page_rows.clamp(STRETCH_MIN, ceiling),
+            ceiling,
             stretch: None,
             position,
             region: None,
@@ -283,7 +294,7 @@ impl Walk {
             clock.scanned += 1;
             let until = stretch.until;
             self.stretch = None;
-            self.target = self.target.saturating_mul(STRETCH_GROWTH).min(STRETCH_MAX);
+            self.target = self.target.saturating_mul(STRETCH_GROWTH).min(self.ceiling);
             if until > u64::from(u32::MAX) {
                 scan = Some((u32::MAX, u64::MAX));
                 break Walked::End;
@@ -312,8 +323,9 @@ impl Walk {
     }
 
     /// The map stretch past `scan`: every row of every segment whose cell is below the nearest
-    /// cell a segment reaches `target` rows ahead, and at least the nearest cell any segment
-    /// holds, so a stretch always covers a row. `None` where no segment holds a row past `scan`.
+    /// cell a segment reaches its share of `target` rows ahead, and at least the nearest cell any
+    /// segment holds, so a stretch always covers a row. `None` where no segment holds a row past
+    /// `scan`.
     fn open_map_stretch(
         &mut self,
         cx: &PageCx<'_>,
@@ -325,6 +337,12 @@ impl Walk {
             .iter()
             .map(|&(segment, _)| first_after(segment, scan))
             .collect();
+        let ahead = segments
+            .iter()
+            .zip(&starts)
+            .filter(|&(&(segment, _), &start)| start < segment.row_count)
+            .count();
+        let share = (self.target as usize / ahead.max(1)).max(1);
         let mut until: u64 = 1 << 32;
         let mut nearest: Option<u32> = None;
         for (&(segment, _), &start) in segments.iter().zip(&starts) {
@@ -333,7 +351,7 @@ impl Walk {
                 continue;
             };
             nearest = Some(nearest.map_or(cell, |n| n.min(cell)));
-            if let Some(&reach) = cells.get(start as usize + self.target as usize) {
+            if let Some(&reach) = cells.get(start as usize + share) {
                 until = until.min(u64::from(reach));
             }
         }
