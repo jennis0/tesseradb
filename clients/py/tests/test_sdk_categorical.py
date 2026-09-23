@@ -111,3 +111,38 @@ def test_declare_columns_declares_a_categorical_column_a_category(served, corpus
     db = served(declare_from_the_frame)
     assert sorted(db.categories("venue").column("key").to_pylist()) == sorted(VENUES)
     assert db.view("map").filter({"venue": {"eq": "icml"}}).count() == 10
+
+
+def test_a_pandas_string_frame_inserted_after_the_first_commit_lands(served, corpus):
+    """pandas 3 makes every string column a large string, lists of strings included."""
+    def strings(first: int, count: int) -> pa.Table:
+        rows = range(first, first + count)
+        return pa.Table.from_pandas(
+            pd.DataFrame(
+                {
+                    "id": [f"p{i}" for i in rows],
+                    "x": [float(i % 30) for i in rows],
+                    "y": [1.0] * count,
+                    "venue": [VENUES[i % 3] for i in rows],
+                    "cluster": [f"c{i % 2}" for i in rows],
+                    "label": [[LABELS[i % 2]] for i in rows],
+                    "doi": [f"10.1/{i}" for i in rows],
+                }
+            ),
+            preserve_index=False,
+        )
+
+    def first_commit(db):
+        declare(db, strings(0, 30))
+        db.declare_attribute("doi", type="keyword", index=True)
+        db.insert("doi", strings(0, 30), id="id", value="doi")
+
+    later = strings(30, 12)
+    assert pa.types.is_large_string(later.schema.field("id").type)
+    db = served(first_commit)
+    insert(db, later)
+    db.insert("doi", later, id="id", value="doi")
+    report = db.commit()
+    assert report.ok, report
+    assert served_counts(db) == expected(0, 42)
+    assert db.view("map").filter({"doi": {"eq": "10.1/40"}}).count() == 1
