@@ -768,9 +768,11 @@ impl Executor {
     ///
     /// It creates no point and no row. Every entity a row names was resolved at the boundary, so
     /// this pass adds cells to entities that have them and members to artifacts; a subject that
-    /// does not exist refused the batch before it was submitted. What it does create is an
-    /// artifact a layer column named and no artifact held, on an `open` layer, through the same
-    /// [`Executor::prepare_mints`] the ingest door's window close uses.
+    /// does not exist refused the batch before it was submitted. What it does create, each
+    /// through the function the ingest window's close uses: a code for an open vocabulary's new
+    /// key; an artifact a layer column named and no artifact held, on an `open` layer
+    /// ([`Executor::prepare_mints`]); and an artifact a filled value names on a layer whose
+    /// artifacts are a column's values ([`Executor::derive_records`]).
     ///
     /// The fill rule is evaluated here and nowhere else, beside the join arm and for its reason:
     /// the sources are the commit-window buffer, the unflushed fills and the flushed homes, and
@@ -778,12 +780,12 @@ impl Executor {
     /// identical value is a no-op, and a cell holding a different value refuses the whole batch
     /// with a `409` naming the column and the key and never the held value.
     ///
-    /// One append, one fsync, one apply. The values record and the growth records its layer
-    /// columns produced are made durable together, so there is no state in which a cell is filled
-    /// and its membership is not.
+    /// One append, one fsync, one apply. The vocabulary mint records, the values record, and the
+    /// publications and growths its columns produced are made durable together and in that order,
+    /// so there is no state in which a cell is filled and its code or membership is not.
     pub(super) fn commit_values(
         &mut self,
-        request: tessera_lifecycle::ValuesRequest,
+        mut request: tessera_lifecycle::ValuesRequest,
         reply: Reply<ValuesReceipt>,
     ) {
         let started = std::time::Instant::now();
@@ -802,7 +804,27 @@ impl Executor {
             }
         }
 
-        let planned = match plan_fills(&generation, &request) {
+        let columns = match values_columns(&generation.bundle.manifest, &request) {
+            Ok(columns) => columns,
+            Err(e) => {
+                reply.fail(e);
+                return;
+            }
+        };
+        // An open vocabulary's new key is minted here as the ingest window mints it, so the cell
+        // the fill rule compares and the log records is the code.
+        let minted = match mint_values_codes(&generation, &mut request, &columns) {
+            Ok(minted) => minted,
+            Err(e) => {
+                reply.fail(ExecError::VocabularyRefused {
+                    detail: e.to_string(),
+                });
+                return;
+            }
+        };
+        let vocabulary_records = minted.records();
+
+        let planned = match plan_fills(&generation, &request, &columns) {
             Ok(planned) => planned,
             Err(e) => {
                 reply.fail(e);
@@ -849,6 +871,16 @@ impl Executor {
                 }
             }
         }
+        // A value this batch filled creates its artifact on a layer whose artifacts are that
+        // column's values, as the same value would at an ingest window's close.
+        let filled = planned.fills.iter().map(|(_, fill)| fill.scalars.as_slice());
+        match self.derive_records(filled, &minted.vocabularies) {
+            Ok(records) => mints.extend(records),
+            Err(detail) => {
+                reply.fail(ExecError::LayerRefused { detail });
+                return;
+            }
+        }
         let growth = match self
             .live
             .with_artifacts(|store| values_growth_records(&memberships, &request.rows, store))
@@ -888,10 +920,9 @@ impl Executor {
         // claimed, and replay applies the sequence in order, so an artifact must exist before
         // anything addresses it.
         let artifact_records: Vec<&WalRecord> = mints.iter().chain(growth.iter()).collect();
-        // The level version each record is the delta against, read before the apply moves it, on
-        // `commit_growth`'s rule, carried forward across the sequence because a mint and a growth
-        // of this batch may name one level and each moves it exactly once.
-        let mut durable: Vec<&WalRecord> = vec![&values_record];
+        // The vocabulary mints go first, since the values record carries their codes.
+        let mut durable: Vec<&WalRecord> = vocabulary_records.iter().collect();
+        durable.push(&values_record);
         durable.extend(&artifact_records);
         let positions = match self.make_durable(&durable, "a values batch") {
             Ok(positions) => positions,
@@ -900,10 +931,11 @@ impl Executor {
                 return;
             }
         };
-        let values_position = positions[0];
+        let values_at = vocabulary_records.len();
+        let values_position = positions[values_at];
         // At the tick, on the ingest door's rule: this is a data door and its batches arrive in
         // runs.
-        self.apply_artifact_records(&artifact_records, &positions[1..], Publish::AtTick);
+        self.apply_artifact_records(&artifact_records, &positions[values_at + 1..], Publish::AtTick);
 
         // The cells reach the buffer's fill map, which is what the next flush writes into the
         // family's entity-space extent and the record blob. The map is cloned with the buffer, on
@@ -924,7 +956,15 @@ impl Executor {
             .store(buffer.len(), Ordering::SeqCst);
         // A values batch fills cells on rows the buffer already holds and buffers none of its own,
         // so nothing joins the buffered-row lists here.
-        let next = generation.with_buffer(Arc::new(buffer), &[], |_| {});
+        let suggest = generation.suggest.with_mints(
+            &tessera_analyse::SuggestionFold::new(),
+            &minted.vocabularies,
+            &minted.fresh,
+        );
+        let next = generation.with_buffer(Arc::new(buffer), &[], |g| {
+            g.vocabularies = Arc::new(minted.vocabularies);
+            g.suggest = suggest;
+        });
         self.publish(next, started);
         // A values batch allocates no entity, so the index records none: the batch id and the
         // body hash are the whole of what a retry is answered off. Indexed at the values record's

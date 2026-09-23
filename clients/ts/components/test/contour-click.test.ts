@@ -43,6 +43,7 @@ function artifactsProjection(served: Artifact[]): ArtifactsProjection {
     layer: 'clusters',
     layers: ['clusters'],
     served,
+    colourServed: [],
     lineage: servedLineage(served),
     status: 'shown',
     refusal: null,

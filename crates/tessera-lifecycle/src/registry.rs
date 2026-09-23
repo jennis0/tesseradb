@@ -2722,6 +2722,15 @@ impl LayerRegistry {
                 layer_entity,
                 runs,
             } => {
+                // Replay over a seed that already holds this registration keeps its version:
+                // nothing about the layer changed.
+                let version = match self.layers.get(&declaration.name) {
+                    Some(held) if held.entity == *layer_entity => held.version,
+                    _ => {
+                        self.version += 1;
+                        self.version
+                    }
+                };
                 self.layers.insert(
                     declaration.name.clone(),
                     RegisteredLayer {
@@ -2742,10 +2751,9 @@ impl LayerRegistry {
                         declaration: (**declaration).clone(),
                         entity: *layer_entity,
                         runs: runs.clone(),
-                        version: self.version + 1,
+                        version,
                     },
                 );
-                self.version += 1;
             }
             WalRecord::LayerDrop { name } => {
                 self.layers.remove(name);

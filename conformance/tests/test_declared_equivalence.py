@@ -600,19 +600,11 @@ RENDER_REFUSED = (
     "the control plane refuses `render = true` on PUT /control/attributes; a rendered column can "
     "only be declared at a build"
 )
-VALUES_DO_NOT_MINT = (
-    "POST /control/values buffers an open vocabulary's new key unminted, and every flush after "
-    "it fails on the column's type, so nothing more is published"
-)
-TEXT_LOST_AT_RESTART = (
-    "a text column declared live matches nothing after a restart until a fold rebuilds its index"
-)
 
 #: Cases and stages expected to fail as a whole, why, and the exception they fail with. Strict,
 #: so each flips when the cause is fixed.
 EXPECTED_FAILURES = {
     **{("rendered-attributes", stage): (RENDER_REFUSED, RenderRefused) for stage in STAGES},
-    **{("open-category-values", stage): (VALUES_DO_NOT_MINT, fx.NeverVisible) for stage in STAGES},
 }
 
 
@@ -629,17 +621,7 @@ class Known:
     reason: str
 
 
-ANY = r".*"
-
 KNOWN = (
-    Known(
-        "layer-version",
-        "layers",
-        ("restart", "fold", "fold-restart"),
-        ((r"meta", r"\.layers\[\d+\]\.version"),),
-        "a restart moves the version `/v1/meta` gives each layer registered live, though nothing "
-        "about who may see the layer changed",
-    ),
     Known(
         "artifact-order",
         "layers",
@@ -663,13 +645,6 @@ KNOWN = (
         "a family scoped to a live group lists its views in the order their first flushes ran "
         "(the view holding the lowest entity id first), where a build lists them in the group's "
         "declared order",
-    ),
-    Known(
-        "text-index",
-        "text-attributes",
-        ("restart",),
-        ((r"viewport world z\d (filter|highlight) note", ANY),),
-        TEXT_LOST_AT_RESTART,
     ),
 )
 

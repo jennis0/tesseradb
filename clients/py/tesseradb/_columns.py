@@ -1,13 +1,9 @@
-"""`declare_columns`: every column of a frame declared from its dtype, and nothing inferred.
+"""`declare_columns`: every column of a frame declared from its data type.
 
-Nothing is inferred by default. The helper that reads a frame is explicit: it declares every
-column not in `skip` and not already declared, typed from its dtype, as details
-only: stored in the record blob, shown at drill-down, neither rendered nor indexed. `render` and
-`index` apply their flags to the columns named; `keyword` and `category` choose those families for
-string columns, which are `text` otherwise.
-
-Only the frame's schema is read, and a column's values decide nothing. `render` is fixed at the
-first commit, which is why this helper never chooses it.
+Each column not in `skip` and not already declared is declared as a detail: stored and shown
+when an item is opened, neither rendered nor filterable unless named. `keyword` and `category`
+choose those types for string columns, which are `text` otherwise, and a categorical column is a
+category. Only the frame's schema is read, never its values.
 """
 
 from __future__ import annotations
@@ -16,7 +12,7 @@ from dataclasses import dataclass
 
 import pyarrow as pa
 
-#: A category minted from the data is an open, public vocabulary at this width.
+#: A category declared from a frame reads an open, public vocabulary at this width.
 VOCABULARY_WIDTH = "u16"
 
 
@@ -91,6 +87,14 @@ def columns_of(
 
 def _column(name: str, dtype: pa.DataType, keyword: bool, category: bool) -> DeclaredColumn:
     spelled = str(dtype)
+    if pa.types.is_dictionary(dtype):
+        value = dtype.value_type
+        if (pa.types.is_string(value) or pa.types.is_large_string(value)) and not keyword:
+            return DeclaredColumn(
+                name, spelled, "category", False, False, vocabulary=name,
+                why="a categorical column, over an open public vocabulary at width u16",
+            )
+        dtype, spelled = value, str(value)
     width = _WIDTHS.get(spelled)
     if width is not None:
         return DeclaredColumn(name, spelled, width, False, False, why="the matching width")

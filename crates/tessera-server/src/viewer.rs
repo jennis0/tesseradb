@@ -371,7 +371,7 @@ async fn categories(
     let limit = match query.limit {
         Some(0) => {
             return Err(ApiError::Contract(
-                "limit must be at least 1; a zero-length page cannot make progress".to_string(),
+                "limit must be at least 1".to_string(),
             ))
         }
         Some(n) => n.min(state.limits.max_category_values),
@@ -455,15 +455,13 @@ fn resolve_category_column(
         } => Ok(resolved),
         tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
             "'{column}' is scoped to view group '{group}' and this request names no view of \
-             it, so the name decides no value set. Pass `view=` a view of that group, or pin \
-             the one it means — '{column}@<key>'"
+             it; pass `view=` a view of that group, or pin the one it means as '{column}@<key>'"
         ))),
         tessera_engine::LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
             "unknown view '{pin}' of group '{group}'"
         ))),
         tessera_engine::LeafColumn::PinOnUnscoped { column } => Err(ApiError::Contract(format!(
-            "'{column}' is not scoped to a view group, so there is nothing for the pin to \
-             choose between: it is one value set for the corpus"
+            "'{column}' is not scoped to a view group; leave out the pin"
         ))),
         _ => Err(ApiError::Unknown("unknown category column".to_string())),
     }
@@ -500,7 +498,7 @@ async fn suggest(
     let AxumQuery(query) = query.map_err(|_| {
         ApiError::Contract(
             "the query string is malformed, or carries a parameter this route does not define; \
-             it accepts only `q`, `limit`, `counts` and `view`"
+             send only `q`, `limit`, `counts` and `view`"
                 .to_string(),
         )
     })?;
@@ -514,9 +512,7 @@ async fn suggest(
     let limit = match query.limit {
         Some(0) => {
             return Err(ApiError::Contract(
-                "limit must be at least 1; a zero-length suggestion page is a request for no \
-                 answer"
-                    .to_string(),
+                "limit must be at least 1".to_string(),
             ))
         }
         Some(n) => n.min(state.limits.max_suggestions),
@@ -1765,8 +1761,8 @@ async fn browse(
     // `limit` clamps and `0` refuses, as on `/v1/categories`.
     if req.limit == Some(0) {
         return Err(ApiError::Contract(
-            "`limit` is 0, which asks for a page with no rows. Omit it for the deployment's \
-             default, or name a positive number up to `selection.max_browse_rows`"
+            "`limit` is 0; omit it for the deployment's default, or send a positive number up \
+             to `selection.max_browse_rows`"
                 .to_string(),
         ));
     }
@@ -1776,8 +1772,8 @@ async fn browse(
     // At most one of `parent` and `q`: roots, children or search.
     if req.parent.is_some() && req.q.is_some() {
         return Err(ApiError::Contract(
-            "`parent` and `q` are two different forms of this verb — the children form and the \
-             search form — so a request carries at most one of them"
+            "`parent` and `q` are two forms of this verb, children and search; send at most \
+             one of them"
                 .to_string(),
         ));
     }
@@ -1792,7 +1788,7 @@ async fn browse(
         None => None,
         Some(text) => Some(BrowseCursor::parse(text).ok_or_else(|| {
             ApiError::Contract(
-                "`cursor` is not one this endpoint issued — pass back a page's `next` unchanged"
+                "`cursor` is not one this endpoint issued; pass back a page's `next` unchanged"
                     .to_string(),
             )
         })?),

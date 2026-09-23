@@ -404,13 +404,7 @@ async fn assert_indistinguishable(a: &Deployment, b: &Deployment) -> usize {
             .send();
         async move {
             let body: serde_json::Value = request.await.unwrap().json().await.unwrap();
-            // A layer's version moves when a restart replays its registration over a seeded
-            // registry, which follows the deployment's write history rather than any label.
-            let mut layers = body["layers"].clone();
-            for layer in layers.as_array_mut().unwrap() {
-                layer.as_object_mut().unwrap().remove("version");
-            }
-            layers
+            body["layers"].clone()
         }
     };
     assert_eq!(

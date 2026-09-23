@@ -90,9 +90,9 @@ import {artifactBudgetFor} from './artifactBudget.js';
 
 /** The session's held artifacts, and the channel's state — what a projection is built from. */
 export type ArtifactChannelState = {
-  /** The first layer on — the one a single-layer reader keeps naming. */
+  /** The first layer asked for — the one a single-layer reader keeps naming. */
   layer: string | null;
-  /** Every layer on, with the closure the store named (decision 0096). */
+  /** Every layer asked for, as the store named them (decision 0096). */
   layers: string[];
   artifacts: Artifact[];
   status: 'idle' | 'loading' | 'shown' | 'refused';
@@ -345,8 +345,9 @@ export class ArtifactChannel {
   }
 
   /**
-   * Point the channel at the layers that are on — a closure, usually one layer with its
-   * dependents (decision 0096). Every one is named in the request and each costs its own pass.
+   * Point the channel at the layers the store asks for: the drawn layers with their closure
+   * (decision 0096), and the layer the points are coloured by. Every one is named in the request
+   * and each costs its own pass.
    */
   setLayers(layers: readonly string[]): void {
     const next = [...layers];

@@ -91,17 +91,14 @@ pub(super) fn held_scoped_value(
         })
 }
 
-/// Apply the fill rule to one values batch: the cells nothing holds, refusing on the first cell
-/// held differently. Claims each cell from three sources in order: the buffered row, an earlier
-/// batch's unflushed fill, and the flushed homes. An absent cell has no claimant in any of them,
-/// so extents stay disjoint per column when the flush writes them.
-///
-/// A row index, a column name and a key reach the caller; nothing else does (I10).
-pub(super) fn plan_fills(
-    generation: &Generation,
+/// Where each column a values batch names lands: a declared scalar first, then one of the batch
+/// view's group-scoped families. Refuses a name in neither, a `render` column, and any column on
+/// a batch that names no view. Asked again here after the door asked it, since the door read a
+/// generation this pass may have moved past.
+pub(super) fn values_columns(
+    manifest: &tessera_store::manifest::Manifest,
     request: &tessera_lifecycle::ValuesRequest,
-) -> Result<PlannedFills, ExecError> {
-    let manifest = &generation.bundle.manifest;
+) -> Result<Vec<ValuesColumn>, ExecError> {
     let declared = &manifest.declared_scalars;
     // A cell is written by its view's flush pass; a batch naming no view fills none.
     let Some(view) = request.view.as_deref() else {
@@ -113,15 +110,9 @@ pub(super) fn plan_fills(
                 ),
             });
         }
-        return Ok(PlannedFills::default());
+        return Ok(Vec::new());
     };
     let families = scoped_families_of_view(manifest, view);
-    let owner_view = scoped_owner_view_of(manifest, view);
-    let key = key_of_owner_view(&owner_view);
-
-    // One resolution per batch, not per row: a name in neither space is refused here too, since
-    // the door reads a generation this pass may have moved past.
-    //
     // A `render` column cannot be filled: a fill acquires no row, so the value never reaches the
     // hot column a tile or drill-down reads from, and where the column is not also `index` there
     // is no other home either.
@@ -156,12 +147,34 @@ pub(super) fn plan_fills(
         return Err(ExecError::ValuesRefused {
             detail: format!(
                 "column '{name}' is neither a declared scalar nor a group-scoped family whose key \
-                 set holds view '{}'; declare the column, or name the view whose key addresses \
-                 the cell",
-                view
+                 set holds view '{view}'; declare the column, or name the view whose key \
+                 addresses the cell"
             ),
         });
     }
+    Ok(columns)
+}
+
+/// Apply the fill rule to one values batch, whose `columns` are [`values_columns`]' answer: the
+/// cells nothing holds, refusing on the first cell held differently. Claims each cell from three
+/// sources in order: the buffered row, an earlier batch's unflushed fill, and the flushed homes.
+/// An absent cell has no claimant in any of them, so extents stay disjoint per column when the
+/// flush writes them.
+///
+/// A row index, a column name and a key reach the caller; nothing else does (I10).
+pub(super) fn plan_fills(
+    generation: &Generation,
+    request: &tessera_lifecycle::ValuesRequest,
+    columns: &[ValuesColumn],
+) -> Result<PlannedFills, ExecError> {
+    let manifest = &generation.bundle.manifest;
+    let declared = &manifest.declared_scalars;
+    let Some(view) = request.view.as_deref() else {
+        return Ok(PlannedFills::default());
+    };
+    let families = scoped_families_of_view(manifest, view);
+    let owner_view = scoped_owner_view_of(manifest, view);
+    let key = key_of_owner_view(&owner_view);
 
     let mut fills = Vec::with_capacity(request.rows.len());
     let mut scoped_fills = Vec::new();

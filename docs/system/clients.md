@@ -95,13 +95,13 @@ area just outside what is on screen once the view has settled and nothing else i
 for. None of this is visible from outside the store: a host tells it where the camera is and
 reads what it publishes.
 
-Annotation layers are requested on their own, naming the layers that are on, rather than read off
-cached point geometry. Artifacts are clusters, boundaries, hierarchy nodes and their labels, as
-[annotations](annotations.md#what-an-artifact-is) defines them. A cache holds geometry it has
-already fetched and does not ask again for a tile it already holds, and such a tile carries no
-artifacts, so a client reading them off the point path would watch clusters disappear from a
-view that had not moved, for no reason a person could see. Asking on its own avoids that at the
-cost of one extra request once a view has settled.
+Annotation layers are requested on their own, naming the layers drawn and the layer the points
+are coloured by, rather than read off cached point geometry. Artifacts are clusters, boundaries,
+hierarchy nodes and their labels, as [annotations](annotations.md#what-an-artifact-is) defines
+them. A cache holds geometry it has already fetched and does not ask again for a tile it already
+holds, and such a tile carries no artifacts, so a client reading them off the point path would
+watch clusters disappear from a view that had not moved, for no reason a person could see. Asking
+on its own avoids that at the cost of one extra request once a view has settled.
 
 ```mermaid
 flowchart LR

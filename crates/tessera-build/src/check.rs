@@ -30,12 +30,13 @@ use std::path::{Path, PathBuf};
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tessera_spatial::tiler::ScalarType;
+use tessera_store::scalar_column;
 
 use crate::config::{
     ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup, ENTITY_ID,
 };
 use crate::ids::Addressing;
-use crate::input::{column_carries, TERM_ID};
+use crate::input::TERM_ID;
 
 /// The declaration a finding or a source is about, in its parts.
 ///
@@ -365,7 +366,8 @@ fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut
                 );
                 continue;
             };
-            if !column_carries(attribute, field.data_type()) {
+            let category = attribute.vocabulary.is_some();
+            if !scalar_column::carries(attribute.ty, category, field.data_type()) {
                 report.note(
                     &object,
                     format!(
@@ -450,7 +452,10 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
                 );
                 continue;
             };
-            if column == attribute.column() && !column_carries(attribute, field.data_type()) {
+            let category = attribute.vocabulary.is_some();
+            if column == attribute.column()
+                && !scalar_column::carries(attribute.ty, category, field.data_type())
+            {
                 report.note(
                     &object,
                     format!(

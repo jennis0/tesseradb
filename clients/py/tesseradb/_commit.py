@@ -29,9 +29,9 @@ becomes visible in, and `?wait=visible` holds a route's answer until the counter
 number. Every page of the plan goes unwaited and one `POST
 /control/flush?wait=visible` closes the commit: the flush arms a cycle and then waits on the
 number that cycle will carry, so it covers every page before it and the SDK reads no counter of
-its own. `visible: true` ends the commit. `visible: false` — the server's
-`serve.visible_wait_max_secs` reached — is a finding: the write happened and is durable, and what
-it wrote reaches the served forms at the next cycle.
+its own. `visible: true` ends the commit. `visible: false` means the server's
+`serve.visible_wait_max_secs` ran out, and is a finding: the write happened and is durable, and
+what it wrote can be read after the next cycle.
 """
 
 from __future__ import annotations
@@ -69,10 +69,8 @@ class Finding:
 class Page:
     """One request the plan will make, with its body and its batch id already made.
 
-    Both are made here rather than at send time, and for the same reason: a retry is the *same*
-    request sent again, so it carries the id the first attempt carried and the bytes the first
-    attempt carried. A page built afresh would be a new request — which is what a second
-    `commit()` of the same frame is, and is meant to be.
+    Both are made here, before sending, so a retry sends the same id and the same bytes. A
+    second `commit()` of the same table builds new requests.
     """
 
     kind: str
@@ -967,21 +965,16 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
         # set. The route's count bound is checked before the plan is built.
         record["excluding"] = [addressed(e) for e in row["excluding"]]
     elif not members and record.get("attached_to"):
-        # **A memberless label carries no `members` at all**: an attached artifact
-        # with no members of its own is served over its target's membership, so the field is
-        # omitted rather than sent empty. An empty list would say the same thing today, and saying
-        # nothing is what the mapping form — a cluster key to a line of text — actually means.
+        # An attached artifact with no members of its own is served over its target's
+        # membership, so it sends no `members` field.
         pass
     else:
-        # A record carrying neither `members` nor `excluding` and attaching to nothing is a `422`,
-        # and the route makes no exception for a shape: "an artifact whose membership holds nobody
-        # is published with an empty `members` list". So a spatial record carries
-        # the empty list beside its shape, which the shape's own resolution then supersedes.
+        # The route refuses a record with neither `members` nor `excluding` that attaches to
+        # nothing, a shape included, so a spatial record sends an empty list beside its shape.
         record["members"] = [addressed(e) for e in members]
     body = json.dumps(record).encode()
-    # A membership spelled by exclusion travels whole, so nothing of it is trimmed; every other
-    # record pages its membership and then its generating sets, a memberless attached one included
-    # — it has sets to page even with no `members` field of its own.
+    # A membership spelled by exclusion travels whole. Every other record pages its membership
+    # and then its generating sets, including an attached record with no `members` field.
     while len(body) > budget and row.get("excluding") is None and (members or any(sets)):
         # Trim the membership first, then each generating set from the last rank down: the page
         # that follows carries the rest, and a set's own page is a `PATCH` at its rank.
@@ -1312,9 +1305,9 @@ def _detail(answer: Answer) -> str:
 def _waited(report, answer: Answer) -> None:
     """What the closing flush says about the commit's visibility.
 
-    `visible: true` is the wait: the publication the flush armed has completed, so the next cell
-    reads what this commit wrote. `visible: false` is the server's bound reached, which is a
-    finding rather than a refusal — the write is durable and publishes at the next cycle.
+    `visible: true` means the next cell reads what this commit wrote. `visible: false` means the
+    server's wait ran out: a finding, since the write is durable and can be read after the next
+    cycle.
     """
     if not answer.ok:
         # The pages landed and are durable; what failed is the request that would have published
