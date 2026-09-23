@@ -32,10 +32,12 @@ def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list
     default, read off the rung's own declaration: the view's `point_visibility.field`, and every
     `[[attribute]]` that travels with a point there. One read from a file of its own is joined
     on entity id, as the build reads it beside the points: each joined file is `(file, columns,
-    select)`. A group-scoped attribute travels only on a view of its group or of one sharing its
-    keys, its rows picked by the `fields.view` column where its file names one."""
+    select, fields)`. A group-scoped attribute travels only on a view of its group or of one
+    sharing its keys, its rows picked by its file's discriminator, `view` unless `fields.view`
+    renames it."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
+    entity = declared.get("defaults", {}).get("entity_id_field", "entity_id")
     view = view or declared_views(rung)[0]
     access = view["point_visibility"].get("field")
     held = set(pq.ParquetFile(view["points"]).schema_arrow.names)
@@ -50,9 +52,17 @@ def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list
             if attribute["name"] in held:
                 attributes.append(attribute["name"])
             continue
-        column = (attribute.get("fields") or {}).get("view")
-        select = (column, view["key"]) if group is not None and column else None
-        entry = joined.setdefault((own, select), {"file": own, "columns": [], "select": select})
+        column = (attribute.get("fields") or {}).get("view", "view")
+        select = (column, view["key"]) if group is not None else None
+        entry = joined.setdefault(
+            (own, select),
+            {
+                "file": own,
+                "columns": [],
+                "select": select,
+                "fields": {"entity_id": (attribute.get("fields") or {}).get("entity_id", entity)},
+            },
+        )
         entry["columns"].append(attribute["name"])
         attributes.append(attribute["name"])
     return access, attributes, list(joined.values())
@@ -65,16 +75,20 @@ def scope_group(attribute: dict) -> str | None:
 
 
 def encode_batch(
-    table: pa.Table, access: str | None, attributes: list[str], columns: Sequence[str] = ()
+    table: pa.Table,
+    coordinates: Sequence[str],
+    access: str | None,
+    attributes: list[str],
+    columns: Sequence[str] = (),
 ) -> bytes:
-    """One Arrow IPC stream for a slice of the hold-out. `access` is the wire's list of labels,
-    a null becoming the empty list for the view's declaration to interpret. `external_id` is
-    the source entity id, eight bytes little-endian, the build's own form. `columns` names the
-    column-route layers, already named for the layer they belong to."""
+    """One Arrow IPC stream for a slice of the hold-out. `coordinates` is the view's pair,
+    `lon`/`lat` for a projected view and `x`/`y` for one with none, which the table and the wire
+    both spell so. `access` is the wire's list of labels, a null becoming the empty list for the
+    view's declaration to interpret. `external_id` is the source entity id, eight bytes
+    little-endian, the build's own form. `columns` names the column-route layers, already named
+    for the layer they belong to."""
     entities = table.column("entity_id").to_pylist()
-    # The points file's own spelling, which the build already held to the view's projection:
-    # `lon`/`lat` for a projected view, `x`/`y` for one with none.
-    names = ["x", "y"] if "x" in table.column_names else ["lon", "lat"]
+    names = list(coordinates)
     arrays = [table.column(name).cast(pa.float64()).combine_chunks() for name in names]
     if access is not None:
         column = table.column(access).combine_chunks()
@@ -103,14 +117,7 @@ def encode_batch(
     for name in columns:
         arrays.append(table.column(name).combine_chunks())
         names.append(name)
-    return stream_bytes(arrays, names)
-
-
-def stream_bytes(arrays: Sequence, names: Sequence[str]) -> bytes:
-    """One record batch as a whole Arrow IPC stream."""
-    batch = pa.RecordBatch.from_arrays(
-        [pa.array(a) if not isinstance(a, pa.Array) else a for a in arrays], names=list(names)
-    )
+    batch = pa.RecordBatch.from_arrays(arrays, names=names)
     sink = pa.BufferOutputStream()
     with ipc.new_stream(sink, batch.schema) as writer:
         writer.write_batch(batch)
@@ -194,7 +201,7 @@ class HoldOut:
         head_rows: int = 0,
         log=print,
         view: dict | None = None,
-        members: bool = True,
+        members: Sequence[str] = (),
         record_order: bool = False,
     ):
         #: The view's own points file: its positions, its access column, and whichever declared
@@ -203,13 +210,19 @@ class HoldOut:
         view = view or declared_views(rung)[0]
         self.points = view["points"]
         self.select = view["select"]
+        #: The view's coordinate pair, and the file's spelling of each canonical column a batch
+        #: reads by name.
+        self.coordinates = [name for name in view["fields"] if name not in ("entity_id", "view")]
+        self.renamed = {
+            spelt: name for name, spelt in view["fields"].items() if name != "view" and spelt != name
+        }
         self.batch_rows = batch_rows
         self.held = np.sort(held)
         self.access, self.attributes, joined = wire_columns(rung, view)
         #: Each joined file's rows for the hold-out, read once: small beside the points.
         self.joined = [
             read_view_rows(
-                {"points": entry["file"], "select": entry["select"]},
+                {"points": entry["file"], "select": entry["select"], "fields": entry["fields"]},
                 ["entity_id", *entry["columns"]],
                 self.held,
             )
@@ -220,11 +233,11 @@ class HoldOut:
         self.log = log
         self.body_stats = self.new_body_stats()
         self.head: pa.Table | None = None
-        # Membership is entity-space and travels once, with the pass that allocates the entities.
+        #: The column-route layers in `members`, whose member lists travel as batch columns.
         self.members = [
             MemberStream(layer["name"], layer["members"], self.held)
             for layer in declared_layers(rung)
-            if layer["route"] == "column" and members
+            if layer["route"] == "column" and layer["name"] in members
         ]
         self.columns = [stream.name for stream in self.members]
         self.member_stats = {stream.name: stream.stats for stream in self.members}
@@ -287,6 +300,8 @@ class HoldOut:
             group = reader.read_row_group(index)
             if self.select is not None:
                 group = group.filter(pc.equal(group.column(self.select[0]), self.select[1]))
+            if self.renamed:
+                group = group.rename_columns([self.renamed.get(n, n) for n in group.column_names])
             table = group.filter(pa.array(in_sorted(group.column("entity_id").to_numpy(), self.held)))
             del group
             if table.num_rows == 0:
@@ -327,5 +342,5 @@ class HoldOut:
 
     def encode(self, table: pa.Table) -> bytes:
         """[`encode_batch`] over a slice of this hold-out, member columns included."""
-        return encode_batch(table, self.access, self.attributes, self.columns)
+        return encode_batch(table, self.coordinates, self.access, self.attributes, self.columns)
 

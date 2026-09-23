@@ -967,6 +967,17 @@ impl Manifest {
         // the other order would delete the view the caller was just told it had. A death whose key
         // nothing recreated simply leaves the group without it.
         for stone in dead {
+            // A death takes away only the incarnation it names. The list is never pruned and is
+            // applied again at every roster publication and every open, so it goes on naming
+            // earlier incarnations of a key created again; the recreated key keeps its place and
+            // its families' columns.
+            let owner_id = format!("{}{}{}", stone.group, crate::GROUP_SEPARATOR, stone.key);
+            if manifest
+                .incarnation_of(&owner_id)
+                .is_some_and(|live| live != stone.incarnation)
+            {
+                continue;
+            }
             // **The owner's groups and every group sharing its views** — the one expansion
             // `Self::view_ids_for_key` defines, which the drop's own prunes take too.
             let ids = manifest.view_ids_for_key(&stone.group, &stone.key);
@@ -2755,5 +2766,78 @@ mod tests {
             vec![view_id],
             "and the column of that view is on the family's list"
         );
+    }
+
+    /// **A death takes away the incarnation it names and no other.** The list of deaths is never
+    /// pruned, so a key created again meets its predecessor's death at every later merge; a key
+    /// dropped a second time meets its own.
+    #[test]
+    fn a_death_removes_only_the_incarnation_it_names() {
+        let group = GroupDescriptor {
+            name: "quarter".to_string(),
+            title: None,
+            members_of: None,
+            quantisation: Quantisation {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            projection: Projection::None,
+            metadata: Vec::new(),
+            visibility: None,
+            point_default: None,
+            views: Vec::new(),
+            scoped_scalars: Vec::new(),
+        };
+        let family = ScopedScalar {
+            name: "rank".to_string(),
+            group: "quarter".to_string(),
+            arrow_type: ScalarType::I32,
+            vocabulary: None,
+            analyser: None,
+            index: true,
+            render: false,
+            views: Vec::new(),
+        };
+        let created = |incarnation| CreatedView {
+            group: "quarter".to_string(),
+            key: "2026-Q1".to_string(),
+            incarnation,
+            visibility: None,
+            metadata: BTreeMap::new(),
+        };
+        let stone = |incarnation| DeadIncarnation {
+            group: "quarter".to_string(),
+            key: "2026-Q1".to_string(),
+            incarnation,
+        };
+        let view_id = format!("quarter{}2026-Q1", crate::GROUP_SEPARATOR);
+        // The key as a fold writes it into `MANIFEST.json` once incarnation 1 has a column.
+        let folded = bare_manifest().with_declarations(&Declarations {
+            groups: std::slice::from_ref(&group),
+            scoped_attributes: std::slice::from_ref(&family),
+            created_views: &[created(1)],
+            scoped_columns: &[("rank".to_string(), view_id.clone(), 1)],
+            ..Declarations::default()
+        });
+        let listed = |manifest: &Manifest| {
+            manifest.groups[0]
+                .scoped_scalars
+                .iter()
+                .any(|f| f.views.contains(&view_id))
+        };
+        let rostered = |manifest: &Manifest| manifest.groups[0].views.iter().any(|v| v.key == "2026-Q1");
+
+        // Recreated: the predecessor's death leaves it alone.
+        let recreated = folded.with_roster(&[created(1)], &[stone(0)]);
+        assert_eq!(recreated.incarnation_of(&view_id), Some(1));
+        assert!(rostered(&recreated) && listed(&recreated));
+
+        // Dropped again: both deaths are on the list, and its own takes it away.
+        let dropped_again = folded.with_roster(&[], &[stone(0), stone(1)]);
+        assert_eq!(dropped_again.incarnation_of(&view_id), None);
+        assert!(!rostered(&dropped_again));
+        assert!(!listed(&dropped_again));
     }
 }

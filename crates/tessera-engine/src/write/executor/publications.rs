@@ -710,8 +710,8 @@ impl Executor {
 
         let Some(mut manifest) = crate::coalesce::rebased(&partition_data.manifest, &completed)
         else {
-            // The window it planned against is gone. Expected rather than exceptional, as
-            // `rebased` shows, and the files are orphans nothing references.
+            // The window it planned against is gone: a merge that published while the pass ran
+            // consumed some of its external-id runs. The files are orphans nothing references.
             tracing::warn!("discarding a completed coalesce that no longer rebases");
             return;
         };

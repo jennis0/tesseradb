@@ -1266,7 +1266,7 @@ def _fold(report, page: Page, answer: Answer) -> None:
         report.values_filled += int(body.get("filled", 0))
         report.already_present += int(body.get("held", 0))
         # A values page carrying a layer's key column mints artifacts from it as the other two
-        # doors do, and `joined` counts the members that joined artifacts the database held.
+        # doors do, and `joined` counts every membership it added, to minted and held artifacts.
         report.artifacts_minted += int(body.get("minted", 0))
         report.memberships_joined += int(body.get("joined", 0))
     elif page.kind == "publish":

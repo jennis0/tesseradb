@@ -275,8 +275,8 @@ def ingest_cell(cell: dict) -> dict:
         "fraction": cell["fraction"],
         "concurrency": cell["concurrency"],
         "seed": cell.get("seed"),
-        "base_rows": cell.get("base_rows"),
-        "holdout_rows": cell.get("holdout_rows"),
+        "base_rows": cell.get("base_entities"),
+        "holdout_rows": cell.get("holdout_entities"),
         "blocked": cell.get("blocked"),
         "base_build": {
             k: v for k, v in (cell.get("build") or {}).items() if k != "stages"
