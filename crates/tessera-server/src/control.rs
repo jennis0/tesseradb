@@ -33,7 +33,7 @@ use crate::error::{
     map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
 };
 use crate::health::is_ready;
-use crate::state::AppState;
+use crate::state::{ApiJson, ApiJsonRejection, AppState};
 
 /// The deny lane's runtime, whose blocking pool runs every `/control/changes` body. The deny lane
 /// never shares tokio's blocking pool with ingest: an ingest closure holds its thread until its
@@ -1119,15 +1119,16 @@ fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
 async fn changes(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
-    body: Result<Json<Vec<ChangeItem>>, axum::extract::rejection::JsonRejection>,
+    body: Result<ApiJson<Vec<ChangeItem>>, ApiJsonRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let Json(items) = body.map_err(|rejection| {
-        body_refusal(
+    let ApiJson(items) = body.map_err(|rejection| match rejection {
+        ApiJsonRejection::Shape(e) => e,
+        ApiJsonRejection::Body(rejection) => body_refusal(
             rejection.status(),
             "change request",
             CHANGES_MAX_BODY_BYTES,
             "; split it into smaller requests",
-        )
+        ),
     })?;
 
     // The item cap, checked before anything is resolved.
@@ -1288,7 +1289,7 @@ async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
 async fn register_layer(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
-    body: Json<tessera_types::layer::LayerDeclaration>,
+    body: ApiJson<tessera_types::layer::LayerDeclaration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let mut declaration = body.0;
     let name = declaration.name.clone();
@@ -1403,7 +1404,7 @@ struct AttributeBody {
 async fn declare_attribute(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
-    body: Json<AttributeBody>,
+    body: ApiJson<AttributeBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
     let name = body.name.clone();
@@ -1485,7 +1486,7 @@ async fn declare_vocabulary(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
-    body: Json<VocabularyBody>,
+    body: ApiJson<VocabularyBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
     let request = tessera_engine::VocabularyRequest {
@@ -1523,7 +1524,7 @@ async fn mint_vocabulary_values(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
-    body: Json<VocabularyValuesBody>,
+    body: ApiJson<VocabularyValuesBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let values: Vec<tessera_engine::DeclaredValue> = body
         .0
@@ -1637,7 +1638,7 @@ async fn create_view_group(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
-    body: Json<ViewGroupBody>,
+    body: ApiJson<ViewGroupBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
     let declaration = tessera_engine::ViewGroupDeclaration {
@@ -1673,7 +1674,7 @@ async fn create_plain_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
-    body: Json<PlainViewBody>,
+    body: ApiJson<PlainViewBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
     let declaration = tessera_engine::PlainViewDeclaration {
@@ -1758,7 +1759,7 @@ async fn create_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
-    body: Json<ViewRecord>,
+    body: ApiJson<ViewRecord>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let record = body.0;
     let mut metadata = std::collections::BTreeMap::new();
@@ -3004,7 +3005,7 @@ async fn grow_memberships(
 #[cfg(feature = "fault-injection")]
 async fn faults_arm(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<FaultSiteRequest>,
+    ApiJson(req): ApiJson<FaultSiteRequest>,
 ) -> Result<StatusCode, ApiError> {
     let site = parse_pause_site(&req.site)?;
     state

@@ -11,10 +11,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::response::Response;
 use serde::Deserialize;
 
 use tessera_engine::{
@@ -26,7 +24,7 @@ use tessera_wire::{
 };
 
 use crate::error::{map_engine_error, ApiError};
-use crate::state::{AppState, GatePermits, ViewerSession};
+use crate::state::{ApiJson, AppState, GatePermits, ViewerSession};
 use crate::stream::{CancelGuard, Producer};
 use crate::viewer::FilterParser;
 
@@ -138,23 +136,12 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// `POST /v1/items`. A body that is not the request object is a `422` saying what serde found; a
-/// body that is not JSON, or not sent as JSON, keeps axum's own refusal.
+/// `POST /v1/items`.
 pub(crate) async fn items(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
-    body: Result<Json<ItemsReq>, JsonRejection>,
+    ApiJson(req): ApiJson<ItemsReq>,
 ) -> Result<Response, ApiError> {
-    let req = match body {
-        Ok(Json(req)) => req,
-        Err(JsonRejection::JsonDataError(e)) => {
-            return Err(ApiError::Contract(format!(
-                "{}; send the fields this route defines, with the values its schema allows",
-                e.body_text()
-            )))
-        }
-        Err(other) => return Ok(other.into_response()),
-    };
 
     // Created before admission so one token covers the whole request; the guard then moves into
     // the response body.
