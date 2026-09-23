@@ -4054,6 +4054,7 @@ async fn grow_memberships(
                             .map(|c| (c.rank, c.values))
                             .collect(),
                         shape,
+                        access: Vec::new(),
                     };
                     join
                 })

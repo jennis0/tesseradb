@@ -2236,6 +2236,7 @@ fn main() {
                 contents,
                 attached_to: None,
                 parents: Vec::new(),
+                access: Vec::new(),
             }
         })
         .collect();

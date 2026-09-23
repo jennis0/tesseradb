@@ -179,6 +179,7 @@ fn build_fixture(shape: Shape) -> Fixture {
                 contents,
                 attached_to: None,
                 parents: parent.iter().copied().collect(),
+                access: Vec::new(),
             },
             None,
         );
@@ -849,6 +850,7 @@ fn an_index_over_another_population_is_refused_and_the_level_derives_its_own() {
                 contents: Vec::new(),
                 attached_to: None,
                 parents: Vec::new(),
+                access: Vec::new(),
             },
             None,
         );

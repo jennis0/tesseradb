@@ -328,6 +328,7 @@ fn records(sets: &[Bitmap]) -> Vec<ArtifactRecord> {
             contents: Vec::new(),
             attached_to: None,
             parents: Vec::new(),
+            access: Vec::new(),
         })
         .collect()
 }

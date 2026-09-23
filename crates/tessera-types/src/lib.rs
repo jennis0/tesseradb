@@ -181,9 +181,11 @@ pub struct GenerationStamp {
 // 17: a side-manifest's `deny` and `tombstones` are each one base64 string holding a portable
 // Roaring bitmap of entity ids, where a 16 manifest carries an array of objects and an array of
 // numbers. A 16 manifest's arrays do not deserialise as strings, so a stale bundle refuses.
+// 18: a packed artifact record carries its own access label after its parents. A 17 record read
+// at 18 takes the shape's marker for the label's count, so a stale bundle refuses.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 17;
+pub const BUNDLE_FORMAT: u32 = 18;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

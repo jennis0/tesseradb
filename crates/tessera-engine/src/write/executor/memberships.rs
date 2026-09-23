@@ -457,6 +457,8 @@ impl Executor {
                             .map(|parent| vec![(*parent).to_string()])
                             .unwrap_or_default(),
                         shape: None,
+                        // A key column names no label, so a minted artifact takes the default.
+                        access: Vec::new(),
                     })
                     .collect();
                 let pending = |key: &str| {

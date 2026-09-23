@@ -446,6 +446,7 @@ fn build_shard(fixture: &Fixture, sharding: &Sharding, shard: u32, scratch: &Pat
                     contents: Vec::new(),
                     attached_to: None,
                     parents: Vec::new(),
+                    access: Vec::new(),
                 },
             ));
         }
