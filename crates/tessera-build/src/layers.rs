@@ -2232,8 +2232,8 @@ pub fn predicate_artifact_keys(
         let mut key_of_code: BTreeMap<u32, &str> = BTreeMap::new();
         if let Some(name) = &attribute.vocabulary {
             if let Some(vocabulary) = schema.vocabularies.get(name) {
-                for (key, code) in &vocabulary.codes {
-                    key_of_code.insert(*code, key.as_str());
+                for (key, code) in vocabulary.values.bindings() {
+                    key_of_code.insert(code, key);
                 }
             }
             if let Some(minter) = minters.get(name) {

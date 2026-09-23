@@ -1446,6 +1446,7 @@ async fn a_declaration_carrying_the_removed_withdrawal_field_is_refused_by_name(
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap();
         assert_eq!(status, 422, "{body}");
+        assert_eq!(error_code(&body), "contract", "{body}");
         assert!(body.contains("withdraw_on_member_deletion"), "{body}");
     }
     // The same declaration without the field registers, so the refusal was the field's.

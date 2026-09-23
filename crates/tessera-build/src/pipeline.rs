@@ -5573,7 +5573,7 @@ pub(crate) fn postings_are_owed(
         .vocabulary
         .as_ref()
         .and_then(|name| schema.vocabularies.get(name))
-        .is_some_and(|v| v.visibility == crate::config::Visibility::Derived)
+        .is_some_and(|v| v.visibility() == crate::config::Visibility::Derived)
 }
 
 /// The vocabulary code a category column's value carries.
@@ -6668,10 +6668,13 @@ mod tests {
                     name: "departments".to_string(),
                     title: None,
                     value_set: crate::config::ValueSet::Closed,
-                    visibility,
                     width: ScalarType::U16,
-                    codes: Default::default(),
-                    titles: Default::default(),
+                    values: crate::config::VocabularyMinter::new(
+                        "departments",
+                        crate::config::VocabularyKind::Declared,
+                        visibility,
+                        ScalarType::U16,
+                    ),
                     reserved: Vec::new(),
                 },
             );

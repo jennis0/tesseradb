@@ -2129,8 +2129,8 @@ fn read_f64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
 /// **Parquet, like every other build input**, so a 400-value published vocabulary is the same
 /// kind of artifact as the points and pairs files and needs no second reader.
 ///
-/// **`code` may be absent, and its absence assigns rather than defaults** (`configuration.md` §1):
-/// a sourced value set is the same pair of choices an inline one is — where the values come from,
+/// **`code` may be absent, and then the build draws one** (`configuration.md` §1): a sourced
+/// value set is the same pair of choices an inline one is — where the values come from,
 /// and whether the codes are pinned. A caller who does not care which integer a value gets should
 /// not have to invent one. Absent for *some* rows and present for others is refused: which half
 /// the file meant would be decided by row order.
@@ -2160,7 +2160,7 @@ pub fn read_vocabulary_file(
         )));
     }
     // `key` is the one field a value file must carry; `code` and `title` are absent-or-present by
-    // design (absence assigns codes, and a value may have no title). A *declared* `code` or
+    // design (absence draws a code, and a value may have no title). A *declared* `code` or
     // `title` the file lacks is still a refusal — the map says where a field is, and a name it
     // gives that nothing carries is a column its author believes is being read.
     let key_idx = field_index(path, &schema, fields, "key")?;
@@ -2440,13 +2440,13 @@ impl BatchColumn {
     ) -> Result<BatchValues> {
         if let Some(vocabulary) = &attribute.vocabulary {
             // A category arrives as its *key*, never as a code: §3.1 — the key in the row is not
-            // the display name, and the code is assigned once and pinned, so a data file
+            // the display name, and the code is drawn once and pinned, so a data file
             // supplying codes directly would be a second place codes are decided.
             let keys = crate::utf8::Utf8Values::new(column).ok_or_else(|| BuildError::Schema {
                 path: path.to_path_buf(),
                 detail: format!(
                     "attribute '{}' is a category, so its column must hold value keys (utf8); \
-                     this file holds {:?}. A category's code is assigned once from the \
+                     this file holds {:?}. A category's code is drawn once from the \
                      vocabulary and never re-derived from the data (per-point-attributes §3.4)",
                     attribute.name,
                     column.data_type()

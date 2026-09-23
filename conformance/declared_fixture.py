@@ -13,11 +13,10 @@ live ingest appends), so anything carrying an identifier is rekeyed here, and on
 - an item card by the `fx` it was asked for;
 - an artifact by `(layer, key)`, and its parents by their keys;
 - a rendered category's code on a point by its key. Codes themselves are compared on the
-  category lists and the typeahead. An open vocabulary's codes are drawn at random by both
-  deployments, which is what `data-model.md` describes, so they are not compared. A build numbers
-  a closed vocabulary 1, 2, 3 and so on where a running service draws its codes at random; that
-  is pinned as a known difference awaiting a ruling. Whatever the live side serves is held to one
-  code per key across every principal and every stage.
+  category lists and the typeahead. Both deployments draw a code at random for every value they
+  do not pin, which is what `data-model.md` describes, so a drawn code is not compared across
+  them. Whatever the live side serves is held to one code per key across every principal and
+  every stage.
 
 Rows whose order is set by `tessera_id` (points within a tile, browse rows with equal counts)
 are sorted by the rekeyed identity instead. The artifacts frame's rows are compared by key, and
@@ -460,14 +459,11 @@ def observe(server, plan: Plan) -> Observation:
     return Observation(answers, codes)
 
 
-def _open_columns(meta: dict) -> set[str]:
-    """Category columns over an open vocabulary, whose codes both deployments draw at random."""
+def _category_columns(meta: dict) -> set[str]:
+    """Category columns. No vocabulary here pins a code, so both deployments draw every code at
+    random."""
     families = meta.get("declared_scalars", []) + meta.get("scoped_scalars", [])
-    return {
-        d["name"]
-        for d in families
-        if (d.get("category") or {}).get("kind") == "discovered"
-    }
+    return {d["name"] for d in families if d.get("category")}
 
 
 def _observe_one(
@@ -479,7 +475,7 @@ def _observe_one(
     meta = record_one(server, token, Meta()).payload
     out["meta"] = normalise_meta(meta)
     keys_of = _code_maps(server, token, meta)
-    drawn = _open_columns(meta)
+    drawn = _category_columns(meta)
 
     def without_drawn_codes(column: str, values: list[dict]) -> None:
         if column.split("@")[0] in drawn:
