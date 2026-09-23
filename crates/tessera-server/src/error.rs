@@ -248,15 +248,13 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
             tracing::error!(%column, %detail, "a column's suggestion index could not be read");
             ApiError::FailClosed(format!("column '{column}' cannot be suggested over"))
         }
-        // The plugin is the deployment's code, so what its refusal says is not sent.
-        EngineError::Plugin(e) => {
-            tracing::error!(detail = %e, "the plugin refused; answering fail-closed");
-            ApiError::FailClosed("the deployment's plugin refused this request".to_string())
+        // Everything else is the deployment's fault, and its text can name a path, a segment, a
+        // bundle file or what the plugin said (`Malformed`, `Plugin`, `Wal`, an unreadable filter
+        // artefact in `FilterRefused`), so it is logged and never sent.
+        other => {
+            tracing::error!(detail = %other, "an engine failure; answering fail-closed");
+            ApiError::FailClosed("the server could not complete this request".to_string())
         }
-        // Everything else is the deployment's fault, and its text can name a path, a segment or
-        // a bundle file (`Malformed`, `Wal`, an unreadable filter artefact in `FilterRefused`),
-        // so it goes through the store sanitiser.
-        other => map_store_error(other),
     }
 }
 

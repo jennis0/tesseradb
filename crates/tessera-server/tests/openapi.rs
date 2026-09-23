@@ -539,6 +539,28 @@ async fn authorise_and_revoke_match_the_description() {
         .await
         .unwrap();
     assert_refusal(&doc, resp, 422, "contract").await;
+    // auth_data the plugin refuses is the caller's to correct, and the plugin's reason reaches
+    // them: a 422 whose detail is not the fail-closed text every internal failure gets.
+    let resp = f
+        .server
+        .client
+        .post(f.server.session_url("/session/authorise"))
+        .bearer_auth(SESSION_CREDENTIAL)
+        .json(&json!({ "auth_data": base64::engine::general_purpose::STANDARD.encode("not json") }))
+        .send()
+        .await
+        .unwrap();
+    let body = assert_refusal(&doc, resp, 422, "contract").await;
+    let internal = tessera_server::error::map_engine_error(tessera_engine::EngineError::Malformed(
+        String::new(),
+    ));
+    let internal: Value = serde_json::from_slice(
+        &axum::body::to_bytes(axum::response::IntoResponse::into_response(internal).into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_ne!(body["detail"], internal["detail"]);
 
     // Revoke: 204 with no body, and the token is then a 401 — the session ending, exactly as a
     // 403 would be (the obligations list's rule).
