@@ -306,7 +306,6 @@ class Deployment:
             view_id=WORLD,
             bbox=BBOX,
             k=K,
-            max_merged_segment_bytes=None,
             automatic_folds=False,
         )
         self.harness.spawn()
