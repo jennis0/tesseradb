@@ -595,3 +595,239 @@ async fn an_unlabelled_artifact_takes_a_named_default() {
     );
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// A build is an ingest into an empty database
+// ---------------------------------------------------------------------------------------------
+
+/// The artifacts both sides hold: key, members, labels. `None` is no label.
+const BUILT: [(&str, std::ops::Range<u64>, Option<&[&str]>); 4] = [
+    ("open", 0..40, None),
+    ("red", 40..80, Some(&["red"])),
+    ("either", 80..120, Some(&["blue", "red"])),
+    ("blue", 120..160, Some(&["blue"])),
+];
+
+/// Write the artifact source, its label column spelled as `labels` says: a list of strings, or a
+/// plain string where each artifact carries at most one label.
+fn write_teams(path: &std::path::Path, list: bool) {
+    use arrow::array::{ArrayRef, ListBuilder, StringArray, StringBuilder, UInt64Builder};
+    use arrow::datatypes::{DataType, Field, Schema};
+    let keys = StringArray::from(BUILT.iter().map(|(k, _, _)| *k).collect::<Vec<_>>());
+    let mut members = ListBuilder::new(UInt64Builder::new());
+    for (_, range, _) in &BUILT {
+        for e in range.clone() {
+            members.values().append_value(e);
+        }
+        members.append(true);
+    }
+    let team: ArrayRef = if list {
+        let mut team = ListBuilder::new(StringBuilder::new());
+        for (_, _, labels) in &BUILT {
+            match labels {
+                None => team.append(false),
+                Some(labels) => {
+                    for label in *labels {
+                        team.values().append_value(label);
+                    }
+                    team.append(true);
+                }
+            }
+        }
+        std::sync::Arc::new(team.finish())
+    } else {
+        std::sync::Arc::new(StringArray::from(
+            BUILT
+                .iter()
+                .map(|(_, _, labels)| labels.map(|l| l[0]))
+                .collect::<Vec<_>>(),
+        ))
+    };
+    let members: ArrayRef = std::sync::Arc::new(members.finish());
+    let schema = std::sync::Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("members", members.data_type().clone(), false),
+        Field::new("team", team.data_type().clone(), true),
+    ]));
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        schema.clone(),
+        vec![std::sync::Arc::new(keys), members, team],
+    )
+    .unwrap();
+    let mut w =
+        parquet::arrow::ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None)
+            .unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+fn built_config(field: &str) -> String {
+    format!(
+        r#"
+[sources]
+points = "points.parquet"
+teams  = "teams.parquet"
+
+[[view]]
+name             = "s0"
+extent           = {{ min = 0.0, max = 1000.0 }}
+point_visibility = {{ default = "public" }}
+
+[[layer]]
+name                      = "{LAYER}"
+title                     = "{LAYER}"
+views                     = ["s0"]
+source                    = "teams"
+membership                = "enumerated"
+visibility                = "public"
+artifact_visibility       = {{ field = "{field}", default = "inherited" }}
+require_member_visibility = "none"
+hierarchy                 = {{ kind = "nested", prune_children = false }}
+content                   = {{ computed = ["centroid"] }}
+
+[[layer]]
+name                      = "inline"
+title                     = "inline"
+views                     = ["s0"]
+membership                = "enumerated"
+visibility                = "public"
+artifact_visibility       = {{ field = "team", default = "inherited" }}
+require_member_visibility = "none"
+hierarchy                 = {{ kind = "flat", prune_children = false }}
+artifacts = [
+  {{ key = "inline-red", members = [0, 1, 2], access = "red" }},
+  {{ key = "inline-open", members = [3, 4, 5] }},
+]
+"#
+    )
+}
+
+/// Build the fixture's points with the two layers above; the build's own answer.
+fn build_labelled(dir: &std::path::Path, list: bool, field: &str) -> Result<(), String> {
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
+    write_points_n(&points, N_ITEMS);
+    write_pairs_n(&pairs, N_ITEMS);
+    write_teams(&dir.join("teams.parquet"), list);
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, built_config(field)).unwrap();
+    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+        .map_err(|e| e.to_string())?;
+    let args = tessera_build::BuildArgs {
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),
+        out: dir.join("bundle"),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: FIXTURE_IDSET,
+        shard_id: 0,
+        layers: config.layers,
+        layer_inputs: config.layer_sources,
+        scoped_layers: Default::default(),
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: config.schema,
+    };
+    tessera_build::build(&args).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Keys and masked counts served to one principal, per layer.
+async fn served_counts(server: &TestServer, terms: &[&str]) -> Vec<(String, String, u64)> {
+    let token = token(server, terms).await;
+    let mut rows: Vec<(String, String, u64)> =
+        decode_viewport_frames(&viewport_raw(server, &token, viewport(0, json!({}))).await)
+            .artifacts
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| (row.layer, row.key.unwrap_or_default(), row.masked_count))
+            .collect();
+    rows.sort();
+    rows
+}
+
+/// **The same labelled artifacts, built and published, serve alike** to every principal, whether
+/// the build reads the label column as a list or as a plain string.
+#[tokio::test]
+async fn labels_built_and_labels_published_serve_alike() {
+    for list in [true, false] {
+        let built = TempDir::new().unwrap();
+        build_labelled(built.path(), list, "team").expect("the labelled build succeeds");
+        let built_server = open(&built).await;
+
+        let live = TempDir::new().unwrap();
+        build_fixture(
+            &live.path().join("bundle"),
+            &live.path().join("points.parquet"),
+            &live.path().join("pairs.parquet"),
+        );
+        let live_server = open(&live).await;
+        declare(&live_server, teams_declaration("inherited")).await;
+        let mut inline = teams_declaration("inherited");
+        inline["name"] = json!("inline");
+        inline["title"] = json!("inline");
+        inline["hierarchy"]["kind"] = json!("flat");
+        inline["content"]["computed"] = json!([]);
+        declare(&live_server, inline).await;
+        publish(
+            &live_server,
+            LAYER,
+            json!(BUILT
+                .iter()
+                .map(|(key, range, labels)| {
+                    // A plain string column carries the first label alone.
+                    let labels: Option<Vec<&str>> =
+                        labels.map(|l| if list { l.to_vec() } else { vec![l[0]] });
+                    json!({ "key": key, "members": members(range.clone()), "access": labels })
+                })
+                .collect::<Vec<_>>()),
+        )
+        .await;
+        publish(
+            &live_server,
+            "inline",
+            json!([
+                { "key": "inline-red", "members": members(0..3), "access": ["red"] },
+                { "key": "inline-open", "members": members(3..6) },
+            ]),
+        )
+        .await;
+        tick(&live_server).await;
+
+        for terms in [&["0"][..], &["0", "red"], &["0", "blue"], &["1", "red", "blue"]] {
+            let from_build = served_counts(&built_server, terms).await;
+            assert_eq!(
+                from_build,
+                served_counts(&live_server, terms).await,
+                "{terms:?}, list {list}"
+            );
+            assert!(!from_build.is_empty());
+        }
+        built_server.shutdown().await;
+        live_server.shutdown().await;
+    }
+}
+
+/// A declared label field its source does not carry is refused by the build.
+#[test]
+fn a_label_field_the_source_does_not_carry_is_refused() {
+    let dir = TempDir::new().unwrap();
+    assert!(build_labelled(dir.path(), true, "squad").is_err());
+    let dir = TempDir::new().unwrap();
+    assert!(build_labelled(dir.path(), true, "team").is_ok(), "the same build naming the column");
+}

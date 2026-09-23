@@ -116,6 +116,8 @@ struct PlannedArtifact {
     /// shape content is read in the same space, and is read in a second pass once every row of the
     /// layer is in hand.
     space: Option<String>,
+    /// The artifact's own access label, as the plugin's descriptors. Empty is no label.
+    access: Vec<Vec<u8>>,
 }
 
 /// How a source spelled one artifact's membership.
@@ -160,6 +162,7 @@ struct ResolvedArtifact {
     attached_to: Option<IncomingAttachment>,
     parent_keys: Vec<String>,
     shape: Option<ArtifactShapes>,
+    access: Vec<Vec<u8>>,
 }
 
 /// Where an artifact's members are by the time anything wants to read them.
@@ -704,6 +707,7 @@ pub fn read(
                 &input.name,
                 path,
                 fields,
+                declaration.artifact_visibility.field.as_deref(),
                 enumerated,
                 scoped.get(&input.name),
                 &mut plan,
@@ -880,10 +884,14 @@ pub fn read(
 /// artifact written twice, which is refused below: two rows for one key are two artifacts as far
 /// as the file is concerned, and taking either would be taking the file's row order for an answer.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn read_artifacts(
     layer: &str,
     path: &Path,
     fields: &Fields,
+    // The column each artifact's own access label is read from, named directly by the layer's
+    // `artifact_visibility.field` as a view's access column is by `point_visibility.field`.
+    access_field: Option<&str>,
     enumerated: bool,
     scoped: Option<&crate::ScopedLayer>,
     plan: &mut LayerPlan,
@@ -935,6 +943,20 @@ fn read_artifacts(
         let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
         let parent = parent_column(path, &batch, fields)?;
+        let access = match access_field {
+            None => None,
+            Some(field) => {
+                let column = batch.column_by_name(field).ok_or_else(|| BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "layer '{layer}': `artifact_visibility.field = \"{field}\"` names a \
+                         column this file does not carry. Its columns are: {}",
+                        column_names(&batch)
+                    ),
+                })?;
+                Some(crate::input::access_labels(path, column, field)?)
+            }
+        };
 
         // **A stored membership on a layer whose members are computed is a refusal**, not a
         // column read anyway: `membership` decides what a write invalidates, and a spatial or
@@ -1039,6 +1061,10 @@ fn read_artifacts(
                     _ => None,
                 },
                 space: space_at(spaces, row).map(str::to_string),
+                access: match &access {
+                    Some(labels) => descriptors_of(layer, &labels[row])?,
+                    None => Vec::new(),
+                },
             };
         }
     }
@@ -1117,9 +1143,23 @@ fn plan_inline(
                 }
             },
             space: row.space.clone(),
+            access: descriptors_of(layer, &row.access)?,
         };
     }
     Ok(())
+}
+
+/// An artifact's labels as the plugin's descriptors. The build labels with the passthrough plugin,
+/// as it does a points file's access column.
+fn descriptors_of(layer: &str, labels: &[String]) -> Result<Vec<Vec<u8>>> {
+    use tessera_plugin::Plugin as _;
+    if labels.is_empty() {
+        return Ok(Vec::new());
+    }
+    let labels: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
+    tessera_plugin::Passthrough::new()
+        .terms_of_labels(&labels)
+        .map_err(|e| BuildError::Invalid(format!("layer '{layer}': an artifact's label: {e}")))
 }
 
 /// One row per `(artifact, entity)`: the memberships, and the generating sets beside them.
@@ -2831,6 +2871,7 @@ fn resolve_artifact(
         attached_to: artifact.attached_to.take(),
         parent_keys: std::mem::take(&mut artifact.parent_keys),
         shape: artifact.shape.take(),
+        access: std::mem::take(&mut artifact.access),
     })
 }
 
@@ -2845,6 +2886,7 @@ struct PublishableBody {
     attached_to: Option<IncomingAttachment>,
     parent_keys: Vec<String>,
     shape: Option<ArtifactShapes>,
+    access: Vec<Vec<u8>>,
 }
 
 impl ResolvedArtifact {
@@ -2857,6 +2899,7 @@ impl ResolvedArtifact {
             attached_to: self.attached_to.take(),
             parent_keys: std::mem::take(&mut self.parent_keys),
             shape: self.shape.take(),
+            access: std::mem::take(&mut self.access),
         }
     }
 }
@@ -2883,6 +2926,7 @@ fn incoming_artifact(
     result.parent_keys = body.parent_keys;
     result.shape = body.shape;
     result.view = body.view;
+    result.access = body.access;
     Ok(result)
 }
 
@@ -4812,6 +4856,7 @@ mod tests {
             attached_to: None,
             parent_keys,
             shape: None,
+            access: Vec::new(),
         };
         for parent in 0..parents {
             let member = parent as u32 * 10;
@@ -4927,6 +4972,7 @@ mod tests {
                 attached_to: None,
                 parent_keys: Vec::new(),
                 shape: None,
+                access: Vec::new(),
             })
             .collect();
         let artifacts: Vec<(&str, usize)> = (0..sizes.len()).map(|i| ("k", i)).collect();
