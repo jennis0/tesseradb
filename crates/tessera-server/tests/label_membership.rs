@@ -754,37 +754,15 @@ fn build_with_labels(dir: &std::path::Path) {
     let parsed = tessera_build::config::Config::parse(&config, &Default::default())
         .expect("the declaration parses");
     let args = tessera_build::BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            // The pairs relation, so a principal's mask is the fixture's own and the two
-            // principals below differ.
-            access: tessera_build::config::AccessInput::relation(pairs),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: dir.join("bundle"),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
         layers: parsed.layers,
         layer_inputs: parsed.layer_sources,
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: parsed.schema,
+        // The pairs relation, so a principal's mask is the fixture's own and the two principals
+        // below differ.
+        ..build_args(
+            &dir.join("bundle"),
+            vec![view_args("s0", &points, AccessInput::relation(pairs))],
+        )
     };
     tessera_build::build(&args).expect("the bundle builds");
 }

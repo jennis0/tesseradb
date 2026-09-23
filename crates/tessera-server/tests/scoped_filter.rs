@@ -37,11 +37,8 @@ use common::*;
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::config::{Attribute, Fields};
-use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
-    ViewArgs,
-};
+use tessera_build::config::Attribute;
+use tessera_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily};
 use tessera_spatial::tiler::ScalarType;
 
 const ENTITIES: u64 = 30;
@@ -68,16 +65,6 @@ const THRESHOLD: f64 = 0.5;
 /// column where Q3's was asked for is observable; and one entity in three carries **no value at
 /// all** in a given quarter, which is the presence bitmap's ordinary case (decision 0064) rather
 /// than a hole to fill.
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
-    }
-}
-
 fn sentiment(slot: usize, entity: u64) -> Option<f32> {
     if (entity + slot as u64).is_multiple_of(3) {
         return None;
@@ -173,19 +160,6 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option
     w.close().unwrap();
 }
 
-fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
-    ViewArgs {
-        visibility: None,
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Fields::default(),
-        select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-    }
-}
-
 /// The bundle: one plain view, a group of four quarters each carrying its own `sentiment` column,
 /// and a second group over the same four keys with its own layout and no values of its own — the
 /// family belongs to the group that owns the views (`views.md` §3.3, §5).
@@ -194,7 +168,11 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
     write_points(&world_points, "world", WORLD, None);
-    let mut views = vec![view_args("world", &world_points, &pairs)];
+    let mut views = vec![view_args(
+        "world",
+        &world_points,
+        AccessInput::relation(&pairs),
+    )];
     let mut family_views = Vec::new();
     for group in ["quarter", "quarter_alt"] {
         for (slot, (key, members)) in QUARTERS.iter().enumerate() {
@@ -207,7 +185,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
             if carries.is_some() {
                 family_views.push(views.len());
             }
-            views.push(view_args(&id, &points, &pairs));
+            views.push(view_args(&id, &points, AccessInput::relation(&pairs)));
         }
     }
     let roster = || {
@@ -222,8 +200,6 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
     };
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 title: None,
@@ -291,22 +267,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
                 source: None,
             },
         ],
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..build_args(&out, views)
     })
     .expect("a nine-view build with one scoped family succeeds");
     out

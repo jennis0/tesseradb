@@ -29,7 +29,7 @@ use parquet::arrow::ArrowWriter;
 use serde_json::json;
 use tempfile::TempDir;
 use tessera_build::config::Fields;
-use tessera_build::{build, BuildArgs, ViewArgs};
+use tessera_build::{build, ViewArgs};
 use tessera_spatial::{Bounds, Projection};
 
 /// Points in longitude and latitude, inside the boundary published below.
@@ -41,16 +41,6 @@ const PLACES: &[(f64, f64)] = &[
     (-2.0, 56.5),
     (-7.0, 55.0),
 ];
-
-/// The whole world in Web Mercator.
-fn world_frame() -> Bounds {
-    Bounds {
-        x_min: 0.0,
-        x_max: 1.0,
-        y_min: 0.0,
-        y_max: 1.0,
-    }
-}
 
 /// **The same projection, a different frame**: a view zoomed on north-west Europe spends its whole
 /// grid there. Nothing in the declaration ties the two extents together, which is decision 0040's
@@ -94,14 +84,10 @@ fn write_lon_lat_points(path: &Path) {
 
 fn view(id: &str, extent: Bounds, projection: Projection, points: &Path, pairs: &Path) -> ViewArgs {
     ViewArgs {
-        visibility: None,
-        view_id: id.to_string(),
         projection,
         extent,
-        points: points.to_path_buf(),
         point_fields: Fields::moved(format!("view '{id}'"), [("x", "lon"), ("y", "lat")]),
-        select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        ..view_args(id, points, AccessInput::relation(pairs))
     }
 }
 
@@ -114,9 +100,16 @@ async fn serve_two_frames(tmp: &TempDir) -> TestServer {
     write_lon_lat_points(&points);
     write_pairs_n(&pairs, PLACES.len() as u64);
     let bundle = dir.join("bundle");
-    build(&BuildArgs {
-        views: vec![
-            view("world", world_frame(), Projection::WebMercator, &points, &pairs),
+    build(&build_args(
+        &bundle,
+        vec![
+            view(
+                "world",
+                world_frame(),
+                Projection::WebMercator,
+                &points,
+                &pairs,
+            ),
             view(
                 "europe",
                 europe_frame(),
@@ -138,26 +131,7 @@ async fn serve_two_frames(tmp: &TempDir) -> TestServer {
                 &pairs,
             ),
         ],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: bundle.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
-    })
+    ))
     .expect("the two-frame fixture builds");
     spawn_server(&bundle, &dir.join("cache"), &dir.join("wal.log")).await
 }

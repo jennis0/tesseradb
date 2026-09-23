@@ -24,7 +24,8 @@ use base64::Engine as _;
 use parking_lot::Mutex;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::{build, BuildArgs};
+pub use tessera_build::config::AccessInput;
+use tessera_build::{build, BuildArgs, ViewArgs};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::faults::FaultSwitchboard;
 use tessera_plugin::Passthrough;
@@ -54,6 +55,28 @@ pub fn extent() -> Bounds {
         x_max: 1000.0,
         y_min: 0.0,
         y_max: 1000.0,
+    }
+}
+
+/// The whole-world Web Mercator frame, which is the unit square: every projection's output is
+/// normalised to `[0, 1]` on both axes.
+pub fn world_frame() -> Bounds {
+    Bounds {
+        x_min: 0.0,
+        x_max: 1.0,
+        y_min: 0.0,
+        y_max: 1.0,
+    }
+}
+
+/// A view group's quantisation over [`extent`].
+pub fn group_frame() -> tessera_build::Quantisation {
+    let e = extent();
+    tessera_build::Quantisation {
+        x_min: e.x_min,
+        x_max: e.x_max,
+        y_min: e.y_min,
+        y_max: e.y_max,
     }
 }
 
@@ -127,7 +150,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         points_path,
         pairs_path,
         n,
-        tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        AccessInput::relation(pairs_path),
     );
 }
 
@@ -139,21 +162,20 @@ pub fn build_fixture_with_access(
     points_path: &Path,
     pairs_path: &Path,
     n: u64,
-    access: tessera_build::config::AccessInput,
+    access: AccessInput,
 ) {
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points_path.to_path_buf(),
-            point_fields: Default::default(),
-            select: None,
-            access,
-        }],
+    let view = view_args("s0", points_path, access);
+    build(&build_args(out, vec![view])).expect("fixture build should succeed");
+}
+
+/// A build of `views` into `out` under the test identity key, minting external ids and writing no
+/// oracle pairs, with every other input empty. A test sets what it varies with struct update
+/// syntax.
+pub fn build_args(out: &Path, views: Vec<ViewArgs>) -> BuildArgs {
+    BuildArgs {
+        views,
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
@@ -168,13 +190,27 @@ pub fn build_fixture_with_access(
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
         mint_external_ids: true,
-        emit_oracle_pairs: true,
+        emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
         schema: Default::default(),
-    };
-    build(&args).expect("fixture build should succeed");
+    }
+}
+
+/// A plain view `view_id` over the points at `points` with its access terms from `access`, in
+/// [`extent`] with no projection.
+pub fn view_args(view_id: &str, points: &Path, access: AccessInput) -> ViewArgs {
+    ViewArgs {
+        visibility: None,
+        view_id: view_id.to_string(),
+        projection: tessera_spatial::Projection::None,
+        extent: extent(),
+        points: points.to_path_buf(),
+        point_fields: Default::default(),
+        select: None,
+        access,
+    }
 }
 
 pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {

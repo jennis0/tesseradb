@@ -52,10 +52,9 @@ use common::*;
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::config::{AccessInput, AccessSource, Attribute, Fields, ValueSet};
+use tessera_build::config::{AccessInput, AccessSource, Attribute, ValueSet};
 use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
-    ViewArgs,
+    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily, ViewArgs,
 };
 use tessera_spatial::tiler::ScalarType;
 
@@ -226,31 +225,18 @@ fn write_points_labelled(
     w.close().unwrap();
 }
 
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
-    }
-}
-
-fn view_args(view: &str, points: &Path, visibility: Option<&[&str]>) -> ViewArgs {
+/// A view whose points carry their own label in an `access` column, behind `visibility` where one
+/// is given.
+fn gated_view(view: &str, points: &Path, visibility: Option<&[&str]>) -> ViewArgs {
+    // The label is a column of the view's own points file, so the descriptors interned into the
+    // dictionary are the words this file writes, which is what lets a gate below name one.
+    let access = AccessInput {
+        source: AccessSource::Field("access".to_string()),
+        default: Some("public".to_string()),
+    };
     ViewArgs {
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Fields::default(),
-        select: None,
-        // The label is a column of the view's own points file, so the descriptors interned into
-        // the dictionary are the words this file writes — which is what lets a gate below name one.
-        access: AccessInput {
-            source: AccessSource::Field("access".to_string()),
-            default: Some("public".to_string()),
-        },
         visibility: visibility.map(labels),
+        ..view_args(view, points, access)
     }
 }
 
@@ -289,19 +275,19 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
     let ledger_points = dir.join("ledger.parquet");
     write_points_labelled(&ledger_points, "ledger", LEDGER, None, |_| COMMA_TERM);
     let mut views = vec![
-        view_args("world", &world_points, None),
+        gated_view("world", &world_points, None),
         // **A disjunctive gate.** A gate wanting several terms declares them as a list
         // (decision 0132): this is the term set {finance, legal}, and the gate is satisfied by
         // intersection with the principal's.
-        view_args("atlas", &atlas_points, Some(&["finance", "legal"])),
+        gated_view("atlas", &atlas_points, Some(&["finance", "legal"])),
         // **One label with a comma in it**: one term, gating exactly the principals who hold it.
-        view_args("ledger", &ledger_points, Some(&[COMMA_TERM])),
+        gated_view("ledger", &ledger_points, Some(&[COMMA_TERM])),
     ];
     for (key, members, visibility) in QUARTERS {
         let id = format!("quarter:{key}");
         let points = dir.join(format!("quarter-{key}.parquet"));
         write_points(&points, &id, members, None);
-        views.push(view_args(&id, &points, visibility));
+        views.push(gated_view(&id, &points, visibility));
     }
     let mut family_views = Vec::new();
     for (ordinal, (key, members)) in SEALED.iter().enumerate() {
@@ -309,12 +295,10 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
         let points = dir.join(format!("sealed-{key}.parquet"));
         write_points(&points, &id, members.clone(), Some(ordinal));
         family_views.push(views.len());
-        views.push(view_args(&id, &points, None));
+        views.push(gated_view(&id, &points, None));
     }
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 title: None,
@@ -427,21 +411,6 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 family_views.clone(),
             ),
         ],
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: tessera_build::config::Schema {
             attributes: Vec::new(),
             // The value set `mood`'s codes index. `public`, so the list is authored and
@@ -465,6 +434,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 },
             )]),
         },
+        ..build_args(&out, views)
     })
     .expect("a gated eight-view build succeeds");
     out
@@ -1444,7 +1414,7 @@ fn write_shared_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scope
 fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
     let world_points = dir.join("shared-world.parquet");
     write_shared_points(&world_points, "world", 0..20, None);
-    let mut views = vec![view_args("world", &world_points, None)];
+    let mut views = vec![gated_view("world", &world_points, None)];
 
     let mut family_views = Vec::new();
     for (ordinal, (key, members)) in SEALED.iter().enumerate() {
@@ -1455,7 +1425,7 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
         // `s2` carries a view gate inside the group, so a `finance` holder reaches its key only
         // through the public sharer.
         let gate: Option<&[&str]> = (*key == "s2").then_some(&["legal"]);
-        views.push(view_args(&id, &points, gate));
+        views.push(gated_view(&id, &points, gate));
     }
     // The sharer's views: public, a different layout over the same keys, and carrying no scoped
     // column of their own — the column is the owner's and is reached through the key.
@@ -1463,13 +1433,11 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
         let id = format!("sealed_map:{key}");
         let points = dir.join(format!("shared-map-{key}.parquet"));
         write_shared_points(&points, &id, members.clone(), None);
-        views.push(view_args(&id, &points, None));
+        views.push(gated_view(&id, &points, None));
     }
 
     let out = dir.join("shared-bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 title: None,
@@ -1513,22 +1481,7 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
             },
             family_views,
         )],
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..build_args(&out, views)
     })
     .expect("a sealed owner shared under a public roster builds");
     out

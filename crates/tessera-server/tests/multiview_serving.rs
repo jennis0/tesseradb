@@ -35,8 +35,8 @@ use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, Quantisation,
-    ViewArgs, ViewMetadataType, ViewMetadataValue,
+    build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewMetadataType,
+    ViewMetadataValue,
 };
 
 const ENTITIES: u64 = 30;
@@ -88,31 +88,6 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
     w.close().unwrap();
 }
 
-/// [`extent`] in the manifest's own shape — one frame for a group, which is what its own copy
-/// records so a view created while the service runs has one to take.
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
-    }
-}
-
-fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
-    ViewArgs {
-        visibility: None,
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Default::default(),
-        select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-    }
-}
-
 /// One microsecond timestamp per quarter boundary — the roster metadata's `timestamp_us` values,
 /// stated here so the wire can be compared against a number this file wrote. `slot` is this
 /// file's own index into [`QUARTERS`] and nothing the service knows about.
@@ -127,13 +102,17 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
     write_points(&world_points, "world", WORLD);
-    let mut views = vec![view_args("world", &world_points, &pairs)];
+    let mut views = vec![view_args(
+        "world",
+        &world_points,
+        AccessInput::relation(&pairs),
+    )];
     for group in ["quarter", "quarter_alt"] {
         for (key, _, members) in QUARTERS {
             let id = format!("{group}:{key}");
             let points = dir.join(format!("{group}-{key}.parquet"));
             write_points(&points, &id, members);
-            views.push(view_args(&id, &points, &pairs));
+            views.push(view_args(&id, &points, AccessInput::relation(&pairs)));
         }
     }
     let roster = |with_metadata: bool| {
@@ -166,10 +145,6 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
     };
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        // `world` is the declared anchor: within a signature group, ids are ordered by the Morton
-        // code an item holds *there* (decision 0112).
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 // Declared on one group and not the other, so `/v1/meta` is asked both questions.
@@ -211,23 +186,9 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
                 views: roster(false),
             },
         ],
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        // `world`, first of `views`, is the anchor: within a signature group, ids are ordered by
+        // the Morton code an item holds there.
+        ..build_args(&out, views)
     })
     .expect("a nine-view build succeeds");
     out

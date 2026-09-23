@@ -24,7 +24,7 @@ use common::*;
 use parquet::arrow::ArrowWriter;
 use serde_json::Value;
 use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
+use tessera_build::build;
 use tessera_spatial::frame::AlignedSquare;
 use tessera_spatial::{Bounds, Projection};
 
@@ -67,13 +67,11 @@ fn build_projected(out: &Path, tmp: &Path, projection: Projection, frame: Bounds
     let pairs = tmp.join(format!("pairs-{}.parquet", out.display().to_string().len()));
     write_lon_lat_points(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
+    let args = build_args(
+        out,
+        vec![tessera_build::ViewArgs {
             projection,
             extent: frame,
-            points: points.clone(),
             // `lon`/`lat` become the canonical `x`/`y` at the declaration, which is what
             // `compile_projected_fields` does for a `[[view]]` block; built outright here because
             // there is no document around this build.
@@ -81,29 +79,9 @@ fn build_projected(out: &Path, tmp: &Path, projection: Projection, frame: Bounds
                 "points",
                 [("x", "lon"), ("y", "lat")],
             ),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+            ..view_args("s0", &points, AccessInput::relation(&pairs))
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
-    };
+    );
     build(&args).expect("a projected fixture build should succeed");
 }
 

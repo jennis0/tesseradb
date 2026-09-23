@@ -32,28 +32,16 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
+use tessera_build::build;
 use tessera_build::config::Fields;
 use tessera_build::input::deinterleave;
-use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::{Wal, WalRecord};
 use tessera_plugin::Passthrough;
-use tessera_spatial::{Bounds, Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
+use tessera_spatial::{Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
 
 use common::*;
-
-/// The whole-world `web_mercator` frame, which **is** the unit square (`projections.md` §4): every
-/// projection's output is normalised to `[0, 1]` on both axes, x east and y south, so a 16-bit
-/// cell here is exactly an XYZ tile at zoom 16.
-fn world_frame() -> Bounds {
-    Bounds {
-        x_min: 0.0,
-        x_max: 1.0,
-        y_min: 0.0,
-        y_max: 1.0,
-    }
-}
 
 /// Places, in longitude and latitude — the order GeoJSON and WKT use, which is the whole reason
 /// this view's columns are named for what they hold.
@@ -118,37 +106,15 @@ fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
     let pairs_path = tmp.join("pairs.parquet");
     write_lon_lat_points(&points_path, points);
     write_pairs_n(&pairs_path, points.len() as u64);
-    build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
+    build(&build_args(
+        out,
+        vec![tessera_build::ViewArgs {
             projection: Projection::WebMercator,
             extent: world_frame(),
-            points: points_path,
             point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path),
+            ..view_args("s0", &points_path, AccessInput::relation(pairs_path))
         }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
-    })
+    ))
     .expect("the projected fixture builds");
 }
 

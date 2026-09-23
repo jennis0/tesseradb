@@ -32,12 +32,9 @@ use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tessera_build::config::{
-    Attribute, Fields, Schema, ScopedAttributeFile, ValueSet, Visibility, Vocabulary,
+    Attribute, Schema, ScopedAttributeFile, ValueSet, Visibility, Vocabulary,
 };
-use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
-    ViewArgs,
-};
+use tessera_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily};
 use tessera_engine::EngineConfig;
 use tessera_spatial::tiler::ScalarType;
 
@@ -233,16 +230,6 @@ fn position(view: &str, e: u64) -> (f64, f64) {
     }
 }
 
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
-    }
-}
-
 /// A points file. A view of the group carries the three columns its families read from it; the
 /// plain view carries none, which is what it means for the family to be the group's.
 fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option<usize>) {
@@ -326,19 +313,6 @@ fn write_score_source(path: &Path) {
     w.close().unwrap();
 }
 
-fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
-    ViewArgs {
-        visibility: None,
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Fields::default(),
-        select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-    }
-}
-
 fn vocabulary(name: &str, values: &[&str], visibility: Visibility) -> Vocabulary {
     Vocabulary {
         name: name.to_string(),
@@ -393,19 +367,21 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
     write_points(&world_points, "world", WORLD, None);
     let score_source = dir.join("score.parquet");
     write_score_source(&score_source);
-    let mut views = vec![view_args("world", &world_points, &pairs)];
+    let mut views = vec![view_args(
+        "world",
+        &world_points,
+        AccessInput::relation(&pairs),
+    )];
     let mut family_views = Vec::new();
     for (slot, (key, range)) in QUARTERS.iter().enumerate() {
         let id = format!("quarter:{key}");
         let points = dir.join(format!("quarter-{key}.parquet"));
         write_points(&points, &id, range.clone(), Some(slot));
         family_views.push(views.len());
-        views.push(view_args(&id, &points, &pairs));
+        views.push(view_args(&id, &points, AccessInput::relation(&pairs)));
     }
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
@@ -487,21 +463,6 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                 }),
             ),
         ],
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: Schema {
             attributes: Vec::new(),
             vocabularies: HashMap::from([
@@ -519,6 +480,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                 ),
             ]),
         },
+        ..build_args(&out, views)
     })
     .expect("a five-view build with five scoped families succeeds");
     out

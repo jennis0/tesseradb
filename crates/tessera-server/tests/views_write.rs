@@ -35,8 +35,8 @@ use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, Quantisation,
-    ViewArgs, ViewMetadataType, ViewMetadataValue,
+    build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewArgs,
+    ViewMetadataType, ViewMetadataValue,
 };
 
 const ENTITIES: u64 = 20;
@@ -89,29 +89,6 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, key: Option<
     w.close().unwrap();
 }
 
-fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
-    ViewArgs {
-        visibility: None,
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Default::default(),
-        select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-    }
-}
-
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
-    }
-}
-
 /// One plain view, a group of one view carrying two metadata names, and a second group over the
 /// same keys — the three shapes a create has to get right (`views.md` §3.1, §3.3).
 fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
@@ -119,12 +96,16 @@ fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
     write_points(&world_points, "world", WORLD, None);
-    let mut views = vec![view_args("world", &world_points, &pairs)];
+    let mut views = vec![view_args(
+        "world",
+        &world_points,
+        AccessInput::relation(&pairs),
+    )];
     for group in ["quarter", "quarter_map"] {
         let id = format!("{group}:2026-Q1");
         let points = dir.join(format!("{group}-q1.parquet"));
         write_points(&points, &id, Q1, None);
-        views.push(view_args(&id, &points, &pairs));
+        views.push(view_args(&id, &points, AccessInput::relation(&pairs)));
     }
     let roster = |with_metadata: bool| {
         vec![GroupViewDescriptor {
@@ -173,8 +154,6 @@ render = true
         .expect("the fixture declaration parses");
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 title: None,
@@ -212,26 +191,12 @@ render = true
                 views: roster(false),
             },
         ],
-        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             dir.join("world.parquet"),
             &config.schema,
         ),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(&out, views)
     })
     .expect("a three-view build succeeds");
     out
@@ -1422,29 +1387,14 @@ render = true
     let groups = config.group_registry(&registry, &views);
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
         anchor,
         groups,
-        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             dir.join("world.parquet"),
             &config.schema,
         ),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(&out, views)
     })
     .expect("the minted build succeeds");
     out
@@ -2013,11 +1963,6 @@ async fn serve_families() -> Served {
         .expect("the families declaration parses");
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views: vec![
-            view_args("world", &world_points, &pairs),
-            view_args("quarter:2026-Q1", &q1_points, &pairs),
-        ],
-        anchor: 0,
         groups: vec![GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
@@ -2034,26 +1979,18 @@ async fn serve_families() -> Served {
                 metadata: Default::default(),
             }],
         }],
-        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             world_points.clone(),
             &config.schema,
         ),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(
+            &out,
+            vec![
+                view_args("world", &world_points, AccessInput::relation(&pairs)),
+                view_args("quarter:2026-Q1", &q1_points, AccessInput::relation(&pairs)),
+            ],
+        )
     })
     .expect("the families build succeeds");
     open(tmp).await

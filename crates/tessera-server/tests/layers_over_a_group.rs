@@ -230,26 +230,13 @@ fn build_side(layers: &str, keyed: &dyn Fn(u64) -> bool) -> Built {
         })
         .collect();
     build(&BuildArgs {
-        views,
         anchor,
         groups,
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: dir.join("bundle"),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers,
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(&dir.join("bundle"), views)
     })
     .expect("the fixture builds");
     Built { _tmp: tmp, dir }

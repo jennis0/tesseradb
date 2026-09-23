@@ -39,10 +39,9 @@ use common::*;
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::config::{Attribute, Fields};
+use tessera_build::config::Attribute;
 use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
-    ViewArgs,
+    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily, ViewArgs,
 };
 use tessera_engine::EngineConfig;
 use tessera_spatial::tiler::ScalarType;
@@ -94,16 +93,6 @@ fn position(view: &str, e: u64) -> (f64, f64) {
             (e / 5) as f64 * 70.0 + key.len() as f64,
         ),
         Some((_, _)) => ((e % 7) as f64 * 90.0, 900.0 - (e / 7) as f64 * 60.0),
-    }
-}
-
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
     }
 }
 
@@ -165,16 +154,11 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option
 const GATED_QUARTER: &str = "2026-Q2";
 const GATE_TERM: &str = "1";
 
-fn view_args(view: &str, points: &Path, pairs: &Path, visibility: Option<&str>) -> ViewArgs {
+/// A view of this fixture, behind `visibility` where one is given.
+fn gated_view(view: &str, points: &Path, pairs: &Path, visibility: Option<&str>) -> ViewArgs {
     ViewArgs {
         visibility: visibility.map(|label| vec![label.to_string()]),
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Fields::default(),
-        select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        ..view_args(view, points, AccessInput::relation(pairs))
     }
 }
 
@@ -214,7 +198,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
     write_points(&world_points, "world", WORLD, None);
-    let mut views = vec![view_args("world", &world_points, &pairs, None)];
+    let mut views = vec![gated_view("world", &world_points, &pairs, None)];
     let mut family_views = Vec::new();
     for (slot, (key, range)) in QUARTERS.iter().enumerate() {
         let id = format!("quarter:{key}");
@@ -222,7 +206,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
         write_points(&points, &id, range.clone(), Some(slot));
         family_views.push(views.len());
         let gate = (*key == GATED_QUARTER).then_some(GATE_TERM);
-        views.push(view_args(&id, &points, &pairs, gate));
+        views.push(gated_view(&id, &points, &pairs, gate));
     }
     // The sharing group's views are public throughout, including the one whose owner counterpart
     // is gated — which is what makes the mixed case reachable at all.
@@ -230,17 +214,15 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
         let id = format!("quarter_map:{key}");
         let points = dir.join(format!("map-{key}.parquet"));
         write_points(&points, &id, range.clone(), Some(slot));
-        views.push(view_args(&id, &points, &pairs, None));
+        views.push(gated_view(&id, &points, &pairs, None));
     }
     // The sharing group's own key, which the owner acquires only while the service runs.
     let borrowed = format!("quarter_map:{BORROWED_KEY}");
     let borrowed_points = dir.join("map-borrowed.parquet");
     write_points(&borrowed_points, &borrowed, BORROWED, None);
-    views.push(view_args(&borrowed, &borrowed_points, &pairs, None));
+    views.push(gated_view(&borrowed, &borrowed_points, &pairs, None));
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 title: None,
@@ -333,22 +315,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
             ],
             false => Vec::new(),
         },
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..build_args(&out, views)
     })
     .expect("the fixture builds");
     out

@@ -225,40 +225,14 @@ async fn served_field_sourced(default: &str) -> (TempDir, TestServer) {
     let bundle_root = tmp.path().join("bundle");
     let points = tmp.path().join("points.parquet");
     write_field_points(&points);
-    tessera_build::build(&tessera_build::BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points,
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput {
-                source: tessera_build::config::AccessSource::Field("categories".to_string()),
-                default: Some(default.to_string()),
-            },
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: bundle_root.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
-    })
+    let access = AccessInput {
+        source: tessera_build::config::AccessSource::Field("categories".to_string()),
+        default: Some(default.to_string()),
+    };
+    tessera_build::build(&build_args(
+        &bundle_root,
+        vec![view_args("s0", &points, access)],
+    ))
     .expect("a field-sourced view with a null row builds under a declared default");
     let server = spawn_server(
         &bundle_root,

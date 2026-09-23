@@ -27,7 +27,7 @@ use tempfile::TempDir;
 
 use tessera_build::config::{Config, Fields};
 use tessera_build::{build, BuildArgs};
-use tessera_spatial::{Bounds, Projection};
+use tessera_spatial::Projection;
 
 use common::*;
 
@@ -45,15 +45,6 @@ const PLACES: &[(f64, f64)] = &[
     (-2.0, 56.5),
     (-7.0, 55.0),
 ];
-
-fn world_frame() -> Bounds {
-    Bounds {
-        x_min: 0.0,
-        x_max: 1.0,
-        y_min: 0.0,
-        y_max: 1.0,
-    }
-}
 
 fn write_lon_lat_points(path: &Path) {
     let schema = Arc::new(Schema::new(vec![
@@ -187,35 +178,17 @@ fn build_projected(out: &Path, tmp: &Path) -> Config {
     write_pairs_n(&pairs_path, PLACES.len() as u64);
     let config = built_layers(tmp);
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: Projection::WebMercator,
-            extent: world_frame(),
-            points: points_path,
-            point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
         layers: config.layers.clone(),
         layer_inputs: config.layer_sources.clone(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..build_args(
+            out,
+            vec![tessera_build::ViewArgs {
+                projection: Projection::WebMercator,
+                extent: world_frame(),
+                point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
+                ..view_args("s0", &points_path, AccessInput::relation(pairs_path))
+            }],
+        )
     })
     .expect("the projected fixture builds");
     config

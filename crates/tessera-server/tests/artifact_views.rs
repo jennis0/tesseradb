@@ -87,21 +87,17 @@ fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
             write_points(&points, slot as f64 * 10.0, 0..IN_VIEW[slot]);
             tessera_build::ViewArgs {
                 visibility: gate(slot),
-                view_id: format!("quarter:{key}"),
-                projection: tessera_spatial::Projection::None,
-                extent: extent(),
-                points,
-                point_fields: Default::default(),
-                select: None,
-                access: tessera_build::config::AccessInput::relation(pairs.clone()),
+                ..view_args(
+                    &format!("quarter:{key}"),
+                    &points,
+                    AccessInput::relation(&pairs),
+                )
             }
         })
         .collect();
     let e = extent();
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
@@ -127,23 +123,7 @@ fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
                 })
                 .collect(),
         }],
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..build_args(&out, views)
     })
     .expect("the two-view group builds");
     out
