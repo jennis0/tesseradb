@@ -553,6 +553,25 @@ async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 422);
+
+    // The held label is compared after a restart, read from the log, and after a fold, read from
+    // a packed record: the same label is accepted and a different one refused.
+    let mut d = restart(d).await;
+    for stage in ["restart", "fold"] {
+        if stage == "fold" {
+            fold(&d.server).await;
+            d = restart(d).await;
+        }
+        let server = &d.server;
+        let (status, _) = patch(server, LAYER, json!([{ "key": "open", "access": ["red"] }])).await;
+        assert_eq!(status, 200, "{stage}");
+        let (status, _) =
+            patch(server, LAYER, json!([{ "key": "open", "access": ["blue"] }])).await;
+        assert_eq!(status, 409, "{stage}");
+        let blue = token(server, &["0", "blue"]).await;
+        assert!(!keys_served(&viewport_raw(server, &blue, viewport(0, json!({}))).await)
+            .contains(&"open".to_string()), "{stage}");
+    }
 }
 
 /// An artifact with no label takes the layer's default: a named default admits only a viewer
