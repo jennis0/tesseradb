@@ -554,32 +554,26 @@ def labels_block(
 
 
 def _artifact_visibility(value: Any) -> Any:
-    """The default an artifact with no label of its own takes. Which column carries each
-    artifact's own label is named on its insert, with `access=`."""
+    """A label, which is the default, or `{"field": column, "default": label}`, where the field
+    names the column each artifact's own labels are read from."""
     if isinstance(value, dict):
-        if "field" in value:
-            raise Refusal(
-                "artifact_visibility: the column an artifact's own label is read from is named on "
-                "the artifacts insert with access=, not on the layer. Give the default here"
-            )
         return Inline(value)
     return Inline({"default": value})
 
 
 def carry_labels(layer: str, block: dict, column: str) -> None:
-    """An artifacts insert naming `access=`: the layer's artifacts carry their own labels, read
-    from that column. Written onto the declaration the build reads, or onto the declaration a
-    layer new to the server is sent with, and never onto the SDK's own blocks.
+    """Write `column` as the field of the layer's `artifact_visibility`, refusing a different
+    column where one is already written.
 
-    `block` is either spelling of `artifact_visibility`: the TOML block's, or the route's body.
+    `block` is the TOML block the build reads or the body a layer new to the server is sent
+    with, never the SDK's own block.
     """
     visibility = dict(block.get("artifact_visibility") or {})
     held = visibility.get("field")
     if held is not None and held != column:
         raise Refusal(
-            f"insert into layer {layer!r}: access={column!r}, and an earlier insert read this "
-            f"layer's labels from {held!r}. Every artifacts table of one layer carries its labels "
-            f"under one column name"
+            f"insert into layer {layer!r}: access={column!r}, and this layer reads its labels "
+            f"from column {held!r}. Name that column with access={held!r}"
         )
     visibility["field"] = column
     block["artifact_visibility"] = Inline(visibility)

@@ -296,9 +296,11 @@ class Database:
         - `require_member_visibility`: how much of an annotation's membership a reader must see
           for it to be shown: `"all"`, `"any"`, `"none"`, `{"fraction": 0.1}` or `{"count": 50}`.
         - `visibility`: who may see the layer at all: `"public"` or an access label.
-        - `artifact_visibility`: whether each annotation also carries an access label of its own.
-          Not built yet: nothing sets such a label, so a layer that declares one shows no
-          annotations to anyone.
+        - `artifact_visibility`: the access label of an annotation that carries none of its own,
+          or `{"field": column, "default": label}`. The field names the column each annotation's
+          own labels are read from; an artifacts insert names that column with `access=`, and an
+          insert naming another column is refused. Without a field, the first artifacts insert
+          naming `access=` sets it before the first commit.
         - `computed`: which properties the server computes per reader: `"centroid"`, `"box"` and
           `"hull"`.
         - `supplied`: content you provide per annotation, such as text, as
@@ -430,6 +432,7 @@ class Database:
                 f"insert into {kind} {target!r}: a {kind} takes no {role} table"
             )
         self._refuse_an_insert_the_target_cannot_take(target, kind, role, block, named)
+        self._refuse_a_second_label_column(target, kind, role, block, named)
         projected = kind in ("view", "view_group") and block.get("projection", "none") != "none"
         metadata = D.metadata_names(block) if role == "roster" else ()
         if kind == "labels" and role == "text":
@@ -541,6 +544,20 @@ class Database:
                 f"its artifacts per view, one key in two views being two artifacts, so every row "
                 f"carries the view it belongs to. Name the column that says which with view="
             )
+
+    def _refuse_a_second_label_column(
+        self, target: str, kind: str, role: str, block: dict, named: dict
+    ) -> None:
+        """Refuse an artifacts insert whose `access=` differs from the column the layer declares
+        or an earlier insert named."""
+        column = named.get("access")
+        if kind != "layer" or role != "artifacts" or not column:
+            return
+        held = {"artifact_visibility": block.get("artifact_visibility")}
+        for other in self.inserts + self.pending:
+            if other.target == target and other.role == "artifacts" and other.columns.get("access"):
+                D.carry_labels(target, held, other.columns["access"])
+        D.carry_labels(target, held, column)
 
     def _refuse_a_second_view_without_its_labels(
         self, kind: str, role: str, target: str, insert: Insert
