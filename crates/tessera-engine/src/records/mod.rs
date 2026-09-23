@@ -302,7 +302,7 @@ struct Planned<'r> {
 impl Engine {
     /// Serve one `POST /v1/items` response into `sink` and return its trailer. Every refusal is
     /// decided before the head: the request's shape, the idset, the view, the cursor (before any
-    /// position in it is used), then the fields. An `Err` after the head leaves the response
+    /// position in it is used), the fields, then the filter. An `Err` after the head leaves the response
     /// without a trailer, which a client reads as incomplete and resumes from the last page end.
     pub fn items_stream(
         &self,
@@ -316,8 +316,8 @@ impl Engine {
         self.serve_pages(&planned, walk, started, sink)
     }
 
-    /// The generation, the idset, the view, the cursor and the fields, in that order, then the
-    /// order, the page size and the counts.
+    /// The generation, the idset, the view, the cursor, the fields and the filter, in that order,
+    /// then the order, the page size and the counts.
     fn plan_items<'r>(
         &self,
         session: &'r Session,
@@ -358,6 +358,19 @@ impl Engine {
             req.fields,
             req.system_fields,
         )?;
+        if let Some(expr) = &req.filter {
+            // Routed once under no candidate, so a malformed filter is refused whatever rows the
+            // view holds or the viewer may see.
+            let open =
+                self.open_view(session, &generation, req.view, &req.cancel, &mut Probe::new())?;
+            self.route_filters_under(
+                &open.served,
+                &open.mask,
+                &croaring::Bitmap::new(),
+                &req.cancel,
+                |route| route(expr, true).map(|_| ()),
+            )?;
+        }
         let order = resumed
             .map(|cursor| cursor.position.order)
             .or(req.order)

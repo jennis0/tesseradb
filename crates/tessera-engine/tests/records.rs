@@ -2429,3 +2429,23 @@ fn a_row_cut_by_the_ceiling_adds_no_key_to_the_dictionary() {
         assert_eq!(dictionary, carried);
     }
 }
+
+/// **A malformed filter is refused before the head whatever rows remain**, for a viewer who sees
+/// everything and for one who sees nothing, in both orders.
+#[test]
+fn a_malformed_filter_is_refused_whatever_rows_remain() {
+    let fx = Fx::new();
+    let fields: Vec<String> = Vec::new();
+    for credential in [full_coverage_credential(), zero_credential()] {
+        let session = fx.engine.authorise(&credential).unwrap();
+        for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+            let mut req = request("s0", &fields);
+            req.order = Some(order);
+            req.filter = Some(leaf("nothing", FilterOperand::Equals(AttrLocalId::new(1))));
+            assert!(matches!(
+                respond(&fx.engine, &session, req).map(|_| ()),
+                Err(EngineError::FilterMalformed(_))
+            ));
+        }
+    }
+}
