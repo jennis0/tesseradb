@@ -1,5 +1,6 @@
-//! Each merged output is reopened, or its counts checked against the inputs, before the manifest
-//! can name it, so a merge defect fails the pass instead of being published.
+//! Each merged output is reopened, or its counts checked, before the manifest can name it, so a
+//! merge defect fails the pass instead of being published. The store checks an external-id run
+//! and its locator as it writes them.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -60,32 +61,10 @@ pub(super) fn coalesce_runs(
         external_id_run: format!("{}/external-ids.arrow", ctx.out_rel),
     };
     let out_dir = ctx.prefix_dir.join(&ctx.out_rel);
-    let rows = coalesce_external_id_runs(&inputs, extent.entity_lo, extent.entity_hi, &out_dir)
+    coalesce_external_id_runs(&inputs, extent.entity_lo, extent.entity_hi, &out_dir)
         .map_err(failed("external-id runs"))?;
     digest_outputs(files, ctx, extent.files())?;
-
-    // The inputs' counts do not bound the output exactly, since a key bound in two runs keeps only
-    // the newer binding, so the run is reopened instead.
-    let reopened = run_rows(&ctx.prefix_dir.join(&extent.external_id_run))
-        .map_err(failed("the coalesced external-id run does not reopen"))?;
-    let locator_bytes = std::fs::metadata(ctx.prefix_dir.join(&extent.path))
-        .map_err(failed("the coalesced locator does not reopen"))?
-        .len();
-    let span = extent.entity_hi - extent.entity_lo + 1;
-    if reopened != rows || locator_bytes != span * 4 {
-        return Err(MaintenanceFailed(format!(
-            "the coalesced external-id run holds {reopened} rows where its writer reported {rows}, \
-             and its locator is {locator_bytes} bytes for a span of {span} entities"
-        )));
-    }
     Ok(extent)
-}
-
-fn run_rows(path: &Path) -> Result<usize, arrow::error::ArrowError> {
-    let file = std::io::BufReader::new(std::fs::File::open(path)?);
-    arrow::ipc::reader::FileReader::try_new(file, None)?
-        .map(|batch| batch.map(|b| b.num_rows()))
-        .sum()
 }
 
 pub(super) fn coalesce_dicts(
