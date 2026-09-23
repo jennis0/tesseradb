@@ -1863,6 +1863,10 @@ impl Executor {
         // dictionary it planned against; `Dict::load` reproduces them only if its extent lands
         // where the flush assumed. Scoped to flushes that wrote an extent, since one that
         // promoted nothing carries only ordinals append-only extension preserves.
+        //
+        // The flush is the only other writer of the dictionary under one prefix, and one flush is
+        // outstanding at a time, so what this guards is `Engine::publish_geometry` swapping in a
+        // dictionary during the flight without moving the prefix.
         if dictionary_moved_under(completed.promoted_from_dict_len, live.dict.len()) {
             tracing::warn!(
                 planned = completed.promoted_from_dict_len,
