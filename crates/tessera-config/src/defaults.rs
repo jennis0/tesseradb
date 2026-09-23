@@ -65,8 +65,9 @@ pub const DEFAULT_BULK_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_BULK_RESPONSE_MS: u64 = 30_000;
 
 /// What one bulk read holds, in pages of `max_page_bytes`: about four while a page is built
-/// (measured 4.05 with rows of very uneven size) and one for its encoded copy.
-pub const BULK_READ_PAGES_HELD: usize = 5;
+/// (measured 4.05 with rows of very uneven size), and three encoded pages: two in the body's
+/// channel and one being written by the HTTP layer.
+pub const BULK_READ_PAGES_HELD: usize = 7;
 
 /// `compute_admission`'s default per compute thread; small requests wait on scheduling, not CPU.
 pub const COMPUTE_ADMISSION_MULTIPLIER: usize = 4;

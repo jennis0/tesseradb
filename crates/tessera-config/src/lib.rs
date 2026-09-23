@@ -251,7 +251,7 @@ pub fn serving_blocking_threads(config: &Config) -> usize {
         .saturating_add(BLOCKING_THREAD_RESERVE)
 }
 
-/// The memory the bulk-read lane may hold at once: [`BULK_READ_PAGES_HELD`] pages of
+/// The memory bulk reads may hold at once: [`BULK_READ_PAGES_HELD`] pages of
 /// `max_page_bytes` for each read it admits.
 pub fn bulk_read_memory_bytes(config: &Config) -> usize {
     config
@@ -1099,7 +1099,7 @@ mod tests {
         assert_eq!(config.bulk_admission, DEFAULT_BULK_ADMISSION);
         assert_eq!(config.bulk_response_bytes, DEFAULT_BULK_RESPONSE_BYTES);
         assert_eq!(config.bulk_response_ms, DEFAULT_BULK_RESPONSE_MS);
-        assert_eq!(bulk_read_memory_bytes(&config), 640 * 1024 * 1024);
+        assert_eq!(bulk_read_memory_bytes(&config), 2 * 7 * 64 * 1024 * 1024);
 
         let config = parse(&valid_toml(
             "max_page_rows = 10\nmax_page_bytes = 4096\nbulk_admission = 3\n\
