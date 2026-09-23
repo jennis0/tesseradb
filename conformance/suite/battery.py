@@ -7,12 +7,14 @@ A battery is a list of queries and a recorded response per query (§12.2):
 
 The membership is §3's table, and it is small because the query surface is deliberately small —
 the same property that makes the leak register enumerable. Every served surface is here: the
-schema (`/v1/meta`), a category's values (`/v1/categories/{column}`), the viewport's three
-streamed surfaces (tiles, points, underlay — the underlay must be *requested*, since at
-`underlay_offset = 0` it emits nothing and silently drops out of every comparison), the region
-summary, and the drill-down (`/v1/items/{id}`), which earns its place twice over: it is the only
-surface that reads all three homes, so a blob-resident field dropped by a producer is visible
-nowhere else.
+schema (`/v1/meta`), a category's values (`/v1/categories/{column}`) and its typeahead
+(`/suggest`), the viewport's streamed surfaces (tiles, points, underlay and artifacts, with a
+filter or a highlight where asked — the underlay must be *requested*, since at
+`underlay_offset = 0` it emits nothing and silently drops out of every comparison, and the
+artifacts only where `layers` names some), the region summary, the drill-down
+(`/v1/items/{id}`), which earns its place twice over: it is the only surface that reads all three
+homes, so a blob-resident field dropped by a producer is visible nowhere else, and a layer's
+browse page (`/v1/artifacts/browse`) and one artifact's card (`/v1/artifacts/{id}`).
 
 `/v1/region` is specified (contracts §3.2) and **not in the router**, so the battery carries it as
 an [`Absent`] entry — an explicitly marked absence rather than a query that silently never runs.
@@ -126,7 +128,6 @@ class Suggest:
     column: str
     q: str
     counts: bool = False
-    view_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -277,8 +278,6 @@ def record_one(server, token: str, query: Query) -> Canonical:
         params = {"q": query.q}
         if query.counts:
             params["counts"] = "true"
-        if query.view_id is not None:
-            params["view"] = query.view_id
         resp = requests.get(
             f"{server.viewer_base}/v1/categories/{query.column}/suggest",
             headers={"Authorization": f"Bearer {token}"},

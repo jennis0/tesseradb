@@ -793,6 +793,10 @@ def _require(held: bool, what: str) -> None:
 def _assert_not_vacuous(case: Case, observed: dict) -> None:
     """Every principal must see the thing under test on the built side, or an equal comparison
     proves nothing for that principal."""
+    for label, answer in observed["everyone"].items():
+        # A malformed request would be refused alike on both sides and compare equal.
+        refused = isinstance(answer, dict) and answer.get("status", 200) != 200
+        _require(not refused, f"{case.name}: everyone is refused {label}: {answer}")
     for principal, answers in observed.items():
         where = f"{case.name} for {principal}"
         for label, _, views in case.plan.filters:
