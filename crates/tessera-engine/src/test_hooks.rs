@@ -157,19 +157,16 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn maintenance_idle_for_test(&self) -> bool {
+        use crate::write::outstanding;
         let health = self.write.health();
         let busy = [
-            &health.flush_in_flight,
-            &health.flush_completed_pending,
-            &health.merge_in_flight,
-            &health.merge_completed_pending,
-            &health.coalesce_in_flight,
-            &health.coalesce_completed_pending,
-            &health.fold_in_flight,
-            &health.fold_completed_pending,
+            (&health.flush_in_flight, &health.flush_completed_pending),
+            (&health.merge_in_flight, &health.merge_completed_pending),
+            (&health.coalesce_in_flight, &health.coalesce_completed_pending),
+            (&health.fold_in_flight, &health.fold_completed_pending),
         ];
-        busy.iter().all(|flag| !flag.load(Ordering::SeqCst))
-            && self.refresh_in_flight.load(Ordering::SeqCst) == crate::refresh::NO_REFRESH
+        !busy.iter().any(|(running, pending)| outstanding(running, pending))
+            && !self.refresh_in_flight()
     }
 
     /// Hold the background refresh in flight, so a test can land a racer in that window.

@@ -838,10 +838,11 @@ impl ExecutorHealth {
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
             flush_in_flight: self.flush_in_flight.load(Ordering::SeqCst),
-            merge_in_flight: self.merge_in_flight.load(Ordering::SeqCst)
-                || self.merge_completed_pending.load(Ordering::SeqCst),
-            coalesce_in_flight: self.coalesce_in_flight.load(Ordering::SeqCst)
-                || self.coalesce_completed_pending.load(Ordering::SeqCst),
+            merge_in_flight: outstanding(&self.merge_in_flight, &self.merge_completed_pending),
+            coalesce_in_flight: outstanding(
+                &self.coalesce_in_flight,
+                &self.coalesce_completed_pending,
+            ),
         }
     }
 
