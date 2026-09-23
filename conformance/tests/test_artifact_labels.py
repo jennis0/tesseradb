@@ -4,8 +4,9 @@ The oracle computes from the planting rules which artifacts each principal is se
 masked count, which served parent and which served target. Every assertion here compares the
 running binary with that answer, over a bundle built from artifact sources and over a service the
 same artifacts were published into, one of them labelled by a fill after its publication. Each is
-checked live, after a restart, after a fold, and after a restart following the fold, which is when
-every record is read back from a packed extent.
+checked live (the published service by the server that took the writes, straight after the fill),
+after a restart, after a fold, and after a restart following the fold, which is when every record
+is read back from a packed extent.
 
 What is compared, per principal: the artifacts frame (keys, masked counts, parent links, targets),
 the points frame's membership columns, the identifier route (status and body, a withheld artifact
@@ -174,15 +175,13 @@ def built(tmp_path_factory):
 def published(tmp_path_factory):
     bundle = fx.build_bundle(tmp_path_factory.mktemp("labels-published"), with_layers=False)
     state = tmp_path_factory.mktemp("labels-published-serve")
-    server, proc = spawn_server(bundle, state)
-    try:
-        fx.publish(server)
-    finally:
-        stop_server(proc)
     yield bundle, state
 
 
-def live_restart_fold_restart(bundle, state) -> None:
+def live_restart_fold_restart(bundle, state, prepare=None) -> None:
+    """Check one deployment live, after a restart, after a fold, and after a restart following
+    it. `prepare` writes into the first server before its live check, so that check reads the
+    state the writes left in memory."""
     started = []
     try:
         for stage in ("live", "restart", "fold", "fold-restart"):
@@ -191,6 +190,8 @@ def live_restart_fold_restart(bundle, state) -> None:
                     stop_server(started[-1])
                 server, proc = spawn_server(bundle, state)
                 started.append(proc)
+                if stage == "live" and prepare is not None:
+                    prepare(server)
             if stage == "fold":
                 server.compact()
             check(server)
@@ -205,4 +206,4 @@ def test_a_built_bundle_serves_each_principal_what_the_oracle_says(built):
 
 
 def test_a_published_service_serves_each_principal_what_the_oracle_says(published):
-    live_restart_fold_restart(*published)
+    live_restart_fold_restart(*published, prepare=fx.publish)
