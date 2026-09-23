@@ -25,16 +25,16 @@ const NONCE_LEN: usize = 24;
 
 /// The route a cursor was issued on, bound into its associated data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Route {
+pub(super) enum Route {
     Items = 1,
 }
 
 /// What a cursor is bound to besides its payload.
-pub(crate) struct Binding<'a> {
-    pub(crate) route: Route,
-    pub(crate) view: &'a str,
-    pub(crate) incarnation: u64,
-    pub(crate) auth_data_hash: [u8; 32],
+pub(super) struct Binding<'a> {
+    pub(super) route: Route,
+    pub(super) view: &'a str,
+    pub(super) incarnation: u64,
+    pub(super) auth_data_hash: [u8; 32],
 }
 
 impl Binding<'_> {
@@ -53,11 +53,11 @@ impl Binding<'_> {
 
 /// The sealing key, derived from the identity key, so a rotation of that key stops every cursor
 /// opening.
-pub(crate) struct CursorKey([u8; 32]);
+pub(super) struct CursorKey([u8; 32]);
 
 impl CursorKey {
     /// The key for a deployment whose identity key is `identity_key_hex`, the manifest's spelling.
-    pub(crate) fn of(identity_key_hex: &str) -> Result<CursorKey> {
+    pub(super) fn of(identity_key_hex: &str) -> Result<CursorKey> {
         let bytes = decode_hex(identity_key_hex).ok_or_else(|| {
             EngineError::Malformed(
                 "the manifest's identity key is not 32 lowercase hex characters".to_string(),
@@ -74,7 +74,7 @@ impl CursorKey {
     }
 
     /// `payload` sealed under `binding`, as base64url without padding.
-    pub(crate) fn seal(&self, binding: &Binding<'_>, payload: &[u8]) -> String {
+    pub(super) fn seal(&self, binding: &Binding<'_>, payload: &[u8]) -> String {
         let mut nonce = [0u8; NONCE_LEN];
         rand::thread_rng().fill_bytes(&mut nonce);
         let aad = binding.associated_data();
@@ -96,7 +96,7 @@ impl CursorKey {
 
     /// The payload `token` seals under `binding`, or [`EngineError::CursorRefused`] for every
     /// reason it does not open.
-    pub(crate) fn open(&self, binding: &Binding<'_>, token: &str) -> Result<Vec<u8>> {
+    pub(super) fn open(&self, binding: &Binding<'_>, token: &str) -> Result<Vec<u8>> {
         let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(token)
             .map_err(|_| EngineError::CursorRefused)?;
@@ -136,13 +136,13 @@ fn decode_hex(hex: &str) -> Option<[u8; 16]> {
 }
 
 /// A map-order position: a row's cell and `tessera_id`.
-pub(crate) type MapKey = (u32, u64);
+pub(super) type MapKey = (u32, u64);
 
 /// How far a read has gone. `last` is the last row returned, and `scan` the position every row at
 /// or before which has been considered; a read resumes after `scan`, which is never before
 /// `last`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Position {
+pub(super) enum Position {
     Map {
         last: Option<MapKey>,
         scan: Option<MapKey>,
@@ -156,7 +156,7 @@ pub(crate) enum Position {
 
 impl Position {
     /// The start of a read in `order`.
-    pub(crate) fn start(order: RecordsOrder) -> Position {
+    pub(super) fn start(order: RecordsOrder) -> Position {
         match order {
             RecordsOrder::Map => Position::Map {
                 last: None,
@@ -169,7 +169,7 @@ impl Position {
         }
     }
 
-    pub(crate) fn order(&self) -> RecordsOrder {
+    pub(super) fn order(&self) -> RecordsOrder {
         match self {
             Position::Map { .. } => RecordsOrder::Map,
             Position::Stored { .. } => RecordsOrder::Stored,
@@ -179,9 +179,9 @@ impl Position {
 
 /// An items cursor's sealed payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ItemsCursor {
-    pub(crate) idset: u32,
-    pub(crate) position: Position,
+pub(super) struct ItemsCursor {
+    pub(super) idset: u32,
+    pub(super) position: Position,
 }
 
 /// `idset, order, flags, last (u32, u64), scan (u32, u64)`, little-endian, where bit 0 of `flags`
@@ -192,7 +192,7 @@ const HAS_LAST: u8 = 1;
 const HAS_SCAN: u8 = 2;
 
 impl ItemsCursor {
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub(super) fn encode(&self) -> Vec<u8> {
         let (order, last, scan) = match self.position {
             Position::Map { last, scan } => (0u8, last, scan),
             Position::Stored { last, scan } => {
@@ -214,7 +214,7 @@ impl ItemsCursor {
 
     /// A payload that opened but does not parse is refused like one that did not open: it can
     /// only be a payload of another format.
-    pub(crate) fn decode(payload: &[u8]) -> Result<ItemsCursor> {
+    pub(super) fn decode(payload: &[u8]) -> Result<ItemsCursor> {
         if payload.len() != PAYLOAD_LEN || payload[5] & !(HAS_LAST | HAS_SCAN) != 0 {
             return Err(EngineError::CursorRefused);
         }

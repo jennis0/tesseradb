@@ -8,16 +8,16 @@ use crate::filter::{Family, FieldHomes, PIN};
 use crate::viewport::{EngineMeta, LeafColumn};
 
 /// One named field, resolved.
-pub(crate) struct Named {
+pub(super) struct Named {
     /// The spelling the request used, which is the column's name in every page.
-    pub(crate) name: String,
-    pub(crate) ty: ScalarType,
-    pub(crate) vocabulary: Option<String>,
-    pub(crate) home: Home,
+    pub(super) name: String,
+    pub(super) ty: ScalarType,
+    pub(super) vocabulary: Option<String>,
+    pub(super) home: Home,
 }
 
 /// Where a named field's value is read from, one home per field.
-pub(crate) enum Home {
+pub(super) enum Home {
     /// The row tail of the requested view, by the declared name.
     Rendered,
     /// An entity-space value column, under its internal key: a declared column's own name, or a
@@ -29,7 +29,7 @@ pub(crate) enum Home {
 
 /// A column the system supplies rather than the schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SystemField {
+pub(super) enum SystemField {
     Position,
     ExternalId,
     Labels,
@@ -47,16 +47,16 @@ impl SystemField {
 }
 
 /// Every column a request's pages carry after `tessera_id`, in order.
-pub(crate) struct FieldPlan {
-    pub(crate) named: Vec<Named>,
-    pub(crate) system: Vec<SystemField>,
+pub(super) struct FieldPlan {
+    pub(super) named: Vec<Named>,
+    pub(super) system: Vec<SystemField>,
 }
 
 impl FieldPlan {
     /// Resolve the request's `fields` and `system_fields` under `view`. A group-scoped field
     /// resolves as a filter leaf on it does, through the same resolution, with every family
     /// admitted since a field need not be filterable to be read.
-    pub(crate) fn resolve(
+    pub(super) fn resolve(
         meta: &EngineMeta,
         view: &str,
         visible: &crate::gate::VisibleViews,
@@ -86,7 +86,7 @@ impl FieldPlan {
 
     /// The order a request that names none and carries no cursor is served in: stored when any
     /// named field is read only from the record store, which holds rows in that order.
-    pub(crate) fn preferred_order(&self) -> RecordsOrder {
+    pub(super) fn preferred_order(&self) -> RecordsOrder {
         match self.named.iter().any(|n| matches!(n.home, Home::Record(_))) {
             true => RecordsOrder::Stored,
             false => RecordsOrder::Map,

@@ -300,13 +300,6 @@ impl FieldHomes {
         }
     }
 
-    /// The field's value is read from the record store and from nowhere else: every `text` field,
-    /// and every field with neither `render` nor `index` except a category over a `derived`
-    /// vocabulary.
-    pub fn record_only(self) -> bool {
-        self.record && !self.rendered && !self.value_column
-    }
-
     /// The homes by the names `/v1/meta` publishes, in that order.
     pub fn names(self) -> Vec<&'static str> {
         [

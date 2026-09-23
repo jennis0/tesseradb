@@ -9,10 +9,10 @@ pub(crate) struct OpenView<'a> {
     /// The composed mask, before any filter narrows it.
     pub(crate) mask: EffectiveMask,
     /// Kept beside the mask for the background ladder fill, which takes the whole entry.
-    pub(crate) geometry: Arc<SessionGeometry>,
-    pub(crate) coordinates: ViewCoordinates,
+    pub(super) geometry: Arc<SessionGeometry>,
+    pub(super) coordinates: ViewCoordinates,
     /// The bundle-wide render columns and then this view's scoped ones, in that order.
-    pub(crate) render_scalars: Vec<DeclaredScalar>,
+    pub(super) render_scalars: Vec<DeclaredScalar>,
 }
 
 /// θ's inputs for one request: the composed visible cardinality the threshold is anchored on, and

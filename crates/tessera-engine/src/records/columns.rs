@@ -48,7 +48,7 @@ enum SystemValues {
 }
 
 /// Every column of one page, before it is cut to the byte ceiling.
-pub(crate) struct PageValues {
+pub(super) struct PageValues {
     tessera_ids: Vec<u64>,
     named: Vec<(String, Values)>,
     system: Vec<SystemValues>,
@@ -58,7 +58,7 @@ pub(crate) struct PageValues {
 
 impl Engine {
     /// Read every field `plan` names for `rows`, from the generation the page was walked in.
-    pub(crate) fn read_page(
+    pub(super) fn read_page(
         &self,
         session: &Session,
         generation: &Generation,
@@ -308,7 +308,7 @@ impl PageValues {
     }
 
     /// The batch of the leading rows that fit in `max_bytes`, how many that is, and their bytes.
-    pub(crate) fn into_batch(mut self, max_bytes: usize) -> Result<(RecordBatch, usize, usize)> {
+    pub(super) fn into_batch(mut self, max_bytes: usize) -> Result<(RecordBatch, usize, usize)> {
         let (kept, bytes) = self.fit(max_bytes);
         self.tessera_ids.truncate(kept);
         let mut fields: Vec<Field> = vec![Field::new("tessera_id", DataType::UInt64, false)];

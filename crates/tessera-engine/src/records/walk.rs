@@ -39,17 +39,17 @@ const STRETCH_MAX: u32 = 1 << 24;
 const STRETCH_GROWTH: u32 = 4;
 
 /// One row a page takes, located in the generation the page was walked in.
-pub(crate) struct Taken {
+pub(super) struct Taken {
     /// Index into the view's segments, ascending by row base.
-    pub(crate) seg: usize,
-    pub(crate) local: u32,
-    pub(crate) tessera_id: u64,
-    pub(crate) entity: u32,
-    pub(crate) matched: bool,
+    pub(super) seg: usize,
+    pub(super) local: u32,
+    pub(super) tessera_id: u64,
+    pub(super) entity: u32,
+    pub(super) matched: bool,
 }
 
 /// Why a walk stopped taking rows.
-pub(crate) enum Walked {
+pub(super) enum Walked {
     /// The page holds as many rows as it asked for.
     Filled,
     /// Nothing remains past the rows taken.
@@ -59,15 +59,15 @@ pub(crate) enum Walked {
     Stopped(ResponseEndedBy),
 }
 
-pub(crate) struct Collected {
-    pub(crate) rows: Vec<Taken>,
-    pub(crate) walked: Walked,
+pub(super) struct Collected {
+    pub(super) rows: Vec<Taken>,
+    pub(super) walked: Walked,
     /// The position after every row taken: the last of them, and how far the scan went.
-    pub(crate) position: Position,
+    pub(super) position: Position,
 }
 
 /// A response's time budget and cancellation.
-pub(crate) struct Clock {
+pub(super) struct Clock {
     started: Instant,
     budget: Duration,
     cancel: Option<CancelToken>,
@@ -77,7 +77,7 @@ pub(crate) struct Clock {
 }
 
 impl Clock {
-    pub(crate) fn new(started: Instant, budget: Duration, cancel: Option<CancelToken>) -> Clock {
+    pub(super) fn new(started: Instant, budget: Duration, cancel: Option<CancelToken>) -> Clock {
         Clock {
             started,
             budget,
@@ -86,11 +86,11 @@ impl Clock {
         }
     }
 
-    pub(crate) fn cancelled(&self) -> bool {
+    pub(super) fn cancelled(&self) -> bool {
         self.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
     }
 
-    pub(crate) fn out_of_time(&self) -> bool {
+    pub(super) fn out_of_time(&self) -> bool {
         self.started.elapsed() >= self.budget
     }
 
@@ -109,14 +109,14 @@ impl Clock {
 }
 
 /// A walk through one response: the position reached and the stretch ahead of it.
-pub(crate) struct Walk {
+pub(super) struct Walk {
     filter: Option<FilterExpr>,
     keep_unmatched: bool,
     target: u32,
     stretch: Option<Stretch>,
-    pub(crate) position: Position,
+    pub(super) position: Position,
     /// The first region verdict an evaluation reached, for the response's header.
-    pub(crate) region: Option<RegionVerdict>,
+    pub(super) region: Option<RegionVerdict>,
 }
 
 struct Stretch {
@@ -203,7 +203,7 @@ fn runs_of(rows: &[u32]) -> Vec<Range<u32>> {
 }
 
 impl Walk {
-    pub(crate) fn new(
+    pub(super) fn new(
         filter: Option<FilterExpr>,
         keep_unmatched: bool,
         page_rows: u32,
@@ -222,7 +222,7 @@ impl Walk {
     /// Take up to `need` rows past the position, in the walk's order, from the view `open`
     /// resolved in `generation`. The position is left where it was; the caller commits the one
     /// [`Collected`] carries, or one of its own after cutting the page.
-    pub(crate) fn collect(
+    pub(super) fn collect(
         &mut self,
         engine: &Engine,
         open: &OpenView<'_>,
@@ -241,7 +241,7 @@ impl Walk {
     }
 
     /// The position just after one taken row, for a page cut before the rows that followed it.
-    pub(crate) fn position_at(&self, open: &OpenView<'_>, row: &Taken) -> Position {
+    pub(super) fn position_at(&self, open: &OpenView<'_>, row: &Taken) -> Position {
         match self.position {
             Position::Map { .. } => {
                 let key = map_key(&open.served.segments, row);
