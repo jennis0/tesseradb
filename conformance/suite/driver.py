@@ -931,9 +931,14 @@ def _publication_counts(h: SuiteHarness) -> dict:
 
 
 def _settled(executor: dict) -> bool:
-    """No work-lane job queued and no flush on the pool. Status reports nothing narrower for a
-    merge or coalesce still running on the pool."""
-    return executor["work_depth"] == 0 and not executor["flush"]["in_flight"]
+    """No work-lane job queued, and no flush, merge or coalesce running or waiting to publish."""
+    flush = executor["flush"]
+    return (
+        executor["work_depth"] == 0
+        and not flush["in_flight"]
+        and not flush["merge_in_flight"]
+        and not flush["coalesce_in_flight"]
+    )
 
 
 def _assert_isolated(h: SuiteHarness, label: str, before: dict, own: tuple[str, ...]) -> None:

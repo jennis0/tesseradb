@@ -3158,6 +3158,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "flush_requested": executor.flush_requested,
                 // Whether a flush is on the pool now, which the two flush counts cannot show.
                 "in_flight": executor.flush_in_flight,
+                // The same for a merge and a coalesce: running on the pool, or finished and not
+                // yet published.
+                "merge_in_flight": executor.merge_in_flight,
+                "coalesce_in_flight": executor.coalesce_in_flight,
                 "buffered_items": executor.buffered_items,
                 "overlay_publications": executor.overlay_publications,
                 // Session projections refreshed after a flush or merge. A live session serves

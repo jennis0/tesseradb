@@ -462,6 +462,10 @@ pub struct ExecutorStats {
     pub flush_requested: bool,
     /// Whether a flush unit is executing on the pool — see [`ExecutorHealth::flush_in_flight`].
     pub flush_in_flight: bool,
+    /// Whether a merge is running on the pool or finished and not yet published.
+    pub merge_in_flight: bool,
+    /// Whether a coalesce is running on the pool or finished and not yet published.
+    pub coalesce_in_flight: bool,
     /// See [`ExecutorHealth::overlay_diverged`].
     pub overlay_diverged: bool,
     /// See [`ExecutorHealth::prefix_diverged`].
@@ -834,6 +838,10 @@ impl ExecutorHealth {
             buffered_items: self.buffered_items.load(Ordering::Relaxed),
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
             flush_in_flight: self.flush_in_flight.load(Ordering::SeqCst),
+            merge_in_flight: self.merge_in_flight.load(Ordering::SeqCst)
+                || self.merge_completed_pending.load(Ordering::SeqCst),
+            coalesce_in_flight: self.coalesce_in_flight.load(Ordering::SeqCst)
+                || self.coalesce_completed_pending.load(Ordering::SeqCst),
         }
     }
 
