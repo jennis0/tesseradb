@@ -34,7 +34,9 @@ from .holdout import HoldOut
 from .publication import Publication
 from .split import (
     build_bundle,
+    declared_entities,
     declared_layers,
+    declared_views,
     ranks_for,
     split_entities,
     state_extent,
@@ -169,7 +171,9 @@ class Cycle:
     def build_base(self) -> Path:
         base_dir = self.work / f"base-{self.args.fraction:g}"
         bundle = base_dir / "bundle"
-        base_ids, held = split_entities(self.rung / "points.parquet", self.args.fraction, self.args.seed)
+        base_ids, held = split_entities(
+            declared_entities(self.rung), self.args.fraction, self.args.seed
+        )
         self.result["base_rows"] = int(len(base_ids))
         self.result["holdout_rows"] = int(len(held))
         self.held = held
@@ -177,13 +181,13 @@ class Cycle:
             self.log(f"reusing {bundle}")
             self.result["build"] = {"reused": True}
             return base_dir
-        # `--reuse-base` also reuses prepared inputs whose build failed: the points file holds
-        # the row count this fraction and seed give.
-        prepared = base_dir / "points.parquet"
+        # `--reuse-base` also reuses prepared inputs whose build failed, where they hold the
+        # entity count this fraction and seed give.
+        prepared = base_dir / "base-inputs.json"
         reuse_inputs = (
             self.args.reuse_base
             and prepared.exists()
-            and pq.ParquetFile(prepared).metadata.num_rows == len(base_ids)
+            and json.loads(prepared.read_text()).get("entities") == len(base_ids)
         )
         if reuse_inputs:
             self.log(f"reusing the prepared base inputs at {base_dir}")
@@ -347,23 +351,9 @@ class Cycle:
         return served
 
     def read_views(self) -> None:
-        """Every declared view, the anchor first, with the points file each one's pass sends: a
-        row in a second view joins an entity that must already exist."""
-        declared = tomllib.loads((self.rung / "corpus.toml").read_text())
-        named = declared.get("sources", {})
-        default_source = declared.get("defaults", {}).get("source", "points")
-        self.views = [
-            {
-                "name": view["name"],
-                "points": self.rung
-                / named.get(
-                    view.get("source", default_source), view.get("source", default_source)
-                ),
-            }
-            for view in declared.get("view", [])
-        ]
-        anchor = declared.get("allocation_view") or self.views[0]["name"]
-        self.views.sort(key=lambda view: view["name"] != anchor)
+        """Every declared view, the anchor first, each group's views among them, with the file
+        each one's pass reads: a row in a second view joins an entity that must already exist."""
+        self.views = [{**view, "name": view["id"]} for view in declared_views(self.rung)]
         self.result["views"] = self.view_names
 
     def open_session(self, served: Deployment, ranks: list[dict]) -> None:
@@ -399,7 +389,7 @@ class Cycle:
                 batch_rows,
                 head_rows=head if first else 0,
                 log=self.log,
-                points=entry["points"],
+                view=entry,
                 members=first,
             )
             self.log(
@@ -579,6 +569,12 @@ class Cycle:
                 f"has no roster and no member table, and an ingested row joins it through the "
                 f"attribute its batch carries",
             }
+        if layer["roster"] is None and layer["inline"]:
+            self.log(f"  {name}: nothing to publish, its artifacts are written in the declaration")
+            return "declined", {
+                "reason": "artifacts written in the declaration: the base build carries them, "
+                "and their members are computed at request time or named there",
+            }
         if layer["roster"] is None:
             members = layer["members"]
             if layer["supplied"]:
@@ -616,6 +612,7 @@ class Cycle:
             self.args.publish_max_bytes,
             self.args.publish_bucket_rows,
             self.limits,
+            view_column=layer.get("view_column"),
         )
         try:
             sent = self.send_publication(control, name, publication)
@@ -790,14 +787,17 @@ class Cycle:
 
     def do_fold(self, control) -> dict:
         """`POST /control/compact`, and the compaction block once a fold has landed."""
-        before = control.status()["compaction"]["folds"]
+        before = control.status()["compaction"]
         code = control.compact().status_code
-        done, wall = wait_for(
-            lambda: control.status()["compaction"]["folds"] > before,
-            timeout=self.args.fold_timeout,
-            interval=1.0,
-        )
+
+        # A fold the server discarded counts a failure and never lands, so either ends the wait.
+        def settled() -> bool:
+            now = control.status()["compaction"]
+            return now["folds"] > before["folds"] or now["fold_failures"] > before["fold_failures"]
+
+        settled_in_time, wall = wait_for(settled, timeout=self.args.fold_timeout, interval=1.0)
         compaction = control.status()["compaction"]
+        done = settled_in_time and compaction["folds"] > before["folds"]
         return {
             "status": code,
             "completed": done,
@@ -805,7 +805,7 @@ class Cycle:
             "fold_s": compaction.get("last_secs"),
             "fold_peak_rss_bytes": compaction.get("last_rss_bytes"),
             "folds": compaction.get("folds"),
-            "fold_failures": compaction.get("fold_failures"),
+            "fold_failures": compaction.get("fold_failures", 0) - before.get("fold_failures", 0),
             "live_rows": compaction.get("live_rows"),
         }
 

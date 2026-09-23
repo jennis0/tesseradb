@@ -13,27 +13,55 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from pyarrow import ipc
 
-from .split import declared_layers, in_sorted, member_table_columns
+from .split import (
+    declared_layers,
+    declared_views,
+    in_sorted,
+    member_table_columns,
+    read_view_rows,
+    source_path,
+)
 
 # ---------------------------------------------------------------------------------------------
 # The hold-out, as ingest batches
 # ---------------------------------------------------------------------------------------------
 
 
-def wire_columns(rung: Path, points: Path | None = None) -> tuple[str | None, list[str]]:
-    """`(access column, attribute columns)` for the hold-out's batches, read off the rung's own
-    declaration: the first `point_visibility.field` any view declares, and every `[[attribute]]`
-    the declaration names that `points` holds."""
+def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list[str], list[dict]]:
+    """`(access column, attribute columns, joined files)` for one view's batches, the anchor's by
+    default, read off the rung's own declaration: the view's `point_visibility.field`, and every
+    `[[attribute]]` that travels with a point there. One read from a file of its own is joined
+    on entity id, as the build reads it beside the points: each joined file is `(file, columns,
+    select)`. A group-scoped attribute travels only on a view of its group or of one sharing its
+    keys, its rows picked by the `fields.view` column where its file names one."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
-    access = None
-    for view in declared.get("view", []):
-        field = (view.get("point_visibility") or {}).get("field")
-        if field:
-            access = field
-            break
-    held = set(pq.ParquetFile(points or rung / "points.parquet").schema_arrow.names)
-    attributes = [a["name"] for a in declared.get("attribute", []) if a["name"] in held]
-    return access, attributes
+    named = declared.get("sources", {})
+    view = view or declared_views(rung)[0]
+    access = view["point_visibility"].get("field")
+    held = set(pq.ParquetFile(view["points"]).schema_arrow.names)
+    attributes: list[str] = []
+    joined: dict = {}
+    for attribute in declared.get("attribute", []):
+        group = scope_group(attribute)
+        if group not in (None, view["owner"]):
+            continue
+        own = source_path(rung, named, attribute.get("source"))
+        if own in (None, view["points"]):
+            if attribute["name"] in held:
+                attributes.append(attribute["name"])
+            continue
+        column = (attribute.get("fields") or {}).get("view")
+        select = (column, view["key"]) if group is not None and column else None
+        entry = joined.setdefault((own, select), {"file": own, "columns": [], "select": select})
+        entry["columns"].append(attribute["name"])
+        attributes.append(attribute["name"])
+    return access, attributes, list(joined.values())
+
+
+def scope_group(attribute: dict) -> str | None:
+    """The group an attribute's values vary by, or None for one value per entity."""
+    scope = attribute.get("scope")
+    return scope.get("group") if isinstance(scope, dict) else None
 
 
 def encode_batch(
@@ -75,8 +103,13 @@ def encode_batch(
     for name in columns:
         arrays.append(table.column(name).combine_chunks())
         names.append(name)
+    return stream_bytes(arrays, names)
+
+
+def stream_bytes(arrays: Sequence, names: Sequence[str]) -> bytes:
+    """One record batch as a whole Arrow IPC stream."""
     batch = pa.RecordBatch.from_arrays(
-        [pa.array(a) if not isinstance(a, pa.Array) else a for a in arrays], names=names
+        [pa.array(a) if not isinstance(a, pa.Array) else a for a in arrays], names=list(names)
     )
     sink = pa.BufferOutputStream()
     with ipc.new_stream(sink, batch.schema) as writer:
@@ -160,15 +193,27 @@ class HoldOut:
         batch_rows: int,
         head_rows: int = 0,
         log=print,
-        points: Path | None = None,
+        view: dict | None = None,
         members: bool = True,
     ):
         #: The view's own points file: its positions, its access column, and whichever declared
-        #: attributes it holds.
-        self.points = points or rung / "points.parquet"
+        #: attributes it holds; and the `(column, key)` picking the view's rows out of a file
+        #: several views share.
+        view = view or declared_views(rung)[0]
+        self.points = view["points"]
+        self.select = view["select"]
         self.batch_rows = batch_rows
-        self.access, self.attributes = wire_columns(rung, self.points)
         self.held = np.sort(held)
+        self.access, self.attributes, joined = wire_columns(rung, view)
+        #: Each joined file's rows for the hold-out, read once: small beside the points.
+        self.joined = [
+            read_view_rows(
+                {"points": entry["file"], "select": entry["select"]},
+                ["entity_id", *entry["columns"]],
+                self.held,
+            )
+            for entry in joined
+        ]
         self.head_rows = head_rows
         self.max_body_bytes = int(max_body_bytes)
         self.log = log
@@ -230,6 +275,8 @@ class HoldOut:
         head_rows = 0
         for index in range(reader.metadata.num_row_groups):
             group = reader.read_row_group(index)
+            if self.select is not None:
+                group = group.filter(pc.equal(group.column(self.select[0]), self.select[1]))
             table = group.filter(pa.array(in_sorted(group.column("entity_id").to_numpy(), self.held)))
             del group
             if table.num_rows == 0:
@@ -245,6 +292,10 @@ class HoldOut:
                 self.last_entity = int(entities[-1])
                 for stream in self.members:
                     table = table.append_column(stream.name, stream.keys_for(entities))
+            for values in self.joined:
+                at = pc.index_in(table.column("entity_id"), value_set=values.column("entity_id"))
+                for name in values.column_names[1:]:
+                    table = table.append_column(name, pc.take(values.column(name), at))
             if head_rows < self.head_rows:
                 take = min(self.head_rows - head_rows, table.num_rows)
                 head.append(table.slice(0, take))
@@ -267,3 +318,4 @@ class HoldOut:
     def encode(self, table: pa.Table) -> bytes:
         """[`encode_batch`] over a slice of this hold-out, member columns included."""
         return encode_batch(table, self.access, self.attributes, self.columns)
+

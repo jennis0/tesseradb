@@ -180,9 +180,15 @@ these under `shed` and percentiles the rest.
 
 ### §3 `ingest[]` — one cell
 
-An ingest cycle ingests every declared view, the anchor view first, since entities are allocated
-on its pass alone. The fields below are the anchor view's figures; the driver's own result file
-also carries every view's, under `ingest_by_view` (below, under "Beyond the schema").
+An ingest cycle ingests every declared view, the anchor view first, then each other plain view
+and each view of every group. An entity is allocated on the first pass that holds it and joins
+on each later one. The hold-out is a set of entities, drawn from every view's points, so an
+entity's rows in every view are held back and ingested together. A group's views read either
+their own file or one file shared by the group, picked out by its `fields.view` column. An
+attribute read from a file of its own is joined on entity id onto the batches of every view it
+applies to, picked by view key for a group-scoped one, as the build reads it beside the points.
+The fields below are the anchor view's figures; the driver's own result file also carries every
+view's, under `ingest_by_view` (below, under "Beyond the schema").
 
 | field | unit | how it was measured |
 |---|---|---|
@@ -203,7 +209,7 @@ also carries every view's, under `ingest_by_view` (below, under "Beyond the sche
 | `bodies_over_cap` | count | single-row bodies over the cap, sent as they are and refused 422 |
 | `flush_s` | seconds | `POST /control/flush` to the `flushes` counter moving, or the buffer already empty |
 | `visibility_s` | seconds | the same request to a zoom-0 viewport reaching the expected count, not `flush_s` |
-| `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once |
+| `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once, and the wait ends when a fold lands or the server counts one discarded |
 | `fold_peak_rss` | bytes | the server's own `compaction.last_rss_bytes` |
 | `driver_peak_rss` | bytes/`null` | the driver's own `VmHWM` at the cell's end, not the server's |
 | `equivalence` | — | the masked-count equivalence test, by surface — below |
@@ -212,7 +218,10 @@ also carries every view's, under `ingest_by_view` (below, under "Beyond the sche
 
 `publish` covers one phase: the base bundle carries the built fraction's points and every layer's
 declaration; each layer's artifacts, memberships and supplied content are published through
-`PUT /control/layers/{name}/artifacts` after every point they depend on is ingested.
+`PUT /control/layers/{name}/artifacts` after every point they depend on is ingested. A roster
+may carry its members itself, as a `members` list column, and a group-scoped layer's rows name
+their view in its `fields.view` column. A layer whose artifacts are written in the declaration
+is carried by the base build and published nowhere.
 
 | field | unit | how it was measured |
 |---|---|---|

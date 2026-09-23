@@ -21,11 +21,24 @@ import pyarrow.parquet as pq
 # ---------------------------------------------------------------------------------------------
 
 
-def split_entities(points: Path, fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
+def declared_entities(rung: Path) -> np.ndarray:
+    """Every entity id the rung's views hold: the anchor view's in file order, then each other
+    view's ids the ones before it did not hold."""
+    parts: list[np.ndarray] = []
+    seen = np.zeros(0, np.int64)
+    for path in dict.fromkeys(view["points"] for view in declared_views(rung)):
+        ids = pq.read_table(path, columns=["entity_id"]).column("entity_id").to_numpy()
+        fresh = ids[~in_sorted(ids, seen)] if len(seen) else ids
+        fresh = fresh[np.sort(np.unique(fresh, return_index=True)[1])]
+        parts.append(fresh)
+        seen = np.sort(np.concatenate([seen, fresh]))
+    return np.concatenate(parts) if parts else seen
+
+
+def split_entities(ids: np.ndarray, fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
     """`(base entity ids, hold-out entity ids)` — a seeded uniform hold-out of `fraction`, over
     entities rather than rows, which differ once a rung has several views.
     """
-    ids = pq.read_table(points, columns=["entity_id"]).column("entity_id").to_numpy()
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(ids))
     cut = int(round(fraction * len(ids)))
@@ -264,8 +277,8 @@ def base_declaration(
     text: str, keep_members: Sequence[str] = (), keep_sources: Sequence[str] = ()
 ) -> tuple[str, list[dict]]:
     """The rung's `corpus.toml` as the base's: every layer stated, and only a column-route
-    layer's member table kept. A `[[layer]]`'s `source` and `[layer.members]` are build-only
-    acquisition, removed except where `keep_members` or `keep_sources` names the layer. Returns
+    layer's member table kept. A `[[layer]]`'s `source`, its `fields` and `[layer.members]` are
+    build-only acquisition, removed except where `keep_members` or `keep_sources` names the layer. Returns
     the rewritten text and one record per layer, saying what was removed."""
     out: list[str] = []
     removed: list[dict] = []
@@ -297,7 +310,8 @@ def base_declaration(
             continue
         if layer is not None and head.startswith("name") and layer["layer"] is None:
             layer["layer"] = head.split("=", 1)[1].strip().strip('"')
-        if section == "[[layer]]" and head.startswith("source") and "=" in head:
+        # A layer's `fields` map names columns of the file its `source` names, so it goes with it.
+        if section == "[[layer]]" and head.startswith(("source", "fields")) and "=" in head:
             if layer is None or layer["layer"] not in keep_sources:
                 if layer is not None:
                     layer["removed"].append(head)
@@ -343,6 +357,11 @@ def declared_layers(rung: Path) -> list[dict]:
                 "route": route,
                 "value_set": layer.get("value_set"),
                 "hierarchy": (layer.get("hierarchy") or {}).get("kind"),
+                # The roster column naming each artifact's view, on a group-scoped layer.
+                "view_column": (layer.get("fields") or {}).get("view")
+                if isinstance(layer.get("scope"), dict)
+                else None,
+                "inline": bool(layer.get("artifacts")),
             }
         )
     return out
@@ -414,24 +433,16 @@ def build_bundle(
 
 
 def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
-    """The complement's inputs: the points, the declaration, and a column-route layer's member
-    table over the base's rows. Nothing else: a publication-route layer's artifacts are
-    published on the wire after the points they depend on have been ingested. `corpus.toml` is
-    rewritten by [`base_declaration`]."""
+    """The complement's inputs: every file a view or an attribute reads, over the base's
+    entities, the declaration, and a column-route layer's member table over the base's rows.
+    Nothing else: a publication-route layer's artifacts are published on the wire after the
+    points they depend on have been ingested. `corpus.toml` is rewritten by
+    [`base_declaration`]."""
     out.mkdir(parents=True, exist_ok=True)
     layers = declared_layers(rung)
     published = [layer["name"] for layer in layers if layer["route"] == "publication"]
     on_column = [layer for layer in layers if layer["route"] == "column"]
-    kept: dict = {
-        "points": filter_parquet(
-            rung / "points.parquet", out / "points.parquet", "entity_id", base_ids, drop=published
-        ),
-        "dropped_membership_columns": [
-            name
-            for name in pq.ParquetFile(rung / "points.parquet").schema_arrow.names
-            if name in set(published)
-        ],
-    }
+    kept: dict = {"entities": len(base_ids)}
     kept["member_tables"], rosters = write_base_members(out, on_column, base_ids)
     if rosters:
         kept["rosters"] = rosters
@@ -444,6 +455,7 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
     (out / "corpus.toml").write_text(declaration)
     kept["declaration_only"] = removed
     (out / "tessera.toml").write_text((rung / "tessera.toml").read_text())
+    (out / "base-inputs.json").write_text(json.dumps(kept))
     return kept
 
 
@@ -473,27 +485,27 @@ def copy_declared_inputs(
     rung: Path, out: Path, base_ids: np.ndarray, published: Sequence[str]
 ) -> dict:
     """Every other file the declaration still names, read off the declaration rather than listed
-    here: a vocabulary is copied whole, and any other view's points file is filtered by entity id
-    exactly as the anchor's is.
+    here: a vocabulary is copied whole, and every file a view or an attribute reads is filtered
+    to the base's entities, leaving out a publication-route layer's column.
     """
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
-    anchor = declared.get("defaults", {}).get("source", "points")
     kept: dict = {}
     for vocabulary in declared.get("vocabulary", []):
         got = source_path(rung, named, vocabulary.get("source"))
         if got is not None and got.exists():
             shutil.copy2(got, out / got.name)
             kept.setdefault("vocabularies", []).append(got.name)
-    for view in declared.get("view", []):
-        source = view.get("source", anchor)
-        if source == anchor:
-            continue
-        got = source_path(rung, named, source)
-        if got.exists():
-            kept.setdefault("views", {})[got.name] = filter_parquet(
-                got, out / got.name, "entity_id", base_ids, drop=published
-            )
+    entity_files = [view["points"] for view in declared_views(rung)] + [
+        source_path(rung, named, attribute.get("source"))
+        for attribute in declared.get("attribute", [])
+    ]
+    for got in dict.fromkeys(path for path in entity_files if path is not None):
+        dropped = [name for name in pq.ParquetFile(got).schema_arrow.names if name in set(published)]
+        kept.setdefault("entity_files", {})[got.name] = {
+            "rows": filter_parquet(got, out / got.name, "entity_id", base_ids, drop=published),
+            "dropped_membership_columns": dropped,
+        }
     for name in ("branch.parquet", ".env"):
         source = rung / name
         if source.exists() and not (out / name).exists():
