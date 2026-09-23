@@ -70,6 +70,9 @@ struct DependencyContext<'a> {
     served: &'a ServedView<'a>,
     mask: &'a crate::compose::EffectiveMask,
     reachable: &'a tessera_lifecycle::ResolvedLayers,
+    /// Each target layer's label test for this viewer, settled once per request: a named default
+    /// is put through the plugin once rather than once per candidate.
+    labels: std::cell::RefCell<rustc_hash::FxHashMap<String, crate::artifacts::LabelGate<'a>>>,
 }
 
 /// What [`Engine::warm_artifact_projections`] did, for the open's own log line: a count and a
@@ -261,14 +264,6 @@ impl Engine {
         ))
     }
 
-    /// Which layers this principal may know exist. A gate-failed name and a never-registered one
-    /// answer identically, so a name outside this set reveals nothing about why.
-    fn reachable_layers(&self, served: &ServedView<'_>) -> tessera_lifecycle::ResolvedLayers {
-        self.write.live().resolve_layers(
-            |term| served.session.satisfied().contains(&term),
-            |label| served.generation.dict.lookup(label.as_bytes()),
-        )
-    }
 
     /// One artifact, located and gated for one principal.
     ///
@@ -307,7 +302,7 @@ impl Engine {
             return Ok(None);
         }
         // Reachability, then live suppression — same order as `serve_artifacts`.
-        let reachable = self.reachable_layers(served);
+        let reachable = self.reachable_layers(served.session);
         if !reachable.contains(&name)
             || generation.overlay.is_deleted(layer.entity)
             || generation.overlay.is_suppressed(layer.entity)
@@ -374,12 +369,13 @@ impl Engine {
             served,
             mask,
             reachable: &reachable,
+            labels: Default::default(),
         };
         let dependency_served = self.dependency_gate(&ctx);
         let artifact_view = crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &generation.overlay,
-            satisfied: session.satisfied(),
+            labels: self.label_gate(session, &layer.declaration),
             layer_reachable: true,
             rows: &rows,
             mask,
@@ -388,10 +384,8 @@ impl Engine {
             denied,
             counts,
         };
-        // A layer whose `artifact_visibility` names a field withholds here, fail-closed, as it
-        // does on the viewport — per-artifact terms do not exist to satisfy yet.
         let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-            artifact_view.verdict(entity, ordinal, None)
+            artifact_view.verdict(entity, ordinal)
         else {
             return Ok(None);
         };
@@ -850,10 +844,17 @@ impl Engine {
         let containment = rows
             .partition()
             .map(|p| p.answer_for_one(ctx.served.session.satisfied()));
+        // A statement of its own, so the borrow ends before the verdict below follows a chain
+        // back into this function.
+        let labels = *ctx
+            .labels
+            .borrow_mut()
+            .entry(attachment.layer.clone())
+            .or_insert_with(|| self.label_gate(ctx.served.session, &layer.declaration));
         crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &ctx.served.generation.overlay,
-            satisfied: ctx.served.session.satisfied(),
+            labels,
             layer_reachable: true,
             rows: &rows,
             mask: ctx.mask,
@@ -862,8 +863,7 @@ impl Engine {
             denied: ctx.served.denied,
             counts,
         }
-        // The target's own label is `None` here, fail-closed, as on the two serving routes.
-        .verdict(entity, attachment.ordinal, None)
+        .verdict(entity, attachment.ordinal)
         .is_served()
     }
 
@@ -894,7 +894,7 @@ impl Engine {
         tiling: &Tiling,
         req: &ViewportRequest<'_>,
     ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
-        let reachable = self.reachable_layers(served);
+        let reachable = self.reachable_layers(served.session);
         // Intersected with the request, never unioned: asking for a name is not a way to learn it.
         let names: Vec<String> = match req.layers {
             LayerSelection::Named(list) => list
@@ -913,6 +913,7 @@ impl Engine {
             served,
             mask,
             reachable: &reachable,
+            labels: Default::default(),
         };
         let dependency_served = self.dependency_gate(&ctx);
 
@@ -1141,7 +1142,7 @@ impl Engine {
         let view = crate::artifacts::ArtifactView {
             declaration: &layer.registered.declaration,
             overlay: &served.generation.overlay,
-            satisfied: served.session.satisfied(),
+            labels: self.label_gate(served.session, &layer.registered.declaration),
             layer_reachable: true,
             rows,
             mask: pass.sets.mask,
@@ -1160,6 +1161,10 @@ impl Engine {
         // a row-major level, a scan over the viewport intersected with the mask.
         let candidates = rows.candidacy(&pass.sets.viewport, level.counts.as_deref());
         for ordinal in candidates.iter() {
+            // An artifact its own label withholds has no membership probed.
+            if !view.admits_label(ordinal) {
+                continue;
+            }
             // Every candidate pays a masked probe, on whichever route is cheapest for it.
             if !rows.candidate_in(ordinal, &candidates, &pass.sets.viewport, pass.sets.mask) {
                 continue;
@@ -1167,10 +1172,8 @@ impl Engine {
             let Some(entity) = level.runs.entity_of(ordinal as u64).map(EntityId::new) else {
                 continue;
             };
-            // A layer whose `artifact_visibility` names a field serves nothing here, fail-closed:
-            // admitting it anyway would turn a missing declaration into a grant to everyone.
             let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-                view.verdict(entity, ordinal, None)
+                view.verdict(entity, ordinal)
             else {
                 continue;
             };

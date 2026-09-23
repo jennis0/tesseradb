@@ -364,7 +364,13 @@ def main() -> None:
     # Six curated collections, membership drawn irrespective of bucket — some members will be
     # absent from a given view (a C-bucket entity under "quarter", a D-bucket one under "world"),
     # which is the ordinary case a layer over a group has to tolerate.
+    # Each collection carries an access label of its own, which a principal must hold to be served
+    # it: `public`, one country, two countries, or none, which the layer's `inherited` default
+    # answers with the layer's own label. The layer asks for one visible member, so a principal on
+    # the ladder who sees a collection's members and lacks its label is withheld it by the label
+    # alone: every collection draws members from every country.
     collection_names = ["frontier", "core", "outliers", "review", "watchlist", "archive"]
+    collection_labels = [["public"], ["US"], None, ["CN", "RU"], ["IN"], None]
     coll_rows = {"key": [], "contents": [], "members": [], "access": []}
     for i, name in enumerate(collection_names):
         pick = hashed_unit(entity_id, 0xC0 + i) < 0.08  # ~8% of the whole population each
@@ -372,13 +378,13 @@ def main() -> None:
         coll_rows["key"].append(name)
         coll_rows["contents"].append([[f"{name}-tag"]])
         coll_rows["members"].append(members)
-        coll_rows["access"].append(None if i % 3 else "public")
+        coll_rows["access"].append(collection_labels[i])
     coll_table = pa.table(
         {
             "key": pa.array(coll_rows["key"], type=pa.string()),
             "contents": pa.array(coll_rows["contents"], type=pa.list_(pa.list_(pa.string()))),
             "members": pa.array(coll_rows["members"], type=pa.list_(pa.uint64())),
-            "access": pa.array(coll_rows["access"], type=pa.string()),
+            "access": pa.array(coll_rows["access"], type=pa.list_(pa.string())),
         }
     )
     pq.write_table(coll_table, out / "collections.parquet")

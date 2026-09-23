@@ -1069,10 +1069,12 @@ pub enum DeclarationError {
     /// Carries the two spellings, so the message names what to remove.
     TwoDrawnGeometries(String),
     /// An attribute layer declares something its derived artifacts cannot carry — content, a
-    /// dependency, levels, its own access labels, or a layout pin — or a spatial layer names its
-    /// own access-label field. Carries the spelling, so the message names the key an operator has
-    /// to remove.
+    /// dependency, levels, its own access labels, or a layout pin. Carries the spelling, so the
+    /// message names the key an operator has to remove.
     PredicateDeclares(String),
+    /// A layer's `visibility`, `artifact_visibility.default` or `artifact_visibility.field` is not
+    /// a word that can be read. Carries the refusal.
+    Label(String),
     /// A layer naming itself in `depends_on`.
     SelfDependency,
     /// A layer named `all`, which the viewport request's `layers` field reserves for *every layer
@@ -1141,6 +1143,7 @@ impl std::fmt::Display for DeclarationError {
                  `shape_x`/`shape_y` column pair, so a layer declares at most one of a derived \
                  hull, a membership shape and an authored shape content"
             ),
+            DeclarationError::Label(detail) => write!(f, "{detail}"),
             DeclarationError::PredicateDeclares(what) => write!(
                 f,
                 "a layer whose membership is a predicate declares {what}, which its artifacts \
@@ -1331,10 +1334,9 @@ impl LayerDeclaration {
         // computed content, `depends_on`, levels, any hierarchy and a layout pin are all things
         // its rows can carry. Computed content is cheap there because the flush resolves every
         // row's membership into a per-row source; the pin selects between the same forms it
-        // selects between for an enumerated layer. What stays refused on both is the
-        // proportional criterion (above) and, on a spatial layer, naming its own access-label
-        // field: a shape's row carries no label column the registry reads, so the field would
-        // withhold every artifact of the layer for every principal.
+        // selects between for an enumerated layer, and a label of its own is carried on its
+        // record as an enumerated artifact's is. What stays refused on both is the proportional
+        // criterion (above).
         let refuse = |what: &str| Err(DeclarationError::PredicateDeclares(what.to_string()));
         if matches!(self.membership, MembershipSource::Attribute(_)) {
             if !self.content.supplied.is_empty() {
@@ -1366,14 +1368,29 @@ impl LayerDeclaration {
                 return refuse("a layout pin");
             }
         }
-        if matches!(
-            self.membership,
-            MembershipSource::Spatial | MembershipSource::Attribute(_)
-        ) && self.artifact_visibility.carries_own_labels()
+        if matches!(self.membership, MembershipSource::Attribute(_))
+            && self.artifact_visibility.carries_own_labels()
         {
-            // A derived artifact carries no row of its own to read a label off, so naming the
-            // field would withhold every artifact of the layer for every principal.
+            // A derived artifact carries no record of its own to read a label off.
             return refuse("`artifact_visibility.field`");
+        }
+        let label = |key: &str, word: &str| {
+            crate::label::check_label(key, word).map_err(DeclarationError::Label)
+        };
+        if let Some(visibility) = &self.visibility {
+            label("visibility", visibility)?;
+        }
+        if let MemberDefault::Label(default) = &self.artifact_visibility.default {
+            label("artifact_visibility.default", default)?;
+        }
+        if let Some(field) = &self.artifact_visibility.field {
+            if field.trim().is_empty() {
+                return Err(DeclarationError::Label(
+                    "`artifact_visibility.field` is empty. Name the column each artifact's own \
+                     access label is read from, or omit the field"
+                        .to_string(),
+                ));
+            }
         }
 
         let mut views: BTreeSet<&str> = BTreeSet::new();
@@ -1877,7 +1894,7 @@ mod tests {
 
     /// **A spatial layer may declare what an attribute layer may not** (ruling (b)): its artifacts
     /// are published rows, so content, a dependency, levels, a hierarchy and a pin all have a row
-    /// to sit on. The one refusal it shares is naming its own access-label field.
+    /// to sit on, and so does an access label of its own.
     #[test]
     fn a_spatial_layer_may_declare_content_levels_and_a_hierarchy() {
         let base = || {
@@ -1913,10 +1930,37 @@ mod tests {
 
         let mut d = base();
         d.artifact_visibility = ArtifactVisibility::carried("visibility");
-        assert!(matches!(
-            d.validate(),
-            Err(DeclarationError::PredicateDeclares(_))
-        ));
+        assert!(d.validate().is_ok());
+    }
+
+    /// A layer's labels are checked where the declaration is, so the build and a running service
+    /// refuse the same words: an empty label, `inherited` where a label is expected, and an empty
+    /// field.
+    #[test]
+    fn a_layers_labels_are_refused_where_they_cannot_be_read() {
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some(" ".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some("inherited".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.artifact_visibility.default = MemberDefault::Label("inherited".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.artifact_visibility.field = Some("".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some("team".into());
+        d.artifact_visibility = ArtifactVisibility {
+            field: Some("team".into()),
+            default: MemberDefault::Label("public".into()),
+        };
+        assert!(d.validate().is_ok());
     }
 
     /// **What an attribute layer may not declare.** Each of these would register a layer that is

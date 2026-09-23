@@ -55,6 +55,10 @@ pub struct Session {
     /// invent one they do not. Holds `public` too, with no credential behind it, for the same
     /// reason it is in [`Session::satisfied`].
     satisfied_descriptors: Arc<FxHashMap<TermId, Vec<u8>>>,
+    /// Every descriptor the credential resolved to, whether or not the dictionary carries it, and
+    /// `public`. What a layer's or an artifact's own label is tested against: those labels are
+    /// compared as descriptors, so a label no item carries is still one a credential can hold.
+    credentials: Arc<FxHashSet<Vec<u8>>>,
     /// Every view of every group this principal may reach, resolved once at authorise and fixed
     /// for the session's life. Every view is evaluated whatever the outcome, so a gate-failed name
     /// costs the same lookup as a name nobody declared, and a view created after authorise is a
@@ -110,6 +114,11 @@ impl Session {
         &self.satisfied_descriptors
     }
 
+    /// Whether the credential holds any of `descriptors`.
+    pub(crate) fn holds_any(&self, descriptors: &[Vec<u8>]) -> bool {
+        descriptors.iter().any(|d| self.credentials.contains(d))
+    }
+
     /// `sha256(auth_data)`.
     pub(crate) fn auth_data_hash(&self) -> [u8; 32] {
         self.auth_data_hash
@@ -146,6 +155,8 @@ impl Engine {
         // published while building a fragment against the watermark that preceded it.
         let generation = self.generation.load();
 
+        let mut credentials: FxHashSet<Vec<u8>> = auth_terms.iter().cloned().collect();
+        credentials.insert(tessera_authz::PUBLIC_LABEL.to_vec());
         let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
         let mut satisfied_descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
         let mut unresolved_count = 0usize;
@@ -174,12 +185,9 @@ impl Engine {
             satisfied_descriptors.insert(term, tessera_authz::PUBLIC_LABEL.to_vec());
         }
 
-        // Resolved after the credential and `public` are both in `satisfied`, since a gate is
-        // satisfied by exactly the terms an item's label is.
         let visible_views = Arc::new(crate::gate::resolve(
             &generation.bundle.manifest,
-            &generation.dict,
-            &satisfied,
+            &credentials,
             self.plugin.as_ref(),
         ));
 
@@ -224,6 +232,7 @@ impl Engine {
             fragment,
             satisfied_sorted,
             satisfied_descriptors: Arc::new(satisfied_descriptors),
+            credentials: Arc::new(credentials),
             visible_views,
             auth_data_hash,
             expires_at,
@@ -310,6 +319,42 @@ impl Engine {
             })
     }
 
+    /// Which layers this principal may know exist. A layer's label is put through the plugin and
+    /// compared with the credential's descriptors, the test an artifact's own label takes. A
+    /// gate-failed name and a never-registered one answer identically, so a name outside this set
+    /// reveals nothing about why.
+    pub(crate) fn reachable_layers(&self, session: &Session) -> tessera_lifecycle::ResolvedLayers {
+        self.write
+            .live()
+            .resolve_layers(|label| self.holds_label(session, label))
+    }
+
+    /// Whether `session` holds `label`, as the plugin maps it. A plugin refusal holds nothing.
+    pub(crate) fn holds_label(&self, session: &Session, label: &str) -> bool {
+        match self.plugin.terms_of_labels(&[label.as_bytes().to_vec()]) {
+            Ok(descriptors) => session.holds_any(&descriptors),
+            Err(_) => false,
+        }
+    }
+
+    /// The label test for one layer's artifacts, for this session: an artifact's own label is
+    /// admitted when the credential holds any of its descriptors, and an artifact with none by
+    /// the layer's `artifact_visibility.default`.
+    pub(crate) fn label_gate<'s>(
+        &self,
+        session: &'s Session,
+        declaration: &tessera_types::layer::LayerDeclaration,
+    ) -> crate::artifacts::LabelGate<'s> {
+        use tessera_types::layer::MemberDefault;
+        // A layer naming no field has no artifact labels, and its default says nothing.
+        let unlabelled = !declaration.artifact_visibility.carries_own_labels()
+            || match &declaration.artifact_visibility.default {
+                MemberDefault::Inherited => true,
+                MemberDefault::Label(label) => self.holds_label(session, label),
+            };
+        crate::artifacts::LabelGate::new(&session.credentials, unlabelled)
+    }
+
     /// Which layers this principal may know exist, and which of those are currently served.
     ///
     /// Two questions, answered in that order. Reachability is resolved from the registry: one set
@@ -319,11 +364,7 @@ impl Engine {
     /// layer is served.
     pub fn visible_layers(&self, session: &Session) -> Vec<tessera_types::layer::RegisteredLayer> {
         let generation = self.generation();
-        let resolved = self.write.live().resolve_layers(
-            |term| session.satisfied.contains(&term),
-            |label| generation.dict.lookup(label.as_bytes()),
-        );
-        resolved
+        self.reachable_layers(session)
             .names()
             .filter_map(|name| self.write.live().registered_layer(name))
             .filter(|layer| {

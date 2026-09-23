@@ -35,7 +35,7 @@ pub use rows::{
     ArtifactRecords, ArtifactRows, Candidacy, Containment, Matched, MembershipRows,
 };
 pub use sources::{AttributeSource, PredicateSource, SpatialSource};
-pub use view::{ArtifactVerdict, ArtifactView, Withheld};
+pub use view::{ArtifactVerdict, ArtifactView, LabelGate, Withheld};
 
 pub(crate) use rows::view_key;
 

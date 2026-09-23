@@ -1218,6 +1218,26 @@ impl<'a> AccessBatch<'a> {
     }
 }
 
+/// Each row's access labels, read as a points file's access column is read: a string, a list of
+/// strings or a dictionary of either, trimmed, with a null, an empty string and an empty list all
+/// no label. An artifact source's label column takes this.
+pub(crate) fn access_labels(
+    path: &Path,
+    column: &arrow::array::ArrayRef,
+    name: &str,
+) -> Result<Vec<Vec<String>>> {
+    let batch = read_access_column(path, column, name)?;
+    Ok((0..column.len())
+        .map(|row| {
+            batch
+                .row(row)
+                .iter()
+                .map(|&i| batch.distinct[i as usize].to_string())
+                .collect()
+        })
+        .collect())
+}
+
 /// Decode one batch of the access column into [`AccessBatch`], applying the trim and the empty
 /// rule.
 ///

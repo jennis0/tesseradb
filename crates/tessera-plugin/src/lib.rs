@@ -166,28 +166,27 @@ fn passthrough_hash() -> String {
     format!("{:x}", Sha256::digest(PASSTHROUGH_IDENTITY.as_bytes()))
 }
 
-/// The label every principal holds. A `visibility` of `public` alone admits everyone and is stored
-/// as `None`.
-pub const PUBLIC: &str = "public";
-/// The word a layer writes as its artifacts' default visibility to give them the layer's own
-/// `visibility`. It is not a label, and it is refused wherever a label is expected.
-pub const INHERITED: &str = "inherited";
+pub use tessera_types::label::{check_label, INHERITED, PUBLIC};
 
-/// Check a word written where one access label is expected. `public` is accepted as a label. An
-/// empty word and [`INHERITED`] are refused. `key` names the setting in the refusal.
-pub fn check_label(key: &str, label: &str) -> Result<(), String> {
-    if label.trim().is_empty() {
-        return Err(format!(
-            "`{key}` is empty; write an access label, or `public` for the label every principal \
-             holds"
-        ));
+/// An artifact's own access labels as the descriptors it is stored and compared by: the one rule the
+/// build and a running service both read labels through. No labels is no label. Labels the plugin
+/// maps to no term are refused: stored as no label, the artifact would take its layer's default,
+/// which can admit everyone the layer does.
+pub fn artifact_access(plugin: &dyn Plugin, labels: &[Descriptor]) -> Result<Vec<Descriptor>, String> {
+    if labels.is_empty() {
+        return Ok(Vec::new());
     }
-    if label == INHERITED {
-        return Err(format!(
-            "`{key}` is `inherited`, which is not a label; write an access label or `public`"
-        ));
+    let descriptors = plugin
+        .terms_of_labels(labels)
+        .map_err(|e| format!("`access`: the plugin refused the labels: {e}"))?;
+    if descriptors.is_empty() {
+        return Err(
+            "`access` names labels the plugin maps to no term, so no viewer could hold them; \
+             write labels the plugin maps to a term, or send no `access` for no label"
+                .to_string(),
+        );
     }
-    Ok(())
+    Ok(descriptors)
 }
 
 /// Check `point_visibility.default`, the label given to a point that carries none of its own.
@@ -361,6 +360,12 @@ mod tests {
             }
         }
         assert!(check_visibility(&NoTerms, Some(&labels(&["finance"]))).is_err());
+        assert!(artifact_access(&NoTerms, &[b"finance".to_vec()]).is_err());
+        assert_eq!(artifact_access(&NoTerms, &[]), Ok(Vec::new()));
+        assert_eq!(
+            artifact_access(&Passthrough, &[b"finance".to_vec()]),
+            Ok(vec![b"finance".to_vec()])
+        );
         assert!(check_point_default(&NoTerms, "finance").is_err());
         // `public` is accepted without asking the plugin.
         assert!(check_point_default(&NoTerms, "public").is_ok());

@@ -1506,3 +1506,21 @@ async fn a_sealed_familys_values_need_the_groups_gate_and_not_only_a_reachable_v
         .await
         .contains(&"sealed:s2".to_string()));
 }
+
+/// **A view labelled with a term no point carries** is reached by a principal whose credential
+/// names it and by no other: a view's label is compared with the credential's descriptors, as a
+/// layer's and an artifact's are, not with the terms the dictionary happens to hold.
+#[tokio::test]
+async fn a_view_labelled_with_a_term_no_point_carries_is_reached_by_its_holder_alone() {
+    let served = serve().await;
+    assert_eq!(
+        create_view(&served, "quarter", "2026-Q6", json!({ "visibility": ["team-x"] }))
+            .await
+            .status(),
+        201
+    );
+    let held = meta(&served, &token(&served, &["team-x"]).await).await;
+    assert!(view_ids(&held).contains("quarter:2026-Q6"));
+    let out = meta(&served, &token(&served, &["finance"]).await).await;
+    assert!(!view_ids(&out).contains("quarter:2026-Q6"));
+}

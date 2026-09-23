@@ -636,6 +636,10 @@ pub struct InlineArtifact {
     pub attached_level: u32,
     #[serde(default)]
     pub attached_key: Option<String>,
+    /// The artifact's own access labels, on a layer whose `artifact_visibility` names a field.
+    /// Written as one string or as a list; absent is no label.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub access: Vec<String>,
 }
 
 /// A key written as one string or as a list of them — the two spellings of an artifact row's
