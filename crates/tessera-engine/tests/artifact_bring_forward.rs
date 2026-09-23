@@ -245,6 +245,7 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
         .map(|(i, key)| tessera_lifecycle::BatchMembership {
             layer: LAYER.to_string(),
             level: 0,
+            view: None,
             key: (*key).to_string(),
             rows: vec![i as u32],
         })

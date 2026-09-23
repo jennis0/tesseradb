@@ -56,19 +56,32 @@ pub struct RegionContext {
     pub max_vertices: u64,
 }
 
-/// Parse `filters` into an expression, or refuse.
-///
-/// `column_of` resolves a leaf's **spelling** — which may pin a group-scoped attribute's view,
-/// `sentiment@2026-Q3` or `sentiment@#3` (`views.md` §5) — to the column the engine evaluates and
-/// its family, or reports why it cannot. `resolve` maps `(column, key)` to a code. `region` is
-/// what a `region` leaf's geometry is quantised against.
-pub fn parse(
-    filters: &Value,
-    column_of: &dyn Fn(&str) -> LeafColumn,
-    resolve: &dyn Fn(&str, &str) -> Option<u32>,
-    region: &RegionContext,
-) -> Result<FilterExpr, ApiError> {
-    parse_node(filters, column_of, resolve, region)
+/// A view's quantisation extent, as the shape canonicaliser takes it.
+pub fn view_extent(view: &tessera_engine::MetaView) -> Bounds {
+    let q = view.quantisation;
+    Bounds {
+        x_min: q.x_min,
+        x_max: q.x_max,
+        y_min: q.y_min,
+        y_max: q.y_max,
+    }
+}
+
+/// A `tessera_id` as a request carries it: a JSON number, or its decimal string for a caller that
+/// cannot carry a `u64` intact. `field` names it in the refusal.
+pub fn tessera_id(value: Option<&Value>, field: &str) -> Result<TesseraId, ApiError> {
+    match value {
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(Value::String(s)) => s.parse::<u64>().ok(),
+        _ => None,
+    }
+    .map(TesseraId::new)
+    .ok_or_else(|| {
+        bad(format!(
+            "`{field}` is a `tessera_id`: a JSON number, or a decimal string where the caller \
+             cannot carry one intact"
+        ))
+    })
 }
 
 /// The column a leaf's spelling names, or the refusal it earns (`views.md` §5).
@@ -111,7 +124,13 @@ fn bad(detail: impl Into<String>) -> ApiError {
     ApiError::Contract(detail.into())
 }
 
-fn parse_node(
+/// Parse `filters` into an expression, or refuse.
+///
+/// `column_of` resolves a leaf's **spelling** — which may pin a group-scoped attribute's view,
+/// `sentiment@2026-Q3` or `sentiment@#3` (`views.md` §5) — to the column the engine evaluates and
+/// its family, or reports why it cannot. `resolve` maps `(column, key)` to a code. `region` is
+/// what a `region` leaf's geometry is quantised against.
+pub fn parse(
     node: &Value,
     column_of: &dyn Fn(&str) -> LeafColumn,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
@@ -139,7 +158,7 @@ fn parse_node(
             })?;
             let kids = arr
                 .iter()
-                .map(|k| parse_node(k, column_of, resolve, region))
+                .map(|k| parse(k, column_of, resolve, region))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(match combinator {
                 "all_of" => FilterExpr::AllOf(kids),
@@ -199,18 +218,10 @@ fn parse_member_of(body: &Value) -> Result<tessera_engine::filter::MemberOfLeaf,
         .get("layer")
         .and_then(Value::as_str)
         .ok_or_else(|| bad("`member_of.layer` is the name of a layer, as a string"))?;
-    let artifact = match obj.get("artifact") {
-        Some(Value::Number(n)) => n.as_u64(),
-        Some(Value::String(s)) => s.parse::<u64>().ok(),
-        _ => None,
-    }
-    .ok_or_else(|| {
-        bad("`member_of.artifact` is a `tessera_id` — a JSON number, or a decimal string where the \
-             caller cannot carry one intact")
-    })?;
+    let artifact = tessera_id(obj.get("artifact"), "member_of.artifact")?;
     Ok(tessera_engine::filter::MemberOfLeaf {
         layer: layer.to_string(),
-        artifact: TesseraId::new(artifact),
+        artifact,
     })
 }
 
@@ -275,13 +286,7 @@ fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiErro
         if obj.contains_key("space") {
             return Err(bad("`region.artifact` names a published shape and carries no `space`"));
         }
-        let id = match &obj["artifact"] {
-            Value::Number(n) => n.as_u64(),
-            Value::String(s) => s.parse::<u64>().ok(),
-            _ => None,
-        }
-        .ok_or_else(|| bad("`region.artifact` is a tessera_id — a whole number, or its decimal string"))?;
-        return Ok(RegionLeaf::Artifact(TesseraId::new(id)));
+        return Ok(RegionLeaf::Artifact(tessera_id(obj.get("artifact"), "region.artifact")?));
     }
     let number = |v: &Value, what: &str| -> Result<f64, ApiError> {
         v.as_f64()
@@ -530,7 +535,8 @@ fn parse_operand(
                 .as_str()
                 .ok_or_else(|| {
                     bad(format!(
-                        "column '{column}': `phrase` takes a string. There is no                          `minimum_should_match` for a phrase — adjacency is not a count"
+                        "column '{column}': `phrase` takes a string. There is no \
+                         `minimum_should_match` for a phrase — adjacency is not a count"
                     ))
                 })?
                 .to_string(),

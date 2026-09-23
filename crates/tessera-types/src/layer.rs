@@ -1530,9 +1530,43 @@ pub fn parent_edges<T>(entries: &[Option<T>]) -> impl Iterator<Item = (&T, &T)> 
         })
 }
 
+/// The views a layer is drawn on, from the names its `views` gives: a group's name is every view
+/// of the group, and any other name is one view. `group` answers a group's views, `None` where the
+/// name is no group, and `view` whether a name is a view. `Err` is a name that is neither.
+pub fn expand_views(
+    declared: &[String],
+    group: impl Fn(&str) -> Option<Vec<String>>,
+    view: impl Fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
+    let mut expanded = Vec::with_capacity(declared.len());
+    for name in declared {
+        match group(name) {
+            Some(views) => expanded.extend(views),
+            None if view(name) => expanded.push(name.clone()),
+            None => return Err(name.clone()),
+        }
+    }
+    Ok(expanded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_group_is_every_view_of_it_and_a_name_that_is_neither_is_refused() {
+        let group = |name: &str| (name == "years").then(|| vec!["years:1".into(), "years:2".into()]);
+        let view = |name: &str| name == "papers";
+        let declared = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            expand_views(&declared(&["papers", "years"]), group, view),
+            Ok(declared(&["papers", "years:1", "years:2"]))
+        );
+        assert_eq!(
+            expand_views(&declared(&["papers", "nowhere"]), group, view),
+            Err("nowhere".to_string())
+        );
+    }
 
     fn decl(kind: HierarchyKind, levels: Vec<u32>) -> LayerDeclaration {
         LayerDeclaration {

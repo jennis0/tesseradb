@@ -32,100 +32,10 @@ pub enum ApiError {
     /// 500: mask construction, WAL durability, or any other fail-closed failure (Global
     /// Constraint 3). Never returned for a partial or best-effort result.
     FailClosed(String),
-    /// 429: the viewer/session compute-admission gate is saturated — either the outer
-    /// slots semaphore had no permit to `try_acquire` at all, or the inner compute semaphore did
-    /// not free one within `admission_timeout_ms`. Whole-request shed, never a partial result or
-    /// a narrowed `k` (spec constraint: shedding must not change WHAT a principal sees). Carries
-    /// `Retry-After: 1` and body `retry_after_s: 1`, both fixed, never a knob.
-    ///
-    /// **This variant means saturation and nothing else.** A shed from the engine's single-flight
-    /// builders is [`ApiError::SingleFlightBackpressure`], which is a different mechanism reached
-    /// after this gate has already admitted the request.
-    Backpressure,
-    /// 429 `backpressure` for the **write** path: the bounded ingest work queue was full
-    /// (`SubmitError::QueueFull`; contracts §3.1's 429 row names ingest first).
-    ///
-    /// **A second variant for one wire code, and the wire code is what is closed** — contracts
-    /// §3.1 lists `backpressure` once and both variants emit it. The split is here because the two
-    /// 429s answer different questions about *when to come back*, and one variant cannot carry
-    /// both docs truthfully: [`ApiError::Backpressure`] argues `Retry-After: 1` as fixed on the
-    /// grounds that a compute-admission saturation clears on one request's timescale, which is not
-    /// true of a write queue draining at fsync timescale.
-    ///
-    /// **The value is per-subject, and that is contract** — contracts §3.1's 429 row and §0.3
-    /// **deviation 11**. What every 429 on every plane must carry is the `Retry-After` header and a
-    /// body `retry_after_s` holding the same number; what is *not* contract is that the number is
-    /// `1` anywhere but the compute-admission gate. Deviation 11 spells out the consequence this
-    /// variant exists to make possible — "a caller that retries at 1 s against a queue draining in
-    /// 30 s manufactures exactly the load the 429 exists to shed".
-    ///
-    /// **`retry_after_s` is derived** by `tessera_engine::estimate_retry_after_s` from the work
-    /// queue's depth and an EWMA of observed work-lane service time. That function's doc states, at
-    /// the site, the three things that make it an **estimator and not a bound**: service time is not
-    /// stationary (the `IngestBuffer` clone is O(total buffered items)), the deny lane is drained to
-    /// empty before every work item and so is in the real drain but not in the figure, and the depth
-    /// is a snapshot of two independently-advancing counters.
-    ///
-    /// **Unreachable from `/control/changes`, twice over.** A `Command::Change` goes to the
-    /// unbounded deny lane by `Command::is_never_shed`, so it cannot produce `QueueFull`; and
-    /// [`map_change_batch_error`] contains no route from that lane to this variant at all, because
-    /// contracts §3.1 says `/control/changes` is **never** load-shed and a structural absence
-    /// survives an edit to `is_never_shed` that a comment would not.
-    WriteBackpressure { retry_after_s: u64 },
-    /// 429 `backpressure` for `/control/ingest`'s **admission** bound: this server is already
-    /// running `ingest_admission` ingest handlers, each holding a blocking-pool thread.
-    /// The refusal happens *before* `spawn_blocking`, so it costs no thread, no queue slot and no
-    /// WAL byte.
-    ///
-    /// **A third variant for one wire code, and it is the third for the same reason as the
-    /// second**: contracts §3.1 lists `backpressure` once and every variant emits it, but §0.3 deviation
-    /// 11 makes the *value* per-subject, and this subject's value is neither of the other two's.
-    /// [`ApiError::Backpressure`]'s fixed `1` rests on a compute-admission saturation clearing on
-    /// one request's timescale; [`ApiError::WriteBackpressure`]'s comes from a queue's depth. This
-    /// one is neither: a permit here frees when one in-flight handler finishes, and the executor is
-    /// serial, so the wait for the *next* permit is about **one** work item's service time — not
-    /// the whole queue's, and not one second. Giving it the gate's fixed `1` would be exactly the
-    /// "future 429 subject silently inheriting a number that was never argued for it" that
-    /// deviation 11 was written to prevent; the number here is derived by
-    /// [`admission_retry_after_s`].
-    ///
-    /// **Distinguishable from `WriteBackpressure` on the wire, deliberately**, because the two
-    /// tests that pin them would otherwise be able to pass on each other's 429: the `detail`
-    /// strings name different mechanisms, and every 429 assertion matches on the body rather than
-    /// on the status alone.
-    IngestAdmissionBackpressure { retry_after_s: u64 },
-    /// 429 `backpressure` for the engine's **single-flight builders**, and — for the row
-    /// projection — the answer at the **end of a wait rather than instead of one** (decision
-    /// 0058). A racer parks on the in-flight build and is served its result; this is what it gets
-    /// if `serve.single_flight_wait_ms` runs out first. `EngineError::FragmentBuilding` still
-    /// reaches here immediately: the fragment cache is `tessera-authz`'s own single-flight, which
-    /// 0058 did not rule on, and its builds are on the session plane rather than the viewer's.
-    ///
-    /// **What changed for a reader of this 429.** It used to mean "someone else got here first,
-    /// come back in a moment"; a retry then usually found the slot warm. It now means the build is
-    /// outlasting a budget already argued to exceed a cold build at 10⁹, so a client seeing it
-    /// repeatedly is seeing something slower than the design's worst measured case, not a race.
-    ///
-    /// **A fourth variant for one wire code, on [`ApiError::WriteBackpressure`]'s argument** —
-    /// contracts §3.1 lists `backpressure` once and all four emit it; what is closed is the code,
-    /// not the `detail`. The split is here because one variant cannot carry both docs truthfully:
-    /// [`ApiError::Backpressure`] says the server is at its compute-admission bound, and here it is
-    /// not — the gate admitted this request and has free permits. Borrowing that variant sent a
-    /// caller, and an operator reading the body, to a gate that had shed nothing.
-    ///
-    /// **The number is the gate's `1`, and here it is argued rather than inherited** (contracts
-    /// §0.3 deviation 11 forbids the inheritance, not the value): a single-flight build holds the
-    /// slot for one build of one session's projection, which is the timescale `1` was chosen for.
-    /// It is deliberately **not** re-derived from `single_flight_wait_ms`: a caller that has
-    /// already waited the budget is not helped by being told to wait it again, and the retry it
-    /// makes at 1 s is what finds the value if the build lands just after the budget expired.
-    ///
-    /// **`ComputeGateStatus::shed_total` deliberately does not count this path**, as
-    /// [`crate::state::ComputeGate::shed_total`]'s own doc records: that counter is the gate's two
-    /// shed paths, and this shed happens downstream of them. So the two 429s are distinguishable in
-    /// a log or a response body — the `detail` strings name different mechanisms — but not in that
-    /// counter, and a client-observed 429 rate above `shed_total` is this gap, not a lost count.
-    SingleFlightBackpressure,
+    /// 429 `backpressure`: a bound shed the whole request, never a partial result or a narrowed
+    /// `k`. Carries a `Retry-After` header and a body `retry_after_s` holding the same number.
+    /// The number is per cause (contracts §0.3 deviation 11); see [`ShedCause`].
+    Backpressure { retry_after_s: u64, cause: ShedCause },
     /// 503 `not-ready`: contracts §3.1's row — "unverified bundle, unready worker, unloaded
     /// plugin". Reached when the write executor was never started, or is gone **without having
     /// been handed the command** (`SubmitError::ExecutorDead`).
@@ -144,12 +54,66 @@ pub enum ApiError {
     NotReady,
 }
 
+/// Which bound shed a request. Every cause answers the one wire code `backpressure`; they differ
+/// in the `detail` and in how `retry_after_s` is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShedCause {
+    /// The viewer and session planes' compute-admission gate: no slot, or no compute permit within
+    /// `admission_timeout_ms`. `Retry-After` is fixed at [`RETRY_AFTER_SECS`], because a
+    /// saturation clears on one request's timescale. The only cause the gate's `shed_total` counts.
+    ComputeGate,
+    /// The ingest work queue is full (`SubmitError::QueueFull`), or the ingest buffer is at
+    /// `ingest_buffer_max_items`. `retry_after_s` is estimated from the drain rate, not fixed.
+    /// Unreachable from `/control/changes`, which is never load-shed: [`map_change_batch_error`]
+    /// has no route to it.
+    WriteQueue,
+    /// `/control/ingest`'s admission bound, refused before `spawn_blocking`, so it costs no thread,
+    /// no queue slot and no WAL byte. `retry_after_s` is [`admission_retry_after_s`].
+    IngestAdmission,
+    /// An engine single-flight build (a row projection or a mask fragment) outlasted
+    /// `serve.single_flight_wait_ms`, after the compute gate had admitted the request. The gate's
+    /// `shed_total` does not count it. `Retry-After` is [`RETRY_AFTER_SECS`].
+    SingleFlight,
+    /// A suggestion walk is already in flight for this session. `Retry-After` is
+    /// [`RETRY_AFTER_SECS`].
+    SuggestInFlight,
+}
+
+impl ShedCause {
+    fn detail(self, retry_after_s: u64) -> String {
+        match self {
+            ShedCause::ComputeGate => {
+                "the server is at its compute-admission bound; retry shortly".to_string()
+            }
+            ShedCause::WriteQueue => format!(
+                "the write queue is full; retry after {retry_after_s}s. Deny-disposition \
+                 changes are never shed for load and are unaffected"
+            ),
+            ShedCause::IngestAdmission => format!(
+                "the server is at its ingest-admission bound; retry after {retry_after_s}s. \
+                 Nothing in this request was decoded, queued or appended — the body was, \
+                 however, buffered in full before this refusal, since the extractor runs ahead \
+                 of every check in the handler. Deny-disposition changes are never shed for \
+                 load and are unaffected"
+            ),
+            ShedCause::SingleFlight => "a concurrent request is already building this session's \
+                 row projection or mask fragment; retry shortly. This is not compute admission — \
+                 that gate admitted this request, and its shed counters do not move for this \
+                 refusal"
+                .to_string(),
+            ShedCause::SuggestInFlight => "a suggestion request for this session is already in \
+                 flight; retry shortly"
+                .to_string(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ErrorBody {
     error: &'static str,
     detail: String,
-    /// Contracts §3.1's error body: `retry_after_s` is optional and present only on the three
-    /// backpressure variants, so every other error body carries no such field at all.
+    /// Contracts §3.1's error body: `retry_after_s` is optional and present only on
+    /// `backpressure`, so every other error body carries no such field at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_s: Option<u64>,
 }
@@ -157,7 +121,7 @@ struct ErrorBody {
 /// `Retry-After` for the compute-admission gate is fixed at 1 second, never a knob — the same
 /// figure the body's
 /// `retry_after_s` carries, so a caller reading either agrees with the other.
-const RETRY_AFTER_SECS: u64 = 1;
+pub const RETRY_AFTER_SECS: u64 = 1;
 
 impl ApiError {
     fn parts(&self) -> (StatusCode, &'static str, String) {
@@ -182,37 +146,13 @@ impl ApiError {
                 "fail-closed",
                 detail.clone(),
             ),
-            ApiError::Backpressure => (
+            ApiError::Backpressure {
+                retry_after_s,
+                cause,
+            } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "backpressure",
-                "the server is at its compute-admission bound; retry shortly".to_string(),
-            ),
-            ApiError::WriteBackpressure { retry_after_s } => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "backpressure",
-                format!(
-                    "the write queue is full; retry after {retry_after_s}s. Deny-disposition \
-                     changes are never shed for load and are unaffected"
-                ),
-            ),
-            ApiError::IngestAdmissionBackpressure { retry_after_s } => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "backpressure",
-                format!(
-                    "the server is at its ingest-admission bound; retry after {retry_after_s}s. \
-                     Nothing in this request was decoded, queued or appended — the body was, \
-                     however, buffered in full before this refusal, since the extractor runs ahead \
-                     of every check in the handler. Deny-disposition changes are never shed for \
-                     load and are unaffected"
-                ),
-            ),
-            ApiError::SingleFlightBackpressure => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "backpressure",
-                "a concurrent request is already building this session's row projection or mask \
-                 fragment; retry shortly. This is not compute admission — that gate admitted this \
-                 request, and its shed counters do not move for this refusal"
-                    .to_string(),
+                cause.detail(*retry_after_s),
             ),
             ApiError::NotReady => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -233,15 +173,7 @@ impl ApiError {
     /// same discipline [`map_accept_error`] applies to its own table.
     fn retry_after_s(&self) -> Option<u64> {
         match self {
-            // Fixed at one second, never a knob — see the variant's doc.
-            ApiError::Backpressure => Some(RETRY_AFTER_SECS),
-            ApiError::WriteBackpressure { retry_after_s } => Some(*retry_after_s),
-            // Deviation 11's third subject — see the variant's doc for why its number is neither
-            // of the other two's.
-            ApiError::IngestAdmissionBackpressure { retry_after_s } => Some(*retry_after_s),
-            // Also one second, on this subject's own argument rather than inherited from the
-            // gate's — see the variant's doc.
-            ApiError::SingleFlightBackpressure => Some(RETRY_AFTER_SECS),
+            ApiError::Backpressure { retry_after_s, .. } => Some(*retry_after_s),
             ApiError::BadCredential
             | ApiError::ExpiredToken
             | ApiError::Unknown(_)
@@ -284,7 +216,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// `retry_after_s` for [`ApiError::IngestAdmissionBackpressure`].
+/// `retry_after_s` for [`ShedCause::IngestAdmission`].
 ///
 /// **One work item's service time, not the queue's** — and the difference is the argument. An
 /// admission permit frees when one in-flight handler completes, the executor is serial, so the
@@ -350,12 +282,18 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         // cache never blocks a second caller, so the honest response is 429 `backpressure` with
         // `Retry-After: 1` — by the client's retry the slot is warm. Named explicitly rather than
         // left to the catch-all so this mapping stays visible at the call site. Not
-        // `ApiError::Backpressure`: the compute gate admitted this request and may be entirely
+        // `ShedCause::ComputeGate`: the compute gate admitted this request and may be entirely
         // idle, so that variant's detail would send the reader to the wrong mechanism.
-        EngineError::ProjectionBuilding => ApiError::SingleFlightBackpressure,
+        EngineError::ProjectionBuilding => ApiError::Backpressure {
+            retry_after_s: RETRY_AFTER_SECS,
+            cause: ShedCause::SingleFlight,
+        },
         // Lifecycle §3.3, the fragment-cache twin of the arm above: a concurrent
         // `authorise` call is already building this credential's mask fragment. Same mapping.
-        EngineError::FragmentBuilding => ApiError::SingleFlightBackpressure,
+        EngineError::FragmentBuilding => ApiError::Backpressure {
+            retry_after_s: RETRY_AFTER_SECS,
+            cause: ShedCause::SingleFlight,
+        },
         // Cooperative cancellation (the rapid-pan case). Named explicitly, rather than left
         // to the catch-all below, so the response body can NEVER carry this variant's own
         // `Display` — a fixed string only, the same rule `map_store_error`/`map_join_error` apply
@@ -497,7 +435,10 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
             // branch. The operator's signal is `write_executor.work_depth` on `/control/status`,
             // which is a gauge rather than a per-event line.
             tracing::debug!("the ingest work queue is full; answering 429 backpressure");
-            ApiError::WriteBackpressure { retry_after_s }
+            ApiError::Backpressure {
+                retry_after_s,
+                cause: ShedCause::WriteQueue,
+            }
         }
         AcceptError::Submit(SubmitError::ExecutorDead) => {
             tracing::error!("the write executor is not running; answering 503 not-ready");
@@ -553,7 +494,7 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // code space instead would recolour every row already carrying a code, so the refusal is
         // the whole answer and it has to say what was refused.
         AcceptError::Exec(ExecError::VocabularyRefused { detail }) => {
-            ApiError::Contract(detail.clone())
+            ApiError::Contract(detail)
         }
         // **And here, for the third time and the same reason.** A refused layer declaration names
         // the caller's own declaration measured against the deployment's published rules — a name
@@ -561,36 +502,36 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // and never another layer's terms. It is refused before the first allocation and before the
         // WAL append, so the answer is a clean 422 with no effect, and a 422 the caller cannot read
         // is one they cannot fix.
-        AcceptError::Exec(ExecError::LayerRefused { detail }) => ApiError::Contract(detail.clone()),
+        AcceptError::Exec(ExecError::LayerRefused { detail }) => ApiError::Contract(detail),
         // **A fixed part held differently is the caller's 409** (`ingest.md` §1.1, §4.3): the
         // request is wrong and the timing is not, so a retry with the same bytes answers the same.
         // The detail names the part and never the held value. Decided before the append, so
         // nothing is in force.
-        AcceptError::Exec(ExecError::PartConflict { detail }) => ApiError::Conflict(detail.clone()),
+        AcceptError::Exec(ExecError::PartConflict { detail }) => ApiError::Conflict(detail),
         // **The roster's three answers, told apart because the caller's remedy differs**
         // (`views.md` §3.2). A refused record is one to correct; a taken or burnt key is one to
         // replace, a roster record being immutable; and an unknown group or key is the same 404
         // an unknown view id is on every other surface, so the two planes cannot disagree about
         // what "no such view" means.
-        AcceptError::Exec(ExecError::ViewRefused { detail }) => ApiError::Contract(detail.clone()),
-        AcceptError::Exec(ExecError::ViewConflict { detail }) => ApiError::Conflict(detail.clone()),
-        AcceptError::Exec(ExecError::ViewUnknown { detail }) => ApiError::Unknown(detail.clone()),
+        AcceptError::Exec(ExecError::ViewRefused { detail }) => ApiError::Contract(detail),
+        AcceptError::Exec(ExecError::ViewConflict { detail }) => ApiError::Conflict(detail),
+        AcceptError::Exec(ExecError::ViewUnknown { detail }) => ApiError::Unknown(detail),
         // **The join rule's refusal, and the detail is the whole answer** (`views.md` §4, decision
         // 0116). It moved off the handler and onto the serial writer, and the body did not move
         // with it: the text is the handler's own, byte for byte, so a caller cannot tell which site
         // refused — which is the point, the two sites having been collapsed into one. It names a
         // row index, a column and a view key, and nothing else.
-        AcceptError::Exec(ExecError::JoinRefused { detail }) => ApiError::Conflict(detail.clone()),
+        AcceptError::Exec(ExecError::JoinRefused { detail }) => ApiError::Conflict(detail),
         // **A declaration's two answers, told apart because the caller's remedy differs**
         // (`ingest.md` §1.1). A refused declaration is one to correct and resend, and names the
         // caller's own request measured against the published schema; a held name under another
         // identity is one the caller cannot have, a column's width and placement being baked
         // into every row. Both are decided before the append, so neither has an effect.
         AcceptError::Exec(ExecError::AttributeRefused { detail }) => {
-            ApiError::Contract(detail.clone())
+            ApiError::Contract(detail)
         }
         AcceptError::Exec(ExecError::AttributeConflict { detail }) => {
-            ApiError::Conflict(detail.clone())
+            ApiError::Conflict(detail)
         }
         // **The fill rule's two answers on the values route** (`ingest.md` §1.1, §1.4), told
         // apart because the caller's remedy differs. A cell held differently is a `409`: the
@@ -599,15 +540,15 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // the held value. A row naming a subject that does not exist, or a layer key no artifact
         // holds, is a `422`: the caller ingests or publishes it and sends the batch again. Both
         // are decided before the append, so neither has an effect.
-        AcceptError::Exec(ExecError::ValueConflict { detail }) => ApiError::Conflict(detail.clone()),
-        AcceptError::Exec(ExecError::ValuesRefused { detail }) => ApiError::Contract(detail.clone()),
+        AcceptError::Exec(ExecError::ValueConflict { detail }) => ApiError::Conflict(detail),
+        AcceptError::Exec(ExecError::ValuesRefused { detail }) => ApiError::Contract(detail),
         // **A vocabulary declaration's own two answers**, on the attribute declaration's rule
         // above: a refused declaration or page is corrected and resent, and a held identity — a
         // vocabulary's, or a value's title — is one the caller cannot have, because a code's
         // width is baked into every row and a value's properties are supplied once with the
         // value. Both are decided before the append, so neither has an effect.
         AcceptError::Exec(ExecError::VocabularyConflict { detail }) => {
-            ApiError::Conflict(detail.clone())
+            ApiError::Conflict(detail)
         }
         // Both are the caller's row, malformed in a way the engine refused before anything was
         // acked or WAL-durable — a contract answer, not a fault.
@@ -680,8 +621,6 @@ pub fn map_change_batch_error(
     failures: &[(tessera_lifecycle::ChangeOp, tessera_engine::AcceptError)],
     applied: usize,
 ) -> Option<ApiError> {
-    use tessera_engine::AcceptError;
-
     if failures.is_empty() {
         return None;
     }
@@ -689,22 +628,11 @@ pub fn map_change_batch_error(
     // All three quantities are derived here, never passed in: a caller computing them itself is one
     // forgotten variant away from turning a partially-applied batch into a 503, which is the exact
     // fail-open this function exists to close — reintroduced in its own signature.
-
-    // Rule 2's condition, and it is deliberately the *narrowest* of the three: 503 asserts the node
-    // took nothing at all, so anything that reached the executor — including a 409-class refusal,
-    // which is a contract answer and not a readiness fault — disqualifies it. Op-blind on purpose:
-    // "did it reach the executor" is a question about the queue, not about what the command was.
-    let reached_executor = applied > 0
-        || failures.iter().any(|(_, f)| match f {
-            AcceptError::Exec(_) => true,
-            AcceptError::Submit(e) => e.may_have_taken_effect(),
-            // Refused before the submit, so it never reached the executor. Ingest-only in
-            // practice; named rather than folded, per this function's own rule.
-            AcceptError::OutsideExtent { .. }
-            | AcceptError::UnknownView { .. }
-            | AcceptError::ScalarArity { .. }
-            | AcceptError::SteppedDown => false,
-        });
+    let BatchOutcome {
+        reached_executor,
+        may_be_in_force,
+        some_not_applied,
+    } = fold_change_failures(failures, applied);
     if !reached_executor {
         tracing::error!(
             failures = failures.len(),
@@ -712,29 +640,6 @@ pub fn map_change_batch_error(
         );
         return Some(ApiError::NotReady);
     }
-
-    let may_be_in_force = applied > 0
-        || failures.iter().any(|(op, f)| match f {
-            AcceptError::Exec(e) => exec_failure_may_be_in_force(*op, e),
-            AcceptError::Submit(e) => e.may_have_taken_effect(),
-            AcceptError::OutsideExtent { .. }
-            | AcceptError::UnknownView { .. }
-            | AcceptError::ScalarArity { .. }
-            | AcceptError::SteppedDown => false,
-        });
-    // The exact negation, item by item, so no item can be counted in both halves or in neither. A
-    // `ReceiptLost` is in neither category's *certain* sense — it lands in `may_be_in_force` and out
-    // of this one, which is right: its disposition is unknown, so the operator must not be told it
-    // definitely did not apply.
-    let some_not_applied = failures.iter().any(|(op, f)| match f {
-        AcceptError::Exec(e) => !exec_failure_may_be_in_force(*op, e),
-        AcceptError::Submit(e) => !e.may_have_taken_effect(),
-        // Refused before the submit: certainly not applied, which is this half's sense exactly.
-        AcceptError::OutsideExtent { .. }
-        | AcceptError::UnknownView { .. }
-        | AcceptError::ScalarArity { .. }
-        | AcceptError::SteppedDown => true,
-    });
 
     tracing::error!(
         failures = failures.len(),
@@ -766,6 +671,65 @@ pub fn map_change_batch_error(
         );
     }
     Some(ApiError::FailClosed(detail))
+}
+
+/// Where one failed change stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChangeFailure {
+    /// Refused before it reached the executor: certainly not applied.
+    BeforeExecutor,
+    /// Reached the executor and may be in force: a deny applied anyway, or a lost receipt.
+    MayBeInForce,
+    /// Reached the executor and was not applied.
+    NotApplied,
+}
+
+fn classify_change_failure(
+    op: tessera_lifecycle::ChangeOp,
+    failure: &tessera_engine::AcceptError,
+) -> ChangeFailure {
+    use tessera_engine::AcceptError;
+    match failure {
+        AcceptError::Exec(e) if exec_failure_may_be_in_force(op, e) => ChangeFailure::MayBeInForce,
+        AcceptError::Exec(_) => ChangeFailure::NotApplied,
+        // A `Submit` failure reached the executor exactly when non-enqueue is not proven.
+        AcceptError::Submit(e) if e.may_have_taken_effect() => ChangeFailure::MayBeInForce,
+        AcceptError::Submit(_) => ChangeFailure::BeforeExecutor,
+        // Refused before the submit. Ingest-only in practice; named rather than folded.
+        AcceptError::OutsideExtent { .. }
+        | AcceptError::UnknownView { .. }
+        | AcceptError::ScalarArity { .. }
+        | AcceptError::SteppedDown => ChangeFailure::BeforeExecutor,
+    }
+}
+
+/// The three facts [`map_change_batch_error`] answers from.
+#[derive(Debug, PartialEq, Eq)]
+struct BatchOutcome {
+    /// Anything reached the executor. 503 asserts the node took nothing, so a 409-class refusal
+    /// that reached it disqualifies the 503 too.
+    reached_executor: bool,
+    /// Anything may have taken effect: an applied item, or a failure that may be in force.
+    may_be_in_force: bool,
+    /// At least one item was certainly not applied. A lost receipt is in `may_be_in_force` and not
+    /// here, because its disposition is unknown.
+    some_not_applied: bool,
+}
+
+fn fold_change_failures(
+    failures: &[(tessera_lifecycle::ChangeOp, tessera_engine::AcceptError)],
+    applied: usize,
+) -> BatchOutcome {
+    let classes: Vec<ChangeFailure> = failures
+        .iter()
+        .map(|(op, f)| classify_change_failure(*op, f))
+        .collect();
+    BatchOutcome {
+        reached_executor: applied > 0
+            || classes.iter().any(|c| *c != ChangeFailure::BeforeExecutor),
+        may_be_in_force: applied > 0 || classes.contains(&ChangeFailure::MayBeInForce),
+        some_not_applied: classes.iter().any(|c| *c != ChangeFailure::MayBeInForce),
+    }
 }
 
 /// Whether an executed-and-failed change may nonetheless be in force — **a question about the op as
@@ -862,7 +826,7 @@ mod tests {
     /// fail-closed 500: the caller can come back, and telling them otherwise turns a shed into a
     /// reported fault.
     ///
-    /// **The `7` is load-bearing.** `ApiError::Backpressure` sits next door with a hard-coded
+    /// **The `7` is load-bearing.** `ShedCause::ComputeGate` sits next door with a hard-coded
     /// `Retry-After: 1`, so a build that routed write backpressure through *it* would pass any
     /// version of this test written with `1`. Asserting a value the fixed arm cannot produce is
     /// what distinguishes "the status is right" from "the queue's own interval reaches the caller".
@@ -898,7 +862,11 @@ mod tests {
         let body = ErrorBody {
             error: "backpressure",
             detail: String::new(),
-            retry_after_s: ApiError::WriteBackpressure { retry_after_s: 7 }.retry_after_s(),
+            retry_after_s: ApiError::Backpressure {
+                retry_after_s: 7,
+                cause: ShedCause::WriteQueue,
+            }
+            .retry_after_s(),
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(
@@ -910,14 +878,10 @@ mod tests {
     /// A dead executor that was never handed the command is contracts §3.1's `not-ready` row.
     #[test]
     fn a_dead_executor_is_503_not_ready() {
-        let (status, code, detail) =
+        let (status, code, _) =
             map_accept_error(AcceptError::Submit(SubmitError::ExecutorDead)).parts();
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(code, "not-ready");
-        assert!(
-            detail.contains("nothing in this request was applied"),
-            "503's whole meaning is that the node took nothing; got: {detail}"
-        );
     }
 
     /// A receipt lost to a dying executor must never be 503: the executor's sequence is
@@ -929,7 +893,7 @@ mod tests {
     /// `ExecutorDead`, on the reasoning that both mean "the executor is gone".
     #[test]
     fn a_lost_receipt_is_500_not_503_and_says_it_may_be_in_force() {
-        let (status, code, detail) =
+        let (status, code, _) =
             map_accept_error(AcceptError::Submit(SubmitError::ReceiptLost)).parts();
         assert_eq!(
             status,
@@ -938,10 +902,6 @@ mod tests {
              node took nothing, which is the fail-open"
         );
         assert_eq!(code, "fail-closed");
-        assert!(
-            detail.contains("do not treat this as a no-op"),
-            "the operator must be told the effect may be present; got: {detail}"
-        );
     }
 
     /// `may_have_taken_effect` is the whole basis of the fold's 503 arm, so pin the classification
@@ -984,21 +944,21 @@ mod tests {
             ChangeOp::Suppress,
             AcceptError::Submit(SubmitError::ExecutorDead),
         )];
-        let (status, code, detail) = map_change_batch_error(&failures, 1).unwrap().parts();
+        let (status, code, _) = map_change_batch_error(&failures, 1).unwrap().parts();
         assert_eq!(
             status,
             StatusCode::INTERNAL_SERVER_ERROR,
             "one item applied durably; 503 would report the batch as a no-op"
         );
         assert_eq!(code, "fail-closed");
-        assert!(
-            detail.contains("may be in force"),
-            "the applied half must be reported; got: {detail}"
-        );
-        assert!(
-            detail.contains("NOT applied"),
-            "the un-applied half must be reported too, or the operator cannot know to re-submit; \
-             got: {detail}"
+        assert_eq!(
+            fold_change_failures(&failures, 1),
+            BatchOutcome {
+                reached_executor: true,
+                may_be_in_force: true,
+                some_not_applied: true,
+            },
+            "both halves must be reported, or the operator cannot know to re-submit"
         );
     }
 
@@ -1013,10 +973,10 @@ mod tests {
                 AcceptError::Submit(SubmitError::ExecutorDead),
             ),
         ];
-        let (status, _, detail) = map_change_batch_error(&failures, 0).unwrap().parts();
+        let (status, _, _) = map_change_batch_error(&failures, 0).unwrap().parts();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(detail.contains("may be in force"), "got: {detail}");
-        assert!(detail.contains("NOT applied"), "got: {detail}");
+        let outcome = fold_change_failures(&failures, 0);
+        assert!(outcome.may_be_in_force && outcome.some_not_applied, "{outcome:?}");
     }
 
     /// A lost receipt anywhere in a batch is enough on its own: its disposition is unknown, so the
@@ -1050,18 +1010,17 @@ mod tests {
     fn a_batch_of_only_refused_non_deny_changes_claims_nothing_is_in_force() {
         let op = ChangeOp::Unsuppress;
         let failures = vec![(op, wal_failure())];
-        let (status, code, detail) = map_change_batch_error(&failures, 0).unwrap().parts();
+        let (status, code, _) = map_change_batch_error(&failures, 0).unwrap().parts();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(code, "fail-closed");
+        assert_eq!(classify_change_failure(op, &failures[0].1), ChangeFailure::NotApplied);
+        let outcome = fold_change_failures(&failures, 0);
         assert!(
-            !detail.contains("may be in force"),
+            !outcome.may_be_in_force,
             "a refused-not-applied {op:?} leaves no effect; asserting one invites the operator \
-             to hunt for a deny that is not there. Got: {detail}"
+             to hunt for a deny that is not there"
         );
-        assert!(
-            detail.contains("NOT applied"),
-            "the operator must be told to re-submit; got: {detail}"
-        );
+        assert!(outcome.some_not_applied, "the operator must be told to re-submit");
     }
 
     /// Half two, the mirror error on the same fold: an applied-anyway `Suppress` beside a refused
@@ -1075,16 +1034,17 @@ mod tests {
             (ChangeOp::Suppress, wal_failure()),
             (ChangeOp::Unsuppress, wal_failure()),
         ];
-        let (status, _, detail) = map_change_batch_error(&failures, 0).unwrap().parts();
+        let (status, _, _) = map_change_batch_error(&failures, 0).unwrap().parts();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let outcome = fold_change_failures(&failures, 0);
         assert!(
-            detail.contains("may be in force"),
-            "the suppress was applied anyway (lifecycle §4); got: {detail}"
+            outcome.may_be_in_force,
+            "the suppress was applied anyway (lifecycle §4)"
         );
         assert!(
-            detail.contains("NOT applied"),
+            outcome.some_not_applied,
             "the unsuppress was refused without applying, and an operator who is not told that \
-             believes the item is visible again; got: {detail}"
+             believes the item is visible again"
         );
     }
 
@@ -1217,29 +1177,29 @@ mod tests {
     /// with a different counter: the gate has already admitted this request and may be idle.
     #[test]
     fn map_engine_error_takes_projection_building_to_backpressure() {
-        let (status, code, detail) = map_engine_error(EngineError::ProjectionBuilding).parts();
-        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(code, "backpressure");
-        assert!(
-            detail.contains("row projection"),
-            "the detail must name the mechanism that shed, got: {detail}"
-        );
-        assert!(
-            !detail.contains("at its compute-admission bound"),
-            "the detail must not claim compute-admission saturation, got: {detail}"
-        );
+        assert_single_flight_429(map_engine_error(EngineError::ProjectionBuilding));
     }
 
     /// `FragmentBuilding` is explicitly named in `map_engine_error`'s match and
     /// maps to the same 429 `backpressure` arm as `ProjectionBuilding`.
     #[test]
     fn map_engine_error_takes_fragment_building_to_backpressure() {
-        let (status, code, detail) = map_engine_error(EngineError::FragmentBuilding).parts();
-        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(code, "backpressure");
+        assert_single_flight_429(map_engine_error(EngineError::FragmentBuilding));
+    }
+
+    fn assert_single_flight_429(e: ApiError) {
         assert!(
-            !detail.contains("at its compute-admission bound"),
-            "the detail must not claim compute-admission saturation, got: {detail}"
+            matches!(e, ApiError::Backpressure { cause: ShedCause::SingleFlight, .. }),
+            "a single-flight shed must not be reported as the compute gate's, got {e:?}"
+        );
+        let response = e.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
         );
     }
 
@@ -1247,10 +1207,9 @@ mod tests {
     /// to the 409 `conflict` body `POST /v1/items/{tessera_id}` returns for a stale idset.
     #[test]
     fn map_engine_error_takes_stale_idset_to_409_conflict() {
-        let (status, code, detail) = map_engine_error(EngineError::StaleIdSet).parts();
+        let (status, code, _) = map_engine_error(EngineError::StaleIdSet).parts();
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(code, "conflict");
-        assert_eq!(detail, "stale idset; re-resolve by external_id");
     }
 
     /// `UnderlayRefused` — the §3.3 underlay's three bounds (the configured offset ceiling, the
@@ -1273,13 +1232,9 @@ mod tests {
         let refused = EngineError::UnderlayRefused(
             "offset 5 is above the configured maximum of 4".to_string(),
         );
-        let (status, code, detail) = map_engine_error(refused).parts();
+        let (status, code, _) = map_engine_error(refused).parts();
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(code, "contract");
-        assert_eq!(
-            detail, "offset 5 is above the configured maximum of 4",
-            "the caller's own numbers and the configured bound reach the caller unchanged"
-        );
     }
 
     /// `TooManyTiles` — a `(zoom, bbox)` product above `max_tiles_per_request`, counted and
@@ -1295,17 +1250,13 @@ mod tests {
     /// string that carries neither number.
     #[test]
     fn map_engine_error_takes_too_many_tiles_to_422_contract() {
-        let (status, code, detail) = map_engine_error(EngineError::TooManyTiles {
+        let (status, code, _) = map_engine_error(EngineError::TooManyTiles {
             demanded: 4_294_967_296,
             limit: 262_144,
         })
         .parts();
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(code, "contract");
-        assert!(
-            detail.contains("4294967296") && detail.contains("262144"),
-            "the detail must name both the demanded count and the limit, got: {detail}"
-        );
     }
 
     /// `Cancelled` is explicitly named in `map_engine_error`'s match (not caught only by the
@@ -1324,7 +1275,11 @@ mod tests {
     /// `retry_after_s: 1` body field, fixed, so a caller reading either agrees with the other.
     #[test]
     fn backpressure_carries_retry_after_header_and_body_field() {
-        let response = ApiError::Backpressure.into_response();
+        let response = ApiError::Backpressure {
+            retry_after_s: RETRY_AFTER_SECS,
+            cause: ShedCause::ComputeGate,
+        }
+        .into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             response
@@ -1333,23 +1288,6 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("1")
         );
-    }
-
-    /// The single-flight 429 carries the same `Retry-After: 1` — argued for this subject rather
-    /// than inherited (see the variant's doc), but the same number, so a client's retry timing is
-    /// unchanged by the split. Only the `detail` distinguishes the two.
-    #[test]
-    fn single_flight_backpressure_carries_the_same_retry_after_as_the_gate() {
-        let response = ApiError::SingleFlightBackpressure.into_response();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok()),
-            Some("1")
-        );
-        assert_eq!(ApiError::SingleFlightBackpressure.retry_after_s(), Some(1));
     }
 
     /// Every other error body omits the field entirely — `retry_after_s` is

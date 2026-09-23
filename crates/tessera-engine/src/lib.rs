@@ -126,6 +126,8 @@ pub use tessera_spatial::Projection;
 // validates an ingested coordinate against this declaration (§6), so the type needs to be nameable
 // from the crate that reads it.
 pub use tessera_store::manifest::Quantisation;
+// A batch's layer column is read by the rule a build reads a member table's key column by.
+pub use tessera_store::member_key;
 // The write path's **outcome** vocabulary, and nothing else.
 //
 // `LifecycleHandle`, `LifecycleQueues`, `Command` and `Reply` are deliberately **not** here, and

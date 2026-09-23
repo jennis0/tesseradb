@@ -32,7 +32,7 @@ use tessera_engine::{
     ViewportHead, ViewportSink,
 };
 
-use crate::error::{map_engine_error, map_join_error, ApiError};
+use crate::error::{map_engine_error, ApiError};
 use crate::health::{healthz, readyz};
 use crate::state::{AppState, GatePermits};
 
@@ -99,13 +99,6 @@ impl From<&GenerationStamp> for PinDto {
     }
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-}
-
 /// Flips a [`CancelToken`] on drop. Created before the admission-gate acquire, held by the
 /// `viewport` handler while it awaits the first flush, then moved into the [`StreamBody`] for
 /// the life of the response — so the one transport signal for "the client went away" (the
@@ -158,6 +151,25 @@ fn metadata_value(value: &tessera_engine::ViewMetadataValue) -> serde_json::Valu
     serde_json::json!({"type": tag, "value": value})
 }
 
+/// A column's `category` block on `/v1/meta`: the vocabulary it draws from, that vocabulary's kind
+/// and its visibility. `None` for a column with no vocabulary, or one naming a vocabulary the
+/// snapshot does not hold.
+fn category_block(
+    meta: &tessera_engine::EngineMeta,
+    vocabulary: Option<&str>,
+) -> Option<serde_json::Value> {
+    let name = vocabulary?;
+    let vocabulary = meta.vocabularies.get(name)?;
+    Some(serde_json::json!({
+        "vocabulary": name,
+        "kind": match vocabulary.kind() {
+            tessera_engine::VocabularyKind::Declared => "declared",
+            tessera_engine::VocabularyKind::Discovered => "discovered",
+        },
+        "visibility": vocabulary.visibility().as_str(),
+    }))
+}
+
 async fn meta(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -167,8 +179,7 @@ async fn meta(
     // so an unauthenticated `/v1/meta` would hand the corpus shape to anyone who can reach the
     // viewer listener. The bearer here is a session token, so a valid, unexpired session is
     // required exactly as for `/v1/viewport`.
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let session = state.viewer_session(&headers)?;
 
     let meta = state.engine.meta();
     let selection = state.engine.config();
@@ -178,12 +189,12 @@ async fn meta(
     // filtering is two steps in the engine — reachability by terms, then a live suppression check
     // on each layer's own entity — so a layer this caller may not know about is absent by the same
     // route a name nobody registered is.
-    let layers = state.engine.visible_layers(&entry.session);
+    let layers = state.engine.visible_layers(&session);
     // **The views, the groups and the scoped families this principal may reach** (`views.md` §6),
     // resolved at authorise and fixed for the session's life. Read here rather than recomputed:
     // this document is the discovery surface, and a roster that disagreed with what a viewer verb
     // will answer is an existence oracle by subtraction.
-    let visible = entry.session.visible_views();
+    let visible = session.visible_views();
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
@@ -287,21 +298,10 @@ async fn meta(
         // separate, paged, per-principal endpoint and this stays a small shared document
         // (per-point-attributes §3.8).
         "declared_scalars": meta.declared_scalars.iter().map(|s| {
-            let category = s.vocabulary.as_deref().and_then(|name| {
-                let vocabulary = meta.vocabularies.get(name)?;
-                Some(serde_json::json!({
-                    "vocabulary": name,
-                    "kind": match vocabulary.kind() {
-                        tessera_engine::VocabularyKind::Declared => "declared",
-                        tessera_engine::VocabularyKind::Discovered => "discovered",
-                    },
-                    "visibility": vocabulary.visibility().as_str(),
-                }))
-            });
             serde_json::json!({
                 "name": s.name,
                 "arrow_type": s.arrow_type.arrow_type_name(),
-                "category": category,
+                "category": category_block(&meta, s.vocabulary.as_deref()),
                 // **The analyser that produced a `text` column's terms**, as the full
                 // `<name>/<version>` identity the manifest records (decision 0070); `null` for
                 // every other type, which genuinely has none.
@@ -359,17 +359,7 @@ async fn meta(
                 // visibility — the three facts an entity-scoped category's entry gives, for the
                 // same reason: the hot column and the postings both carry a bare code, and a
                 // client with no block cannot tell a `u8` category from a `u8` number.
-                "category": f.vocabulary.as_deref().and_then(|name| {
-                    let vocabulary = meta.vocabularies.get(name)?;
-                    Some(serde_json::json!({
-                        "vocabulary": name,
-                        "kind": match vocabulary.kind() {
-                            tessera_engine::VocabularyKind::Declared => "declared",
-                            tessera_engine::VocabularyKind::Discovered => "discovered",
-                        },
-                        "visibility": vocabulary.visibility().as_str(),
-                    }))
-                }),
+                "category": category_block(&meta, f.vocabulary.as_deref()),
                 // The analyser a scoped `text` family's terms were produced by, for the reason
                 // `declared_scalars` publishes one: an empty `match` is otherwise
                 // indistinguishable from a query that segmented differently from the index.
@@ -453,7 +443,7 @@ async fn meta(
         // bare or pinned, takes the unknown-column 422 rather than a refusal that would confirm
         // the group or its keys.
         "filter_operands": meta.declared_scalars.iter().filter(|d| tessera_engine::filter::is_filterable(d)).map(|d| {
-            let family = family_of(d);
+            let family = tessera_engine::filter::Family::of(d);
             serde_json::json!({
                 "column": d.name,
                 "family": family.as_str(),
@@ -497,7 +487,7 @@ async fn meta(
         "selection": {
             "k_min": selection.k_min,
             "k_max_marks": selection.k_max_marks,
-            "max_k": state.max_k,
+            "max_k": state.limits.max_k,
             "theta_target_marks": selection.theta_target_marks,
             "max_underlay_offset": selection.max_underlay_offset,
             // Published for exactly the reason `max_k` is: a client
@@ -509,14 +499,14 @@ async fn meta(
             // `/v1/categories`' page ceiling, published for the same reason the others are: a
             // client that pages must know when a short page means "the set ended" rather than
             // "the deployment truncated".
-            "max_category_values": state.max_category_values,
+            "max_category_values": state.limits.max_category_values,
             // `/v1/categories/{column}/suggest`'s two ceilings (`value-suggestion.md` §5.3),
             // published on `max_category_values`' own argument. `max_suggestions` is the page
             // ceiling and `limit`'s default; `max_suggestion_walk` is the walk budget a client
             // reads `more: true` against on a page it did not fill, rather than mistaking it for
             // its own arithmetic being wrong. Deployment constants, identical for every principal.
-            "max_suggestions": state.max_suggestions,
-            "max_suggestion_walk": state.max_suggestion_walk,
+            "max_suggestions": state.limits.max_suggestions,
+            "max_suggestion_walk": state.limits.max_suggestion_walk,
             // The cardinality at or under which a suggestion is answered from this session's own
             // set of visible values rather than by probing (`value-suggestion.md` §6.3, decision
             // 0124). Published on the same argument, and it is the one constant on this surface a
@@ -524,24 +514,24 @@ async fn meta(
             // which a zoom-0 viewport already returns exactly as `visible`. What they learn from
             // the pair is which side of a published constant their own mask falls on, which is a
             // self-disclosure; nothing about another principal's mask and no corpus statistic.
-            "max_suggest_set_entities": state.max_suggest_set_entities,
+            "max_suggest_set_entities": state.limits.max_suggest_set_entities,
             // The publication vertex cap a shape is held to (`polygon-membership.md` §9), so a
             // caller can simplify before submitting rather than learn the number from a `422`.
             // A deployment constant, identical for every principal.
-            "max_shape_vertices": state.max_shape_vertices,
+            "max_shape_vertices": state.limits.max_shape_vertices,
             // The `region` leaf's two bounds (selection-operand §2), on the same argument: a
             // client choosing a shape is choosing a cost, and a refusal it cannot predict is
             // indistinguishable from its own arithmetic being wrong. Over the first is a `422`
             // naming the count and the cap; over the second is **not a refusal** — the answer
             // is a cover, said on `x-tessera-region`. Deployment constants, identical for every
             // principal.
-            "max_region_vertices": state.max_region_vertices,
-            "max_region_cells": state.max_region_cells,
+            "max_region_vertices": state.limits.max_region_vertices,
+            "max_region_cells": state.limits.max_region_cells,
             // `POST /v1/artifacts/browse`'s page ceiling and default
             // (`highlight-and-hierarchy.md` §4), published for `max_category_values`' reason: a
             // client choosing a page size is choosing a cost, and a refusal it cannot predict is
             // indistinguishable from its own arithmetic being wrong.
-            "max_browse_rows": state.max_browse_rows,
+            "max_browse_rows": state.limits.max_browse_rows,
         },
         // The annotation layers this principal may know exist, and what each declared.
         //
@@ -658,11 +648,10 @@ async fn categories(
     AxumPath(column): AxumPath<String>,
     AxumQuery(query): AxumQuery<CategoriesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let session = state.viewer_session(&headers)?;
 
     let meta = state.engine.meta();
-    let visible = entry.session.visible_views();
+    let visible = session.visible_views();
     let resolved =
         resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
 
@@ -676,8 +665,8 @@ async fn categories(
                 "limit must be at least 1; a zero-length page cannot make progress".to_string(),
             ))
         }
-        Some(n) => n.min(state.max_category_values),
-        None => state.max_category_values,
+        Some(n) => n.min(state.limits.max_category_values),
+        None => state.limits.max_category_values,
     };
 
     // Parsed before the engine call so a malformed code list is a 422 about the request rather
@@ -697,18 +686,23 @@ async fn categories(
         None => None,
     };
 
-    let query = match &codes {
-        Some(codes) => tessera_engine::CategoryQuery::Codes(codes),
-        None => tessera_engine::CategoryQuery::Page {
-            after: query.after.as_deref(),
-            limit,
-        },
-    };
-
+    // A `derived` column probes a posting per value, so the listing runs off the reactor.
+    let after = query.after;
     let page = state
-        .engine
-        .categories(&entry.session, &resolved, query)
-        .map_err(map_engine_error)?
+        .blocking(move |state| {
+            let query = match &codes {
+                Some(codes) => tessera_engine::CategoryQuery::Codes(codes),
+                None => tessera_engine::CategoryQuery::Page {
+                    after: after.as_deref(),
+                    limit,
+                },
+            };
+            state
+                .engine
+                .categories(&session, &resolved, query)
+                .map_err(map_engine_error)
+        })
+        .await?
         .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
 
     Ok(Json(serde_json::json!({
@@ -821,7 +815,7 @@ struct SuggestQuery {
 /// `compute_gate` permit; a per-keystroke surface queued behind viewport renders would be
 /// unusable. What it takes instead is [`crate::state::SuggestAdmission`]'s one-per-session slot: a
 /// second request for a session already walking is refused with the shared `429 backpressure`
-/// (`ApiError::Backpressure`, `Retry-After: 1`) **before any work runs**, which is what stops a
+/// (`ShedCause::SuggestInFlight`, `Retry-After: 1`) **before any work runs**, which is what stops a
 /// client that does not debounce its keystrokes from turning a held key into a queue.
 async fn suggest(
     State(state): State<Arc<AppState>>,
@@ -829,8 +823,7 @@ async fn suggest(
     AxumPath(column): AxumPath<String>,
     query: Result<AxumQuery<SuggestQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let session = state.viewer_session(&headers)?;
 
     // An unknown query parameter is `deny_unknown_fields`'s rejection, which axum reports as an
     // extractor error rather than routing it through `SuggestQuery`'s `Deserialize` impl and back
@@ -860,44 +853,47 @@ async fn suggest(
                     .to_string(),
             ))
         }
-        Some(n) => n.min(state.max_suggestions),
-        None => state.max_suggestions,
+        Some(n) => n.min(state.limits.max_suggestions),
+        None => state.limits.max_suggestions,
     };
     let counts = query.counts.unwrap_or(false);
 
     let meta = state.engine.meta();
-    let visible = entry.session.visible_views();
+    let visible = session.visible_views();
     let resolved = resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
 
     // **At most one walk in flight per session, refused before any work runs.** `token_id` rather
     // than the bearer token itself: the admission set is process-wide, and a token never crosses a
     // response or a log line here either way, but the id is the same handle `/session/revoke`
     // already addresses this session by.
-    let Some(_suggest_guard) = state.suggest_admission.try_begin(entry.session.token_id()) else {
-        return Err(ApiError::Backpressure);
+    let Some(_suggest_guard) = state.suggest_admission.try_begin(session.token_id()) else {
+        return Err(ApiError::Backpressure {
+            retry_after_s: crate::error::RETRY_AFTER_SECS,
+            cause: crate::error::ShedCause::SuggestInFlight,
+        });
     };
 
-    let walk_budget = state.max_suggestion_walk;
-    let max_suggest_set_entities = state.max_suggest_set_entities;
+    let walk_budget = state.limits.max_suggestion_walk;
+    let max_suggest_set_entities = state.limits.max_suggest_set_entities;
     let q = query.q.clone();
-    let page = tokio::task::spawn_blocking(move || {
-        let _suggest_guard = _suggest_guard;
-        state
-            .engine
-            .suggest(
-                &entry.session,
-                &resolved,
-                &q,
-                limit,
-                counts,
-                walk_budget,
-                max_suggest_set_entities,
-            )
-    })
-    .await
-    .map_err(map_join_error)?
-    .map_err(map_engine_error)?
-    .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
+    let page = state
+        .blocking(move |state| {
+            let _suggest_guard = _suggest_guard;
+            state
+                .engine
+                .suggest(
+                    &session,
+                    &resolved,
+                    &q,
+                    limit,
+                    counts,
+                    walk_budget,
+                    max_suggest_set_entities,
+                )
+                .map_err(map_engine_error)
+        })
+        .await?
+        .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
 
     Ok(Json(serde_json::json!({
         // The caller's own spelling, as `/v1/categories` echoes it — never the resolved,
@@ -924,15 +920,6 @@ async fn suggest(
         }).collect::<Vec<_>>(),
         "more": page.more,
     })))
-}
-
-/// A filterable column's family — **one derivation, used by `/v1/meta`, the parser and the engine's
-/// own routing alike**, so the operator list a client is published cannot differ from the one it is
-/// held to, nor from the rules the scan reads its values by. It lives in the engine because the row
-/// route needs it too: a rendered `u8` category and a rendered `u8` number are the same bytes and
-/// have opposite absence rules.
-fn family_of(d: &tessera_engine::DeclaredScalar) -> tessera_engine::filter::Family {
-    tessera_engine::filter::Family::of(d)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1257,8 +1244,17 @@ enum Shed {
 impl Shed {
     fn detail(self) -> &'static str {
         match self {
-            Shed::Deadline => "the whole-stream deadline fired: the response was committed and the                                work behind its next frame outran serve.stream_deadline_ms. A cold                                request over a level whose derived structures the prefix does not                                carry is the shape to check first — the build's artifact pass                                writes them, and an open reporting no adoptions says they were not                                taken",
-            Shed::Stall => "the per-send stall budget fired: the client stopped reading and                             serve.stream_write_stall_ms elapsed with the body channel full",
+            Shed::Deadline => {
+                "the whole-stream deadline fired: the response was committed and the work behind \
+                 its next frame outran serve.stream_deadline_ms. A cold request over a level whose \
+                 derived structures the prefix does not carry is the shape to check first — the \
+                 build's artifact pass writes them, and an open reporting no adoptions says they \
+                 were not taken"
+            }
+            Shed::Stall => {
+                "the per-send stall budget fired: the client stopped reading and \
+                 serve.stream_write_stall_ms elapsed with the body channel full"
+            }
         }
     }
 }
@@ -1430,6 +1426,68 @@ impl ViewportSink for WireSink {
     }
 }
 
+/// What a request's filter expressions are parsed against: one `Engine::meta()` snapshot and the
+/// view the request names, whose frame and projection a `region` leaf is canonicalised in.
+struct FilterParser<'a> {
+    meta: &'a tessera_engine::EngineMeta,
+    view: &'a tessera_engine::MetaView,
+    visible: &'a tessera_engine::gate::VisibleViews,
+    region: crate::filter_dto::RegionContext,
+    /// Each category's vocabulary by the leaf's bare name, entity-scoped columns and group-scoped
+    /// families alike. Names are unique across the two lists, so one map cannot answer two things.
+    vocab_of: std::cell::OnceCell<std::collections::HashMap<&'a str, &'a str>>,
+}
+
+impl<'a> FilterParser<'a> {
+    fn new(
+        meta: &'a tessera_engine::EngineMeta,
+        view: &'a tessera_engine::MetaView,
+        visible: &'a tessera_engine::gate::VisibleViews,
+        max_region_vertices: u64,
+    ) -> Self {
+        FilterParser {
+            meta,
+            view,
+            visible,
+            region: crate::filter_dto::RegionContext {
+                extent: crate::filter_dto::view_extent(view),
+                projection: view.projection,
+                max_vertices: max_region_vertices,
+            },
+            vocab_of: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn parse(&self, value: &serde_json::Value) -> Result<tessera_engine::filter::FilterExpr, ApiError> {
+        let meta = self.meta;
+        let vocab_of = self.vocab_of.get_or_init(|| {
+            meta.declared_scalars
+                .iter()
+                .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
+                .chain(
+                    meta.scoped_scalars
+                        .iter()
+                        .filter_map(|f| Some((f.name.as_str(), f.vocabulary.as_deref()?))),
+                )
+                .collect()
+        });
+        crate::filter_dto::parse(
+            value,
+            &|leaf| meta.resolve_filter_column(leaf, &self.view.id, self.visible),
+            &|column, key| {
+                // A scoped family's pin decides which column is read, never which value set the
+                // key is in, so it is dropped before the lookup.
+                let name = column
+                    .split_once(tessera_engine::filter::PIN)
+                    .map_or(column, |(name, _)| name);
+                let vocabulary = vocab_of.get(name)?;
+                meta.vocabularies.get(vocabulary)?.code_of(key)
+            },
+            &self.region,
+        )
+    }
+}
+
 /// The producer: the engine call through frame serialisation, run inside `spawn_blocking` for
 /// the whole life of the stream. Returns nothing — every outcome is communicated through the
 /// oneshot (pre-first-flush errors), the channel (frames), or the shared state (completion
@@ -1464,13 +1522,6 @@ fn run_viewport_stream(
         return;
     };
     let view_id = view.id.clone();
-    let view_extent = tessera_engine::shapes::Bounds {
-        x_min: view.quantisation.x_min,
-        x_max: view.quantisation.x_max,
-        y_min: view.quantisation.y_min,
-        y_max: view.quantisation.y_max,
-    };
-    let view_projection = view.projection;
     // Contracts §3.2's default. It is the deployment's own overplot ceiling rather than a
     // literal, so a client that expresses no preference gets the full budget this deployment will
     // serve and §7.2's proportional window is realised in full — at the old default of 30 against a
@@ -1479,7 +1530,7 @@ fn run_viewport_stream(
     let k = req
         .k
         .unwrap_or_else(|| state.engine.config().k_max_marks)
-        .min(state.max_k);
+        .min(state.limits.max_k);
 
     // **Deduplicated here, not trusted from the caller — first occurrence kept, order
     // preserved.** A repeated tile would be served — and drawn — twice, inflating every count a
@@ -1502,63 +1553,13 @@ fn run_viewport_stream(
     // more under streaming than it did before it: once a frame is out the status line is spent, and
     // a filter refused mid-stream could only be reported as a truncation.
     // **One parse for both expressions.** `filters` and `highlight` are two fields of one request
-    // in one grammar (`highlight-and-hierarchy.md` §2), so they are parsed by one closure against
-    // one schema — a second transcription here is a second surface, which is the argument the
-    // design makes for there being no list of highlights on the wire either.
-    let parse_expr = |value: &serde_json::Value| {
-        {
-            // **Keyed by the leaf's bare name**, the entity-scoped columns and the group-scoped
-            // families alike: a family's columns are one declaration and share one vocabulary, so
-            // a key resolves to the same code whichever view's column reads it. Names are unique
-            // across the two lists — the build refuses a family sharing a declared column's name —
-            // so one map cannot answer two things.
-            let vocab_of: std::collections::HashMap<&str, &str> = meta
-                .declared_scalars
-                .iter()
-                .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
-                .chain(
-                    meta.scoped_scalars
-                        .iter()
-                        .filter_map(|f| Some((f.name.as_str(), f.vocabulary.as_deref()?))),
-                )
-                .collect();
-            // A `region` leaf is canonicalised here, against the view's own extent — the one
-            // `/v1/meta` publishes — so the engine sees a grid-unit shape and the vertex cap and
-            // every coordinate refusal are `422`s before any compute (selection-operand §2).
-            // **The frame and the projection of the view this request names**, not the bundle's
-            // first: both are declared per view (decision 0040, `projections.md` §3). A `region`
-            // leaf declared in longitude and latitude is placed by the same function that placed
-            // the points it selects (`polygon-membership.md` R12), against the same grid — and
-            // reading any other view's would hold the wrong rows with nothing saying so. Both are
-            // taken from one lookup, so they cannot come from different views.
-            let region = crate::filter_dto::RegionContext {
-                extent: view_extent,
-                projection: view_projection,
-                max_vertices: state.max_region_vertices,
-            };
-            crate::filter_dto::parse(
-                value,
-                // **The engine resolves the leaf's spelling**, against the same operand predicate
-                // `/v1/meta` publishes and the same view namespace a request's `view` is resolved
-                // through — so a column a client was told about parses, a column it was not stays
-                // the unknown-column 422, and a pinned leaf cannot mean one thing here and another
-                // on the discovery document (`views.md` §5).
-                &|leaf| meta.resolve_filter_column(leaf, &view_id, session.visible_views()),
-                &|column, key| {
-                    // The caller's own spelling reaches here, which for a scoped family may pin a
-                    // view (`views.md` §5). The pin decides which *column* is read and never which
-                    // value set the key is in — that is the family's — so it is dropped before the
-                    // lookup rather than being a second key space.
-                    let name = column
-                        .split_once(tessera_engine::filter::PIN)
-                        .map_or(column, |(name, _)| name);
-                    let vocabulary = vocab_of.get(name)?;
-                    meta.vocabularies.get(vocabulary)?.code_of(key)
-                },
-                &region,
-            )
-        }
-    };
+    // in one grammar (`highlight-and-hierarchy.md` §2), so they are parsed against one schema.
+    let parser = FilterParser::new(
+        &meta,
+        view,
+        session.visible_views(),
+        state.limits.max_region_vertices,
+    );
     // The pre-first-flush channel, the same one an engine refusal takes: nothing is committed, the
     // handler is still waiting on it, and the typed `422` reaches the client exactly as it did
     // before streaming.
@@ -1567,7 +1568,7 @@ fn run_viewport_stream(
             let _ = tx.send(Err(e));
         }
     };
-    let filter = match req.filters.as_ref().map(&parse_expr) {
+    let filter = match req.filters.as_ref().map(|v| parser.parse(v)) {
         None => None,
         Some(Ok(expr)) => Some(expr),
         Some(Err(e)) => {
@@ -1575,7 +1576,7 @@ fn run_viewport_stream(
             return;
         }
     };
-    let highlight = match req.highlight.as_ref().map(&parse_expr) {
+    let highlight = match req.highlight.as_ref().map(|v| parser.parse(v)) {
         None => None,
         Some(Ok(expr)) => Some(expr),
         Some(Err(e)) => {
@@ -1671,7 +1672,7 @@ fn run_viewport_stream(
     let outcome =
         state
             .engine
-            .viewport_stream(session, request, state.stream_flush_bytes, &mut sink);
+            .viewport_stream(session, request, state.limits.stream_flush_bytes, &mut sink);
 
     match outcome {
         Ok(timings) => {
@@ -1686,7 +1687,7 @@ fn run_viewport_stream(
                 "points": sink.points_total,
                 "flushes": sink.flushes,
             });
-            if state.stage_timing {
+            if state.limits.stage_timing {
                 if let Some(csv) =
                     stage_header(&timings, sink.arrow_serialise_ns, sink.shape_guard_fired)
                 {
@@ -1805,8 +1806,7 @@ async fn viewport(
     headers: HeaderMap,
     Json(req): Json<ViewportReq>,
 ) -> Result<Response, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let session = state.viewer_session(&headers)?;
 
     if req.zoom > 16 {
         return Err(ApiError::Contract("zoom must be in 0..=16".to_string()));
@@ -1905,7 +1905,7 @@ async fn viewport(
     // panic is observable as the oneshot closing (mapped to the same fail-closed 500 the old
     // `map_join_error` produced), or — after the first flush — as a body abort.
     //
-    // Closure capture: `state` is a cloned `Arc<AppState>`, `entry` the `Arc<SessionEntry>`,
+    // Closure capture: `state` is a cloned `Arc<AppState>`, `session` the `Arc<Session>`,
     // `req` moved whole, `sink` carries the `GatePermits` (released at the sweep/emit boundary
     // and at producer exit — see `WireSink`), and only a *clone* of `cancel` moves in:
     // `cancel_guard` keeps the original, first here, then inside the response body.
@@ -1918,8 +1918,8 @@ async fn viewport(
         tx,
         permits: gate_permits,
         start,
-        stall: Duration::from_millis(state.stream_write_stall_ms),
-        deadline: Duration::from_millis(state.stream_deadline_ms),
+        stall: Duration::from_millis(state.limits.stream_write_stall_ms),
+        deadline: Duration::from_millis(state.limits.stream_deadline_ms),
         first_flush_at: None,
         shed: None,
         // Re-derived from the request inside the producer; the default only carries this value
@@ -1937,7 +1937,7 @@ async fn viewport(
     drop(tokio::task::spawn_blocking(move || {
         run_viewport_stream(
             &closure_state,
-            &entry.session,
+            &session,
             req,
             closure_cancel,
             sink,
@@ -2476,8 +2476,7 @@ async fn browse(
     Json(req): Json<BrowseReq>,
 ) -> Result<Json<BrowseResp>, ApiError> {
     use tessera_engine::browse::{BrowseCursor, BrowseForm, BrowseRequest};
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
+    let session = state.viewer_session(&headers)?;
     // **`limit` clamps and `0` refuses** — the page bound is `/v1/categories`' shape exactly.
     if req.limit == Some(0) {
         return Err(ApiError::Contract(
@@ -2488,7 +2487,7 @@ async fn browse(
     }
     let limit = req
         .limit
-        .map_or(state.max_browse_rows, |n| n.min(state.max_browse_rows));
+        .map_or(state.limits.max_browse_rows, |n| n.min(state.limits.max_browse_rows));
     // **Exactly one of `parent` and `q`, or neither** — three forms, and a request naming two
     // would need an order between them that nothing states.
     if req.parent.is_some() && req.q.is_some() {
@@ -2500,19 +2499,7 @@ async fn browse(
     }
     let form = match (&req.parent, &req.q) {
         (Some(value), _) => {
-            let id = match value {
-                serde_json::Value::Number(n) => n.as_u64(),
-                serde_json::Value::String(s) => s.parse::<u64>().ok(),
-                _ => None,
-            }
-            .ok_or_else(|| {
-                ApiError::Contract(
-                    "`parent` is a `tessera_id` — a JSON number, or a decimal string where the \
-                     caller cannot carry one intact"
-                        .to_string(),
-                )
-            })?;
-            BrowseForm::Children(TesseraId::new(id))
+            BrowseForm::Children(crate::filter_dto::tessera_id(Some(value), "parent")?)
         }
         (None, Some(q)) => BrowseForm::Search(q.clone()),
         (None, None) => BrowseForm::Roots,
@@ -2526,75 +2513,45 @@ async fn browse(
             )
         })?),
     };
-    let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
-    let out = tokio::task::spawn_blocking(move || {
-        let _gate_permits = gate_permits;
-        let meta = state.engine.meta();
-        // The same view resolution every other viewer verb takes, gate included.
-        let view = meta
-            .resolve_visible_view(&req.view, entry.session.visible_views())
-            .map(|v| v.id.clone())
-            .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
-        // The filter is parsed against the live schema, before any compute — the viewport's own
-        // rule, and the same parser, so one object means one thing on both verbs.
-        let filter = match &req.filters {
-            None => None,
-            Some(value) => {
-                let view_meta = meta
-                    .resolve_view(&view)
-                    .ok_or_else(|| ApiError::Unknown(format!("unknown view '{view}'")))?;
-                let vocab_of: std::collections::HashMap<&str, &str> = meta
-                    .declared_scalars
-                    .iter()
-                    .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
-                    .chain(
-                        meta.scoped_scalars
-                            .iter()
-                            .filter_map(|f| Some((f.name.as_str(), f.vocabulary.as_deref()?))),
+    let out = state
+        .gated(move |state| {
+            let meta = state.engine.meta();
+            // The same view resolution every other viewer verb takes, gate included.
+            let view = meta
+                .resolve_visible_view(&req.view, session.visible_views())
+                .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
+            // The filter is parsed against the live schema, before any compute — the viewport's own
+            // rule, and the same parser, so one object means one thing on both verbs.
+            let filter = req
+                .filters
+                .as_ref()
+                .map(|value| {
+                    FilterParser::new(
+                        &meta,
+                        view,
+                        session.visible_views(),
+                        state.limits.max_region_vertices,
                     )
-                    .collect();
-                let region = crate::filter_dto::RegionContext {
-                    extent: tessera_engine::shapes::Bounds {
-                        x_min: view_meta.quantisation.x_min,
-                        x_max: view_meta.quantisation.x_max,
-                        y_min: view_meta.quantisation.y_min,
-                        y_max: view_meta.quantisation.y_max,
+                    .parse(value)
+                })
+                .transpose()?;
+            state
+                .engine
+                .browse(
+                    &session,
+                    BrowseRequest {
+                        view: &view.id,
+                        layer: &req.layer,
+                        level: req.level,
+                        form,
+                        filter,
+                        limit,
+                        cursor,
                     },
-                    projection: view_meta.projection,
-                    max_vertices: state.max_region_vertices,
-                };
-                Some(crate::filter_dto::parse(
-                    value,
-                    &|leaf| meta.resolve_filter_column(leaf, &view, entry.session.visible_views()),
-                    &|column, key| {
-                        let name = column
-                            .split_once(tessera_engine::filter::PIN)
-                            .map_or(column, |(name, _)| name);
-                        let vocabulary = vocab_of.get(name)?;
-                        meta.vocabularies.get(vocabulary)?.code_of(key)
-                    },
-                    &region,
-                )?)
-            }
-        };
-        state
-            .engine
-            .browse(
-                &entry.session,
-                BrowseRequest {
-                    view: &view,
-                    layer: &req.layer,
-                    level: req.level,
-                    form,
-                    filter,
-                    limit,
-                    cursor,
-                },
-            )
-            .map_err(crate::error::map_engine_error)
-    })
-    .await
-    .map_err(map_join_error)??;
+                )
+                .map_err(crate::error::map_engine_error)
+        })
+        .await?;
     Ok(Json(BrowseResp {
         artifacts: out.artifacts.into_iter().map(browse_row).collect(),
         parents: out.parents.into_iter().map(browse_row).collect(),
@@ -2624,36 +2581,32 @@ async fn artifact(
     AxumPath(raw): AxumPath<u64>,
     Json(req): Json<ArtifactReq>,
 ) -> Result<Json<ArtifactResp>, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
-    let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
-
-    let served = tokio::task::spawn_blocking(move || {
-        let _gate_permits = gate_permits;
-        // **The same view resolution the viewport takes** (`views.md` §3.2, §6), gate included,
-        // so one id means one view on every verb and a view its gate fails is the same 404 on all
-        // of them. The engine call below
-        // loads its own generation; a view that went away between the two is the 404 an unknown
-        // view already is, which is the answer either order produces.
-        let view = state
-            .engine
-            .meta()
-            .resolve_visible_view(&req.view, entry.session.visible_views())
-            .map(|v| v.id.clone())
-            .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
-        state
-            .engine
-            .artifact(
-                &entry.session,
-                TesseraId::new(raw),
-                req.idset,
-                &view,
-                req.zoom,
-            )
-            .map_err(crate::error::map_engine_error)
-    })
-    .await
-    .map_err(map_join_error)??;
+    let session = state.viewer_session(&headers)?;
+    let served = state
+        .gated(move |state| {
+            // **The same view resolution the viewport takes** (`views.md` §3.2, §6), gate included,
+            // so one id means one view on every verb and a view its gate fails is the same 404 on all
+            // of them. The engine call below
+            // loads its own generation; a view that went away between the two is the 404 an unknown
+            // view already is, which is the answer either order produces.
+            let view = state
+                .engine
+                .meta()
+                .resolve_visible_view(&req.view, session.visible_views())
+                .map(|v| v.id.clone())
+                .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
+            state
+                .engine
+                .artifact(
+                    &session,
+                    TesseraId::new(raw),
+                    req.idset,
+                    &view,
+                    req.zoom,
+                )
+                .map_err(crate::error::map_engine_error)
+        })
+        .await?;
 
     // One `None` arm, one construction site, one detail string — a second with different wording,
     // or a log line inside only one of the withheld cases, would be exactly the oracle the single
@@ -2677,12 +2630,7 @@ async fn item(
     AxumPath(raw): AxumPath<u64>,
     Json(req): Json<ItemReq>,
 ) -> Result<Json<ItemResp>, ApiError> {
-    let token = bearer_token(&headers).ok_or(ApiError::BadCredential)?;
-    let entry = state.authenticated_session(token)?;
-
-    // Gated the same way as `/v1/viewport` (see its handler's comment) — `admit()` sheds with 429
-    // `backpressure` on either stage.
-    let (gate_permits, _admission_us) = state.compute_gate.admit().await?;
+    let session = state.viewer_session(&headers)?;
 
     // `engine.item` checks `req.idset` (if the caller sent one) against the ONE generation it
     // loads, inverts the id (pure, no IO), then reads the external-id sidecar for a visible item —
@@ -2694,16 +2642,9 @@ async fn item(
     // keeping the rule is that a stale-idset request holds a gate permit for the length of the
     // `spawn_blocking` call rather than being rejected before `admit()` runs; see `Engine::item`'s
     // doc for the full argument.
-    //
-    // Closure capture: `state` moved in directly (nothing after this `.await` needs the handler's
-    // own copy), `entry` moved (already an `Arc<SessionEntry>`), `raw`/`req.idset` are `Copy`,
-    // `gate_permits` moves in so both permits release only when this closure returns.
-    let resp = tokio::task::spawn_blocking(move || {
-        let _gate_permits = gate_permits;
-        run_item(&state, &entry.session, raw, req.idset)
-    })
-    .await
-    .map_err(map_join_error)??;
+    let resp = state
+        .gated(move |state| run_item(state, &session, raw, req.idset))
+        .await?;
 
     Ok(Json(resp))
 }

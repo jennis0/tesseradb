@@ -153,6 +153,8 @@ pub struct WindowEntry<W> {
 pub struct ResolvedMembership {
     pub layer: String,
     pub level: u32,
+    /// As on [`crate::command::BatchMembership::view`].
+    pub view: Option<String>,
     /// The key the caller's column carried, kept beside the ordinal because a key with no ordinal
     /// is the whole of what minting has to work from.
     pub key: String,

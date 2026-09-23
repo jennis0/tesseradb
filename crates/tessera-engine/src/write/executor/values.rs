@@ -2,6 +2,7 @@ use super::*;
 
 /// What one values batch's fill rule produced: the cells to hold until the flush writes them, and
 /// the counts the acknowledgement carries.
+#[derive(Default)]
 pub(super) struct PlannedFills {
     /// The entity-scoped cells, one entry per entity.
     pub(super) fills: Vec<(EntityId, tessera_lifecycle::Fill)>,
@@ -102,8 +103,20 @@ pub(super) fn plan_fills(
 ) -> Result<PlannedFills, ExecError> {
     let manifest = &generation.bundle.manifest;
     let declared = &manifest.declared_scalars;
-    let families = scoped_families_of_view(manifest, &request.view);
-    let owner_view = scoped_owner_view_of(manifest, &request.view);
+    // A cell is written by its view's flush pass; a batch naming no view fills none.
+    let Some(view) = request.view.as_deref() else {
+        if let Some(name) = request.columns.first() {
+            return Err(ExecError::ValuesRefused {
+                detail: format!(
+                    "column '{name}' fills a cell and this batch names no view to write it by; \
+                     name one in x-tessera-view"
+                ),
+            });
+        }
+        return Ok(PlannedFills::default());
+    };
+    let families = scoped_families_of_view(manifest, view);
+    let owner_view = scoped_owner_view_of(manifest, view);
     let key = key_of_owner_view(&owner_view);
 
     // One resolution per batch, not per row: a name in neither space is refused here too, since
@@ -145,7 +158,7 @@ pub(super) fn plan_fills(
                 "column '{name}' is neither a declared scalar nor a group-scoped family whose key \
                  set holds view '{}'; declare the column, or name the view whose key addresses \
                  the cell",
-                request.view
+                view
             ),
         });
     }
@@ -280,7 +293,7 @@ pub(super) fn plan_fills(
             fills.push((
                 entity,
                 tessera_lifecycle::Fill {
-                    view: request.view.clone(),
+                    view: view.to_string(),
                     scalars,
                     wal_pos: None,
                 },
@@ -291,7 +304,7 @@ pub(super) fn plan_fills(
                 entity,
                 owner_view.clone(),
                 tessera_lifecycle::ScopedFill {
-                    view: request.view.clone(),
+                    view: view.to_string(),
                     scoped,
                     wal_pos: None,
                 },

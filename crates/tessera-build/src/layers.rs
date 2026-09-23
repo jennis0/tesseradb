@@ -70,10 +70,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{
-    Array, FixedSizeListArray, Int16Array, Int32Array, Int64Array, Int8Array, ListArray,
-    UInt16Array, UInt32Array, UInt64Array, UInt8Array,
-};
+use arrow::array::{Array, FixedSizeListArray, ListArray, UInt32Array, UInt64Array};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use tessera_lifecycle::alloc::Allocator;
@@ -429,7 +426,11 @@ impl LayerPlan {
             std::collections::btree_map::Entry::Occupied(e) => *e.get(),
             std::collections::btree_map::Entry::Vacant(e) => {
                 e.insert(next);
-                self.bodies.push(PlannedArtifact::default());
+                // A key minted by a member row is in the view its row named.
+                self.bodies.push(PlannedArtifact {
+                    view_key: address.3.clone(),
+                    ..PlannedArtifact::default()
+                });
                 self.addresses.push(address);
                 next
             }
@@ -3749,8 +3750,9 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 // Key columns: text, or an integer spelling one
 // ---------------------------------------------------------------------------------------------
 
-/// A `key` column at the two types a producer has — UTF-8, or an integer canonicalised to its
-/// decimal string, so `3` and `"3"` name one artifact.
+/// A `key` column: text, or an integer canonicalised to its decimal string, so `3` and `"3"` name
+/// one artifact. Which types, and how a cell reads, is [`tessera_store::member_key`]'s, the rule the
+/// running service reads a batch's layer column by.
 ///
 /// **A key is one type below this reader**: the plan, the store and the manifest all hold a string,
 /// so an integer column is converted rather than carried. *Where* the conversion happens is the
@@ -3762,88 +3764,7 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 /// already has: a point whose cluster is on the roster formats nothing and allocates nothing, and
 /// the only decimal string an open layer writes is the one it mints an artifact under, once per
 /// cluster.
-#[derive(Clone, Copy)]
-pub(crate) enum KeyColumn<'a> {
-    Text(crate::utf8::Utf8Column<'a>),
-    I8(&'a Int8Array),
-    I16(&'a Int16Array),
-    I32(&'a Int32Array),
-    I64(&'a Int64Array),
-    U8(&'a UInt8Array),
-    U16(&'a UInt16Array),
-    U32(&'a UInt32Array),
-    U64(&'a UInt64Array),
-}
-
-/// What one **member** row's key says.
-enum KeyRead<'a> {
-    /// **This point is in no artifact** — a null key, or exactly `-1`, the sentinel every clusterer
-    /// emits for noise (`artifacts-from-points.md` §2). Exactly `-1` and not any negative: a
-    /// negative id is otherwise unusual enough that swallowing `-7` would more likely be eating
-    /// data than handling noise. For a text column, null only.
-    Unclustered,
-    Named(&'a str),
-    Numbered(i128),
-}
-
-impl<'a> KeyColumn<'a> {
-    fn is_null(&self, row: usize) -> bool {
-        match self {
-            KeyColumn::Text(a) => return a.is_null(row),
-            KeyColumn::I8(a) => *a as &dyn Array,
-            KeyColumn::I16(a) => *a as &dyn Array,
-            KeyColumn::I32(a) => *a as &dyn Array,
-            KeyColumn::I64(a) => *a as &dyn Array,
-            KeyColumn::U8(a) => *a as &dyn Array,
-            KeyColumn::U16(a) => *a as &dyn Array,
-            KeyColumn::U32(a) => *a as &dyn Array,
-            KeyColumn::U64(a) => *a as &dyn Array,
-        }
-        .is_null(row)
-    }
-
-    fn integer_at(&self, row: usize) -> Option<i128> {
-        match self {
-            KeyColumn::Text(_) => None,
-            KeyColumn::I8(a) => Some(a.value(row) as i128),
-            KeyColumn::I16(a) => Some(a.value(row) as i128),
-            KeyColumn::I32(a) => Some(a.value(row) as i128),
-            KeyColumn::I64(a) => Some(a.value(row) as i128),
-            KeyColumn::U8(a) => Some(a.value(row) as i128),
-            KeyColumn::U16(a) => Some(a.value(row) as i128),
-            KeyColumn::U32(a) => Some(a.value(row) as i128),
-            KeyColumn::U64(a) => Some(a.value(row) as i128),
-        }
-    }
-
-    /// The canonical key at `row` — **the allocating read, for one row per artifact.**
-    fn key_at(&self, row: usize) -> Option<String> {
-        if self.is_null(row) {
-            return None;
-        }
-        Some(match self {
-            KeyColumn::Text(a) => a.value(row).to_string(),
-            _ => self.integer_at(row).expect("an integer column").to_string(),
-        })
-    }
-
-    /// What one member row's key says — **the non-allocating read, for one row per point.**
-    ///
-    /// The noise sentinel is [`tessera_types::layer::NOISE_KEY`]'s, not a literal here: the wire
-    /// reads the same cell out of an Arrow batch and the two must agree about what `-1` means.
-    fn read_at(&self, row: usize) -> KeyRead<'a> {
-        if self.is_null(row) {
-            return KeyRead::Unclustered;
-        }
-        match self {
-            KeyColumn::Text(a) => KeyRead::Named(a.value(row)),
-            _ => match self.integer_at(row).expect("an integer column") {
-                tessera_types::layer::NOISE_KEY => KeyRead::Unclustered,
-                value => KeyRead::Numbered(value),
-            },
-        }
-    }
-}
+pub(crate) use tessera_store::member_key::{KeyColumn, KeyRead};
 
 pub(crate) fn key_column<'a>(
     path: &Path,
@@ -3867,31 +3788,14 @@ fn scalar_key_column<'a>(
     name: &str,
     what: &str,
 ) -> Result<KeyColumn<'a>> {
-    Ok(match array.data_type() {
-        arrow::datatypes::DataType::Utf8 | arrow::datatypes::DataType::LargeUtf8 => {
-            KeyColumn::Text(crate::utf8::Utf8Column::new(array.as_ref()).ok_or_else(|| {
-                BuildError::Invalid(format!(
-                    "{}: column {name} is {:?}, which this reader cannot take",
-                    path.display(),
-                    array.data_type()
-                ))
-            })?)
-        }
-        arrow::datatypes::DataType::Int8 => KeyColumn::I8(typed(path, array, name)?),
-        arrow::datatypes::DataType::Int16 => KeyColumn::I16(typed(path, array, name)?),
-        arrow::datatypes::DataType::Int32 => KeyColumn::I32(typed(path, array, name)?),
-        arrow::datatypes::DataType::Int64 => KeyColumn::I64(typed(path, array, name)?),
-        arrow::datatypes::DataType::UInt8 => KeyColumn::U8(typed(path, array, name)?),
-        arrow::datatypes::DataType::UInt16 => KeyColumn::U16(typed(path, array, name)?),
-        arrow::datatypes::DataType::UInt32 => KeyColumn::U32(typed(path, array, name)?),
-        arrow::datatypes::DataType::UInt64 => KeyColumn::U64(typed(path, array, name)?),
-        other => {
-            return Err(BuildError::Invalid(format!(
-                "{}: {what} {name} is {other:?}, and a key is text or an integer — an integer key \
-                 is read as its decimal spelling, so `3` and \"3\" name one artifact",
-                path.display()
-            )))
-        }
+    KeyColumn::new(array.as_ref()).ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "{}: {what} {name} is {:?}, and a key is {}; an integer key is read as its decimal \
+             spelling, so `3` and \"3\" name one artifact",
+            path.display(),
+            array.data_type(),
+            tessera_store::member_key::KEY_TYPES
+        ))
     })
 }
 

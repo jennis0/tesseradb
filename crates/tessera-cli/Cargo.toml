@@ -39,6 +39,7 @@ tessera-analyse = { path = "../tessera-analyse" }
 # (`correctness-suite.md` §12.1), on the same drive-the-CLI precedent as `tokenise`.
 tessera-corpus = { path = "../tessera-corpus" }
 tessera-spatial = { path = "../tessera-spatial" }
+tessera-config = { path = "../tessera-config" }
 tessera-server = { path = "../tessera-server" }
 tessera-store = { path = "../tessera-store" }
 tessera-types = { path = "../tessera-types" }

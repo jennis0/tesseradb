@@ -1257,3 +1257,50 @@ async fn a_content_type_naming_neither_encoding_is_refused() {
     .await;
     assert_eq!(status, 201, "{body}");
 }
+
+/// A null coordinate in an Arrow batch is refused, as it is in JSON, and the batch has no effect.
+#[tokio::test]
+async fn a_null_coordinate_in_an_arrow_batch_is_refused() {
+    let (_tmp, server) = served_declared().await;
+    let high_water = control_status(&server).await["entity_id_high_water"].clone();
+    for column in ["x", "y"] {
+        let ids = [500u64, 501, 502];
+        let access = access_column(ids.iter().map(|_| "0"));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("external_id", DataType::Binary, true),
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            access_field(&access),
+        ]));
+        let with_null = |name: &str| -> Float64Array {
+            if name == column {
+                Float64Array::from(vec![Some(1.0), None, Some(3.0)])
+            } else {
+                Float64Array::from(vec![1.0, 2.0, 3.0])
+            }
+        };
+        let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(BinaryArray::from_iter_values(
+                    external.iter().map(|v| v.as_slice()),
+                )),
+                Arc::new(with_null("x")),
+                Arc::new(with_null("y")),
+                Arc::new(access),
+            ],
+        )
+        .unwrap();
+        let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+        writer.write(&batch).unwrap();
+        let body = writer.into_inner().unwrap();
+        let (status, resp) = ingest(&server, &format!("null-{column}"), Some(ARROW), body).await;
+        assert_eq!(status, 422, "{column}: {resp}");
+    }
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water,
+        "no refused batch allocated an entity"
+    );
+}

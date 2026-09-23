@@ -625,7 +625,7 @@ fn a_wildcard_origin_is_refused_when_the_deployment_file_is_loaded() {
     };
 
     let path = write("cors_origins = [\"*\"]");
-    let err = tessera_server::config::load(&path).expect_err("a wildcard must refuse to start");
+    let err = tessera_config::load(&path).expect_err("a wildcard must refuse to start");
     let message = err.to_string();
     assert!(
         message.contains("cors_origins") && message.contains('*'),
@@ -633,7 +633,7 @@ fn a_wildcard_origin_is_refused_when_the_deployment_file_is_loaded() {
     );
 
     let path = write("dev_cors_origins = [\"*\"]");
-    let err = tessera_server::config::load(&path).expect_err("a wildcard must refuse to start");
+    let err = tessera_config::load(&path).expect_err("a wildcard must refuse to start");
     assert!(
         err.to_string().contains("dev_cors_origins"),
         "the development list is enumerated on the same terms: {err}"
@@ -642,6 +642,6 @@ fn a_wildcard_origin_is_refused_when_the_deployment_file_is_loaded() {
     // The same file with named origins loads, so the test above is about the wildcard and not
     // about the fixture being wrong.
     let path = write("cors_origins = [\"https://app.example\"]");
-    let config = tessera_server::config::load(&path).expect("named origins must load");
+    let config = tessera_config::load(&path).expect("named origins must load");
     assert_eq!(config.cors_origins, vec!["https://app.example"]);
 }

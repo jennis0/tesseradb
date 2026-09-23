@@ -287,7 +287,7 @@ fn values_request(
     ValuesRequest {
         batch_id: batch.to_string(),
         body_hash: hash,
-        view: "s0".to_string(),
+        view: Some("s0".to_string()),
         columns: columns.iter().map(|c| c.to_string()).collect(),
         rows: rows
             .into_iter()

@@ -172,7 +172,7 @@ fn declaration(deployment_path: &str) -> Result<(Object, tessera_build::config::
     let path = Path::new(deployment_path);
     let from = path.parent().unwrap_or(Path::new("."));
     let (_, deployment) =
-        tessera_server::config::open(Some(path), from).map_err(|detail| Finding {
+        tessera_config::open(Some(path), from).map_err(|detail| Finding {
             object: Object::file("deployment", path.display()),
             detail,
         })?;

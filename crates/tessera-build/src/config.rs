@@ -4636,22 +4636,24 @@ fn compile_layers(
         // **A name in `views` is a plain view or a whole group** (`views.md` §2): naming a group
         // draws the layer on every view of it, present and future, which is what lets a layer
         // follow a group that grows at ingest rather than being redeclared per quarter.
-        for view in declared_views {
-            if !views.iter().any(|v| &v.name == view) && !groups.iter().any(|g| &g.name == view) {
-                return Err(declaration_error(format!(
-                    "layer '{}' declares view '{view}', which no `[[view]]` or `[[view_group]]` \
-                     block declares. Declared: {}. A layer in a view that does not exist is \
-                     registered, reachable and empty, which no client can tell from one whose \
-                     artifacts were all withheld",
-                    block.name,
-                    names(
-                        views
-                            .iter()
-                            .map(|v| v.name.as_str())
-                            .chain(groups.iter().map(|g| g.name.as_str()))
-                    )
-                )));
-            }
+        if let Err(view) = tessera_types::layer::expand_views(
+            declared_views,
+            |name| groups.iter().any(|g| g.name == name).then(Vec::new),
+            |name| views.iter().any(|v| v.name == name),
+        ) {
+            return Err(declaration_error(format!(
+                "layer '{}' declares view '{view}', which no `[[view]]` or `[[view_group]]` block \
+                 declares. Declared: {}. A layer in a view that does not exist is registered, \
+                 reachable and empty, which no client can tell from one whose artifacts were all \
+                 withheld",
+                block.name,
+                names(
+                    views
+                        .iter()
+                        .map(|v| v.name.as_str())
+                        .chain(groups.iter().map(|g| g.name.as_str()))
+                )
+            )));
         }
 
         // **A scoped layer is a different artifact set per view of one group** (`views.md` §3.5),
@@ -5904,19 +5906,19 @@ impl Config {
     /// ⊘ *Present and future* is the ingest half: a view created later gets the layer's artifacts
     /// at the fold that writes them (spec §3.5).
     pub fn expand_layer_views(registry: &[BuildView], declared: &[String]) -> Vec<String> {
-        let mut expanded = Vec::with_capacity(declared.len());
-        for name in declared {
-            let of_group: Vec<String> = registry
-                .iter()
-                .filter(|view| view.group.as_ref().is_some_and(|g| &g.group == name))
-                .map(|view| view.id.clone())
-                .collect();
-            match of_group.is_empty() {
-                true => expanded.push(name.clone()),
-                false => expanded.extend(of_group),
-            }
-        }
-        expanded
+        tessera_types::layer::expand_views(
+            declared,
+            |name| {
+                let of_group: Vec<String> = registry
+                    .iter()
+                    .filter(|view| view.group.as_ref().is_some_and(|g| g.group == name))
+                    .map(|view| view.id.clone())
+                    .collect();
+                (!of_group.is_empty()).then_some(of_group)
+            },
+            |_| true,
+        )
+        .expect("every name that is no group is kept as a view")
     }
 
     /// The group registry the manifest publishes, derived from a [`Config::build_views`]

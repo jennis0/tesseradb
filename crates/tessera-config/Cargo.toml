@@ -1,0 +1,17 @@
+[package]
+name = "tessera-config"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+# `CompactionSchedule` and the engine's own defaults for the keys it owns.
+tessera-engine = { path = "../tessera-engine" }
+tessera-types = { path = "../tessera-types" }
+serde = { workspace = true }
+toml = "0.8"
+# `Semaphore::MAX_PERMITS`, the bound an admission gate is refused past.
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

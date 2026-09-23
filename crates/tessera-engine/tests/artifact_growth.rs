@@ -713,6 +713,7 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
                 memberships: vec![tessera_lifecycle::BatchMembership {
                     layer: layer.to_string(),
                     level: 0,
+                    view: None,
                     key: key.to_string(),
                     rows: vec![0],
                 }],
@@ -831,6 +832,7 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
                 memberships: vec![tessera_lifecycle::BatchMembership {
                     layer: "clusters/a".to_string(),
                     level: 0,
+                    view: None,
                     key: "never-declared".to_string(),
                     rows: vec![0],
                 }],
@@ -885,6 +887,7 @@ fn ingest_into_view(engine: &Engine, batch: &str, view: &str, external_id: &str,
                 memberships: vec![tessera_lifecycle::BatchMembership {
                     layer: "clusters/a".to_string(),
                     level: 0,
+                    view: None,
                     key: key.to_string(),
                     rows: vec![0],
                 }],

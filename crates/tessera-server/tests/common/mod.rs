@@ -28,7 +28,7 @@ use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::faults::FaultSwitchboard;
 use tessera_plugin::Passthrough;
-use tessera_server::state::{AppState, ComputeGate, IngestAdmission, SessionRegistry};
+use tessera_server::state::{AppState, ComputeGate, IngestAdmission, ServeLimits, SessionRegistry};
 use tessera_spatial::Bounds;
 use tessera_types::IdentityKey;
 
@@ -654,51 +654,49 @@ async fn mount_server_with_flush(
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         heap: tessera_server::memory::HeapWatch::default(),
-        max_k,
-        // Small enough that the fixtures' vocabularies page rather than arriving whole, so the
-        // cursor is exercised by an ordinary request rather than only by a contrived one.
-        max_category_values: 4,
-        // Small enough that a suggestion fixture's page and walk-budget behaviour are exercised
-        // by an ordinary request rather than only by a contrived one — the same argument as
-        // `max_category_values` above.
-        max_suggestions: 4,
-        max_suggestion_walk: 1_000,
-        // **The probe route, for every principal these tests use**, so a case asserting `more` on
-        // a spent budget cannot be raced by an async sweep landing first (`value-suggestion.md`
-        // §6.3). One is the schema's floor and every test principal sees more than one entity. The
-        // set route is exercised end to end by the engine's own tests and by the conformance
-        // differential, both at the shipped default.
-        max_suggest_set_entities: 1,
+        limits: ServeLimits {
+            max_k,
+            // Small enough that the fixtures' vocabularies page rather than arriving whole, so the
+            // cursor is exercised by an ordinary request rather than only by a contrived one.
+            max_category_values: 4,
+            // Small enough that a suggestion fixture's page and walk-budget behaviour are exercised
+            // by an ordinary request rather than only by a contrived one — the same argument as
+            // `max_category_values` above.
+            max_suggestions: 4,
+            max_suggestion_walk: 1_000,
+            // **The probe route, for every principal these tests use**, so a case asserting `more` on
+            // a spent budget cannot be raced by an async sweep landing first (`value-suggestion.md`
+            // §6.3). One is the schema's floor and every test principal sees more than one entity. The
+            // set route is exercised end to end by the engine's own tests and by the conformance
+            // differential, both at the shipped default.
+            max_suggest_set_entities: 1,
+            ingest_max_batch_rows: ingest_limits.max_batch_rows,
+            ingest_buffer_max_items: ingest_limits.buffer_max_items,
+            ingest_max_batch_bytes: ingest_limits.max_batch_bytes,
+            publish_max_body_bytes: ingest_limits.publish_max_body_bytes,
+            max_artifacts_per_request: ingest_limits.max_artifacts_per_request,
+            max_members_per_request: ingest_limits.max_members_per_request,
+            max_excluded_per_request: ingest_limits.max_excluded_per_request,
+            // On, so the header assertions below exercise the emission path rather than only its
+            // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
+            stage_timing: true,
+            // The op-point default (1 MiB) leaves every fixture-sized response in one points frame,
+            // which is exactly the degenerate case contracts §3.2 requires readers to accept; the
+            // multi-frame path is exercised by the tests that mount a tiny threshold explicitly
+            // (`spawn_server_with_stream_flush`).
+            stream_flush_bytes,
+            stream_write_stall_ms,
+            dev_cors_origins: cors.dev,
+            cors_origins: cors.production,
+            cors_loopback: cors.loopback,
+            visible_wait_max_secs,
+            ..Default::default()
+        },
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
-        max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
-        max_region_vertices: 10_000,
-        max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
-        max_browse_rows: 200,
         compute_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
-        ingest_max_batch_rows: ingest_limits.max_batch_rows,
-        ingest_buffer_max_items: ingest_limits.buffer_max_items,
-        ingest_max_batch_bytes: ingest_limits.max_batch_bytes,
-        publish_max_body_bytes: ingest_limits.publish_max_body_bytes,
-        max_artifacts_per_request: ingest_limits.max_artifacts_per_request,
-        max_members_per_request: ingest_limits.max_members_per_request,
-        max_excluded_per_request: ingest_limits.max_excluded_per_request,
-        // On, so the header assertions below exercise the emission path rather than only its
-        // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
-        stage_timing: true,
-        // The op-point default (1 MiB) leaves every fixture-sized response in one points frame,
-        // which is exactly the degenerate case contracts §3.2 requires readers to accept; the
-        // multi-frame path is exercised by the tests that mount a tiny threshold explicitly
-        // (`spawn_server_with_stream_flush`).
-        stream_flush_bytes,
-        stream_write_stall_ms,
-        stream_deadline_ms: 60_000,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
-        dev_cors_origins: cors.dev,
-        cors_origins: cors.production,
-        cors_loopback: cors.loopback,
-        visible_wait_max_secs,
         faults,
     });
 

@@ -13,6 +13,7 @@ pub mod fold;
 mod locator;
 pub mod manifest;
 pub mod manifest_write;
+pub mod member_key;
 pub mod membership;
 pub mod merge;
 pub mod pairs;

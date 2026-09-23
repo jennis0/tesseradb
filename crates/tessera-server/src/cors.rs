@@ -64,12 +64,13 @@ const EXPOSED: [&str; 7] = [
 /// equality.
 pub fn viewer_layer(state: &AppState) -> Option<CorsLayer> {
     let origins: Vec<String> = state
+        .limits
         .dev_cors_origins
         .iter()
-        .chain(state.cors_origins.iter())
+        .chain(state.limits.cors_origins.iter())
         .cloned()
         .collect();
-    layer(&origins, state.cors_loopback)
+    layer(&origins, state.limits.cors_loopback)
 }
 
 /// The session plane's layer: the development list, and **only** the development list.
@@ -80,7 +81,7 @@ pub fn viewer_layer(state: &AppState) -> Option<CorsLayer> {
 /// decision 0102 declined. Reading the field here rather than taking it as an argument is what
 /// makes that a property of this module instead of a rule every caller has to remember.
 pub fn session_layer(state: &AppState) -> Option<CorsLayer> {
-    layer(&state.dev_cors_origins, false)
+    layer(&state.limits.dev_cors_origins, false)
 }
 
 /// The layer for a configured origin list, or `None` when there is nothing to configure.
@@ -92,8 +93,8 @@ pub fn session_layer(state: &AppState) -> Option<CorsLayer> {
 /// An origin that is not a valid header value is dropped rather than panicking the process. If
 /// that leaves the list empty the result is `None`, so an operator who typed something
 /// unparseable gets no CORS and no claim of CORS. A wildcard is dropped on the same footing:
-/// [`AllowOrigin::list`] panics on one, and `config::load` refuses one outright
-/// ([`crate::config::ConfigError::CorsWildcard`]), so this is the belt for a state assembled
+/// [`AllowOrigin::list`] panics on one, and `tessera_config::load` refuses one outright, so this
+/// is the belt for a state assembled
 /// without going through parse — the tests' path.
 fn layer(origins: &[String], loopback: bool) -> Option<CorsLayer> {
     let parsed: Vec<HeaderValue> = origins

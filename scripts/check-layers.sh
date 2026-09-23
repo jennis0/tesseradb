@@ -95,7 +95,7 @@ fi
 # extension module built as a cdylib, so there is no rlib for a workspace crate to link even if one
 # tried, and an edge into it would put the interpreter's ABI underneath the binary.
 for leaf in bench python; do
-  for c in types plugin cache authz store spatial lifecycle engine wire server build cli; do
+  for c in types plugin cache authz store spatial lifecycle engine wire config server build cli; do
     # Match a dependency declaration (`tessera-bench = ...` or a path to it), not prose -- these
     # manifests discuss the harness in comments, and a substring grep flags its own documentation.
     if grep -nE "^[[:space:]]*tessera-$leaf[[:space:]]*=|\.\./tessera-$leaf" \
@@ -110,11 +110,11 @@ done
 # `bench-timing` by default, and cargo unifies features across a `--workspace` build, so the
 # compile gate alone is not enough -- `tessera-server` also gates emission on `[serve]
 # stage_timing`, default false. Assert the runtime gate is still there and still defaults closed.
-if ! grep -q "stage_timing" crates/tessera-server/src/config.rs; then
-  echo "FAIL: the [serve] stage_timing runtime gate is missing from the server config"
+if ! grep -q "stage_timing" crates/tessera-config/src/lib.rs; then
+  echo "FAIL: the [serve] stage_timing runtime gate is missing from the deployment config"
   fail=1
 fi
-if ! grep -q "stage_timing.unwrap_or(false)" crates/tessera-server/src/config.rs; then
+if ! grep -q "stage_timing.unwrap_or(false)" crates/tessera-config/src/lib.rs; then
   echo "FAIL: stage_timing must default to false (fail closed)"
   fail=1
 fi

@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, Float32Array, Float64Array, ListArray, StringArray, UInt32Array,
-    UInt64Array,
+    Array, ArrayRef, BinaryArray, Float32Array, Float64Array, LargeStringArray, ListArray,
+    StringArray, StringViewArray, UInt32Array, UInt64Array,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -119,14 +119,24 @@ content = {{ computed = ["centroid", "box"] }}
     )
 }
 
-/// The points file. `keyed` is which of its rows carry a key at all: the rest hold a null, which
-/// is the file's own spelling of *this point is in no artifact yet*.
-fn write_points(path: &Path, rows: &[u64], keyed: &dyn Fn(u64) -> bool) {
+/// A column of keys at one of the string types a producer writes.
+fn text_keys(keys: Vec<Option<String>>, as_type: &DataType) -> ArrayRef {
+    match as_type {
+        DataType::Utf8 => Arc::new(StringArray::from(keys)),
+        DataType::LargeUtf8 => Arc::new(LargeStringArray::from(keys)),
+        DataType::Utf8View => Arc::new(StringViewArray::from_iter(keys)),
+        other => panic!("{other:?} is not a string type"),
+    }
+}
+
+/// The points file, its key column at `key_type`. `keyed` is which of its rows carry a key at all:
+/// the rest hold a null, which is the file's own spelling of *this point is in no artifact yet*.
+fn write_points_as(path: &Path, rows: &[u64], keyed: &dyn Fn(u64) -> bool, key_type: &DataType) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
-        Field::new("cluster", DataType::Utf8, true),
+        Field::new("cluster", key_type.clone(), true),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -138,11 +148,12 @@ fn write_points(path: &Path, rows: &[u64], keyed: &dyn Fn(u64) -> bool) {
             Arc::new(Float64Array::from(
                 rows.iter().map(|e| y_of(*e)).collect::<Vec<_>>(),
             )),
-            Arc::new(StringArray::from(
+            text_keys(
                 rows.iter()
                     .map(|e| keyed(*e).then(|| key_of(*e)))
                     .collect::<Vec<_>>(),
-            )),
+                key_type,
+            ),
         ],
     )
     .unwrap();
@@ -184,12 +195,22 @@ struct Built {
 }
 
 fn build_side(rows: &[u64], keyed: &dyn Fn(u64) -> bool, layer: &str) -> Built {
+    build_side_as(rows, keyed, layer, &DataType::Utf8)
+}
+
+/// [`build_side`] with the points file's key column at `key_type`.
+fn build_side_as(
+    rows: &[u64],
+    keyed: &dyn Fn(u64) -> bool,
+    layer: &str,
+    key_type: &DataType,
+) -> Built {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path().to_path_buf();
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     let config_path = dir.join("config.toml");
-    write_points(&points, rows, keyed);
+    write_points_as(&points, rows, keyed, key_type);
     write_pairs(&pairs, rows);
     std::fs::write(&config_path, format!("{VIEW_TOML}{layer}")).unwrap();
 
@@ -318,7 +339,12 @@ async fn post_values_arrow(server: &TestServer, batch_id: &str, body: Vec<u8>) -
 
 /// The chain column: one entry per declared level, coarse to fine.
 fn chain_column(rows: &[u64]) -> ArrayRef {
-    let item = Arc::new(Field::new("item", DataType::Utf8, true));
+    chain_column_as(rows, &DataType::Utf8)
+}
+
+/// [`chain_column`] with its elements at `element`.
+fn chain_column_as(rows: &[u64], element: &DataType) -> ArrayRef {
+    let item = Arc::new(Field::new("item", element.clone(), true));
     let mut offsets: Vec<i32> = vec![0];
     let mut entries: Vec<Option<String>> = Vec::new();
     for e in rows {
@@ -328,7 +354,7 @@ fn chain_column(rows: &[u64]) -> ArrayRef {
     Arc::new(ListArray::new(
         item,
         OffsetBuffer::new(offsets.into()),
-        Arc::new(StringArray::from(entries)) as ArrayRef,
+        text_keys(entries, element),
         None,
     ))
 }
@@ -1024,4 +1050,54 @@ async fn a_values_page_records_an_edge_the_artifact_does_not_hold() {
         vec!["k0"],
         "the edge the column named is the edge the layer holds"
     );
+}
+
+/// **A key column is text at any of Arrow's string types, at every door.** pandas writes
+/// `large_utf8` and polars `utf8_view`; the bytes are the same and so is the key. A build reading
+/// the file and a values page carrying the column, scalar or as a list's elements, store the same
+/// memberships.
+#[tokio::test]
+async fn a_key_column_at_any_string_type_stores_what_utf8_stores() {
+    let all: Vec<u64> = (0..N).collect();
+    let tail: Vec<u64> = (BUILT..N).collect();
+    for key_type in [DataType::LargeUtf8, DataType::Utf8View] {
+        let built = build_side_as(&all, &|_| true, &layer_toml("flat"), &key_type);
+        let by_build = serve(&built).await;
+        tick(&by_build).await;
+        assert_eq!(
+            browse_counts(&by_build, &["0", "1"], LAYER, None).await,
+            expected_members(),
+            "the build reads a {key_type:?} key column"
+        );
+
+        let built = build_side(&all, &|e| e < BUILT, &layer_toml("flat"));
+        let by_values = serve(&built).await;
+        let keys = text_keys(tail.iter().map(|e| Some(key_of(*e))).collect(), &key_type);
+        let (status, body) =
+            post_values_arrow(&by_values, "typed", values_arrow(&tail, LAYER, keys)).await;
+        assert_eq!(status, 200, "a {key_type:?} key column at the values route: {body}");
+        tick(&by_values).await;
+        assert_eq!(
+            browse_counts(&by_values, &["0", "1"], LAYER, None).await,
+            expected_members(),
+            "the values route reads a {key_type:?} key column"
+        );
+    }
+
+    let mut layer = layer_toml("tiered");
+    layer.push_str(
+        "\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n",
+    );
+    for element in [DataType::LargeUtf8, DataType::Utf8View] {
+        let built = build_side(&all, &|_| false, &layer);
+        let server = serve(&built).await;
+        let (status, body) = post_values_arrow(
+            &server,
+            "chain",
+            values_arrow(&all, LAYER, chain_column_as(&all, &element)),
+        )
+        .await;
+        assert_eq!(status, 200, "a list of {element:?} at the values route: {body}");
+        assert_eq!(body["minted"].as_u64(), Some(1 + 3 + 8), "{body}");
+    }
 }

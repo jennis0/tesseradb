@@ -15,11 +15,6 @@ use tessera_engine::{Engine, Session};
 
 use crate::error::ApiError;
 
-/// One authorised session: the engine's [`Session`].
-pub struct SessionEntry {
-    pub session: Session,
-}
-
 /// The current Unix second, as `Session::expires_at` measures it.
 ///
 /// One function rather than the expression inlined at each site, because two readings of the same
@@ -41,9 +36,7 @@ pub fn now_secs() -> u64 {
 /// every call while the registry holds one or two sessions, and so the threshold is never zero.
 /// What the number *does* fix is the residue a quiescent process keeps: with the live set below it,
 /// up to this many expired sessions — and the fragments they pin — survive until the next
-/// authorisation. 16 is twice `serve.expected_concurrent_sessions`' default of 8, which is the
-/// concurrency the cache bounds are already sized against, so the sweep's own slack is of the same
-/// order as the working set the deployment declared rather than a number chosen for roundness.
+/// authorisation.
 const SWEEP_FLOOR_ENTRIES: usize = 16;
 
 /// Every live session, indexed both by bearer token (the viewer plane's lookup) and by
@@ -57,7 +50,7 @@ const SWEEP_FLOOR_ENTRIES: usize = 16;
 /// process at one entry per `/session/authorise` call, and the growth is attacker-driven for anyone
 /// holding the session credential.
 ///
-/// The cost is not the map entry. Each retained [`SessionEntry`] holds a `Session`, which holds an
+/// The cost is not the map entry. Each retained [`Session`] holds an
 /// `Arc<FrozenFragment>` — a live memory mapping. `FragmentCache`'s byte bound governs *its own
 /// map*, so evicting an entry there frees nothing while a session still references it (see
 /// `FrozenFragment`'s `CacheWeight` impl). **Dead sessions pin exactly the memory that bound exists
@@ -116,7 +109,7 @@ const SWEEP_FLOOR_ENTRIES: usize = 16;
 /// is swept it is indistinguishable from one that never existed**, and no client may treat the
 /// 401/403 split as a statement about whether a token was ever valid.
 pub struct SessionRegistry {
-    by_token: FxHashMap<String, std::sync::Arc<SessionEntry>>,
+    by_token: FxHashMap<String, Arc<Session>>,
     token_id_to_token: FxHashMap<u64, String>,
     /// Retained count at which [`Self::insert`] runs a sweep. See [`next_sweep_threshold`].
     sweep_at: usize,
@@ -202,12 +195,11 @@ impl SessionRegistry {
         &mut self,
         session: Session,
         now_secs: u64,
-    ) -> (std::sync::Arc<SessionEntry>, Vec<u64>) {
+    ) -> (Arc<Session>, Vec<u64>) {
         let token = session.token().to_string();
         let token_id = session.token_id();
-        let entry = std::sync::Arc::new(SessionEntry { session });
-        self.by_token
-            .insert(token.clone(), std::sync::Arc::clone(&entry));
+        let entry = Arc::new(session);
+        self.by_token.insert(token.clone(), Arc::clone(&entry));
         self.token_id_to_token.insert(token_id, token);
         let expired = if self.by_token.len() >= self.sweep_at {
             self.sweep_expired(now_secs)
@@ -236,7 +228,7 @@ impl SessionRegistry {
     fn sweep_expired(&mut self, now_secs: u64) -> Vec<u64> {
         let before = self.by_token.len();
         self.by_token
-            .retain(|_, entry| entry.session.expires_at() > now_secs);
+            .retain(|_, entry| entry.expires_at() > now_secs);
         // The secondary index is pruned against the primary map rather than swept on its own
         // deadline, so the two cannot disagree about which sessions exist — `revoke` reaches
         // `by_token` only through this index, and an index entry outliving its session would make
@@ -262,7 +254,7 @@ impl SessionRegistry {
         swept
     }
 
-    pub fn get(&self, token: &str) -> Option<std::sync::Arc<SessionEntry>> {
+    pub fn get(&self, token: &str) -> Option<Arc<Session>> {
         self.by_token.get(token).cloned()
     }
 
@@ -345,9 +337,8 @@ impl Drop for GatePermits {
 /// on in-flight *requests*, not on runnable CPU: the rayon pool (`compute_threads`) is what bounds
 /// the parallel-sweep CPU any one admitted request may fan out across, and this gate deliberately
 /// lets the serialise phase oversubscribe up to `compute_admission` (default 4×
-/// `compute_threads` — `tessera-server::config::COMPUTE_ADMISSION_MULTIPLIER`'s doc has the
-/// measurement) because small requests at this corpus scale are latency-bound on scheduling, not
-/// CPU. Never wraps `/healthz`, `/readyz`, `/v1/meta`, `/session/revoke`, or any control-plane
+/// `compute_threads`) because small requests at this corpus scale are latency-bound on scheduling,
+/// not CPU. Never wraps `/healthz`, `/readyz`, `/v1/meta`, `/session/revoke`, or any control-plane
 /// route — a suppression must always reach the WAL, gate saturated or not, so the control plane
 /// carries its own bound (see [`IngestAdmission`]) rather than sharing this one.
 ///
@@ -368,7 +359,7 @@ pub struct ComputeGate {
     ///
     /// **Does not count every 429 the server can return.** The engine's single-flight builders
     /// (`EngineError::ProjectionBuilding`/`FragmentBuilding`) also emit the 429 `backpressure`
-    /// code, as [`crate::error::ApiError::SingleFlightBackpressure`], but those sheds happen
+    /// code, as [`crate::error::ShedCause::SingleFlight`], but those sheds happen
     /// *after* this gate has already admitted the request — a distinct mechanism this counter has
     /// no visibility into, and one whose `detail` says so. A caller correlating
     /// `shed_total` against the client-observed 429 rate should expect the latter to be equal or
@@ -432,7 +423,10 @@ impl ComputeGate {
             Ok(permit) => permit,
             Err(_) => {
                 self.shed_total.fetch_add(1, Ordering::Relaxed);
-                return Err(crate::error::ApiError::Backpressure);
+                return Err(crate::error::ApiError::Backpressure {
+                    retry_after_s: crate::error::RETRY_AFTER_SECS,
+                    cause: crate::error::ShedCause::ComputeGate,
+                });
             }
         };
 
@@ -452,7 +446,10 @@ impl ComputeGate {
             // both mean "no compute permit arrived in time".
             Ok(Err(_)) | Err(_) => {
                 self.shed_total.fetch_add(1, Ordering::Relaxed);
-                return Err(crate::error::ApiError::Backpressure);
+                return Err(crate::error::ApiError::Backpressure {
+                    retry_after_s: crate::error::RETRY_AFTER_SECS,
+                    cause: crate::error::ShedCause::ComputeGate,
+                });
             }
         };
 
@@ -621,13 +618,10 @@ impl Drop for SuggestGuard {
     }
 }
 
-/// Process-wide server state, shared (behind `Arc`) across every axum handler on every plane.
-pub struct AppState {
-    pub engine: Engine,
-    pub sessions: Mutex<SessionRegistry>,
-    /// The allocator's trim cadence and its gauges — see [`crate::memory`]. Process-wide, named
-    /// by no principal, and read by `/control/status`' `heap` block.
-    pub heap: crate::memory::HeapWatch,
+/// The limits and settings `AppState` reads from `[serve]`: every number and flag a handler
+/// consults. [`Default`] is the shipped defaults.
+#[derive(Debug, Clone)]
+pub struct ServeLimits {
     pub max_k: usize,
     /// `/v1/categories`' page-size ceiling and its default. See `Config::max_category_values`.
     pub max_category_values: usize,
@@ -639,9 +633,6 @@ pub struct AppState {
     /// The cardinality at or under which the suggestion verb takes the per-session set route. See
     /// `Config::max_suggest_set_entities`.
     pub max_suggest_set_entities: u64,
-    /// At most one `/v1/categories/{column}/suggest` in flight per session
-    /// (`value-suggestion.md` §5.1). Never touched by any other route.
-    pub suggest_admission: SuggestAdmission,
     /// The publication vertex cap a shape is held to. See `Config::max_shape_vertices`.
     pub max_shape_vertices: u64,
     /// A `region` leaf's vertex cap. See `Config::max_region_vertices`.
@@ -651,11 +642,6 @@ pub struct AppState {
     /// `POST /v1/artifacts/browse`'s page-size ceiling and its default. See
     /// `Config::max_browse_rows`.
     pub max_browse_rows: usize,
-    /// The viewer/session admission gate. Never touched by the control plane.
-    pub compute_gate: ComputeGate,
-    /// The control plane's own admission bound. Deliberately **not** `compute_gate`: an ingest
-    /// batch durability-syncing must not be throttled by the budget a slow viewport consumes.
-    pub ingest_admission: IngestAdmission,
     /// Per-request row cap on `/control/ingest`; over is 422. Checked after the Arrow decode, which
     /// is the earliest point the row count is knowable.
     pub ingest_max_batch_rows: usize,
@@ -689,8 +675,6 @@ pub struct AppState {
     pub stream_write_stall_ms: u64,
     /// The whole emit phase's wall budget. See `Config::stream_deadline_ms`.
     pub stream_deadline_ms: u64,
-    pub session_credential: String,
-    pub operator_credential: String,
     /// `serve.dev_cors_origins`. Empty — the default — means the viewer and session routers mount
     /// no CORS layer at all. See [`crate::cors`] for why this is a development affordance and why
     /// the control plane never consults it.
@@ -710,6 +694,90 @@ pub struct AppState {
     /// wait. The wait polls the publication counter and holds no lock and no executor, so this
     /// bounds a client's latency and nothing else.
     pub visible_wait_max_secs: u64,
+}
+
+impl ServeLimits {
+    pub fn from_config(config: &tessera_config::Config) -> Self {
+        ServeLimits {
+            max_k: config.max_k,
+            max_category_values: config.max_category_values,
+            max_suggestions: config.max_suggestions,
+            max_suggestion_walk: config.max_suggestion_walk,
+            max_suggest_set_entities: config.max_suggest_set_entities,
+            max_shape_vertices: config.max_shape_vertices,
+            max_region_vertices: config.max_region_vertices,
+            max_region_cells: config.max_region_cells,
+            max_browse_rows: config.max_browse_rows,
+            ingest_max_batch_rows: config.ingest_max_batch_rows,
+            ingest_buffer_max_items: config.ingest_buffer_max_items,
+            ingest_max_batch_bytes: config.ingest_max_batch_bytes,
+            publish_max_body_bytes: config.publish_max_body_bytes,
+            max_artifacts_per_request: config.max_artifacts_per_request,
+            max_members_per_request: config.max_members_per_request,
+            max_excluded_per_request: config.max_excluded_per_request,
+            stage_timing: config.stage_timing,
+            stream_flush_bytes: config.stream_flush_bytes,
+            stream_write_stall_ms: config.stream_write_stall_ms,
+            stream_deadline_ms: config.stream_deadline_ms,
+            dev_cors_origins: config.dev_cors_origins.clone(),
+            cors_origins: config.cors_origins.clone(),
+            cors_loopback: config.cors_loopback,
+            visible_wait_max_secs: config.visible_wait_max_secs,
+        }
+    }
+}
+
+impl Default for ServeLimits {
+    fn default() -> Self {
+        use tessera_config::defaults as c;
+        ServeLimits {
+            max_k: c::DEFAULT_MAX_K,
+            max_category_values: c::DEFAULT_MAX_CATEGORY_VALUES,
+            max_suggestions: c::DEFAULT_MAX_SUGGESTIONS,
+            max_suggestion_walk: c::DEFAULT_MAX_SUGGESTION_WALK,
+            max_suggest_set_entities: c::DEFAULT_MAX_SUGGEST_SET_ENTITIES,
+            max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+            max_region_vertices: c::DEFAULT_MAX_REGION_VERTICES,
+            max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
+            max_browse_rows: c::DEFAULT_MAX_BROWSE_ROWS,
+            ingest_max_batch_rows: c::DEFAULT_INGEST_MAX_BATCH_ROWS,
+            ingest_buffer_max_items: c::DEFAULT_INGEST_BUFFER_MAX_ITEMS,
+            ingest_max_batch_bytes: c::DEFAULT_INGEST_MAX_BATCH_BYTES,
+            publish_max_body_bytes: c::DEFAULT_PUBLISH_MAX_BODY_BYTES,
+            max_artifacts_per_request: c::DEFAULT_MAX_ARTIFACTS_PER_REQUEST,
+            max_members_per_request: c::DEFAULT_MAX_MEMBERS_PER_REQUEST,
+            max_excluded_per_request: c::DEFAULT_MAX_EXCLUDED_PER_REQUEST,
+            stage_timing: false,
+            stream_flush_bytes: c::DEFAULT_STREAM_FLUSH_BYTES,
+            stream_write_stall_ms: c::DEFAULT_STREAM_WRITE_STALL_MS,
+            stream_deadline_ms: c::DEFAULT_STREAM_DEADLINE_MS,
+            dev_cors_origins: Vec::new(),
+            cors_origins: Vec::new(),
+            cors_loopback: false,
+            visible_wait_max_secs: c::DEFAULT_VISIBLE_WAIT_MAX_SECS,
+        }
+    }
+}
+
+/// Process-wide server state, shared (behind `Arc`) across every axum handler on every plane.
+pub struct AppState {
+    pub engine: Engine,
+    pub sessions: Mutex<SessionRegistry>,
+    /// The allocator's trim cadence and its gauges — see [`crate::memory`]. Process-wide, named
+    /// by no principal, and read by `/control/status`' `heap` block.
+    pub heap: crate::memory::HeapWatch,
+    /// The numbers and flags read from `[serve]`.
+    pub limits: ServeLimits,
+    /// At most one `/v1/categories/{column}/suggest` in flight per session
+    /// (`value-suggestion.md` §5.1). Never touched by any other route.
+    pub suggest_admission: SuggestAdmission,
+    /// The viewer/session admission gate. Never touched by the control plane.
+    pub compute_gate: ComputeGate,
+    /// The control plane's own admission bound. Deliberately **not** `compute_gate`: an ingest
+    /// batch durability-syncing must not be throttled by the budget a slow viewport consumes.
+    pub ingest_admission: IngestAdmission,
+    pub session_credential: String,
+    pub operator_credential: String,
     /// The write executor's fault switchboard — the faults build only (decision 0071), absent
     /// from the struct in a default build rather than present and inert. The same `Arc` the
     /// executor consults, so `/control/faults/*` arms the thread that actually pauses. Bearer
@@ -718,20 +786,75 @@ pub struct AppState {
     pub faults: std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>,
 }
 
+/// The token of an `Authorization: Bearer` header, on every plane.
+pub fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
 impl AppState {
+    /// The viewer plane's authentication: the request's bearer token, looked up by
+    /// [`Self::authenticated_session`]. A missing token is `bad-credential`.
+    pub fn viewer_session(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<Arc<Session>, ApiError> {
+        self.authenticated_session(bearer_token(headers).ok_or(ApiError::BadCredential)?)
+    }
+
+    /// Run `f` on the blocking pool behind the compute gate. The permits move into the closure, so
+    /// they release when the work finishes, not when the caller stops waiting.
+    pub async fn gated<T, F>(self: &Arc<Self>, f: F) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&AppState) -> Result<T, ApiError> + Send + 'static,
+    {
+        let (permits, _admission_us) = self.compute_gate.admit().await?;
+        self.blocking(move |state| {
+            let _permits = permits;
+            f(state)
+        })
+        .await
+    }
+
+    /// Run `f` on the blocking pool, off the compute gate.
+    pub async fn blocking<T, F>(self: &Arc<Self>, f: F) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&AppState) -> Result<T, ApiError> + Send + 'static,
+    {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || f(&state))
+            .await
+            .map_err(crate::error::map_join_error)?
+    }
+
+    /// Run the engine write `f` on the blocking pool, off the compute gate, answering its refusal
+    /// by [`crate::error::map_accept_error`].
+    pub async fn write<T, F>(self: &Arc<Self>, f: F) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&AppState) -> Result<T, tessera_engine::AcceptError> + Send + 'static,
+    {
+        self.blocking(move |state| f(state).map_err(crate::error::map_accept_error))
+            .await
+    }
+
     /// Bearer-token lookup for the viewer plane: an unrecognised token is `bad-credential` (401);
     /// a recognised-but-expired one is `expired-token` (403) — the engine itself never checks
     /// `expires_at`, so enforcing the deadline is this method's job and nothing else's.
     pub fn authenticated_session(
         &self,
         token: &str,
-    ) -> Result<std::sync::Arc<SessionEntry>, ApiError> {
+    ) -> Result<Arc<Session>, ApiError> {
         let entry = self
             .sessions
             .lock()
             .get(token)
             .ok_or(ApiError::BadCredential)?;
-        if now_secs() >= entry.session.expires_at() {
+        if now_secs() >= entry.expires_at() {
             return Err(ApiError::ExpiredToken);
         }
         Ok(entry)
@@ -850,7 +973,10 @@ mod compute_gate_tests {
 
         let second = gate.admit().await;
         assert!(
-            matches!(second, Err(ApiError::Backpressure)),
+            matches!(second, Err(ApiError::Backpressure {
+                cause: crate::error::ShedCause::ComputeGate,
+                ..
+            })),
             "a saturated gate must shed the second admission"
         );
         assert_eq!(gate.status().shed_total, 1);
@@ -869,7 +995,10 @@ mod compute_gate_tests {
 
         let second = gate.admit().await;
         assert!(
-            matches!(second, Err(ApiError::Backpressure)),
+            matches!(second, Err(ApiError::Backpressure {
+                cause: crate::error::ShedCause::ComputeGate,
+                ..
+            })),
             "a caller that cannot get a compute permit within the timeout must be shed"
         );
         assert_eq!(gate.status().shed_total, 1);
@@ -884,7 +1013,10 @@ mod compute_gate_tests {
     async fn no_permit_leak_after_a_shed() {
         let gate = ComputeGate::new(1, 0, 1);
         let (first_permits, _) = gate.admit().await.expect("first admit must succeed");
-        assert!(matches!(gate.admit().await, Err(ApiError::Backpressure)));
+        assert!(matches!(gate.admit().await, Err(ApiError::Backpressure {
+                cause: crate::error::ShedCause::ComputeGate,
+                ..
+            })));
 
         drop(first_permits);
 
@@ -905,7 +1037,10 @@ mod compute_gate_tests {
     async fn no_slot_leak_on_a_compute_timeout_shed() {
         let gate = ComputeGate::new(1, 1, 1);
         let (first_permits, _) = gate.admit().await.expect("first admit must succeed");
-        assert!(matches!(gate.admit().await, Err(ApiError::Backpressure)));
+        assert!(matches!(gate.admit().await, Err(ApiError::Backpressure {
+                cause: crate::error::ShedCause::ComputeGate,
+                ..
+            })));
 
         // Two slots total (admission=1, queue=1); the first holder still has one. A second
         // *queued* admit (which will itself time out, since compute is still fully held) must
