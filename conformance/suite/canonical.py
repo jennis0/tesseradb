@@ -170,8 +170,8 @@ def canonicalise_viewport(body: bytes) -> Streamed:
     underlay_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_SUB_CELLS)
     # Taken as bytes and **not sorted**, unlike tiles. Tile emission order is not contract, so it is
     # normalised away; the artifact frame's row order is the serving pass's own — layer by layer,
-    # ordinal by ordinal — and is deterministic for a fixed registry and store. Sorting it would
-    # hide a reordering rather than canonicalise one.
+    # level by level, key by key — and is deterministic for a fixed registry and store. Sorting it
+    # would hide a reordering rather than canonicalise one.
     artifacts_bytes = b"".join(payload for kind, payload in frames if kind == wire.FRAME_ARTIFACTS)
 
     # Step 6 is structural: this function's one parameter is the body.

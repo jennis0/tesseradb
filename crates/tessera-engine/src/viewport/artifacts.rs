@@ -1263,10 +1263,20 @@ impl Engine {
             ))
         };
 
-        for (ordinal, entity, masked_count, rank) in passing {
-            if cut.binary_search(&ordinal).is_err() {
-                continue;
-            }
+        // A level is served in key order, then its keyless artifacts in ordinal order, so a level
+        // a build published and one published at a running service are served alike. The key is
+        // read from the store rather than held with the level's form.
+        let mut keyed: Vec<(Option<String>, Passing)> = self.write.live().with_artifacts(|store| {
+            passing
+                .into_iter()
+                .filter(|&(ordinal, ..)| cut.binary_search(&ordinal).is_ok())
+                .map(|at| (store.get(name, number, at.0).and_then(|r| r.key.clone()), at))
+                .collect()
+        });
+        keyed.sort_unstable_by(|(a, at), (b, bt)| {
+            (a.is_none(), a, at.0).cmp(&(b.is_none(), b, bt.0))
+        });
+        for (stored_key, (ordinal, entity, masked_count, rank)) in keyed {
             // Checked once per artifact served: without this a client that has gone is
             // discovered only once the whole frame is ready, after minutes deriving geometry
             // nobody reads.
@@ -1347,8 +1357,6 @@ impl Engine {
             } else {
                 false
             };
-            // Parents come from the level's records, the key from the store — copying millions
-            // of caller-supplied keys into a cache buys nothing the store's lookup does not.
             let parents: Vec<(String, u32, u32)> = rows
                 .parents(ordinal)
                 .iter()
@@ -1356,10 +1364,7 @@ impl Engine {
                 .collect();
             let key = match req.artifact_rows {
                 ArtifactRows::Identity => None,
-                ArtifactRows::Full => self
-                    .write
-                    .live()
-                    .with_artifacts(|store| store.get(name, number, ordinal)?.key.clone()),
+                ArtifactRows::Full => stored_key,
             };
             // Recorded, not resolved: a parent or attachment target may sit in a level this
             // loop has not reached yet.

@@ -623,14 +623,6 @@ class Known:
 
 KNOWN = (
     Known(
-        "artifact-order",
-        "layers",
-        STAGES,
-        ((r"viewport .*", r"\.artifact order.*"),),
-        "a build serves a level's artifacts in key order and a live layer in publication order, "
-        "before and after a fold; the artifacts frame's order is meant to be deterministic",
-    ),
-    Known(
         "closed-codes",
         "live-vocabularies",
         STAGES,

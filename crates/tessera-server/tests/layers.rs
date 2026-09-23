@@ -564,6 +564,53 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
     );
 }
 
+/// A level's artifacts are served in key order whatever order they were published in, as a
+/// build serves them; artifacts without a key follow, in the order they were published. The
+/// order holds after a fold and a restart.
+#[tokio::test]
+async fn the_artifacts_frame_serves_a_level_in_key_order() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_standard(&tmp).await;
+    let mut d = declaration("clusters/a", None);
+    d["require_member_visibility"] = serde_json::Value::Null;
+    d["hierarchy"]["kind"] = json!("flat");
+    register(&server, d).await;
+    for artifacts in [
+        json!([
+            { "key": "c2", "members": [member(0)] },
+            { "members": [member(3)] },
+        ]),
+        json!([
+            { "key": "c3", "members": [member(6)] },
+            { "key": "c0", "members": [member(9)] },
+            { "members": [member(12)] },
+            { "key": "c1", "members": [member(15)] },
+        ]),
+    ] {
+        let (status, body) = publish(
+            &server,
+            "clusters/a",
+            json!({ "addressing": "external", "artifacts": artifacts }),
+        )
+        .await;
+        assert_eq!(status, 201, "{body}");
+    }
+    let order = |rows: Vec<ArtifactRow>| -> Vec<Option<String>> {
+        rows.into_iter().map(|row| row.key).collect()
+    };
+    let expected: Vec<Option<String>> = ["c0", "c1", "c2", "c3"]
+        .iter()
+        .map(|key| Some(key.to_string()))
+        .chain([None, None])
+        .collect();
+    assert_eq!(order(viewport_artifacts(&server, &["0"], json!({})).await.unwrap()), expected);
+
+    flush_and_fold(&server, None).await;
+    assert_eq!(order(viewport_artifacts(&server, &["0"], json!({})).await.unwrap()), expected);
+    let server = restart(server, &tmp).await;
+    assert_eq!(order(viewport_artifacts(&server, &["0"], json!({})).await.unwrap()), expected);
+}
+
 async fn drill(server: &TestServer, terms: &[&str], tessera_id: &str) -> (u16, serde_json::Value) {
     let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
