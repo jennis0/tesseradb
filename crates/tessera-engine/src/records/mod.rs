@@ -16,6 +16,7 @@
 //! row and repeats none.
 
 mod cursor;
+mod walk;
 
 /// The order a read returns its rows in. Both return the same rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,29 @@ impl RecordsOrder {
         match self {
             RecordsOrder::Map => "map",
             RecordsOrder::Stored => "stored",
+        }
+    }
+}
+
+/// Why a response ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseEndedBy {
+    End,
+    Pages,
+    BudgetBytes,
+    BudgetTime,
+    /// Cancelled.
+    Deadline,
+}
+
+impl ResponseEndedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResponseEndedBy::End => "end",
+            ResponseEndedBy::Pages => "pages",
+            ResponseEndedBy::BudgetBytes => "budget_bytes",
+            ResponseEndedBy::BudgetTime => "budget_time",
+            ResponseEndedBy::Deadline => "deadline",
         }
     }
 }
