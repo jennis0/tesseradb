@@ -150,9 +150,10 @@ impl Engine {
             .load(Ordering::SeqCst)
     }
 
-    /// Whether nothing handed off the executor thread is outstanding: no flush, merge or coalesce
-    /// running or waiting to publish, and no refresh pass in flight. For a test to poll rather
-    /// than sleep before it asks something a publication in flight would change.
+    /// Whether nothing handed off the executor thread is outstanding: no flush, merge, coalesce
+    /// or fold running or waiting to publish, and no refresh pass in flight. Work that is due and
+    /// not yet started is not seen. For a test to poll rather than sleep before it asks something
+    /// a publication in flight would change.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn maintenance_idle_for_test(&self) -> bool {
@@ -164,6 +165,8 @@ impl Engine {
             &health.merge_completed_pending,
             &health.coalesce_in_flight,
             &health.coalesce_completed_pending,
+            &health.fold_in_flight,
+            &health.fold_completed_pending,
         ];
         busy.iter().all(|flag| !flag.load(Ordering::SeqCst))
             && self.refresh_in_flight.load(Ordering::SeqCst) == crate::refresh::NO_REFRESH

@@ -90,8 +90,9 @@ pub struct ExecutorHealth {
     /// publication.
     pub(crate) fold_completed_pending: Arc<AtomicBool>,
     pub(crate) merge_completed_pending: Arc<AtomicBool>,
-    /// A merge or a coalesce is running, or a flush or a coalesce has been handed back and not
-    /// yet published. Shared as above, so a test can wait for maintenance to go idle.
+    /// A merge, coalesce or fold is running, or a flush or a coalesce has been handed back and
+    /// not yet published. Shared as above, so a test can wait for maintenance to go idle.
+    pub(crate) fold_in_flight: Arc<AtomicBool>,
     pub(crate) merge_in_flight: Arc<AtomicBool>,
     pub(crate) coalesce_in_flight: Arc<AtomicBool>,
     pub(crate) coalesce_completed_pending: Arc<AtomicBool>,
@@ -556,6 +557,7 @@ impl ExecutorHealth {
             flush_in_flight: Arc::new(AtomicBool::new(false)),
             fold_completed_pending: Arc::new(AtomicBool::new(false)),
             merge_completed_pending: Arc::new(AtomicBool::new(false)),
+            fold_in_flight: Arc::new(AtomicBool::new(false)),
             merge_in_flight: Arc::new(AtomicBool::new(false)),
             coalesce_in_flight: Arc::new(AtomicBool::new(false)),
             coalesce_completed_pending: Arc::new(AtomicBool::new(false)),

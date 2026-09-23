@@ -448,7 +448,7 @@ impl WritePath {
                     ),
                     fold: executor::Background::sharing(
                         worker_bell.clone(),
-                        Default::default(),
+                        Arc::clone(&health.fold_in_flight),
                         Arc::clone(&health.fold_completed_pending),
                     ),
                     suggest: executor::Background::new(worker_bell.clone()),
