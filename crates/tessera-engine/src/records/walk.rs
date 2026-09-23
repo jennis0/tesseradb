@@ -98,10 +98,11 @@ pub(super) struct Collected {
     pub(super) position: Position,
 }
 
-/// A response's time budget and cancellation, read between chunks of a walk's scan and never per
-/// row. A walk honours either only where stopping moves the position past the one the response
-/// started from, so every response the walk begins moves the scan on, at the cost of scanning
-/// on past a deadline until it does.
+/// A response's time budget and cancellation, read before each chunk of a walk's scan and never
+/// per row. A walk honours either only where stopping moves the position past the one the
+/// response started from, so every response the walk begins moves the scan on. The scan gathers
+/// the least key it has not reached first, so one chunk moves it; a response runs past its
+/// deadline by at most one stretch's filter evaluation, which is not interrupted, and one chunk.
 pub(super) struct Clock {
     started: Instant,
     budget: Duration,
@@ -527,12 +528,6 @@ struct SegmentRun<'a> {
 }
 
 impl SegmentRun<'_> {
-    /// The key of the next gathered row not yet taken.
-    fn head(&self) -> Option<Key> {
-        let &(local, _) = self.buffered.get(self.at)?;
-        Some(self.key(local))
-    }
-
     /// The next chunk of this segment's part of the stretch, through the page's mask.
     fn gather(&mut self, cx: &PageCx<'_>, stretch: &Stretch, keep_unmatched: bool) {
         let hi = self.end.min(self.next.saturating_add(self.chunk));
@@ -617,8 +612,10 @@ impl Take<'_> {
 
     /// Take map-order rows past `scan` and in the stretch until `rows` holds `need`: each
     /// segment's rows that the page's mask admits, and the filter where rows must match, merged
-    /// across segments by `(cell, tessera_id)`. `Some` where the clock stopped the scan, with the
-    /// first key it did not reach.
+    /// across segments by `(cell, tessera_id)`. The least key the scan has not reached is taken
+    /// where it is a gathered row, and gathered where it is not, so the clock, read before each
+    /// chunk, can stop the scan after one. `Some` where it did, with the first key the scan did
+    /// not reach.
     fn map(
         &self,
         scan: Option<Key>,
@@ -644,67 +641,38 @@ impl Take<'_> {
                 at: 0,
             })
             .collect();
-        let began_at = runs.iter().filter_map(SegmentRun::first_unreached).min()?;
-        let mut heads: BinaryHeap<Reverse<(Key, usize)>> = BinaryHeap::with_capacity(runs.len());
-        for i in 0..runs.len() {
-            match self.head(&mut runs, i, clock, rows, began_at) {
-                Ok(Some(key)) => heads.push(Reverse((key, i))),
-                Ok(None) => {}
-                Err(stop) => return Some(stop),
-            }
-        }
+        // Every run under the first key in it the scan has not reached.
+        let mut unreached: BinaryHeap<Reverse<(Key, usize)>> = runs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, run)| run.first_unreached().map(|key| Reverse((key, i))))
+            .collect();
+        let &Reverse((began_at, _)) = unreached.peek()?;
         while rows.len() < need {
-            let Reverse((_, i)) = heads.pop()?;
+            let Reverse((key, i)) = unreached.pop()?;
             let run = &mut runs[i];
-            let (local, matched) = run.buffered[run.at];
-            let tessera_id = run.segment.columns.tessera_id()[local as usize];
-            rows.push(Taken {
-                seg: run.seg,
-                local,
-                tessera_id,
-                entity: cx.entity_of(tessera_id),
-                matched,
-            });
-            run.at += 1;
-            if rows.len() == need {
-                return None;
+            if run.at < run.buffered.len() {
+                let (local, matched) = run.buffered[run.at];
+                let tessera_id = run.segment.columns.tessera_id()[local as usize];
+                rows.push(Taken {
+                    seg: run.seg,
+                    local,
+                    tessera_id,
+                    entity: cx.entity_of(tessera_id),
+                    matched,
+                });
+                run.at += 1;
+            } else {
+                if let Some(stop) = self.stop(clock, rows, key, began_at) {
+                    return Some(stop);
+                }
+                run.gather(cx, self.stretch, self.keep_unmatched);
             }
-            match self.head(&mut runs, i, clock, rows, began_at) {
-                Ok(Some(key)) => heads.push(Reverse((key, i))),
-                Ok(None) => {}
-                Err(stop) => return Some(stop),
+            if let Some(key) = runs[i].first_unreached() {
+                unreached.push(Reverse((key, i)));
             }
         }
         None
-    }
-
-    /// Segment `i`'s next row, gathering chunks until it has one or its part of the stretch is
-    /// spent, and reading the clock before each chunk. `Err` where the clock stops the scan.
-    fn head(
-        &self,
-        runs: &mut [SegmentRun<'_>],
-        i: usize,
-        clock: &Clock,
-        rows: &[Taken],
-        began_at: Key,
-    ) -> std::result::Result<Option<Key>, (ResponseEndedBy, Key)> {
-        loop {
-            if let Some(key) = runs[i].head() {
-                return Ok(Some(key));
-            }
-            if runs[i].next >= runs[i].end {
-                return Ok(None);
-            }
-            let first_unreached = runs
-                .iter()
-                .filter_map(SegmentRun::first_unreached)
-                .min()
-                .expect("this segment holds rows not yet gathered");
-            if let Some(stop) = self.stop(clock, rows, first_unreached, began_at) {
-                return Err(stop);
-            }
-            runs[i].gather(self.cx, self.stretch, self.keep_unmatched);
-        }
     }
 
     /// Take stored-order rows past `scan` from the stretch's items until `rows` holds `need`:
