@@ -844,14 +844,17 @@ impl Engine {
         let containment = rows
             .partition()
             .map(|p| p.answer_for_one(ctx.served.session.satisfied()));
+        // A statement of its own, so the borrow ends before the verdict below follows a chain
+        // back into this function.
+        let labels = *ctx
+            .labels
+            .borrow_mut()
+            .entry(attachment.layer.clone())
+            .or_insert_with(|| self.label_gate(ctx.served.session, &layer.declaration));
         crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &ctx.served.generation.overlay,
-            labels: *ctx
-                .labels
-                .borrow_mut()
-                .entry(attachment.layer.clone())
-                .or_insert_with(|| self.label_gate(ctx.served.session, &layer.declaration)),
+            labels,
             layer_reachable: true,
             rows: &rows,
             mask: ctx.mask,
