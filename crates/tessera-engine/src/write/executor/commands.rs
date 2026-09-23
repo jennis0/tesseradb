@@ -873,7 +873,7 @@ impl Executor {
         let values_record = WalRecord::ValuesBatch {
             batch_id: request.batch_id.clone(),
             body_hash: request.body_hash,
-            view: Some(request.view.clone()),
+            view: request.view.clone(),
             columns: request.columns.clone(),
             rows: request
                 .rows

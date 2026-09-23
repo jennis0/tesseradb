@@ -456,11 +456,17 @@ async fn a_key_column_on_a_group_scoped_layer_mints_in_the_view_it_names() {
     }
     tick(&live).await;
 
+    live.shutdown().await;
+    let reopened = serve(&built).await;
     for year in YEARS {
         let view = format!("years:{year}");
         let expected = counts(of_year(year).into_iter(), &yearly_of);
         assert_eq!(browse(&by_build, &view, LAYER).await, expected, "the build, {view}");
-        assert_eq!(browse(&live, &view, LAYER).await, expected, "the values route, {view}");
+        assert_eq!(
+            browse(&reopened, &view, LAYER).await,
+            expected,
+            "the values route, after a restart, {view}"
+        );
     }
 }
 
@@ -486,6 +492,13 @@ async fn a_key_column_on_an_entity_scoped_layer_needs_no_view_header() {
     let expected = counts(0..ENTITIES, &cluster_of);
     assert_eq!(browse(&by_build, "papers", LAYER).await, expected);
     assert_eq!(browse(&live, "papers", LAYER).await, expected);
+    live.shutdown().await;
+    let live = serve(&built).await;
+    assert_eq!(
+        browse(&live, "papers", LAYER).await,
+        expected,
+        "a batch naming no view survives a restart"
+    );
 
     let (status, body) = register(
         &live,

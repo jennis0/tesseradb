@@ -663,14 +663,18 @@ fn run_values(
     let body_hash: [u8; 32] = Sha256::digest(body).into();
     let meta = state.engine.meta();
     // The view the fills belong to: the header where one was given, and the deployment's only
-    // view otherwise, on `/control/ingest`'s rule. It decides which flush pass writes the cells.
-    let resolved = resolve_view(view, &meta)?;
-    let resolved = resolved.id.clone();
+    // view otherwise, on `/control/ingest`'s rule. It decides which flush pass writes the cells,
+    // so with no header and several views it is refused below only if the batch fills a cell.
+    let resolved = match resolve_view(view, &meta) {
+        Ok(resolved) => Ok(resolved.id.clone()),
+        Err(ambiguous) if view.is_none() => Err(ambiguous),
+        Err(unknown) => return Err(unknown),
+    };
     // **The families and group-scoped layers this batch may name, and the header is half the
     // answer** (`views.md` §5, decision 0116). The key is what addresses a scoped cell or artifact,
     // so the check is `EngineMeta::owning_key` exactly as the ingest door's is — and the header is
     // required beside it, because a batch that named no view has not said which key it is writing.
-    let named = view.map(|_| resolved.as_str());
+    let named = view.and(resolved.as_ref().ok());
     let scoped: Vec<ScopedScalar> = match named {
         None => Vec::new(),
         Some(resolved) => meta
@@ -695,6 +699,11 @@ fn run_values(
         &view_in,
     )
     .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
+    let resolved = match resolved {
+        Ok(resolved) => Some(resolved),
+        Err(_) if columns.is_empty() => None,
+        Err(ambiguous) => return Err(ambiguous),
+    };
 
     // The row cap, on `/control/ingest`'s rule and with its cost: the whole decode is spent
     // before the count is knowable, which is why the byte cap sits on the route.

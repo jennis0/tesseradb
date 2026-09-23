@@ -326,7 +326,7 @@ fn a_deleted_entitys_values_fill_is_not_rebuilt_at_a_restart() {
             .fill_values(tessera_engine::ValuesRequest {
                 batch_id: "v1".to_string(),
                 body_hash: [1u8; 32],
-                view: "s0".to_string(),
+                view: Some("s0".to_string()),
                 columns: vec!["note".to_string()],
                 rows: vec![tessera_engine::IncomingValues {
                     entity: id,
