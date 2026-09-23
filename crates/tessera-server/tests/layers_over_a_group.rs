@@ -421,3 +421,79 @@ async fn a_layer_naming_neither_a_view_nor_a_group_is_refused_at_both_paths() {
     .await;
     assert_eq!(status, 422, "{body}");
 }
+
+fn counts(rows: impl Iterator<Item = u64>, key_of: &dyn Fn(u64) -> String) -> BTreeMap<String, u64> {
+    let mut sizes = BTreeMap::new();
+    for e in rows {
+        *sizes.entry(key_of(e)).or_default() += 1;
+    }
+    sizes
+}
+
+fn of_year(year: &str) -> Vec<u64> {
+    (0..ENTITIES).filter(|e| year_of(*e) == year).collect()
+}
+
+/// **A key column on a group-scoped layer mints per view, at both paths.** The build reads the
+/// view off each member row; the values route reads it off the page's view header, which is how a
+/// client sends one page per view.
+#[tokio::test]
+async fn a_key_column_on_a_group_scoped_layer_mints_in_the_view_it_names() {
+    const LAYER: &str = "clusters/yearly";
+    let built = build_side(&layer_toml(LAYER, &["years"], "years", "yearly"), &|_| true);
+    let by_build = serve(&built).await;
+
+    let built = build_side("", &|_| true);
+    let live = serve(&built).await;
+    let (status, body) = register(&live, layer_json(LAYER, &["years"], Some("years"))).await;
+    assert_eq!(status, 201, "{body}");
+    for year in YEARS {
+        let view = format!("years:{year}");
+        let (status, body) =
+            post_keys(&live, year, Some(&view), LAYER, &of_year(year), &yearly_of).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["minted"].as_u64(), Some(2), "{body}");
+    }
+    tick(&live).await;
+
+    for year in YEARS {
+        let view = format!("years:{year}");
+        let expected = counts(of_year(year).into_iter(), &yearly_of);
+        assert_eq!(browse(&by_build, &view, LAYER).await, expected, "the build, {view}");
+        assert_eq!(browse(&live, &view, LAYER).await, expected, "the values route, {view}");
+    }
+}
+
+/// **A key column on an entity-scoped layer needs no view**, whatever the database's view count:
+/// the layer has one artifact set, drawn on every view it names. A group-scoped layer's column
+/// still needs one, since its keys are a set per view.
+#[tokio::test]
+async fn a_key_column_on_an_entity_scoped_layer_needs_no_view_header() {
+    const LAYER: &str = "clusters/kmeans";
+    const SEEDED: u64 = 8;
+    let layers = layer_toml(LAYER, &["papers"], "", "clusters");
+    let built = build_side(&layers, &|_| true);
+    let by_build = serve(&built).await;
+
+    let built = build_side(&layers, &|e| e < SEEDED);
+    let live = serve(&built).await;
+    let tail: Vec<u64> = (SEEDED..ENTITIES).collect();
+    let (status, body) = post_keys(&live, "week", None, LAYER, &tail, &cluster_of).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["minted"].as_u64(), Some(0), "every key was seeded: {body}");
+    tick(&live).await;
+
+    let expected = counts(0..ENTITIES, &cluster_of);
+    assert_eq!(browse(&by_build, "papers", LAYER).await, expected);
+    assert_eq!(browse(&live, "papers", LAYER).await, expected);
+
+    let (status, body) = register(
+        &live,
+        layer_json("clusters/yearly", &["years"], Some("years")),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) =
+        post_keys(&live, "no-view", None, "clusters/yearly", &of_year("2010"), &yearly_of).await;
+    assert_eq!(status, 422, "{body}");
+}

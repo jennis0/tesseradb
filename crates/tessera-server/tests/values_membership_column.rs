@@ -119,12 +119,6 @@ content = {{ computed = ["centroid", "box"] }}
     )
 }
 
-/// The points file. `keyed` is which of its rows carry a key at all: the rest hold a null, which
-/// is the file's own spelling of *this point is in no artifact yet*.
-fn write_points(path: &Path, rows: &[u64], keyed: &dyn Fn(u64) -> bool) {
-    write_points_as(path, rows, keyed, &DataType::Utf8)
-}
-
 /// A column of keys at one of the string types a producer writes.
 fn text_keys(keys: Vec<Option<String>>, as_type: &DataType) -> ArrayRef {
     match as_type {
@@ -135,7 +129,8 @@ fn text_keys(keys: Vec<Option<String>>, as_type: &DataType) -> ArrayRef {
     }
 }
 
-/// [`write_points`] with the key column at `key_type`.
+/// The points file, its key column at `key_type`. `keyed` is which of its rows carry a key at all:
+/// the rest hold a null, which is the file's own spelling of *this point is in no artifact yet*.
 fn write_points_as(path: &Path, rows: &[u64], keyed: &dyn Fn(u64) -> bool, key_type: &DataType) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
