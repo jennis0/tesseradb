@@ -1,6 +1,6 @@
 # Start
 
-These tutorials take a new user from nothing to a working map, one step at a time.
+Each tutorial starts with no deployment and ends with a map that runs.
 
 - A first map from a data frame, in Python. Not written yet.
 - A first map from Parquet files, with `tessera check`, `tessera build` and `tessera serve`. Not written yet.
