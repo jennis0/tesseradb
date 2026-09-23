@@ -1749,11 +1749,12 @@ fn a_job_is_counted_completed_before_its_caller_is_answered() {
         let caller = std::thread::spawn(move || job(&e));
         faults.await_arrivals(PauseSite::BeforeAck, 1, WAIT);
 
+        // Only the completed count: the caller bumps `work_submitted` after its enqueue, so the
+        // executor can park here before that lands.
         let stats = engine.write_executor_stats();
-        let n = done as u64 + 1;
         assert_eq!(
-            (stats.work_submitted, stats.work_completed),
-            (n, n),
+            stats.work_completed,
+            done as u64 + 1,
             "{what} must be counted completed before it is answered: {stats:?}"
         );
 
@@ -1791,10 +1792,10 @@ fn a_geometry_publication_leaves_the_work_counts_alone() {
     });
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
 
+    // Only the completed count: the caller bumps `work_submitted` after its enqueue.
     let stats = engine.write_executor_stats();
     assert_eq!(
-        (stats.work_submitted, stats.work_completed, stats.work_depth),
-        (1, 0, 1),
+        stats.work_completed, 0,
         "one job is in flight and the publication is no job: {stats:?}"
     );
 
