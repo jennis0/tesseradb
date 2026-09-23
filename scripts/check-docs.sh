@@ -4,7 +4,7 @@
 # tutorials and guides.
 #
 # The tools come from .venv-docs when it exists, and from PATH otherwise. To make it:
-#   python3 -m venv .venv-docs && .venv-docs/bin/pip install -r docs/requirements.txt
+#   python3 -m venv .venv-docs && .venv-docs/bin/pip install -r docs/requirements.txt -c docs/constraints.txt
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
