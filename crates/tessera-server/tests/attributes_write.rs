@@ -613,3 +613,74 @@ fn without_publication(mut body: Value) -> Value {
     );
     body
 }
+
+/// One JSON batch to a write route under view `s0`, answering its body.
+async fn write_json(served: &Served, route: &str, batch_id: &str, body: Value) -> Value {
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url(route))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", "s0")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let answer: Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "batch {batch_id} is accepted: {answer}");
+    answer
+}
+
+fn external(id: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(id)
+}
+
+/// A text column declared at a running service matches the same items after a restart as it did
+/// before, whether its prose arrived by ingest or by a values fill.
+#[tokio::test]
+async fn a_text_column_declared_live_matches_the_same_items_after_a_restart() {
+    let served = serve().await;
+    let note = json!({ "name": "note", "type": "text", "index": true });
+    assert_eq!(declare(&served, note).await.0, 201);
+    let point = |id: &str, note: Option<&str>| {
+        json!({
+            "external_id": external(id), "x": 500.0, "y": 500.0, "access": ["0"], "score": 1.0,
+            "note": note,
+        })
+    };
+    let ingested = write_json(
+        &served,
+        "/control/ingest",
+        "points",
+        json!([
+            point("n1", Some("cedar grove")),
+            point("n2", Some("amber light")),
+            point("n3", None),
+        ]),
+    )
+    .await;
+    let ids: Vec<u64> = ingested["tessera_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()).unwrap())
+        .collect();
+    flush(&served).await;
+    write_json(
+        &served,
+        "/control/values",
+        "values",
+        json!([{ "external_id": external("n3"), "note": "cedar bark" }]),
+    )
+    .await;
+    flush(&served).await;
+
+    let cedar = json!({ "note": { "match": "cedar" } });
+    let before = filtered(&served, cedar.clone()).await;
+    assert_eq!(before, BTreeSet::from([ids[0], ids[2]]));
+    let served = restart(served).await;
+    assert_eq!(filtered(&served, cedar).await, before);
+}
