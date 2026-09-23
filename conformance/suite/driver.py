@@ -563,7 +563,7 @@ class SuiteHarness:
     #: Entries a coalesce takes on every axis but the external-id runs; None leaves eight.
     coalesce_width: int | None = None
     #: Whether a stage that pulls a tick must be the only publication on it. A plan that lets
-    #: maintenance ride its write ticks turns this off.
+    #: merges, coalesces and folds ride its ticks turns this off; a stray flush still fails.
     isolated_ticks: bool = True
 
     server: Server | None = None
@@ -937,18 +937,18 @@ def _settled(executor: dict) -> bool:
 
 
 def _assert_isolated(h: SuiteHarness, label: str, before: dict, own: str | None) -> None:
-    """Fail as a broken plan if anything other than the stage's `own` publication moved."""
-    if not h.isolated_ticks:
-        return
+    """Fail as a broken plan if anything other than the stage's `own` publication moved. A plan
+    without isolated ticks is held to no stray flush only."""
     # A job the tick queued must land before the counters are read, or it rides unseen.
     poll(
         lambda: _settled(h.executor()),
         f"{label}: the executor never went idle after the stage's tick",
     )
     now = _publication_counts(h)
+    watched = before if h.isolated_ticks else ("flushes",)
     moved = [
         f"{key} {before[key]} -> {now[key]}"
-        for key in before
+        for key in watched
         if key != own and now[key] != before[key]
     ]
     if moved:
