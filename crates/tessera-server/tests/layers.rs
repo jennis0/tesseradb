@@ -159,7 +159,8 @@ async fn an_incoherent_declaration_is_refused_with_a_reason() {
     assert!(meta_layers(&server, &["0"]).await.is_empty());
 }
 
-/// Drop tombstones the name for ever, and the recreation refusal says so.
+/// Drop tombstones the name for ever: the name is gone from `/v1/meta`, recreating it is refused,
+/// and it names no live layer.
 #[tokio::test]
 async fn a_dropped_name_is_gone_from_meta_and_refused_on_recreation() {
     let tmp = TempDir::new().unwrap();
@@ -167,17 +168,9 @@ async fn a_dropped_name_is_gone_from_meta_and_refused_on_recreation() {
     register(&server, declaration("clusters/a", None)).await;
     assert_eq!(meta_layers(&server, &["0"]).await.len(), 1);
 
-    let resp = server
-        .client
-        .delete(server.control_url("/control/layers/clusters%2Fa"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    // 200 with a body, not 204: every write acknowledgement on this plane carries its
-    // publication number (contracts §3.4).
-    assert_eq!(resp.status().as_u16(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    // 200 with a body, since every write acknowledgement carries its publication number.
+    let (status, body) = drop_layer(&server, "clusters%2Fa").await;
+    assert_eq!(status, 200, "{body}");
     assert!(
         body["publication"].as_u64().is_some(),
         "the drop names the cycle it is published in: {body}"
@@ -187,6 +180,26 @@ async fn a_dropped_name_is_gone_from_meta_and_refused_on_recreation() {
     let (status, body) = put_layer(&server, declaration("clusters/a", None)).await;
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["error"], "contract", "{body}");
+    // No live layer holds the name, so the refusal is the tombstone's and not a taken name's: a
+    // second drop finds nothing, where a live layer's drop is accepted.
+    let (status, body) = drop_layer(&server, "clusters%2Fa").await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "contract", "{body}");
+    register(&server, declaration("clusters/b", None)).await;
+    assert_eq!(drop_layer(&server, "clusters%2Fb").await.0, 200);
+}
+
+/// `DELETE /control/layers/{name}`: the status and the body.
+async fn drop_layer(server: &TestServer, encoded: &str) -> (u16, serde_json::Value) {
+    let resp = server
+        .client
+        .delete(server.control_url(&format!("/control/layers/{encoded}")))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or_default())
 }
 
 /// Each layer's `/v1/meta` version as `(name, version)`.
@@ -253,14 +266,7 @@ async fn a_restart_after_a_drop_leaves_every_layer_version_where_it_was() {
     let server = serve_standard(&tmp).await;
     register_grown(&server, "clusters/a").await;
     register_grown(&server, "clusters/b").await;
-    let resp = server
-        .client
-        .delete(server.control_url("/control/layers/clusters%2Fa"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(drop_layer(&server, "clusters%2Fa").await.0, 200);
     register_grown(&server, "clusters/c").await;
     assert_eq!(layer_versions(&server).await.len(), 2);
     assert_versions_survive_restarts(server, &tmp).await;
