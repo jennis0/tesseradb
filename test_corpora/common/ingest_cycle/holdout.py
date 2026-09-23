@@ -44,11 +44,10 @@ def encode_batch(
     the source entity id, eight bytes little-endian, the build's own form. `columns` names the
     column-route layers, already named for the layer they belong to."""
     entities = table.column("entity_id").to_pylist()
-    arrays = [
-        table.column("x").cast(pa.float64()).combine_chunks(),
-        table.column("y").cast(pa.float64()).combine_chunks(),
-    ]
-    names = ["x", "y"]
+    # The points file's own spelling, which the build already held to the view's projection:
+    # `lon`/`lat` for a projected view, `x`/`y` for one with none.
+    names = ["x", "y"] if "x" in table.column_names else ["lon", "lat"]
+    arrays = [table.column(name).cast(pa.float64()).combine_chunks() for name in names]
     if access is not None:
         column = table.column(access).combine_chunks()
         if isinstance(column, pa.ChunkedArray):

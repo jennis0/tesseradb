@@ -10,7 +10,8 @@ one's, and the notebook would then hold a URL answering for somebody else's serv
 announces nothing is a refusal carrying what the child wrote.
 
 The child is killed by its pid, at `close()` and at interpreter exit, never by process name: a
-kill by name reaches every other server on the machine.
+kill by name reaches every other server on the machine. A temporary database's directory is
+removed at the same two points, after its child has stopped.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import json
 import os
 import queue
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -53,6 +55,9 @@ TOKEN_MAX_LIFETIME = 3600
 IDENTITY_ENV = "TESSERA_IDENTITY_KEY"
 
 _running: dict[int, subprocess.Popen] = {}
+
+#: The directories of the temporary databases this process made and has not closed.
+temporary: set[Path] = set()
 
 
 class ServeRefused(Refusal):
@@ -281,6 +286,8 @@ def stop(child: subprocess.Popen, timeout: float = 5.0) -> None:
 def _stop_everything() -> None:
     for child in list(_running.values()):
         stop(child)
+    for directory in list(temporary):
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def find_binary() -> tuple[str, str]:

@@ -88,6 +88,8 @@ class Database:
     def __init__(self, path: Path, temporary: bool = False) -> None:
         self.path = Path(path)
         self.temporary = temporary
+        if temporary:
+            _instance.temporary.add(self.path)
         #: The tables inserted before the first commit: what the build reads.
         self.inserts: list[Insert] = []
         #: The tables inserted since the last commit, which the next one sends and forgets.
@@ -799,6 +801,10 @@ class Database:
         the whole inserted corpus. Every commit after it pages what was inserted since the
         last one through the control plane in order, flushes once and waits for the
         publication that flush arms. Then the inserts are forgotten.
+
+        A commit that did not happen raises `Refusal` carrying its report as `report`: a finding
+        that stopped it before anything was sent, a failed build, or every page refused. A commit
+        some of whose pages landed returns its report.
         """
         if self.built:
             return self._paged(sent=True)
@@ -833,7 +839,7 @@ class Database:
             identity=self._identity_in_words(),
         )
         if build.returncode != 0:
-            raise Refusal("commit: the build failed\n" + report.output)
+            raise Refusal("commit: the build failed\n" + report.output, report)
         self.built = True
         self._record_terms(document)
         self.serve()
@@ -882,12 +888,16 @@ class Database:
             + (["flush, and wait for the publication it arms"] if pages else []),
             findings=findings,
         )
-        if not sent or not report.ok:
+        if not sent:
             return report
-        C.run(control, pages, report)
+        if report.findings:
+            raise Refusal(str(report), report)
+        accepted = C.run(control, pages, report)
         self._record_terms(self._document())
         self.pending.clear()
         self._save_state()
+        if pages and not accepted:
+            raise Refusal(str(report), report)
         return report
 
     @property
@@ -1337,8 +1347,9 @@ class Database:
             _instance.stop(self._child)
             self._child = None
             self.listening = None
-        if self.temporary and self.path.exists():
+        if self.temporary:
             shutil.rmtree(self.path, ignore_errors=True)
+            _instance.temporary.discard(self.path)
 
     def __enter__(self) -> "Database":
         return self
@@ -1373,11 +1384,12 @@ def _extent_in_words(extent: Any) -> str:
 
 
 def create(path: str | os.PathLike | None = None, replace: bool = False) -> Database:
-    """A new database, in `path` or in a temporary directory `close()` removes.
+    """A new database, in `path` or in a temporary directory.
 
     With no path the directory is on a RAM-backed filesystem where the platform has one
     (`/dev/shm` on Linux and WSL2) and on disk otherwise, and the call says which: the build reads
     and the server maps that directory, so a small corpus on the RAM-backed path touches no disk.
+    `close()` removes a temporary directory, and so does interpreter exit.
     """
     if path is None:
         parent = RAM_BACKED if RAM_BACKED.is_dir() else None

@@ -190,7 +190,7 @@ def test_new_papers_with_a_cluster_and_a_label_are_served(served, corpus):
     # text is read through the cluster it attaches to: a label set expands to a layer whose
     # artifacts attach, and `browse` refuses such a layer directly.
     assert set(report.artifact_ids) == {"clusters/kmeans", "topics/kmeans"}
-    assert set(report.artifact_ids["topics/kmeans"]) == {"k-new-label"}
+    assert set(report.artifact_ids["topics/kmeans"]) == {(0, None, "k-new-label")}
 
 
 def test_the_new_label_is_served_over_the_rows_the_same_commit_ingested(served, corpus):
@@ -228,8 +228,9 @@ def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_fo
     plan = db.check()
     # One page, and the flush that publishes it.
     assert len(plan.plan) == 2 and plan.plan[0].startswith("points"), plan
-    refused = db.commit()
-    assert not refused.ok
+    with pytest.raises(Refusal) as raised:
+        db.commit()
+    refused = raised.value.report
     assert [r["status"] for r in refused.refusals] == [409]
     assert refused.rows_accepted == {}
     assert not refused.replayed, refused
@@ -238,9 +239,9 @@ def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_fo
     # The same rows moved a little: the ids are still ones the database holds, and the answer is
     # the same refusal. Nothing about the bytes decides it.
     insert_the_new_papers(db, x_offset=0.5)
-    again = db.commit()
-    assert not again.ok
-    assert [r["status"] for r in again.refusals] == [409]
+    with pytest.raises(Refusal) as raised:
+        db.commit()
+    assert [r["status"] for r in raised.value.report.refusals] == [409]
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
 
 
@@ -492,8 +493,9 @@ def test_a_values_cell_re_run_is_sent_again_and_lands_on_the_cells_it_landed_on(
         id="id",
         value="score",
     )
-    conflicted = db.commit()
-    assert not conflicted.ok
+    with pytest.raises(Refusal) as raised:
+        db.commit()
+    conflicted = raised.value.report
     assert [r["status"] for r in conflicted.refusals] == [409]
     assert "score" in conflicted.refusals[0]["detail"]
     # And the cell still holds what it held.
@@ -501,6 +503,40 @@ def test_a_values_cell_re_run_is_sent_again_and_lands_on_the_cells_it_landed_on(
                       filters={"score": {"range": {"gte": 8.0}}})
     assert answer["counts"]["matched"] == 0
 
+
+def test_a_partly_refused_commit_returns_its_report_and_serves_what_landed(served, corpus):
+    """A commit some of whose pages landed has happened: it returns the report, which names the
+    page refused, and the rows that were accepted are served."""
+    db = served(small)
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    before = viewport(db, "map", frame)["counts"]["visible"]
+    # `p0` holds 0.5, so a different value on it is a `409`.
+    db.insert(
+        "score",
+        pa.table({"id": pa.array(["p0"], pa.string()), "score": pa.array([9.0], pa.float64())}),
+        id="id",
+        value="score",
+    )
+    db.insert(
+        "map",
+        pa.table(
+            {
+                "id": pa.array(["q0", "q1"], pa.string()),
+                "x": pa.array([1.5, 2.5], pa.float64()),
+                "y": pa.array([1.0, 1.0], pa.float64()),
+                "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+            }
+        ),
+        id="id",
+        x="x",
+        y="y",
+        access="labels",
+    )
+    report = db.commit()
+    assert not report.ok
+    assert [r["status"] for r in report.refusals] == [409]
+    assert report.rows_accepted == {"map": 2}
+    assert viewport(db, "map", frame)["counts"]["visible"] == before + 2
 
 def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
     """§6.2 step 5: the closing flush waits for the publication it arms, and a commit whose only
@@ -648,9 +684,10 @@ def test_a_row_outside_the_frame_refuses_the_commit_and_nothing_is_sent(served, 
     plan = db.check()
     assert not plan.ok
     assert any("outside view 'map''s frame" in str(f) for f in plan.findings), plan
-    report = db.commit()
-    assert not report.ok, report
-    assert report.rows_accepted == {} and not report.refusals
+    with pytest.raises(Refusal) as raised:
+        db.commit()
+    report = raised.value.report
+    assert report.findings and report.rows_accepted == {} and not report.refusals
     # Neither row was sent: the one inside the frame is not a commit the user asked for on its own.
     assert viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"] == before
 

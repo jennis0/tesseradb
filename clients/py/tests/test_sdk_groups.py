@@ -348,3 +348,41 @@ def test_a_plain_view_declared_after_the_first_commit_is_created_and_served(grou
     assert report.plan[0] == "declare view 'extra'"
     assert report.rows_accepted == {"extra": 15}
     assert viewport(db, "extra", FRAME)["counts"]["visible"] == 15
+
+
+def test_a_later_commit_publishes_one_key_on_every_view_its_rows_name(grouped):
+    """An artifacts table repeating its keys across the views of a group publishes one artifact
+    per row, each drawn on its own view with its own members."""
+    db = grouped
+    keys = [f"k{i}" for i in range(5)]
+    db.insert(
+        "clusters",
+        artifacts=artifacts(keys * 2, ["a"] * 5 + ["b"] * 5),
+        key="key",
+        level="level",
+        view="slice",
+    )
+    # Key k<i> holds i + 1 entities on `a` and i + 11 on `b`.
+    db.insert(
+        "clusters",
+        members=pa.concat_tables(
+            [memberships(key, "a", IDS[: i + 1]) for i, key in enumerate(keys)]
+            + [memberships(key, "b", IDS[: i + 11]) for i, key in enumerate(keys)]
+        ),
+        id="entity",
+        key="key",
+        level="level",
+        view="slice",
+    )
+    report = db.commit()
+    assert report.ok, report.refusals
+    assert report.artifacts_minted == 10
+    assert len(set(report.artifact_ids["clusters"].values())) == 10
+
+    for view, first in (("slices:a", 1), ("slices:b", 11)):
+        served = {
+            one["key"]: one["masked_count"]
+            for one in browse(db, view, "clusters")["artifacts"]
+            if one["key"] in keys
+        }
+        assert served == {key: first + i for i, key in enumerate(keys)}, view
