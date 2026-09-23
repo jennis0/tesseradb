@@ -157,7 +157,7 @@ def filter_probes(
             candidates = list(views)
         offered += 1
         candidates.sort(key=lambda v: v["id"] != view["id"])
-        values = column_sample(rung, candidates, column)
+        values = column_sample(rung, view, candidates, column)
         if values is not None:
             probes += family_probes(
                 column, operand["family"], operand["operands"], values, binary, analysers.get(column)
@@ -165,12 +165,12 @@ def filter_probes(
     return probes, offered
 
 
-def column_sample(rung: Path, candidates: Sequence[dict], column: str) -> pa.Array | None:
-    """Up to `PROBE_SAMPLE_ROWS` of the view's own rows' non-null values of `column`, from the
-    first of `candidates` whose batches carry it: its points file, or the file the column is
-    joined from."""
-    for view in candidates:
-        _, attributes, joined = wire_columns(rung, view)
+def column_sample(rung: Path, view: dict, candidates: Sequence[dict], column: str) -> pa.Array | None:
+    """Up to `PROBE_SAMPLE_ROWS` non-null values of `column`, from the first of `candidates` whose
+    batches carry it: its points file, or the file the column is joined from. Read from another
+    view, only the rows of entities `view` holds are kept, so every value is one `view` has."""
+    for candidate in candidates:
+        _, attributes, joined = wire_columns(rung, candidate)
         if column not in attributes:
             continue
         source = next(
@@ -179,9 +179,12 @@ def column_sample(rung: Path, candidates: Sequence[dict], column: str) -> pa.Arr
                 for j in joined
                 if column in j["columns"]
             ),
-            view,
+            candidate,
         )
-        rows = read_view_rows(source, [column], limit=PROBE_SAMPLE_ROWS)
+        keep = None
+        if candidate["id"] != view["id"]:
+            keep = np.unique(read_view_rows(view, ["entity_id"]).column("entity_id").to_numpy())
+        rows = read_view_rows(source, [column], keep=keep, limit=PROBE_SAMPLE_ROWS)
         return rows.column(column).combine_chunks().drop_null()
     return None
 
