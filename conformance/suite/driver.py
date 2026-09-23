@@ -930,10 +930,21 @@ def _publication_counts(h: SuiteHarness) -> dict:
     }
 
 
+def _settled(executor: dict) -> bool:
+    """No work-lane job queued and no flush on the pool. Status reports nothing narrower for a
+    merge or coalesce still running on the pool."""
+    return executor["work_depth"] == 0 and not executor["flush"]["in_flight"]
+
+
 def _assert_isolated(h: SuiteHarness, label: str, before: dict, own: str | None) -> None:
     """Fail as a broken plan if anything other than the stage's `own` publication moved."""
     if not h.isolated_ticks:
         return
+    # A job the tick queued must land before the counters are read, or it rides unseen.
+    poll(
+        lambda: _settled(h.executor()),
+        f"{label}: the executor never went idle after the stage's tick",
+    )
     now = _publication_counts(h)
     moved = [
         f"{key} {before[key]} -> {now[key]}"
