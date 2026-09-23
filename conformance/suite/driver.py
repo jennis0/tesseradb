@@ -931,13 +931,16 @@ def _publication_counts(h: SuiteHarness) -> dict:
 
 
 def _settled(executor: dict) -> bool:
-    """No work-lane job queued, and no flush, merge or coalesce running or waiting to publish."""
+    """No work-lane job queued, no flush, merge or coalesce running or waiting to publish, and no
+    refresh running. A publication arms its refresh as it lands, and a request made before the
+    refresh ends may be refused with 429."""
     flush = executor["flush"]
     return (
         executor["work_depth"] == 0
         and not flush["in_flight"]
         and not flush["merge_in_flight"]
         and not flush["coalesce_in_flight"]
+        and not flush["refresh_in_flight"]
     )
 
 
