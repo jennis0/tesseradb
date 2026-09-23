@@ -1808,6 +1808,20 @@ async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
     ];
     check_recreated(&served, "before a restart", &expected, &untouched).await;
 
+    // Any later change to the roster republishes it with the drop still on the list.
+    let other = served
+        .server
+        .client
+        .put(served.server.control_url("/control/views/quarter/2026-Q9"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other.status().as_u16(), 201);
+    served.token = token(&served, &["0", "1"]).await;
+    check_recreated(&served, "after another view is created", &expected, &untouched).await;
+
     let served = restart(served, default_engine_config()).await;
     check_recreated(&served, "after a restart", &expected, &untouched).await;
 

@@ -967,6 +967,17 @@ impl Manifest {
         // the other order would delete the view the caller was just told it had. A death whose key
         // nothing recreated simply leaves the group without it.
         for stone in dead {
+            // A death takes away only the incarnation it names. The list is never pruned and is
+            // applied again at every roster publication and every open, so it goes on naming
+            // earlier incarnations of a key created again, which keeps its place and its
+            // families' columns.
+            let owner_id = format!("{}{}{}", stone.group, crate::GROUP_SEPARATOR, stone.key);
+            if manifest
+                .incarnation_of(&owner_id)
+                .is_some_and(|live| live != stone.incarnation)
+            {
+                continue;
+            }
             // **The owner's groups and every group sharing its views** — the one expansion
             // `Self::view_ids_for_key` defines, which the drop's own prunes take too.
             let ids = manifest.view_ids_for_key(&stone.group, &stone.key);
@@ -2752,8 +2763,28 @@ mod tests {
                 .find(|f| f.name == "rank")
                 .expect("the declared family")
                 .views,
-            vec![view_id],
+            vec![view_id.clone()],
             "and the column of that view is on the family's list"
         );
+
+        // A death takes away the incarnation it names and no other: the key created again stays,
+        // with its column, when an earlier incarnation's death is applied over it.
+        let stone = |incarnation| DeadIncarnation {
+            group: "quarter".to_string(),
+            key: "2026-Q1".to_string(),
+            incarnation,
+        };
+        let listed = |manifest: &Manifest| {
+            manifest.groups[0]
+                .scoped_scalars
+                .iter()
+                .any(|f| f.views.contains(&view_id))
+        };
+        let earlier = merged.with_roster(std::slice::from_ref(&created), &[stone(0)]);
+        assert_eq!(earlier.incarnation_of(&view_id), Some(1));
+        assert!(listed(&earlier));
+        let own = merged.with_roster(&[], &[stone(1)]);
+        assert_eq!(own.incarnation_of(&view_id), None);
+        assert!(!listed(&own));
     }
 }
