@@ -227,6 +227,60 @@ async fn a_dropped_name_is_gone_from_meta_and_refused_on_recreation() {
     );
 }
 
+/// Each layer's `/v1/meta` version as `(name, version)`.
+async fn layer_versions(server: &TestServer) -> Vec<(String, u64)> {
+    meta_layers(server, &["0"])
+        .await
+        .iter()
+        .map(|l| (l["name"].as_str().unwrap().to_string(), l["version"].as_u64().unwrap()))
+        .collect()
+}
+
+/// A restart changes nothing about a layer, so the version a client echoes to notice a change
+/// stays where it was, after the first restart and after a second. The growth keeps the
+/// registrations in the log beside the manifest that also carries them.
+#[tokio::test]
+async fn a_restart_leaves_every_layer_version_where_it_was() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    for name in ["clusters/a", "clusters/b"] {
+        register(&server, declaration(name, None)).await;
+        let artifacts = json!({
+            "addressing": "external",
+            "artifacts": [{ "key": "c0", "members": [member(0), member(1), member(2)] }]
+        });
+        assert_eq!(publish(&server, name, artifacts).await.0, 201);
+        let route = format!("/control/layers/{}/artifacts", name.replace('/', "%2F"));
+        let grown = server
+            .client
+            .patch(server.control_url(&route))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&json!({
+                "addressing": "external",
+                "artifacts": [{ "key": "c0", "members": [member(3), member(4)] }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(grown.status().as_u16(), 200);
+    }
+    tick(&server).await;
+    let before = layer_versions(&server).await;
+    assert_eq!(before.len(), 2);
+
+    let mut server = server;
+    for _ in 0..2 {
+        server.shutdown().await;
+        server = spawn_server(
+            &tmp.path().join("bundle"),
+            &tmp.path().join("cache"),
+            &tmp.path().join("wal.log"),
+        )
+        .await;
+        assert_eq!(layer_versions(&server).await, before);
+    }
+}
+
 /// The whole plane is behind the operator credential, and a route added to it inherits that check
 /// rather than asking for it. Asserted because the layer routes are new arrivals on that router.
 #[tokio::test]
