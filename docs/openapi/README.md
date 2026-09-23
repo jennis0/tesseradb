@@ -11,9 +11,7 @@ Three things a power user who installs nothing needs, and where each is:
 ## What the description is, and is not
 
 `tessera.yaml` is **hand-authored**. The JSON DTOs live in `tessera-server`, some private, two
-responses built with `json!`, and the Arrow-facing structs carry a deliberate *no serde derive*
-(I10 — entity ids never cross the boundary, so nothing about those types is allowed to serialise
-itself). Nothing generates the description from them, so the test is what stops it drifting:
+responses built with `json!`, and the Arrow-facing structs carry a deliberate *no serde derive*. Nothing generates the description from them, so the test is what stops it drifting:
 every closed DTO is declared `additionalProperties: false`, and a field added to a response and
 not to the file fails the test rather than surfacing on a stranger's screen.
 
