@@ -240,6 +240,18 @@ every 8-byte window at every offset is swept against the unfiltered set and the 
 halves, at the same `~1e-9` coincidence rate the `tessera_id` column's sweep argues. A 4-byte
 sweep of the cursor is not run, for the chance-collision reason the `tessera_id` column gets none.
 
+**`POST /v1/artifacts` is swept whole too.** A layer is published over the catalogue after the
+items sweep, each artifact holding admitted and denied items alike, with a parent edge and a
+derived hull, and read with every property, two pages a response and the cursor carried to the
+end. An artifact's own entity is as internal as an item's, so every sweep of this route also
+looks for the entities behind the artifact identifiers it served. The identifier-valued columns
+(`tessera_id`, `parents`, `target`) are swept against the unfiltered set, as the points batch's
+`tessera_id` is. The number columns (`masked_count`,
+`matched_count`, `level`, and the bits of `centroid_*` and `box_*`) and every 8-byte window of each
+`shape`, whose WKB interleaves 4-byte counts with coordinates, are swept against the
+floor-filtered set, for the reason the position columns are. Keys, contents and the JSON frames
+get the decimal sweep, and the cursor the cursor sweep.
+
 **The explicit negative control (brief step 1's closing instruction).** A scan that never finds
 anything proves nothing if it would never have found anything *anyway* — this test asserts that a
 genuine, known `tessera_id` (one actually decoded from a real viewport response) **is** present in
@@ -282,6 +294,7 @@ import io
 import json
 import re
 import struct
+import time
 from pathlib import Path
 
 from typing import NamedTuple
@@ -289,6 +302,7 @@ from typing import NamedTuple
 import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest
+import requests
 
 from oracle import catalogue
 from oracle import identity as identity_mod
@@ -321,6 +335,11 @@ ITEMS_FIELDS = [
 ITEMS_SYSTEM_FIELDS = ["position", "external_id", "labels"]
 ITEMS_PAGE_ROWS = 4_999
 ITEMS_PAGES_PER_RESPONSE = 2
+# `POST /v1/artifacts`: a layer the sweep publishes, read with every property.
+ARTIFACTS_LAYER = "byte-scan-groups"
+ARTIFACTS_FIELDS = [
+    "key", "level", "parents", "target", "masked_count", "content", "centroid", "box", "shape",
+]
 EXTERNAL_ID_SAMPLE_SIZE = 5  # admitted entities sampled for the external-id sweep
 
 
@@ -532,6 +551,56 @@ def _records_scan(payload: bytes) -> RecordsScan:
             if "tessera:labels" in names:
                 for row in batch.column("tessera:labels").to_pylist():
                     scan.labels.extend(row)
+    return scan
+
+
+class ArtifactsScan(NamedTuple):
+    """What the sweep reads from one `POST /v1/artifacts` records frame."""
+
+    #: The values of the identifier-valued columns: `tessera_id`, every `parents` entry, `target`.
+    id_values: set[int]
+    #: The number columns' values, and the bits of the float columns, as `u64`.
+    number_values: set[int]
+    #: Every 8-byte window of every `shape`, at every offset.
+    shape_windows: set[int]
+    tessera_ids: list[int]
+    #: Keys and contents, for the decimal sweep.
+    text: list[str]
+
+
+def _artifacts_scan(payload: bytes) -> ArtifactsScan:
+    """One artifacts records frame's swept columns, decoded from the Arrow stream."""
+    scan = ArtifactsScan(set(), set(), set(), [], [])
+    with ipc.open_stream(io.BytesIO(payload)) as reader:
+        for batch in reader:
+            names = batch.schema.names
+            ids = batch.column("tessera_id").to_pylist()
+            scan.tessera_ids.extend(ids)
+            scan.id_values.update(ids)
+            if "parents" in names:
+                for parents in batch.column("parents").to_pylist():
+                    scan.id_values.update(parents)
+            if "target" in names:
+                scan.id_values.update(v for v in batch.column("target").to_pylist() if v is not None)
+            for name in ("masked_count", "matched_count", "level"):
+                if name in names:
+                    scan.number_values.update(batch.column(name).to_pylist())
+            for name in names:
+                if name.startswith(("centroid_", "box_")):
+                    for value in batch.column(name).to_pylist():
+                        if value is not None:
+                            scan.number_values.add(
+                                int.from_bytes(struct.pack("<d", value), "little")
+                            )
+            if "shape" in names:
+                for wkb in batch.column("shape").to_pylist():
+                    if wkb is not None:
+                        scan.shape_windows.update(_le_windows(wkb, 8))
+            if "key" in names:
+                scan.text.extend(k for k in batch.column("key").to_pylist() if k is not None)
+            if "content" in names:
+                for values in batch.column("content").to_pylist():
+                    scan.text.extend(values)
     return scan
 
 
@@ -767,6 +836,22 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
         "the records sweep did not catch an entity id's bits in a position column"
     )
     assert not (scan.tessera_windows & targets), "the records sweep flagged a clean identifier"
+    artifacts = _records_stream(
+        {
+            "tessera_id": pa.array(clean_ids, type=pa.uint64()),
+            "parents": pa.array([[planted], []], type=pa.list_(pa.uint64())),
+            "centroid_x": pa.array([planted_bits, 0.5], type=pa.float64()),
+            "shape": pa.array([b"\x01\x06\x00\x00" + planted.to_bytes(8, "little"), None]),
+        }
+    )
+    scan = _artifacts_scan(artifacts)
+    assert planted in scan.id_values, "the artifacts sweep did not catch an entity id in parents"
+    assert planted in scan.number_values, (
+        "the artifacts sweep did not catch an entity id's bits in a centroid column"
+    )
+    assert planted in scan.shape_windows, (
+        "the artifacts sweep did not catch an entity id at an odd offset in a shape"
+    )
     page_end = json.dumps({"next": None, "ended_by": "rows", "rows": planted}).encode()
     assert _decimal_windows(page_end, SAFE_ID_FLOOR) & targets, (
         "the JSON-frame sweep did not catch an entity id in a page end"
@@ -1141,6 +1226,126 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
         assert oracle_bundle.external_id_of(entity_id) not in items_json, (
             f"external id for entity {entity_id} found in an items JSON frame"
         )
+
+    # --- POST /v1/artifacts: a layer published over the catalogue, read whole, every frame swept -
+    idset = server.meta(token)["idset"]
+    shard = oracle_bundle.manifest["identity"].get("shard_id", 0)
+    # Each group holds admitted and denied items alike, so every count is a partial one.
+    seen, unseen = sorted(admitted_high), sorted(denied_high)
+    groups = [seen[i : i + 200] + unseen[i : i + 200] for i in range(0, 4_000, 200)]
+    resp = server.register_layer(
+        {
+            "name": ARTIFACTS_LAYER,
+            "title": ARTIFACTS_LAYER,
+            "views": [VIEW],
+            "membership": "enumerated",
+            "value_set": "closed",
+            "visibility": None,
+            "artifact_visibility": {"field": None, "default": "inherited"},
+            "require_member_visibility": None,
+            "hierarchy": {"kind": "nested", "prune_children": False},
+            "content": {
+                "computed": ["hull"],
+                "supplied": [
+                    {"name": "label", "type": "text", "require_member_visibility": "inherited"}
+                ],
+            },
+            "depends_on": [],
+            "levels": [],
+            "layout": None,
+            "shape": None,
+        }
+    )
+    assert resp.status_code == 201, resp.text
+    planted_artifacts = []
+    for g, group in enumerate(groups):
+        planted_artifacts.append(
+            {
+                "key": f"group-{g}",
+                "members": [str(identity_mod.forward(identity_key, shard, e)) for e in group],
+                "content": [{"values": [f"group {g}"]}],
+                "parent": [] if g == 0 else ["group-0"],
+            }
+        )
+    resp = server.publish_artifacts(
+        ARTIFACTS_LAYER, addressing="tessera", idset=idset, artifacts=planted_artifacts
+    )
+    assert resp.status_code == 201, resp.text
+    # A publication's memberships are served from the tick that publishes them, which a flush
+    # request runs.
+    requests.post(
+        f"{server.control_base}/control/flush",
+        headers={"Authorization": f"Bearer {server.operator_credential}"},
+        timeout=10,
+    ).raise_for_status()
+    deadline = time.monotonic() + 60
+    while True:
+        probe = server.artifacts(token, view=VIEW, layer=ARTIFACTS_LAYER, fields=["masked_count"])
+        assert probe.status_code == 200, probe.text
+        pages = wire.split_items_frames(probe.content).pages
+        if pages and _artifacts_scan(pages[0][0]).number_values - {0}:
+            break
+        assert time.monotonic() < deadline, "the published memberships were never served"
+        time.sleep(0.1)
+
+    artifact_ids: set[int] = set()
+    artifact_id_values: set[int] = set()
+    artifact_number_values: set[int] = set()
+    artifact_shape_windows: set[int] = set()
+    artifact_cursor_windows: set[int] = set()
+    artifact_text = b""
+    body = {
+        "view": VIEW,
+        "layer": ARTIFACTS_LAYER,
+        "fields": ARTIFACTS_FIELDS,
+        "filters": {"region": {"bbox": [0.0, 0.0, GRID_MAX / 2, GRID_MAX]}},
+        "keep_unmatched": True,
+        "page_rows": 3,
+        "pages": 2,
+    }
+    responses = 0
+    while True:
+        resp = server.artifacts(token, **body)
+        assert resp.status_code == 200, resp.text
+        raw = resp.content
+        assert identity_key_raw not in raw, "identity key's raw 16 bytes found in an artifacts body"
+        responses += 1
+        decoded = wire.split_items_frames(raw)
+        artifact_text += b"\n".join(decoded.json_payloads) + b"\n"
+        for cursor in _items_cursors(decoded):
+            artifact_cursor_windows |= _cursor_windows(cursor)
+        for records, _end in decoded.pages:
+            scan = _artifacts_scan(records)
+            artifact_ids.update(scan.tessera_ids)
+            artifact_id_values |= scan.id_values
+            artifact_number_values |= scan.number_values
+            artifact_shape_windows |= scan.shape_windows
+            artifact_text += "\n".join(scan.text).encode() + b"\n"
+        next_cursor = decoded.trailer["next"]
+        if next_cursor is None:
+            break
+        body["cursor"] = next_cursor
+    assert responses > 1, "the artifacts read must be carried across responses by its cursor"
+    assert artifact_ids, "the artifacts read must return rows to mean anything"
+    assert artifact_ids <= artifact_id_values, "the sweep missed the identifiers it was sent"
+    assert artifact_shape_windows, "the artifacts read must carry shapes to sweep"
+    # The artifacts' own entities are internal too: every one this read served, by inverting the
+    # identifiers it was sent.
+    artifact_entities = {identity_mod.invert(identity_key, t)[1] for t in artifact_ids}
+    assert artifact_entities.isdisjoint(artifact_ids)
+    leaked = artifact_id_values & (target_ids | artifact_entities)
+    assert not leaked, f"entity id(s) in an artifacts identifier column: {sorted(leaked)[:20]}"
+    leaked = (artifact_number_values | artifact_shape_windows) & (
+        target_ids_high | artifact_entities
+    )
+    assert not leaked, f"entity id(s) in an artifacts number or shape: {sorted(leaked)[:20]}"
+    leaked = artifact_cursor_windows & (target_ids | artifact_entities)
+    assert not leaked, f"entity id(s) in the bytes of an artifacts cursor: {sorted(leaked)[:20]}"
+    for half in (identity_key.k0, identity_key.k1):
+        assert half not in artifact_id_values | artifact_number_values | artifact_cursor_windows
+    leaked = _decimal_windows(artifact_text, SAFE_ID_FLOOR) & (target_ids_high | artifact_entities)
+    assert not leaked, f"entity id(s) as decimal text in an artifacts body: {sorted(leaked)[:20]}"
+    assert identity_key_hex not in artifact_text.decode("utf-8", errors="replace")
 
     # --- server log: text, so scan for decimal substrings, not just raw LE bytes -----------------
     log_bytes = log_path.read_bytes()

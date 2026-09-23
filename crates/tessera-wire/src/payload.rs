@@ -53,7 +53,7 @@ pub const FRAME_SUB_CELLS: u8 = 2;
 pub const FRAME_POINTS: u8 = 3;
 pub const FRAME_TRAILER: u8 = 4;
 pub const FRAME_ARTIFACTS: u8 = 5;
-pub const FRAME_ITEMS_HEAD: u8 = 6;
+pub const FRAME_RECORDS_HEAD: u8 = 6;
 pub const FRAME_RECORDS: u8 = 7;
 pub const FRAME_PAGE_END: u8 = 8;
 
@@ -464,9 +464,10 @@ pub fn trailer_frame(json: &[u8]) -> Vec<u8> {
     frame(FRAME_TRAILER, json.len(), |out| out.extend_from_slice(json))
 }
 
-/// The items head frame around the caller's JSON.
-pub fn items_head_frame(json: &[u8]) -> Vec<u8> {
-    frame(FRAME_ITEMS_HEAD, json.len(), |out| out.extend_from_slice(json))
+/// The head frame of a bulk read, `POST /v1/items` or `POST /v1/artifacts`, around the caller's
+/// JSON.
+pub fn records_head_frame(json: &[u8]) -> Vec<u8> {
+    frame(FRAME_RECORDS_HEAD, json.len(), |out| out.extend_from_slice(json))
 }
 
 /// The page end frame around the caller's JSON.
@@ -529,7 +530,7 @@ pub fn split_frames(body: &[u8]) -> Result<Vec<(u8, &[u8])>, FrameError> {
                 | FRAME_POINTS
                 | FRAME_TRAILER
                 | FRAME_ARTIFACTS
-                | FRAME_ITEMS_HEAD
+                | FRAME_RECORDS_HEAD
                 | FRAME_RECORDS
                 | FRAME_PAGE_END
         ) {

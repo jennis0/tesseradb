@@ -1,5 +1,6 @@
 //! A reader for OGC well-known binary: `Polygon` and `MultiPolygon` only, either byte order,
-//! Z and M ordinates skipped, an EWKB SRID skipped.
+//! Z and M ordinates skipped, an EWKB SRID skipped. And a writer of `MultiPolygon`, for a shape
+//! served in bulk.
 //!
 //! A polygon in a table arrives as WKB because that is what GeoParquet writes and what every GIS
 //! tool exports. Nothing else is read: a `Point`, a `LineString` or a collection is a refusal
@@ -156,9 +157,84 @@ pub fn read_wkb(bytes: &[u8]) -> Result<RingsF64, WkbError> {
     Ok(parts)
 }
 
+/// Write parts → rings → `(x, y)` as one little-endian two-dimensional `MultiPolygon`. Every
+/// ring is written closed and with at least four points, as a reader of polygons requires: a ring
+/// whose last vertex is not its first is closed by repeating the first, and a ring still shorter
+/// than four, such as a hull over one or two members, repeats its first vertex after itself. Every
+/// vertex written is one the ring holds, so a degenerate ring is a zero-area polygon over them.
+pub fn write_wkb(parts: &RingsF64) -> Vec<u8> {
+    let vertices: usize = parts.iter().flatten().map(|ring| ring.len() + 1).sum();
+    let mut out = Vec::with_capacity(9 + parts.len() * 9 + vertices * 16);
+    let word = |out: &mut Vec<u8>, n: usize| {
+        out.extend_from_slice(&u32::try_from(n).expect("a WKB count fits u32").to_le_bytes())
+    };
+    out.push(1);
+    word(&mut out, 6);
+    word(&mut out, parts.len());
+    for rings in parts {
+        out.push(1);
+        word(&mut out, 3);
+        word(&mut out, rings.len());
+        for ring in rings {
+            let written = closed(ring);
+            word(&mut out, written.len());
+            for (x, y) in written {
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+            }
+        }
+    }
+    out
+}
+
+/// `ring` closed and with at least four points; an empty ring stays empty.
+fn closed(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let Some(&first) = ring.first() else {
+        return Vec::new();
+    };
+    let mut out = ring.to_vec();
+    if ring.len() == 1 || ring.last() != Some(&first) {
+        out.push(first);
+    }
+    while out.len() < 4 {
+        out.insert(1, first);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ring over one point, two points or three collinear points is written closed with at
+    /// least four points, all of them the ring's own.
+    #[test]
+    fn a_degenerate_ring_is_written_closed_with_four_points() {
+        let (a, b, c) = ((1.0, 2.0), (3.0, 4.0), (5.0, 6.0));
+        for ring in [vec![a], vec![a, b], vec![a, b, c], vec![a, a]] {
+            let read = read_wkb(&write_wkb(&vec![vec![ring.clone()]])).unwrap();
+            let written = &read[0][0];
+            assert!(written.len() >= 4, "{ring:?} was written as {written:?}");
+            assert_eq!(written.first(), written.last(), "{ring:?} was written open");
+            assert!(written.iter().all(|v| ring.contains(v)), "{written:?} left {ring:?}");
+        }
+    }
+
+    #[test]
+    fn a_written_multipolygon_reads_back_with_its_rings_closed() {
+        let parts: RingsF64 = vec![
+            vec![vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0)]],
+            vec![vec![(9.0, 9.0), (10.0, 9.0), (10.0, 10.0), (9.0, 9.0)], vec![(5.5, 6.5)]],
+        ];
+        let closed: RingsF64 = vec![
+            vec![vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 0.0)]],
+            vec![
+                vec![(9.0, 9.0), (10.0, 9.0), (10.0, 10.0), (9.0, 9.0)],
+                vec![(5.5, 6.5); 4],
+            ],
+        ];
+        assert_eq!(read_wkb(&write_wkb(&parts)).unwrap(), closed);
+    }
 
     fn le_polygon(rings: &[&[(f64, f64)]], type_word: u32, dims: usize) -> Vec<u8> {
         let mut b = vec![1u8];

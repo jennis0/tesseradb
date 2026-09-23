@@ -7,11 +7,11 @@
 # `additionalProperties: false`. The contract itself is `docs/design/contracts.md` §3 (the API)
 # and §5 (the framing); where the two disagree, contracts wins and this file is wrong.
 #
-# What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport` and `POST /v1/items`.
-# They are not JSON, so each is declared as `application/octet-stream` and described in prose; the
-# frame layout is contracts §5, and `docs/openapi/README.md` carries worked decodes in Python and
-# in JavaScript. The JSON frames of `POST /v1/items` have schemas below (`ItemsHead`,
-# `ItemsPageEnd`, `ItemsTrailer`).
+# What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport`, `POST /v1/items` and
+# `POST /v1/artifacts`. They are not JSON, so each is declared as `application/octet-stream` and
+# described in prose on its route, and `docs/openapi/README.md` carries worked decodes in Python
+# and in JavaScript. The JSON frames of the two bulk reads have schemas
+# below (`ItemsHead`, `ArtifactsHead`, `PageEnd`, `RecordsTrailer`).
 openapi: 3.1.0
 info:
   title: Tessera viewer and session planes
@@ -529,8 +529,8 @@ paths:
         - `6` head: JSON `ItemsHead`, exactly one, first.
         - `7` records: one Arrow IPC stream holding one batch of up to `page_rows` rows. Zero or
           more, each followed by a page end.
-        - `8` page end: JSON `ItemsPageEnd`, carrying the cursor to resume after that page.
-        - `4` trailer: JSON `ItemsTrailer`, exactly one, last.
+        - `8` page end: JSON `PageEnd`, carrying the cursor to resume after that page.
+        - `4` trailer: JSON `RecordsTrailer`, exactly one, last.
 
         A body without a trailer is incomplete. A client whose connection drops resumes from the
         last page end it received and discards a records frame that no page end follows. A
@@ -711,6 +711,133 @@ paths:
                 $ref: "#/components/schemas/Error"
         "422":
           $ref: "#/components/responses/Contract"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /v1/artifacts:
+    post:
+      tags: [viewer]
+      operationId: artifacts
+      summary: Every artifact of one layer this principal is served, page by page, with the properties the caller names.
+      description: |
+        The response is framed as `POST /v1/items`' is: a `6` head (JSON `ArtifactsHead`), `7`
+        records frames each followed by an `8` page end (JSON `PageEnd`), and a `4` trailer
+        (JSON `RecordsTrailer`). Its pages, budgets, page ends, trailer and cursor rules are that
+        route's, and a read is carried across responses by passing each response's `next` back as
+        `cursor` until it is null. Every page is built from the latest data with the visible set
+        composed again, so a deletion or suppression accepted during a read applies from the next
+        page.
+
+        **Rows.** Every artifact of `layer` this principal is served at the moment its page is
+        built, ordered by level and then by publication order within the level. Each page runs the
+        viewport's own verdict for each artifact it walks: the artifact's label, its layer's
+        existence criterion over this principal's visible members, and, where the layer declares
+        content, whether this principal may read it. An attached artifact, such as a clustering's
+        label, is served only while the artifact it is attached to is. Publication order is the
+        publisher's own and is not grouped by access labels.
+
+        **Narrowing.** `level` reads one level of a levelled layer. `parent` reads the artifacts
+        naming that artifact among their parents; a parent this principal is not served answers
+        exactly as a parent with no children does. `q` keeps the artifacts whose key, or whose
+        first served text content, contains it case-insensitively; an authored shape is not text
+        and is never searched. `filters` keeps the artifacts with at least one visible member
+        matching it, and adds a `matched_count` column; under `keep_unmatched` every served
+        artifact is returned, those with no matching member with a zero. An attached artifact,
+        such as a label, is counted by the artifact it is attached to: its `matched_count` is its
+        target's, it is kept or dropped as its target is, and the head's `matched` counts it so,
+        as the viewport gives it its target's matched bit. A request with `filters` evaluates the
+        filter over the whole view once per response.
+
+        **Columns.** `tessera_id` (`uint64`) first, then the named properties in the order named,
+        then `matched_count` (`uint64`) whenever the request carries `filters`. `key`: `utf8`, null
+        where the publisher supplied none. `level`: `uint32`, the declared level, 0 on a layer
+        without levels. `parents`: `list<uint64>`, the parents this principal is also served.
+        `target`: `uint64`, the artifact this one is attached to, null where none. `masked_count`:
+        `uint64`, how many members this principal can see. `content`: `list<utf8>`, the one set of
+        supplied content this principal is served, positional to the layer's `supplied_content`,
+        with an authored shape's slot empty: the shape is served as `shape`, for this view alone.
+        `centroid`: `float64` columns `centroid_x`, `centroid_y`; `box`: `float64` columns
+        `box_x_min`, `box_y_min`, `box_x_max`, `box_y_max`; both over the members this principal
+        can see, in the view's coordinates as `POST /v1/items` converts `position`, null where it
+        sees none. A centroid is the members' mean in the view's projected space, converted: on a
+        geographic view it is not the mean of their longitudes and latitudes. `shape`: `binary`,
+        a WKB `MultiPolygon` in the view's coordinates, null on a layer that draws no geometry: a
+        derived hull over the members this principal can see, or a predicate or authored shape
+        whole, as `POST /v1/artifacts/{tessera_id}` serves it. Every ring is closed and holds at
+        least four points: a hull over one or two members, or over members on one line, is a
+        zero-area polygon over their positions, repeated.
+
+        **Cursor.** Bound to the route, the view and its incarnation, the layer, the `level`
+        named and the credential that received it. A cursor that fails any of these is one `422`
+        with one detail; one issued under another idset is the `409` below.
+
+        Runs under the bulk-read admission limit, `serve.bulk_admission`, with `POST /v1/items`. A
+        read past the limit is refused at once with `429`; none waits.
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArtifactsRequest"
+      responses:
+        "200":
+          description: The framed body, with `POST /v1/items`' headers.
+          headers:
+            x-tessera-identity-key:
+              description: As on `POST /v1/items`.
+              required: false
+              schema:
+                type: string
+            x-tessera-region:
+              description: "Present exactly when the request's `filters` carried a `region` leaf, with the viewport's values."
+              required: false
+              schema:
+                type: string
+                pattern: "^(exact|cover; depth=[0-9]+)$"
+            x-tessera-server-us:
+              description: Server time from admission to the head, microseconds.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+            x-tessera-admission-us:
+              description: Time spent being admitted, microseconds.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: A head, records frames each followed by a page end, and a trailer, as on `POST /v1/items`.
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: "Unknown `view`, or one this principal cannot reach."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "`idset` was supplied and differs from the deployment's, or the cursor was issued under another idset."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "The viewport's filter refusals; a body with an unknown key or missing `view`, `layer` or `fields`; a layer that is unknown or not published to this principal, with one detail for both; `level` on a layer whose kind has one level, or naming a level the layer does not hold; an unknown or repeated property; `parent` with `q`; `page_rows` or `pages` of 0; `count` with a `cursor`; a `compression` outside its values; a cursor that does not open for this request."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429":
           $ref: "#/components/responses/Backpressure"
         "500":
@@ -1720,7 +1847,7 @@ components:
           description: The publisher's own key, where they supplied one.
         name:
           type: string
-          description: The artifact's first supplied text content, where this principal may read it. An artifact whose content cannot be served is absent from the page entirely rather than served with this field empty.
+          description: The artifact's first supplied text content, where this principal may read it; absent where the first content is an authored shape, which is not text. An artifact whose content cannot be served is absent from the page entirely rather than served with this field empty.
         masked_count:
           type: integer
           description: How many of this artifact's members this principal can see — never how many it has, and never moved by `filters`.
@@ -1952,6 +2079,84 @@ components:
           minimum: 0
           description: As on `POST /v1/items/{tessera_id}`; a mismatch is `409`.
 
+    ArtifactsRequest:
+      type: object
+      additionalProperties: false
+      required: [view, layer, fields]
+      properties:
+        view:
+          type: string
+          description: The view whose row space counts are taken in, from `/v1/meta`.
+        layer:
+          type: string
+          description: A layer `/v1/meta` publishes to this principal. Attached layers are allowed.
+        level:
+          type: integer
+          minimum: 0
+          description: Only artifacts at this level, on a levelled layer.
+        parent:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: string
+              pattern: "^[0-9]+$"
+          description: A `tessera_id`. Only the artifacts naming it among their parents. Not with `q`.
+        q:
+          type: string
+          description: Only artifacts whose key, or first served text content, contains this, case-insensitively. Not with `parent`.
+        filters:
+          $ref: "#/components/schemas/FilterExpr"
+        keep_unmatched:
+          type: boolean
+          description: Return every served artifact under `filters`, those with no matching member included.
+        count:
+          type: boolean
+          description: Put the numbers of artifacts served and of those matching in the head. Only on a request with no `cursor`.
+        fields:
+          type: array
+          items:
+            type: string
+            enum: [key, level, parents, target, masked_count, content, centroid, box, shape]
+          description: Properties to return, each once, in this order.
+        page_rows:
+          type: integer
+          minimum: 1
+          description: Rows per page, capped by `selection.max_page_rows`. Absent is the cap.
+        pages:
+          type: integer
+          minimum: 1
+          description: The most pages this response may carry.
+        cursor:
+          type: string
+          description: A previous response's `next`, unchanged.
+        compression:
+          type: string
+          enum: [zstd]
+          description: Compress every records frame's Arrow buffers with zstd.
+        idset:
+          type: integer
+          minimum: 0
+          description: As on `POST /v1/items/{tessera_id}`; a mismatch is `409`.
+
+    ArtifactsHead:
+      type: object
+      additionalProperties: false
+      required: [page_rows]
+      description: The kind-6 frame of a `POST /v1/artifacts` body. `served` and `matched` are present exactly when the request asked for `count`.
+      properties:
+        page_rows:
+          type: integer
+          minimum: 1
+          description: The page size used, after the cap.
+        served:
+          type: integer
+          minimum: 0
+          description: The artifacts the request selects that this principal is served, at the start of the response.
+        matched:
+          type: integer
+          minimum: 0
+          description: Of those, the ones with a visible member matching `filters`; `served` without one.
+
     ItemsHead:
       type: object
       additionalProperties: false
@@ -1975,7 +2180,7 @@ components:
           minimum: 0
           description: Of those, the ones matching `filters`; `visible` without one.
 
-    ItemsPageEnd:
+    PageEnd:
       type: object
       additionalProperties: false
       required: [next, ended_by]
@@ -1989,11 +2194,11 @@ components:
           enum: [rows, bytes, time, end]
           description: "`rows`: the page holds `page_rows`. `bytes`: the next row would have taken it past `max_page_bytes`. `time`: the response's time ran out, or the stream deadline cancelled it, and the response ends after this page. `end`: no row remains."
 
-    ItemsTrailer:
+    RecordsTrailer:
       type: object
       additionalProperties: false
       required: [pages, rows, next, ended_by, stream_us]
-      description: The kind-4 frame of a `POST /v1/items` body.
+      description: The kind-4 frame of a `POST /v1/items` or `POST /v1/artifacts` body.
       properties:
         pages:
           type: integer

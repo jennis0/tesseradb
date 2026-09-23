@@ -26,13 +26,13 @@ mod simplify;
 mod wkb;
 mod wkt;
 
-pub use canon::{CanonError, CanonReport, ShapeF64};
+pub use canon::{CanonError, CanonReport, RingsF64, ShapeF64};
 pub use conic::Conic;
 pub use decompose::{contexts_at, decompose, BoundaryCell, Class, Decomposition, Rect, Region};
 pub use encode::DecodeError;
 pub use polygon::{Part, PolyCtx, Polygon, PolygonRegion, Ring, Vertex};
 pub use project::{Space, DENSIFY_TOLERANCE_CELLS};
-pub use wkb::{read_wkb, WkbError};
+pub use wkb::{read_wkb, write_wkb, WkbError};
 pub use wkt::{read_wkt, WktError};
 
 /// A position on the 32-bit-per-axis grid: what `fixed32` produces and `unsplit32` recovers.

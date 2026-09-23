@@ -1,9 +1,10 @@
 //! The cursor a page end carries: a position sealed to the read it belongs to.
 //!
 //! XChaCha20-Poly1305 under a key derived from the deployment's identity key, with a random
-//! 24-byte nonce drawn for each cursor. The route, the format, the view, the view's incarnation and
-//! the session's authorisation-data hash are the associated data, so a cursor presented under any
-//! other binding does not open, and every such failure is the one refusal
+//! 24-byte nonce drawn for each cursor. The route, the format, the view, the view's incarnation,
+//! the session's authorisation-data hash and, on the artifacts route, the layer, its entity and
+//! the level named are the associated data, so a cursor presented under any other binding does not
+//! open, and every such failure is the one refusal
 //! [`EngineError::CursorRefused`]. The idset and the order are sealed inside: another idset has a
 //! refusal of its own, and a request that names no order takes the cursor's. A client can read
 //! nothing from a cursor and can build none, so no position in one is used before it has opened.
@@ -20,13 +21,14 @@ use crate::error::{EngineError, Result};
 const KEY_DOMAIN: &[u8] = b"tessera-records-cursor-key-v1";
 const AAD_DOMAIN: &[u8] = b"tessera-records-cursor-v1";
 /// The sealed payload's layout. A cursor of another format does not open.
-const FORMAT: u8 = 3;
+const FORMAT: u8 = 4;
 const NONCE_LEN: usize = 24;
 
 /// The route a cursor was issued on, bound into its associated data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Route {
     Items = 1,
+    Artifacts = 2,
 }
 
 /// What a cursor is bound to besides its payload.
@@ -35,11 +37,21 @@ pub(super) struct Binding<'a> {
     pub(super) view: &'a str,
     pub(super) incarnation: u64,
     pub(super) auth_data_hash: [u8; 32],
+    /// The layer an artifacts read is of; `None` on the items route.
+    pub(super) layer: Option<LayerBinding<'a>>,
+}
+
+/// The layer an artifacts cursor is bound to: its name, its own entity, which a drop and a later
+/// registration never share, and the level the request named, if any.
+pub(super) struct LayerBinding<'a> {
+    pub(super) name: &'a str,
+    pub(super) entity: u64,
+    pub(super) level: Option<u32>,
 }
 
 impl Binding<'_> {
     fn associated_data(&self) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(AAD_DOMAIN.len() + 2 + 8 + self.view.len() + 8 + 32);
+        let mut aad = Vec::with_capacity(AAD_DOMAIN.len() + 2 + 8 + self.view.len() + 8 + 32 + 32);
         aad.extend_from_slice(AAD_DOMAIN);
         aad.push(FORMAT);
         aad.push(self.route as u8);
@@ -47,6 +59,22 @@ impl Binding<'_> {
         aad.extend_from_slice(self.view.as_bytes());
         aad.extend_from_slice(&self.incarnation.to_le_bytes());
         aad.extend_from_slice(&self.auth_data_hash);
+        match &self.layer {
+            None => aad.push(0),
+            Some(layer) => {
+                aad.push(1);
+                aad.extend_from_slice(&(layer.name.len() as u64).to_le_bytes());
+                aad.extend_from_slice(layer.name.as_bytes());
+                aad.extend_from_slice(&layer.entity.to_le_bytes());
+                match layer.level {
+                    None => aad.push(0),
+                    Some(level) => {
+                        aad.push(1);
+                        aad.extend_from_slice(&level.to_le_bytes());
+                    }
+                }
+            }
+        }
         aad
     }
 }
@@ -191,6 +219,41 @@ impl ItemsCursor {
     }
 }
 
+/// An artifacts cursor's sealed payload: the idset, and the last `(level, ordinal)` the read has
+/// returned or passed over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ArtifactsCursor {
+    pub(super) idset: u32,
+    pub(super) scan: Option<(u32, u32)>,
+}
+
+/// `idset, has_scan, level, ordinal`, little-endian.
+const ARTIFACTS_PAYLOAD_LEN: usize = 4 + 1 + 4 + 4;
+
+impl ArtifactsCursor {
+    pub(super) fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(ARTIFACTS_PAYLOAD_LEN);
+        out.extend_from_slice(&self.idset.to_le_bytes());
+        out.push(u8::from(self.scan.is_some()));
+        let (level, ordinal) = self.scan.unwrap_or((0, 0));
+        out.extend_from_slice(&level.to_le_bytes());
+        out.extend_from_slice(&ordinal.to_le_bytes());
+        out
+    }
+
+    /// As [`ItemsCursor::decode`], a payload that opened and does not parse is refused.
+    pub(super) fn decode(payload: &[u8]) -> Result<ArtifactsCursor> {
+        if payload.len() != ARTIFACTS_PAYLOAD_LEN || payload[4] > 1 {
+            return Err(EngineError::CursorRefused);
+        }
+        let u32_at = |at: usize| u32::from_le_bytes(payload[at..at + 4].try_into().expect("4"));
+        Ok(ArtifactsCursor {
+            idset: u32_at(0),
+            scan: (payload[4] == 1).then(|| (u32_at(5), u32_at(9))),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +266,7 @@ mod tests {
             view,
             incarnation,
             auth_data_hash: [hash; 32],
+            layer: None,
         }
     }
 
@@ -232,6 +296,43 @@ mod tests {
             rotated.open(&binding("s0", 0, 1), &token),
             Err(EngineError::CursorRefused)
         ));
+    }
+
+    /// An artifacts cursor opens only for its layer's name, entity and named level, and never
+    /// under an items binding for the same view and credential.
+    #[test]
+    fn an_artifacts_cursor_opens_only_for_its_layer_and_level() {
+        let key = CursorKey::of(KEY);
+        let artifacts = |name, entity, level| Binding {
+            route: Route::Artifacts,
+            view: "s0",
+            incarnation: 0,
+            auth_data_hash: [1; 32],
+            layer: Some(LayerBinding {
+                name,
+                entity,
+                level,
+            }),
+        };
+        let cursor = ArtifactsCursor {
+            idset: 3,
+            scan: Some((1, 40)),
+        };
+        let token = key.seal(&artifacts("clusters/a", 9, Some(1)), &cursor.encode());
+        let opened = key.open(&artifacts("clusters/a", 9, Some(1)), &token).unwrap();
+        assert_eq!(ArtifactsCursor::decode(&opened).unwrap(), cursor);
+        for other in [
+            artifacts("clusters/b", 9, Some(1)),
+            artifacts("clusters/a", 8, Some(1)),
+            artifacts("clusters/a", 9, None),
+            artifacts("clusters/a", 9, Some(0)),
+            binding("s0", 0, 1),
+        ] {
+            assert!(matches!(
+                key.open(&other, &token),
+                Err(EngineError::CursorRefused)
+            ));
+        }
     }
 
     #[test]

@@ -54,6 +54,26 @@ def test_items_passes_a_refusal_through(db):
         db.viewer().items("map", ["no_such_field"])
 
 
+def test_artifacts_reads_a_layer_across_responses(db):
+    """A layer published from Python is read whole from Python, carried by its cursor."""
+    viewer = db.viewer()
+    rows, cursor = [], None
+    while True:
+        table, cursor = viewer.artifacts(
+            "map", "clusters", ["key", "masked_count"], page_rows=1, pages=1, cursor=cursor
+        )
+        rows += table.to_pylist()
+        if cursor is None:
+            break
+    assert [row["masked_count"] for row in rows] == [20]
+
+
+def test_artifacts_passes_a_refusal_through(db):
+    """A layer the database does not publish is the server's refusal, raised."""
+    with pytest.raises(Refusal):
+        db.viewer().artifacts("map", "no/such/layer", ["key"])
+
+
 # ---------------------------------------------------------------------------- the artifacts frame
 
 
