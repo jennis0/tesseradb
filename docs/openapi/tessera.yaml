@@ -9,8 +9,8 @@
 #
 # What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport`, `POST /v1/items` and
 # `POST /v1/artifacts`. They are not JSON, so each is declared as `application/octet-stream` and
-# described in prose; the frame layout is contracts §5, and `docs/openapi/README.md` carries
-# worked decodes in Python and in JavaScript. The JSON frames of the two bulk reads have schemas
+# described in prose on its route, and `docs/openapi/README.md` carries worked decodes in Python
+# and in JavaScript. The JSON frames of the two bulk reads have schemas
 # below (`ItemsHead`, `ArtifactsHead`, `PageEnd`, `RecordsTrailer`).
 openapi: 3.1.0
 info:

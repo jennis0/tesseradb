@@ -646,8 +646,6 @@ class Viewer:
             while next is not None:
                 more, next = v.items("papers", ["title"], cursor=next)
         """
-        import pyarrow as pa
-
         request: dict = {"view": view, "fields": list(fields)}
         given = {
             "system_fields": None if system_fields is None else list(system_fields),
@@ -661,13 +659,7 @@ class Viewer:
             "compression": compression,
             "idset": idset,
         }
-        request.update({key: value for key, value in given.items() if value is not None})
-        batches, trailer = _records_pages("items", self._request("POST", "/v1/items", request))
-        if batches:
-            table = pa.Table.from_batches(batches)
-        else:
-            table = pa.table({"tessera_id": pa.array([], pa.uint64())})
-        return table, trailer["next"]
+        return self._bulk_read("items", request, given)
 
     def artifacts(
         self,
@@ -695,8 +687,6 @@ class Viewer:
 
             table, next = v.artifacts("papers", "clusters/topics", ["key", "masked_count"])
         """
-        import pyarrow as pa
-
         request: dict = {"view": view, "layer": layer, "fields": list(fields)}
         given = {
             "level": level,
@@ -711,10 +701,16 @@ class Viewer:
             "compression": compression,
             "idset": idset,
         }
+        return self._bulk_read("artifacts", request, given)
+
+    def _bulk_read(self, route: str, request: dict, given: dict):
+        """One response of `POST /v1/<route>`: `request` with every `given` field that is not
+        `None`, answered as `(table, next)`; a response with no row is a table of `tessera_id`
+        alone."""
+        import pyarrow as pa
+
         request.update({key: value for key, value in given.items() if value is not None})
-        batches, trailer = _records_pages(
-            "artifacts", self._request("POST", "/v1/artifacts", request)
-        )
+        batches, trailer = _records_pages(route, self._request("POST", f"/v1/{route}", request))
         if batches:
             table = pa.Table.from_batches(batches)
         else:

@@ -18,6 +18,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 
+use tessera_engine::filter::FilterExpr;
+use tessera_engine::viewport::MetaView;
 use tessera_engine::{
     ArtifactsRequest, CancelToken, EngineError, ItemsRequest, PageEnd, RecordsHead, RecordsLimits,
     RecordsOrder, RecordsSink, RecordsTrailer, RegionVerdict, SinkClosed, SinkResult,
@@ -201,9 +203,10 @@ pub(crate) async fn items(
         Err(answer) => return Ok(*answer),
     };
     let compression = req.compression;
-    bulk_read(state, session, "items", "visible", compression, move |state, session, cancel, sink| {
+    let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
         run_items(state, session, req, cancel, sink)
-    })
+    };
+    bulk_read(state, session, "items", "visible", compression, read)
     .await
 }
 
@@ -218,9 +221,10 @@ pub(crate) async fn artifacts(
         Err(answer) => return Ok(*answer),
     };
     let compression = req.compression;
-    bulk_read(state, session, "artifacts", "served", compression, move |state, session, cancel, sink| {
+    let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
         run_artifacts(state, session, req, cancel, sink)
-    })
+    };
+    bulk_read(state, session, "artifacts", "served", compression, read)
     .await
 }
 
@@ -353,7 +357,7 @@ fn view_and_filter<'m>(
     session: &tessera_engine::Session,
     view: &str,
     filters: Option<&serde_json::Value>,
-) -> Result<(&'m tessera_engine::viewport::MetaView, Option<tessera_engine::filter::FilterExpr>), ApiError> {
+) -> Result<(&'m MetaView, Option<FilterExpr>), ApiError> {
     // An unknown view and one this principal cannot reach are the viewport's one 404.
     let view = meta
         .resolve_visible_view(view, session.visible_views())
