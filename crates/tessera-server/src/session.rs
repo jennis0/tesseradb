@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{map_engine_error, ApiError};
 use crate::health::{healthz, readyz};
-use crate::state::{bearer_token, AppState};
+use crate::state::{AppState, SessionCredential};
 
 pub fn router(state: Arc<AppState>) -> Router {
     // The **development** seam covers this plane as well as the viewer plane: on a laptop the
@@ -56,11 +56,9 @@ struct AuthoriseResp {
 
 async fn authorise(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: SessionCredential,
     Json(req): Json<AuthoriseReq>,
 ) -> Result<Json<AuthoriseResp>, ApiError> {
-    state.check_bearer(bearer_token(&headers), &state.session_credential)?;
-
     let auth_data = base64::engine::general_purpose::STANDARD
         .decode(&req.auth_data)
         .map_err(|e| ApiError::Contract(format!("auth_data is not valid base64: {e}")))?;
@@ -109,10 +107,9 @@ struct RevokeReq {
 
 async fn revoke(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    _: SessionCredential,
     Json(req): Json<RevokeReq>,
 ) -> Result<StatusCode, ApiError> {
-    state.check_bearer(bearer_token(&headers), &state.session_credential)?;
     state.sessions.lock().revoke(req.token_id);
     // Drop the revoked session's row projections. The registry removal above is what makes the
     // session unusable (`authenticated_session` now returns `BadCredential`); this is memory hygiene

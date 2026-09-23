@@ -1295,18 +1295,76 @@ async fn send_viewer_probe(
         req = req.bearer_auth(credential);
     }
     if *method == reqwest::Method::POST {
-        req = match kind {
-            Malformed::Syntax => req
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body("{"),
-            Malformed::ContentType => req
-                .header(reqwest::header::CONTENT_TYPE, "text/plain")
-                .body(viewer_body(path).to_string()),
-            Malformed::Shape => req.json(&json!("not a request object")),
-            _ => req.json(&viewer_body(path)),
-        };
+        req = with_body(req, kind, &viewer_body(path));
     }
     req.send().await.unwrap()
+}
+
+/// `req` carrying `body` as JSON, or malformed as `kind`.
+fn with_body(
+    req: reqwest::RequestBuilder,
+    kind: Malformed,
+    body: &Value,
+) -> reqwest::RequestBuilder {
+    match kind {
+        Malformed::Syntax => req
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{"),
+        Malformed::ContentType => req
+            .header(reqwest::header::CONTENT_TYPE, "text/plain")
+            .body(body.to_string()),
+        Malformed::Shape => req.json(&json!("not a request object")),
+        _ => req.json(body),
+    }
+}
+
+/// **Both session-plane routes refuse a caller without the session credential before they read
+/// the body.** With no credential or a wrong one, a request the route accepts and each malformed
+/// body answer 401, so an unauthenticated caller learns nothing about the request shape and no
+/// body is buffered for them. With the credential, the malformed bodies answer the refusal the
+/// route gives them, so the 401s are not the route refusing everything.
+#[tokio::test]
+async fn both_session_routes_require_the_credential_before_the_body() {
+    let doc = description();
+    let f = fixture().await;
+    let auth_data = base64::engine::general_purpose::STANDARD.encode(r#"{"terms":["0"]}"#);
+    let routes = [
+        ("/session/authorise", json!({ "auth_data": auth_data })),
+        ("/session/revoke", json!({ "token_id": 1 })),
+    ];
+    let malformed = [
+        (Malformed::Syntax, 400),
+        (Malformed::ContentType, 415),
+        (Malformed::Shape, 422),
+    ];
+    for (path, body) in &routes {
+        let url = f.server.session_url(path);
+        let kinds = std::iter::once(Malformed::No).chain(malformed.iter().map(|(kind, _)| *kind));
+        for kind in kinds {
+            for credential in [None, Some("not-the-session-credential")] {
+                let mut req = f.server.client.post(url.clone());
+                if let Some(credential) = credential {
+                    req = req.bearer_auth(credential);
+                }
+                let resp = with_body(req, kind, body).send().await.unwrap();
+                assert_eq!(
+                    resp.status().as_u16(),
+                    401,
+                    "POST {path} ({kind:?}) with credential {credential:?}"
+                );
+                assert_refusal(&doc, resp, 401, "bad-credential").await;
+            }
+        }
+        for (kind, status) in malformed {
+            let req = f.server.client.post(url.clone()).bearer_auth(SESSION_CREDENTIAL);
+            let resp = with_body(req, kind, body).send().await.unwrap();
+            assert_eq!(
+                resp.status().as_u16(),
+                status,
+                "POST {path} ({kind:?}) with the session credential"
+            );
+        }
+    }
 }
 
 /// A body each POST route on the viewer plane accepts. A described POST route with no entry here

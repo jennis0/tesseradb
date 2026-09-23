@@ -797,6 +797,25 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for ViewerSession {
     }
 }
 
+/// The session plane's authentication, as an extractor: the request's bearer token checked against
+/// the session credential by [`AppState::check_bearer`].
+///
+/// Both session handlers name it first after the state, so a caller without the credential is
+/// refused before the body is read.
+pub struct SessionCredential;
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for SessionCredential {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, ApiError> {
+        state.check_bearer(bearer_token(&parts.headers), &state.session_credential)?;
+        Ok(SessionCredential)
+    }
+}
+
 impl AppState {
     /// Run `f` on the blocking pool behind the compute gate. The permits move into the closure, so
     /// they release when the work finishes, not when the caller stops waiting.
