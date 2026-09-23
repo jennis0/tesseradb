@@ -608,10 +608,6 @@ TEXT_LOST_AT_RESTART = (
     "a text column declared live matches nothing after a restart until a fold rebuilds its index"
 )
 
-GROUP_VIEW_RECREATED = (
-    "a group view dropped and recreated loses its scoped families after a fold and a restart"
-)
-
 #: Cases and stages expected to fail as a whole, why, and the exception they fail with. Strict,
 #: so each flips when the cause is fixed.
 EXPECTED_FAILURES = {
@@ -674,20 +670,6 @@ KNOWN = (
         ("restart",),
         ((r"viewport world z\d (filter|highlight) note", ANY),),
         TEXT_LOST_AT_RESTART,
-    ),
-    Known(
-        "recreated-view-families",
-        "group-view-recreated",
-        ("fold-restart",),
-        (
-            (r"viewport quarter:Q2 z\d (filter|highlight) (feel|sentiment)", ANY),
-            (r"viewport world z\d (filter|highlight) pinned", ANY),
-            (r"categories feel@Q2", ANY),
-            (r"suggest feel@Q2 .*", ANY),
-            (r"meta", r"\.scoped_scalars\[\d+\]\.views.*"),
-            (r"item \d+", r"\.body\.scoped\.\w+(\.Q2)?"),
-        ),
-        GROUP_VIEW_RECREATED,
     ),
 )
 
