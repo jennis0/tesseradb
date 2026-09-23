@@ -77,7 +77,12 @@ pub fn fixed32(v: f64, min: f64, max: f64) -> u32 {
 /// The coordinate at the centre of a 32-bit fixed-point position's step: within half a step of
 /// every value [`fixed32`] maps to `q`, a step being `(max - min) / 2^32`.
 pub fn unfixed32(q: u32, min: f64, max: f64) -> f64 {
-    min + (f64::from(q) + 0.5) / FIXED_SPAN * (max - min)
+    unfixed(f64::from(q), min, max)
+}
+
+/// [`unfixed32`] for a position between grid steps, such as a mean of positions.
+pub fn unfixed(q: f64, min: f64, max: f64) -> f64 {
+    min + (q + 0.5) / FIXED_SPAN * (max - min)
 }
 
 /// Split a pair of 32-bit fixed-point axes into the stored `(cell code, sub-cell residual)`.
