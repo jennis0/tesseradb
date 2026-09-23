@@ -740,8 +740,17 @@ fn adopt_derived_structures(
     Arc<crate::shapes::ShapeStore>,
 ) {
     let prefix_dir = &readers.prefix_dir;
+    // Only the structures written over a view's live incarnation. A key dropped and created
+    // again keeps its predecessor's structures listed until a fold, under the same view id and
+    // level version, and they address rows the new view does not have.
+    let incarnation_of = |view: &str| bundle.manifest.incarnation_of(view);
     let manifest_derived_extents: Vec<tessera_store::manifest::DerivedExtent> =
-        across_partitions(bundle, |m| m.derived_extents.iter().cloned());
+        across_partitions(bundle, |m| m.derived_extents.iter().cloned())
+            .into_iter()
+            .filter(|e| {
+                crate::filter::carries_live_view(&incarnation_of, e.view.as_deref(), e.incarnation)
+            })
+            .collect();
 
     // The fold's containment partitions, adopted where their coordinate still holds; a
     // mismatched partition is dropped and the level recomposes on first use.
