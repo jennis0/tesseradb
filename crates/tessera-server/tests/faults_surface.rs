@@ -238,7 +238,11 @@ async fn an_executor_panic_fails_readiness_and_reports_dead() {
         Duration::from_secs(30),
         async || {
             let resp = server.client.get(server.viewer_url("/readyz")).send().await;
-            resp.unwrap().status() == 503
+            let status = resp.unwrap().status();
+            match status == 503 {
+                true => Ok(()),
+                false => Err(format!("/readyz answers {status}")),
+            }
         },
     )
     .await;

@@ -1022,43 +1022,74 @@ pub fn flat_layer(name: &str) -> serde_json::Value {
     })
 }
 
-/// Poll `attempt` every `every` until it gives a value, failing the test if it has not within
-/// `within`.
-pub async fn poll<T>(
+/// One attempt of a wait: a value, or not yet. An attempt that returns `Err` says what it saw,
+/// and the last of those is printed if the wait times out.
+pub trait Attempt<T> {
+    fn outcome(self) -> Result<T, String>;
+}
+
+impl<T> Attempt<T> for Option<T> {
+    fn outcome(self) -> Result<T, String> {
+        self.ok_or_else(String::new)
+    }
+}
+
+impl<T> Attempt<T> for Result<T, String> {
+    fn outcome(self) -> Result<T, String> {
+        self
+    }
+}
+
+impl Attempt<()> for bool {
+    fn outcome(self) -> Result<(), String> {
+        if self {
+            Ok(())
+        } else {
+            Err(String::new())
+        }
+    }
+}
+
+/// Poll `attempt` every `every` until it gives a value, failing the test with the last thing it
+/// saw if it has not within `within`.
+pub async fn poll<T, A: Attempt<T>>(
     what: &str,
     within: std::time::Duration,
     every: std::time::Duration,
-    mut attempt: impl AsyncFnMut() -> Option<T>,
+    mut attempt: impl AsyncFnMut() -> A,
 ) -> T {
     let deadline = std::time::Instant::now() + within;
     loop {
-        if let Some(value) = attempt().await {
-            return value;
+        let seen = match attempt().await.outcome() {
+            Ok(value) => return value,
+            Err(seen) => seen,
+        };
+        if std::time::Instant::now() >= deadline {
+            match seen.is_empty() {
+                true => panic!("{what}: not within {within:?}"),
+                false => panic!("{what}: not within {within:?}; last seen: {seen}"),
+            }
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{what}: not within {within:?}"
-        );
         tokio::time::sleep(every).await;
     }
 }
 
 /// [`poll`] every ten milliseconds.
-pub async fn wait_for<T>(
+pub async fn wait_for<T, A: Attempt<T>>(
     what: &str,
     within: std::time::Duration,
-    attempt: impl AsyncFnMut() -> Option<T>,
+    attempt: impl AsyncFnMut() -> A,
 ) -> T {
     poll(what, within, std::time::Duration::from_millis(10), attempt).await
 }
 
-/// Poll `done` until it holds, failing the test if it has not within `within`.
-pub async fn wait_until(
+/// [`wait_for`] a condition.
+pub async fn wait_until<A: Attempt<()>>(
     what: &str,
     within: std::time::Duration,
-    mut done: impl AsyncFnMut() -> bool,
+    done: impl AsyncFnMut() -> A,
 ) {
-    wait_for(what, within, async || done().await.then_some(())).await
+    wait_for(what, within, done).await
 }
 
 /// Send `request` until the answer is neither shed nor stale and return it, failing the test
@@ -1096,7 +1127,11 @@ pub async fn wait_for_executor(
     done: impl Fn(&tessera_engine::ExecutorStats) -> bool,
 ) {
     wait_until(what, std::time::Duration::from_secs(180), async || {
-        done(&server.state.engine.write_executor_stats())
+        let stats = server.state.engine.write_executor_stats();
+        match done(&stats) {
+            true => Ok(()),
+            false => Err(format!("{stats:?}")),
+        }
     })
     .await
 }
@@ -1123,7 +1158,11 @@ pub async fn tick(server: &TestServer) {
         .unwrap_or_else(|| panic!("the 202 carries the publication number: {body}"));
     let what = format!("publication {target}");
     wait_until(&what, std::time::Duration::from_secs(120), async || {
-        control_status(server).await["publication"].as_u64() >= Some(target)
+        let publication = control_status(server).await["publication"].clone();
+        match publication.as_u64() >= Some(target) {
+            true => Ok(()),
+            false => Err(format!("publication {publication}")),
+        }
     })
     .await
 }
@@ -1136,7 +1175,15 @@ pub async fn drain(server: &TestServer) {
         std::time::Duration::from_secs(120),
         async || {
             tick(server).await;
-            server.state.engine.buffered_items() == 0
+            let buffered = server.state.engine.buffered_items();
+            if buffered == 0 {
+                return Ok(());
+            }
+            let stats = server.state.engine.write_executor_stats();
+            Err(format!(
+                "{buffered} rows buffered, {} flushes, {} failures, {} flushable",
+                stats.flushes, stats.flush_failures, stats.flushable_items
+            ))
         },
     )
     .await

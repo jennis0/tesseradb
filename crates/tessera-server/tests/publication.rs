@@ -72,7 +72,14 @@ async fn request_flush(server: &TestServer) -> u64 {
 /// client does.
 async fn await_publication(server: &TestServer, n: u64) {
     let what = format!("the publication counter reaching {n}");
-    wait_until(&what, DEADLINE, async || publication(server).await >= n).await;
+    wait_until(&what, DEADLINE, async || {
+        let now = publication(server).await;
+        match now >= n {
+            true => Ok(()),
+            false => Err(format!("the counter at {now}")),
+        }
+    })
+    .await;
 }
 
 async fn declare_attribute(server: &TestServer, body: Value) {

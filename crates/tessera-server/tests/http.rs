@@ -741,7 +741,8 @@ const GATE_POLL_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 async fn poll_until_in_flight(server: &TestServer, want: u64) {
     let shed_at_entry = compute_status(server).await["shed_total"].as_u64().unwrap();
     let what = format!("compute.in_flight reaching {want}");
-    wait_until(&what, GATE_POLL_BOUND, async || {
+    let every = std::time::Duration::from_millis(1);
+    poll(&what, GATE_POLL_BOUND, every, async || {
         let compute = compute_status(server).await;
         if want > 0 && compute["in_flight"].as_u64() != Some(want) {
             let shed_now = compute["shed_total"].as_u64().unwrap();
@@ -752,7 +753,10 @@ async fn poll_until_in_flight(server: &TestServer, want: u64) {
                  when it arrived. Gate state: {compute}"
             );
         }
-        compute["in_flight"].as_u64() == Some(want)
+        match compute["in_flight"].as_u64() == Some(want) {
+            true => Ok(()),
+            false => Err(format!("gate state {compute}")),
+        }
     })
     .await;
 }
@@ -775,15 +779,22 @@ async fn poll_until_in_flight(server: &TestServer, want: u64) {
 /// still has to observe the stream end and drop the permit. This closes the gap by waiting for
 /// the gate itself to say it is empty, which is the condition the caller actually depends on.
 async fn poll_until_gate_idle(server: &TestServer) {
-    wait_until(
+    let every = std::time::Duration::from_millis(1);
+    poll(
         "the compute gate holding no permit",
         GATE_POLL_BOUND,
+        every,
         async || {
             let compute = compute_status(server).await;
             let held = compute["in_flight"].as_u64().unwrap()
                 + compute["waiting"].as_u64().unwrap()
                 + compute["streaming"].as_u64().unwrap();
-            held == 0
+            match held == 0 {
+                true => Ok(()),
+                false => Err(format!(
+                    "a permit leaked past its request; gate state {compute}"
+                )),
+            }
         },
     )
     .await;
@@ -2006,7 +2017,11 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
         let what = format!("the streaming gauge reaching {want}");
         let patience = std::time::Duration::from_millis(patience_ms);
         wait_until(&what, patience, async || {
-            state.compute_gate.status().streaming == want
+            let now = state.compute_gate.status().streaming;
+            match now == want {
+                true => Ok(()),
+                false => Err(format!("streaming gauge at {now}")),
+            }
         })
         .await
     };

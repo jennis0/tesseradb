@@ -92,7 +92,10 @@ async fn announce_line(stream: &SharedStream) -> String {
         std::time::Duration::from_secs(60),
         async || {
             let text = stream.text();
-            text.split_once('\n').map(|(line, _)| line.to_string())
+            match text.split_once('\n') {
+                Some((line, _)) => Ok(line.to_string()),
+                None => Err(format!("the stream holds {text:?}")),
+            }
         },
     )
     .await
