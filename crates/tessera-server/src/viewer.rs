@@ -178,15 +178,7 @@ async fn meta(
         // The whole column schema. The `category` block is what tells a `u16` category from a
         // `u16` integer, since the points batch carries only codes. Values are served by the
         // paged, per-principal `/v1/categories`, which keeps this document small.
-        "declared_scalars": meta.declared_scalars.iter().zip(&meta.homes).map(|(s, homes)| {
-            let homes: Vec<&str> = [
-                (homes.rendered, "rendered"),
-                (homes.value_column, "value_column"),
-                (homes.record, "record"),
-            ]
-            .into_iter()
-            .filter_map(|(held, home)| held.then_some(home))
-            .collect();
+        "declared_scalars": meta.declared_scalars.iter().enumerate().map(|(index, s)| {
             serde_json::json!({
                 "name": s.name,
                 "arrow_type": s.arrow_type.arrow_type_name(),
@@ -201,7 +193,7 @@ async fn meta(
                 "index": s.index,
                 // Where `POST /v1/items` reads the value from. A field whose only home is
                 // `record` is read from the record store, in stored order.
-                "homes": homes,
+                "homes": meta.homes[index].names(),
             })
         }).collect::<Vec<_>>(),
         // Group-scoped column families, in `declared_scalars`' shape plus `scope`: each family is
