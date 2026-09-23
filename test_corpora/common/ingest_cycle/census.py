@@ -147,6 +147,13 @@ def filter_probes(
     analysers = {a["name"]: a.get("analyser") for a in declared.get("attribute", [])}
     probes: list[dict] = []
     offered = 0
+    held: list[np.ndarray] = []
+
+    def entities() -> np.ndarray:
+        if not held:
+            held.append(np.unique(read_view_rows(view, ["entity_id"]).column("entity_id").to_numpy()))
+        return held[0]
+
     for operand in meta.get("filter_operands") or []:
         column = operand["column"]
         if operand.get("scope"):
@@ -157,7 +164,7 @@ def filter_probes(
             candidates = list(views)
         offered += 1
         candidates.sort(key=lambda v: v["id"] != view["id"])
-        values = column_sample(rung, view, candidates, column)
+        values = column_sample(rung, view, candidates, column, entities)
         if values is not None:
             probes += family_probes(
                 column, operand["family"], operand["operands"], values, binary, analysers.get(column)
@@ -165,10 +172,13 @@ def filter_probes(
     return probes, offered
 
 
-def column_sample(rung: Path, view: dict, candidates: Sequence[dict], column: str) -> pa.Array | None:
+def column_sample(
+    rung: Path, view: dict, candidates: Sequence[dict], column: str, entities
+) -> pa.Array | None:
     """Up to `PROBE_SAMPLE_ROWS` non-null values of `column`, from the first of `candidates` whose
-    batches carry it: its points file, or the file the column is joined from. Read from another
-    view, only the rows of entities `view` holds are kept, so every value is one `view` has."""
+    batches carry it: its points file, or the file the column is joined from. Read from any file
+    other than `view`'s own points file, only the rows of the entities `view` holds, `entities()`,
+    are kept, so every value is one `view` has."""
     for candidate in candidates:
         _, attributes, joined = wire_columns(rung, candidate)
         if column not in attributes:
@@ -181,9 +191,7 @@ def column_sample(rung: Path, view: dict, candidates: Sequence[dict], column: st
             ),
             candidate,
         )
-        keep = None
-        if candidate["id"] != view["id"]:
-            keep = np.unique(read_view_rows(view, ["entity_id"]).column("entity_id").to_numpy())
+        keep = None if source is candidate and candidate["id"] == view["id"] else entities()
         rows = read_view_rows(source, [column], keep=keep, limit=PROBE_SAMPLE_ROWS)
         return rows.column(column).combine_chunks().drop_null()
     return None

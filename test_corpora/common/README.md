@@ -273,10 +273,11 @@ filter operand `/v1/meta` offers on that view, a group-scoped family on the view
 included: a numeric column's presence and upper half, a category or keyword column's three
 commonest values, and a text column's two commonest words of four letters or more, and
 `/v1/categories` for each category column, followed through every page. Each value is drawn from
-up to 200,000 of the view's own rows in the file its batches take the column from, and a text
-column's words are the tokens `tessera tokenise` produces under the column's declared analyser. A
-matched count or value list that differs counts under `filters`, and a probe answer that did not
-arrive whole is a sentence under `incomplete`.
+up to 200,000 rows of the file the view's batches take the column from, kept to the entities the
+view holds wherever that file is not the view's own points file, and a text column's words are
+the tokens `tessera tokenise` produces under the column's declared analyser. A matched count or
+value list that differs counts under `filters`, and a probe answer that did not arrive whole is a
+sentence under `incomplete`.
 
 `equivalence.views` holds each view's own comparison, keyed by name, with the five flags above,
 `frames`, `frames_equal`, `census_coverage`, `differences` and `differences_by_surface`.
