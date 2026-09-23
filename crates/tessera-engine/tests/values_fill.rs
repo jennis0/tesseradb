@@ -749,6 +749,13 @@ fn a_fill_on_a_flushed_entity_is_read_through_the_claimant_read() {
         Some(&ScalarOut::Utf8("second layer".to_string())),
         "and the filling layer's column beside it: {after:?}"
     );
+
+    // The fold merges the two rows into one, and both columns are still read.
+    fold(&engine);
+    let session = session_of(&engine);
+    let folded = fields_of(&engine, &session, entity);
+    assert_eq!(folded.get("origin"), after.get("origin"), "after the fold: {folded:?}");
+    assert_eq!(folded.get("note"), after.get("note"), "after the fold: {folded:?}");
 }
 
 /// **A tick whose only work is fills publishes them, and writes no segment** (`ingest.md` §1.4).

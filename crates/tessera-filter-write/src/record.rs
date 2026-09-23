@@ -1056,33 +1056,101 @@ mod tests {
         assert!(folded.fields_of(0).expect("read").is_some());
     }
 
-    /// The two refusals are this merge's own, exactly as they are the value columns': an overlap
-    /// or an interleaving would pair rows with the wrong ranks with no later symptom, and a single
-    /// input is not a window.
+    /// One layer whose rows each carry one utf8 field under `tag`.
+    fn tagged_layer(dir: &Path, name: &str, tag: u16, rows: &[(u32, &str)]) -> RecordBlob {
+        let (blocks, hasrow, directory) = paths_of(dir, name);
+        let mut writer =
+            RecordBlobWriter::create(&blocks, &hasrow, &directory, RECORD_BLOCK_TARGET)
+                .expect("create");
+        for (entity, value) in rows {
+            let field = RecordFieldRef {
+                tag,
+                value: tessera_filter::RecordValueRef::Utf8(value),
+            };
+            writer.push_row(*entity, &[field]).expect("push");
+        }
+        writer.finish().expect("finish");
+        RecordBlob::open(&blocks, &hasrow, &directory, Access::Read).expect("open")
+    }
+
+    /// What the reader's stack answers for `entity` over the layers named, oldest first, with the
+    /// fields in tag order.
+    fn stack_answer(dir: &Path, layers: &[&str], entity: u32) -> Option<Vec<RecordField>> {
+        let extents: Vec<tessera_filter::RecordExtentPaths> = layers
+            .iter()
+            .map(|name| {
+                let (blocks, hasrow, directory) = paths_of(dir, name);
+                tessera_filter::RecordExtentPaths {
+                    blocks,
+                    hasrow,
+                    directory,
+                }
+            })
+            .collect();
+        let stack =
+            tessera_filter::RecordStack::open(None, &extents, Access::Read).expect("the stack");
+        let mut fields = stack.fields_of(entity).expect("read")?;
+        fields.sort_by_key(|f| f.tag);
+        Some(fields)
+    }
+
+    /// Layers whose entities interleave, and layers holding a row for one entity, merge by entity.
+    /// Each merged row is what the reader's stack answers over the inputs: the union of the layers'
+    /// fields, and where two layers carry one tag, the earlier layer's value.
     #[test]
-    fn overlapping_or_interleaved_layers_are_refused() {
+    fn interleaved_and_shared_entities_merge_as_the_reader_answers() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let a = layer_at(
-            dir.path(),
-            "a",
-            RECORD_BLOCK_TARGET,
-            &[(1, "one"), (3, "three")],
-        );
-        let clash = layer_at(dir.path(), "clash", RECORD_BLOCK_TARGET, &[(3, "again")]);
-        let err = coalesce_to(dir.path(), "c1", &[&a, &clash], RECORD_BLOCK_TARGET)
-            .expect_err("an overlap is refused");
-        assert!(err.to_string().contains("twice"), "{err}");
+        tagged_layer(dir.path(), "a", 0, &[(1, "a1"), (3, "a3"), (4, "a4"), (6, "a6")]);
+        tagged_layer(dir.path(), "b", 0, &[(0, "b0"), (2, "b2"), (5, "b5"), (6, "b6")]);
+        tagged_layer(dir.path(), "c", 1, &[(3, "c3"), (7, "c7")]);
+        let open = |name: &str| {
+            let (blocks, hasrow, directory) = paths_of(dir.path(), name);
+            RecordBlob::open(&blocks, &hasrow, &directory, Access::Read).expect("open")
+        };
+        let (a, b, c) = (open("a"), open("b"), open("c"));
 
-        let interleaved = layer_at(
-            dir.path(),
-            "b",
-            RECORD_BLOCK_TARGET,
-            &[(0, "zero"), (2, "two")],
+        let out = coalesce_to(dir.path(), "merged", &[&a, &b, &c], RECORD_BLOCK_TARGET)
+            .expect("the coalesce");
+        out.self_check().expect("addressing");
+        for entity in 0..=8u32 {
+            assert_eq!(
+                out.fields_of(entity).expect("read"),
+                stack_answer(dir.path(), &["a", "b", "c"], entity),
+                "entity {entity}"
+            );
+        }
+        assert_eq!(
+            out.fields_of(6).expect("read").expect("a row")[0].value,
+            RecordValue::Utf8("a6".to_string()),
+            "the earlier layer's value for a tag two layers carry"
         );
-        let err = coalesce_to(dir.path(), "c2", &[&a, &interleaved], RECORD_BLOCK_TARGET)
-            .expect_err("interleaving is refused");
-        assert!(err.to_string().contains("interleaved"), "{err}");
+        assert_eq!(out.fields_of(3).expect("read").expect("a row").len(), 2);
 
-        assert!(coalesce_to(dir.path(), "c3", &[&a], RECORD_BLOCK_TARGET).is_err());
+        let (blocks, hasrow, directory) = paths_of(dir.path(), "folded");
+        fold_record_blob(
+            &[&a, &b, &c],
+            &Bitmap::from_iter([4u32]),
+            &blocks,
+            &hasrow,
+            &directory,
+            RECORD_BLOCK_TARGET,
+        )
+        .expect("the fold");
+        let folded = RecordBlob::open(&blocks, &hasrow, &directory, Access::Read).expect("open");
+        for entity in 0..=8u32 {
+            let expected = match entity {
+                4 => None,
+                _ => stack_answer(dir.path(), &["a", "b", "c"], entity),
+            };
+            assert_eq!(folded.fields_of(entity).expect("read"), expected, "entity {entity}");
+        }
+    }
+
+    /// A single input is not a window.
+    #[test]
+    fn a_single_extent_is_not_coalesced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = layer_at(dir.path(), "a", RECORD_BLOCK_TARGET, &[(1, "one")]);
+        assert!(coalesce_to(dir.path(), "c", &[&a], RECORD_BLOCK_TARGET).is_err());
     }
 }

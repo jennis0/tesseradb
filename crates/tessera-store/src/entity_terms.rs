@@ -981,6 +981,25 @@ mod tests {
         }
     }
 
+    /// Layers whose entities interleave, as two views flushed from one commit window leave them,
+    /// merge by entity and answer what the stack answered.
+    #[test]
+    fn a_merge_of_interleaved_extents_answers_what_the_layered_read_answered() {
+        let (a, first) = round_trip(&[(1u32, vec![1]), (3, vec![]), (4, vec![2, 5])]);
+        let (b, second) = round_trip(&[(0u32, vec![7]), (2, vec![1, 9]), (5, vec![3])]);
+        let stack = EntityTermsStack::open(None, &[paths_of(a.path()), paths_of(b.path())]).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        assert_eq!(merge_into(out.path(), &[&first, &second]), 6);
+        let merged = EntityTermsStack::open(None, &[paths_of(out.path())]).unwrap();
+        for entity in 0..8 {
+            assert_eq!(
+                merged.terms_of(entity).unwrap(),
+                stack.terms_of(entity).unwrap(),
+                "entity {entity}"
+            );
+        }
+    }
+
     /// **Two merges of the same inputs are byte-equal.** The bundle's identity is its files'
     /// digests, and a merge whose output depended on iteration order or on a hash seed would give
     /// two nodes coalescing the same window two different bundles.

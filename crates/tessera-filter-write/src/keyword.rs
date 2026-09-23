@@ -943,11 +943,10 @@ mod tests {
         );
     }
 
-    /// **The inherited guards still fire through the keyword entry points**, because they guard the
-    /// entity relation and this pass changes only the values. Sharing the merge is what makes that
-    /// true rather than a second copy that agrees.
+    /// **The overlap guard still fires through the keyword entry points**, because it guards the
+    /// entity relation and this pass changes only the values.
     #[test]
-    fn overlapping_and_interleaved_keyword_layers_are_refused() {
+    fn overlapping_keyword_layers_are_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
         let first = layer(dir.path(), "a", &[(7, "alpha"), (8, "bravo")]);
         let clash = layer(dir.path(), "b", &[(8, "charlie")]);
@@ -955,14 +954,39 @@ mod tests {
             .expect_err("an overlap is refused");
         assert!(err.to_string().contains("twice"), "{err}");
 
-        let odd = layer(dir.path(), "odd", &[(1, "alpha"), (3, "charlie")]);
-        let even = layer(dir.path(), "even", &[(0, "bravo"), (2, "delta")]);
-        let err = coalesce(dir.path(), "interleaved", &[odd.as_ref(), even.as_ref()])
-            .expect_err("interleaving is refused");
-        assert!(err.to_string().contains("interleaved"), "{err}");
-
         // And a single extent is not a window: the pass collapses several into one.
         assert!(coalesce(dir.path(), "alone", &[first.as_ref()]).is_err());
+    }
+
+    /// Keyword layers whose entities interleave merge by entity, each entity keeping its own key
+    /// through the renumbering, in the coalesce and in the fold.
+    #[test]
+    fn interleaved_keyword_layers_merge_by_entity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let odd = layer(dir.path(), "odd", &[(1, "alpha"), (3, "charlie"), (4, "echo")]);
+        let even = layer(dir.path(), "even", &[(0, "bravo"), (2, "delta"), (5, "alpha")]);
+        let expected = [
+            (0, "bravo"),
+            (1, "alpha"),
+            (2, "delta"),
+            (3, "charlie"),
+            (4, "echo"),
+            (5, "alpha"),
+        ];
+
+        coalesce(dir.path(), "interleaved", &[odd.as_ref(), even.as_ref()])
+            .expect("the coalesce");
+        let (column, dict) = open_output(dir.path(), "interleaved");
+        for (entity, key) in expected {
+            assert_eq!(key_of(&column, &dict, entity).as_deref(), Some(key), "entity {entity}");
+        }
+
+        fold_to_bytes(dir.path(), "folded", &[even.as_ref(), odd.as_ref()], &bitmap([3]), 6);
+        let (column, dict) = open_output(dir.path(), "folded");
+        for (entity, key) in expected {
+            let expected = (entity != 3).then_some(key);
+            assert_eq!(key_of(&column, &dict, entity).as_deref(), expected, "entity {entity}");
+        }
     }
 
     /// **An ordinal outside its own layer's dictionary refuses rather than being remapped.** It is

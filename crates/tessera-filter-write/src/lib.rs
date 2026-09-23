@@ -780,23 +780,40 @@ mod tests {
         assert!(coalesce_to(dir.path(), "alone", &[&first]).is_err());
     }
 
-    /// **Interleaved layers are refused rather than sorted.** The merge is linear because entity
-    /// ids are issued monotonically (**I9**); a sort here would paper over an allocator that had
-    /// stopped doing that, and the symptom would be values paired with the wrong entities.
+    /// Layers whose entities interleave merge by entity. Two views flushed from one commit window
+    /// leave extents like these, and runs of more than one entity cross between the layers.
     #[test]
-    fn interleaved_layers_are_refused() {
+    fn interleaved_layers_merge_by_entity() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let odd = ValueColumn::partial(codes_u32(vec![1, 3]), bitmap([1, 3])).expect("a layer");
-        let even = ValueColumn::partial(codes_u32(vec![0, 2]), bitmap([0, 2])).expect("a layer");
-        let err = fold_value_column(
-            &[&odd, &even],
-            &Bitmap::new(),
-            4,
-            &dir.path().join("v.arrow"),
-            &dir.path().join("p.roaring"),
-        )
-        .expect_err("interleaving is refused");
-        assert!(err.to_string().contains("interleaved"), "{err}");
+        let a = [1u32, 3, 4, 5, 9];
+        let b = [0u32, 2, 6, 7, 8, 10];
+        let layer = |entities: &[u32]| {
+            let values = entities.iter().map(|e| e * 100).collect();
+            ValueColumn::partial(codes_u32(values), bitmap(entities.iter().copied()))
+                .expect("a layer")
+        };
+        let (a, b) = (layer(&a), layer(&b));
+        let every: Vec<u32> = (0..=10).collect();
+
+        for inputs in [[&a, &b], [&b, &a]] {
+            let out = coalesce_to(dir.path(), "coalesced", &inputs).expect("the coalesce");
+            assert_eq!(out.present().iter().collect::<Vec<_>>(), every);
+            for e in 0..=10u32 {
+                assert_eq!(out.value_of(e).map(|v| v.raw()), Some(e * 100), "entity {e}");
+            }
+        }
+
+        let values = dir.path().join("folded-values.arrow");
+        let presence = dir.path().join("folded-presence.roaring");
+        let partial = fold_value_column(&[&b, &a], &bitmap([4, 7]), 11, &values, &presence)
+            .expect("the fold");
+        assert!(partial, "two blanked entities leave the column partial");
+        let out = ValueColumn::open(&values, Some(&presence), tessera_filter::Access::Read)
+            .expect("the folded column");
+        for e in 0..=10u32 {
+            let expected = (e != 4 && e != 7).then_some(e * 100);
+            assert_eq!(out.value_of(e).map(|v| v.raw()), expected, "entity {e}");
+        }
     }
 
     /// **The postings are what the folded column says**, code for code — which is what makes one a
