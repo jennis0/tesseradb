@@ -1,0 +1,7 @@
+# Only the Rust workspace goes into the build context.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates/
+crates/**/target/

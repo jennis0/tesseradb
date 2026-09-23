@@ -384,6 +384,21 @@ enum ArtifactCensusLayer {
     Treed,
 }
 
+/// The first of SIGTERM and SIGINT to arrive, by name.
+async fn termination() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (Ok(mut term), Ok(mut int)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = term.recv() => "SIGTERM",
+        _ = int.recv() => "SIGINT",
+    }
+}
+
 fn parse_extent(raw: &str) -> Result<Bounds, String> {
     let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
     if parts.len() != 4 {
@@ -1915,8 +1930,10 @@ fn main() -> ExitCode {
             // Diagnostics on stderr, because stdout carries one thing: the JSON line naming the
             // three bound addresses, which a supervisor reads as the process's first stdout line
             // (`tessera_server::serve_announcing`).
+            // Colour only for a terminal, so a container's or a supervisor's log is plain text.
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
+                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
                 .init();
             let deployment = match tessera_config::discover(
                 deployment.as_deref(),
@@ -1960,8 +1977,22 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match runtime.block_on(tessera_server::run(prepared)) {
-                Ok(()) => ExitCode::SUCCESS,
+            // SIGTERM or SIGINT ends the process at once. A write is fsynced before it is
+            // acknowledged, so stopping here loses only what no client was told had landed, and
+            // the next start replays the log.
+            let outcome = runtime.block_on(async {
+                tokio::select! {
+                    served = tessera_server::run(prepared) => served.map(|()| None),
+                    signal = termination() => Ok(Some(signal)),
+                }
+            });
+            runtime.shutdown_background();
+            match outcome {
+                Ok(Some(signal)) => {
+                    eprintln!("tessera serve: stopped on {signal}");
+                    ExitCode::SUCCESS
+                }
+                Ok(None) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("tessera serve: {e}");
                     ExitCode::FAILURE
