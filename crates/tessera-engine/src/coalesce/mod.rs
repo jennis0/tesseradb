@@ -19,7 +19,7 @@ use tessera_store::manifest::{
     TextExtent,
 };
 
-use crate::flush::MaintenanceFailed;
+use crate::flush::{failed, MaintenanceFailed};
 
 mod execute;
 mod plan;
@@ -191,7 +191,7 @@ pub(crate) fn execute_coalesce(
     ctx: CoalesceContext,
 ) -> Result<CompletedCoalesce, MaintenanceFailed> {
     std::fs::create_dir_all(ctx.prefix_dir.join(&ctx.out_rel))
-        .map_err(|e| MaintenanceFailed(format!("coalesce dir: {e}")))?;
+        .map_err(failed("coalesce dir"))?;
     let mut files: BTreeMap<String, FileDigest> = BTreeMap::new();
 
     let tier = taken(plan.tiers)
