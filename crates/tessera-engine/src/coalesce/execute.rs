@@ -1,8 +1,8 @@
-//! Each merged output is reopened, or its counts checked against the inputs, before the manifest
-//! can name it, so a merge defect fails the pass instead of being published.
+//! Each merged output is reopened, or its counts checked, before the manifest can name it, so a
+//! merge defect fails the pass instead of being published. For an external-id run, the store
+//! checks the rows it wrote against the rows the merge emitted.
 
 use std::collections::BTreeMap;
-use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,11 +14,9 @@ use tessera_store::manifest::{
 };
 
 use super::{coalesced_column_rel, CoalesceContext, ColumnWindow, OpenedTier};
-use crate::flush::{digest_of, MaintenanceFailed, SMALL_TERM_THRESHOLD};
-
-fn failed<E: Display>(what: impl Display) -> impl FnOnce(E) -> MaintenanceFailed {
-    move |e| MaintenanceFailed(format!("{what}: {e}"))
-}
+use crate::flush::{
+    digest_of, failed, remove_spool_on_error, MaintenanceFailed, SMALL_TERM_THRESHOLD,
+};
 
 fn digest_outputs<'r>(
     files: &mut BTreeMap<String, FileDigest>,
@@ -318,17 +316,18 @@ pub(super) fn coalesce_text_window(
     };
     let dict_path = ctx.prefix_dir.join(&extent.dict);
     let postings_path = ctx.prefix_dir.join(&extent.postings);
-    // The spool file is removed on every exit path.
     let spool_path = column_dir.join("postings.spool");
-    let outcome = tessera_filter_write::coalesce_text_extents(
-        &inputs,
-        &dict_path,
-        &postings_path,
-        &ctx.prefix_dir.join(&extent.presence),
+    remove_spool_on_error(
+        tessera_filter_write::coalesce_text_extents(
+            &inputs,
+            &dict_path,
+            &postings_path,
+            &ctx.prefix_dir.join(&extent.presence),
+            &spool_path,
+        ),
         &spool_path,
-    );
-    let _ = std::fs::remove_file(&spool_path);
-    outcome.map_err(failed(format!("text coalesce for '{column}'")))?;
+    )
+    .map_err(failed(format!("text coalesce for '{column}'")))?;
     digest_outputs(files, ctx, extent.files())?;
 
     // A dictionary and postings that disagree would give ordinals that name the wrong words.
@@ -387,7 +386,7 @@ pub(super) fn coalesce_entity_terms(
     )
     .map_err(failed("entity-terms coalesce"))?;
     // Fewer than the inputs hold means an input listed an entity with no offsets; publishing that
-    // would silently lose those entities' label sets.
+    // would lose those entities' label sets with no symptom.
     if written != expected {
         return Err(MaintenanceFailed(format!(
             "the coalesced entity-terms extent holds {written} entities where its inputs hold \
