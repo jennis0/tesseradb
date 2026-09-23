@@ -39,7 +39,7 @@ Each stage's barrier is wire- or filesystem-observable, never a sleep:
 | stage | barrier |
 |---|---|
 | build, load | the spawn's own health wait, then `/control/status` readiness |
-| write (ingest + flush) | ``flush.flushes`` up, then ``flush.refreshes`` up and ``flush.refresh_in_flight`` false — the second half is decision 0044 D1: an established session serves its old projection until the background refresh replaces it, so a recording after the version bump alone is short by exactly the batch |
+| write (ingest + flush) | ``flush.flushes`` up, then ``flush.refreshes`` up and ``flush.refresh_in_flight`` false: an established session serves its old projection until the background refresh replaces it, so a recording after the version bump alone is short by exactly the batch |
 | merge | ``merges`` up, ``segments_version`` bumped, ``refreshes`` up (a merge's publication runs the same refresh pass) |
 | coalesce | ``coalesces`` up — the one stage that moves no row and bumps no version (write-path §7), so its barrier must be a counter; the version is asserted *unchanged* |
 | deny | the 200 acknowledgement itself — a deny is fail-closed at acceptance (write-path §5.4), so there is nothing later to wait for |
@@ -1091,8 +1091,7 @@ class Write(Stage):
         poll(
             lambda: (flush := h.executor()["flush"])["refreshes"] > self._snap["refreshes"]
             and not flush["refresh_in_flight"],
-            f"{self.label}: the background refresh never replaced the resident projection — "
-            f"a recording now would be short by exactly this batch (decision 0044 D1)",
+            f"{self.label}: the background refresh never replaced the resident projection",
         )
         _assert_isolated(h, self.label, self._counts, own=("flushes",))
 
