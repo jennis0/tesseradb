@@ -97,9 +97,9 @@ pub struct ViewportRequest<'a> {
     /// The client's per-tile mark budget. Clamped to `max_k` and then to `k_max_marks`. Must be
     /// non-decreasing as the client zooms in, or marks pop out of view.
     pub k: usize,
-    /// The stamp of the response the client is currently holding, echoed back. Advisory: the
-    /// request is always answered from live geometry; it only sets [`ViewportOut::stale`] when
-    /// the live geometry has moved since.
+    /// The stamp of the response the client is currently holding, echoed back. Advisory: it does
+    /// not choose what the request is answered from, and only sets [`ViewportOut::stale`] when
+    /// it differs from the stamp this response reports.
     pub stamp: Option<GenerationStamp>,
     /// Request underlay sub-cell counts at depth `zoom + offset`. `None` or `Some(0)` serves
     /// none and costs nothing.

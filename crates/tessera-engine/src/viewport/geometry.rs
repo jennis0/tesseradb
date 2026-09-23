@@ -271,6 +271,10 @@ impl Engine {
                     .pool
                     .install(|| self.projection_routes.build(&inputs, space));
                 SessionGeometry {
+                    stamp: GenerationStamp {
+                        prefix: generation.prefix.clone(),
+                        segments_version: generation.segments_version,
+                    },
                     fragment: Arc::clone(&fragment),
                     projection: Arc::new(projection),
                     satisfied_sorted: Arc::clone(session.satisfied_sorted()),

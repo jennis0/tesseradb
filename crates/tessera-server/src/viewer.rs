@@ -58,8 +58,8 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 /// A generation stamp on the wire, in the viewport request body and the `x-tessera-pin` response
-/// header (the same JSON in both). The server always answers from live geometry; the stamp only
-/// sets the response's `stale` flag.
+/// header (the same JSON in both). The header names the generation the response was answered
+/// from; a presented stamp only sets the response's `stale` flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PinDto {
     prefix: String,

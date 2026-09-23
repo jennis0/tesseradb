@@ -28,7 +28,7 @@ use croaring::Portable;
 use rustc_hash::FxHashSet;
 
 use tessera_authz::FrozenFragment;
-use tessera_types::TermId;
+use tessera_types::{GenerationStamp, TermId};
 
 use crate::cancel::CancelToken;
 use crate::projection::RowProjection;
@@ -136,6 +136,9 @@ pub(crate) enum Peek {
 /// what the [`tessera_authz::FragmentCache`] is asked with; `auth_data_hash` is a digest of the
 /// credential, never the credential.
 pub(crate) struct SessionGeometry {
+    /// The generation `projection` was taken for, which is one behind the live generation when
+    /// the entry is served stale. A response served from this entry reports it.
+    pub(crate) stamp: GenerationStamp,
     /// The fragment `projection` was taken over — never the live one, unless they coincide.
     pub(crate) fragment: Arc<FrozenFragment>,
     pub(crate) projection: Arc<RowProjection>,

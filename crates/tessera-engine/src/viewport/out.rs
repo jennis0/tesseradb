@@ -334,7 +334,8 @@ pub struct ArtifactOut {
 pub struct ViewportOut {
     /// The coordinates a client keys its replica on. See [`ViewCoordinates`].
     pub coordinates: ViewCoordinates,
-    /// The geometry this response was answered from — what a client echoes back next time.
+    /// The generation this response was answered from, which is one behind the live generation
+    /// while a refresh has not yet replaced the session's projection. A client echoes it back.
     pub stamp: GenerationStamp,
     /// Whether the geometry moved since the stamp the request presented. `false` when no stamp
     /// was presented, or when the presented stamp equals this response's. Reports that the corpus

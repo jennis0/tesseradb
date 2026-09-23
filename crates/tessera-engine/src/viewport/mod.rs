@@ -212,20 +212,6 @@ impl Engine {
         let generation = self.generation.load_full();
         probe.lap(|t| &mut t.generation_resolve_ns);
 
-        // What this response was answered from, and whether that is newer than what the client
-        // presented — one clone and one comparison against the generation already loaded above.
-        let answered_from = GenerationStamp {
-            prefix: generation.prefix.clone(),
-            segments_version: generation.segments_version,
-        };
-        // A presented stamp naming a superseded generation or prefix is answered exactly as an
-        // absent one is: it sets a flag, never selects, refuses or expires.
-        let stale = req
-            .stamp
-            .as_ref()
-            .is_some_and(|presented| *presented != answered_from);
-        probe.lap(|t| &mut t.stamp_compare_ns);
-
         let k = req.k.min(self.config.max_k);
 
         let OpenView {
@@ -235,6 +221,16 @@ impl Engine {
             coordinates,
             render_scalars,
         } = self.open_view(session, &generation, req.view, &req.cancel, &mut probe)?;
+
+        // What this response was answered from: the generation the session's projection was taken
+        // for, which is one behind `generation` while a refresh has not yet replaced it. A
+        // presented stamp that differs sets a flag, and never selects, refuses or expires.
+        let answered_from = geometry.stamp.clone();
+        let stale = req
+            .stamp
+            .as_ref()
+            .is_some_and(|presented| *presented != answered_from);
+        probe.lap(|t| &mut t.stamp_compare_ns);
 
         let tiles = self.resolve_tiles(&served, &req, &mut probe)?;
 
@@ -264,7 +260,7 @@ impl Engine {
         // above and never by a row. A refusal from the sink means the consumer is gone.
         sink.head(ViewportHead {
             coordinates,
-            stamp: answered_from.clone(),
+            stamp: answered_from,
             stale,
             region,
             render_scalars: render_scalars.to_vec(),
