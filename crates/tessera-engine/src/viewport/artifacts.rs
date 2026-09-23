@@ -52,13 +52,16 @@ pub(crate) fn take_authored_shapes(
     shapes
 }
 
+/// A drawn geometry as the wire carries it: parts, then rings, then vertices in grid units.
+pub(crate) type Rings = Vec<Vec<Vec<[u32; 2]>>>;
+
 /// One view's authored shape as rings for the wire, and whether the vertex budget fired; `None`
 /// where the artifact authored none for `view` or its bytes do not decode.
 pub(crate) fn authored_rings(
     shapes: &tessera_lifecycle::membership::ArtifactShapes,
     view: &str,
     zoom: Option<u8>,
-) -> Option<(Vec<Vec<Vec<[u32; 2]>>>, bool)> {
+) -> Option<(Rings, bool)> {
     let shape = tessera_spatial::shape::Shape::decode(shapes.for_view(view)?).ok()?;
     Some(crate::shapes::served_rings(&shape, zoom))
 }
