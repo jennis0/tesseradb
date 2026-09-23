@@ -288,9 +288,9 @@ each layer's `declared_levels` against the levels an artifact was served at, wit
 `levels_missing` is a failure sentence, since a census that compares no artifact at a level proves
 nothing there. `census_coverage.visible` is the broadest principal's zoom-0 count and
 `census_coverage.filters` counts the filter operands `/v1/meta` offers on the view (`offered`),
-the probes compared, those matching something, and the category lists, and names the probes whose
-answer on the all-in build matched nothing (`unmatched_on_all_in`). Operands offered with nothing
-compared, and each unmatched probe, are failure sentences. `equivalence.views_compared_nowhere` names every view the all-in build serves that the
+the probes compared, those matching something, and the category lists, and names each operand that
+produced no probe (`unprobed`) and each probe whose answer on the all-in build matched nothing
+(`unmatched_on_all_in`). Each unprobed operand and each unmatched probe is a failure sentence. `equivalence.views_compared_nowhere` names every view the all-in build serves that the
 census did not reach or saw nothing in, each a failure sentence. The top-level `equal` is every view's `equal`, `incomplete` is a sentence per census
 request that did not arrive whole, and the other top-level fields are the views' own summed or
 concatenated.

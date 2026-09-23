@@ -137,16 +137,16 @@ def category_keys(
 
 def filter_probes(
     rung: Path, views: Sequence[dict], view: dict, meta: dict, binary: Path
-) -> tuple[list[dict], int]:
-    """What a view's census asks beyond counts and layers, and how many filter operands `/v1/meta`
-    offers on the view. For each operand, a filter or two whose values are drawn from the rows the
+) -> tuple[list[dict], dict[str, int]]:
+    """What a view's census asks beyond counts and layers, and how many probes each filter operand
+    `/v1/meta` offers on the view produced, by column. For each operand, a filter or two whose values are drawn from the rows the
     view's batches take the column from, and a category column's value list. A group-scoped column
     is read from a view holding the same key and an entity-scoped one from any view carrying it."""
     scoped = {family["name"]: set(family["views"]) for family in meta.get("scoped_scalars") or []}
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     analysers = {a["name"]: a.get("analyser") for a in declared.get("attribute", [])}
     probes: list[dict] = []
-    offered = 0
+    offered: dict[str, int] = {}
     held: list[np.ndarray] = []
 
     def entities() -> np.ndarray:
@@ -162,13 +162,13 @@ def filter_probes(
             candidates = [v for v in views if (v["owner"], v["key"]) == (view["owner"], view["key"])]
         else:
             candidates = list(views)
-        offered += 1
         candidates.sort(key=lambda v: v["id"] != view["id"])
         values = column_sample(rung, view, candidates, column, entities)
-        if values is not None:
-            probes += family_probes(
-                column, operand["family"], operand["operands"], values, binary, analysers.get(column)
-            )
+        asked = [] if values is None else family_probes(
+            column, operand["family"], operand["operands"], values, binary, analysers.get(column)
+        )
+        offered[column] = len(asked)
+        probes += asked
     return probes, offered
 
 
@@ -457,10 +457,13 @@ def compare_census(folded: dict, all_in: dict) -> dict:
     }
 
 
-def census_coverage(one_view: dict, declared: dict, offered: int = 0, all_in: dict | None = None) -> dict:
+def census_coverage(
+    one_view: dict, declared: dict, offered: dict | None = None, all_in: dict | None = None
+) -> dict:
     """What a census actually compared, read from the principal that sees the most: artifacts and
     parent edges per census zoom, per layer the levels an artifact was served at against the
-    levels the layer declares, and the filter probes against the `offered` operands. `declared` is
+    levels the layer declares, and the filter probes against `offered`, the probes each operand
+    produced by column. `declared` is
     each layer's declared levels, empty for a layer that declares none, which sits wholly at level
     0. `all_in` is the same view's census on the all-in build, whose probes must match something.
     """
@@ -514,7 +517,8 @@ def census_coverage(one_view: dict, declared: dict, offered: int = 0, all_in: di
         "layers": layers,
         "visible": row["zoom0_visible"],
         "filters": {
-            "offered": offered,
+            "offered": len(offered or {}),
+            "unprobed": sorted(column for column, n in (offered or {}).items() if not n),
             "compared": len(filters),
             "matching": sum(1 for matched in filters.values() if matched),
             "category_columns": len(row.get("categories") or {}),
@@ -537,12 +541,14 @@ def coverage_failures(coverage: dict) -> list[str]:
 
 
 def probe_failures(coverage: dict) -> list[str]:
-    """A sentence where the filter comparison proved nothing: operands offered and no probe
-    compared, or a probe that matched nothing on the all-in build, where its values came from."""
+    """A sentence where the filter comparison proved nothing: an operand `/v1/meta` offers that
+    produced no probe, or a probe that matched nothing on the all-in build, where its values came
+    from."""
     filters = coverage.get("filters") or {}
-    out = []
-    if filters.get("offered") and not filters.get("compared") and not filters.get("category_columns"):
-        out.append(f"compared no probe of the {filters['offered']} filter operand(s) /v1/meta offers")
+    out = [
+        f"asked no probe of {column}, a filter operand /v1/meta offers"
+        for column in filters.get("unprobed") or []
+    ]
     out += [
         f"asked the probe {name}, which matched nothing on the all-in build"
         for name in filters.get("unmatched_on_all_in") or []

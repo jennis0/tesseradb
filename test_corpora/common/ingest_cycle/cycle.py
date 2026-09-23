@@ -945,7 +945,7 @@ class Cycle:
             all_in_frames = {v["id"]: v["quantisation"] for v in all_in_meta["views"]}
             self.meta_layers = all_in_meta.get("layers") or []
             self.choose_boxes(allin.viewer, reference_token)
-            offered: dict[str, int] = {}
+            offered: dict[str, dict[str, int]] = {}
             for view in self.views:
                 self.probes[view["name"]], offered[view["name"]] = filter_probes(
                     self.rung, self.views, view, all_in_meta, self.binary
