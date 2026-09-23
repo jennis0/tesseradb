@@ -812,7 +812,10 @@ const CROSSING_CHUNK_MIN_ROWS: u32 = 4096;
 
 /// The view-space rows a request's tiles span: every tile part shifted into view row space by its
 /// segment's `row_base`, sorted, and merged where adjacent, so the domain is never widened.
-pub(crate) fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Vec<Range<u32>> {
+pub(crate) fn crossing_domain(
+    ranges: &[Vec<(usize, Range<u32>)>],
+    row_bases: &[u32],
+) -> Vec<Range<u32>> {
     let mut spans: Vec<Range<u32>> = ranges
         .iter()
         .flat_map(|parts| parts.iter())
@@ -1000,7 +1003,8 @@ impl Engine {
         ) -> Result<T>,
     ) -> Result<T> {
         let candidate = self.filter_candidate(served.session, served.generation)?;
-        self.route_filters_under(served, mask, &candidate, cancel, body)
+        let resolved = ResolvedLeaves::default();
+        self.route_filters_under(served, mask, &candidate, &resolved, cancel, body)
     }
 
     /// The entity-space set a request's filter is evaluated under: the session's fragment brought
@@ -1021,20 +1025,48 @@ impl Engine {
 
     /// [`Self::route_filters`] under a candidate the caller composed: a subset of
     /// [`Self::filter_candidate`]'s set, never wider, since every scan returns a subset of it.
+    /// A region or `member_of` leaf `resolved` holds is answered from it, and one it does not is
+    /// resolved and kept there; the caller holds it only while `served` and `mask` are the ones
+    /// it was filled under.
     pub(crate) fn route_filters_under<T>(
         &self,
         served: &ServedView<'_>,
         mask: &EffectiveMask,
         candidate: &croaring::Bitmap,
+        resolved: &ResolvedLeaves,
         cancel: &Option<CancelToken>,
         body: impl FnOnce(
             &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
         ) -> Result<T>,
     ) -> Result<T> {
-        let regions =
-            |leaf: &crate::filter::RegionLeaf| self.resolve_region(leaf, served, mask, cancel);
-        let members =
-            |leaf: &crate::filter::MemberOfLeaf| self.resolve_member_of(leaf, served, mask);
+        let regions = |leaf: &crate::filter::RegionLeaf| {
+            let held = resolved
+                .regions
+                .borrow()
+                .iter()
+                .find(|(held, _)| held == leaf)
+                .map(|(_, rows)| rows.clone());
+            if let Some(rows) = held {
+                return Ok(rows);
+            }
+            let rows = self.resolve_region(leaf, served, mask, cancel)?;
+            resolved.regions.borrow_mut().push((leaf.clone(), rows.clone()));
+            Ok(rows)
+        };
+        let members = |leaf: &crate::filter::MemberOfLeaf| {
+            let held = resolved
+                .members
+                .borrow()
+                .iter()
+                .find(|(held, _)| held == leaf)
+                .map(|(_, rows)| rows.clone());
+            if let Some(rows) = held {
+                return Ok(rows);
+            }
+            let rows = self.resolve_member_of(leaf, served, mask)?;
+            resolved.members.borrow_mut().push((leaf.clone(), rows.clone()));
+            Ok(rows)
+        };
         let layers = |layer: &str| self.reaches_layer(served.session, served.generation, layer);
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
@@ -1172,6 +1204,14 @@ impl Engine {
         }
         Ok(gated.rows.visible_rows(gated.ordinal, mask))
     }
+}
+
+/// The region and `member_of` leaves answered under one view and mask, so a leaf evaluated again
+/// under them is resolved once.
+#[derive(Default)]
+pub(crate) struct ResolvedLeaves {
+    regions: std::cell::RefCell<Vec<(crate::filter::RegionLeaf, crate::region::RegionRows)>>,
+    members: std::cell::RefCell<Vec<(crate::filter::MemberOfLeaf, croaring::Bitmap)>>,
 }
 
 /// A filter's refusal as the engine's: the caller's fault or the deployment's, as [`FilterError`]

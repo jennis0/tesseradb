@@ -2655,9 +2655,14 @@ fn a_cell_larger_than_a_stretch_is_read_whole() {
         let mut req = request("s0", &fields);
         req.order = Some(order);
         req.page_rows = Some(1000);
-        // A stretch's ceiling at its floor of 4,096 rows, under the 10,000 in the one cell.
-        req.limits.max_page_bytes = 16 * 4096;
-        let ids = read_all(&engine, &session, &req).ids();
+        // A page ceiling of 4,096 bytes holds a stretch to its floor of 4,096 rows at any cost a
+        // row, so every stretch ends inside the 10,000 rows of the one cell.
+        req.limits.max_page_bytes = 4096;
+        // Room for every row three times over, so a read that repeats rows ends by its pages.
+        req.pages = Some(64);
+        let (sink, trailer) = respond(&engine, &session, req).unwrap();
+        assert_eq!(trailer.ended_by, ResponseEndedBy::End, "{order:?}: one response");
+        let ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
         assert_each_once(&ids);
         assert_eq!(ids.len() as u64, visible, "{order:?}");
     }

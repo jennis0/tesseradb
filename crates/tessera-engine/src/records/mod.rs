@@ -19,7 +19,6 @@ mod cursor;
 mod plan;
 mod walk;
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::record_batch::RecordBatch;
@@ -32,7 +31,6 @@ use crate::region::RegionVerdict;
 use crate::session::Session;
 use crate::timing::Probe;
 use crate::viewport::{filter_refusal, meta_of, SinkClosed, SinkResult};
-use crate::Generation;
 
 pub(crate) use cursor::CursorKey;
 use cursor::{Binding, ItemsCursor, Position, Route};
@@ -106,7 +104,8 @@ pub struct ItemsRequest<'a> {
     /// page holding whatever rows the page under way had reached. The walk honours it only once
     /// stopping moves the cursor on, so it may run on for one stretch's filter evaluation and one
     /// chunk of the scan after it. A token cancelled before the response walks its first page
-    /// ends the response with no rows and the cursor it was given, since the client has gone.
+    /// ends the response with no rows, no counts and the cursor it was given, since the client
+    /// has gone.
     pub cancel: Option<CancelToken>,
 }
 
@@ -285,8 +284,11 @@ enum Paged {
     Stopped(ResponseEndedBy),
 }
 
-/// Everything a response fixes before its head: the request, its fields and order, the binding
-/// its cursors are sealed under, and the head's counts.
+/// The head's counts, and the verdict the counting evaluation's region leaves reached.
+type Counted = (ItemsCounts, Option<RegionVerdict>);
+
+/// Everything a response fixes before its first page: the request, its fields and order, and the
+/// binding its cursors are sealed under.
 struct Planned<'r> {
     session: &'r Session,
     req: ItemsRequest<'r>,
@@ -295,9 +297,6 @@ struct Planned<'r> {
     page_rows: u32,
     idset: u32,
     binding: Binding<'r>,
-    counts: Option<ItemsCounts>,
-    /// The verdict the counting evaluation reached.
-    counted_region: Option<RegionVerdict>,
 }
 
 impl Engine {
@@ -374,13 +373,6 @@ impl Engine {
             .page_rows
             .unwrap_or(u32::MAX)
             .min(req.limits.max_page_rows.max(1));
-        let (counts, counted_region) = match req.count {
-            true => {
-                let (counts, region) = self.items_counts(session, &generation, &req)?;
-                (Some(counts), region)
-            }
-            false => (None, None),
-        };
         let walk = Walk::new(
             req.filter.clone(),
             req.keep_unmatched,
@@ -397,8 +389,6 @@ impl Engine {
                 page_rows,
                 idset,
                 binding,
-                counts,
-                counted_region,
             },
             walk,
         ))
@@ -424,11 +414,12 @@ impl Engine {
             };
             self.cursor_key.seal(&planned.binding, &cursor.encode())
         };
+        let mut counted: Option<Counted> = None;
         let mut head_sent = false;
-        let mut send_head = |walk: &Walk, sink: &mut dyn ItemsSink| -> Result<()> {
+        let mut send_head = |walk: &Walk, counted, sink: &mut dyn ItemsSink| -> Result<()> {
             if !head_sent {
                 head_sent = true;
-                sink.head(&planned.head(walk))
+                sink.head(&planned.head(walk, counted))
                     .map_err(|SinkClosed| EngineError::Cancelled)?;
             }
             Ok(())
@@ -449,8 +440,23 @@ impl Engine {
             if clock.cancelled() {
                 break ResponseEndedBy::Deadline;
             }
-            let page = self.items_page(planned, &mut walk, &mut clock)?;
-            send_head(&walk, sink)?;
+            // Each page reads the latest generation and composes the view's mask for itself; the
+            // first also counts under them, when the request asked for counts.
+            let generation = self.generation.load_full();
+            let req = &planned.req;
+            let open = self.open_view(
+                planned.session,
+                &generation,
+                req.view,
+                &req.cancel,
+                &mut Probe::new(),
+            )?;
+            let cx = PageCx::new(self, &open, &generation);
+            if req.count && counted.is_none() {
+                counted = Some(self.items_counts(&cx, req)?);
+            }
+            let page = self.items_page(planned, &cx, &mut walk, &mut clock)?;
+            send_head(&walk, counted, sink)?;
             match page {
                 Paged::Rows {
                     batch,
@@ -479,7 +485,7 @@ impl Engine {
                 Paged::Stopped(reason) => break reason,
             }
         };
-        send_head(&walk, sink)?;
+        send_head(&walk, counted, sink)?;
         Ok(ItemsTrailer {
             pages,
             rows,
@@ -488,35 +494,23 @@ impl Engine {
         })
     }
 
-    /// One page from the latest generation: the view's mask composed for it, the rows walked from
-    /// the position, their fields read and the batch cut to the byte ceiling. A walk stopped for
-    /// time or cancellation while holding rows makes a short page of them. The walk's position
-    /// moves to the page's end, or where the page holds no row, to the scan position reached.
+    /// One page under `cx`: the rows walked from the position, their fields read and the batch cut
+    /// to the byte ceiling. A walk stopped for time or cancellation while holding rows makes a
+    /// short page of them. The walk's position moves to the page's end, or where the page holds no
+    /// row, to the scan position reached.
     fn items_page(
         &self,
         planned: &Planned<'_>,
+        cx: &PageCx<'_>,
         walk: &mut Walk,
         clock: &mut Clock,
     ) -> Result<Paged> {
         let req = &planned.req;
-        let generation = self.generation.load_full();
-        let open = self.open_view(
-            planned.session,
-            &generation,
-            req.view,
-            &req.cancel,
-            &mut Probe::new(),
-        )?;
-        let cx = PageCx {
-            engine: self,
-            open: &open,
-            generation: &generation,
-        };
         let Collected {
             rows,
             walked,
             position,
-        } = walk.collect(&cx, planned.page_rows as usize, clock)?;
+        } = walk.collect(cx, planned.page_rows as usize, clock)?;
         if rows.is_empty() {
             walk.position = position;
             return Ok(match walked {
@@ -525,7 +519,7 @@ impl Engine {
             });
         }
         let (batch, kept, bytes) = read_page(
-            &cx,
+            cx,
             &planned.plan,
             &rows,
             req.keep_unmatched,
@@ -536,7 +530,7 @@ impl Engine {
             _ => None,
         };
         let ended_by = if kept < rows.len() {
-            walk.position = walk.position_at(&cx, &rows[kept - 1]);
+            walk.position = walk.position_at(cx, &rows[kept - 1]);
             PageEndedBy::Bytes
         } else {
             walk.position = position;
@@ -555,14 +549,14 @@ impl Engine {
     }
 
     /// The head's counts: the view's visible items, and of them the ones the filter matches, by
-    /// one evaluation of the filter over the whole view on the route every page takes.
+    /// one evaluation of the filter over the whole view on the route every page takes, under the
+    /// first page's mask.
     fn items_counts(
         &self,
-        session: &Session,
-        generation: &Arc<Generation>,
+        cx: &PageCx<'_>,
         req: &ItemsRequest<'_>,
-    ) -> Result<(ItemsCounts, Option<RegionVerdict>)> {
-        let open = self.open_view(session, generation, req.view, &req.cancel, &mut Probe::new())?;
+    ) -> Result<Counted> {
+        let open = cx.open;
         let visible = open.mask.visible_total();
         let Some(expr) = &req.filter else {
             return Ok((
@@ -574,13 +568,8 @@ impl Engine {
             ));
         };
         let total = u32::try_from(open.served.data.row_space.total_rows()).unwrap_or(u32::MAX);
-        let cx = PageCx {
-            engine: self,
-            open: &open,
-            generation,
-        };
         let whole_view = std::iter::once(0..total).collect::<Vec<_>>();
-        let routed = filter_rows(&cx, expr, None, &whole_view, false, &req.cancel)?;
+        let routed = filter_rows(cx, expr, None, &whole_view, false, &req.cancel)?;
         let matched = open
             .mask
             .rows_in_range(0..total)
@@ -605,12 +594,14 @@ fn refuse_shape(req: &ItemsRequest<'_>) -> Result<()> {
 }
 
 impl Planned<'_> {
-    fn head(&self, walk: &Walk) -> ItemsHead {
+    /// The head, with the counts and the verdict the counting evaluation reached, where the
+    /// request asked for counts.
+    fn head(&self, walk: &Walk, counted: Option<Counted>) -> ItemsHead {
         ItemsHead {
             order: self.order,
             page_rows: self.page_rows,
-            counts: self.counts,
-            region: RegionVerdict::coarsest(self.counted_region, walk.region),
+            counts: counted.map(|(counts, _)| counts),
+            region: RegionVerdict::coarsest(counted.and_then(|(_, region)| region), walk.region),
         }
     }
 }

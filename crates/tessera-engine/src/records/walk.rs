@@ -37,7 +37,7 @@ use crate::error::Result;
 use crate::filter::FilterExpr;
 use crate::histogram::MaskIdentity;
 use crate::region::RegionVerdict;
-use crate::viewport::{crossing_domain, segment_holding, OpenView, RoutedRows};
+use crate::viewport::{crossing_domain, segment_holding, OpenView, ResolvedLeaves, RoutedRows};
 use crate::Generation;
 
 /// The first stretch spans at least this many rows, or candidate items in stored order, whatever
@@ -58,9 +58,24 @@ pub(super) struct PageCx<'a> {
     pub(super) engine: &'a Engine,
     pub(super) open: &'a OpenView<'a>,
     pub(super) generation: &'a Arc<Generation>,
+    /// The region and `member_of` leaves answered under this page's mask.
+    resolved: ResolvedLeaves,
 }
 
-impl PageCx<'_> {
+impl<'a> PageCx<'a> {
+    pub(super) fn new(
+        engine: &'a Engine,
+        open: &'a OpenView<'a>,
+        generation: &'a Arc<Generation>,
+    ) -> PageCx<'a> {
+        PageCx {
+            engine,
+            open,
+            generation,
+            resolved: ResolvedLeaves::default(),
+        }
+    }
+
     fn segments(&self) -> &[(&SegmentData, u32)] {
         &self.open.served.segments
     }
@@ -225,7 +240,8 @@ fn first_at(segment: &SegmentData, until: Option<Key>) -> u32 {
 }
 
 /// A filter's rows over `domain`, routed under `candidate`, or under the session's whole
-/// candidate where that is `None`: every leaf takes the row route where its column affords one.
+/// candidate where that is `None`: every leaf takes the row route where its column affords one,
+/// and a region or `member_of` leaf is resolved once a page.
 pub(super) fn filter_rows(
     cx: &PageCx<'_>,
     expr: &FilterExpr,
@@ -240,12 +256,15 @@ pub(super) fn filter_rows(
     let body = |route: &dyn Fn(&FilterExpr, bool) -> Result<crate::filter::RoutedFilter>| {
         engine.rows_of_routed(served, route(expr, true)?, domain, rows_in_ranges, per_tile_only)
     };
-    match candidate {
-        Some(candidate) => {
-            engine.route_filters_under(served, &cx.open.mask, candidate, cancel, body)
+    let whole;
+    let candidate = match candidate {
+        Some(candidate) => candidate,
+        None => {
+            whole = engine.filter_candidate(served.session, cx.generation)?;
+            &whole
         }
-        None => engine.route_filters(served, &cx.open.mask, cancel, body),
-    }
+    };
+    engine.route_filters_under(served, &cx.open.mask, candidate, &cx.resolved, cancel, body)
 }
 
 impl Walk {
