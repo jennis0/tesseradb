@@ -415,6 +415,7 @@ def declared_layers(rung: Path) -> list[dict]:
         roster = source_path(rung, named, layer.get("source"))
         members = source_path(rung, named, (layer.get("members") or {}).get("source"))
         supplied = bool((layer.get("content") or {}).get("supplied"))
+        scope = layer.get("scope")
         if attribute is not None:
             route = "attribute"
         elif members is not None and members.exists() and per_point_member_table(members):
@@ -431,9 +432,12 @@ def declared_layers(rung: Path) -> list[dict]:
                 "route": route,
                 "value_set": layer.get("value_set"),
                 "hierarchy": (layer.get("hierarchy") or {}).get("kind"),
-                # The roster column naming each artifact's view, on a group-scoped layer.
-                "view_column": (layer.get("fields") or {}).get("view")
-                if isinstance(layer.get("scope"), dict)
+                "views": layer.get("views") or [],
+                # The group a group-scoped layer's artifact sets vary by, and the roster column
+                # naming each artifact's view.
+                "scope_group": scope.get("group") if isinstance(scope, dict) else None,
+                "view_column": (layer.get("fields") or {}).get("view", "view")
+                if isinstance(scope, dict)
                 else None,
                 "inline": bool(layer.get("artifacts")),
             }

@@ -51,8 +51,8 @@ def wire_columns(rung: Path, view: dict | None = None) -> tuple[str | None, list
             if attribute["name"] in held:
                 attributes.append(attribute["name"])
             continue
-        column = (attribute.get("fields") or {}).get("view")
-        select = (column, view["key"]) if group is not None and column else None
+        column = (attribute.get("fields") or {}).get("view", "view")
+        select = (column, view["key"]) if group is not None else None
         entry = joined.setdefault(
             (own, select),
             {
@@ -203,7 +203,7 @@ class HoldOut:
         head_rows: int = 0,
         log=print,
         view: dict | None = None,
-        members: bool = True,
+        members: Sequence[str] = (),
         record_order: bool = False,
     ):
         #: The view's own points file: its positions, its access column, and whichever declared
@@ -233,11 +233,11 @@ class HoldOut:
         self.log = log
         self.body_stats = self.new_body_stats()
         self.head: pa.Table | None = None
-        # Membership is entity-space and travels once, with the pass that allocates the entities.
+        #: The column-route layers in `members`, whose member lists travel as batch columns.
         self.members = [
             MemberStream(layer["name"], layer["members"], self.held)
             for layer in declared_layers(rung)
-            if layer["route"] == "column" and members
+            if layer["route"] == "column" and layer["name"] in members
         ]
         self.columns = [stream.name for stream in self.members]
         self.member_stats = {stream.name: stream.stats for stream in self.members}

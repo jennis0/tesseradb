@@ -406,7 +406,7 @@ class Cycle:
                 head_rows=head if first else 0,
                 log=self.log,
                 view=entry,
-                members=first,
+                members=self.column_layers() if first else (),
             )
             self.log(
                 f"ingesting {len(self.held):,} rows into {name} from "
@@ -1088,7 +1088,12 @@ class Cycle:
         # deleted holder never blocks a re-ingest, so each must be accepted rather than 409'd,
         # and each later view must join the entity the anchor's pass allocated.
         out["reingest_by_view"], answered = self.ingest_views(
-            self.views, deleted, hold.max_body_bytes, hold.batch_rows, "recycle"
+            self.views,
+            deleted,
+            hold.max_body_bytes,
+            hold.batch_rows,
+            "recycle",
+            lambda view: self.column_layers() if view["name"] == self.anchor else (),
         )
         passes = out["reingest_by_view"].values()
         out["reingest"] = {
@@ -1115,11 +1120,22 @@ class Cycle:
         out["overlay"] = control.status()["overlay"]
         return out
 
+    def column_layers(self, view: dict | None = None) -> list[str]:
+        """The column-route layers a pass carries member columns for: every one on the pass that
+        allocates the entities, or those drawn on `view`, by name or by its group."""
+        return [
+            layer["name"]
+            for layer in declared_layers(self.rung)
+            if layer["route"] == "column"
+            and (view is None or {view["id"], view["group"]} & set(layer["views"]))
+        ]
+
     def ingest_views(
-        self, views, entities, cap: int, batch_rows: int, label: str
+        self, views, entities, cap: int, batch_rows: int, label: str, members
     ) -> tuple[dict, dict]:
         """`entities`' rows in each of `views`, one pass per view in order, and each entity's
-        answered tessera_ids across the passes."""
+        answered tessera_ids across the passes. `members(view)` names the column-route layers
+        whose member columns that view's pass carries."""
         figures: dict = {}
         answered: dict[int, set] = {}
         for view in views:
@@ -1131,7 +1147,7 @@ class Cycle:
                 batch_rows,
                 log=self.log,
                 view=view,
-                members=name == self.anchor,
+                members=members(view),
                 record_order=True,
             )
             tessera_ids: dict[int, int] = {}
@@ -1148,8 +1164,9 @@ class Cycle:
     def do_view_recreate(self, control) -> dict:
         """Drop the last key of a group that owns its views, which drops that key's view in every
         group sharing it, create it again from its roster record, and send it every row and every
-        group-scoped layer artifact of that key: each view must then match the all-in build's
-        census, which declared the view fresh."""
+        artifact of that key of each layer scoped to one of those groups: each view must then
+        match the all-in build's census, which declared the view fresh. A column-route layer's
+        roster goes first and its members travel on the batches, as on the first ingest."""
         target = next(
             (view for view in reversed(self.views) if view["group"] and view["group"] == view["owner"]),
             None,
@@ -1159,6 +1176,8 @@ class Cycle:
         group, key = target["owner"], target["key"]
         views = [view for view in self.views if (view["owner"], view["key"]) == (group, key)]
         names = [view["name"] for view in views]
+        groups = {view["group"] for view in views}
+        scoped = [layer for layer in declared_layers(self.rung) if layer["scope_group"] in groups]
         out: dict = {"group": group, "key": key, "views": names}
         dropped = control.drop_view(group, key)
         out["drop"] = {"status": dropped.status_code, "body": dropped.text[:600]}
@@ -1166,15 +1185,24 @@ class Cycle:
         created = control.create_view(group, key, self.roster_record(target))
         out["create"] = {"status": created.status_code, "body": created.text[:600]}
         assert self.limits is not None, "the limits block is read before a view is recreated"
+        out["publish_rosters"] = self.publish_key(
+            control,
+            key,
+            [layer for layer in scoped if layer["route"] == "column" and layer["roster"] is not None],
+            members=False,
+        )
         out["ingest_by_view"], answered = self.ingest_views(
             views,
             np.sort(declared_entities(self.rung)),
             int(self.limits["ingest"]["max_batch_bytes"]),
             int(self.limits["ingest"]["max_batch_rows"]),
             "recreate",
+            self.column_layers,
         )
         out["items_with_several_ids"] = sum(1 for tids in answered.values() if len(tids) > 1)
-        out["publish"] = self.publish_key(control, key)
+        out["publish"] = self.publish_key(
+            control, key, [layer for layer in scoped if self.routed_elsewhere(layer) is None]
+        )
         _, out["flushed"], _ = self.flush_and_wait(control)
         after = {
             name: census(
@@ -1211,20 +1239,20 @@ class Cycle:
             record["visibility"] = view["record"]["visibility"]
         return record
 
-    def publish_key(self, control, key: str) -> dict:
-        """Every group-scoped layer's artifacts of one view key, published again."""
+    def publish_key(self, control, key: str, layers: list[dict], members: bool = True) -> dict:
+        """Each of `layers`' artifacts of one view key, picked out of its roster by the layer's
+        view column, published again; without their members where `members` is false."""
         out: dict = {}
-        for layer in declared_layers(self.rung):
-            if layer["view_column"] is None or layer["roster"] is None:
-                continue
+        for layer in layers:
             work = self.work / f"recreate-{layer['name'].replace('/', '__')}"
             work.mkdir(parents=True, exist_ok=True)
             roster = pq.read_table(layer["roster"])
             kept = roster.filter(pc.equal(roster.column(layer["view_column"]), key))
             pq.write_table(kept, work / layer["roster"].name)
-            out[layer["name"]] = self.publish_layer(
-                control, layer["name"], {**layer, "roster": work / layer["roster"].name}, work / "publish"
-            )
+            record = {**layer, "roster": work / layer["roster"].name}
+            if not members:
+                record["members"] = None
+            out[layer["name"]] = self.publish_layer(control, layer["name"], record, work / "publish")
         return out
 
     def viewport_status(self, view: str) -> int:
@@ -1381,9 +1409,12 @@ class Cycle:
                     f"the recreated views answered {recreate['items_with_several_ids']} item(s) "
                     f"with a different tessera_id in each"
                 )
-            for layer, entry in (recreate.get("publish") or {}).items():
-                if entry.get("refusals"):
-                    out.append(f"republishing {layer} for {where} was refused {entry['refusals']} time(s)")
+            for step in ("publish_rosters", "publish"):
+                for layer, entry in (recreate.get(step) or {}).items():
+                    if entry.get("refusals"):
+                        out.append(
+                            f"republishing {layer} for {where} was refused {entry['refusals']} time(s)"
+                        )
             out += [
                 f"the census on the recreated view {name} is not the all-in build's: "
                 f"{compared['differences_by_surface']}"
