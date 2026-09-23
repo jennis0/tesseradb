@@ -73,12 +73,10 @@ def addressed(value: Any) -> str:
 def batch_id(source: str, index: int) -> str:
     """A page's batch id: a fresh random id, made once when the request is built.
 
-    **A request's identity is the client's to choose, and it is never inferred from what the
-    request contains.** The id an attempt carries is reused for the
-    retries of that same attempt — after a `429`, a timeout or a lost answer, inside one
-    `commit()` — and for nothing else. Nothing is kept across commits or sessions, so the same
-    frame inserted and committed five times is five loads, which is what a user testing a loader
-    asks for and used to get one of.
+    The id is never derived from the request's content. Retries of one attempt inside one
+    `commit()`, after a `429`, a timeout or a lost answer, reuse it, and nothing else does.
+    Nothing is kept across commits, so the same table inserted and committed five times is
+    loaded five times.
 
     The source name and the page index ride in front of the random half so that an operator
     reading a server log can tell which page a line is about; nothing reads them.

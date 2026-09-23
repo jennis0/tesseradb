@@ -98,8 +98,8 @@ fn category_code(
              '{vocabulary}' does not list; send a key it lists",
             declared.name
         ))),
-        // A novel key travels as a key; the executor mints its code when the commit window
-        // closes, before the WAL append.
+        // A novel key travels as a key; the executor mints its code at a commit window's close
+        // or in a values batch's pass, before the WAL append.
         VocabularyKind::Discovered => Ok(WalScalar::Utf8(key.to_string())),
     }
 }

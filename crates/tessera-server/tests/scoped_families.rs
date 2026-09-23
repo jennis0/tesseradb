@@ -1766,3 +1766,77 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
         (true, json!("upper"))
     );
 }
+
+/// **A group-scoped family's new key is minted by the values batch that names it**, on an open
+/// vocabulary no ingest has used, and the cell is served under its view after a flush and after a
+/// restart.
+#[tokio::test]
+async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
+    let served = serve().await;
+    let declarations = [
+        (
+            "/control/vocabularies/grade",
+            json!({ "value_set": "open", "visibility": "public", "width": "u16" }),
+        ),
+        (
+            "/control/attributes",
+            json!({
+                "name": "grade", "type": "category", "vocabulary": "grade", "index": true,
+                "scope": { "group": "quarter" }
+            }),
+        ),
+    ];
+    for (path, body) in declarations {
+        let resp = served
+            .server
+            .client
+            .put(served.server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 201, "{path}");
+    }
+    let id = ingest_scoped(
+        &served,
+        "q3-only",
+        "quarter:2026-Q3",
+        &[(FILLED, 250.0, 250.0, IN_Q3)],
+    )
+    .await[0];
+    flush(&served).await;
+
+    use base64::Engine as _;
+    let row = json!([{
+        "external_id": base64::engine::general_purpose::STANDARD.encode(external_id_of(FILLED)),
+        "grade": "g7",
+    }]);
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/values"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "scoped-grade")
+        .header("x-tessera-view", "quarter:2026-Q3")
+        .json(&row)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().await.unwrap_or_default());
+    flush(&served).await;
+    assert_eq!(scoped_grade(&served, id).await, (true, json!("g7")));
+
+    let served = restart(served, default_engine_config()).await;
+    assert_eq!(scoped_grade(&served, id).await, (true, json!("g7")));
+}
+
+/// Whether `2026-Q3` serves `id` under `grade = g7`, and the item card's `2026-Q3` grade.
+async fn scoped_grade(served: &Served, id: u64) -> (bool, Value) {
+    let filter = json!({ "grade": { "eq": "g7" } });
+    let matched = ids(served, "quarter:2026-Q3", Some(filter)).await;
+    let resp = post_item(&served.server, &served.token, id).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let card: Value = resp.json().await.unwrap();
+    (matched.contains(&id), card["scoped"]["grade"]["2026-Q3"].clone())
+}
