@@ -237,8 +237,8 @@ impl Executor {
                         health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!(
                             error = %e,
-                            "a coalesce window failed; its extents stay as they are and it is \
-                             retried at the next tick"
+                            "a coalesce window failed; its extents stay as they are, and the \
+                             same window is retried at every tick until something changes"
                         );
                     }
                     unit.complete(completed)
