@@ -11,12 +11,14 @@ is read back from a packed extent.
 What is compared, per principal: the artifacts frame (keys, masked counts, parent links, targets),
 the points frame's membership columns, the identifier route (status and body, a withheld artifact
 answering exactly as an identifier nothing was issued under), `member_of` counts, and browse's
-roots, children and search, walked page by page through `next`.
+roots, children and search, walked page by page through `next`. A served artifact's drill-down
+carries its layer, key and masked count.
 """
 
 from __future__ import annotations
 
 import io
+import json
 
 import pyarrow.ipc as ipc
 import pytest
@@ -113,6 +115,10 @@ def check(server) -> None:
             answer = drill(server, token, tessera_id)
             if key in expected:
                 assert answer[0] == 200, (terms, key)
+                body = json.loads(answer[1])
+                assert (body["layer"], body.get("key"), body["masked_count"]) == (
+                    key[0], key[1], expected[key][0]
+                ), (terms, key)
             else:
                 assert answer == never, (terms, key)
             if key[0] == fx.NAMES:
