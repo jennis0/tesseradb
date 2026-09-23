@@ -19,68 +19,9 @@ use tempfile::TempDir;
 
 const LAYER: &str = "clusters/grown";
 
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
-fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
-}
-
 /// How many of `range` the fixture gives term 1 to — the narrow principal's expected count.
 fn narrow_count(range: std::ops::Range<u64>) -> u64 {
     range.filter(|s| terms_of(*s).contains(&1)).count() as u64
-}
-
-async fn open(tmp: &TempDir) -> TestServer {
-    spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
-async fn serve(tmp: &TempDir) -> TestServer {
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    open(tmp).await
-}
-
-/// Reopen the same bundle and the same WAL. The old server is stopped and waited for first, so its
-/// executor has released the bundle root's write lock before the new one takes it.
-async fn restart(server: TestServer, tmp: &TempDir) -> TestServer {
-    server.shutdown().await;
-    open(tmp).await
-}
-
-async fn register(server: &TestServer) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
-            "name": LAYER,
-            "title": LAYER,
-            "views": ["s0"],
-            "membership": "enumerated",
-            "value_set": "closed",
-            "visibility": null,
-            "artifact_visibility": { "field": null, "default": "inherited" },
-            "require_member_visibility": null,
-            "hierarchy": { "kind": "flat", "prune_children": false },
-            "content": { "computed": [], "supplied": [] },
-            "depends_on": [],
-            "levels": []
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "the layer registers");
 }
 
 fn artifacts_url(server: &TestServer) -> String {
@@ -190,82 +131,6 @@ async fn change(server: &TestServer, item: serde_json::Value) {
     assert_eq!(status, 200, "{}", resp.text().await.unwrap());
 }
 
-async fn wait_until(
-    server: &TestServer,
-    what: &str,
-    done: impl Fn(&tessera_engine::ExecutorStats) -> bool,
-) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        if done(&server.state.engine.write_executor_stats()) {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{what}: never happened"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
-/// Flush, then fold. **One point is ingested first**: a flush with nothing buffered publishes
-/// nothing, so the row is what gives the flush an extent to write and the fold something to fold
-/// into the base.
-async fn flush_and_fold(server: &TestServer) {
-    let ingested = external_id_of(9_001);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "grow-fold")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(&ingested[..]),
-            10.0,
-            10.0,
-            "0",
-        )]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "{}",
-        resp.text().await.unwrap()
-    );
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_until(server, "the flush published", move |now| {
-        now.flushes > before.flushes
-    })
-    .await;
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_until(server, "the fold published", move |now| {
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        now.folds > before.folds
-    })
-    .await;
-}
-
 /// The receipt says what joined and nothing else.
 fn assert_receipt(artifact: &serde_json::Value, key: &str, tessera_id: &str, joined: u64) {
     assert_eq!(artifact["key"], key, "{artifact}");
@@ -288,7 +153,7 @@ fn assert_receipt(artifact: &serde_json::Value, key: &str, tessera_id: &str, joi
 async fn an_artifact_published_with_one_slice_grows_in_two_more_and_serves_the_union() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    register(&server).await;
+    register(&server, flat_layer(LAYER)).await;
     let id = publish(&server, "a", members(0..10)).await;
     assert_eq!(count(&server, &["0"]).await, 10);
 
@@ -333,7 +198,7 @@ async fn an_artifact_published_with_one_slice_grows_in_two_more_and_serves_the_u
 async fn an_unknown_key_refuses_the_whole_batch() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    register(&server).await;
+    register(&server, flat_layer(LAYER)).await;
     publish(&server, "a", members(0..10)).await;
 
     let (status, body) = grow(
@@ -367,7 +232,7 @@ async fn an_unknown_key_refuses_the_whole_batch() {
 async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    register(&server).await;
+    register(&server, flat_layer(LAYER)).await;
     publish(&server, "a", members(0..10)).await;
 
     change(
@@ -421,7 +286,7 @@ async fn a_deleted_member_refuses_the_batch_and_a_suppressed_member_joins() {
 async fn a_suppressed_artifact_grows_and_stays_suppressed() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    register(&server).await;
+    register(&server, flat_layer(LAYER)).await;
     let id = publish(&server, "a", members(0..10)).await;
     change(
         &server,
@@ -464,7 +329,7 @@ async fn a_suppressed_artifact_grows_and_stays_suppressed() {
 async fn growth_survives_a_restart_and_a_fold() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    register(&server).await;
+    register(&server, flat_layer(LAYER)).await;
     let id = publish(&server, "a", members(0..10)).await;
     let (status, body) = grow(&server, json!([{ "key": "a", "members": members(10..20) }])).await;
     assert_eq!(status, 200, "{body}");
@@ -479,7 +344,7 @@ async fn growth_survives_a_restart_and_a_fold() {
     assert_receipt(&body["artifacts"][0], "a", &id, 10);
     assert_eq!(count(&server, &["0"]).await, 30);
 
-    flush_and_fold(&server).await;
+    flush_and_fold(&server, None).await;
     assert_eq!(
         count(&server, &["0"]).await,
         30,
@@ -507,7 +372,7 @@ async fn growth_survives_a_restart_and_a_fold() {
 async fn tessera_addressing_grows_under_the_current_idset_and_refuses_a_stale_one() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    register(&server).await;
+    register(&server, flat_layer(LAYER)).await;
 
     // The identifiers of served points, as a client would hold them.
     let auth = authorise(&server, &["0"]).await;
@@ -631,7 +496,7 @@ async fn tessera_addressing_grows_under_the_current_idset_and_refuses_a_stale_on
 async fn a_growth_body_carries_keys_members_and_the_fixed_parts_and_nothing_else() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    register(&server).await;
+    register(&server, flat_layer(LAYER)).await;
     publish(&server, "a", members(0..10)).await;
 
     for extra in [
@@ -691,7 +556,7 @@ async fn a_growth_body_carries_keys_members_and_the_fixed_parts_and_nothing_else
 async fn a_restated_growth_appends_only_the_members_the_artifact_does_not_hold() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    register(&server).await;
+    register(&server, flat_layer(LAYER)).await;
     publish(&server, "a", members(0..10)).await;
 
     // Restated whole: every member the publication gave it.

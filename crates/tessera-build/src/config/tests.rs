@@ -325,6 +325,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "attached_layer",
             "attached_level",
             "attached_key",
+            "access",
         ],
     );
     expect_keys(

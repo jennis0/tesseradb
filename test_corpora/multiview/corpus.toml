@@ -234,7 +234,7 @@ membership                = "enumerated"
 hierarchy                 = { kind = "flat" }
 visibility                = "public"
 artifact_visibility       = { field = "access", default = "inherited" }
-require_member_visibility = "all"
+require_member_visibility = { count = 1 }
 
 # One supplied content value per artifact — the `contents` column both layer files carry, one
 # entry per rank and one value per supplied kind. `inherited` because the tag is the artifact's

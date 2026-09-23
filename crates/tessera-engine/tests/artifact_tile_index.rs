@@ -179,6 +179,7 @@ fn build_fixture(shape: Shape) -> Fixture {
                 contents,
                 attached_to: None,
                 parents: parent.iter().copied().collect(),
+                access: Vec::new(),
             },
             None,
         );
@@ -281,7 +282,7 @@ impl Fixture {
         &self,
         granted: &[u32],
         overlay: &Overlay,
-    ) -> (EffectiveMask, FxHashSet<TermId>, Bitmap) {
+    ) -> (EffectiveMask, Bitmap) {
         let satisfied: FxHashSet<TermId> = granted.iter().map(|t| TermId::new(*t)).collect();
         let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
         sorted.sort_unstable_by_key(|t| t.raw());
@@ -302,7 +303,7 @@ impl Fixture {
             &denied,
             Some(&buffered),
         );
-        (mask, satisfied, denied)
+        (mask, denied)
     }
 }
 
@@ -393,7 +394,7 @@ fn sweep(
         let Some(entity) = fx.entity_of(ordinal) else {
             continue;
         };
-        if let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal, None) {
+        if let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal) {
             out.push((ordinal, masked_count, rank));
         }
     }
@@ -426,7 +427,7 @@ fn walk(
         let Some(entity) = fx.entity_of(ordinal) else {
             continue;
         };
-        if let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal, None) {
+        if let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal) {
             out.push((ordinal, masked_count, rank));
         }
     }
@@ -480,11 +481,11 @@ fn differential(fx: &Fixture, rows: &ArtifactRows) -> usize {
     let mut total = 0usize;
     for overlay in [&Overlay::new(), &denied_overlay] {
         for granted in principals() {
-            let (mask, satisfied, denied) = fx.mask(&granted, overlay);
+            let (mask, denied) = fx.mask(&granted, overlay);
             let view = ArtifactView {
                 declaration: &declaration,
                 overlay,
-                satisfied: &satisfied,
+                labels: open_labels(),
                 layer_reachable: true,
                 rows,
                 dependency_served: &always_served,
@@ -665,11 +666,11 @@ fn a_hole_is_absent_and_an_empty_projection_is_a_live_artifact() {
     // zero count.
     let declaration = declaration();
     let overlay = Overlay::new();
-    let (mask, satisfied, denied) = fx.mask(&(0..TERMS).collect::<Vec<_>>(), &overlay);
+    let (mask, denied) = fx.mask(&(0..TERMS).collect::<Vec<_>>(), &overlay);
     let view = ArtifactView {
         declaration: &declaration,
         overlay: &overlay,
-        satisfied: &satisfied,
+        labels: open_labels(),
         layer_reachable: true,
         rows: &rows,
         dependency_served: &always_served,
@@ -681,7 +682,7 @@ fn a_hole_is_absent_and_an_empty_projection_is_a_live_artifact() {
     let entity = fx.entity_of(empty).expect("the artifact is live");
     assert!(
         matches!(
-            view.verdict(entity, empty, None),
+            view.verdict(entity, empty),
             ArtifactVerdict::Serve {
                 masked_count: 0,
                 ..
@@ -849,6 +850,7 @@ fn an_index_over_another_population_is_refused_and_the_level_derives_its_own() {
                 contents: Vec::new(),
                 attached_to: None,
                 parents: Vec::new(),
+                access: Vec::new(),
             },
             None,
         );
@@ -1149,11 +1151,11 @@ fn a_narrow_viewport_walks_the_perimeter_rather_than_the_level() {
     let rows = fx.rows();
     let declaration = declaration();
     let overlay = Overlay::new();
-    let (mask, satisfied, denied) = fx.mask(&(0..TERMS).collect::<Vec<_>>(), &overlay);
+    let (mask, denied) = fx.mask(&(0..TERMS).collect::<Vec<_>>(), &overlay);
     let view = ArtifactView {
         declaration: &declaration,
         overlay: &overlay,
-        satisfied: &satisfied,
+        labels: open_labels(),
         layer_reachable: true,
         rows: &rows,
         dependency_served: &always_served,
@@ -1184,4 +1186,10 @@ fn a_narrow_viewport_walks_the_perimeter_rather_than_the_level() {
         "the whole map visited {whole_nodes} nodes"
     );
     assert!(all.len() > served.len());
+}
+
+/// A label test admitting every artifact that carries no label: no artifact here carries one.
+fn open_labels() -> tessera_engine::artifacts::LabelGate<'static> {
+    static EMPTY: std::sync::OnceLock<rustc_hash::FxHashSet<Vec<u8>>> = std::sync::OnceLock::new();
+    tessera_engine::artifacts::LabelGate::new(EMPTY.get_or_init(Default::default), true)
 }

@@ -14,11 +14,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::json;
 use tempfile::TempDir;
 use tessera_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation};
@@ -33,41 +31,6 @@ const SCOPED: &str = "clusters/quarterly";
 const PLAIN: &str = "clusters/whole";
 const SHAPES: &str = "regions/quarterly";
 const ITEMS: u64 = 400;
-
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
-fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
-}
-
-fn write_points(path: &Path, offset: f64, ids: std::ops::Range<u64>) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ]));
-    let ids: Vec<u64> = ids.collect();
-    let xs: Vec<f64> = ids
-        .iter()
-        .map(|e| ((e * 7) % 900) as f64 + offset)
-        .collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 11) % 900) as f64).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
 
 /// A two-view group over one corpus: every entity of q2 has a row in q1 as well, so an artifact
 /// of one view could be projected into the other's row space — which is exactly the mistake
@@ -84,24 +47,23 @@ fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
         .enumerate()
         .map(|(slot, key)| {
             let points = dir.join(format!("{key}.parquet"));
-            write_points(&points, slot as f64 * 10.0, 0..IN_VIEW[slot]);
+            let offset = slot as f64 * 10.0;
+            let place = |e: u64| (((e * 7) % 900) as f64 + offset, ((e * 11) % 900) as f64);
+            let ids: Vec<u64> = (0..IN_VIEW[slot]).collect();
+            write_points(&points, &ids, place, Vec::new());
             tessera_build::ViewArgs {
                 visibility: gate(slot),
-                view_id: format!("quarter:{key}"),
-                projection: tessera_spatial::Projection::None,
-                extent: extent(),
-                points,
-                point_fields: Default::default(),
-                select: None,
-                access: tessera_build::config::AccessInput::relation(pairs.clone()),
+                ..view_args(
+                    &format!("quarter:{key}"),
+                    &points,
+                    AccessInput::relation(&pairs),
+                )
             }
         })
         .collect();
     let e = extent();
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
@@ -127,44 +89,19 @@ fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
                 })
                 .collect(),
         }],
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..build_args(&out, views)
     })
     .expect("the two-view group builds");
     out
 }
 
-async fn open(tmp: &TempDir) -> TestServer {
-    spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
-async fn serve(tmp: &TempDir) -> TestServer {
+async fn serve_group(tmp: &TempDir) -> TestServer {
     build_group(tmp.path(), false);
     open(tmp).await
 }
 
 /// The same fixture with q1 behind a gate — see [`build_group`].
-async fn serve_gated(tmp: &TempDir) -> TestServer {
+async fn serve_gated_group(tmp: &TempDir) -> TestServer {
     build_group(tmp.path(), true);
     open(tmp).await
 }
@@ -192,23 +129,6 @@ fn declaration(name: &str, group: Option<&str>, kind: &str) -> serde_json::Value
     })
 }
 
-async fn register(server: &TestServer, declaration: serde_json::Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status().as_u16(),
-        201,
-        "the layer registers: {:?}",
-        resp.text().await
-    );
-}
-
 async fn put(
     server: &TestServer,
     layer: &str,
@@ -231,8 +151,7 @@ async fn put(
 
 /// One view's served artifact rows of a layer, by key — the answer a viewer is given.
 async fn served(server: &TestServer, view: &str, layer: &str) -> Vec<(String, u64)> {
-    let auth = authorise(server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(server, &["0"]).await;
     served_as(server, &token, view, layer).await
 }
 
@@ -276,7 +195,7 @@ async fn served_as(
 #[tokio::test]
 async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
     register(&server, declaration(PLAIN, None, "flat")).await;
 
@@ -353,8 +272,7 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
 
     // The identity comes back off the log, so a re-`PUT` of the same key in the same view is the
     // held artifact rather than a third.
-    server.shutdown().await;
-    let server = open(&tmp).await;
+    let server = restart(server, &tmp).await;
     assert_eq!(
         served(&server, "quarter:q1", SCOPED).await,
         vec![("c1".to_string(), 10)],
@@ -380,7 +298,7 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
 #[tokio::test]
 async fn a_parent_in_another_view_is_refused() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     register(&server, declaration(SCOPED, Some("quarter"), "nested")).await;
 
     let (status, body) = put(
@@ -419,84 +337,6 @@ async fn a_parent_in_another_view_is_refused() {
     );
 }
 
-async fn wait_until(
-    server: &TestServer,
-    what: &str,
-    done: impl Fn(&tessera_engine::ExecutorStats) -> bool,
-) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        if done(&server.state.engine.write_executor_stats()) {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{what}: never happened"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
-/// Flush, then fold — `grow_memberships.rs`' sequence, and its reason: a flush with nothing
-/// buffered publishes nothing, so a row is ingested first to give the fold something to fold.
-async fn flush_and_fold(server: &TestServer) {
-    let ingested = external_id_of(9_001);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "views-fold")
-        // A multi-view bundle names the batch's view: which one a row belongs to is not
-        // inferable (contracts §3.4).
-        .header("x-tessera-view", format!("quarter:{}", KEYS[0]))
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_optional(&[(
-            Some(&ingested[..]),
-            10.0,
-            10.0,
-            "0",
-        )]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "{}",
-        resp.text().await.unwrap()
-    );
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_until(server, "the flush published", move |now| {
-        now.flushes > before.flushes
-    })
-    .await;
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_until(server, "the fold published", move |now| {
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        now.folds > before.folds
-    })
-    .await;
-}
-
 /// **The view survives the fold and the reopen** (`bundle_format` 8): the fold packs each record
 /// into a membership extent and a restart seeds the store from those bytes, so a view lost there
 /// would collapse two views' keys into one index and draw one view's artifacts on every view of
@@ -504,7 +344,7 @@ async fn flush_and_fold(server: &TestServer) {
 #[tokio::test]
 async fn a_group_scoped_level_survives_a_fold_and_a_reopen_with_its_views() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
 
     let (status, body) = put(
@@ -523,7 +363,7 @@ async fn a_group_scoped_level_survives_a_fold_and_a_reopen_with_its_views() {
         .unwrap()
         .to_string();
 
-    flush_and_fold(&server).await;
+    flush_and_fold(&server, Some(format!("quarter:{}", KEYS[0]).as_str())).await;
     assert_eq!(
         served(&server, "quarter:q1", SCOPED).await,
         vec![("c1".to_string(), 10)],
@@ -536,8 +376,7 @@ async fn a_group_scoped_level_survives_a_fold_and_a_reopen_with_its_views() {
 
     // Reopened from the packed extents, with the log's publication behind the fold's high-water:
     // the views come back off the blob.
-    server.shutdown().await;
-    let server = open(&tmp).await;
+    let server = restart(server, &tmp).await;
     assert_eq!(
         served(&server, "quarter:q1", SCOPED).await,
         vec![("c1".to_string(), 10)],
@@ -589,7 +428,7 @@ fn spatial_declaration(name: &str) -> serde_json::Value {
 #[tokio::test]
 async fn a_shape_published_into_one_view_is_drawn_on_no_other() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     register(&server, spatial_declaration(SHAPES)).await;
 
     // One box over the whole extent, published into q2 alone. Every row of both views is inside
@@ -614,7 +453,7 @@ async fn a_shape_published_into_one_view_is_drawn_on_no_other() {
     );
 
     // The same after a fold, which rebuilds the level's forms from the packed records.
-    flush_and_fold(&server).await;
+    flush_and_fold(&server, Some(format!("quarter:{}", KEYS[0]).as_str())).await;
     assert_eq!(
         served(&server, "quarter:q1", SHAPES).await,
         Vec::new(),
@@ -633,7 +472,7 @@ async fn a_shape_published_into_one_view_is_drawn_on_no_other() {
 #[tokio::test]
 async fn a_group_scoped_exclusion_complements_against_its_own_views_entities() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
 
     let (status, body) = put(
@@ -706,13 +545,6 @@ async fn drilled(
     (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
-async fn token_for(server: &TestServer, terms: &[&str]) -> String {
-    authorise(server, terms).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string()
-}
-
 /// **A view of a group-scoped layer serves that view's artifacts and no others** (`views.md`
 /// §3.5). An artifact of another view of the group is absent entire — from the viewport's
 /// artifacts frame, from browse, and from the identifier route — rather than served with a masked
@@ -729,7 +561,7 @@ async fn token_for(server: &TestServer, terms: &[&str]) -> String {
 #[tokio::test]
 async fn an_artifact_of_another_view_of_the_group_is_absent_from_every_verb() {
     let tmp = TempDir::new().unwrap();
-    let server = serve_gated(&tmp).await;
+    let server = serve_gated_group(&tmp).await;
     register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
 
     let (status, body) = put(
@@ -760,7 +592,7 @@ async fn an_artifact_of_another_view_of_the_group_is_absent_from_every_verb() {
     // fold rebuilds the level's forms from.
     for round in ["published", "folded"] {
         if round == "folded" {
-            flush_and_fold(&server).await;
+            flush_and_fold(&server, Some(format!("quarter:{}", KEYS[0]).as_str())).await;
         }
         assert_eq!(
             browsed(&server, &both, "quarter:q1", SCOPED).await,
@@ -821,8 +653,7 @@ async fn an_artifact_of_another_view_of_the_group_is_absent_from_every_verb() {
     }
 
     // And across a restart, the store seeded from the packed extents rather than from the log.
-    server.shutdown().await;
-    let server = open(&tmp).await;
+    let server = restart(server, &tmp).await;
     let both = token_for(&server, &["0", "1"]).await;
     let only_q2 = token_for(&server, &["0"]).await;
     assert_eq!(
@@ -883,7 +714,7 @@ async fn ticked(server: &TestServer) {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
-    wait_until(
+    wait_for_executor(
         server,
         "the tick published the interval's deltas",
         move |now| now.ticks > before,
@@ -915,7 +746,7 @@ enum Second {
 /// all read the same form.
 async fn a_warm_form_takes_no_delta_of_another_view(warm: usize, second: Second) {
     let tmp = TempDir::new().unwrap();
-    let server = serve_gated(&tmp).await;
+    let server = serve_gated_group(&tmp).await;
     register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
     let (a, b) = (KEYS[warm], KEYS[1 - warm]);
     let (a_view, b_view) = (format!("quarter:{a}"), format!("quarter:{b}"));
@@ -1044,7 +875,7 @@ async fn a_warm_q2_form_takes_no_growth_of_q1() {
 #[tokio::test]
 async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_restart() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     let mut declaration = spatial_declaration(SHAPES);
     declaration["layout"] = json!("row_major_label");
     register(&server, declaration).await;
@@ -1058,13 +889,13 @@ async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_re
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    flush_and_fold(&server).await;
+    flush_and_fold(&server, Some(format!("quarter:{}", KEYS[0]).as_str())).await;
     let untouched = served(&server, "quarter:q1", SHAPES).await;
     assert!(!untouched.is_empty(), "the control view draws its shape");
 
     recreate(&server, "q2").await;
     ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
-    flush(&server).await;
+    tick(&server).await;
 
     let recreated = served(&server, "quarter:q2", SHAPES).await;
     assert!(
@@ -1073,8 +904,7 @@ async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_re
     );
     assert_eq!(served(&server, "quarter:q1", SHAPES).await, untouched);
 
-    server.shutdown().await;
-    let server = open(&tmp).await;
+    let server = restart(server, &tmp).await;
     assert_eq!(
         served(&server, "quarter:q2", SHAPES).await,
         recreated,
@@ -1146,22 +976,6 @@ async fn ingest_right_of_the_shape(server: &TestServer, view: &str, batch_id: &s
         .collect()
 }
 
-async fn flush(server: &TestServer) {
-    let before = server.state.engine.write_executor_stats();
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 202);
-    wait_until(server, "the flush published", move |now| {
-        now.flushes > before.flushes
-    })
-    .await;
-}
-
 /// Request a fold and wait until it has either published or been discarded, returning whether
 /// it published.
 async fn fold_settled(server: &TestServer) -> bool {
@@ -1174,7 +988,7 @@ async fn fold_settled(server: &TestServer) -> bool {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
-    wait_until(server, "the fold settled", move |now| {
+    wait_for_executor(server, "the fold settled", move |now| {
         now.folds > before.folds || now.fold_failures > before.fold_failures
     })
     .await;
@@ -1207,10 +1021,10 @@ async fn points_as(server: &TestServer, terms: &[&str], view: &str) -> BTreeSet<
 #[tokio::test]
 async fn a_view_recreated_during_a_fold_takes_none_of_its_predecessors_rows() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     // Something for the fold to fold.
     ingest_right_of_the_shape(&server, "quarter:q1", "into-q1").await;
-    flush(&server).await;
+    tick(&server).await;
 
     server.state.engine.set_fold_paused_for_test(true);
     let before = server.state.engine.write_executor_stats();
@@ -1222,17 +1036,18 @@ async fn a_view_recreated_during_a_fold_takes_none_of_its_predecessors_rows() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    while !server.state.engine.fold_is_holding_for_test() {
-        assert!(std::time::Instant::now() < deadline, "the fold never reached its hold");
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    wait_until(
+        "the fold reached its hold",
+        std::time::Duration::from_secs(120),
+        async || server.state.engine.fold_is_holding_for_test(),
+    )
+    .await;
 
     recreate(&server, "q2").await;
     assert!(points_of(&server, "quarter:q2").await.is_empty());
 
     server.state.engine.set_fold_paused_for_test(false);
-    wait_until(&server, "the fold settled", move |now| {
+    wait_for_executor(&server, "the fold settled", move |now| {
         now.folds > before.folds || now.fold_failures > before.fold_failures
     })
     .await;
@@ -1242,11 +1057,10 @@ async fn a_view_recreated_during_a_fold_takes_none_of_its_predecessors_rows() {
     );
 
     let own = ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
-    flush(&server).await;
+    tick(&server).await;
     assert_eq!(points_of(&server, "quarter:q2").await, own);
 
-    server.shutdown().await;
-    let server = open(&tmp).await;
+    let server = restart(server, &tmp).await;
     assert_eq!(points_of(&server, "quarter:q2").await, own, "after a restart");
 
     assert!(fold_settled(&server).await, "a later fold lands");
@@ -1259,7 +1073,7 @@ async fn a_view_recreated_during_a_fold_takes_none_of_its_predecessors_rows() {
 #[tokio::test]
 async fn a_flushed_segment_the_size_of_the_base_is_not_read_off_the_base_column() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     let mut declaration = spatial_declaration(SHAPES);
     declaration["layout"] = json!("row_major_label");
     register(&server, declaration).await;
@@ -1270,15 +1084,14 @@ async fn a_flushed_segment_the_size_of_the_base_is_not_read_off_the_base_column(
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    flush_and_fold(&server).await;
+    flush_and_fold(&server, Some(format!("quarter:{}", KEYS[0]).as_str())).await;
 
     ingest_right_of_the_shape(&server, "quarter:q2", "outside").await;
-    flush(&server).await;
+    tick(&server).await;
     let before = served(&server, "quarter:q2", SHAPES).await;
     assert_eq!(before.len(), 1, "the shape is drawn: {before:?}");
 
-    server.shutdown().await;
-    let server = open(&tmp).await;
+    let server = restart(server, &tmp).await;
     assert_eq!(served(&server, "quarter:q2", SHAPES).await, before);
 }
 
@@ -1287,22 +1100,75 @@ async fn a_flushed_segment_the_size_of_the_base_is_not_read_off_the_base_column(
 #[tokio::test]
 async fn a_recreated_view_the_size_of_its_predecessor_serves_its_own_items_after_a_restart() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let server = serve_group(&tmp).await;
     recreate(&server, "q2").await;
     let own = ingest_right_of_the_shape(&server, "quarter:q2", "recreated-q2").await;
-    flush(&server).await;
+    tick(&server).await;
     assert_eq!(points_of(&server, "quarter:q2").await, own);
 
     // The new items carry `0` alone, so a principal holding `1` alone sees none of them. The
     // dropped view's items divisible by three carry `1`.
     assert!(points_as(&server, &["1"], "quarter:q2").await.is_empty());
 
-    server.shutdown().await;
-    let server = open(&tmp).await;
+    let server = restart(server, &tmp).await;
     assert_eq!(points_of(&server, "quarter:q2").await, own);
     assert!(
         points_as(&server, &["1"], "quarter:q2").await.is_empty(),
         "a restart masks the recreated view's rows by its own items"
+    );
+}
+
+/// **A growth names the view its artifact belongs to**, as a publication does: on a group-scoped
+/// layer the same key in two views is two artifacts, and `PATCH` grows the one in the view it
+/// names. Naming none is refused. The Arrow form's case is below.
+#[tokio::test]
+async fn a_growth_grows_the_artifact_in_the_view_it_names() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_group(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([
+            { "key": "c1", "view": "q1", "members": members(0..10) },
+            { "key": "c1", "view": "q2", "members": members(0..10) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let patch = |body: serde_json::Value| {
+        server
+            .client
+            .patch(server.control_url(&format!(
+                "/control/layers/{}/artifacts",
+                SCOPED.replace('/', "%2F")
+            )))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+    };
+    let resp = patch(json!({ "addressing": "external", "artifacts": [
+        { "key": "c1", "members": members(10..20) }
+    ] }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 422);
+
+    let resp = patch(json!({ "addressing": "external", "artifacts": [
+        { "key": "c1", "view": "q2", "members": members(10..25) }
+    ] }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{:?}", resp.text().await);
+    ticked(&server).await;
+    assert_eq!(
+        served(&server, "quarter:q1", SCOPED).await,
+        vec![("c1".to_string(), 10)]
+    );
+    assert_eq!(
+        served(&server, "quarter:q2", SCOPED).await,
+        vec![("c1".to_string(), 25)]
     );
 }
 
@@ -1312,24 +1178,28 @@ async fn a_recreated_view_the_size_of_its_predecessor_serves_its_own_items_after
 async fn a_view_dropped_during_its_first_flush_takes_none_of_its_rows() {
     for recreated_in_flight in [true, false] {
         let tmp = TempDir::new().unwrap();
-        let server = serve(&tmp).await;
+        let server = serve_group(&tmp).await;
         create_key(&server, "q3").await;
         ingest_right_of_the_shape(&server, "quarter:q3", "into-q3").await;
 
         server.state.engine.set_flush_paused_for_test(true);
         ticked(&server).await;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !server.state.engine.flush_is_holding_for_test() {
-            assert!(std::time::Instant::now() < deadline, "the flush never reached its hold");
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_until(
+            "the flush reached its hold",
+            std::time::Duration::from_secs(120),
+            async || server.state.engine.flush_is_holding_for_test(),
+        )
+        .await;
         if recreated_in_flight {
             recreate(&server, "q3").await;
         } else {
             drop_key(&server, "q3").await;
         }
         server.state.engine.set_flush_paused_for_test(false);
-        wait_until(&server, "the held flush left the pool", |now| !now.flush_in_flight).await;
+        wait_for_executor(&server, "the held flush left the pool", |now| {
+            !now.flush_in_flight
+        })
+        .await;
         // Two ticks: the first drains the handed-back flush, the second follows its publication.
         ticked(&server).await;
         ticked(&server).await;
@@ -1342,12 +1212,95 @@ async fn a_view_dropped_during_its_first_flush_takes_none_of_its_rows() {
              (recreated in flight: {recreated_in_flight})"
         );
 
-        server.shutdown().await;
-        let server = open(&tmp).await;
+        let server = restart(server, &tmp).await;
         assert!(
             points_of(&server, "quarter:q3").await.is_empty(),
             "nor after a restart (recreated in flight: {recreated_in_flight})"
         );
         server.shutdown().await;
     }
+}
+
+
+/// One Arrow growth body: `key`, `members` and, where given, a `view` column of the type named.
+fn arrow_growth(key: &str, members: Vec<String>, view: Option<(DataType, Option<&str>)>) -> Vec<u8> {
+    use arrow::array::{ArrayRef, Int64Array, ListBuilder, StringArray, StringBuilder};
+    let mut list = ListBuilder::new(StringBuilder::new());
+    for member in members {
+        list.values().append_value(member);
+    }
+    list.append(true);
+    let list: ArrayRef = Arc::new(list.finish());
+    let mut fields = vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("members", list.data_type().clone(), false),
+    ];
+    let mut columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![key])), list];
+    if let Some((ty, value)) = view {
+        fields.push(Field::new("view", ty.clone(), true));
+        columns.push(match ty {
+            DataType::Utf8 => Arc::new(StringArray::from(vec![value])),
+            _ => Arc::new(Int64Array::from(vec![Some(2)])),
+        });
+    }
+    let metadata = [("addressing".to_string(), "external".to_string())].into_iter().collect();
+    let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.finish().unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// The Arrow form of `PATCH` names a group-scoped artifact's view in a `view` column: a growth
+/// naming one grows that view's artifact, and one with no column, a null cell or a column that is
+/// not text is refused with nothing applied.
+#[tokio::test]
+async fn an_arrow_growth_grows_the_artifact_in_the_view_its_view_column_names() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_group(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([
+            { "key": "c1", "view": "q1", "members": members(0..10) },
+            { "key": "c1", "view": "q2", "members": members(0..10) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let patch = |body: Vec<u8>| {
+        server
+            .client
+            .patch(server.control_url(&format!(
+                "/control/layers/{}/artifacts",
+                SCOPED.replace('/', "%2F")
+            )))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .header("content-type", "application/vnd.apache.arrow.stream")
+            .body(body)
+            .send()
+    };
+    for refused in [
+        arrow_growth("c1", members(10..20), None),
+        arrow_growth("c1", members(10..20), Some((DataType::Utf8, None))),
+        arrow_growth("c1", members(10..20), Some((DataType::Int64, None))),
+    ] {
+        let resp = patch(refused).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 422);
+    }
+    let resp = patch(arrow_growth("c1", members(10..25), Some((DataType::Utf8, Some("q2")))))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{:?}", resp.text().await);
+    ticked(&server).await;
+    assert_eq!(
+        served(&server, "quarter:q1", SCOPED).await,
+        vec![("c1".to_string(), 10)]
+    );
+    assert_eq!(
+        served(&server, "quarter:q2", SCOPED).await,
+        vec![("c1".to_string(), 25)]
+    );
 }

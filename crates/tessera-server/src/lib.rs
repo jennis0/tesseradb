@@ -12,8 +12,10 @@ pub mod error;
 mod filter_dto;
 pub mod health;
 pub mod memory;
+mod records;
 pub mod session;
 pub mod state;
+mod stream;
 pub mod viewer;
 
 use std::path::Path;
@@ -140,6 +142,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
             config.compute_queue,
             config.admission_timeout_ms,
         ),
+        // `POST /v1/items` only.
+        bulk_gate: ComputeGate::for_bulk_reads(config.bulk_admission),
         // The viewer gate never covers the control plane, so writes have a limiter of their own.
         ingest_admission: state::IngestAdmission::new(config.ingest_admission),
         session_credential,
@@ -147,6 +151,17 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         #[cfg(feature = "fault-injection")]
         faults,
     });
+
+    // The server knows no memory cap to hold bulk reads against, so their figure is logged for
+    // the operator to compare with the cap the deployment runs under: each read builds a page in
+    // about four page sizes and holds three encoded pages, two queued for the body and one being
+    // written.
+    tracing::info!(
+        bulk_admission = config.bulk_admission,
+        max_page_bytes = config.max_page_bytes,
+        bulk_read_memory_bytes = tessera_config::bulk_read_memory_bytes(&config),
+        "bulk reads may hold this much memory at once, within the process's memory cap"
+    );
 
     // At `warn`, because this lets a page from another origin present the session credential.
     // `serve.cors_origins` names pages that may present tokens and gets no warning.

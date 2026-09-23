@@ -17,9 +17,6 @@ pub(crate) fn plan_coalesce(
     policy: CoalescePolicy,
     is_live: &dyn Fn(&str, tessera_types::view::ViewIncarnation) -> bool,
 ) -> Option<CoalescePlan> {
-    if policy.width < 2 {
-        return None;
-    }
     // A file neither manifest digests makes its entry ineligible.
     let size_of = |rel: &str| -> Option<u64> {
         manifest
@@ -45,10 +42,14 @@ pub(crate) fn plan_coalesce(
     // recency is list position. No locator extent names the base run, so it is never taken.
     let locator_size =
         |extent: &LocatorExtent| -> Option<u64> { extent.files().map(&size_of).sum() };
+    let runs_policy = CoalescePolicy {
+        floor_bytes: policy.run_floor_bytes,
+        ..policy
+    };
     if let Some(window) = select_window(
         &manifest.locator_extents,
-        policy.width,
-        policy,
+        policy.run_width,
+        runs_policy,
         locator_size,
     ) {
         let extents = &manifest.locator_extents[window];

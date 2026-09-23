@@ -8,7 +8,7 @@ use rustc_hash::FxHashSet;
 use tessera_lifecycle::membership::Attachment;
 use tessera_lifecycle::Overlay;
 use tessera_types::layer::{ExistenceCriterion, LayerDeclaration};
-use tessera_types::{EntityId, TermId};
+use tessera_types::EntityId;
 
 
 use crate::compose::MaskedSet;
@@ -27,8 +27,9 @@ pub enum Withheld {
     Verdict,
     /// The viewer may not know the layer exists.
     LayerGate,
-    /// The layer says its artifacts carry their own terms, and this viewer holds none of this one's.
-    OwnTerms,
+    /// The artifact's own access label, or the layer's default for one with none, does not admit
+    /// this viewer.
+    OwnLabel,
     /// The masked count does not clear the declared criterion.
     Criterion,
     /// What this artifact attaches to is suppressed, deleted, or in a layer this viewer does not
@@ -64,14 +65,36 @@ impl ArtifactVerdict {
     }
 }
 
+/// The access-label test for one layer's artifacts and one viewer: an artifact with a label is
+/// admitted when the viewer's credential holds any of its descriptors, and one with none by
+/// `unlabelled`, which the layer's `artifact_visibility.default` decided. It reads the credential
+/// and nothing a request can narrow, so a filter never moves it.
+#[derive(Clone, Copy)]
+pub struct LabelGate<'a> {
+    held: &'a FxHashSet<Vec<u8>>,
+    unlabelled: bool,
+}
+
+impl<'a> LabelGate<'a> {
+    pub fn new(held: &'a FxHashSet<Vec<u8>>, unlabelled: bool) -> Self {
+        LabelGate { held, unlabelled }
+    }
+
+    /// Whether an artifact carrying `access` is admitted.
+    pub fn admits(&self, access: &[Vec<u8>]) -> bool {
+        if access.is_empty() {
+            return self.unlabelled;
+        }
+        access.iter().any(|d| self.held.contains(d))
+    }
+}
+
 /// Everything the predicate needs about one viewer and one layer, gathered once.
 pub struct ArtifactView<'a, M: MaskedSet> {
     pub declaration: &'a LayerDeclaration,
     pub overlay: &'a Overlay,
-    /// The viewer's satisfied terms, the same set item visibility uses. Satisfaction is
-    /// intersection with this set, never a conservative label join, which would yield an empty
-    /// required set for a disjunctive gate and admit every principal.
-    pub satisfied: &'a FxHashSet<TermId>,
+    /// The access-label test for this layer's artifacts and this viewer.
+    pub labels: LabelGate<'a>,
     /// Whether the viewer reaches the layer at all, resolved once per session. The overlay half of
     /// the verdict is still asked live, never cached alongside this.
     pub layer_reachable: bool,
@@ -105,15 +128,8 @@ pub struct ArtifactView<'a, M: MaskedSet> {
 }
 
 impl<M: MaskedSet> ArtifactView<'_, M> {
-    /// The one predicate. `own_terms` is the artifact's own access label resolved to a term, or
-    /// `None` if it carries none: a layer whose `artifact_visibility` names a field withholds an
-    /// artifact with no term there rather than admitting it as a grant to everyone.
-    pub fn verdict(
-        &self,
-        artifact_entity: EntityId,
-        ordinal: u32,
-        own_terms: Option<TermId>,
-    ) -> ArtifactVerdict {
+    /// The one predicate.
+    pub fn verdict(&self, artifact_entity: EntityId, ordinal: u32) -> ArtifactVerdict {
         // Holes, ordinals past the level's end and another view's group-scoped artifact are absent.
         if !self.rows.holds(ordinal) {
             return ArtifactVerdict::Absent(Withheld::NoArtifact);
@@ -129,20 +145,17 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             return ArtifactVerdict::Absent(Withheld::LayerGate);
         }
 
-        // Run before the artifact's own terms and criterion, so a withheld dependency makes this
-        // absent without its own membership being touched — for every route, since search, a held
-        // identifier and a filter reach a label directly rather than by traversing the edge.
+        // The artifact's own label, before anything reads its membership or its target.
+        if !self.admits_label(ordinal) {
+            return ArtifactVerdict::Absent(Withheld::OwnLabel);
+        }
+
+        // Before the criterion, so a withheld dependency makes this absent without its own
+        // membership being touched, on every route: search, a held identifier and a filter reach
+        // an attached artifact directly rather than by traversing the edge.
         if let Some(attachment) = self.rows.attachment(ordinal) {
             if !(self.dependency_served)(attachment) {
                 return ArtifactVerdict::Absent(Withheld::Attachment);
-            }
-        }
-
-        // The artifact's own terms, if its layer says it carries them.
-        if self.declaration.artifact_visibility.carries_own_labels() {
-            match own_terms {
-                Some(term) if self.satisfied.contains(&term) => {}
-                _ => return ArtifactVerdict::Absent(Withheld::OwnTerms),
             }
         }
 
@@ -170,6 +183,12 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         };
 
         ArtifactVerdict::Serve { masked_count, rank }
+    }
+
+    /// Whether the artifact's own label admits this viewer. Reads no membership, so a caller may
+    /// ask it before any masked probe.
+    pub fn admits_label(&self, ordinal: u32) -> bool {
+        self.labels.admits(self.rows.records().access(ordinal))
     }
 
     /// Containment, by the partition where there is one and by the mask where there is not.
@@ -265,12 +284,12 @@ mod tests {
 
         let broad_count = broad
             .view(&d, true)
-            .verdict(EntityId::new(999), 0, None)
+            .verdict(EntityId::new(999), 0)
             .masked_count()
             .unwrap();
         let narrow_count = narrow
             .view(&d, true)
-            .verdict(EntityId::new(999), 0, None)
+            .verdict(EntityId::new(999), 0)
             .masked_count()
             .unwrap();
 
@@ -287,7 +306,7 @@ mod tests {
         let d = declaration(false, Some(ExistenceCriterion::Count(5)));
         let fx = Fixture::new(&[&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], &[1, 2, 3, 4, 5, 6]);
         assert_eq!(
-            fx.view(&d, true).verdict(EntityId::new(999), 0, None),
+            fx.view(&d, true).verdict(EntityId::new(999), 0),
             ArtifactVerdict::Serve {
                 masked_count: 6,
                 rank: None
@@ -297,7 +316,7 @@ mod tests {
         // One fewer visible member: absent, not served with a rounded count.
         let below = Fixture::new(&[&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], &[1, 2, 3, 4]);
         assert_eq!(
-            below.view(&d, true).verdict(EntityId::new(999), 0, None),
+            below.view(&d, true).verdict(EntityId::new(999), 0),
             ArtifactVerdict::Absent(Withheld::Criterion)
         );
     }
@@ -314,9 +333,9 @@ mod tests {
 
         let fx = Fixture::new(&[&small, &large], &mask);
         let view = fx.view(&d, true);
-        assert!(view.verdict(EntityId::new(999), 0, None).is_served());
+        assert!(view.verdict(EntityId::new(999), 0).is_served());
         assert_eq!(
-            view.verdict(EntityId::new(998), 1, None),
+            view.verdict(EntityId::new(998), 1),
             ArtifactVerdict::Absent(Withheld::Criterion)
         );
     }
@@ -327,63 +346,98 @@ mod tests {
         let d = declaration(false, None);
         let mut fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
         let entity = EntityId::new(999);
-        assert!(fx.view(&d, true).verdict(entity, 0, None).is_served());
+        assert!(fx.view(&d, true).verdict(entity, 0).is_served());
 
         fx.overlay.apply(entity, ChangeOp::Suppress);
         assert_eq!(
-            fx.view(&d, true).verdict(entity, 0, None),
+            fx.view(&d, true).verdict(entity, 0),
             ArtifactVerdict::Absent(Withheld::Verdict)
         );
 
         let mut fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
         fx.overlay.apply(entity, ChangeOp::Delete);
         assert_eq!(
-            fx.view(&d, true).verdict(entity, 0, None),
+            fx.view(&d, true).verdict(entity, 0),
             ArtifactVerdict::Absent(Withheld::Verdict)
         );
     }
 
-    /// The own-terms flag and the criterion are independent declarations composed by conjunction:
+    /// The own label and the criterion are independent declarations composed by conjunction:
     /// satisfying one does not switch the other off.
     #[test]
-    fn the_own_terms_flag_does_not_disable_the_criterion() {
+    fn the_own_label_does_not_disable_the_criterion() {
         let d = declaration(true, Some(ExistenceCriterion::Count(5)));
         let mut fx = Fixture::new(&[&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], &[1, 2, 3, 4]);
-        fx.satisfied.insert(TermId::new(7));
-
+        fx.held.insert(b"t7".to_vec());
+        fx.label(0, &[b"t7"]);
         assert_eq!(
-            fx.view(&d, true)
-                .verdict(EntityId::new(999), 0, Some(TermId::new(7))),
+            fx.view(&d, true).verdict(EntityId::new(999), 0),
             ArtifactVerdict::Absent(Withheld::Criterion)
         );
     }
 
-    /// A layer whose artifacts carry their own terms withholds one that carries none.
+    /// An artifact's own label admits a viewer holding any of its descriptors and no other, and
+    /// the label is tested before the criterion reads the membership.
     #[test]
-    fn an_artifact_with_no_terms_on_a_layer_carrying_own_labels_is_withheld() {
+    fn an_artifact_is_served_only_to_a_viewer_its_own_label_admits() {
+        let d = declaration(true, Some(ExistenceCriterion::Count(50)));
+        let mut fx = Fixture::new(&[&[1, 2, 3], &[1, 2, 3]], &[1, 2, 3]);
+        fx.label(0, &[b"a", b"b"]);
+        fx.label(1, &[b"c"]);
+        fx.held.insert(b"b".to_vec());
+        assert_eq!(
+            fx.view(&d, true).verdict(EntityId::new(999), 1),
+            ArtifactVerdict::Absent(Withheld::OwnLabel),
+            "a label the viewer does not hold withholds before the criterion is asked"
+        );
+        let d = declaration(true, None);
+        assert!(fx.view(&d, true).verdict(EntityId::new(998), 0).is_served());
+        assert_eq!(
+            fx.view(&d, true).verdict(EntityId::new(999), 1),
+            ArtifactVerdict::Absent(Withheld::OwnLabel)
+        );
+    }
+
+    /// An artifact with no label is answered by the layer's default, which the caller settles
+    /// into `unlabelled`.
+    #[test]
+    fn an_unlabelled_artifact_takes_the_layers_default() {
         let d = declaration(true, None);
         let mut fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
-        fx.satisfied.insert(TermId::new(7));
-        let view = fx.view(&d, true);
-
+        assert!(fx.view(&d, true).verdict(EntityId::new(999), 0).is_served());
+        fx.unlabelled = false;
         assert_eq!(
-            view.verdict(EntityId::new(999), 0, None),
-            ArtifactVerdict::Absent(Withheld::OwnTerms)
+            fx.view(&d, true).verdict(EntityId::new(999), 0),
+            ArtifactVerdict::Absent(Withheld::OwnLabel)
         );
-        assert_eq!(
-            view.verdict(EntityId::new(999), 0, Some(TermId::new(8))),
-            ArtifactVerdict::Absent(Withheld::OwnTerms),
-            "a term the viewer does not hold is no better than none"
-        );
-        assert!(view
-            .verdict(EntityId::new(999), 0, Some(TermId::new(7)))
-            .is_served());
+    }
 
-        let derived = declaration(false, None);
-        assert!(fx
-            .view(&derived, true)
-            .verdict(EntityId::new(999), 0, Some(TermId::new(8)))
-            .is_served());
+    /// A label-withheld artifact never asks after the artifact it attaches to.
+    #[test]
+    fn the_own_label_precedes_the_attachment() {
+        let d = declaration(true, None);
+        let mut rows = attached_rows(&[1, 2, 3]);
+        let records = Arc::make_mut(&mut rows.records);
+        records.access = vec![Some(Arc::from(vec![b"x".to_vec()].as_slice()))];
+        let mask = Bitmap::of(&[1, 2, 3]);
+        let never = |_: &Attachment| -> bool { panic!("a withheld label asked its target") };
+        let held = FxHashSet::default();
+        assert_eq!(
+            ArtifactView {
+                declaration: &d,
+                overlay: &Overlay::new(),
+                labels: LabelGate::new(&held, true),
+                layer_reachable: true,
+                rows: &rows,
+                mask: &mask,
+                dependency_served: &never,
+                containment: None,
+                denied: &Bitmap::new(),
+                counts: None,
+            }
+            .verdict(LABEL_ENTITY, 0),
+            ArtifactVerdict::Absent(Withheld::OwnLabel)
+        );
     }
 
     /// An unreachable layer withholds every artifact in it, before any membership is touched.
@@ -392,7 +446,7 @@ mod tests {
         let d = declaration(false, None);
         let fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
         assert_eq!(
-            fx.view(&d, false).verdict(EntityId::new(999), 0, None),
+            fx.view(&d, false).verdict(EntityId::new(999), 0),
             ArtifactVerdict::Absent(Withheld::LayerGate)
         );
     }
@@ -410,7 +464,7 @@ mod tests {
         let view = ArtifactView {
             declaration: &d,
             overlay: &Overlay::new(),
-            satisfied: &FxHashSet::default(),
+            labels: open_labels(),
             layer_reachable: true,
             rows: &rows,
             mask: &all,
@@ -420,7 +474,7 @@ mod tests {
             counts: None,
         };
         assert_eq!(
-            view.verdict(EntityId::new(999), 0, None),
+            view.verdict(EntityId::new(999), 0),
             ArtifactVerdict::Serve {
                 masked_count: 7,
                 rank: Some(0)
@@ -432,7 +486,7 @@ mod tests {
         let view = ArtifactView {
             declaration: &d,
             overlay: &Overlay::new(),
-            satisfied: &FxHashSet::default(),
+            labels: open_labels(),
             layer_reachable: true,
             rows: &rows,
             mask: &nearly,
@@ -442,7 +496,7 @@ mod tests {
             counts: None,
         };
         assert_eq!(
-            view.verdict(EntityId::new(999), 0, None),
+            view.verdict(EntityId::new(999), 0),
             ArtifactVerdict::Absent(Withheld::Containment)
         );
     }
@@ -459,7 +513,7 @@ mod tests {
             ArtifactView {
                 declaration: &d,
                 overlay: &Overlay::new(),
-                satisfied: &FxHashSet::default(),
+                labels: open_labels(),
                 layer_reachable: true,
                 rows: &rows,
                 mask,
@@ -468,7 +522,7 @@ mod tests {
                 denied: &Bitmap::new(),
                 counts: None,
             }
-            .verdict(EntityId::new(999), 0, None)
+            .verdict(EntityId::new(999), 0)
         };
 
         for mask in [Bitmap::of(&[1, 2, 3, 4]), Bitmap::of(&[1, 2, 5, 6])] {
@@ -496,7 +550,7 @@ mod tests {
         let view = ArtifactView {
             declaration: &d,
             overlay: &Overlay::new(),
-            satisfied: &FxHashSet::default(),
+            labels: open_labels(),
             layer_reachable: true,
             rows: &rows,
             mask: &everything,
@@ -506,7 +560,7 @@ mod tests {
             counts: None,
         };
         assert_eq!(
-            view.verdict(EntityId::new(999), 0, None),
+            view.verdict(EntityId::new(999), 0),
             ArtifactVerdict::Absent(Withheld::Containment),
             "a viewer who can see every row there is must still not be served a set that lost \
              members on the way into row space"
@@ -532,6 +586,7 @@ mod tests {
                 })],
                 parents: vec![Vec::new()],
                 declared: vec![Vec::new()],
+                access: Vec::new(),
             },
             MembershipRows {
                 rows: vec![Some(Arc::new(Bitmap::of(members)))],
@@ -554,7 +609,7 @@ mod tests {
             ArtifactView {
                 declaration: &d,
                 overlay: &overlay,
-                satisfied: &FxHashSet::default(),
+                labels: open_labels(),
                 layer_reachable: true,
                 rows: &rows,
                 mask: &mask,
@@ -563,7 +618,7 @@ mod tests {
                 denied: &Bitmap::new(),
                 counts: None,
             }
-            .verdict(LABEL_ENTITY, 0, None)
+            .verdict(LABEL_ENTITY, 0)
         };
 
         assert!(
@@ -589,7 +644,7 @@ mod tests {
             ArtifactView {
                 declaration: &d,
                 overlay: &overlay,
-                satisfied: &FxHashSet::default(),
+                labels: open_labels(),
                 layer_reachable: true,
                 rows: &rows,
                 mask: &mask,
@@ -598,7 +653,7 @@ mod tests {
                 denied: &Bitmap::new(),
                 counts: None,
             }
-            .verdict(LABEL_ENTITY, 0, None),
+            .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::Verdict)
         );
     }
@@ -613,7 +668,7 @@ mod tests {
             ArtifactView {
                 declaration: &d,
                 overlay: &Overlay::new(),
-                satisfied: &FxHashSet::default(),
+                labels: open_labels(),
                 layer_reachable: true,
                 rows: &rows,
                 mask: &mask,
@@ -622,7 +677,7 @@ mod tests {
                 denied: &Bitmap::new(),
                 counts: None,
             }
-            .verdict(LABEL_ENTITY, 0, None),
+            .verdict(LABEL_ENTITY, 0),
             ArtifactVerdict::Absent(Withheld::Attachment)
         );
     }
@@ -638,7 +693,7 @@ mod tests {
         assert!(ArtifactView {
             declaration: &d,
             overlay: &Overlay::new(),
-            satisfied: &FxHashSet::default(),
+            labels: open_labels(),
             layer_reachable: true,
             rows: &rows,
             mask: &mask,
@@ -647,7 +702,7 @@ mod tests {
             denied: &Bitmap::new(),
             counts: None,
         }
-        .verdict(EntityId::new(999), 0, None)
+        .verdict(EntityId::new(999), 0)
         .is_served());
     }
 
@@ -657,7 +712,7 @@ mod tests {
         let d = declaration(false, None);
         let fx = Fixture::new(&[&[1, 2, 3]], &[1, 2, 3]);
         assert_eq!(
-            fx.view(&d, true).verdict(EntityId::new(999), 0, None),
+            fx.view(&d, true).verdict(EntityId::new(999), 0),
             ArtifactVerdict::Serve {
                 masked_count: 3,
                 rank: None

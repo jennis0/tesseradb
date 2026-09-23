@@ -120,7 +120,7 @@ CONTRACTS: dict[tuple[str, str], Contract] = {
         required=("key",),
         optional=(
             "level", "parent", "contents", "attached_layer", "attached_level", "attached_key",
-            "members", "excluding", "space", "view",
+            "members", "excluding", "space", "view", "access",
         ),
         canonical=_artifact_columns(),
         canonical_only=ARTIFACT_CANONICAL_ONLY,

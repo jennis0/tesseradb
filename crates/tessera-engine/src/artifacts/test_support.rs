@@ -8,7 +8,6 @@ use rustc_hash::FxHashSet;
 use tessera_lifecycle::membership::Attachment;
 use tessera_lifecycle::Overlay;
 use tessera_types::layer::{LayerDeclaration, ServingLayout};
-use tessera_types::TermId;
 
 
 use crate::tile_index::TileIndex;
@@ -23,6 +22,7 @@ pub(super) fn rows_of(sets: &[&[u32]]) -> ArtifactRows {
             attachments: vec![None; sets.len()],
             parents: vec![Vec::new(); sets.len()],
             declared: vec![Vec::new(); sets.len()],
+            access: Vec::new(),
         },
         MembershipRows {
             rows: sets.iter().map(|s| Some(Arc::new(Bitmap::of(s)))).collect(),
@@ -67,6 +67,7 @@ pub(super) fn rows_with_contents(members: &[u32], contents: &[(&[u32], u64)]) ->
             attachments: vec![None],
             parents: vec![Vec::new()],
             declared: vec![contents.iter().map(|(_, declared)| *declared).collect()],
+            access: Vec::new(),
         },
         MembershipRows {
             rows: vec![Some(Arc::new(Bitmap::of(members)))],
@@ -78,7 +79,10 @@ pub(super) fn rows_with_contents(members: &[u32], contents: &[(&[u32], u64)]) ->
 
 pub(super) struct Fixture {
     pub(super) overlay: Overlay,
-    pub(super) satisfied: FxHashSet<TermId>,
+    /// The viewer's credential descriptors.
+    pub(super) held: FxHashSet<Vec<u8>>,
+    /// Whether an artifact with no label is admitted.
+    pub(super) unlabelled: bool,
     pub(super) rows: ArtifactRows,
     pub(super) mask: Bitmap,
     pub(super) denied: Bitmap,
@@ -88,7 +92,8 @@ impl Fixture {
     pub(super) fn new(members: &[&[u32]], mask: &[u32]) -> Self {
         Fixture {
             overlay: Overlay::new(),
-            satisfied: FxHashSet::default(),
+            held: FxHashSet::default(),
+            unlabelled: true,
             rows: rows_of(members),
             mask: Bitmap::of(mask),
             denied: Bitmap::new(),
@@ -103,7 +108,7 @@ impl Fixture {
         ArtifactView {
             declaration,
             overlay: &self.overlay,
-            satisfied: &self.satisfied,
+            labels: LabelGate::new(&self.held, self.unlabelled),
             layer_reachable: reachable,
             rows: &self.rows,
             mask: &self.mask,
@@ -113,4 +118,23 @@ impl Fixture {
             counts: None,
         }
     }
+}
+
+impl Fixture {
+    /// Give the artifact at `ordinal` its own access label.
+    pub(super) fn label(&mut self, ordinal: u32, access: &[&[u8]]) {
+        let records = Arc::make_mut(&mut self.rows.records);
+        let idx = ordinal as usize;
+        if records.access.len() <= idx {
+            records.access.resize_with(idx + 1, || None);
+        }
+        let access: Vec<Vec<u8>> = access.iter().map(|d| d.to_vec()).collect();
+        records.access[idx] = Some(Arc::from(access.as_slice()));
+    }
+}
+
+/// A label test that admits every artifact with no label and holds no descriptor.
+pub(super) fn open_labels() -> LabelGate<'static> {
+    static EMPTY: std::sync::OnceLock<FxHashSet<Vec<u8>>> = std::sync::OnceLock::new();
+    LabelGate::new(EMPTY.get_or_init(FxHashSet::default), true)
 }

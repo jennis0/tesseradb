@@ -7,10 +7,11 @@ use arrow::datatypes::{DataType, TimeUnit, UInt16Type};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use tessera_wire::{
-    artifacts_frame, artifacts_identity_frame, points_frame, points_highlight_frame, split_frames,
-    sub_cells_frame, tiles_frame, trailer_frame, ArtifactRow, FrameError, ScalarColumn,
-    FRAME_ARTIFACTS, FRAME_HEADER_BYTES, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES,
-    FRAME_TRAILER,
+    artifacts_frame, artifacts_identity_frame, items_head_frame, page_end_frame, points_frame,
+    points_highlight_frame, records_frame, split_frames, sub_cells_frame, tiles_frame,
+    trailer_frame, ArtifactRow, FrameError, RecordsCompression, ScalarColumn, FRAME_ARTIFACTS,
+    FRAME_HEADER_BYTES, FRAME_ITEMS_HEAD, FRAME_PAGE_END, FRAME_POINTS, FRAME_RECORDS,
+    FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER,
 };
 
 /// The batches of one Arrow payload.
@@ -554,4 +555,73 @@ fn artifact_rows_stay_within_their_size_bounds() {
     assert!(identity < 20.0, "identity rows are {identity:.1} B/row");
     let full = artifacts_frame(&rows).len() as f64 / ROWS as f64;
     assert!(full < 140.0, "full rows are {full:.1} B/row");
+}
+
+/// A page of records: an identifier, a nullable number, a category's keys under a dictionary and
+/// a list of labels, so every buffer kind a records frame carries is present.
+fn records_page(rows: u64) -> RecordBatch {
+    use arrow::array::{ArrayRef, Float64Array, Int32Array, ListBuilder, StringBuilder};
+    use arrow::datatypes::{Field, Int32Type, Schema};
+    use std::sync::Arc;
+    let ids: ArrayRef = Arc::new(UInt64Array::from_iter_values(
+        (0..rows).map(|r| r.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+    ));
+    let score: ArrayRef = Arc::new(Float64Array::from_iter(
+        (0..rows).map(|r| (r % 5 != 0).then_some(r as f64 * 0.5)),
+    ));
+    let keys = Int32Array::from_iter_values((0..rows).map(|r| (r % 3) as i32));
+    let values = StringArray::from(vec!["astro", "cond", "hep"]);
+    let archive: ArrayRef =
+        Arc::new(DictionaryArray::<Int32Type>::try_new(keys, Arc::new(values)).unwrap());
+    let mut labels = ListBuilder::new(StringBuilder::new());
+    for r in 0..rows {
+        for label in ["public", "restricted"].iter().take((r % 3) as usize) {
+            labels.values().append_value(label);
+        }
+        labels.append(true);
+    }
+    let labels: ArrayRef = Arc::new(labels.finish());
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("score", DataType::Float64, true),
+        Field::new("archive", archive.data_type().clone(), true),
+        Field::new("tessera:labels", labels.data_type().clone(), false),
+    ]));
+    RecordBatch::try_new(schema, vec![ids, score, archive, labels]).unwrap()
+}
+
+/// An items body is a head, records frames each followed by a page end, and a trailer, and each
+/// splits and decodes alone.
+#[test]
+fn an_items_body_splits_into_its_four_kinds() {
+    let page = records_page(10);
+    let mut body = items_head_frame(br#"{"order":"map","page_rows":10}"#);
+    body.extend(records_frame(&page, RecordsCompression::None).unwrap());
+    body.extend(page_end_frame(br#"{"next":null,"ended_by":"end"}"#));
+    body.extend(trailer_frame(br#"{"pages":1,"rows":10,"next":null,"ended_by":"end"}"#));
+    let frames = split_frames(&body).unwrap();
+    let kinds: Vec<u8> = frames.iter().map(|(kind, _)| *kind).collect();
+    assert_eq!(
+        kinds,
+        vec![FRAME_ITEMS_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER]
+    );
+    assert_eq!(frames[0].1, br#"{"order":"map","page_rows":10}"#);
+    assert_eq!(batches(frames[1].1), vec![page]);
+}
+
+/// A compressed records frame decodes to the same batch as an uncompressed one, and its buffers
+/// are compressed rather than the frame being copied.
+#[test]
+fn a_zstd_records_frame_decodes_to_the_same_batch() {
+    let page = records_page(5_000);
+    let plain = records_frame(&page, RecordsCompression::None).unwrap();
+    let zstd = records_frame(&page, RecordsCompression::Zstd).unwrap();
+    assert_eq!(batch_of(&plain, FRAME_RECORDS), page);
+    assert_eq!(batch_of(&zstd, FRAME_RECORDS), page);
+    assert!(
+        zstd.len() < plain.len(),
+        "compressed {} bytes against {} plain",
+        zstd.len(),
+        plain.len()
+    );
 }

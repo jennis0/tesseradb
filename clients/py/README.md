@@ -315,9 +315,12 @@ outside the box. Two boxes that do not overlap select nothing.
 filters applied and its camera on the box. The map draws everything in frame, including items
 just outside the box.
 
-`sample(zoom=0, k=None, ...)` is what a map draws at a zoom: a density-thinned sample in which
-each map tile carries at most `k` points. It is for drawing, and it holds fewer rows than the
-selection has items; `count()` is the number. The result reads as a pyarrow table of
+`sample(zoom=0, k=None, ...)` is what a map draws at a zoom: a display sample, thinned by density,
+in which each map tile carries at most `k` points and the zoom sets how many tiles there are. It
+holds fewer rows than the selection has items; `count()` is the number, and the reader's
+`items(view, fields, ...)` reads the rows themselves, a response at a time: it returns the
+response's rows as a pyarrow table and the cursor to pass back as `cursor`, `None` once no row
+remains. Its other keywords are `POST /v1/items`' request fields, sent as given. The result reads as a pyarrow table of
 `tessera_id`, `code` (the point's position on the view's grid) and the columns declared with
 `render=True`. A category column holds each value's key, as a dictionary column, and null for a
 value the reader may not see; the keys are looked up once per reader and kept. Its schema metadata carries `tessera.counts` (`visible`, `matched`, `highlighted`

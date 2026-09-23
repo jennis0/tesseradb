@@ -238,10 +238,13 @@ class Publication:
         bucket_rows: int,
         limits: dict,
         view_column: str | None = None,
+        access_column: str | None = None,
     ):
         self.table = in_parent_order(roster_table(roster))
         #: The roster column naming the view each artifact belongs to, on a group-scoped layer.
         self.view_column = view_column
+        #: The roster column each artifact's own access label is read from, sent as `access`.
+        self.access_column = access_column
         self.rows = self.table.to_pylist()
         self.keys = [row["key"] for row in self.rows]
         self.held = set(self.keys)
@@ -405,11 +408,21 @@ class Publication:
 
     # -- bodies ----------------------------------------------------------------------------
 
+    def _view(self, i: int) -> bytes:
+        if self.view_column is None:
+            return b""
+        return b',"view":' + json.dumps(self.rows[i][self.view_column]).encode()
+
     def _head(self, i: int) -> bytes:
-        view = b""
-        if self.view_column is not None:
-            view = b',"view":' + json.dumps(self.rows[i][self.view_column]).encode()
-        return b'{"key":' + json.dumps(self.rows[i]["key"]).encode() + view + b',"members":'
+        access = b""
+        labels = self.rows[i].get(self.access_column) if self.access_column else None
+        if labels:
+            labels = [labels] if isinstance(labels, str) else list(labels)
+            access = b',"access":' + json.dumps(labels).encode()
+        return (
+            b'{"key":' + json.dumps(self.rows[i]["key"]).encode() + self._view(i) + access
+            + b',"members":'
+        )
 
     def bodies(self):
         """Yield the requests in order: `("put", level, body, artifacts, members, edges)` per
@@ -443,27 +456,30 @@ class Publication:
             if remainder is not None:
                 yield "put", level, self._body(level, batch), *counts
                 batch, size, counts = [], 0, [0, 0, 0]
-                yield from self._grow_slices(row_level, self.rows[i]["key"], remainder)
+                yield from self._grow_slices(row_level, i, remainder)
         if batch:
             yield "put", level, self._body(level, batch), *counts
 
-    def _grow_body(self, level: int, key: str, members: np.ndarray) -> bytes:
+    def _grow_body(self, level: int, i: int, members: np.ndarray) -> bytes:
+        """One growth of roster row `i`, naming its view on a group-scoped layer."""
         return (
             b'{"level":' + str(level).encode() + b',"addressing":"external","artifacts":[{"key":'
-            + json.dumps(key).encode() + b',"members":' + json_list(members) + b"}]}"
+            + json.dumps(self.rows[i]["key"]).encode() + self._view(i) + b',"members":'
+            + json_list(members) + b"}]}"
         )
 
-    def _grow_slices(self, level: int, key: str, members: np.ndarray):
+    def _grow_slices(self, level: int, i: int, members: np.ndarray):
         """`("grow", level, key, body, members)` for `members`, in slices under the growth
         route's byte cap and its member count."""
-        fixed = len(self._grow_body(level, key, EMPTY_ENTITIES)) - 2
+        key = self.rows[i]["key"]
+        fixed = len(self._grow_body(level, i, EMPTY_ENTITIES)) - 2
         per_slice = max(1, min((self.grow_max_bytes - fixed - 1) // 15, self.max_members))
         self.stats["grown_artifacts"] += 1
         self.stats["grown_members_sent"] += len(members)
         for start in range(0, len(members), per_slice):
             piece = members[start : start + per_slice]
             self.stats["grow_slices"] += 1
-            yield "grow", level, key, self._grow_body(level, key, piece), len(piece)
+            yield "grow", level, key, self._grow_body(level, i, piece), len(piece)
 
     def _block(self, i: int, groups: dict) -> tuple[bytes | None, int, int, np.ndarray | None]:
         """One artifact's JSON with as many members as fit under the cap, its member and edge

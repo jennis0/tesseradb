@@ -1,13 +1,9 @@
-//! Shared fixtures for `tessera-server`'s integration tests.
-//!
-//! The integration tests are split by subject across several binaries — `http.rs` (viewer plane,
-//! session plane, config, byte shape, the compute-admission gate), `http_write.rs` (the control
-//! plane's write path) and `http_engine_state.rs` (pins and session revocation). This module holds
-//! every fixture they share, so the split does not become drift.
+//! What `tessera-server`'s integration tests share: building a bundle, serving it, writing to
+//! it, waiting for what a write publishes, and decoding what a viewer is served. A helper more
+//! than one test file needs lives here and nowhere else.
 
-// Each integration-test binary compiles this module separately, so a fixture used by only one of
-// them is genuinely dead code in the other. Allowing it here is what keeps the two halves from
-// each carrying their own copy — which is the drift this module exists to prevent.
+// Each test binary compiles this module on its own, so a helper one binary does not use is dead
+// code there.
 #![allow(dead_code)]
 
 use std::io::Cursor;
@@ -15,7 +11,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, Float32Array, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{
+    Array, ArrayRef, BinaryArray, Float32Array, Float64Array, UInt32Array, UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
@@ -23,8 +21,10 @@ use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use parking_lot::Mutex;
 use parquet::arrow::ArrowWriter;
+use tempfile::TempDir;
 
-use tessera_build::{build, BuildArgs};
+pub use tessera_build::config::AccessInput;
+use tessera_build::{build, BuildArgs, ViewArgs};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::faults::FaultSwitchboard;
 use tessera_plugin::Passthrough;
@@ -57,6 +57,28 @@ pub fn extent() -> Bounds {
     }
 }
 
+/// The whole-world Web Mercator frame, which is the unit square: every projection's output is
+/// normalised to `[0, 1]` on both axes.
+pub fn world_frame() -> Bounds {
+    Bounds {
+        x_min: 0.0,
+        x_max: 1.0,
+        y_min: 0.0,
+        y_max: 1.0,
+    }
+}
+
+/// A view group's quantisation over [`extent`].
+pub fn group_frame() -> tessera_build::Quantisation {
+    let e = extent();
+    tessera_build::Quantisation {
+        x_min: e.x_min,
+        x_max: e.x_max,
+        y_min: e.y_min,
+        y_max: e.y_max,
+    }
+}
+
 pub fn terms_of(source_id: u64) -> Vec<u64> {
     if source_id.is_multiple_of(3) {
         vec![0, 1]
@@ -65,95 +87,114 @@ pub fn terms_of(source_id: u64) -> Vec<u64> {
     }
 }
 
-/// Parameterised over the item count — see [`build_fixture_n`]'s doc for why (calibration task:
-/// the byte-equality tests in `tests/http.rs` need a genuinely multi-tile, multi-thousand-row
-/// regime, well above this module's default `N_ITEMS` — see that file's `PARALLEL_HEADLINE_ITEMS`
-/// doc for how they reach the parallel branch specifically, which item count alone no longer does
-/// post-§14).
+/// Write `columns`, in order, as one parquet file at `path`.
+pub fn write_parquet(path: &Path, columns: Vec<(Field, ArrayRef)>) {
+    let (fields, arrays): (Vec<Field>, Vec<ArrayRef>) = columns.into_iter().unzip();
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// Write the points `ids` as a parquet file at `path`: `entity_id`, `x` and `y` placed by
+/// `position`, then the `extra` columns.
+pub fn write_points(
+    path: &Path,
+    ids: &[u64],
+    position: impl Fn(u64) -> (f64, f64),
+    extra: Vec<(Field, ArrayRef)>,
+) {
+    let (xs, ys): (Vec<f64>, Vec<f64>) = ids.iter().map(|&e| position(e)).unzip();
+    let mut columns = vec![
+        column("entity_id", false, UInt64Array::from(ids.to_vec())),
+        column("x", false, Float64Array::from(xs)),
+        column("y", false, Float64Array::from(ys)),
+    ];
+    columns.extend(extra);
+    write_parquet(path, columns);
+}
+
+/// A column named `name` for [`write_points`] or [`write_parquet`], typed by its array.
+pub fn column(name: &str, nullable: bool, array: impl Array + 'static) -> (Field, ArrayRef) {
+    (
+        Field::new(name, array.data_type().clone(), nullable),
+        Arc::new(array),
+    )
+}
+
+/// Where the fixture places entity `e` in [`extent`].
+pub fn scatter(e: u64) -> (f64, f64) {
+    (((e * 37) % 1000) as f64, ((e * 53) % 1000) as f64)
+}
+
+/// Entities `0..n`, placed by [`scatter`], with no other column.
 pub fn write_points_n(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write_points(path, &(0..n).collect::<Vec<_>>(), scatter, Vec::new());
 }
 
-/// Parameterised over the item count — see [`build_fixture_n`]'s doc for why.
-pub fn write_pairs_n(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities = Vec::new();
-    let mut terms = Vec::new();
-    for e in 0..n {
-        for t in terms_of(e) {
-            entities.push(e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
+/// The pairs relation over `rows`: each entity holds the terms [`terms_of`] gives it.
+pub fn write_pairs(path: &Path, rows: &[u64]) {
+    let (entities, terms): (Vec<u64>, Vec<u32>) = rows
+        .iter()
+        .flat_map(|&e| terms_of(e).into_iter().map(move |t| (e, t as u32)))
+        .unzip();
+    write_parquet(
+        path,
         vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
+            column("entity_id", false, UInt64Array::from(entities)),
+            column("term_id", false, UInt32Array::from(terms)),
         ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-/// See [`build_fixture`] — parameterised, same reason as [`write_points_n`].
-pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
-    build_fixture_with_access(
-        out,
-        points_path,
-        pairs_path,
-        n,
-        tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
     );
 }
 
-/// [`build_fixture_n`] under a `point_visibility` of the caller's choosing — the declared
-/// default is what `/control/ingest` fills an empty `access` list with, or refuses on
-/// (decision 0133), so a test of that needs a fixture declaring each.
-pub fn build_fixture_with_access(
-    out: &Path,
-    points_path: &Path,
-    pairs_path: &Path,
-    n: u64,
-    access: tessera_build::config::AccessInput,
-) {
-    write_points_n(points_path, n);
-    write_pairs_n(pairs_path, n);
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points_path.to_path_buf(),
-            point_fields: Default::default(),
-            select: None,
-            access,
-        }],
+/// [`write_pairs`] over the entities `0..n`.
+pub fn write_pairs_n(path: &Path, n: u64) {
+    write_pairs(path, &(0..n).collect::<Vec<_>>());
+}
+
+/// Entities `0..places.len()`, each at its `(lon, lat)`, as a parquet file at `path`.
+pub fn write_lon_lat(path: &Path, places: &[(f64, f64)]) {
+    let (lons, lats): (Vec<f64>, Vec<f64>) = places.iter().copied().unzip();
+    write_parquet(
+        path,
+        vec![
+            column(
+                "entity_id",
+                false,
+                UInt64Array::from_iter_values(0..places.len() as u64),
+            ),
+            column("lon", false, Float64Array::from(lons)),
+            column("lat", false, Float64Array::from(lats)),
+        ],
+    );
+}
+
+/// The standard fixture: `n` items placed by [`scatter`], with the terms [`terms_of`] gives them,
+/// built into `dir/bundle` from points and pairs files written beside it in `dir`.
+pub fn build_fixture(dir: &Path, n: u64) -> std::path::PathBuf {
+    build_fixture_with_access(dir, n, AccessInput::relation(dir.join("pairs.parquet")))
+}
+
+/// [`build_fixture`] under the `point_visibility` given, whose default is what an ingested row
+/// with an empty `access` list takes.
+pub fn build_fixture_with_access(dir: &Path, n: u64, access: AccessInput) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let points = dir.join("points.parquet");
+    write_points_n(&points, n);
+    write_pairs_n(&dir.join("pairs.parquet"), n);
+    let out = dir.join("bundle");
+    let view = view_args("s0", &points, access);
+    build(&build_args(&out, vec![view])).expect("fixture build should succeed");
+    out
+}
+
+/// A build of `views` into `out` under the test identity key, minting external ids and writing no
+/// oracle pairs, with every other input empty. A test sets what it varies with struct update
+/// syntax.
+pub fn build_args(out: &Path, views: Vec<ViewArgs>) -> BuildArgs {
+    BuildArgs {
+        views,
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
@@ -168,17 +209,60 @@ pub fn build_fixture_with_access(
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
         mint_external_ids: true,
-        emit_oracle_pairs: true,
+        emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
         schema: Default::default(),
-    };
-    build(&args).expect("fixture build should succeed");
+    }
 }
 
-pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
-    build_fixture_n(out, points_path, pairs_path, N_ITEMS)
+/// A plain view `view_id` over the points at `points` with its access terms from `access`, in
+/// [`extent`] with no projection.
+pub fn view_args(view_id: &str, points: &Path, access: AccessInput) -> ViewArgs {
+    ViewArgs {
+        visibility: None,
+        view_id: view_id.to_string(),
+        projection: tessera_spatial::Projection::None,
+        extent: extent(),
+        points: points.to_path_buf(),
+        point_fields: Default::default(),
+        select: None,
+        access,
+    }
+}
+
+/// Build one plain view, `s0`, over `points` and `pairs` into `out`, declaring the attributes and
+/// vocabularies in `schema_toml` and reading each attribute from `points`.
+pub fn build_declared(out: &Path, points: &Path, pairs: &Path, schema_toml: &str) {
+    let schema_path = points.with_file_name("schema.toml");
+    std::fs::write(&schema_path, schema_toml).unwrap();
+    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+        .unwrap()
+        .schema;
+    build(&BuildArgs {
+        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        schema,
+        ..build_args(
+            out,
+            vec![view_args("s0", points, AccessInput::relation(pairs))],
+        )
+    })
+    .expect("fixture build should succeed");
+}
+
+/// Build `n` items placed by [`scatter`], each with a non-null `f32` `score` of `e % 7`, into
+/// `dir/bundle` under the attributes and vocabularies `schema_toml` declares.
+pub fn build_scored(dir: &Path, n: u64, schema_toml: &str) -> std::path::PathBuf {
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
+    let ids: Vec<u64> = (0..n).collect();
+    let score = Float32Array::from_iter_values(ids.iter().map(|e| (e % 7) as f32));
+    write_points(&points, &ids, scatter, vec![column("score", false, score)]);
+    write_pairs_n(&pairs, n);
+    let out = dir.join("bundle");
+    build_declared(&out, &points, &pairs, schema_toml);
+    out
 }
 
 /// `tessera_build`'s external-id convention (see its `write_external_ids` doc): the source
@@ -246,14 +330,12 @@ impl TestServer {
         for task in tasks {
             let _ = task.await;
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while Arc::strong_count(&self.state) > 1 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "a connection task still holds the engine 30 s after the listeners stopped"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        wait_until(
+            "the connection tasks releasing the engine",
+            std::time::Duration::from_secs(30),
+            async || Arc::strong_count(&self.state) == 1,
+        )
+        .await;
         // The engine is dropped here: the executor thread is joined and the bundle root's write
         // lock released before this returns.
         drop(self);
@@ -324,6 +406,8 @@ pub async fn spawn_server_with_stream_flush(
         stream_write_stall_ms,
         Arc::new(FaultSwitchboard::new()),
         DEFAULT_VISIBLE_WAIT_MAX_SECS,
+        generous_bulk_gate(),
+        |_| {},
     )
     .await
 }
@@ -332,11 +416,142 @@ pub async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path)
     spawn_server_with_config(bundle_root, cache_dir, wal_path, default_engine_config()).await
 }
 
+/// A server over the bundle at `dir/bundle`, keeping its cache and write-ahead log in `dir`.
+pub async fn open(dir: impl AsRef<Path>) -> TestServer {
+    open_with(dir, default_engine_config()).await
+}
+
+/// [`open`] under `config`.
+pub async fn open_with(dir: impl AsRef<Path>, config: EngineConfig) -> TestServer {
+    let dir = dir.as_ref();
+    spawn_server_with_config(
+        &dir.join("bundle"),
+        &dir.join("cache"),
+        &dir.join("wal.log"),
+        config,
+    )
+    .await
+}
+
+/// Build the standard fixture ([`build_fixture`]) into `dir` and serve it.
+pub async fn serve(dir: impl AsRef<Path>) -> TestServer {
+    build_fixture(dir.as_ref(), N_ITEMS);
+    open(dir).await
+}
+
+/// The standard fixture, served, under a `point_visibility` declaring `default` or none.
+pub async fn serve_with_default(default: Option<&str>) -> (TempDir, TestServer) {
+    let tmp = TempDir::new().unwrap();
+    let access = AccessInput {
+        source: tessera_build::config::AccessSource::Relation(tmp.path().join("pairs.parquet")),
+        default: default.map(str::to_string),
+    };
+    build_fixture_with_access(tmp.path(), N_ITEMS, access);
+    let server = open(&tmp).await;
+    (tmp, server)
+}
+
+/// Stop `server` and serve the bundle in `dir` again, over the same cache and log.
+pub async fn restart(server: TestServer, dir: impl AsRef<Path>) -> TestServer {
+    server.shutdown().await;
+    open(dir).await
+}
+
+/// A running server, a token for a principal holding both fixture terms, and the directory that
+/// holds the bundle, cache and log, kept for as long as the server runs.
+pub struct Served {
+    pub server: TestServer,
+    pub token: String,
+    pub tmp: TempDir,
+}
+
+impl Served {
+    /// Build a bundle into a fresh directory with `build` and serve it.
+    pub async fn build<R>(build: impl FnOnce(&Path) -> R) -> Served {
+        Served::build_with(build, default_engine_config()).await
+    }
+
+    /// [`Served::build`] under `config`.
+    pub async fn build_with<R>(build: impl FnOnce(&Path) -> R, config: EngineConfig) -> Served {
+        let tmp = TempDir::new().unwrap();
+        build(tmp.path());
+        Served::open_with(tmp, config).await
+    }
+
+    /// Serve the bundle already built in `tmp`.
+    pub async fn open(tmp: TempDir) -> Served {
+        Served::open_with(tmp, default_engine_config()).await
+    }
+
+    /// [`Served::open`] under `config`.
+    pub async fn open_with(tmp: TempDir, config: EngineConfig) -> Served {
+        let server = open_with(&tmp, config).await;
+        let token = token_for(&server, &["0", "1"]).await;
+        Served { server, token, tmp }
+    }
+
+    /// Take a fresh token for the same principal. The views a session may see are resolved when
+    /// it authorises, so a test that creates a view and then reads it takes a new one first.
+    pub async fn reauthorise(&mut self) {
+        self.token = token_for(&self.server, &["0", "1"]).await;
+    }
+
+    /// Stop the server and serve the same bundle, cache and log again, with a fresh token.
+    pub async fn restart(self) -> Served {
+        self.restart_with(default_engine_config()).await
+    }
+
+    /// [`Served::restart`] under `config`.
+    pub async fn restart_with(self, config: EngineConfig) -> Served {
+        let Served { server, tmp, .. } = self;
+        server.shutdown().await;
+        Served::open_with(tmp, config).await
+    }
+}
+
 /// The default test gate: generous enough that no test which issues a handful of sequential
 /// requests can ever observe it. Only the gate-specific tests construct a deliberately tiny
 /// [`ComputeGate`] to exercise shedding.
 pub fn generous_test_gate() -> ComputeGate {
     ComputeGate::new(64, 64, 250)
+}
+
+/// The bulk-read lane every mount takes but the lane's own tests, generous for the same reason.
+pub fn generous_bulk_gate() -> ComputeGate {
+    ComputeGate::for_bulk_reads(16)
+}
+
+/// A server whose two admission gates and `[serve]` limits the caller chooses: the bulk-read tests
+/// set the lane, the page ceilings, the response budgets and the stream budgets through `tune`.
+pub async fn spawn_server_with_bulk_reads(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    compute_gate: ComputeGate,
+    bulk_gate: ComputeGate,
+    tune: impl FnOnce(&mut ServeLimits),
+) -> TestServer {
+    let config = default_engine_config();
+    let max_k = config.max_k;
+    let mut engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+        .expect("engine should open against a freshly built bundle");
+    engine
+        .start_write_executor(1024)
+        .expect("the write executor starts once per engine");
+    mount_server_with_flush(
+        engine,
+        max_k,
+        compute_gate,
+        generous_ingest_limits(),
+        CorsOrigins::none(),
+        1 << 20,
+        10_000,
+        Arc::new(FaultSwitchboard::new()),
+        DEFAULT_VISIBLE_WAIT_MAX_SECS,
+        bulk_gate,
+        tune,
+    )
+    .await
 }
 
 /// Like [`spawn_server`], but with a caller-supplied `EngineConfig` — the concurrency tests
@@ -555,6 +770,8 @@ pub async fn spawn_server_with_visible_wait(
         10_000,
         Arc::new(FaultSwitchboard::new()),
         visible_wait_max_secs,
+        generous_bulk_gate(),
+        |_| {},
     )
     .await
 }
@@ -607,6 +824,8 @@ async fn mount_server_with(
         10_000,
         Arc::new(FaultSwitchboard::new()),
         DEFAULT_VISIBLE_WAIT_MAX_SECS,
+        generous_bulk_gate(),
+        |_| {},
     )
     .await
 }
@@ -631,13 +850,16 @@ pub async fn mount_server_with_faults(
         10_000,
         faults,
         DEFAULT_VISIBLE_WAIT_MAX_SECS,
+        generous_bulk_gate(),
+        |_| {},
     )
     .await
 }
 
 /// [`mount_server_with`], with the streamed viewport's flush threshold and write-stall budget
 /// explicit — the tests that pin the multi-frame and shed paths mount a threshold far below one
-/// response's bytes and a stall far below the default.
+/// response's bytes and a stall far below the default — and the bulk-read lane, with `tune` last
+/// over the limits.
 #[allow(clippy::too_many_arguments)]
 async fn mount_server_with_flush(
     engine: Engine,
@@ -649,51 +871,56 @@ async fn mount_server_with_flush(
     stream_write_stall_ms: u64,
     faults: Arc<FaultSwitchboard>,
     visible_wait_max_secs: u64,
+    bulk_gate: ComputeGate,
+    tune: impl FnOnce(&mut ServeLimits),
 ) -> TestServer {
+    let mut limits = ServeLimits {
+        max_k,
+        // Small enough that the fixtures' vocabularies page rather than arriving whole, so the
+        // cursor is exercised by an ordinary request rather than only by a contrived one.
+        max_category_values: 4,
+        // Small enough that a suggestion fixture's page and walk-budget behaviour are exercised
+        // by an ordinary request rather than only by a contrived one — the same argument as
+        // `max_category_values` above.
+        max_suggestions: 4,
+        max_suggestion_walk: 1_000,
+        // **The probe route, for every principal these tests use**, so a case asserting `more` on
+        // a spent budget cannot be raced by an async sweep landing first (`value-suggestion.md`
+        // §6.3). One is the schema's floor and every test principal sees more than one entity. The
+        // set route is exercised end to end by the engine's own tests and by the conformance
+        // differential, both at the shipped default.
+        max_suggest_set_entities: 1,
+        ingest_max_batch_rows: ingest_limits.max_batch_rows,
+        ingest_buffer_max_items: ingest_limits.buffer_max_items,
+        ingest_max_batch_bytes: ingest_limits.max_batch_bytes,
+        publish_max_body_bytes: ingest_limits.publish_max_body_bytes,
+        max_artifacts_per_request: ingest_limits.max_artifacts_per_request,
+        max_members_per_request: ingest_limits.max_members_per_request,
+        max_excluded_per_request: ingest_limits.max_excluded_per_request,
+        // On, so the header assertions below exercise the emission path rather than only its
+        // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
+        stage_timing: true,
+        // The op-point default (1 MiB) leaves every fixture-sized response in one points frame,
+        // which is exactly the degenerate case contracts §3.2 requires readers to accept; the
+        // multi-frame path is exercised by the tests that mount a tiny threshold explicitly
+        // (`spawn_server_with_stream_flush`).
+        stream_flush_bytes,
+        stream_write_stall_ms,
+        dev_cors_origins: cors.dev,
+        cors_origins: cors.production,
+        cors_loopback: cors.loopback,
+        visible_wait_max_secs,
+        ..Default::default()
+    };
+    tune(&mut limits);
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
         heap: tessera_server::memory::HeapWatch::default(),
-        limits: ServeLimits {
-            max_k,
-            // Small enough that the fixtures' vocabularies page rather than arriving whole, so the
-            // cursor is exercised by an ordinary request rather than only by a contrived one.
-            max_category_values: 4,
-            // Small enough that a suggestion fixture's page and walk-budget behaviour are exercised
-            // by an ordinary request rather than only by a contrived one — the same argument as
-            // `max_category_values` above.
-            max_suggestions: 4,
-            max_suggestion_walk: 1_000,
-            // **The probe route, for every principal these tests use**, so a case asserting `more` on
-            // a spent budget cannot be raced by an async sweep landing first (`value-suggestion.md`
-            // §6.3). One is the schema's floor and every test principal sees more than one entity. The
-            // set route is exercised end to end by the engine's own tests and by the conformance
-            // differential, both at the shipped default.
-            max_suggest_set_entities: 1,
-            ingest_max_batch_rows: ingest_limits.max_batch_rows,
-            ingest_buffer_max_items: ingest_limits.buffer_max_items,
-            ingest_max_batch_bytes: ingest_limits.max_batch_bytes,
-            publish_max_body_bytes: ingest_limits.publish_max_body_bytes,
-            max_artifacts_per_request: ingest_limits.max_artifacts_per_request,
-            max_members_per_request: ingest_limits.max_members_per_request,
-            max_excluded_per_request: ingest_limits.max_excluded_per_request,
-            // On, so the header assertions below exercise the emission path rather than only its
-            // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
-            stage_timing: true,
-            // The op-point default (1 MiB) leaves every fixture-sized response in one points frame,
-            // which is exactly the degenerate case contracts §3.2 requires readers to accept; the
-            // multi-frame path is exercised by the tests that mount a tiny threshold explicitly
-            // (`spawn_server_with_stream_flush`).
-            stream_flush_bytes,
-            stream_write_stall_ms,
-            dev_cors_origins: cors.dev,
-            cors_origins: cors.production,
-            cors_loopback: cors.loopback,
-            visible_wait_max_secs,
-            ..Default::default()
-        },
+        limits,
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
         compute_gate,
+        bulk_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
@@ -742,40 +969,213 @@ async fn mount_server_with_flush(
 pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value {
     let auth_data = serde_json::json!({ "terms": terms }).to_string();
     let encoded = base64::engine::general_purpose::STANDARD.encode(auth_data);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let resp = server
-            .client
-            .post(server.session_url("/session/authorise"))
-            .bearer_auth(SESSION_CREDENTIAL)
-            .json(&serde_json::json!({ "auth_data": encoded }))
-            .send()
-            .await
-            .unwrap();
-        if resp.status().as_u16() == 429 && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            continue;
-        }
-        assert_eq!(resp.status(), 200, "authorise should succeed");
-        return resp.json().await.unwrap();
+    let resp = wait_for(
+        "authorise",
+        std::time::Duration::from_secs(60),
+        async || {
+            let resp = server
+                .client
+                .post(server.session_url("/session/authorise"))
+                .bearer_auth(SESSION_CREDENTIAL)
+                .json(&serde_json::json!({ "auth_data": encoded }))
+                .send()
+                .await
+                .unwrap();
+            if resp.status().as_u16() == 429 {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                return None;
+            }
+            assert_eq!(resp.status(), 200, "authorise should succeed");
+            Some(resp)
+        },
+    )
+    .await;
+    resp.json().await.unwrap()
+}
+
+/// The token [`authorise`] returns for a principal holding `terms`.
+pub async fn token_for(server: &TestServer, terms: &[&str]) -> String {
+    authorise(server, terms).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// `bytes` in standard base64, the way the wire carries an external id.
+pub fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// A built item's member address: its external id ([`external_id_of`]) in base64.
+pub fn member(source_id: u64) -> String {
+    b64(&external_id_of(source_id))
+}
+
+/// [`member`] for each of `range`.
+pub fn members(range: std::ops::Range<u64>) -> Vec<String> {
+    range.map(member).collect()
+}
+
+/// `PUT /control/layers` with `declaration`: the status and the body, or null where there is none.
+pub async fn put_layer(
+    server: &TestServer,
+    declaration: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&declaration)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// Register the layer `declaration` names, failing the test unless it is created.
+pub async fn register(server: &TestServer, declaration: serde_json::Value) {
+    let (status, body) = put_layer(server, declaration).await;
+    assert_eq!(status, 201, "the layer registers: {body}");
+}
+
+/// A flat layer `name` over `s0` whose artifacts list their members, with a closed value set, no
+/// gate, and no content. A test changes a field by indexing the value.
+pub fn flat_layer(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "title": name,
+        "views": ["s0"],
+        "membership": "enumerated",
+        "value_set": "closed",
+        "visibility": null,
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": null,
+        "hierarchy": { "kind": "flat", "prune_children": false },
+        "content": { "computed": [], "supplied": [] },
+        "depends_on": [],
+        "levels": []
+    })
+}
+
+/// One attempt of a wait: a value, or not yet. An attempt that returns `Err` says what it saw,
+/// and the last of those is printed if the wait times out.
+pub trait Attempt<T> {
+    fn outcome(self) -> Result<T, String>;
+}
+
+impl<T> Attempt<T> for Option<T> {
+    fn outcome(self) -> Result<T, String> {
+        self.ok_or_else(String::new)
     }
 }
 
-/// Force a publication and wait for it to complete: the moment a level's row forms, and the rows
-/// of anything flushed with them, are what a viewer is served (`ingest.md` §1.3, §10 ruling 6).
-///
-/// A write is durable at its acknowledgement and visible at a numbered publication, so a test that
-/// writes on the control plane and then reads what a viewer is served puts this between the two.
-///
-/// The wait is the server's own (decision 0144): `POST /control/flush?wait=visible` holds the 202
-/// until the publication counter has reached the number that request armed. Waiting on the tick
-/// counter instead returns when a tick has begun, which is before the segment a tick flushed is
-/// published, so a test reading a count over rows ingested since the last publication could beat
-/// the flush it asked for and read the corpus without them.
-///
-/// `visible: false` is the server saying it waited `serve.visible_wait_max_secs` and the
-/// publication had not landed. A test that then read the served answer would be asserting against
-/// a corpus in an unknown state, so this fails there rather than sleeping and trying again.
+impl<T> Attempt<T> for Result<T, String> {
+    fn outcome(self) -> Result<T, String> {
+        self
+    }
+}
+
+impl Attempt<()> for bool {
+    fn outcome(self) -> Result<(), String> {
+        if self {
+            Ok(())
+        } else {
+            Err(String::new())
+        }
+    }
+}
+
+/// Poll `attempt` every `every` until it gives a value, failing the test with the last thing it
+/// saw if it has not within `within`.
+pub async fn poll<T, A: Attempt<T>>(
+    what: &str,
+    within: std::time::Duration,
+    every: std::time::Duration,
+    mut attempt: impl AsyncFnMut() -> A,
+) -> T {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let seen = match attempt().await.outcome() {
+            Ok(value) => return value,
+            Err(seen) => seen,
+        };
+        if std::time::Instant::now() >= deadline {
+            match seen.is_empty() {
+                true => panic!("{what}: not within {within:?}"),
+                false => panic!("{what}: not within {within:?}; last seen: {seen}"),
+            }
+        }
+        tokio::time::sleep(every).await;
+    }
+}
+
+/// [`poll`] every ten milliseconds.
+pub async fn wait_for<T, A: Attempt<T>>(
+    what: &str,
+    within: std::time::Duration,
+    attempt: impl AsyncFnMut() -> A,
+) -> T {
+    poll(what, within, std::time::Duration::from_millis(10), attempt).await
+}
+
+/// [`wait_for`] a condition.
+pub async fn wait_until<A: Attempt<()>>(
+    what: &str,
+    within: std::time::Duration,
+    done: impl AsyncFnMut() -> A,
+) {
+    wait_for(what, within, done).await
+}
+
+/// Send `request` until the answer is neither shed nor stale and return it, failing the test
+/// unless a `200` arrives within a minute. A `429` is the admission gate shedding under machine
+/// load and `x-tessera-stale: 1` a stale stamp; neither is the answer a test asks about.
+pub async fn settled(request: impl AsyncFn() -> reqwest::Response) -> reqwest::Response {
+    wait_for(
+        "a settled answer",
+        std::time::Duration::from_secs(60),
+        async || {
+            let resp = request().await;
+            if resp.status().as_u16() == 429 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                return None;
+            }
+            assert_eq!(resp.status().as_u16(), 200, "the request answers");
+            let stale = resp
+                .headers()
+                .get("x-tessera-stale")
+                .is_some_and(|v| v == "1");
+            if stale {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                return None;
+            }
+            Some(resp)
+        },
+    )
+    .await
+}
+
+/// Poll the write executor's counters until `done` holds, failing the test after three minutes.
+pub async fn wait_for_executor(
+    server: &TestServer,
+    what: &str,
+    done: impl Fn(&tessera_engine::ExecutorStats) -> bool,
+) {
+    wait_until(what, std::time::Duration::from_secs(180), async || {
+        let stats = server.state.engine.write_executor_stats();
+        match done(&stats) {
+            true => Ok(()),
+            false => Err(format!("{stats:?}")),
+        }
+    })
+    .await
+}
+
+/// Ask for a flush and wait until the publication it names has landed, so a test that writes on
+/// the control plane can then read what a viewer is served. `POST /control/flush?wait=visible`
+/// holds its answer for the server's visible wait; where that ends first (`visible: false`, a slow
+/// publication under load), this keeps reading `/control/status` for up to two minutes more.
 pub async fn tick(server: &TestServer) {
     let resp = server
         .client
@@ -786,11 +1186,102 @@ pub async fn tick(server: &TestServer) {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
     let body: serde_json::Value = resp.json().await.unwrap();
+    if body["visible"] == serde_json::json!(true) {
+        return;
+    }
+    let target = body["publication"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the 202 carries the publication number: {body}"));
+    let what = format!("publication {target}");
+    wait_until(&what, std::time::Duration::from_secs(120), async || {
+        let publication = control_status(server).await["publication"].clone();
+        match publication.as_u64() >= Some(target) {
+            true => Ok(()),
+            false => Err(format!("publication {publication}")),
+        }
+    })
+    .await
+}
+
+/// Publish until nothing is buffered. A flush takes one view's rows, so a batch that landed in
+/// several views needs a [`tick`] for each.
+pub async fn drain(server: &TestServer) {
+    wait_until(
+        "the buffer drained",
+        std::time::Duration::from_secs(120),
+        async || {
+            tick(server).await;
+            let buffered = server.state.engine.buffered_items();
+            if buffered == 0 {
+                return Ok(());
+            }
+            let stats = server.state.engine.write_executor_stats();
+            Err(format!(
+                "{buffered} rows buffered, {} flushes, {} failures, {} flushable",
+                stats.flushes, stats.flush_failures, stats.flushable_items
+            ))
+        },
+    )
+    .await
+}
+
+/// Ask for a fold and wait until it publishes, failing the test if any fold this server ran was
+/// discarded.
+pub async fn fold(server: &TestServer) {
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(
-        body["visible"],
-        serde_json::json!(true),
-        "the flush this asked for had not published within the server's visible wait: {body}"
+        resp.status().as_u16(),
+        202,
+        "a fold is accepted at any time"
     );
+    wait_for_executor(server, "the fold published", move |now| {
+        assert_eq!(
+            now.fold_failures, 0,
+            "a fold was discarded rather than published"
+        );
+        now.folds > before.folds
+    })
+    .await;
+}
+
+/// Ingest one point, into `view` where the bundle holds several, then [`tick`] and [`fold`]. A
+/// flush with nothing buffered publishes nothing, so the point gives the fold something to fold.
+pub async fn flush_and_fold(server: &TestServer, view: Option<&str>) {
+    let ingested = external_id_of(9_001);
+    let mut request = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "flush-and-fold")
+        .header("content-type", "application/vnd.apache.arrow.stream");
+    if let Some(view) = view {
+        request = request.header("x-tessera-view", view);
+    }
+    let resp = request
+        .body(build_ingest_batch_optional(&[(
+            Some(&ingested[..]),
+            10.0,
+            10.0,
+            "0",
+        )]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "{}",
+        resp.text().await.unwrap()
+    );
+    tick(server).await;
+    fold(server).await;
 }
 
 /// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no idset).
@@ -1340,4 +1831,71 @@ pub fn build_ingest_batch_optional(rows: &[(Option<&[u8]>, f32, f32, &str)]) -> 
     let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
     writer.write(&batch).unwrap();
     writer.into_inner().unwrap()
+}
+
+/// One decoded `POST /v1/items` body.
+pub struct DecodedItems {
+    /// The kind-6 head.
+    pub head: serde_json::Value,
+    /// Each kind-7 records frame's batch, with the kind-8 page end that follows it.
+    pub pages: Vec<(RecordBatch, serde_json::Value)>,
+    /// The kind-4 trailer.
+    pub trailer: serde_json::Value,
+    /// Each records frame's payload as sent, for a test about its encoding.
+    pub records_payloads: Vec<Vec<u8>>,
+}
+
+impl DecodedItems {
+    /// Every page's `tessera_id` column, in order.
+    pub fn tessera_ids(&self) -> Vec<u64> {
+        self.pages
+            .iter()
+            .flat_map(|(batch, _)| {
+                batch
+                    .column_by_name("tessera_id")
+                    .expect("every page leads with tessera_id")
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .expect("tessera_id is uint64")
+                    .values()
+                    .to_vec()
+            })
+            .collect()
+    }
+}
+
+/// Decodes an items body strictly: one head first, a page end after every records frame and
+/// nowhere else, one trailer last, and one batch in every records frame.
+pub fn decode_items(bytes: &[u8]) -> DecodedItems {
+    use tessera_wire::{FRAME_ITEMS_HEAD, FRAME_PAGE_END, FRAME_RECORDS, FRAME_TRAILER};
+    let frames = tessera_wire::split_frames(bytes).expect("an items body splits into frames");
+    assert!(frames.len() >= 2, "a head and a trailer at least");
+    let json = |payload: &[u8]| -> serde_json::Value {
+        serde_json::from_slice(payload).expect("a JSON frame parses")
+    };
+    let (first_kind, first) = frames[0];
+    assert_eq!(first_kind, FRAME_ITEMS_HEAD, "the head is first");
+    let (last_kind, last) = frames[frames.len() - 1];
+    assert_eq!(last_kind, FRAME_TRAILER, "the trailer is last");
+    let mut pages = Vec::new();
+    let mut records_payloads = Vec::new();
+    let middle = &frames[1..frames.len() - 1];
+    assert!(middle.len().is_multiple_of(2), "every records frame has its page end");
+    for pair in middle.chunks(2) {
+        assert_eq!(pair[0].0, FRAME_RECORDS, "a records frame, then its page end");
+        assert_eq!(pair[1].0, FRAME_PAGE_END, "a records frame, then its page end");
+        let mut batches: Vec<RecordBatch> = StreamReader::try_new(Cursor::new(pair[0].1), None)
+            .expect("a records frame is an Arrow stream")
+            .map(|batch| batch.expect("a records batch decodes"))
+            .collect();
+        assert_eq!(batches.len(), 1, "one batch per records frame");
+        pages.push((batches.remove(0), json(pair[1].1)));
+        records_payloads.push(pair[0].1.to_vec());
+    }
+    DecodedItems {
+        head: json(first),
+        pages,
+        trailer: json(last),
+        records_payloads,
+    }
 }

@@ -212,6 +212,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                     .collect(),
                 attached_to: None,
                 parents: Vec::new(),
+                access: Vec::new(),
             },
             None,
         );

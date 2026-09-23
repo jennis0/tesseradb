@@ -43,19 +43,13 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::array::{Float32Array, StringArray};
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
-use tempfile::TempDir;
-use tessera_build::config::{AccessInput, AccessSource, Attribute, Fields, ValueSet};
+use tessera_build::config::{AccessInput, AccessSource, Attribute, ValueSet};
 use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
-    ViewArgs,
+    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily, ViewArgs,
 };
 use tessera_spatial::tiler::ScalarType;
 
@@ -161,11 +155,11 @@ fn tint(ordinal: usize, e: u64) -> &'static str {
 
 /// A points file: geometry, the entity's own access label, and — for a view of `sealed` — that
 /// view's own columns of the five scoped families.
-fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Option<usize>) {
+fn write_view_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Option<usize>) {
     write_points_labelled(path, view, ids, scoped, label_of)
 }
 
-/// [`write_points`] with the entity's label chosen by the caller, for the one view whose
+/// [`write_view_points`] with the entity's label chosen by the caller, for the one view whose
 /// entities carry a term no other file interns.
 fn write_points_labelled(
     path: &Path,
@@ -174,83 +168,37 @@ fn write_points_labelled(
     scoped: Option<usize>,
     label_of: fn(u64) -> &'static str,
 ) {
-    let mut fields = vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("access", DataType::Utf8, false),
-    ];
-    if scoped.is_some() {
-        fields.push(Field::new("sentiment", DataType::Float32, true));
-        fields.push(Field::new("mood", DataType::Utf8, true));
-        fields.push(Field::new("note", DataType::Utf8, true));
-        fields.push(Field::new("glow", DataType::Float32, true));
-        fields.push(Field::new("tint", DataType::Utf8, true));
-    }
-    let schema = Arc::new(Schema::new(fields));
     let ids: Vec<u64> = ids.collect();
-    let mut columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(UInt64Array::from(ids.clone())),
-        Arc::new(Float64Array::from(
-            ids.iter().map(|&e| position(view, e).0).collect::<Vec<_>>(),
-        )),
-        Arc::new(Float64Array::from(
-            ids.iter().map(|&e| position(view, e).1).collect::<Vec<_>>(),
-        )),
-        Arc::new(StringArray::from(
-            ids.iter().map(|&e| label_of(e)).collect::<Vec<_>>(),
-        )),
-    ];
+    let label = StringArray::from(ids.iter().map(|&e| label_of(e)).collect::<Vec<_>>());
+    let mut extra = vec![column("access", false, label)];
     if let Some(ordinal) = scoped {
-        columns.push(Arc::new(Float32Array::from(
-            ids.iter()
-                .map(|&e| sentiment(ordinal, e))
-                .collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(StringArray::from(
-            ids.iter().map(|&e| mood(ordinal, e)).collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(StringArray::from(
-            ids.iter().map(|&e| note(ordinal, e)).collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(Float32Array::from(
-            ids.iter().map(|&e| glow(ordinal, e)).collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(StringArray::from(
-            ids.iter().map(|&e| tint(ordinal, e)).collect::<Vec<_>>(),
-        )));
+        let floats = |value: fn(usize, u64) -> Option<f32>| {
+            Float32Array::from(ids.iter().map(|&e| value(ordinal, e)).collect::<Vec<_>>())
+        };
+        let mood = StringArray::from(ids.iter().map(|&e| mood(ordinal, e)).collect::<Vec<_>>());
+        let note = StringArray::from(ids.iter().map(|&e| note(ordinal, e)).collect::<Vec<_>>());
+        let tint = StringArray::from(ids.iter().map(|&e| tint(ordinal, e)).collect::<Vec<_>>());
+        extra.push(column("sentiment", true, floats(sentiment)));
+        extra.push(column("mood", true, mood));
+        extra.push(column("note", true, note));
+        extra.push(column("glow", true, floats(glow)));
+        extra.push(column("tint", true, tint));
     }
-    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write_points(path, &ids, |e| position(view, e), extra);
 }
 
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
-    }
-}
-
-fn view_args(view: &str, points: &Path, visibility: Option<&[&str]>) -> ViewArgs {
+/// A view whose points carry their own label in an `access` column, behind `visibility` where one
+/// is given.
+fn gated_view(view: &str, points: &Path, visibility: Option<&[&str]>) -> ViewArgs {
+    // The label is a column of the view's own points file, so the descriptors interned into the
+    // dictionary are the words this file writes, which is what lets a gate below name one.
+    let access = AccessInput {
+        source: AccessSource::Field("access".to_string()),
+        default: Some("public".to_string()),
+    };
     ViewArgs {
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Fields::default(),
-        select: None,
-        // The label is a column of the view's own points file, so the descriptors interned into
-        // the dictionary are the words this file writes — which is what lets a gate below name one.
-        access: AccessInput {
-            source: AccessSource::Field("access".to_string()),
-            default: Some("public".to_string()),
-        },
         visibility: visibility.map(labels),
+        ..view_args(view, points, access)
     }
 }
 
@@ -283,38 +231,36 @@ fn roster(views: &[(&str, Option<&[&str]>)]) -> Vec<GroupViewDescriptor> {
 /// gated view in it, and a gated group carrying a scoped attribute.
 fn build_gated(dir: &Path) -> std::path::PathBuf {
     let world_points = dir.join("world.parquet");
-    write_points(&world_points, "world", 0..20, None);
+    write_view_points(&world_points, "world", 0..20, None);
     let atlas_points = dir.join("atlas.parquet");
-    write_points(&atlas_points, "atlas", 0..20, None);
+    write_view_points(&atlas_points, "atlas", 0..20, None);
     let ledger_points = dir.join("ledger.parquet");
     write_points_labelled(&ledger_points, "ledger", LEDGER, None, |_| COMMA_TERM);
     let mut views = vec![
-        view_args("world", &world_points, None),
+        gated_view("world", &world_points, None),
         // **A disjunctive gate.** A gate wanting several terms declares them as a list
         // (decision 0132): this is the term set {finance, legal}, and the gate is satisfied by
         // intersection with the principal's.
-        view_args("atlas", &atlas_points, Some(&["finance", "legal"])),
+        gated_view("atlas", &atlas_points, Some(&["finance", "legal"])),
         // **One label with a comma in it**: one term, gating exactly the principals who hold it.
-        view_args("ledger", &ledger_points, Some(&[COMMA_TERM])),
+        gated_view("ledger", &ledger_points, Some(&[COMMA_TERM])),
     ];
     for (key, members, visibility) in QUARTERS {
         let id = format!("quarter:{key}");
         let points = dir.join(format!("quarter-{key}.parquet"));
-        write_points(&points, &id, members, None);
-        views.push(view_args(&id, &points, visibility));
+        write_view_points(&points, &id, members, None);
+        views.push(gated_view(&id, &points, visibility));
     }
     let mut family_views = Vec::new();
     for (ordinal, (key, members)) in SEALED.iter().enumerate() {
         let id = format!("sealed:{key}");
         let points = dir.join(format!("sealed-{key}.parquet"));
-        write_points(&points, &id, members.clone(), Some(ordinal));
+        write_view_points(&points, &id, members.clone(), Some(ordinal));
         family_views.push(views.len());
-        views.push(view_args(&id, &points, None));
+        views.push(gated_view(&id, &points, None));
     }
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 title: None,
@@ -427,21 +373,6 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 family_views.clone(),
             ),
         ],
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: tessera_build::config::Schema {
             attributes: Vec::new(),
             // The value set `mood`'s codes index. `public`, so the list is authored and
@@ -468,35 +399,16 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 },
             )]),
         },
+        ..build_args(&out, views)
     })
     .expect("a gated eight-view build succeeds");
     out
 }
 
-struct Served {
-    server: TestServer,
-    _tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    let bundle = build_gated(tmp.path());
-    let server = spawn_server(
-        &bundle,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    Served { server, _tmp: tmp }
-}
-
 /// A session holding exactly these label descriptors. `&[]` is the outsider: `public` and nothing
 /// else, which `Engine::authorise` adds inside the trust boundary.
 async fn token(served: &Served, terms: &[&str]) -> String {
-    authorise(&served.server, terms).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    token_for(&served.server, terms).await
 }
 
 async fn meta(served: &Served, token: &str) -> Value {
@@ -587,7 +499,7 @@ async fn create_view(served: &Served, group: &str, key: &str, body: Value) -> re
 /// gated plain view, no gated view inside a public group, and no gated group at all.
 #[tokio::test]
 async fn meta_publishes_the_views_a_principal_may_reach_and_no_others() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let holder = token(&served, &["finance"]).await;
     let outsider = token(&served, &[]).await;
 
@@ -660,7 +572,7 @@ async fn meta_publishes_the_views_a_principal_may_reach_and_no_others() {
 /// contained in every principal's mask, so *every* principal would pass — including this one.
 #[tokio::test]
 async fn a_disjunctive_gate_admits_either_term_and_neither_admits_nobody() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     for term in ["finance", "legal"] {
         let held = meta(&served, &token(&served, &[term]).await).await;
         assert!(
@@ -694,7 +606,7 @@ async fn a_disjunctive_gate_admits_either_term_and_neither_admits_nobody() {
 /// assertion.
 #[tokio::test]
 async fn a_label_containing_a_comma_is_one_term() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let held = meta(&served, &token(&served, &[COMMA_TERM]).await).await;
     assert!(
         view_ids(&held).contains("ledger"),
@@ -719,7 +631,7 @@ async fn a_label_containing_a_comma_is_one_term() {
 /// is the shape: the key is present and lists only reachable views.
 #[tokio::test]
 async fn the_meta_document_names_no_unreachable_view_anywhere() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let out = meta(&served, &token(&served, &[]).await).await;
     let reachable = view_ids(&out);
     for layer in out["layers"].as_array().unwrap() {
@@ -750,7 +662,7 @@ async fn the_meta_document_names_no_unreachable_view_anywhere() {
 /// a client that could tell the two apart at all would hold an existence oracle over the roster.
 #[tokio::test]
 async fn a_gate_failed_view_answers_exactly_as_a_view_that_never_existed() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let outsider = token(&served, &[]).await;
 
     let cases = [
@@ -823,7 +735,7 @@ async fn artifact_status(served: &Served, token: &str, view: &str) -> u16 {
 /// fail this test rather than reappear quietly.
 #[tokio::test]
 async fn a_gate_failed_view_leaves_nothing_countable_in_the_roster() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let out = meta(&served, &token(&served, &[]).await).await;
     let rostered: Vec<&Value> = out["views"]
         .as_array()
@@ -871,7 +783,7 @@ fn leaf(column: &str) -> Value {
 /// ordinary unknown-column `422`, which names no group and confirms no key.
 #[tokio::test]
 async fn a_scoped_attribute_collapses_whole_outside_its_groups_gate() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let outsider = token(&served, &[]).await;
     let holder = token(&served, &["finance"]).await;
 
@@ -936,7 +848,7 @@ async fn a_scoped_attribute_collapses_whole_outside_its_groups_gate() {
 /// at the list would publish a gated group's value names to anyone with a session.
 #[tokio::test]
 async fn the_category_text_and_render_only_families_collapse_at_the_same_site() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let outsider = token(&served, &[]).await;
     let holder = token(&served, &["finance"]).await;
 
@@ -1017,7 +929,7 @@ async fn the_category_text_and_render_only_families_collapse_at_the_same_site() 
 /// which is the only place the document would name the group.
 #[tokio::test]
 async fn a_sealed_familys_render_column_is_named_in_no_response_outside_the_gate() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let holder = token(&served, &["finance"]).await;
     let outsider = token(&served, &[]).await;
 
@@ -1103,7 +1015,7 @@ async fn points_schema(served: &Served, token: &str, view: &str) -> Vec<String> 
 /// of `sealed:s1` and not its `legal` ones.
 #[tokio::test]
 async fn passing_a_gate_does_not_widen_the_mask_inside_it() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let holder = token(&served, &["finance"]).await;
     let (status, body) = viewport(&served, &holder, "sealed:s1", None).await;
     assert_eq!(status, 200);
@@ -1128,7 +1040,7 @@ async fn passing_a_gate_does_not_widen_the_mask_inside_it() {
 /// one that never existed — and is served to the next session, which re-resolves the set.
 #[tokio::test]
 async fn a_view_created_after_a_session_authorised_waits_for_re_authorisation() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let before = token(&served, &[]).await;
     assert_eq!(
         create_view(&served, "quarter", "2026-Q5", json!({}))
@@ -1166,7 +1078,7 @@ async fn a_view_created_after_a_session_authorised_waits_for_re_authorisation() 
 /// author.
 #[tokio::test]
 async fn a_create_takes_a_gate_and_refuses_one_no_principal_could_satisfy() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     assert_eq!(
         create_view(
             &served,
@@ -1231,7 +1143,7 @@ async fn a_create_takes_a_gate_and_refuses_one_no_principal_could_satisfy() {
 /// author. The gated group's views are creatable and droppable with no label presented.
 #[tokio::test]
 async fn the_control_plane_reaches_a_gated_group() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     assert_eq!(
         create_view(&served, "sealed", "s3", json!({}))
             .await
@@ -1315,7 +1227,7 @@ async fn item_views(served: &Served, token: &str, id: u64) -> Vec<String> {
 /// whom the group does not exist.
 #[tokio::test]
 async fn the_drill_down_names_no_gate_failed_view_and_no_sealed_value() {
-    let served = serve().await;
+    let served = Served::build(build_gated).await;
     let outsider = token(&served, &[]).await;
     let holder = token(&served, &["finance"]).await;
     // `public`, and in every view of this fixture: `world`/`atlas` (0..20), all four quarters, and
@@ -1399,40 +1311,18 @@ const SHARED_ENTITY: u64 = 14;
 /// A points file for the shared-sealed fixture: geometry, the access label, and — for a view of
 /// `sealed` itself — that view's own `sentiment`.
 fn write_shared_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Option<usize>) {
-    let mut fields = vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("access", DataType::Utf8, false),
-    ];
-    if scoped.is_some() {
-        fields.push(Field::new("sentiment", DataType::Float32, true));
-    }
-    let schema = Arc::new(Schema::new(fields));
     let ids: Vec<u64> = ids.collect();
-    let mut columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(UInt64Array::from(ids.clone())),
-        Arc::new(Float64Array::from(
-            ids.iter().map(|&e| position(view, e).0).collect::<Vec<_>>(),
-        )),
-        Arc::new(Float64Array::from(
-            ids.iter().map(|&e| position(view, e).1).collect::<Vec<_>>(),
-        )),
-        Arc::new(StringArray::from(
-            ids.iter().map(|&e| label_of(e)).collect::<Vec<_>>(),
-        )),
-    ];
+    let label = StringArray::from(ids.iter().map(|&e| label_of(e)).collect::<Vec<_>>());
+    let mut extra = vec![column("access", false, label)];
     if let Some(ordinal) = scoped {
-        columns.push(Arc::new(Float32Array::from(
+        let sentiment = Float32Array::from(
             ids.iter()
                 .map(|&e| sentiment(ordinal, e))
                 .collect::<Vec<_>>(),
-        )));
+        );
+        extra.push(column("sentiment", true, sentiment));
     }
-    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write_points(path, &ids, |e| position(view, e), extra);
 }
 
 /// **A group-gated owner whose views a *public* group shares** (`views.md` §3.3): `sealed` is
@@ -1447,7 +1337,7 @@ fn write_shared_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scope
 fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
     let world_points = dir.join("shared-world.parquet");
     write_shared_points(&world_points, "world", 0..20, None);
-    let mut views = vec![view_args("world", &world_points, None)];
+    let mut views = vec![gated_view("world", &world_points, None)];
 
     let mut family_views = Vec::new();
     for (ordinal, (key, members)) in SEALED.iter().enumerate() {
@@ -1458,7 +1348,7 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
         // `s2` carries a view gate inside the group, so a `finance` holder reaches its key only
         // through the public sharer.
         let gate: Option<&[&str]> = (*key == "s2").then_some(&["legal"]);
-        views.push(view_args(&id, &points, gate));
+        views.push(gated_view(&id, &points, gate));
     }
     // The sharer's views: public, a different layout over the same keys, and carrying no scoped
     // column of their own — the column is the owner's and is reached through the key.
@@ -1466,13 +1356,11 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
         let id = format!("sealed_map:{key}");
         let points = dir.join(format!("shared-map-{key}.parquet"));
         write_shared_points(&points, &id, members.clone(), None);
-        views.push(view_args(&id, &points, None));
+        views.push(gated_view(&id, &points, None));
     }
 
-    let out = dir.join("shared-bundle");
+    let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 title: None,
@@ -1516,37 +1404,10 @@ fn build_shared_sealed(dir: &Path) -> std::path::PathBuf {
             },
             family_views,
         )],
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..build_args(&out, views)
     })
     .expect("a sealed owner shared under a public roster builds");
     out
-}
-
-async fn serve_shared() -> Served {
-    let tmp = TempDir::new().unwrap();
-    let bundle = build_shared_sealed(tmp.path());
-    let server = spawn_server(
-        &bundle,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    Served { server, _tmp: tmp }
 }
 
 /// **The family's own group gate is tested, and the per-view gate does not stand in for it**
@@ -1580,7 +1441,7 @@ async fn serve_shared() -> Served {
 /// worked around here.
 #[tokio::test]
 async fn a_sealed_familys_values_need_the_groups_gate_and_not_only_a_reachable_view() {
-    let served = serve_shared().await;
+    let served = Served::build(build_shared_sealed).await;
     let outsider = token(&served, &[]).await;
     let holder = token(&served, &["finance"]).await;
     let both = token(&served, &["finance", "legal"]).await;
@@ -1647,4 +1508,22 @@ async fn a_sealed_familys_values_need_the_groups_gate_and_not_only_a_reachable_v
     assert!(item_views(&served, &both, id)
         .await
         .contains(&"sealed:s2".to_string()));
+}
+
+/// **A view labelled with a term no point carries** is reached by a principal whose credential
+/// names it and by no other: a view's label is compared with the credential's descriptors, as a
+/// layer's and an artifact's are, not with the terms the dictionary happens to hold.
+#[tokio::test]
+async fn a_view_labelled_with_a_term_no_point_carries_is_reached_by_its_holder_alone() {
+    let served = Served::build(build_gated).await;
+    assert_eq!(
+        create_view(&served, "quarter", "2026-Q6", json!({ "visibility": ["team-x"] }))
+            .await
+            .status(),
+        201
+    );
+    let held = meta(&served, &token(&served, &["team-x"]).await).await;
+    assert!(view_ids(&held).contains("quarter:2026-Q6"));
+    let out = meta(&served, &token(&served, &["finance"]).await).await;
+    assert!(!view_ids(&out).contains("quarter:2026-Q6"));
 }

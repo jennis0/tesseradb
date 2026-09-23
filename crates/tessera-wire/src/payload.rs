@@ -1,8 +1,10 @@
-//! Frames of the streamed `POST /v1/viewport` response.
+//! Frames of the streamed `POST /v1/viewport` and `POST /v1/items` responses.
 //!
 //! A body is a sequence of frames: a `u8` kind, a `u32` little-endian payload length, then the
 //! payload. Every payload decodes on its own, so no reader walks Arrow messages to find a
 //! boundary.
+//!
+//! A viewport body:
 //!
 //! ```text
 //! kind 1  tiles      Arrow stream; exactly one, first
@@ -13,6 +15,16 @@
 //! kind 3  points     Arrow stream; zero or more, whole tiles per frame, concatenating to the
 //!                    full points set
 //! kind 4  trailer    JSON; exactly one, last. Its presence says the body is complete
+//! ```
+//!
+//! An items body:
+//!
+//! ```text
+//! kind 6  head       JSON; exactly one, first
+//! kind 7  records    Arrow stream of one batch, its buffers optionally zstd-compressed; zero or
+//!                    more, each followed by a page end
+//! kind 8  page end   JSON; one after each records frame, carrying the cursor to resume after it
+//! kind 4  trailer    JSON; exactly one, last
 //! ```
 //!
 //! Clients index the tiles batch and the artifacts batch's fixed columns by position, so a new
@@ -30,7 +42,9 @@ use arrow::array::{
     UInt64Builder, UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, UInt16Type};
-use arrow::ipc::writer::StreamWriter;
+use arrow::error::ArrowError;
+use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+use arrow::ipc::CompressionType;
 use arrow::record_batch::RecordBatch;
 
 /// Frame kinds. A reader refuses a kind it does not know.
@@ -39,6 +53,9 @@ pub const FRAME_SUB_CELLS: u8 = 2;
 pub const FRAME_POINTS: u8 = 3;
 pub const FRAME_TRAILER: u8 = 4;
 pub const FRAME_ARTIFACTS: u8 = 5;
+pub const FRAME_ITEMS_HEAD: u8 = 6;
+pub const FRAME_RECORDS: u8 = 7;
+pub const FRAME_PAGE_END: u8 = 8;
 
 pub const FRAME_HEADER_BYTES: usize = 5;
 
@@ -447,6 +464,53 @@ pub fn trailer_frame(json: &[u8]) -> Vec<u8> {
     frame(FRAME_TRAILER, json.len(), |out| out.extend_from_slice(json))
 }
 
+/// The items head frame around the caller's JSON.
+pub fn items_head_frame(json: &[u8]) -> Vec<u8> {
+    frame(FRAME_ITEMS_HEAD, json.len(), |out| out.extend_from_slice(json))
+}
+
+/// The page end frame around the caller's JSON.
+pub fn page_end_frame(json: &[u8]) -> Vec<u8> {
+    frame(FRAME_PAGE_END, json.len(), |out| out.extend_from_slice(json))
+}
+
+/// How a records frame's Arrow buffers are compressed. A reader needs a zstd codec for the
+/// compressed form and nothing else: the schema and the batch framing are never compressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordsCompression {
+    None,
+    Zstd,
+}
+
+/// A records frame: `batch` as an Arrow stream of that one batch, with any dictionary its columns
+/// carry written before it. An error is a batch the IPC writer refuses.
+pub fn records_frame(
+    batch: &RecordBatch,
+    compression: RecordsCompression,
+) -> Result<Vec<u8>, ArrowError> {
+    let options = match compression {
+        RecordsCompression::None => IpcWriteOptions::default(),
+        RecordsCompression::Zstd => {
+            IpcWriteOptions::default().try_with_compression(Some(CompressionType::ZSTD))?
+        }
+    };
+    let mut written = Ok(());
+    let out = frame(FRAME_RECORDS, batch.get_array_memory_size() + 1024, |out| {
+        written = write_stream(out, batch, options);
+    });
+    written.map(|()| out)
+}
+
+fn write_stream(
+    out: &mut Vec<u8>,
+    batch: &RecordBatch,
+    options: IpcWriteOptions,
+) -> Result<(), ArrowError> {
+    let mut writer = StreamWriter::try_new_with_options(out, &batch.schema(), options)?;
+    writer.write(batch)?;
+    writer.finish()
+}
+
 /// Split a body into `(kind, payload)` frames. A short header, a payload running past the end
 /// of the body, or an unknown kind is an error, so a truncated body never reads as a shorter
 /// response.
@@ -460,7 +524,14 @@ pub fn split_frames(body: &[u8]) -> Result<Vec<(u8, &[u8])>, FrameError> {
         let kind = header[0];
         if !matches!(
             kind,
-            FRAME_TILES | FRAME_SUB_CELLS | FRAME_POINTS | FRAME_TRAILER | FRAME_ARTIFACTS
+            FRAME_TILES
+                | FRAME_SUB_CELLS
+                | FRAME_POINTS
+                | FRAME_TRAILER
+                | FRAME_ARTIFACTS
+                | FRAME_ITEMS_HEAD
+                | FRAME_RECORDS
+                | FRAME_PAGE_END
         ) {
             return Err(FrameError::UnknownKind { kind, at });
         }

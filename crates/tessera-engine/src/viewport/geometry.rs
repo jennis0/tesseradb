@@ -10,7 +10,7 @@ pub(crate) struct OpenView<'a> {
     pub(crate) mask: EffectiveMask,
     /// Kept beside the mask for the background ladder fill, which takes the whole entry.
     pub(super) geometry: Arc<SessionGeometry>,
-    pub(super) coordinates: ViewCoordinates,
+    pub(crate) coordinates: ViewCoordinates,
     /// The bundle-wide render columns and then this view's scoped ones, in that order.
     pub(super) render_scalars: Vec<DeclaredScalar>,
 }

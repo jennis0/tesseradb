@@ -18,38 +18,6 @@ use tempfile::TempDir;
 const TOPICS: &str = "topics/filled";
 const TREE: &str = "clusters/filled";
 
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
-fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
-}
-
-async fn open(tmp: &TempDir) -> TestServer {
-    spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
-async fn serve(tmp: &TempDir) -> TestServer {
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    open(tmp).await
-}
-
-async fn restart(server: TestServer, tmp: &TempDir) -> TestServer {
-    server.shutdown().await;
-    open(tmp).await
-}
-
 /// A layer declaring one supplied content that needs no generating set, or a nested tree.
 fn declaration(name: &str, supplied: bool, kind: &str) -> serde_json::Value {
     let supplied = if supplied {
@@ -71,18 +39,6 @@ fn declaration(name: &str, supplied: bool, kind: &str) -> serde_json::Value {
         "depends_on": [],
         "levels": []
     })
-}
-
-async fn register(server: &TestServer, declaration: serde_json::Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "the layer registers");
 }
 
 fn artifacts_url(server: &TestServer, layer: &str) -> String {

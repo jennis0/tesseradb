@@ -16,18 +16,13 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use serde_json::json;
 use tempfile::TempDir;
 
 use tessera_build::config::{Config, Fields};
 use tessera_build::{build, BuildArgs};
-use tessera_spatial::{Bounds, Projection};
+use tessera_spatial::Projection;
 
 use common::*;
 
@@ -45,41 +40,6 @@ const PLACES: &[(f64, f64)] = &[
     (-2.0, 56.5),
     (-7.0, 55.0),
 ];
-
-fn world_frame() -> Bounds {
-    Bounds {
-        x_min: 0.0,
-        x_max: 1.0,
-        y_min: 0.0,
-        y_max: 1.0,
-    }
-}
-
-fn write_lon_lat_points(path: &Path) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("lon", DataType::Float64, false),
-        Field::new("lat", DataType::Float64, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(UInt64Array::from(
-                (0..PLACES.len() as u64).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                PLACES.iter().map(|p| p.0).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                PLACES.iter().map(|p| p.1).collect::<Vec<_>>(),
-            )),
-        ],
-    )
-    .expect("the fixture batch is well-formed");
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
 
 /// One artifact table for the drawing layer: a key, a membership and one ranked content holding
 /// the triangle's WKT — the shape a caller's own file has, and the only route by which a table's
@@ -99,19 +59,14 @@ fn write_drawings(path: &Path) {
     contents.values().append(true);
     contents.append(true);
 
-    let keys = Arc::new(keys.finish());
-    let members = Arc::new(members.finish());
-    let contents = Arc::new(contents.finish());
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("key", DataType::Utf8, false),
-        Field::new("members", members.data_type().clone(), true),
-        Field::new("contents", contents.data_type().clone(), true),
-    ]));
-    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![keys, members, contents])
-        .expect("the fixture artifact table is well-formed");
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write_parquet(
+        path,
+        vec![
+            column("key", false, keys.finish()),
+            column("members", true, members.finish()),
+            column("contents", true, contents.finish()),
+        ],
+    );
 }
 
 /// The two layers the **build** publishes: one whose membership is the triangle, written inline
@@ -183,39 +138,21 @@ require_member_visibility = "none"
 fn build_projected(out: &Path, tmp: &Path) -> Config {
     let points_path = tmp.join("points.parquet");
     let pairs_path = tmp.join("pairs.parquet");
-    write_lon_lat_points(&points_path);
+    write_lon_lat(&points_path, PLACES);
     write_pairs_n(&pairs_path, PLACES.len() as u64);
     let config = built_layers(tmp);
     build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: Projection::WebMercator,
-            extent: world_frame(),
-            points: points_path,
-            point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
         layers: config.layers.clone(),
         layer_inputs: config.layer_sources.clone(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
+        ..build_args(
+            out,
+            vec![tessera_build::ViewArgs {
+                projection: Projection::WebMercator,
+                extent: world_frame(),
+                point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
+                ..view_args("s0", &points_path, AccessInput::relation(pairs_path))
+            }],
+        )
     })
     .expect("the projected fixture builds");
     config
@@ -224,12 +161,7 @@ fn build_projected(out: &Path, tmp: &Path) -> Config {
 async fn serve_projected(tmp: &TempDir) -> TestServer {
     let bundle_root = tmp.path().join("bundle");
     build_projected(&bundle_root, tmp.path());
-    spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
+    open(&tmp).await
 }
 
 /// The declaration `PUT /control/layers` takes for a layer that draws one authored polygon.
@@ -254,25 +186,6 @@ fn drawing_layer(name: &str) -> serde_json::Value {
         "depends_on": [],
         "levels": []
     })
-}
-
-/// A member as `addressing: "external"` names it: the build's own 8-byte spelling, base64'd.
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
-async fn register(server: &TestServer, declaration: serde_json::Value) -> (u16, serde_json::Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
 async fn publish(
@@ -330,10 +243,13 @@ async fn an_authored_wgs84_shape_lands_where_a_membership_one_does_through_eithe
 
     // The control plane's two: the batch's `default_space`, and a row overriding it.
     assert_eq!(
-        register(&server, drawing_layer("regions/batch")).await.0,
+        put_layer(&server, drawing_layer("regions/batch")).await.0,
         201
     );
-    assert_eq!(register(&server, drawing_layer("regions/row")).await.0, 201);
+    assert_eq!(
+        put_layer(&server, drawing_layer("regions/row")).await.0,
+        201
+    );
     let members: Vec<String> = (0..PLACES.len() as u64).map(member).collect();
     let (status, body) = publish(
         &server,
@@ -387,7 +303,7 @@ async fn an_authored_shape_report_carries_the_decomposition() {
     let tmp = TempDir::new().unwrap();
     let server = serve_projected(&tmp).await;
     assert_eq!(
-        register(&server, drawing_layer("regions/report")).await.0,
+        put_layer(&server, drawing_layer("regions/report")).await.0,
         201
     );
     let members: Vec<String> = (0..PLACES.len() as u64).map(member).collect();
@@ -421,21 +337,10 @@ async fn an_authored_shape_report_carries_the_decomposition() {
 #[tokio::test]
 async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
     // The fixture bundle every other server test uses: one view, `projection = "none"`.
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     assert_eq!(
-        register(&server, drawing_layer("regions/flat")).await.0,
+        put_layer(&server, drawing_layer("regions/flat")).await.0,
         201
     );
 
@@ -472,7 +377,7 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
     let tmp = TempDir::new().unwrap();
     let server = serve_projected(&tmp).await;
     assert_eq!(
-        register(&server, drawing_layer("regions/batch")).await.0,
+        put_layer(&server, drawing_layer("regions/batch")).await.0,
         201
     );
     let (status, body) = publish(

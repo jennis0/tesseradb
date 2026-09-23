@@ -299,6 +299,9 @@ pub struct IncomingArtifact {
     /// layer, because the rows inside the shape are resolved from it at every segment's
     /// publication.
     pub shape: Option<ArtifactShapes>,
+    /// The artifact's own access label, as the plugin's descriptors for the labels the caller
+    /// wrote. Empty is no label, which the layer's `artifact_visibility.default` answers.
+    pub access: Vec<Vec<u8>>,
 }
 
 /// The target of an attachment, as a caller names it.
@@ -395,6 +398,7 @@ impl IncomingArtifact {
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
+            access: Vec::new(),
         }
     }
 
@@ -461,6 +465,7 @@ impl IncomingArtifact {
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
+            access: Vec::new(),
         }
     }
 }
@@ -489,6 +494,9 @@ pub struct IncomingGrowth {
     /// nothing behind it. Minting is what a *membership column* does — at a build from a member
     /// source, and at ingest from a column named for the layer (`artifacts-from-points.md` §6.3).
     pub key: String,
+    /// The view the artifact belongs to, on a layer scoped to a group: part of its identity, as on
+    /// a publication. `None` on an entity-scoped layer.
+    pub view: Option<String>,
     /// The entities joining. Empty is a no-op rather than a refusal: nothing joining is a thing a
     /// caller can honestly say, and it discloses nothing.
     pub joining: Bitmap,
@@ -527,6 +535,8 @@ pub struct FixedParts {
     pub contents: Vec<(u16, Vec<String>)>,
     /// The canonical shapes, on [`IncomingArtifact::shape`]'s terms.
     pub shape: Option<ArtifactShapes>,
+    /// The access label, on [`IncomingArtifact::access`]'s terms. Empty supplies none.
+    pub access: Vec<Vec<u8>>,
 }
 
 impl FixedParts {
@@ -536,6 +546,7 @@ impl FixedParts {
             && self.attached_to.is_none()
             && self.contents.is_empty()
             && self.shape.is_none()
+            && self.access.is_empty()
     }
 }
 
@@ -546,6 +557,7 @@ impl IncomingGrowth {
     pub fn from_entities(key: String, joining: impl IntoIterator<Item = EntityId>) -> Self {
         IncomingGrowth {
             key,
+            view: None,
             joining: bitmap_of_entities(joining),
             leaving: Bitmap::new(),
             rank: None,
@@ -565,6 +577,7 @@ impl IncomingGrowth {
     ) -> Self {
         IncomingGrowth {
             key,
+            view: None,
             joining: bitmap_of_entities(joining),
             leaving: bitmap_of_entities(leaving),
             rank,
@@ -844,6 +857,17 @@ pub struct ArtifactRecord {
     /// the cut does not — those are information about what contains what, not a ladder to coarsen
     /// along (owner ruling, 2026-08-18).
     pub parents: Vec<crate::wal::ParentRef>,
+    /// The artifact's own access label as descriptors, ascending and without repeats. Empty is no
+    /// label.
+    pub access: Vec<Vec<u8>>,
+}
+
+/// An access label's descriptors in the one order every copy of it is stored and compared in.
+pub fn canonical_access(descriptors: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut sorted = descriptors.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted
 }
 
 /// How far a chain of borrowed memberships is followed. A label may attach to a label, which
@@ -1515,6 +1539,19 @@ impl ArtifactStore {
                     }
                 }
             }
+            ArtifactPart::Access(access) => {
+                if *access != canonical_access(access) || access.is_empty() {
+                    return FillOutcome::Undecodable;
+                }
+                if record.access.is_empty() {
+                    record.access = access.clone();
+                    FillOutcome::Filled
+                } else if record.access == *access {
+                    FillOutcome::Identical
+                } else {
+                    FillOutcome::Differs
+                }
+            }
             ArtifactPart::Content {
                 rank,
                 values,
@@ -1649,6 +1686,7 @@ impl ArtifactStore {
                         entity: a.entity,
                     }),
                     parents: published.parents.clone(),
+                    access: published.access.clone(),
                 },
                 shape,
             );
@@ -2765,6 +2803,7 @@ impl ArtifactStore {
 ///             | content*
 ///             | attachment
 ///             | parents
+///             | access
 ///             | shape
 /// content    := digest (32 bytes, SHA-256 of the values)
 ///             | u64 LE cardinality                       -- the set's stored cardinality
@@ -2774,6 +2813,8 @@ impl ArtifactStore {
 ///                    | u32 LE level | u32 LE ordinal | u64 LE target entity
 /// parents    := u16 LE parent_count                      -- 0 at a root
 ///             | per parent, ascending by (level, ordinal): u32 LE level | u32 LE ordinal
+/// access     := u16 LE label_count                       -- 0 for no label
+///             | per descriptor, strictly ascending: u16 LE len | descriptor bytes
 /// shape      := u8 0                                     -- no declared shape
 ///             | u8 3 | digest (32 bytes, SHA-256 of what follows)
 ///                    | u16 LE views
@@ -2891,6 +2932,22 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
         for parent in &record.parents {
             out.extend_from_slice(&parent.level.to_le_bytes());
             out.extend_from_slice(&parent.ordinal.to_le_bytes());
+        }
+    }
+    // The access label, counted as the parents are, so an unlabelled record is an explicit zero.
+    // A list or a descriptor too long to count is written as the refusal marker the decoder
+    // rejects, since a shortened label would serve the artifact to viewers it did not name.
+    let access_count = u16::try_from(record.access.len()).unwrap_or(u16::MAX);
+    let too_long = record.access.iter().any(|d| d.len() >= u16::MAX as usize);
+    if too_long {
+        out.extend_from_slice(&u16::MAX.to_le_bytes());
+    } else {
+        out.extend_from_slice(&access_count.to_le_bytes());
+        if access_count != u16::MAX {
+            for descriptor in &record.access {
+                out.extend_from_slice(&(descriptor.len() as u16).to_le_bytes());
+                out.extend_from_slice(descriptor);
+            }
         }
     }
     // **The shape, on the same discriminant rule** — and here the fail-closed reading is the loud
@@ -3068,6 +3125,20 @@ pub fn decode_record(
         }
         parents.push(parent);
     }
+    // Strictly ascending, or a decode failure: the writer keeps the list in canonical order.
+    let access_count = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+    if access_count == u16::MAX as usize {
+        return None;
+    }
+    let mut access: Vec<Vec<u8>> = Vec::with_capacity(access_count);
+    for _ in 0..access_count {
+        let len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+        let descriptor = take(len)?.to_vec();
+        if access.last().is_some_and(|last| *last >= descriptor) {
+            return None;
+        }
+        access.push(descriptor);
+    }
     // **The shapes go through [`ArtifactShapes::new`] rather than being assembled from the
     // bytes**, so a blob carrying no view or an empty shape is a decode failure and not an artifact
     // whose membership is a region nobody wrote. One constructor, at both ends. Whether the bytes
@@ -3110,6 +3181,7 @@ pub fn decode_record(
             contents,
             attached_to,
             parents,
+            access,
         },
         shape,
     ))
@@ -3222,6 +3294,7 @@ mod tests {
             contents: Vec::new(),
             attached_to: None,
             parents: Vec::new(),
+            access: Vec::new(),
         }
     }
 
@@ -3847,6 +3920,64 @@ mod tests {
         }
     }
 
+    /// An access label survives the packed extent; a list the writer could not produce, and every
+    /// truncation, refuses rather than decoding as a shorter label.
+    #[test]
+    fn an_access_label_round_trips_and_a_damaged_one_is_refused() {
+        let mut r = record(100, &[1, 2, 3]);
+        r.access = canonical_access(&[b"team-b".to_vec(), b"team-a".to_vec()]);
+        let blob = encode_record(&r, None);
+        let (back, _) = decode_record(r.entity, &blob).expect("a whole blob decodes");
+        assert_eq!(back.access, vec![b"team-a".to_vec(), b"team-b".to_vec()]);
+
+        let plain = record(101, &[1]);
+        let (back, _) = decode_record(plain.entity, &encode_record(&plain, None)).unwrap();
+        assert!(back.access.is_empty());
+
+        let mut backwards = r.clone();
+        backwards.access.reverse();
+        assert!(decode_record(backwards.entity, &encode_record(&backwards, None)).is_none());
+        let mut twice = r.clone();
+        twice.access.push(b"team-b".to_vec());
+        assert!(decode_record(twice.entity, &encode_record(&twice, None)).is_none());
+
+        for len in 0..blob.len() {
+            assert!(decode_record(r.entity, &blob[..len]).is_none());
+        }
+    }
+
+    /// A label fills a record that has none, an identical one changes nothing, and a different
+    /// one is refused and leaves the held label in place.
+    #[test]
+    fn an_access_label_fills_once() {
+        use crate::wal::ArtifactPart;
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[1]), None);
+        let a = vec![b"team-a".to_vec()];
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &ArtifactPart::Access(a.clone())),
+            FillOutcome::Filled
+        );
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &ArtifactPart::Access(a.clone())),
+            FillOutcome::Identical
+        );
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &ArtifactPart::Access(vec![b"team-b".to_vec()])),
+            FillOutcome::Differs
+        );
+        assert_eq!(store.get("clusters/a", 0, 0).unwrap().access, a);
+        assert_eq!(
+            store.fill(
+                "clusters/a",
+                0,
+                0,
+                &ArtifactPart::Access(vec![b"z".to_vec(), b"a".to_vec()])
+            ),
+            FillOutcome::Undecodable
+        );
+    }
+
     /// **A record whose stored cardinality is not the size of the set beside it is refused.**
     ///
     /// Containment reads the row-space operator against this number (`ingest.md` §1.1), and in an
@@ -3992,6 +4123,7 @@ mod tests {
                 attached_to: None,
                 parents: Vec::new(),
                 shape: None,
+                access: Vec::new(),
             }],
         }
     }

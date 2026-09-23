@@ -29,7 +29,7 @@ tessera-plugin = { path = "../tessera-plugin" }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1", features = ["full"] }
-# The streamed viewport body implements `futures_core::Stream` by hand (viewer.rs's
+# The streamed bodies implement `futures_core::Stream` by hand (stream.rs's
 # `StreamBody`); axum's `Body::from_stream` consumes it. Already in the tree via axum — this
 # only makes the trait nameable.
 futures-core = "0.3"
