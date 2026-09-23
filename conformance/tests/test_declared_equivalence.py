@@ -600,9 +600,6 @@ RENDER_REFUSED = (
     "the control plane refuses `render = true` on PUT /control/attributes; a rendered column can "
     "only be declared at a build"
 )
-TEXT_LOST_AT_RESTART = (
-    "a text column declared live matches nothing after a restart until a fold rebuilds its index"
-)
 
 #: Cases and stages expected to fail as a whole, why, and the exception they fail with. Strict,
 #: so each flips when the cause is fixed.
@@ -623,8 +620,6 @@ class Known:
     places: tuple[tuple[str, str], ...]
     reason: str
 
-
-ANY = r".*"
 
 KNOWN = (
     Known(
@@ -658,13 +653,6 @@ KNOWN = (
         "a family scoped to a live group lists its views in the order their first flushes ran "
         "(the view holding the lowest entity id first), where a build lists them in the group's "
         "declared order",
-    ),
-    Known(
-        "text-index",
-        "text-attributes",
-        ("restart",),
-        ((r"viewport world z\d (filter|highlight) note", ANY),),
-        TEXT_LOST_AT_RESTART,
     ),
 )
 
