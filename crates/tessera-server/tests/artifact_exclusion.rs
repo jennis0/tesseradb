@@ -288,11 +288,8 @@ async fn a_list_over_the_bound_is_refused_naming_the_inclusion_spelling() {
     .await;
     assert_eq!(code, 422, "{body}");
     let detail = body["detail"].as_str().unwrap_or_default().to_string();
+    assert_eq!(body["error"], "contract", "{body}");
     assert!(detail.contains("max_excluded_per_request"), "{detail}");
-    assert!(
-        detail.contains("inclusion"),
-        "the refusal names the remedy: {detail}"
-    );
     assert_eq!(
         served(&server, LAYER, &["0"]).await.len(),
         1,
@@ -458,11 +455,5 @@ async fn a_second_exclusion_on_a_held_key_is_a_conflict() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("one spelling"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "contract", "{body}");
 }

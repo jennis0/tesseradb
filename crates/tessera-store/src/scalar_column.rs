@@ -11,8 +11,8 @@
 //! declaration only in microseconds, because nothing records a unit and two units under one
 //! declaration would store incomparable numbers.
 //!
-//! A category's column carries value keys, which only its vocabulary can resolve, so a category is
-//! not read here.
+//! A category's column carries value keys as strings at either offset width, whatever width its
+//! codes are declared at. Only its vocabulary can resolve a key, so a category is not read here.
 
 use std::fmt;
 
@@ -26,10 +26,13 @@ use tessera_spatial::tiler::{ScalarType, ScalarValue};
 
 use crate::utf8::{is_utf8, Utf8Values};
 
-/// Whether a column of Arrow type `found` carries a value declared `ty`. An integer's fit is
-/// checked per row by [`ScalarColumn::value`], so for an integer declaration this answers only
-/// whether the column holds integers.
-pub fn carries(ty: ScalarType, found: &DataType) -> bool {
+/// Whether a column of Arrow type `found` carries a value declared `ty`, or a category's keys
+/// where `category` is set. An integer's fit is checked per row by [`ScalarColumn::value`], so
+/// for an integer declaration this answers only whether the column holds integers.
+pub fn carries(ty: ScalarType, category: bool, found: &DataType) -> bool {
+    if category {
+        return is_utf8(found);
+    }
     match ty {
         ScalarType::Bool => matches!(found, DataType::Boolean),
         ScalarType::F32 | ScalarType::F64 => {
@@ -281,11 +284,25 @@ mod tests {
         for ty in DECLARED {
             for column in &columns {
                 assert_eq!(
-                    carries(ty, column.data_type()),
+                    carries(ty, false, column.data_type()),
                     ScalarColumn::new(column, ty).is_some(),
                     "declared {ty:?} against {:?}",
                     column.data_type()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn a_category_carries_strings_at_either_offset_width_and_nothing_else() {
+        let strings = [DataType::Utf8, DataType::LargeUtf8];
+        let others = [DataType::UInt8, DataType::UInt32, DataType::Int64, DataType::Boolean];
+        for ty in [ScalarType::U8, ScalarType::U16, ScalarType::U32] {
+            for found in &strings {
+                assert!(carries(ty, true, found), "{ty:?} category against {found:?}");
+            }
+            for found in &others {
+                assert!(!carries(ty, true, found), "{ty:?} category against {found:?}");
             }
         }
     }

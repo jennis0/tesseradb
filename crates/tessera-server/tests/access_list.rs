@@ -503,8 +503,9 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     writer.write(&batch).unwrap();
     let resp = ingest(&server, "absent", writer.into_inner().unwrap()).await;
     assert_eq!(resp.status(), 422);
-    let detail = resp.text().await.unwrap();
-    assert!(detail.contains("column 'access' missing"), "{detail}");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("'access'"), "{body}");
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water_before,
