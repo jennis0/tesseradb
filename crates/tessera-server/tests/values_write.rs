@@ -57,19 +57,6 @@ async fn serve() -> Served {
     served
 }
 
-/// Stop the server and open the same bundle and log again.
-async fn restart(served: Served) -> Served {
-    let Served { server, tmp } = served;
-    server.shutdown().await;
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    Served { server, tmp }
-}
-
 async fn declare(served: &Served, body: Value) {
     let resp = served
         .server
@@ -283,10 +270,7 @@ async fn the_values_route_fills_restates_and_refuses() {
 
 /// The keys a viewer route that lists a column's values answers, on one page.
 async fn listed_keys(served: &Served, path: &str) -> Vec<String> {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     let resp = served
         .server
         .client
@@ -325,7 +309,7 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
     )
     .await;
     let id = ingest_point(&served, "points-1", "subject").await;
-    flush(&served).await;
+    tick(&served.server).await;
 
     let (status, answer) = values(
         &served,
@@ -346,17 +330,17 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
     .await;
     assert_eq!(status, 422, "a closed vocabulary's unknown key is refused: {answer}");
 
-    flush(&served).await;
+    tick(&served.server).await;
     let fields = item_fields(&served, id).await;
     assert_eq!(fields["grade"], json!("g0"), "{fields}");
     assert!(fields["dept"].is_null(), "the refused batch wrote nothing: {fields}");
     assert_minted_key_is_listed(&served, "g0").await;
 
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(item_fields(&served, id).await["grade"], json!("g0"));
     assert_minted_key_is_listed(&served, "g0").await;
     let second = ingest_point(&served, "points-2", "second").await;
-    flush(&served).await;
+    tick(&served.server).await;
     assert!(
         item_fields(&served, second).await["grade"].is_null(),
         "a flush after the restart publishes"
@@ -365,10 +349,7 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
 
 /// The keys of the artifacts a viewport over the whole frame serves from `layer`.
 async fn served_keys(served: &Served, layer: &str) -> Vec<String> {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     let resp = served
         .server
         .client
@@ -403,32 +384,24 @@ async fn a_value_filled_by_a_values_batch_derives_its_artifact_as_ingest_does() 
         json!({"name": "grade", "type": "category", "vocabulary": "grade", "index": true}),
     )
     .await;
-    let resp = served
-        .server
-        .client
-        .put(served.server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
-            "name": "grades",
-            "title": "Grades",
-            "views": ["s0"],
-            "membership": { "attribute": "grade" },
-            "visibility": null,
-            "artifact_visibility": { "field": null, "default": "inherited" },
-            "require_member_visibility": null,
-            "hierarchy": { "kind": "flat", "prune_children": false },
-            "content": { "computed": [], "supplied": [] },
-            "depends_on": [],
-            "levels": []
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap_or_default());
+    let grades = json!({
+        "name": "grades",
+        "title": "Grades",
+        "views": ["s0"],
+        "membership": { "attribute": "grade" },
+        "visibility": null,
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": null,
+        "hierarchy": { "kind": "flat", "prune_children": false },
+        "content": { "computed": [], "supplied": [] },
+        "depends_on": [],
+        "levels": []
+    });
+    register(&served.server, grades).await;
 
     ingest_point_with(&served, "points-1", "by-ingest", json!({"grade": "g1"})).await;
     ingest_point(&served, "points-2", "by-values").await;
-    flush(&served).await;
+    tick(&served.server).await;
     let (status, answer) = values(
         &served,
         "values-1",
@@ -437,10 +410,10 @@ async fn a_value_filled_by_a_values_batch_derives_its_artifact_as_ingest_does() 
     )
     .await;
     assert_eq!(status, 200, "{answer}");
-    flush(&served).await;
+    tick(&served.server).await;
     assert_eq!(served_keys(&served, "grades").await, ["g1", "g2"]);
 
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(served_keys(&served, "grades").await, ["g1", "g2"]);
 }
 

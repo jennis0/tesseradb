@@ -238,13 +238,7 @@ async fn assert_versions_survive_restarts(server: TestServer, tmp: &TempDir) {
     let before = layer_versions(&server).await;
     let mut server = server;
     for _ in 0..2 {
-        server.shutdown().await;
-        server = spawn_server(
-            &tmp.path().join("bundle"),
-            &tmp.path().join("cache"),
-            &tmp.path().join("wal.log"),
-        )
-        .await;
+        server = restart(server, tmp).await;
         assert_eq!(layer_versions(&server).await, before);
     }
 }

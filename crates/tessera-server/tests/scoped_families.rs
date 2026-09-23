@@ -1772,7 +1772,7 @@ async fn an_entity_scoped_fill_needs_no_view_header() {
 /// restart.
 #[tokio::test]
 async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     let declarations = [
         (
             "/control/vocabularies/grade",
@@ -1805,11 +1805,10 @@ async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
         &[(FILLED, 250.0, 250.0, IN_Q3)],
     )
     .await[0];
-    flush(&served).await;
+    drain(&served.server).await;
 
-    use base64::Engine as _;
     let row = json!([{
-        "external_id": base64::engine::general_purpose::STANDARD.encode(external_id_of(FILLED)),
+        "external_id": member(FILLED),
         "grade": "g7",
     }]);
     let resp = served
@@ -1824,10 +1823,10 @@ async fn a_values_batch_mints_a_new_key_for_a_group_scoped_family() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().await.unwrap_or_default());
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(scoped_grade(&served, id).await, (true, json!("g7")));
 
-    let served = restart(served, default_engine_config()).await;
+    let served = served.restart().await;
     assert_eq!(scoped_grade(&served, id).await, (true, json!("g7")));
 }
 

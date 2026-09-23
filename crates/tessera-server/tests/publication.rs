@@ -662,22 +662,19 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
 
     // Until the node has recovered its WAL and a tick has planned over the request, which the
     // refused gate turns into a held cycle. The counter must stay short of the number throughout.
-    let deadline = std::time::Instant::now() + DEADLINE;
-    let executor = loop {
-        assert!(
-            publication(&server).await < n,
-            "the counter must not pass a cycle whose gate refused it"
-        );
-        let executor = server.state.engine.write_executor_stats();
-        if executor.wal_recoveries > 0 && executor.ticks > ticks {
-            break executor;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the node never recovered its WAL and ticked: {executor:?}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    };
+    let executor = wait_for(
+        "the node recovering its WAL and ticking",
+        DEADLINE,
+        async || {
+            assert!(
+                publication(&server).await < n,
+                "the counter must not pass a cycle whose gate refused it"
+            );
+            let executor = server.state.engine.write_executor_stats();
+            (executor.wal_recoveries > 0 && executor.ticks > ticks).then_some(executor)
+        },
+    )
+    .await;
 
     // **The operator plane says why**, which is what stops a stalled counter reading as a hung
     // server. The node recovered its WAL in process, so the posture is back to `running`; what
