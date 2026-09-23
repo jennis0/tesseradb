@@ -1674,11 +1674,9 @@ impl Wal {
 
     /// What the surviving members and their sidecars occupy on disc, in bytes.
     ///
-    /// **A gauge, and not the runtime ceiling `wal_hard_limit_bytes` reads as.** That key bounds a
-    /// startup relation and nothing compares the live log against it; what a node should do at a
-    /// limit is undecided, and refusing a *deny* for space would be fail-open. This reports the
-    /// size to `/control/status` and decides nothing. Enforcement still needs the ruling, not the
-    /// accessor.
+    /// **A gauge, and not a ceiling.** Nothing bounds the live log's size; what a node should do
+    /// at a limit is undecided, and refusing a *deny* for space would be fail-open. This reports
+    /// the size to `/control/status` and decides nothing.
     ///
     /// **Allocated blocks, not apparent length.** `st_blocks` answers the question a capacity
     /// gauge is asked — what the device cannot use for anything else — and it comes from the same

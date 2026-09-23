@@ -345,20 +345,14 @@ compaction_window_start = "off"
 
 #: How large a single `/control/ingest` batch may be, when a plan asks for one.
 #:
-#: **Two ceilings bound this, and the tighter one is not the obvious one.** The WAL-headroom
-#: relation — `ingest_queue_bound × ingest_max_batch_bytes` plus the reserved deny headroom under
-#: `wal_hard_limit_bytes` — allows about 224 MiB at the shipped defaults. It is not what binds. A
-#: **64 MiB per-connection ceiling** is, and its argument is sharper: an ingest body is buffered in
-#: full before any handler runs, so this key is what *one* credentialed connection costs, and
-#: nothing bounds how many arrive — the resident relation bounds the admitted window, not the queue
-#: of uploads in front of it. Measured, not read: 200 MiB was refused at startup by that ceiling
-#: while satisfying the WAL relation comfortably.
+#: An ingest body is buffered in full before any handler runs, so this key is what *one*
+#: credentialed connection costs, and nothing bounds how many arrive.
 #:
 #: **What a plan may then pose is bounded by the row's width on the wire, not by the row count**,
 #: and the refusal is a 422 at the door — before decoding, so it costs no queue slot and no WAL
 #: append. Measured against this corpus: 500,000 rows overflow 32 MiB, so a row exceeds 67 B
-#: encoded. The byte cap therefore sits at the ceiling and the row count is chosen to fit under it
-#: with margin, which is the order these two must be reasoned in.
+#: encoded. The byte cap is therefore set first and the row count is chosen to fit under it with
+#: margin, which is the order these two must be reasoned in.
 BIG_BATCH_ROWS = 250_000
 BIG_BATCH_BYTES = 64 * 1024 * 1024
 

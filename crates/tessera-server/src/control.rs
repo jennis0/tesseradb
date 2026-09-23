@@ -359,11 +359,10 @@ pub fn router(state: Arc<AppState>) -> Router {
 ///    **What it does NOT close.** A caller holding a *valid* operator credential still buffers up
 ///    to `ingest_max_batch_bytes` per in-flight request, and `axum::serve` applies no connection or
 ///    concurrency cap, so the *count* of connections remains unbounded. What each one costs is
-///    bounded by `config::INGEST_MAX_BATCH_BYTES_CEILING`; how many there are is bounded by
-///    deployment posture — the control plane is a unix socket reachable only by admin systems, and
-///    where it is exposed more widely the connection bound is a reverse proxy's (SA §8). That
-///    constant records the two in-process mechanisms assessed for the count and why each was
-///    declined.
+///    `ingest_max_batch_bytes`, which the operator sets; how many there are is bounded by
+///    deployment posture: the control plane is a unix socket reachable only by admin systems, and
+///    where it is exposed more widely the connection bound is a reverse proxy's. [`ingest`]'s doc
+///    says why the two in-process bounds on the count were declined.
 /// 2. **A control route cannot be added unauthenticated by omission.** The layer wraps the whole
 ///    router, so a `.route(..)` added to [`router`] tomorrow is behind the credential the moment it
 ///    exists. There is no opt-out to reach for and no list to be added to by accident.
@@ -467,7 +466,7 @@ fn layer_frames(
 /// before the bearer check. Stating it here changes no behaviour except the answer: the limit is now
 /// a number this crate owns, so the 422 can name it, and a future decision to raise it is a decision
 /// rather than an inherited default. It is **not** sized against `ingest_max_batch_bytes`: a change
-/// item is order 200 B (see `config::RESERVED_DENY_HEADROOM_BYTES`), so this admits roughly ten
+/// item is order 200 B, so this admits roughly ten
 /// thousand suppressions in one request, and a caller with more than that has to split — which is
 /// a latency cost on a batch, not a refusal of any individual deny.
 const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -1212,7 +1211,7 @@ fn run_ingest(
     // and cloning `external_id`, `descriptors`, `scalars` and `terms` out would leave `items`,
     // `descriptor_lists`, `terms_per_item` *and* `rows` live simultaneously while `accept_ingest`
     // blocks on its receipt with all four in scope — a doubling multiplied by `ingest_admission`
-    // concurrent handlers, which is the term `INGEST_RESIDENT_CEILING_BYTES`'s arithmetic is about.
+    // concurrent handlers.
     // Moving also deletes four per-row allocations on the path that must sustain 10⁹-scale ingest;
     // the three source vectors drop at the end of this statement.
     // Which rows join, by position. Empty for every batch of new items, which is most of them.
@@ -1313,18 +1312,14 @@ fn run_ingest(
 /// connection or concurrency cap, so N authenticated connections pin `N × ingest_max_batch_bytes`.
 /// The two factors are bounded by different things, and separating them is the whole of the answer:
 ///
-/// - **the per-connection factor** is bounded by `config::INGEST_MAX_BATCH_BYTES_CEILING`, a
-///   startup refusal on the key itself. Without it, small admission and queue bounds with a
-///   gigabyte batch cap satisfy every relation over the *admitted* window — which is what
-///   `INGEST_RESIDENT_CEILING_BYTES` weighs — and then die on the second concurrent upload, in
-///   front of it;
-/// - **the count** is bounded by deployment posture, not by this process. The constant's doc
-///   carries the argument, including why a `tower` concurrency limit and a listener-level
-///   connection cap were both declined: the first queues rather than sheds and, on the whole
-///   control router, would put `/control/changes` behind an in-flight bound shared with
-///   receipt-blocking ingest handlers — lifecycle §1.3's forbidden shape, the exact thing
-///   [`DENY_RUNTIME`] exists to prevent; the second refuses by not accepting, which leaves the
-///   caller in the kernel's accept backlog with no status code at all.
+/// - **the per-connection factor** is `ingest_max_batch_bytes`, which the operator sets and
+///   nothing caps;
+/// - **the count** is bounded by deployment posture, not by this process. A `tower` concurrency
+///   limit and a listener-level connection cap were both declined: the first queues rather than
+///   sheds and, on the whole control router, would put `/control/changes` behind an in-flight
+///   bound shared with receipt-blocking ingest handlers, the thing [`DENY_RUNTIME`] exists to
+///   prevent; the second refuses by not accepting, which leaves the caller in the kernel's accept
+///   backlog with no status code at all.
 ///
 /// **The shape is what makes this a bound rather than a fix.** This endpoint buffers the whole body
 /// because it decodes the whole Arrow batch at once; streaming it is a change to the write path
@@ -4266,9 +4261,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             // unbounded case: see `compaction.fold_refusals` below, the same alarm from the other
             // end.
             //
-            // **Nothing is compared against `wal_hard_limit_bytes`.** That key bounds a startup
-            // relation, and what a node should do at a runtime ceiling is undecided — refusing a
-            // deny for space would be fail-open. These report; they do not act.
+            // **These report; they do not act.** Nothing bounds the log's size, and what a node
+            // should do at a ceiling is undecided: refusing a deny for space would be fail-open.
             "wal": {
                 "members": executor.wal.members,
                 "bytes": executor.wal.bytes,
@@ -4614,12 +4608,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             },
         },
         // **`young_evictions` is an alarm, not an undifferentiated counter, and `thrashing` is the
-        // predicate spelled out.** `> 0` is the argued threshold, not an arbitrary one: `prepare`
-        // refuses at startup any bound below `expected_concurrent_sessions × the measured
-        // per-entry size (see `validate_cache_bounds`), so a young eviction means the collapsing
-        // regime was entered *another* way — a second view per session, a generation swap's
-        // transient duplicate, or entries larger than the measured figure. That is precisely what
-        // `validate_cache_bounds`' own doc says this counter is for.
+        // predicate spelled out.** An entry evicted before it was read again means the bound is
+        // smaller than what the sessions reading it hold at once: too many sessions for the
+        // bound, a second view per session, a generation swap's transient duplicate, or entries
+        // larger than expected.
         "row_projection_cache": {
             "entries": projection_cache.entries,
             "bytes": projection_cache.bytes,

@@ -1119,8 +1119,7 @@ pub(crate) fn open_rotation(
     );
 
     // Rotated from the live one, never freshly constructed: `FragmentCache::rotate` carries the
-    // validated byte bound across, and `FragmentCache::new` here would silently unbound the cache
-    // a deployment's startup refusal exists to bound.
+    // configured byte bound across, and `FragmentCache::new` here would silently unbound it.
     let fragments = Arc::new(live_fragments.rotate(bundle_identity));
 
     // Opened over the new prefix, from its own manifests: cloning the live generation's would
