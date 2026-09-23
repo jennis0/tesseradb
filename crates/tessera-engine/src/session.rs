@@ -185,12 +185,9 @@ impl Engine {
             satisfied_descriptors.insert(term, tessera_authz::PUBLIC_LABEL.to_vec());
         }
 
-        // Resolved after the credential and `public` are both in `satisfied`, since a gate is
-        // satisfied by exactly the terms an item's label is.
         let visible_views = Arc::new(crate::gate::resolve(
             &generation.bundle.manifest,
-            &generation.dict,
-            &satisfied,
+            &credentials,
             self.plugin.as_ref(),
         ));
 
