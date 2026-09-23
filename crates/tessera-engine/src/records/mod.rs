@@ -128,6 +128,10 @@ pub struct ItemsHead {
     /// The coarsest verdict the response's region leaves reached before the head was sent: in
     /// the count's evaluation and the first page's, for the response's header.
     pub region: Option<RegionVerdict>,
+    /// The viewport's identity coordinate for this session and view, from the first page's
+    /// geometry, for the response's header. `None` only where the response was cancelled before
+    /// its first page, which happens only when the client has gone.
+    pub identity_key: Option<[u8; 16]>,
 }
 
 /// Why a page ended.
@@ -416,10 +420,14 @@ impl Engine {
         };
         let mut counted: Option<Counted> = None;
         let mut head_sent = false;
-        let mut send_head = |walk: &Walk, counted, sink: &mut dyn ItemsSink| -> Result<()> {
+        let mut send_head = |walk: &Walk,
+                             counted,
+                             identity_key,
+                             sink: &mut dyn ItemsSink|
+         -> Result<()> {
             if !head_sent {
                 head_sent = true;
-                sink.head(&planned.head(walk, counted))
+                sink.head(&planned.head(walk, counted, identity_key))
                     .map_err(|SinkClosed| EngineError::Cancelled)?;
             }
             Ok(())
@@ -444,19 +452,23 @@ impl Engine {
             // first also counts under them, when the request asked for counts.
             let generation = self.generation.load_full();
             let req = &planned.req;
-            let open = self.open_view(
+            // A cancellation that lands while the view opens ends the response as one seen above.
+            let open = match self.open_view(
                 planned.session,
                 &generation,
                 req.view,
                 &req.cancel,
                 &mut Probe::new(),
-            )?;
+            ) {
+                Err(EngineError::Cancelled) => break ResponseEndedBy::Deadline,
+                open => open?,
+            };
             let cx = PageCx::new(self, &open, &generation);
             if req.count && counted.is_none() {
                 counted = Some(self.items_counts(&cx, req)?);
             }
             let page = self.items_page(planned, &cx, &mut walk, &mut clock)?;
-            send_head(&walk, counted, sink)?;
+            send_head(&walk, counted, Some(open.coordinates.identity_key), sink)?;
             match page {
                 Paged::Rows {
                     batch,
@@ -485,7 +497,7 @@ impl Engine {
                 Paged::Stopped(reason) => break reason,
             }
         };
-        send_head(&walk, counted, sink)?;
+        send_head(&walk, counted, None, sink)?;
         Ok(ItemsTrailer {
             pages,
             rows,
@@ -596,12 +608,18 @@ fn refuse_shape(req: &ItemsRequest<'_>) -> Result<()> {
 impl Planned<'_> {
     /// The head, with the counts and the verdict the counting evaluation reached, where the
     /// request asked for counts.
-    fn head(&self, walk: &Walk, counted: Option<Counted>) -> ItemsHead {
+    fn head(
+        &self,
+        walk: &Walk,
+        counted: Option<Counted>,
+        identity_key: Option<[u8; 16]>,
+    ) -> ItemsHead {
         ItemsHead {
             order: self.order,
             page_rows: self.page_rows,
             counts: counted.map(|(counts, _)| counts),
             region: RegionVerdict::coarsest(counted.and_then(|(_, region)| region), walk.region),
+            identity_key,
         }
     }
 }

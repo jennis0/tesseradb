@@ -64,6 +64,51 @@ def split_frames(body: bytes) -> list[tuple[int, bytes]]:
     return frames
 
 
+#: The frame kinds of a `POST /v1/items` body: a head, records frames each followed by a page
+#: end, and the trailer, whose kind is the viewport's.
+FRAME_ITEMS_HEAD = 6
+FRAME_RECORDS = 7
+FRAME_PAGE_END = 8
+_ITEMS_KINDS = {FRAME_ITEMS_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER}
+
+
+def _items_pages(body: bytes):
+    """The record batches and the trailer of a `POST /v1/items` body.
+
+    A body cut short is refused, naming the cursor of the last page end it holds, from which the
+    read resumes without repeating a row; a records frame with no page end after it is dropped.
+    """
+    import pyarrow.ipc as ipc
+
+    batches, pending, cursor, trailer = [], None, None, None
+    at = 0
+    while at < len(body):
+        if len(body) - at < 5:
+            break
+        kind = body[at]
+        if kind not in _ITEMS_KINDS:
+            raise Refusal(f"items: unknown frame kind {kind} at byte {at}")
+        (length,) = struct.unpack_from("<I", body, at + 1)
+        payload = body[at + 5 : at + 5 + length]
+        if len(payload) != length:
+            break
+        if kind == FRAME_RECORDS:
+            pending = ipc.open_stream(io.BytesIO(payload)).read_next_batch()
+        elif kind == FRAME_PAGE_END:
+            batches.append(pending)
+            pending = None
+            cursor = json.loads(payload)["next"]
+        elif kind == FRAME_TRAILER:
+            trailer = json.loads(payload)
+        at += 5 + length
+    if trailer is None:
+        raise Refusal(
+            "items: the response ended before its trailer; pass cursor="
+            f"{cursor!r} to resume after the last whole page"
+        )
+    return batches, trailer
+
+
 def _tables(payloads: Sequence[bytes]):
     """The Arrow streams of one frame kind joined in arrival order, or `None` if there were none."""
     import pyarrow as pa
@@ -572,6 +617,57 @@ class Viewer:
         if record.get("external_id") is not None:
             record["external_id"] = base64.b64decode(record["external_id"])
         return record
+
+    def items(
+        self,
+        view: str,
+        fields: Sequence[str],
+        *,
+        system_fields: Optional[Sequence[str]] = None,
+        filters: Optional[dict] = None,
+        keep_unmatched: Optional[bool] = None,
+        count: Optional[bool] = None,
+        order: Optional[str] = None,
+        page_rows: Optional[int] = None,
+        pages: Optional[int] = None,
+        cursor: Optional[str] = None,
+        compression: Optional[str] = None,
+        idset: Optional[int] = None,
+    ):
+        """One response of `POST /v1/items`: rows of every item this reader may see in `view`.
+
+        Every argument is the request field of the same name, sent only when given; the server's
+        contract says what each does. Returns `(table, next)`: the response's rows as a
+        `pyarrow.Table`, and the cursor to pass back as `cursor` for the rest of the read, or
+        `None` when no row remains. A response that carried no row returns a table of
+        `tessera_id` alone.
+
+            table, next = v.items("papers", ["title"], page_rows=10_000)
+            while next is not None:
+                more, next = v.items("papers", ["title"], cursor=next)
+        """
+        import pyarrow as pa
+
+        request: dict = {"view": view, "fields": list(fields)}
+        given = {
+            "system_fields": None if system_fields is None else list(system_fields),
+            "filters": filters,
+            "keep_unmatched": keep_unmatched,
+            "count": count,
+            "order": order,
+            "page_rows": page_rows,
+            "pages": pages,
+            "cursor": cursor,
+            "compression": compression,
+            "idset": idset,
+        }
+        request.update({key: value for key, value in given.items() if value is not None})
+        batches, trailer = _items_pages(self._request("POST", "/v1/items", request))
+        if batches:
+            table = pa.Table.from_batches(batches)
+        else:
+            table = pa.table({"tessera_id": pa.array([], pa.uint64())})
+        return table, trailer["next"]
 
     def categories(
         self,

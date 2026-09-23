@@ -3054,9 +3054,15 @@ fn parse_pause_site(name: &str) -> Result<tessera_lifecycle::faults::PauseSite, 
 
 /// `GET /control/status`: the operator's view of the node, behind the credential like every
 /// control route; it discloses corpus-wide figures such as `entity_id_high_water`.
+///
+/// `compute` is the admission limit the viewport, item and session routes share, and `bulk` the
+/// one `POST /v1/items` runs under, `serve.bulk_admission`: its `admission`, its `queue` (always
+/// 0, so a read past the limit is refused at once), the reads `in_flight`, which hold their
+/// compute for the whole response, `waiting`, and the `shed_total` of 429s it answered.
 async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiError> {
     // `shed_total` counts this gate's own sheds, not the engine's single-flight 429s.
     let gate = state.compute_gate.status();
+    let bulk = state.bulk_gate.status();
     // The posture string is served only here, behind the credential; `/readyz` stays a bare
     // boolean. `ready` uses the probes' own `is_ready`, so they cannot disagree.
     let executor = state.engine.write_executor_stats();
@@ -3099,6 +3105,14 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             // Responses still streaming, which hold a slot but no compute.
             "streaming": gate.streaming,
             "shed_total": gate.shed_total,
+        },
+        // The bulk-read lane, `POST /v1/items`, which holds its compute for the whole response.
+        "bulk": {
+            "admission": bulk.admission,
+            "queue": bulk.queue,
+            "in_flight": bulk.in_flight,
+            "waiting": bulk.waiting,
+            "shed_total": bulk.shed_total,
         },
         "write_executor": {
             "posture": executor.posture.as_str(),

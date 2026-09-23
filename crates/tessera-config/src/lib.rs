@@ -116,6 +116,11 @@ struct RawServe {
     max_region_vertices: Option<u64>,
     max_region_cells: Option<usize>,
     max_browse_rows: Option<usize>,
+    max_page_rows: Option<u32>,
+    max_page_bytes: Option<usize>,
+    bulk_admission: Option<usize>,
+    bulk_response_bytes: Option<usize>,
+    bulk_response_ms: Option<u64>,
     region_cache_bytes: Option<u64>,
     session_credential_file: Option<PathBuf>,
     session_credential_env: Option<String>,
@@ -180,6 +185,18 @@ pub struct Config {
     pub max_region_vertices: u64,
     pub max_region_cells: usize,
     pub max_browse_rows: usize,
+    /// A bulk read's rows per page.
+    pub max_page_rows: u32,
+    /// A bulk read's Arrow bytes per page, before compression.
+    pub max_page_bytes: usize,
+    /// Bulk reads running at once. One past it is refused with a 429 at once, never queued, and
+    /// `0` refuses every bulk read.
+    pub bulk_admission: usize,
+    /// Bytes one bulk-read response may carry; at least `max_page_bytes`.
+    pub bulk_response_bytes: usize,
+    /// Time one bulk-read response may run. `stream_deadline_ms` also ends one, whichever comes
+    /// first, and either way the response ends with a cursor to resume from.
+    pub bulk_response_ms: u64,
     pub region_cache_bytes: u64,
     /// Emit `x-tessera-stage-ns`; does nothing in a binary built without `bench-timing`.
     pub stage_timing: bool,
@@ -224,13 +241,23 @@ pub struct Config {
     pub fragment_cache_bytes: u64,
 }
 
-/// The serving runtime's `max_blocking_threads`: one per request either admission bound lets
+/// The serving runtime's `max_blocking_threads`: one per request any admission bound lets
 /// through, plus [`BLOCKING_THREAD_RESERVE`]. A queued request holds none.
 pub fn serving_blocking_threads(config: &Config) -> usize {
     config
         .compute_admission
+        .saturating_add(config.bulk_admission)
         .saturating_add(config.ingest_admission)
         .saturating_add(BLOCKING_THREAD_RESERVE)
+}
+
+/// The memory bulk reads may hold at once: [`BULK_READ_PAGES_HELD`] pages of
+/// `max_page_bytes` for each read it admits.
+pub fn bulk_read_memory_bytes(config: &Config) -> usize {
+    config
+        .bulk_admission
+        .saturating_mul(BULK_READ_PAGES_HELD)
+        .saturating_mul(config.max_page_bytes)
 }
 
 /// `HH:MM`, 24-hour, to seconds past UTC midnight. Two digits each, hour below 24, minute below 60.
@@ -400,6 +427,43 @@ fn parse(text: &str) -> Result<Config> {
             key: "serve.compute_admission + serve.compute_queue",
         });
     }
+    let bulk_admission = serve.bulk_admission.unwrap_or(DEFAULT_BULK_ADMISSION);
+    if bulk_admission > Semaphore::MAX_PERMITS {
+        return Err(ConfigError::AdmissionTooLarge {
+            key: "serve.bulk_admission",
+        });
+    }
+    let max_page_rows = serve.max_page_rows.unwrap_or(DEFAULT_MAX_PAGE_ROWS);
+    if max_page_rows == 0 {
+        return Err(ConfigError::Zero {
+            key: "serve.max_page_rows",
+        });
+    }
+    let max_page_bytes = serve.max_page_bytes.unwrap_or(DEFAULT_MAX_PAGE_BYTES);
+    if max_page_bytes == 0 {
+        return Err(ConfigError::Zero {
+            key: "serve.max_page_bytes",
+        });
+    }
+    if max_page_bytes > MAX_PAGE_BYTES_CEILING {
+        return Err(ConfigError::PageBytesTooLarge {
+            value: max_page_bytes,
+        });
+    }
+    let bulk_response_bytes = serve
+        .bulk_response_bytes
+        .unwrap_or(DEFAULT_BULK_RESPONSE_BYTES);
+    if bulk_response_bytes < max_page_bytes {
+        return Err(ConfigError::ResponseBelowPage {
+            response_bytes: bulk_response_bytes,
+            page_bytes: max_page_bytes,
+        });
+    }
+    let stream_deadline_ms = serve
+        .stream_deadline_ms
+        .unwrap_or(DEFAULT_STREAM_DEADLINE_MS);
+    let bulk_response_ms = serve.bulk_response_ms.unwrap_or(DEFAULT_BULK_RESPONSE_MS);
+
     let ingest = raw.ingest;
     let ingest_admission = ingest
         .ingest_admission
@@ -496,6 +560,11 @@ fn parse(text: &str) -> Result<Config> {
             .max_region_cells
             .unwrap_or(tessera_engine::DEFAULT_MAX_REGION_CELLS),
         max_browse_rows: serve.max_browse_rows.unwrap_or(DEFAULT_MAX_BROWSE_ROWS),
+        max_page_rows,
+        max_page_bytes,
+        bulk_admission,
+        bulk_response_bytes,
+        bulk_response_ms,
         region_cache_bytes: serve
             .region_cache_bytes
             .unwrap_or(DEFAULT_REGION_CACHE_BYTES),
@@ -529,9 +598,7 @@ fn parse(text: &str) -> Result<Config> {
         stream_write_stall_ms: serve
             .stream_write_stall_ms
             .unwrap_or(DEFAULT_STREAM_WRITE_STALL_MS),
-        stream_deadline_ms: serve
-            .stream_deadline_ms
-            .unwrap_or(DEFAULT_STREAM_DEADLINE_MS),
+        stream_deadline_ms,
         commit_window_max_items: ingest
             .commit_window_max_items
             .unwrap_or(DEFAULT_COMMIT_WINDOW_MAX_ITEMS),
@@ -1022,6 +1089,65 @@ mod tests {
         );
         assert_eq!(config.compute_queue, 2 * config.compute_admission);
         assert_eq!(config.admission_timeout_ms, DEFAULT_ADMISSION_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn the_bulk_read_keys_have_their_defaults_and_parse_when_set() {
+        let config = parse(&valid_toml("")).expect("defaults must load");
+        assert_eq!(config.max_page_rows, DEFAULT_MAX_PAGE_ROWS);
+        assert_eq!(config.max_page_bytes, DEFAULT_MAX_PAGE_BYTES);
+        assert_eq!(config.bulk_admission, DEFAULT_BULK_ADMISSION);
+        assert_eq!(config.bulk_response_bytes, DEFAULT_BULK_RESPONSE_BYTES);
+        assert_eq!(config.bulk_response_ms, DEFAULT_BULK_RESPONSE_MS);
+        assert_eq!(bulk_read_memory_bytes(&config), 2 * 7 * 64 * 1024 * 1024);
+
+        let config = parse(&valid_toml(
+            "max_page_rows = 10\nmax_page_bytes = 4096\nbulk_admission = 3\n\
+             bulk_response_bytes = 4096\nbulk_response_ms = 5\nstream_deadline_ms = 6",
+        ))
+        .expect("explicit bulk-read keys must load");
+        assert_eq!(config.max_page_rows, 10);
+        assert_eq!(config.max_page_bytes, 4096);
+        assert_eq!(config.bulk_admission, 3);
+        assert_eq!(config.bulk_response_bytes, 4096);
+        assert_eq!(config.bulk_response_ms, 5);
+        assert_eq!(
+            serving_blocking_threads(&config),
+            config.compute_admission + 3 + config.ingest_admission + BLOCKING_THREAD_RESERVE
+        );
+    }
+
+    #[test]
+    fn the_bulk_read_keys_are_refused_where_no_read_could_proceed() {
+        for (keys, key) in [
+            ("max_page_rows = 0", "serve.max_page_rows"),
+            ("max_page_bytes = 0", "serve.max_page_bytes"),
+        ] {
+            assert!(
+                matches!(parse(&valid_toml(keys)), Err(ConfigError::Zero { key: k }) if k == key),
+                "{keys}"
+            );
+        }
+        assert!(matches!(
+            parse(&valid_toml("max_page_bytes = 4294967296")),
+            Err(ConfigError::PageBytesTooLarge { .. })
+        ));
+        assert!(matches!(
+            parse(&valid_toml("max_page_bytes = 4096\nbulk_response_bytes = 4095")),
+            Err(ConfigError::ResponseBelowPage {
+                response_bytes: 4095,
+                page_bytes: 4096
+            })
+        ));
+        // A response time at or past the stream deadline loads: the deadline ends such a read
+        // with a trailer to resume from.
+        assert!(parse(&valid_toml("bulk_response_ms = 60000\nstream_deadline_ms = 1")).is_ok());
+        assert!(matches!(
+            parse(&valid_toml(&format!("bulk_admission = {}", usize::MAX / 2))),
+            Err(ConfigError::AdmissionTooLarge {
+                key: "serve.bulk_admission"
+            })
+        ));
     }
 
     #[test]

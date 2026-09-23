@@ -231,6 +231,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "flatbuffers",
+ "zstd",
 ]
 
 [[package]]
@@ -3124,6 +3125,7 @@ name = "tessera-wire"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "arrow-ipc",
 ]
 
 [[package]]

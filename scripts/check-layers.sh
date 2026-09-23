@@ -70,7 +70,8 @@ if grep -n "fn entity_id" crates/tessera-store/src/read.rs; then
 fi
 
 # The identity key inverts every tessera_id and must never reach the wire.
-if grep -rn "IdentityKey" crates/tessera-wire/src/ crates/tessera-server/src/viewer.rs; then
+if grep -rn "IdentityKey" crates/tessera-wire/src/ crates/tessera-server/src/viewer.rs \
+    crates/tessera-server/src/records.rs crates/tessera-server/src/stream.rs; then
   echo "FAIL: the identity key must not appear in the wire or viewer layers"
   fail=1
 fi

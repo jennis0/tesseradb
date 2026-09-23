@@ -1816,6 +1816,33 @@ fn a_response_ends_at_its_pages_its_bytes_and_cancellation_and_the_read_resumes(
     assert_eq!(ids, everything);
 }
 
+/// **A response whose token is cancelled before it starts is a head and a trailer**: the trailer
+/// ends by the deadline, carries no rows, and resumes from the start.
+#[test]
+fn a_response_cancelled_before_it_starts_is_a_head_and_a_deadline_trailer() {
+    let fx = Fx::new();
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&["note"]);
+    let everything = fx.tids(&fx.map_order(0..N, "s0"));
+    let mut req = request("s0", &fields);
+    req.order = Some(RecordsOrder::Map);
+    req.page_rows = Some(100);
+    let cancel = tessera_engine::CancelToken::new();
+    cancel.cancel();
+    let mut cancelled = req.clone();
+    cancelled.cancel = Some(cancel);
+    let (sink, trailer) = respond(&fx.engine, &session, cancelled).unwrap();
+    assert!(sink.pages.is_empty());
+    assert_eq!((trailer.pages, trailer.rows), (0, 0));
+    assert_eq!(trailer.ended_by, ResponseEndedBy::Deadline);
+    assert_eq!(sink.head.unwrap().counts, None);
+    // No advance: the read resumed from its cursor returns every row, in order.
+    assert_eq!(
+        continue_read(&fx.engine, &session, &req, trailer.next.unwrap()),
+        everything
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Inside one response
 // ---------------------------------------------------------------------------------------------
