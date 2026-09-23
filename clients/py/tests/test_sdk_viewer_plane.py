@@ -27,6 +27,33 @@ def counts(table) -> dict:
     return json.loads(table.schema.metadata[b"tessera.counts"])
 
 
+# ---------------------------------------------------------------------------- the items read
+
+
+def test_items_reads_every_visible_row_once_across_responses(db):
+    """A read carried by its cursor returns each item this reader may see once, compressed or
+    not."""
+    viewer = db.viewer()
+    for compression in (None, "zstd"):
+        ids, cursor = [], None
+        while True:
+            table, cursor = viewer.items(
+                "map", [], system_fields=["position"], page_rows=3, pages=2,
+                cursor=cursor, compression=compression,
+            )
+            assert table.column_names[0] == "tessera_id"
+            ids += table.column("tessera_id").to_pylist()
+            if cursor is None:
+                break
+        assert len(ids) == len(set(ids)) == 20
+
+
+def test_items_passes_a_refusal_through(db):
+    """A field the database does not declare is the server's refusal, raised."""
+    with pytest.raises(Refusal):
+        db.viewer().items("map", ["no_such_field"])
+
+
 # ---------------------------------------------------------------------------- the artifacts frame
 
 
