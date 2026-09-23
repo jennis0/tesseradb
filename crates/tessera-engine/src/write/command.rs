@@ -55,7 +55,7 @@ impl<T> Reply<T> {
     }
 
     /// Answers the command. A caller that has gone away is not an error: the effect stands.
-    pub(super) fn ack(&self, value: T) {
+    pub(super) fn ack(self, value: T) {
         self.count_work();
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
@@ -68,7 +68,7 @@ impl<T> Reply<T> {
         let _ = self.tx.send(Ok(value));
     }
 
-    pub(super) fn fail(&self, error: ExecError) {
+    pub(super) fn fail(self, error: ExecError) {
         self.count_work();
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
