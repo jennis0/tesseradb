@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use tessera_engine::scalar_column::{self, ScalarColumn};
-use tessera_engine::utf8::{self, Utf8Column};
+use tessera_engine::utf8::Utf8Column;
 use tessera_engine::{
     DeclaredScalar, Projection, ScalarType, ScalarValue, ScopedScalar, Vocabularies,
     VocabularyKind, ABSENT_CODE,
@@ -186,7 +186,7 @@ fn check_columns<'b>(
         let Some(col) = batch.column_by_name(&d.name) else {
             continue;
         };
-        if !wire_carries(d, col.data_type()) {
+        if !scalar_column::carries(d.arrow_type, d.vocabulary.is_some(), col.data_type()) {
             return Err(DecodeError(format!(
                 "{body_name}: column '{}' is {:?} but is declared {}; send it as that type",
                 d.name,
@@ -200,7 +200,7 @@ fn check_columns<'b>(
         let Some(col) = batch.column_by_name(&f.name) else {
             continue;
         };
-        if !wire_carries(&scoped_as_declared(f), col.data_type()) {
+        if !scalar_column::carries(f.arrow_type, f.vocabulary.is_some(), col.data_type()) {
             return Err(DecodeError(format!(
                 "{body_name}: column '{}' is {:?} but is a group-scoped attribute declared {}; \
                  send it as that type",
@@ -211,15 +211,6 @@ fn check_columns<'b>(
         }
     }
     Ok(memberships)
-}
-
-/// Whether a batch column of Arrow type `found` carries `declared`, by the rule a build reads a
-/// points file by: a category's column is its keys as strings at either offset width.
-fn wire_carries(declared: &DeclaredScalar, found: &arrow::datatypes::DataType) -> bool {
-    match declared.vocabulary {
-        Some(_) => utf8::is_utf8(found),
-        None => scalar_column::carries(declared.arrow_type, found),
-    }
 }
 
 /// A column `check_columns` has passed, read once for all of one record batch's rows.
