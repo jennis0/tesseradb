@@ -11,7 +11,6 @@ mod common;
 
 use tempfile::TempDir;
 
-use tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
 use tessera_server::state::ComputeGate;
@@ -19,27 +18,19 @@ use tessera_spatial::tiles_for_bbox;
 
 use common::*;
 
-/// Item count for the two byte-equality tests below — see `tessera-engine/tests/viewport.rs`'s
-/// identically-named constant for the full argument (same fixed-extent scatter, so
-/// `Σ range.len() == n` exactly for a full-extent request). This crate does not depend on
-/// `tessera-engine`'s test binary, so the constant and its reasoning are duplicated rather than
-/// shared, matching this file's own existing "same fixture pattern" duplication of
-/// `tests/viewport.rs`'s fixture builder (this file's module doc).
-///
-/// **Item count alone does not reach the parallel branch.** `SERIAL_FALLBACK_MAX_ROWS` sits at
-/// 500,000,000 (see that constant's doc in `tessera-engine` for the calibration), comfortably above
-/// this fixture — which the assertion below pins. The two tests below therefore force the branch
-/// directly via `Engine::set_serial_fallback_max_rows_for_test` (`bench-timing`-gated, test-only) on
-/// each server's `Engine` before it starts serving. This constant still matters independent of that
-/// override: it is what gives the request a genuinely multi-tile, multi-thousand-row shape
-/// (cross-tile ordering, the underlay path) rather than a token one.
-const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
+/// Items for the two byte-equality tests. [`scatter`] puts them on 1,000 locations, so every
+/// occupied tile at zoom 8 holds at least 51, more than the `k` of 50 both tests ask for.
+const PARALLEL_HEADLINE_ITEMS: u64 = 51_000;
 
-/// Sanity check that [`PARALLEL_HEADLINE_ITEMS`] stays deliberately unit-test-scale small relative
-/// to the production threshold — not load-bearing for the two tests' correctness any more (the
-/// `bench-timing` override makes them reach the parallel branch regardless of this relationship),
-/// but a true and worth-keeping fact about why this fixture is cheap to build.
-const _: () = assert!(PARALLEL_HEADLINE_ITEMS < SERIAL_FALLBACK_MAX_ROWS);
+static PARALLEL_HEADLINE: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+
+/// [`build_fixture`] of [`PARALLEL_HEADLINE_ITEMS`] into `dir`, built once per test binary and
+/// copied.
+fn parallel_headline_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+    copy_built(&PARALLEL_HEADLINE, dir, |built| {
+        build_fixture(built, PARALLEL_HEADLINE_ITEMS)
+    })
+}
 
 #[tokio::test]
 async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
@@ -1230,23 +1221,13 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 /// compared -- it is derived from the bundle's own `(prefix, segments_version)`, not from
 /// timing, so it must agree too.
 ///
-/// Uses `PARALLEL_HEADLINE_ITEMS` (300,000), not this file's default
-/// `N_ITEMS` (1,000), for a genuinely multi-tile, multi-thousand-row request. But item count alone
-/// no longer gets this test to the parallel branch at all: `SERIAL_FALLBACK_MAX_ROWS` rose to
-/// 500,000,000 in the post-B9 three-scale re-calibration, and a fixture that reaches it is
-/// impractical at unit-test scale. Review caught that this left `pool.install` untested end to
-/// end. Fixed the same way as the engine-level headline test
-/// (`tessera-engine/tests/viewport.rs`): each server's `Engine` has its threshold forced to 0 via
-/// `Engine::set_serial_fallback_max_rows_for_test` (`bench-timing`-gated, test-only) BEFORE it is
-/// handed to `spawn_server_from_engine`, so both servers genuinely take `pool.install`, differing
-/// only in worker count. Without `bench-timing` (the method does not exist there at all) this
-/// falls back to comparing the serial fold on both configs — still real byte-equality coverage,
-/// just not of the branch this test's name is about; every guard-rail invocation that matters for
-/// this specific claim builds with `bench-timing`.
+/// Each server's engine has its serial fallback threshold forced to 0, so both take the parallel
+/// branch and differ only in worker count. Without `bench-timing` the method does not exist and
+/// both compare the serial fold instead.
 #[tokio::test]
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), PARALLEL_HEADLINE_ITEMS);
+    let bundle_root = parallel_headline_fixture(tmp.path());
 
     let config_1 = EngineConfig {
         compute_threads: 1,
@@ -1291,10 +1272,8 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     let auth_8 = authorise(&server_8, &["0"]).await;
     let token_8 = auth_8["token"].as_str().unwrap();
 
-    // zoom=3 over the full extent: 64 candidate tiles, most non-empty over this fixture's
-    // `(e*37, e*53) % 1000` scatter across `N_ITEMS = 1000` -- multiple non-empty tiles, so the
-    // response's tile-order/point-concatenation ordering is actually exercised, plus an underlay
-    // request so that per-tile path runs across tiles too.
+    // Zoom 3 over the full extent: 64 candidate tiles, most of them occupied, so cross-tile
+    // ordering is exercised, with an underlay so its per-tile path runs too.
     let body = serde_json::json!({
         "view": "s0", "zoom": 3, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 50,
         "underlay_offset": 2
@@ -1352,6 +1331,10 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
         !decoded_1.points.is_empty(),
         "the fixture must return some points"
     );
+    assert!(
+        decoded_1.tiles.iter().any(|&(_, _, matched)| matched > 50),
+        "some tile must hold more candidates than k, or no tile samples"
+    );
 
     assert_eq!(
         decoded_1.deterministic_bytes, decoded_8.deterministic_bytes,
@@ -1381,7 +1364,7 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles(
 ) {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_fixture(tmp.path(), PARALLEL_HEADLINE_ITEMS);
+    let bundle_root = parallel_headline_fixture(tmp.path());
 
     let config_1 = EngineConfig {
         compute_threads: 1,
@@ -1467,6 +1450,10 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
          candidates to exercise the skip path this test is for -- got {} non-empty tiles",
         tiles.len()
     );
+    assert!(
+        tiles.iter().any(|&(_, _, matched)| matched > 50),
+        "some tile must hold more candidates than k, or no tile samples"
+    );
 
     assert_eq!(
         decoded_1.deterministic_bytes, decoded_8.deterministic_bytes,
@@ -1475,34 +1462,24 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
     );
 }
 
-/// **Concurrent viewports on a cold session are all served, off one build** — decision 0058's
-/// whole point, at the boundary a client sees.
+/// **Concurrent viewports on a cold session are all served, off one build.** A cold session's
+/// row projection is not built yet, so eight simultaneous viewports all miss: one builds, and the
+/// other seven wait for that build and are served its result rather than shed.
 ///
-/// A cold session is one whose row projection has not been built. Eight simultaneous viewports on
-/// one therefore all miss, one becomes the builder, and the other seven find a `Building` slot.
-/// They used to be shed with 429 `backpressure`; they now wait for that build and are served its
-/// result.
-///
-/// **The assertions are unconditional now, and that is the change.** This test previously allowed
-/// that no racer might lose, in which case there was no 429 and nothing to check — it could pass
-/// vacuously. Waiting removes the branch: every racer is served whatever the interleaving, and
-/// `misses == 1` says the eight of them cost one projection build rather than eight. The
-/// `shed_total` check stays, because it is what distinguishes this mechanism from the
-/// compute-admission gate, and the gate still sheds nothing here.
-///
-/// The fixture is deliberately larger than [`N_ITEMS`] so the build is wide enough to race.
+/// The build is held open until all seven are parked on it, so every one of them waits.
 #[tokio::test]
 async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
     let tmp = TempDir::new().unwrap();
-    build_fixture(tmp.path(), PARALLEL_HEADLINE_ITEMS);
-    let server = open(&tmp).await;
+    let server = serve_standard(&tmp).await;
 
     // The generous default gate: 48 admission permits against the handful of requests below, so
     // any 429 here would be the single-flight builder's and not the gate's.
     let token = token_for(&server, &["0"]).await;
+    server.state.engine.hold_next_projection_build_for_test();
 
+    const RACERS: u64 = 8;
     let mut racers = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..RACERS {
         let client = server.client.clone();
         let url = server.viewer_url("/v1/viewport");
         let token = token.clone();
@@ -1526,6 +1503,21 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
         }));
     }
 
+    let waiters = RACERS - 1;
+    wait_until(
+        "every racer but the builder parked on the held build",
+        std::time::Duration::from_secs(5),
+        async || {
+            let status = control_status(&server).await;
+            match status["row_projection_cache"]["waiters_now"].as_u64() == Some(waiters) {
+                true => Ok(()),
+                false => Err(format!("{}", status["row_projection_cache"])),
+            }
+        },
+    )
+    .await;
+    server.state.engine.release_projection_build_for_test();
+
     for racer in racers {
         let (status, body) = racer.await.unwrap();
         assert_eq!(
@@ -1546,15 +1538,11 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
     );
     assert_eq!(
         cache["building_refusals"], 0,
-        "nothing was refused — the racers waited and were served"
+        "nothing was refused: the racers waited and were served"
     );
-    // Not asserted as exactly seven: a racer that arrives after the publish is an ordinary hit and
-    // never waits at all, which is a legitimate interleaving rather than a failure. What is
-    // asserted is that hits and waits together account for the other seven, which `misses == 1`
-    // above already says.
-    assert!(
-        cache["waits_satisfied"].as_u64().unwrap() <= 7,
-        "a wait cannot be satisfied for a racer that never waited"
+    assert_eq!(
+        cache["waits_satisfied"], waiters,
+        "every racer that parked on the build was served its result"
     );
 }
 
@@ -1789,16 +1777,16 @@ fn dechunk(body: &[u8]) -> (Vec<u8>, bool) {
 /// is fixed small, so the only room for unread frames is the server's send buffer and the bounded
 /// body channel. Measured on Linux with the default `tcp_wmem`: 2.8 MB of the 3.5 MB response is
 /// held there once the reader stops, and the rest parks the producer until the stall budget
-/// fires. The response is a 2M-item fixture at zoom 6 with `k` 200; its size is tiles × k, so
-/// more items would not widen that margin, and the assertion below names the bytes held so a
-/// narrower points frame shows up as a number. On 2026-08-16 this test failed on a host where the
+/// fires. The response is zoom 6 with `k` 200; its size is tiles × k, so more items than fill
+/// every occupied tile to `k` would not widen that margin. On 2026-08-16 this test failed on a host where the
 /// same binary had passed the same day; a code regression was ruled out by bisection and the
 /// kernel's socket buffers by a larger response failing identically against a fixed buffer
 /// ceiling, which left the client's buffering, and the raw reader removes it.
 #[tokio::test]
 async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero() {
     use tokio::io::AsyncReadExt as _;
-    const SHED_FIXTURE_ITEMS: u64 = 2_000_000;
+    // 200 items on each of the fixture's 1,000 locations, so every occupied tile serves all `k`.
+    const SHED_FIXTURE_ITEMS: u64 = 200_000;
     let tmp = TempDir::new().unwrap();
     let bundle_root = build_fixture(tmp.path(), SHED_FIXTURE_ITEMS);
     let server = spawn_server_with_stream_flush(
@@ -1835,6 +1823,24 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
         })
         .await
     };
+
+    // The response must outgrow the socket buffers, or a stalled reader never parks the producer.
+    let whole = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&big_request)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(
+        whole.len() > 3_500_000,
+        "the response is {} bytes, too small to fill the socket buffers",
+        whole.len()
+    );
 
     // 1. The stalled reader: take the headers, then stop reading, holding the socket open. The
     //    producer fills the channel and the socket buffers, parks, and the stall budget sheds it,
