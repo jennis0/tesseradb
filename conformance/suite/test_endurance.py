@@ -38,8 +38,8 @@ What only accumulation shows, and where this module looks for it:
   one — confirming the settle needs enough unfolded merges to reach it, which is what the
   fold-free ladder phase at the head of the plan provides.
 - **The six axes the coalesce bounds** — delta tiers, dictionary extents, attribute extents,
-  record extents, text extents, and external-id runs (with their locators, bounded by the merge)
-  — over hundreds of cycles rather than the soak's five. Attribute extents are bounded per
+  record extents, text extents, and external-id runs with their locator extents — over hundreds
+  of cycles rather than the soak's five. Attribute extents are bounded per
   column, a keyword column among them: its coalesce merges the window's dictionaries and
   installs the merged one beside the renumbered ordinals (filter-index §5.2, records §7).
 - **The allocator floor and the entity high-water** — monotone across every reload, fold and the
@@ -571,12 +571,12 @@ def observe(
         seg_count += len(segments)
         runs = len(manifest["external_id_runs"])
         locators = len(manifest["locator_extents"])
-        assert runs <= len(segments) + LADDER_SLACK, (
-            f"{label}: {runs} external-id runs against {len(segments)} segments — the merge "
-            f"coalesces its inputs' runs, so runs must track the segment count"
+        assert runs <= AXIS_CEILING, (
+            f"{label}: `external_id_runs` reached {runs} entries (ceiling {AXIS_CEILING}) — "
+            f"only the entity-space coalesce bounds this axis, and it has stopped"
         )
-        assert locators <= len(segments) + LADDER_SLACK, (
-            f"{label}: {locators} locator extents against {len(segments)} segments"
+        assert locators <= AXIS_CEILING, (
+            f"{label}: `locator_extents` reached {locators} entries (ceiling {AXIS_CEILING})"
         )
 
     non_base = dict(view.segment_bytes)

@@ -1803,6 +1803,21 @@ async fn drop_view(
     acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 
+/// An artifact record's `access` labels as the plugin's descriptors: the call `/control/ingest`
+/// makes of its `access` column. Absent and empty are no label.
+fn access_descriptors(
+    state: &AppState,
+    labels: Option<Vec<String>>,
+) -> Result<Vec<Vec<u8>>, ApiError> {
+    let labels: Vec<Vec<u8>> = labels
+        .unwrap_or_default()
+        .into_iter()
+        .map(String::into_bytes)
+        .collect();
+    tessera_plugin::artifact_access(state.engine.plugin().as_ref(), &labels)
+        .map_err(ApiError::Contract)
+}
+
 /// Turns a flat member offset back into `(artifact index, member index)` for a refusal to name.
 fn position_in_batch(widths: &[usize], flat: usize) -> (usize, usize) {
     let mut remaining = flat;
@@ -1838,10 +1853,10 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     let metadata = reader.schema().metadata().clone();
     // Any other column or metadata key is refused, as the JSON form refuses unknown fields.
     for field in reader.schema().fields() {
-        if !matches!(field.name().as_str(), "key" | "members") {
+        if !matches!(field.name().as_str(), "key" | "members" | "view") {
             return Err(ApiError::Contract(format!(
-                "growth body: column '{}' is not one this route takes; a growth carries `key` \
-                 and `members` and nothing else",
+                "growth body: column '{}' is not one this route takes; a growth carries `key`, \
+                 `members` and, on a layer scoped to a group, `view`, and nothing else",
                 field.name()
             )));
         }
@@ -1899,6 +1914,16 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                         .to_string(),
                 )
             })?;
+        // The view each artifact belongs to, on a group-scoped layer. A null cell names none.
+        let views = match batch.column_by_name("view") {
+            None => None,
+            Some(column) => Some(column.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+                ApiError::Contract(
+                    "growth body: column 'view' is not utf8; it names each artifact's view key"
+                        .to_string(),
+                )
+            })?),
+        };
         let members = batch.column_by_name("members").ok_or_else(|| {
             ApiError::Contract(
                 "growth body: column 'members' is missing; it is list<utf8> or large_list<utf8>, \
@@ -1982,6 +2007,9 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
             // travel on the JSON form.
             artifacts.push(GrowingArtifactBody {
                 key: keys.value(row).to_string(),
+                view: views
+                    .filter(|views| !views.is_null(row))
+                    .map(|views| views.value(row).to_string()),
                 rank: None,
                 members: entries(row)?,
                 leaving: Vec::new(),
@@ -1993,6 +2021,7 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                 ellipse: None,
                 wkt: None,
                 space: None,
+                access: None,
             });
         }
     }
@@ -2160,6 +2189,11 @@ struct IncomingArtifactBody {
     /// This row's space, overriding `default_space` for its shape and authored content alike.
     #[serde(default)]
     space: Option<String>,
+    /// The artifact's own access labels, one per element, taken whole. Absent, `null` and `[]`
+    /// are no label, which the layer's `artifact_visibility.default` answers. Refused on a layer
+    /// whose `artifact_visibility` names no field.
+    #[serde(default)]
+    access: Option<Vec<String>>,
 }
 
 /// The shape fields of a publication's or a growth's row.
@@ -2599,6 +2633,11 @@ async fn publish_artifacts(
         }
     }
 
+    let accesses: Vec<Vec<Vec<u8>>> = artifacts
+        .iter_mut()
+        .map(|artifact| access_descriptors(&state, artifact.access.take()))
+        .collect::<Result<_, _>>()?;
+
     // Shapes and addresses read the bundle, so they run on the blocking pool with the write.
     let (batch, keys, shape_reports) = state
         .blocking(move |state| {
@@ -2647,7 +2686,8 @@ async fn publish_artifacts(
             let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
                 .into_iter()
                 .zip(shapes)
-                .map(|(artifact, shape)| {
+                .zip(accesses)
+                .map(|((artifact, shape), access)| {
                     let members: Vec<tessera_types::EntityId> = entities
                         .by_ref()
                         .take(artifact.members.as_ref().map_or(0, |m| m.len()))
@@ -2689,6 +2729,7 @@ async fn publish_artifacts(
                     incoming.shape = shape;
                     incoming.parent_keys = artifact.parent;
                     incoming.view = artifact.view;
+                    incoming.access = access;
                     // The executor takes the complement against the view's entities.
                     if let Some(excluded) = excluded {
                         incoming.exclude(excluded);
@@ -2752,6 +2793,10 @@ struct GrowingArtifactBody {
     /// The key the artifact was published under. An unknown key refuses the batch; this verb
     /// mints nothing.
     key: String,
+    /// The view the artifact belongs to, on a layer scoped to a group, as the publication's record
+    /// names it. Required there and refused on an entity-scoped layer.
+    #[serde(default)]
+    view: Option<String>,
     /// Absent, the row moves the membership; present, the generating set of the content at that
     /// rank, and the row carries no part to fill.
     #[serde(default)]
@@ -2785,6 +2830,10 @@ struct GrowingArtifactBody {
     /// This row's own space, overriding `default_space`.
     #[serde(default)]
     space: Option<String>,
+    /// The access labels, on [`IncomingArtifactBody::access`]'s terms and the fill rule: filled on
+    /// an artifact that has none, accepted when identical, `409` otherwise.
+    #[serde(default)]
+    access: Option<Vec<String>>,
 }
 
 /// One content a `PATCH` fills: its rank, and one value per declared kind in order.
@@ -2823,6 +2872,10 @@ async fn grow_memberships(
         BodyEncoding::Json => artifact_json(&body, "growth")?,
         BodyEncoding::Arrow => grow_body_from_arrow(&body)?,
     };
+    let accesses: Vec<Vec<Vec<u8>>> = artifacts
+        .iter_mut()
+        .map(|artifact| access_descriptors(&state, artifact.access.take()))
+        .collect::<Result<_, _>>()?;
 
     if artifacts.is_empty() {
         return Err(ApiError::Contract(
@@ -2876,7 +2929,8 @@ async fn grow_memberships(
             let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts
                 .into_iter()
                 .zip(shapes)
-                .map(|(artifact, shape)| {
+                .zip(accesses)
+                .map(|((artifact, shape), access)| {
                     let members: Vec<tessera_types::EntityId> =
                         entities.by_ref().take(artifact.members.len()).collect();
                     let leaving: Vec<tessera_types::EntityId> =
@@ -2904,7 +2958,9 @@ async fn grow_memberships(
                             .map(|c| (c.rank, c.values))
                             .collect(),
                         shape,
+                        access,
                     };
+                    join.view = artifact.view;
                     join
                 })
                 .collect();

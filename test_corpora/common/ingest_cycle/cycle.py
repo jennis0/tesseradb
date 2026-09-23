@@ -626,6 +626,7 @@ class Cycle:
             self.args.publish_bucket_rows,
             self.limits,
             view_column=layer.get("view_column"),
+            access_column=layer.get("access_column"),
         )
         try:
             sent = self.send_publication(control, name, publication)

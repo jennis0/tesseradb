@@ -1,9 +1,7 @@
 //! The external-id run merge: key order, and **the keep-newest rule** (decision 0047).
 //!
-//! `merge_execution::the_external_id_runs_coalesce_in_key_order` covers the ordering over runs
-//! with disjoint keys, which is the easy half. What it cannot see is the tie-break, because its
-//! fixture never puts one key in two runs — and the tie-break is the half where being wrong is
-//! silent and serves a *deleted* entity under a live caller's key.
+//! The tie-break is the half where being wrong is silent and serves a *deleted* entity under a
+//! live caller's key.
 //!
 //! **Why a key is ever in two runs.** Decision 0047 makes an edit a delete plus a re-ingest, and a
 //! re-ingest re-binds the external id to a **new** entity. The old holder is a forgotten, deleted
@@ -113,7 +111,7 @@ fn locator_of(dir: &Path) -> Vec<u32> {
 /// group; a heap that tie-broke on descending run index, or a keep-*first* pass, would emit the
 /// deleted holder instead — same row count, same ordering, wrong entity.
 ///
-/// **Mutation:** flip the keep-last lookahead in `coalesce::merge_runs` to keep-first, or reverse
+/// **Mutation:** flip the keep-last lookahead in `coalesce::merge_runs_core` to keep-first, or reverse
 /// the run tie-break, and `shared` resolves to 101 rather than 201.
 #[test]
 fn a_key_in_two_runs_keeps_the_newest_binding() {

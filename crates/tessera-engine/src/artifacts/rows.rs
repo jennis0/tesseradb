@@ -36,6 +36,9 @@ pub struct ArtifactRecords {
     /// projected set because without it a lossy projection would read as containment of a set
     /// smaller than the caller declared.
     pub(super) declared: Vec<Vec<u64>>,
+    /// Per ordinal, the artifact's own access label as descriptors. Grown only as far as the last
+    /// labelled ordinal, so a layer whose artifacts carry no label holds nothing here.
+    pub(super) access: Vec<Option<Arc<[Vec<u8>]>>>,
 }
 
 /// One layer's membership in the row space of one view, built at open and rebuilt when the
@@ -191,6 +194,22 @@ impl ArtifactRecords {
         // The set's stored cardinality, moved by the page that joined or left it, not a count
         // taken of the set here: the store refuses a page whose count disagrees.
         self.declared[idx] = record.contents.iter().map(|v| v.cardinality).collect();
+        if !record.access.is_empty() {
+            if self.access.len() <= idx {
+                self.access.resize_with(idx + 1, || None);
+            }
+            self.access[idx] = Some(Arc::from(record.access.as_slice()));
+        } else if let Some(slot) = self.access.get_mut(idx) {
+            *slot = None;
+        }
+    }
+
+    /// The artifact's own access label as descriptors, empty where it carries none.
+    pub(crate) fn access(&self, ordinal: u32) -> &[Vec<u8>] {
+        self.access
+            .get(ordinal as usize)
+            .and_then(Option::as_deref)
+            .unwrap_or(&[])
     }
 
     /// What the artifact at `ordinal` hangs from, if it hangs from anything.

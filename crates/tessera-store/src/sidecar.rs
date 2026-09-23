@@ -709,9 +709,8 @@ impl ExternalIdSidecar {
         // immaterial; now it is the rule.
         //
         // The filter still does the work it was built for — a run whose range excludes the key is
-        // never opened, verified or mapped — so the common case is unchanged. What changes is the
-        // worst case, which is why §2.4 makes merge's coalescing of runs the bound on how many
-        // there can be.
+        // never opened, verified or mapped — so the common case is unchanged. The worst case walks
+        // every run, and the entity-space coalesce is what bounds how many there are.
         for (idx, bound) in scan.bounds.iter().enumerate().rev() {
             let Some((first, last, _)) = bound else {
                 continue;

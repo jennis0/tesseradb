@@ -906,7 +906,7 @@ def label_members(key: str = "l0", n: int = 5, ranked: bool = True) -> pa.Table:
     )
 
 
-def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
+def artifact_rows_of(db, view: str = "map", frame=None, terms=None) -> list[tuple]:
     """The kind-5 artifacts frame of a whole-extent viewport: layer, key, content, masked count."""
     import io
 
@@ -917,7 +917,7 @@ def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
     box = [-5.0, -5.0, 40.0, 40.0] if frame is None else list(frame)
     content = post(
         db.viewer_url + "/v1/viewport",
-        db.token().token,
+        db.token(terms).token,
         {"view": view, "zoom": 0, "bbox": box, "k": 16, "layers": "all"},
     )
     at = 0
@@ -1197,3 +1197,119 @@ def test_a_memberless_attached_record_omits_members_and_an_unattached_one_sends_
 
     # A record attaching to nothing has no membership to borrow, so the empty list still travels.
     assert json.loads(_artifact_block({"key": "c0"}, 4096)[0])["members"] == []
+
+
+def labelled_teams(db) -> None:
+    """Two teams over the clustering's twenty points, one labelled `red` and one unlabelled."""
+    db.declare_layer("teams", kind="flat")
+    db.insert(
+        "teams",
+        artifacts=pa.table(
+            {
+                "key": pa.array(["red-team", "open-team"], pa.string()),
+                "team": pa.array([["red"], None], pa.list_(pa.string())),
+            }
+        ),
+        key="key",
+        access="team",
+    )
+    db.insert(
+        "teams",
+        members=pa.table(
+            {
+                "key": pa.array(["red-team"] * 5 + ["open-team"] * 5, pa.string()),
+                "entity": pa.array([f"p{i}" for i in range(10)], pa.string()),
+            }
+        ),
+        id="entity",
+        key="key",
+    )
+
+
+def teams_seen(db, terms) -> list[str]:
+    return sorted(row[1] for row in artifact_rows_of(db, terms=terms) if row[0] == "teams")
+
+
+def test_an_artifacts_own_label_withholds_it_from_a_viewer_without_it_at_either_door(
+    served, corpus
+):
+    """`access=` on an artifacts insert: read by the build before the first commit and sent with
+    each record after it, and served to a viewer holding the label and no other."""
+    def built(db):
+        clustering(db)
+        labelled_teams(db)
+
+    for db in (served(built), served(clustering)):
+        if "teams" not in [row[0] for row in artifact_rows_of(db)]:
+            labelled_teams(db)
+            assert db.commit().ok
+        assert teams_seen(db, ["public"]) == ["open-team"]
+        assert teams_seen(db, ["public", "red"]) == ["open-team", "red-team"]
+
+
+def test_a_growth_page_names_the_view_of_a_group_scoped_artifact():
+    """A growth on a layer scoped to a group says which view's artifact it grows."""
+    import json
+
+    body = json.loads(commit_module.patch_body(0, "c1", joining=["p0"], view="q2"))
+    assert body["artifacts"][0]["view"] == "q2"
+    assert "view" not in json.loads(commit_module.patch_body(0, "c1", joining=["p0"]))["artifacts"][0]
+
+
+def test_a_labelled_insert_into_a_held_layer_leaves_the_declaration_and_the_route_answers(
+    served, corpus
+):
+    """After the first commit a layer the server holds is the server's: labels sent into one whose
+    declaration names no label field are refused by the route, and the local declaration is not
+    changed to pretend otherwise."""
+    import tomllib
+
+    db = served(clustering)
+    before = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "clusters")
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {"key": pa.array(["c9"], pa.string()), "team": pa.array([["red"]], pa.list_(pa.string()))}
+        ),
+        key="key",
+        access="team",
+    )
+    after = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "clusters")
+    assert after == before
+    with pytest.raises(Refusal):
+        db.commit()
+    assert "c9" not in [row[1] for row in artifact_rows_of(db)]
+
+
+def test_the_databases_own_viewer_holds_a_layers_named_default(served, corpus):
+    """`viewer()` and `token()` with no terms hold every label the database was given, a layer's
+    named default among them, so an artifact taking that default is served to its own principal."""
+    def declare(db):
+        clustering(db)
+        db.declare_layer("teams", kind="flat", artifact_visibility="red")
+        db.insert(
+            "teams",
+            artifacts=pa.table(
+                {
+                    "key": pa.array(["bare"], pa.string()),
+                    "team": pa.array([None], pa.list_(pa.string())),
+                }
+            ),
+            key="key",
+            access="team",
+        )
+        db.insert(
+            "teams",
+            members=pa.table(
+                {
+                    "key": pa.array(["bare"] * 5, pa.string()),
+                    "entity": pa.array([f"p{i}" for i in range(5)], pa.string()),
+                }
+            ),
+            id="entity",
+            key="key",
+        )
+
+    db = served(declare)
+    assert "bare" in teams_seen(db, None)
+    assert "bare" not in teams_seen(db, ["public"])

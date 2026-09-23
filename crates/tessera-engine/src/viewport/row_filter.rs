@@ -1067,7 +1067,7 @@ impl Engine {
             resolved.members.borrow_mut().push((leaf.clone(), rows.clone()));
             Ok(rows)
         };
-        let layers = |layer: &str| self.reaches_layer(served.session, served.generation, layer);
+        let layers = |layer: &str| self.reaches_layer(served.session, layer);
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
             members: &members,
@@ -1083,19 +1083,8 @@ impl Engine {
     }
 
     /// Whether `session` reaches `layer`: whether a `member_of` may name it.
-    pub(crate) fn reaches_layer(
-        &self,
-        session: &Session,
-        generation: &Generation,
-        layer: &str,
-    ) -> bool {
-        self.write
-            .live()
-            .resolve_layers(
-                |term| session.satisfied().contains(&term),
-                |label| generation.dict.lookup(label.as_bytes()),
-            )
-            .contains(layer)
+    pub(crate) fn reaches_layer(&self, session: &Session, layer: &str) -> bool {
+        self.reachable_layers(session).contains(layer)
     }
 
     /// Answer one region leaf for one request. A drawn shape: its decomposition from the
