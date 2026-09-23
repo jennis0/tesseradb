@@ -1,26 +1,27 @@
-"""``tesseradb``: Tessera's Python package.
+"""Tessera's Python package: read a Tessera database, map it in a notebook, and make one.
 
-The base install is ``authorise``, ``Token`` and ``connect`` — a hosted deployment's ``meta()``
-and ``item()`` — and depends on nothing outside the standard library; ``Viewer.viewport`` needs
-pyarrow and ``Viewer.map`` needs anywidget, each imported where it is used.
+`pip install tesseradb` gives `connect`, `authorise`, `revoke` and `Token`, which need nothing
+beyond the standard library. `Selection.sample` also needs pyarrow and `categories` needs pandas.
+`pip install tesseradb[widget]` adds the notebook map, `Map`. `pip install tesseradb[local]` adds
+`create` and `open`, which make a database in a directory from data frames and files.
 
-``pip install tesseradb[widget]`` adds anywidget and the notebook widget, ``Map``;
-``pip install tesseradb[local]`` adds the SDK, which creates a Tessera database in a directory,
-fills it from frames and files and commits it through the ``tessera`` binary.
-
-``Map`` and the SDK's verbs are imported on first use rather than at import time, so the base
-install needs neither anywidget nor pyarrow to ``import tesseradb``.
+`Map`, `create`, `open` and `Database` are loaded when first used, so `import tesseradb` works
+without the optional packages.
 """
 
 from __future__ import annotations
 
 from ._auth import Token, authorise, revoke
 from ._refusal import Refusal
-from ._viewer import Viewer, connect
+from ._viewer import Count, Sample, Selection, Viewer, connect
 
 __all__ = [
+    "Count",
+    "Database",
     "Map",
     "Refusal",
+    "Sample",
+    "Selection",
     "Token",
     "Viewer",
     "authorise",
@@ -39,7 +40,7 @@ def __getattr__(name: str):
     if name == "Map":
         try:
             from .widget import Map
-        except ImportError as e:  # anywidget absent
+        except ImportError as e:
             raise ImportError(
                 "tesseradb.Map needs the widget extra: pip install 'tesseradb[widget]'"
             ) from e
@@ -47,9 +48,9 @@ def __getattr__(name: str):
     if name in _SDK:
         try:
             from . import _database
-        except ImportError as e:  # pyarrow absent
+        except ImportError as e:
             raise ImportError(
-                "the tesseradb SDK needs the local extra: pip install 'tesseradb[local]'"
+                "making a database needs the local extra: pip install 'tesseradb[local]'"
             ) from e
         return getattr(_database, _SDK[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

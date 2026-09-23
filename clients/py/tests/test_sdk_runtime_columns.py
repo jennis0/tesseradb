@@ -12,7 +12,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
-from conftest import categories, viewport
+from conftest import viewport
 from tesseradb._refusal import Refusal
 
 from test_sdk_corpus import declare_notebook
@@ -131,8 +131,7 @@ def test_a_category_over_an_inline_closed_vocabulary_is_declared_filled_and_list
     assert declared(db, "venue")["category"]["kind"] == "declared"
 
     # `/v1/categories/{column}` is where the values are, codes and all.
-    listed = categories(db, "venue")["values"]
-    assert sorted(one["key"] for one in listed) == sorted(keys)
+    assert sorted(db.categories("venue")["key"]) == sorted(keys)
     assert matched(db, {"venue": {"eq": "neurips"}}) == len(
         [i for i in range(len(HELD)) if keys[i % 3] == "neurips"]
     )
@@ -173,8 +172,8 @@ def test_a_category_over_a_sourced_closed_vocabulary_pages_the_tables_rows(serve
     assert report.values_bound == 3
 
     # The titles came from the table's own column, which is what a sourced set is for.
-    listed = {one["key"]: one.get("title") for one in categories(db, "venue")["values"]}
-    assert listed == {"neurips": "NeurIPS", "icml": "ICML", "iclr": "ICLR"}
+    listed = db.categories("venue")
+    assert dict(zip(listed["key"], listed["title"])) == {"neurips": "NeurIPS", "icml": "ICML", "iclr": "ICLR"}
     assert matched(db, {"venue": {"eq": "icml"}}) == len(
         [i for i in range(len(HELD)) if keys[i % 3] == "icml"]
     )
@@ -228,7 +227,8 @@ def test_an_open_vocabulary_declared_after_the_first_commit_pages_its_titles(ser
     report = db.commit()
     assert report.ok, report
     assert report.values_bound == 2
-    assert {one["key"]: one.get("title") for one in categories(db, "venue")["values"]} == {
+    listed = db.categories("venue")
+    assert dict(zip(listed["key"], listed["title"])) == {
         "neurips": "NeurIPS",
         "icml": "ICML",
     }
@@ -264,8 +264,7 @@ def test_a_value_set_over_the_bodys_cap_is_paged_by_bytes(served, corpus):
     report = db.commit()
     assert report.ok, report
     assert report.values_bound == len(keys)
-    listed = categories(db, "venue", limit=1000)["values"]
-    assert len(listed) == len(keys)
+    assert len(db.categories("venue")) == len(keys)
 
 
 def test_a_vocabulary_no_column_names_is_redeclared_and_answered_as_held(served, corpus):

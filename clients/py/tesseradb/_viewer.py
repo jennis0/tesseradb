@@ -1,21 +1,9 @@
-"""Reading a Tessera database: the widget and the query verbs, over the viewer plane.
+"""Reading a Tessera database over HTTP: the reader, the selection and the answers they give.
 
-A `Viewer` is a viewer-plane URL and a token source, and nothing else. It holds no bundle, no
-schema and no id map: every answer here is a request the server authorises, so a local database
-and a hosted deployment are read by the same three verbs and neither reads a file. The token is
-the whole of the authority. What `meta()` names, what `viewport()` counts and what `item()`
-returns are computed inside the principal's mask, so two viewers over one database
-legitimately disagree.
-
-`connect(url, token)` is the hosted form: a token the deployment issued, as a string, a `Token`
-or a callable returning either. It has no `viewer(terms)`, minting for another principal needing
-the session credential a hosted analyst does not hold, and no write verb, the control plane
-having one operator credential and no per-principal authority.
-
-`Database.viewer(terms)` is the local form, whose token source mints from the directory's session
-credential through `authorise`. The credential stays in the kernel: the source is a closure the
-`Map` calls, and what reaches the page is the minted token, as a custom message that is never
-widget state.
+A `Viewer` is a server address and a way to get a token. It holds no copy of the data: every
+answer is a request the server checks against the token, so a local database and a hosted one are
+read the same way, and two readers holding different access terms get different answers about
+the same data.
 """
 
 from __future__ import annotations
@@ -27,20 +15,19 @@ import struct
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from ._auth import Token, TokenSource, minted
 from ._refusal import Refusal
 
-#: How near expiry a held token may come before the next read mints another, in seconds.
+#: How near expiry a held token may come before the next read gets another, in seconds.
 TOKEN_MARGIN = 60.0
 
-#: The fields of a `/v1/viewport` body that the wire carries as integers.
+#: The `/v1/viewport` fields the server reads as integers.
 _VIEWPORT_INTEGERS = {"k", "artifact_budget", "underlay_offset"}
 
-#: The frame kinds of a `/v1/viewport` body. The decoder below refuses one it
-#: does not know rather than skipping it: a future kind carrying data an old reader drops would
-#: be a sample standing in for the set.
+#: The frame kinds of a `/v1/viewport` body. An unknown kind is refused rather than skipped, since
+#: skipping one could drop data and present what is left as the whole answer.
 FRAME_TILES = 1
 FRAME_SUB_CELLS = 2
 FRAME_POINTS = 3
@@ -48,14 +35,13 @@ FRAME_TRAILER = 4
 FRAME_ARTIFACTS = 5
 _KINDS = {FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER, FRAME_ARTIFACTS}
 
-def split_frames(body: bytes) -> list[tuple[int, bytes]]:
-    """A framed viewport body as `(kind, payload)`, refusing anything that is not one.
 
-    The framing is `u8 kind`, `u32` little-endian length, payload, repeated; every payload but the
-    trailer's is a complete Arrow IPC stream. Truncation, an unknown kind, a
-    misplaced tiles frame and a missing trailer all raise. A truncated body must never decode as a
-    plausible shorter response: the trailer's presence is the completeness signal, and a reader
-    that accepted the prefix would present a sample as the set.
+def split_frames(body: bytes) -> list[tuple[int, bytes]]:
+    """A `/v1/viewport` body as `(kind, payload)` pairs, or a refusal if it is not a whole one.
+
+    Each frame is a one-byte kind, a four-byte little-endian length and the payload. The trailer
+    comes last and marks the body complete, so a body cut short is refused rather than read as a
+    smaller answer.
     """
     frames: list[tuple[int, bytes]] = []
     at = 0
@@ -78,31 +64,8 @@ def split_frames(body: bytes) -> list[tuple[int, bytes]]:
     return frames
 
 
-def _first(views: Sequence[dict]) -> str:
-    """The first view this principal is served, which is what `view=None` means."""
-    if not views:
-        raise Refusal(
-            "viewport: this principal is served no view, so there is nothing to ask about"
-        )
-    return views[0]["id"]
-
-
-def _extent(views: Sequence[dict], view: str) -> list[float]:
-    """A view's whole declared extent, which is what `bbox=None` means."""
-    for block in views:
-        if block["id"] == view:
-            q = block["quantisation"]
-            return [q["x_min"], q["y_min"], q["x_max"], q["y_max"]]
-    raise Refusal(f"viewport: this principal is served no view named {view!r}")
-
-
 def _tables(payloads: Sequence[bytes]):
-    """The Arrow IPC streams of one frame kind, concatenated in arrival order.
-
-    Every frame carries the same schema by construction, and the pieces concatenate to the whole
-    surface: a points frame is a chunk of the points stream, not a stream of its own. `None` where
-    the response carried no frame of that kind at all.
-    """
+    """The Arrow streams of one frame kind joined in arrival order, or `None` if there were none."""
     import pyarrow as pa
     import pyarrow.ipc as ipc
 
@@ -111,33 +74,91 @@ def _tables(payloads: Sequence[bytes]):
 
 
 def _no_points():
-    """The points table of a response that served none: the two fixed columns, no rows.
-
-    The rendered columns are not invented for it. A caller reading a column name off an empty
-    table would be reading this decoder's guess rather than the schema, and `meta()` is where the
-    schema is.
-    """
+    """The points table of an answer that served none: the two columns every answer has."""
     import pyarrow as pa
 
     return pa.table({"tessera_id": pa.array([], pa.uint64()), "code": pa.array([], pa.uint64())})
 
 
+def _tile_counts(frames: Sequence[tuple[int, bytes]]) -> dict:
+    """The tiles frame's counts, summed over its tiles."""
+    counted = _tables([p for kind, p in frames if kind == FRAME_TILES])
+    return {
+        name: sum(int(v) for v in counted.column(name).to_pylist())
+        for name in ("visible", "matched", "highlighted", "served")
+        if name in counted.column_names
+    }
+
+
 def _query(params: dict) -> str:
-    """A query string, or nothing at all where no parameter was given."""
     return "?" + urllib.parse.urlencode(params) if params else ""
 
 
-class Viewport:
-    """One `/v1/viewport` response: the points table, and the other frames beside it.
+def _all_of(expressions: Sequence[dict]) -> Optional[dict]:
+    """Several filter expressions as one, with any top-level `all_of` opened into its parts."""
+    parts: list[dict] = []
+    for expression in expressions:
+        if set(expression) == {"all_of"}:
+            parts.extend(expression["all_of"])
+        else:
+            parts.append(expression)
+    if not parts:
+        return None
+    return parts[0] if len(parts) == 1 else {"all_of": parts}
 
-    Every attribute, index and length reaches the points table, so this is the points table
-    wherever one is expected — `num_rows`, `column()`, `schema.metadata` and `to_pandas()` all
-    read it, and `points` names it outright.
 
-    `artifacts` is the annotation artifacts the response served, as a pyarrow table, and
-    `sub_cells` the exact counts a non-zero `underlay_offset` asked for. Each is `None` where the
-    response carried no frame of that kind, which the wire makes an absence rather than an empty
-    table: a layer that served nothing sends no frame at all.
+class Count(int):
+    """A number of items, which says whether it is exact.
+
+    A count is exact unless the selection has a box whose outline was too long for the server to
+    trace cell by cell. The server then counts every item in a set of grid cells that covers the
+    box, and the number may include items just outside it. `exact` is `False` for such a count,
+    `cover_depth` is the depth of the grid cells used, and the count prints with that said
+    beside it. The server's `max_region_cells` setting decides how long an outline may be.
+
+    A `Count` is an `int` everywhere one is expected.
+    """
+
+    cover_depth: Optional[int]
+
+    def __new__(cls, value: int, cover_depth: Optional[int] = None) -> "Count":
+        count = super().__new__(cls, value)
+        count.cover_depth = cover_depth
+        return count
+
+    @property
+    def exact(self) -> bool:
+        """`True` when this is the exact number, `False` when it may include items outside a box."""
+        return self.cover_depth is None
+
+    def __repr__(self) -> str:
+        if self.exact:
+            return int.__repr__(self)
+        return (
+            f"{int(self)} (at most: the box was counted as the grid cells at depth "
+            f"{self.cover_depth} that cover it)"
+        )
+
+    __str__ = __repr__
+
+
+class Sample:
+    """The points a map draws at one zoom, with the annotations drawn beside them.
+
+    It reads as its points table: `num_rows`, `column()`, `schema` and `to_pandas()` all reach
+    it, and `points` names it. The table holds `tessera_id`, `code` (the point's position, on a
+    grid of 2^32 steps per axis across the view) and every column declared with `render=True`.
+
+    `artifacts` is the annotations served with the points, as a pyarrow table, and `sub_cells`
+    the finer counts that `underlay_offset` asks for. Each is `None` when the answer carried
+    none.
+
+    The points are a sample thinned for drawing. `k` caps how many each map tile carries, so
+    the table is smaller than the set it was drawn from. The table's schema metadata says by how
+    much: `tessera.counts` holds `visible` (the items this reader may see in the tiles the
+    request touched), `matched` (those that also match the filter), `highlighted` (those that
+    also match the highlight) and `served` (the rows in this table). `tessera.request` is the
+    request that was sent, and `tessera.trailer` the server's closing summary.
     """
 
     def __init__(self, points, artifacts=None, sub_cells=None):
@@ -146,8 +167,7 @@ class Viewport:
         self.sub_cells = sub_cells
 
     def __getattr__(self, name: str):
-        # Named here and not yet set: the points table is what `__init__` assigns first, and
-        # delegating before it exists would recur until the stack ran out.
+        # Guards against recursion while `__init__` has not yet set these.
         if name in ("points", "artifacts", "sub_cells"):
             raise AttributeError(name)
         return getattr(self.points, name)
@@ -164,42 +184,301 @@ class Viewport:
             served.append(f"{self.artifacts.num_rows} artifacts")
         if self.sub_cells is not None:
             served.append(f"{self.sub_cells.num_rows} sub-cells")
-        return f"Viewport({', '.join(served)})"
+        return f"Sample({', '.join(served)})"
+
+
+class Selection:
+    """Part of one view, as one reader sees it: a view, the filters applied to it, and a box.
+
+    A view is one layout of the items: one map, with its own coordinates. A reader is who is
+    asking. It sees only the items its access terms let it see, and every number here is
+    computed over those items alone.
+
+    Get one with `db.view(name)` or `viewer.view(name)`. `filter` and `within` return a new,
+    narrower selection and leave this one as it was, so one selection can be the start of
+    several.
+
+        papers = db.view("papers")
+        recent = papers.filter({"year": {"range": {"gte": 2020}}})
+        corner = recent.within((0, 0, 10, 10))
+        corner.count()
+    """
+
+    def __init__(
+        self,
+        reader: Callable[[], "Viewer"],
+        view: str,
+        filters: tuple = (),
+        boxes: tuple = (),
+    ) -> None:
+        self._reader = reader
+        self._view = view
+        self._filters = filters
+        self._boxes = boxes
+
+    @property
+    def view(self) -> str:
+        """The name of the view this selection is part of."""
+        return self._view
+
+    @property
+    def filters(self) -> Optional[dict]:
+        """The filters applied so far, as one expression, or `None` if there are none."""
+        return _all_of(self._filters)
+
+    @property
+    def box(self) -> Optional[tuple]:
+        """The box this selection is limited to, as `(min_x, min_y, max_x, max_y)`, or `None`.
+
+        After two calls to `within` it is the overlap of the two boxes. If they do not overlap,
+        the selection holds nothing and this is the later box.
+        """
+        if not self._boxes:
+            return None
+        overlap = (
+            max(box[0] for box in self._boxes),
+            max(box[1] for box in self._boxes),
+            min(box[2] for box in self._boxes),
+            min(box[3] for box in self._boxes),
+        )
+        if overlap[0] > overlap[2] or overlap[1] > overlap[3]:
+            return self._boxes[-1]
+        return overlap
+
+    def filter(self, expression: dict) -> "Selection":
+        """A narrower selection: the items here that also match `expression`.
+
+        `expression` is a filter written as a dictionary: a column name mapped to a test, or
+        `all_of`, `any_of` or `none_of` over a list of expressions. Filters added one after
+        another must all match.
+
+            db.view("papers").filter({"venue": {"in": ["neurips", "icml"]}})
+            db.view("papers").filter({"year": {"range": {"gte": 2020, "lt": 2024}}})
+            db.view("papers").filter({"title": {"match": "graph neural network"}})
+        """
+        if not isinstance(expression, dict) or not expression:
+            raise Refusal(
+                f"filter takes one expression as a dictionary, such as "
+                f"{{'year': {{'range': {{'gte': 2020}}}}}}; got {expression!r}"
+            )
+        return Selection(self._reader, self._view, self._filters + (expression,), self._boxes)
+
+    def within(self, box: Sequence[float]) -> "Selection":
+        """A narrower selection: the items here whose position is inside `box`.
+
+        `box` is `(min_x, min_y, max_x, max_y)` in the view's own coordinates, the ones the rows
+        were inserted with. An item on an edge is inside.
+
+            db.view("papers").within((0.0, 0.0, 100.0, 50.0)).count()
+        """
+        edges = tuple(float(v) for v in box)
+        if len(edges) != 4:
+            raise Refusal(f"within takes (min_x, min_y, max_x, max_y); got {tuple(box)!r}")
+        if edges[0] > edges[2] or edges[1] > edges[3]:
+            raise Refusal(
+                f"within: {edges} has a minimum above its maximum. Write "
+                f"(min_x, min_y, max_x, max_y)"
+            )
+        return Selection(self._reader, self._view, self._filters, self._boxes + (edges,))
+
+    def count(self) -> Count:
+        """How many items this reader may see in this selection.
+
+        The number is exact: every item in the view that the reader may see, that matches every
+        filter, and that lies inside the box. With no filter and no box it is everything the
+        reader may see in the view.
+
+        One case is not exact. When a box's outline is too long for the server to trace, it
+        counts the grid cells that cover the box, and the returned `Count` has `exact` set to
+        `False` and says so when printed.
+
+            db.view("papers").count()
+            db.viewer(["cs.LG"]).view("papers").filter({"year": {"eq": 2023}}).count()
+        """
+        request = {"view": self._view, "zoom": 0, "tiles": [0], "k": 0}
+        expression = self._expression()
+        if expression is not None:
+            request["filters"] = expression
+        body, headers = self._reader()._exchange("POST", "/v1/viewport", request)
+        counts = _tile_counts(split_frames(body))
+        region = headers.get("x-tessera-region") or ""
+        depth = None
+        if region.startswith("cover"):
+            depth = int(region.rsplit("=", 1)[1])
+        return Count(counts.get("matched", 0), depth)
+
+    def sample(
+        self,
+        zoom: int = 0,
+        k: Optional[int] = None,
+        *,
+        tiles: Optional[Sequence[int]] = None,
+        highlight: Optional[dict] = None,
+        layers: Any = None,
+        levels: Any = None,
+        computed: Optional[Sequence[str]] = None,
+        artifact_budget: Optional[int] = None,
+        artifact_rows: Optional[str] = None,
+        point_rows: Optional[str] = None,
+        underlay_offset: Optional[int] = None,
+        pin: Any = None,
+    ) -> Sample:
+        """The points a map of this selection draws at `zoom`, as a table.
+
+        This is a sample for drawing. Dense areas are thinned so that each map tile carries at
+        most `k` points, and the table holds fewer rows than the selection has items. Use
+        `count()` for how many items there are.
+
+        - `zoom`: the map's zoom level, from 0 (the whole view as one tile) to 16. Each level
+          splits every tile into four.
+        - `k`: the most points drawn per tile. Leave it out for the server's setting.
+        - `tiles`: sample these tiles only, each given by its number at this zoom in Z order.
+          Without it the sample covers the box, or the whole view if there is no box.
+        - `highlight`: a second filter. The points drawn are the same, and each carries a
+          `highlighted` column saying whether it matches.
+        - `layers`: which annotation layers to include, as a list of names, or `"all"`. A layer
+          is a set of annotations over the items, such as clusters or regions. Without it the
+          sample has none. `levels` chooses which levels of a layered hierarchy, `computed`
+          which of `centroid`, `box` and `shape` to compute, `artifact_budget` the most
+          annotations to return, and `artifact_rows="identity"` a short set of their columns.
+        - `underlay_offset`: also count the items in tiles this many levels finer than `zoom`,
+          returned as `sub_cells`.
+        - `point_rows`: `"highlight"` returns each point as `tessera_id` and `highlighted`
+          only, which is enough to update a highlight on points already held.
+        - `pin`: the `x-tessera-pin` value from an earlier answer. The answer then says whether
+          the data has changed since.
+
+        Every option is sent only when given, so the server's own setting applies otherwise.
+
+            sample = db.view("papers").sample(zoom=3, k=256)
+            sample.to_pandas()
+        """
+        reader = self._reader()
+        request: dict = {"view": self._view, "zoom": int(zoom)}
+        if tiles is not None:
+            request["tiles"] = [int(tile) for tile in tiles]
+        else:
+            request["bbox"] = list(self.box or reader._extent(self._view))
+        for name, value in (
+            ("k", k),
+            ("filters", self._expression()),
+            ("highlight", highlight),
+            ("layers", layers),
+            ("levels", levels),
+            ("computed", None if computed is None else list(computed)),
+            ("artifact_budget", artifact_budget),
+            ("artifact_rows", artifact_rows),
+            ("point_rows", point_rows),
+            ("underlay_offset", underlay_offset),
+            ("pin", pin),
+        ):
+            if value is not None:
+                request[name] = int(value) if name in _VIEWPORT_INTEGERS else value
+        body, _ = reader._exchange("POST", "/v1/viewport", request)
+        frames = split_frames(body)
+        artifacts = _tables([p for kind, p in frames if kind == FRAME_ARTIFACTS])
+        sub_cells = _tables([p for kind, p in frames if kind == FRAME_SUB_CELLS])
+        # A points frame with no rows is still the server's schema, so test for None, not falsity.
+        points = _tables([p for kind, p in frames if kind == FRAME_POINTS])
+        if points is None:
+            points = _no_points()
+        trailer = json.loads(next(p for kind, p in frames if kind == FRAME_TRAILER).decode())
+        if points.num_rows != trailer.get("points", points.num_rows):
+            raise Refusal(
+                f"viewport: the trailer says {trailer['points']} points and the body carries "
+                f"{points.num_rows}"
+            )
+        return Sample(
+            points.replace_schema_metadata(
+                {
+                    "tessera.counts": json.dumps(_tile_counts(frames)),
+                    "tessera.trailer": json.dumps(trailer),
+                    "tessera.request": json.dumps(request),
+                }
+            ),
+            artifacts,
+            sub_cells,
+        )
+
+    def map(
+        self,
+        colour_by: Optional[str] = None,
+        layers: Optional[Sequence[str]] = None,
+        height: int = 480,
+    ):
+        """The interactive map of this selection, as a notebook widget.
+
+        It opens on this view with this selection's filters applied, framed on its box if it
+        has one. Items outside the box are still drawn when they are in frame.
+
+        - `colour_by`: the column to colour points by, or `"cluster:<layer>"` to colour them by
+          the clusters of that layer.
+        - `layers`: the annotation layers to draw. `None` lets the map choose and `[]` draws
+          none.
+        - `height`: the widget's height in pixels.
+
+            db.view("papers").filter({"year": {"range": {"gte": 2020}}}).map(colour_by="venue")
+        """
+        return self._reader().map(
+            view=self._view,
+            layers=layers,
+            colour_by=colour_by,
+            filters=self.filters,
+            height=height,
+            bbox=self.box,
+        )
+
+    def _expression(self) -> Optional[dict]:
+        """The filters and every box, as the one expression the server tests items against."""
+        boxes = [{"region": {"bbox": list(box)}} for box in self._boxes]
+        return _all_of(list(self._filters) + boxes)
+
+    def __repr__(self) -> str:
+        parts = [f"view={self._view!r}"]
+        if self._filters:
+            parts.append(f"filters={self.filters!r}")
+        if self._boxes:
+            parts.append(f"box={self.box!r}")
+        return f"Selection({', '.join(parts)})"
 
 
 class Viewer:
-    """One principal's reading of one Tessera database.
+    """A reader of one Tessera database: an address and a token that says what it may see.
 
-    `map()` is the widget, pointed here with this viewer's token source.
-    The verbs beside it — `meta()`, `viewport()`, `item()`, `categories()`,
-    `suggest_category_values()`, `browse_artifacts()` and `artifact()` — are the viewer plane's
-    own, one method each, answered with the token and never by reading a bundle.
+    A reader holds a set of access terms, the labels its token grants. Each item carries labels
+    too, and the reader sees an item when they share one. Every count, map and record a reader
+    is given is computed over the items it may see, so two readers can get different answers
+    from the same database.
+
+    Get one with `connect(url, token)` for a database someone else runs, or with
+    `db.viewer(terms)` for one of your own.
+
+    - `url`: the address of the database's reading endpoint.
+    - `token`: a token as a string, a `Token`, or a function that returns either. A function is
+      called again when the token it gave is close to expiry.
+    - `terms`: the access terms the token was made for, if known. It is kept for display.
     """
 
     def __init__(self, url: str, token: TokenSource, *, terms: Optional[Sequence[str]] = None):
         if not url:
-            raise Refusal("a viewer needs the viewer plane's URL")
+            raise Refusal("a viewer needs the address of the database's reading endpoint")
         if token is None:
             raise Refusal(
-                "a viewer needs a token: the viewer token your deployment issued you, a Token, or "
-                "a callable returning one"
+                "a viewer needs a token: the token your deployment issued you, a Token, or a "
+                "function returning one"
             )
         self.url = url.rstrip("/")
-        #: The token source, held in this process and never in widget state.
         self._source: TokenSource = token
         self._token: Optional[Token] = None
-        #: The terms this viewer was minted for, where it was minted here; `None` where the token
-        #: came from a deployment, which does not tell a holder what it grants.
+        #: The access terms this reader's token was made for, or `None` when the token came from
+        #: elsewhere and does not say.
         self.terms = None if terms is None else list(terms)
 
-    # ---- the token --------------------------------------------------------------------------
-
     def token(self) -> Token:
-        """The token these reads present, minted again when the one held is near expiry.
+        """The token this reader sends, replaced with a fresh one when it is close to expiry.
 
-        A `Token` from `authorise` renews itself with the credential that minted it, which stays
-        wherever it was; a callable is called again; a bare string is what it is, and a server
-        that refuses it says so on the read.
+        A `Token` from `authorise` renews itself. A function given as the token is called again.
+        A plain string is sent as it is until the server refuses it.
         """
         held = self._token
         if held is not None and (held.seconds_left is None or held.seconds_left > TOKEN_MARGIN):
@@ -210,7 +489,17 @@ class Viewer:
         self._token = minted(self._source)
         return self._token
 
-    # ---- the widget -------------------------------------------------------------------------
+    def view(self, name: str) -> Selection:
+        """The whole of one view, as this reader sees it, to count, sample or map.
+
+        `name` is a view's name as `meta()` lists it. A view in a view group is named
+        `"<group>:<key>"`. A name this reader cannot see is refused, and the refusal lists the
+        names it can.
+
+            v.view("papers").count()
+        """
+        self._require_view(name)
+        return Selection(lambda: self, name)
 
     def map(
         self,
@@ -221,12 +510,18 @@ class Viewer:
         height: int = 480,
         **kwargs: Any,
     ):
-        """The explorer in this cell, against this viewer plane as this principal.
+        """The interactive map, as a notebook widget, showing what this reader may see.
 
-        The widget is `Map`, unchanged. What crosses the kernel boundary is
-        control and selection, never data: the page fetches from the viewer plane itself with the
-        token this viewer's source mints, and asks for another before expiry. The token is a
-        custom message and no traitlet carries it, so nothing that saves widget state saves it.
+        - `view`: the view to open on. `None` opens the first one.
+        - `layers`: the annotation layers to draw. `None` lets the map choose and `[]` draws
+          none.
+        - `colour_by`: the column to colour points by, or `"cluster:<layer>"`.
+        - `filters`: a filter expression to apply, as `Selection.filter` takes one.
+        - `height`: the widget's height in pixels.
+
+        Other keywords go to `Map` unchanged, such as `bbox` to frame the camera on a box. The
+        page in the browser fetches its own data from the database with this reader's token. The
+        token is sent to the page as a message and is never saved with the notebook.
         """
         from .widget import Map
 
@@ -241,31 +536,29 @@ class Viewer:
             **kwargs,
         )
 
-    # ---- the query verbs --------------------------------------------------------------------
-
     def meta(self) -> dict:
-        """`GET /v1/meta` as this principal reads it: the views, the layers and the schema.
+        """What this reader may see of the database's structure, as a dictionary.
 
-        Every list here is already inside the mask. A view, a group, a layer or a vocabulary this
-        principal cannot reach is absent from it, with nothing in its place.
+        It lists the views with their coordinate ranges, the annotation layers, the columns and
+        how each can be filtered, and the server's limits. Anything the reader may not see is
+        left out.
         """
         return json.loads(self._request("GET", "/v1/meta", None))
 
     def item(self, tessera_id: Any, idset: Optional[int] = None) -> dict:
-        """`POST /v1/items/{tessera_id}`: the drill-down record for one item.
+        """One item's full record, if this reader may see it.
 
-        `fields` is the record by declared column name, absent where the item has no value.
-        `labels` is the item's own labels intersected with this session's satisfied set, never the
-        full set, and `views` is the views this principal may reach it in. An item
-        this principal may not see is not found, on the refusal one that does not exist gets.
+        - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
+        - `idset`: the id numbering the id came from, `meta()["idset"]`. Ids are renumbered when
+          the database is rebuilt with a new id key. Given this, an id from an older numbering is
+          refused; without it, such an id may name a different item.
 
-        `external_id` is present only where the caller supplied one, and it is bytes here. The
-        wire carries base64, an external id being bytes rather than text, and this decodes it. A
-        `Database` goes one step further and reads those bytes as the type its id column carried.
+        The record has `fields` (the item's values by column name, missing where it has none),
+        `labels` (the item's access labels that this reader also holds), `views` (the views
+        this reader can find it in) and, where the item was inserted with one, `external_id`, as
+        bytes. An item this reader may not see is refused exactly as one that does not exist.
 
-        `idset` is the partitioning the id was minted under (the `idset` of `meta()`). A
-        `tessera_id` is durable only within one: omitting it accepts that an id from a past idset
-        may now name a different item.
+            v.item(sample.column("tessera_id")[0].as_py())
         """
         body = {} if idset is None else {"idset": int(idset)}
         record = json.loads(self._request("POST", f"/v1/items/{tessera_id}", body))
@@ -273,183 +566,51 @@ class Viewer:
             record["external_id"] = base64.b64decode(record["external_id"])
         return record
 
-    def viewport(
-        self,
-        bbox: Optional[Sequence[float]] = None,
-        view: Optional[str] = None,
-        filters: Optional[dict] = None,
-        k: Optional[int] = None,
-        zoom: int = 0,
-        *,
-        tiles: Optional[Sequence[int]] = None,
-        highlight: Optional[dict] = None,
-        layers: Any = None,
-        levels: Any = None,
-        computed: Optional[Sequence[str]] = None,
-        artifact_budget: Optional[int] = None,
-        artifact_rows: Optional[str] = None,
-        point_rows: Optional[str] = None,
-        underlay_offset: Optional[int] = None,
-        pin: Any = None,
-    ) -> "Viewport":
-        """`POST /v1/viewport`: the points, artifacts and counts this principal is served.
-
-        `bbox` is `[x0, y0, x1, y1]` in the view's own extent, and `None` is the whole of it as
-        `meta()` declares it; `tiles` is a list of depth-`zoom` Morton prefixes in its place, and
-        the two are exclusive. `view` is a view id, and `None` the first this principal is served.
-        `zoom` is the tile depth, 0-16, and `k` the per-tile mark budget, whose absence takes the
-        deployment's and whose `0` is the counts-only request. `filters` is the wire's filter
-        expression and `highlight` a second expression in the same grammar, which lights the
-        served set without moving it.
-
-        `layers` names the annotation layers to answer for — `"all"`, or a list of names — and
-        `levels`, `computed`, `artifact_budget` and `artifact_rows` say which of their rungs,
-        which derived properties, how many artifacts and which columns come back.
-        `underlay_offset` asks for exact counts at `zoom + underlay_offset` as the sub-cells
-        frame, `point_rows` projects the points to the highlight bit, and `pin` is the generation
-        stamp a previous response's `x-tessera-pin` header carried. Each is sent only where it was
-        given: what the deployment does with a field nobody named is the deployment's.
-
-        The result is a `Viewport`. It reads as the points table it always did — `tessera_id`,
-        `code` and the columns the schema declares as rendered — and carries `artifacts` and
-        `sub_cells` beside it. They are points; `item()` is where a record is, and `artifact()`
-        where one annotation's own record is. A served set is bounded by `k`, so the counts
-        travel with the table in its schema metadata, each of them a per-request fact about this
-        principal's mask:
-
-        - `tessera.counts`: the tiles frame summed. `visible` is inside the mask and the tiles the
-          box touches at this zoom, `matched` is that and the filter, `highlighted` that and the
-          highlight, `served` is that and the budget.
-        - `tessera.trailer`: the response's trailer, whose presence is what marks it complete.
-        - `tessera.request`: the body this sent, so a table in a later cell says what it is.
-        """
-        if bbox is not None and tiles is not None:
-            raise Refusal(
-                "viewport: a request names a bbox or a list of tiles, never both. Drop one"
-            )
-        # One `/v1/meta`, whichever of the two a caller left out: both are answered from the
-        # same document, and two reads could answer from two.
-        views = self._views() if view is None or (bbox is None and tiles is None) else []
-        request: dict = {"view": view or _first(views), "zoom": int(zoom)}
-        if tiles is not None:
-            request["tiles"] = [int(tile) for tile in tiles]
-        else:
-            request["bbox"] = [
-                float(v) for v in (bbox if bbox is not None else _extent(views, request["view"]))
-            ]
-        for name, value in (
-            ("k", k),
-            ("filters", filters),
-            ("highlight", highlight),
-            ("layers", layers),
-            ("levels", levels),
-            ("computed", None if computed is None else list(computed)),
-            ("artifact_budget", artifact_budget),
-            ("artifact_rows", artifact_rows),
-            ("point_rows", point_rows),
-            ("underlay_offset", underlay_offset),
-            ("pin", pin),
-        ):
-            if value is not None:
-                request[name] = int(value) if name in _VIEWPORT_INTEGERS else value
-        frames = split_frames(self._request("POST", "/v1/viewport", request))
-
-        counted = _tables([p for kind, p in frames if kind == FRAME_TILES])
-        artifacts = _tables([p for kind, p in frames if kind == FRAME_ARTIFACTS])
-        sub_cells = _tables([p for kind, p in frames if kind == FRAME_SUB_CELLS])
-        # `is None` and not a truth test: a zero-row table is falsey, and a frame that arrived
-        # carrying a schema and no rows is the server's schema, not this decoder's stand-in.
-        points = _tables([p for kind, p in frames if kind == FRAME_POINTS])
-        if points is None:
-            points = _no_points()
-        trailer = json.loads(next(p for kind, p in frames if kind == FRAME_TRAILER).decode())
-        counts = {
-            name: sum(int(v) for v in counted.column(name).to_pylist())
-            for name in ("visible", "matched", "highlighted", "served")
-            if name in counted.column_names
-        }
-        if points.num_rows != trailer.get("points", points.num_rows):
-            raise Refusal(
-                f"viewport: the trailer says {trailer['points']} points and the body carries "
-                f"{points.num_rows}"
-            )
-        return Viewport(
-            points.replace_schema_metadata(
-                {
-                    "tessera.counts": json.dumps(counts),
-                    "tessera.trailer": json.dumps(trailer),
-                    "tessera.request": json.dumps(request),
-                }
-            ),
-            artifacts,
-            sub_cells,
-        )
-
     def categories(
-        self,
-        column: str,
-        codes: Optional[Sequence[int]] = None,
-        after: Optional[str] = None,
-        limit: Optional[int] = None,
-        view: Optional[str] = None,
-    ) -> dict:
-        """`GET /v1/categories/{column}`: what a category column's codes stand for.
+        self, column: str, prefix: Optional[str] = None, view: Optional[str] = None
+    ):
+        """The values of a category column that this reader may see, as a pandas DataFrame.
 
-        Two forms. `codes` resolves codes this caller already holds; without it the route
-        enumerates one page of the vocabulary ascending by value key, resumed by handing the
-        answer's `next` back as `after` and bounded by `limit`. A code no visible value explains
-        is omitted from `values` rather than refused, so a shorter list is an answer and not a
-        failure.
+        A category column stores a small integer code for each value. This lists what each code
+        stands for, one row per value, with the columns `key` (the value as inserted), `code`
+        and `title` (the display name, or `None` where none was given).
 
-        `view` is the request's own view, which is what answers a group-scoped category: the
-        route resolves the view before the column, whatever the column's scope. A scoped column
-        can also be pinned in `column` itself, as `<column>@<key>`.
+        - `column`: the category column's name.
+        - `prefix`: list only the values whose key or title, or a word in either, starts with
+          this text, ignoring case. The rows then also have `count`, the number of
+          items this reader may see that carry the value. The server returns at most its
+          `max_suggestions` setting of such values, and `frame.attrs["more"]` is `True` when
+          more matched than were returned.
+        - `view`: the view to read the column in. A column declared for a view group holds
+          different values in each of the group's views, so it needs this.
+
+            v.categories("venue")
+            v.categories("venue", prefix="neur")
         """
-        if codes is not None and not list(codes):
-            # `codes=` empty is the enumeration form on the wire, which would fetch the whole
-            # vocabulary — the opposite of what an empty list asked for.
-            return {"values": [], "next": None}
-        query: dict = {}
-        if codes is not None:
-            query["codes"] = ",".join(str(int(code)) for code in codes)
-        if after is not None:
-            query["after"] = after
-        if limit is not None:
-            query["limit"] = int(limit)
-        if view is not None:
-            query["view"] = view
+        import pandas as pd
+
         path = f"/v1/categories/{urllib.parse.quote(column, safe='')}"
-        return json.loads(self._request("GET", path + _query(query), None))
-
-    def suggest_category_values(
-        self,
-        column: str,
-        q: str,
-        limit: Optional[int] = None,
-        counts: Optional[bool] = None,
-        view: Optional[str] = None,
-    ) -> dict:
-        """`GET /v1/categories/{column}/suggest`: the typeahead over a category vocabulary.
-
-        The values whose folded key, folded title or a word start of either has `q` as a prefix,
-        ordered by the matched text and never by frequency, recency or count. `q` is echoed on the
-        answer exactly as sent, so a caller can tell which request a page belongs to. `counts`
-        serves the number of items carrying each value that this principal may see, and never
-        orders the page.
-
-        There is no cursor: a typeahead pages by the user typing another character, and `more`
-        says the walk stopped early. One suggest is in flight per session, so a second sent while
-        one is running is refused `429`, and the answer to that is to send it again.
-        """
-        query: dict = {"q": q}
-        if limit is not None:
-            query["limit"] = int(limit)
-        if counts:
-            query["counts"] = "true"
-        if view is not None:
-            query["view"] = view
-        path = f"/v1/categories/{urllib.parse.quote(column, safe='')}/suggest"
-        return json.loads(self._request("GET", path + _query(query), None))
+        query: dict = {} if view is None else {"view": view}
+        if prefix is not None:
+            query.update(q=prefix, counts="true")
+            page = json.loads(self._request("GET", path + "/suggest" + _query(query), None))
+            frame = pd.DataFrame(
+                [
+                    (one["key"], one["code"], one.get("title"), one.get("count"))
+                    for one in page["values"]
+                ],
+                columns=["key", "code", "title", "count"],
+            )
+            frame.attrs["more"] = bool(page.get("more"))
+            return frame
+        rows: list[tuple] = []
+        while True:
+            page = json.loads(self._request("GET", path + _query(query), None))
+            rows += [(one["key"], one["code"], one.get("title")) for one in page["values"]]
+            if page.get("next") is None:
+                break
+            query["after"] = page["next"]
+        return pd.DataFrame(rows, columns=["key", "code", "title"])
 
     def browse_artifacts(
         self,
@@ -462,17 +623,25 @@ class Viewer:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> dict:
-        """`POST /v1/artifacts/browse`: one page of a layer's hierarchy, by lineage.
+        """One page of a layer's annotations, as this reader sees them.
 
-        Independent of the viewport: no box, no tiles and no zoom, so a layer spread across the
-        map is read here whatever the viewport's budget cut reaches. Three forms — neither
-        `parent` nor `q` is the roots, `parent` the artifacts naming it, `q` a case-insensitive
-        search over a key or a first supplied text content — and both together is refused.
+        An annotation, or artifact, is one member of a layer: a cluster, a region, a category in
+        a hierarchy. This lists them without regard to what is on screen.
 
-        Each row carries `masked_count`, which is this principal's count of the artifact's members
-        and never its size, and under `filters` a `matched_count` beside it. `view` is required:
-        a masked count is an intersection in row space, and row space is per view. Page with the
-        answer's `next` as `cursor`.
+        - `view`, `layer`: the view and the layer to list.
+        - `level`: list only this level of a layered hierarchy.
+        - `parent`: list the children of this annotation, by its `tessera_id`. Without it, and
+          without `q`, the list is the top-level annotations.
+        - `q`: list the annotations whose key or first text starts with this, ignoring case.
+          It cannot be combined with `parent`.
+        - `filters`: a filter expression. Each row then also has `matched_count`.
+        - `limit`: the most rows on the page.
+        - `cursor`: the `next` value of the previous page, to get the page after it.
+
+        Each row has `masked_count`, the number of the annotation's items this reader may see.
+
+            page = v.browse_artifacts("papers", "clusters")
+            more = v.browse_artifacts("papers", "clusters", cursor=page["next"])
         """
         request: dict = {"view": view, "layer": layer}
         if level is not None:
@@ -496,18 +665,20 @@ class Viewer:
         idset: Optional[int] = None,
         zoom: Optional[int] = None,
     ) -> dict:
-        """`POST /v1/artifacts/{tessera_id}`: one annotation artifact's own record.
+        """One annotation's record, if this reader may see it.
 
-        A separate route from `item()`, so the shape of an answer never says which of the two an
-        identifier names. `masked_count` is this principal's count of the artifact's members and
-        never its size, and the geometry — `centroid`, `box`, `shape` — is recomputed per
-        principal in the same grid units the viewport's `code` carries, so one principal's shape
-        must not be held against the identifier for another. A geometry field that is absent says
-        the layer declares no such property, never that it was withheld.
+        - `tessera_id`: the annotation's id, as `browse_artifacts` or a sample's `artifacts`
+          table gives it.
+        - `view`: the view to read it in.
+        - `idset`: as for `item`.
+        - `zoom`: the zoom level to simplify its outline for. Without it the full outline comes
+          back.
 
-        `view` is required, as it is on `browse_artifacts` and unlike on `item()`. `zoom` is the
-        depth the caller draws at, under which a predicate or an authored shape is generalised;
-        absent serves the whole presimplified shape.
+        The record has `masked_count`, the number of its items this reader may see, and, where
+        its layer computes them, `centroid`, `box` and `shape` in the view's grid coordinates,
+        computed over those items alone. A property the layer does not compute is missing.
+
+            v.artifact(page["artifacts"][0]["tessera_id"], "papers")
         """
         request: dict = {"view": view}
         if idset is not None:
@@ -516,12 +687,27 @@ class Viewer:
             request["zoom"] = int(zoom)
         return json.loads(self._request("POST", f"/v1/artifacts/{tessera_id}", request))
 
-    # ---- the plane --------------------------------------------------------------------------
-
     def _views(self) -> list[dict]:
         return list(self.meta().get("views") or [])
 
-    def _request(self, method: str, path: str, body: Optional[dict]) -> bytes:
+    def _require_view(self, name: str) -> None:
+        names = [block["id"] for block in self._views()]
+        if name not in names:
+            raise Refusal(
+                f"there is no view named {name!r} that this reader can see. The views are: "
+                f"{', '.join(names) or 'none'}"
+            )
+
+    def _extent(self, view: str) -> list[float]:
+        """A view's whole coordinate range, `[min_x, min_y, max_x, max_y]`."""
+        for block in self._views():
+            if block["id"] == view:
+                q = block["quantisation"]
+                return [q["x_min"], q["y_min"], q["x_max"], q["y_max"]]
+        raise Refusal(f"there is no view named {view!r} that this reader can see")
+
+    def _exchange(self, method: str, path: str, body: Optional[dict]) -> tuple[bytes, Any]:
+        """One request: the answer's body and headers, or a refusal with what the server said."""
         request = urllib.request.Request(
             self.url + path,
             data=None if body is None else json.dumps(body).encode(),
@@ -533,10 +719,13 @@ class Viewer:
         )
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
-                return response.read()
+                return response.read(), response.headers
         except urllib.error.HTTPError as refused:
             detail = refused.read().decode(errors="replace")[:1000]
             raise Refusal(f"{method} {path} refused ({refused.code}): {detail}") from None
+
+    def _request(self, method: str, path: str, body: Optional[dict]) -> bytes:
+        return self._exchange(method, path, body)[0]
 
     def __repr__(self) -> str:
         terms = "" if self.terms is None else f", terms={self.terms!r}"
@@ -544,12 +733,16 @@ class Viewer:
 
 
 def connect(url: str, token: TokenSource) -> Viewer:
-    """Read a deployment somebody else runs.
+    """A reader of a Tessera database someone else runs.
 
-    `token` is the viewer token that deployment issued you: a string, a `Token`, or a callable
-    returning either, which is called again when the one it gave expires. There is no
-    `viewer(terms)` here and no write verb. Minting another principal's token needs the session
-    credential and writing needs the control plane's operator credential, neither of which a
-    deployment hands an analyst.
+    - `url`: the address of its reading endpoint.
+    - `token`: the token its operator issued you, as a string, a `Token`, or a function that
+      returns either. A function is called again when its token is close to expiry.
+
+    The reader can read and map. It cannot write, and it cannot read as anyone else, since both
+    need credentials only the operator holds.
+
+        v = tesseradb.connect("https://maps.example/viewer", token=my_token)
+        v.view("papers").count()
     """
     return Viewer(url, token)

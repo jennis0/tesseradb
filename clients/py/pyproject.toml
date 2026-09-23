@@ -28,9 +28,10 @@ dependencies = [
 # (`hatch_build.py`) builds with Node at wheel-build time and packages under `tesseradb/static/`.
 # A user installing the wheel needs no Node; a developer installing from this checkout does.
 widget = ["anywidget>=0.9"]
-# The SDK: a database in a directory, filled from frames and files. pyarrow is the only hard
-# dependency — a pandas or polars frame reaches it through `pa.table`, so neither is required.
-local = ["pyarrow>=14"]
+# The SDK: a database in a directory, filled from frames and files. A pandas or polars frame
+# reaches pyarrow through `pa.table`; pandas is here because `categories()` answers with a
+# DataFrame.
+local = ["pyarrow>=14", "pandas"]
 # `tomli` is the TOML reader the corpus regeneration tests parse both documents with, on the
 # Pythons below 3.11 that carry no `tomllib`. It is a test dependency and reaches no other extra.
 dev = [

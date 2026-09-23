@@ -52,7 +52,7 @@ from ._reports import (
     render_columns_of,
 )
 from ._toml import Inline, dumps
-from ._viewer import Viewer
+from ._viewer import Selection, Viewer
 
 #: The declaration check reads the declaration in this process where the extension module is
 #: installed, and through `tessera check` where it is not. The two read one declaration with one
@@ -1023,24 +1023,31 @@ class Database:
             return raw.decode()
         return raw
 
-    def viewport(
-        self,
-        bbox: Sequence[float] | None = None,
-        view: str | None = None,
-        filters: dict | None = None,
-        k: int | None = None,
-        zoom: int = 0,
-        **rest,
-    ):
-        """What is served for a box, as this database's own principal.
+    def view(self, name: str) -> Selection:
+        """The whole of one view, as this database's own reader sees it: every item.
 
-        `Viewer.viewport` is the verb and this is it under the union of every term the SDK
-        inserted; `rest` is the rest of its keywords — `tiles`, `highlight`, `layers`, `levels`,
-        `computed`, `artifact_budget`, `artifact_rows`, `point_rows`, `underlay_offset` and
-        `pin` — passed through untouched.
+        `name` is a view's name. A view in a view group is named `"<group>:<key>"`. An unknown
+        name is refused, and the refusal lists the views there are.
+
+            db.view("papers").count()
+            db.view("papers").filter({"venue": {"eq": "neurips"}}).map()
         """
-        self._refuse_before_the_first_commit("viewport")
-        return self.viewer().viewport(bbox, view, filters, k, zoom, **rest)
+        self._refuse_before_the_first_commit("view")
+        self.viewer()._require_view(name)
+        return Selection(self.viewer, name)
+
+    def categories(self, column: str, prefix: str | None = None, view: str | None = None):
+        """The values of a category column, as a pandas DataFrame.
+
+        This is `Viewer.categories` as this database's own reader, which sees every value.
+        `prefix` lists only the values starting with it, with a count of items for each, and
+        `view` names the view to read a column declared for a view group in.
+
+            db.categories("venue")
+            db.categories("venue", prefix="neur")
+        """
+        self._refuse_before_the_first_commit("categories")
+        return self.viewer().categories(column, prefix, view)
 
     def _id_arguments(self) -> list[str]:
         """`--mint-external-ids`, where the identity column is an integer.
