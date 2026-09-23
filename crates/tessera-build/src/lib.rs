@@ -1979,6 +1979,7 @@ fn write_manifests(
         // the untouched region rather than a default standing in for a lost value.
         entity_id_low_water: published_layers.low_water,
         layers: published_layers.layers.clone(),
+        layer_registry_version: published_layers.registry_version,
         membership_extents: published_layers.membership_extents.clone(),
         level_versions: published_layers.level_versions.clone(),
         // **The post-bundle artifact pass's output** (`crate::artifact_pass`). Empty only where

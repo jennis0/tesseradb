@@ -2675,9 +2675,11 @@ impl LayerRegistry {
     /// publication — gate and all, reachable again by whoever the old declaration admitted. It is
     /// the same seed-before-replay ordering the overlay follows, and for the same reason.
     ///
-    /// The version is set past every seeded layer's, so a subsequent registration cannot mint a
-    /// version a session has already cached a resolution against.
-    pub fn seed(&mut self, layers: &[RegisteredLayer], tombstones: &[String]) {
+    /// `version` is the counter the manifest saved. The counter resumes from it or from the highest
+    /// seeded layer's version, whichever is higher, so a registration replayed or made after the
+    /// seed is never given a version lower than one already served.
+    pub fn seed(&mut self, layers: &[RegisteredLayer], tombstones: &[String], version: u64) {
+        self.version = self.version.max(version);
         for layer in layers {
             self.version = self.version.max(layer.version);
             self.layers

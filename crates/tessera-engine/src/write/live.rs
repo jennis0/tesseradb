@@ -419,17 +419,17 @@ impl LiveState {
 
     /// The registry as a manifest carries it, plus the mark that must be published beside it.
     ///
-    /// The three travel together, which is why one lock returns them. A manifest carrying a
+    /// The four travel together, which is why one lock returns them. A manifest carrying a
     /// layer whose reserved run sits above the published mark would, at the next restart, hand
     /// that run out again. Reading them separately, with a registration in between, is a way to
     /// publish exactly that inconsistency.
     pub(in crate::write) fn registry_for_publication(
         &self,
-    ) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
+    ) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64, u64) {
         let registry = lock_recover(&self.registry);
         let low_water = lock_recover(&self.allocator).low_water();
         let (layers, tombstones) = registry.snapshot();
-        (layers, tombstones, low_water)
+        (layers, tombstones, registry.version(), low_water)
     }
 
     pub(crate) fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {

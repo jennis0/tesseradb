@@ -1067,7 +1067,7 @@ impl Executor {
         // From the live registry, not the manifest beside it, which can be several publications
         // behind: a fold that copied its (empty) layer list would publish a prefix whose
         // membership extents name layers it does not declare.
-        let (registered_layers, registered_tombstones, registry_low_water) =
+        let (registered_layers, registered_tombstones, registry_version, registry_low_water) =
             self.live.registry_for_publication();
         let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
         let (runtime_attributes, runtime_scoped_attributes) =
@@ -1091,6 +1091,7 @@ impl Executor {
             entity_id_low_water: live_manifest.entity_id_low_water.min(registry_low_water),
             layers: registered_layers,
             layer_tombstones: registered_tombstones,
+            layer_registry_version: registry_version,
             views: created_views,
             // Only the declarations made since the fold planned: the fold's own `MANIFEST.json`
             // already states the rest, with a base written for each.

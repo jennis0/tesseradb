@@ -225,10 +225,12 @@ impl Executor {
     /// forward from the clone, which may be several behind. `min`, not `max`, for the low-water
     /// mark: the row-less region grows downward.
     pub(super) fn write_live_state(&self, manifest: &mut SegmentsManifest, vocabularies: &Vocabularies) {
-        let (layers, layer_tombstones, low_water) = self.live.registry_for_publication();
+        let (layers, layer_tombstones, registry_version, low_water) =
+            self.live.registry_for_publication();
         manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
         manifest.layers = layers;
         manifest.layer_tombstones = layer_tombstones;
+        manifest.layer_registry_version = registry_version;
         let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
         manifest.views = created_views;
         manifest.dead_view_incarnations = dead_view_incarnations;
