@@ -1087,7 +1087,7 @@ fn run_viewport_stream(
                         .deadline_from()
                         .map(|t| t.elapsed().as_millis() as u64)
                         .unwrap_or(0),
-                    deadline_ms = sink.producer.deadline().as_millis() as u64,
+                    deadline_ms = sink.producer.deadline().map_or(0, |d| d.as_millis() as u64),
                     stall_ms = sink.producer.stall().as_millis() as u64,
                     flushes = sink.flushes,
                     "viewport stream SHED mid-body by the server — {}",
@@ -1180,7 +1180,7 @@ async fn viewport(
     let (producer, pending) = crate::stream::channel(
         cancel_guard,
         Duration::from_millis(state.limits.stream_write_stall_ms),
-        Duration::from_millis(state.limits.stream_deadline_ms),
+        Some(Duration::from_millis(state.limits.stream_deadline_ms)),
     );
     let sink = WireSink {
         head: None,

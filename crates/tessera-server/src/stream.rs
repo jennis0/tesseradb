@@ -93,7 +93,8 @@ pub(crate) struct Producer<T> {
     tx: mpsc::Sender<Bytes>,
     state: Arc<AtomicU8>,
     stall: Duration,
-    deadline: Duration,
+    /// The whole-stream deadline, where this stream refuses frames for time.
+    deadline: Option<Duration>,
     /// Set by [`Self::start_deadline`]; the whole-stream deadline is measured from it.
     deadline_from: Option<Instant>,
     /// Why this producer refused a frame, when the server chose to. The engine reports any
@@ -111,12 +112,12 @@ pub(crate) struct Pending<T> {
 /// The body of a stream the producer has opened, to be given the opening's frames.
 pub(crate) struct Opened(StreamBody);
 
-/// A stream whose sends are refused after `stall` of a full channel, or after `deadline` from
-/// [`Producer::start_deadline`]. `cancel_guard` moves into the body.
+/// A stream whose sends are refused after `stall` of a full channel, and, with a `deadline`, after
+/// that long from [`Producer::start_deadline`]. `cancel_guard` moves into the body.
 pub(crate) fn channel<T>(
     cancel_guard: CancelGuard,
     stall: Duration,
-    deadline: Duration,
+    deadline: Option<Duration>,
 ) -> (Producer<T>, Pending<T>) {
     let (opening_tx, opening_rx) = oneshot::channel();
     let (tx, rx) = mpsc::channel::<Bytes>(CHANNEL_FRAMES);
@@ -180,7 +181,7 @@ impl<T> Producer<T> {
         self.stall
     }
 
-    pub(crate) fn deadline(&self) -> Duration {
+    pub(crate) fn deadline(&self) -> Option<Duration> {
         self.deadline
     }
 
@@ -195,12 +196,11 @@ impl<T> Producer<T> {
         let send_started = Instant::now();
         let mut item = Bytes::from(frame);
         loop {
-            if self
-                .deadline_from
-                .is_some_and(|t| t.elapsed() >= self.deadline)
-            {
-                self.shed = Some(Shed::Deadline);
-                return Err(SinkClosed);
+            if let (Some(from), Some(deadline)) = (self.deadline_from, self.deadline) {
+                if from.elapsed() >= deadline {
+                    self.shed = Some(Shed::Deadline);
+                    return Err(SinkClosed);
+                }
             }
             match self.tx.try_send(item) {
                 Ok(()) => return Ok(()),

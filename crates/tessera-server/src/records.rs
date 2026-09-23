@@ -178,7 +178,7 @@ pub(crate) async fn items(
     let (producer, pending) = crate::stream::channel(
         cancel_guard,
         Duration::from_millis(state.limits.stream_write_stall_ms),
-        deadline,
+        None,
     );
     let sink = RecordsSink {
         producer,
