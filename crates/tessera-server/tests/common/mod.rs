@@ -206,28 +206,38 @@ pub fn copy_built<R>(
     out
 }
 
-/// This process's directory for built fixtures. A static is never dropped, so the directories of
-/// processes that have exited are removed here instead.
+/// This process's directory for built fixtures, `<pid>` beside a `<pid>.lock` this process holds
+/// locked for as long as it runs. A static is never dropped, so the directories of processes that
+/// have exited are removed here instead: a lock file nobody holds, and a directory whose lock file
+/// is gone, which only a removal after its process exited leaves.
 fn fixtures_dir() -> std::path::PathBuf {
-    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| {
+    static DIR: std::sync::OnceLock<(std::path::PathBuf, std::fs::File)> =
+        std::sync::OnceLock::new();
+    let (dir, _held) = DIR.get_or_init(|| {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("tessera-server-fixtures");
-        if let Ok(entries) = std::fs::read_dir(&root) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let exited = name
-                    .parse::<u32>()
-                    .is_ok_and(|pid| !Path::new(&format!("/proc/{pid}")).exists());
-                if exited {
-                    let _ = std::fs::remove_dir_all(entry.path());
+        std::fs::create_dir_all(&root).unwrap();
+        for entry in std::fs::read_dir(&root).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "lock") {
+                let unheld = std::fs::File::open(&path).is_ok_and(|f| f.try_lock().is_ok());
+                if unheld {
+                    let _ = std::fs::remove_dir_all(path.with_extension(""));
+                    let _ = std::fs::remove_file(&path);
                 }
+            } else if path.is_dir() && !path.with_extension("lock").exists() {
+                let _ = std::fs::remove_dir_all(&path);
             }
         }
-        let dir = root.join(std::process::id().to_string());
+        // Locked before it takes its name, so no other process can find it unheld.
+        let lock = tempfile::NamedTempFile::new_in(&root).unwrap();
+        lock.as_file().lock().unwrap();
+        let name = std::process::id().to_string();
+        let held = lock.persist(root.join(format!("{name}.lock"))).unwrap();
+        let dir = root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
-    })
-    .clone()
+        (dir, held)
+    });
+    dir.clone()
 }
 
 fn copy_dir(from: &Path, to: &Path) {
