@@ -182,8 +182,6 @@ proptest! {
                 scalar_schema: &schema,
                 absent_ok: &[],
                 row_base: 0,
-                watermark: 10_000,
-                entity_id_high_water: 10_000,
             },
         )
         .expect("the merge executes");
