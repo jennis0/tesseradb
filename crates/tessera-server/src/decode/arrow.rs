@@ -128,8 +128,8 @@ fn category_code(
         ))),
         // **The key travels as a key.** This handler must not mint: two requests racing one novel
         // key would each draw, and that key would end up with two codes and its rows split
-        // between them. The commit-window close resolves it — serially, against the live bindings
-        // — and the row's scalar becomes the code there, before the WAL append.
+        // between them. The write executor mints it serially, at a commit window's close or in a
+        // values batch's pass, and the cell becomes the code before the WAL append.
         VocabularyKind::Discovered => Ok(WalScalar::Utf8(key.to_string())),
     }
 }

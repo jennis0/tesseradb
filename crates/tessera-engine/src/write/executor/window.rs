@@ -121,6 +121,20 @@ pub(super) struct MintedCodes {
     pub(super) fresh: Vec<(String, String, u32)>,
 }
 
+impl MintedCodes {
+    /// One durable record per key bound, to be appended before any record carrying its code.
+    pub(super) fn records(&self) -> Vec<WalRecord> {
+        self.fresh
+            .iter()
+            .map(|(vocabulary, key, code)| WalRecord::VocabularyMint {
+                vocabulary: vocabulary.clone(),
+                key: key.clone(),
+                code: *code,
+            })
+            .collect()
+    }
+}
+
 /// Under `value_set = "open"` a typo creates a permanent object rather than a refusal, so the
 /// operator gets this line.
 fn log_minted_artifacts(minted_per_entry: &[u64], mint_records: &[WalRecord]) {
@@ -501,6 +515,56 @@ impl Executor {
         })
     }
 
+    /// Draw a code for every novel vocabulary key a values batch carries, by the ingest window's
+    /// rule, and rewrite each cell to its code. A column that is neither declared nor one of the
+    /// view's families is left for the fill rule to refuse.
+    pub(super) fn mint_values_codes(
+        &self,
+        request: &mut tessera_lifecycle::ValuesRequest,
+    ) -> std::result::Result<MintedCodes, MintError> {
+        let generation = self.generation.load_full();
+        let manifest = &generation.bundle.manifest;
+        let families = request
+            .view
+            .as_deref()
+            .map(|view| scoped_families_of_view(manifest, view))
+            .unwrap_or_default();
+        let columns: Vec<(&str, Option<&str>, ScalarType)> = request
+            .columns
+            .iter()
+            .map(|name| {
+                let declared = manifest
+                    .declared_scalars
+                    .iter()
+                    .find(|d| &d.name == name)
+                    .map(|d| (d.vocabulary.as_deref(), d.arrow_type));
+                let family = || {
+                    families
+                        .iter()
+                        .find(|f| &f.name == name)
+                        .map(|f| (f.vocabulary.as_deref(), f.arrow_type))
+                };
+                let (vocabulary, arrow_type) =
+                    declared.or_else(family).unwrap_or((None, ScalarType::U32));
+                (name.as_str(), vocabulary, arrow_type)
+            })
+            .collect();
+        let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
+        let mut fresh: Vec<(String, String, u32)> = Vec::new();
+        for row in &mut request.rows {
+            mint_cells(
+                &mut row.values,
+                columns.iter().copied(),
+                &mut vocabularies,
+                &mut fresh,
+            )?;
+        }
+        Ok(MintedCodes {
+            vocabularies,
+            fresh,
+        })
+    }
+
     /// Close a commit window: allocate, then one fsync over the vocabulary mints, the entries, the
     /// artifact publications and the growths against them, in that order, since a mint must be
     /// durable before the rows it colours and a publication must exist before anything addresses
@@ -525,10 +589,7 @@ impl Executor {
 
         mark = self.health.lap(WriteStage::Allocate, mark);
 
-        let MintedCodes {
-            vocabularies,
-            fresh: fresh_bindings,
-        } = match self.mint_window_codes(&mut closing) {
+        let minted = match self.mint_window_codes(&mut closing) {
             Ok(minted) => minted,
             Err(e) => {
                 let detail = e.to_string();
@@ -538,6 +599,11 @@ impl Executor {
                 return;
             }
         };
+        let vocabulary_records = minted.records();
+        let MintedCodes {
+            vocabularies,
+            fresh: fresh_bindings,
+        } = minted;
 
         mark = self.health.lap(WriteStage::VocabularyMint, mark);
 
@@ -588,14 +654,6 @@ impl Executor {
 
         mark = self.health.lap(WriteStage::DeriveRecords, mark);
 
-        let vocabulary_records: Vec<WalRecord> = fresh_bindings
-            .iter()
-            .map(|(vocabulary, key, code)| WalRecord::VocabularyMint {
-                vocabulary: vocabulary.clone(),
-                key: key.clone(),
-                code: *code,
-            })
-            .collect();
         let entries_at = vocabulary_records.len();
         let artifacts_at = entries_at + closing.entries().len();
         let growth_at = artifacts_at + mint_records.len();

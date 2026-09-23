@@ -783,7 +783,7 @@ impl Executor {
     /// and its membership is not.
     pub(super) fn commit_values(
         &mut self,
-        request: tessera_lifecycle::ValuesRequest,
+        mut request: tessera_lifecycle::ValuesRequest,
         reply: Reply<ValuesReceipt>,
     ) {
         let started = std::time::Instant::now();
@@ -801,6 +801,19 @@ impl Executor {
                 return;
             }
         }
+
+        // An open vocabulary's new key is minted here as the ingest window mints it, so the cell
+        // the fill rule compares and the log records is the code.
+        let minted = match self.mint_values_codes(&mut request) {
+            Ok(minted) => minted,
+            Err(e) => {
+                reply.fail(ExecError::VocabularyRefused {
+                    detail: e.to_string(),
+                });
+                return;
+            }
+        };
+        let vocabulary_records = minted.records();
 
         let planned = match plan_fills(&generation, &request) {
             Ok(planned) => planned,
@@ -891,7 +904,8 @@ impl Executor {
         // The level version each record is the delta against, read before the apply moves it, on
         // `commit_growth`'s rule, carried forward across the sequence because a mint and a growth
         // of this batch may name one level and each moves it exactly once.
-        let mut durable: Vec<&WalRecord> = vec![&values_record];
+        let mut durable: Vec<&WalRecord> = vocabulary_records.iter().collect();
+        durable.push(&values_record);
         durable.extend(&artifact_records);
         let positions = match self.make_durable(&durable, "a values batch") {
             Ok(positions) => positions,
@@ -900,10 +914,11 @@ impl Executor {
                 return;
             }
         };
-        let values_position = positions[0];
+        let values_at = vocabulary_records.len();
+        let values_position = positions[values_at];
         // At the tick, on the ingest door's rule: this is a data door and its batches arrive in
         // runs.
-        self.apply_artifact_records(&artifact_records, &positions[1..], Publish::AtTick);
+        self.apply_artifact_records(&artifact_records, &positions[values_at + 1..], Publish::AtTick);
 
         // The cells reach the buffer's fill map, which is what the next flush writes into the
         // family's entity-space extent and the record blob. The map is cloned with the buffer, on
@@ -924,7 +939,15 @@ impl Executor {
             .store(buffer.len(), Ordering::SeqCst);
         // A values batch fills cells on rows the buffer already holds and buffers none of its own,
         // so nothing joins the buffered-row lists here.
-        let next = generation.with_buffer(Arc::new(buffer), &[], |_| {});
+        let suggest = generation.suggest.with_mints(
+            &tessera_analyse::SuggestionFold::new(),
+            &minted.vocabularies,
+            &minted.fresh,
+        );
+        let next = generation.with_buffer(Arc::new(buffer), &[], |g| {
+            g.vocabularies = Arc::new(minted.vocabularies);
+            g.suggest = suggest;
+        });
         self.publish(next, started);
         // A values batch allocates no entity, so the index records none: the batch id and the
         // body hash are the whole of what a retry is answered off. Indexed at the values record's
