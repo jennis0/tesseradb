@@ -3147,4 +3147,80 @@ fn interleaved_new_items_in_two_views_resolve_both_ways_from_the_sidecar() {
         }
     }
     assert!(wrong.is_empty(), "answered wrong from the sidecar: {wrong:?}");
+    drop(engine);
+    tessera_build::verify_deep(&root, &Default::default())
+        .expect("the bundle's two external-id directions agree under the lookup the sidecar uses");
+}
+
+/// **A join keeps its entity's key when the view holding the entity's own row is dropped before
+/// that row flushes.** The drop discards the own row, so the join's flush is the only record of
+/// the binding; after a restart past the log's rotation the key still resolves both ways.
+#[test]
+fn a_join_keeps_its_key_when_the_binding_view_is_dropped_before_it_flushes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+    engine
+        .create_view_group(tessera_lifecycle::wal::ViewGroupDeclaration {
+            name: "quarter".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+            members: None,
+            metadata: Vec::new(),
+        })
+        .expect("the group is declared");
+    engine
+        .create_view("quarter".into(), "q2".into(), None, Default::default())
+        .expect("the view is created");
+
+    let key = b"dropped-binding".to_vec();
+    let row = |view: &str| UnallocatedRow {
+        external_id: Some(key.clone()),
+        view: view.to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let entity = engine
+        .accept_ingest(vec![row("quarter:q2")], "own".to_string(), [0u8; 32])
+        .expect("the item is accepted")[0];
+    let joined = engine
+        .accept_ingest(vec![row("s0")], "join".to_string(), [0u8; 32])
+        .expect("the join is accepted");
+    assert_eq!(joined, vec![entity], "a known external id joins its entity");
+    engine
+        .drop_view("quarter".into(), "q2".into(), false)
+        .expect("the view drops");
+    wait_ticking(&engine, "the join to flush", || {
+        engine.request_flush();
+        engine.generation().buffer.is_empty()
+    });
+
+    drop(engine);
+    let engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        config_uncapped(),
+    )
+    .expect("the bundle reopens");
+    assert!(
+        engine.accepted_batch("join").is_none(),
+        "the log rotated past the batches, so no live map answers for them"
+    );
+    assert_eq!(engine.resolve_external_id(&key).unwrap(), Some(entity), "the key names its entity");
+    assert_eq!(engine.external_id_of(entity).unwrap(), Some(key), "the entity names its key");
 }

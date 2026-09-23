@@ -550,6 +550,31 @@ fn load_locator(desc: &LocatorDesc) -> std::result::Result<Mmap, String> {
     Ok(mapping)
 }
 
+/// One locator that can hold an entity's slot: a flushed extent, by its position in the
+/// manifest's list, or the base locator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Locator {
+    Extent(usize),
+    Base,
+}
+
+/// The locators that can hold `entity`'s slot, in the order a lookup asks them: every flushed
+/// extent whose span covers it, newest first, then the base locator if `entity` is below its
+/// length `base_len`. An entity's external id is the first slot any of them holds; spans may
+/// overlap one another and the base.
+pub fn locators_covering<'a, T>(
+    entity: u64,
+    base_len: u64,
+    extents: &'a [T],
+    span: impl Fn(&T) -> (u64, u64) + 'a,
+) -> impl Iterator<Item = Locator> + 'a {
+    let flushed = extents.iter().enumerate().rev().filter_map(move |(i, extent)| {
+        let (lo, hi) = span(extent);
+        (lo <= entity && entity <= hi).then_some(Locator::Extent(i))
+    });
+    flushed.chain((entity < base_len).then_some(Locator::Base))
+}
+
 /// The external-ID sidecar for one partition: `external_id → entity` for the control plane
 /// (`/control/changes` past WAL retention, `/control/ingest`'s duplicate check) and
 /// `entity → external_id` (via the locator) for `/v1/items` drill-down. See the module doc for
@@ -818,21 +843,25 @@ impl ExternalIdSidecar {
         if self.runs.is_empty() && self.locator.is_none() {
             return Ok(None);
         }
-        if entity.raw() < self.locator_len() {
-            return self.external_id_of(entity);
-        }
-        // Past the build locator's end, the flushed extents. Two views' extents can overlap, and
-        // each holds the absent marker for the other's entities, so every extent containing the
-        // entity is asked, newest first, until one holds a slot for it. Covered with no slot
-        // anywhere is an entity ingested without an external id.
+        // Every locator that can hold the entity's slot is asked in the lookup order until one
+        // holds it: two views' flushes from one commit window overlap, a fold's base overlaps an
+        // extent flushed during its flight, and each holds the absent marker for an entity whose
+        // binding another holds. Covered with no slot anywhere is an entity ingested without an
+        // external id.
         let mut covered = false;
-        for slot in self
-            .locator_runs
-            .iter()
-            .rev()
-            .filter(|s| entity.raw() >= s.desc.entity_lo && entity.raw() <= s.desc.entity_hi)
-        {
+        for locator in locators_covering(entity.raw(), self.locator_len(), &self.locator_runs, |s| {
+            (s.desc.entity_lo, s.desc.entity_hi)
+        }) {
             covered = true;
+            let slot = match locator {
+                Locator::Base => {
+                    if let Some(key) = self.external_id_of(entity)? {
+                        return Ok(Some(key));
+                    }
+                    continue;
+                }
+                Locator::Extent(i) => &self.locator_runs[i],
+            };
             let Some(ordinal) = slot.ordinal_of(entity)? else {
                 continue;
             };
