@@ -70,6 +70,9 @@ struct DependencyContext<'a> {
     served: &'a ServedView<'a>,
     mask: &'a crate::compose::EffectiveMask,
     reachable: &'a tessera_lifecycle::ResolvedLayers,
+    /// Each target layer's label test for this viewer, settled once per request: a named default
+    /// is put through the plugin once rather than once per candidate.
+    labels: std::cell::RefCell<rustc_hash::FxHashMap<String, crate::artifacts::LabelGate<'a>>>,
 }
 
 /// What [`Engine::warm_artifact_projections`] did, for the open's own log line: a count and a
@@ -366,6 +369,7 @@ impl Engine {
             served,
             mask,
             reachable: &reachable,
+            labels: Default::default(),
         };
         let dependency_served = self.dependency_gate(&ctx);
         let artifact_view = crate::artifacts::ArtifactView {
@@ -843,7 +847,11 @@ impl Engine {
         crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &ctx.served.generation.overlay,
-            labels: self.label_gate(ctx.served.session, &layer.declaration),
+            labels: *ctx
+                .labels
+                .borrow_mut()
+                .entry(attachment.layer.clone())
+                .or_insert_with(|| self.label_gate(ctx.served.session, &layer.declaration)),
             layer_reachable: true,
             rows: &rows,
             mask: ctx.mask,
@@ -902,6 +910,7 @@ impl Engine {
             served,
             mask,
             reachable: &reachable,
+            labels: Default::default(),
         };
         let dependency_served = self.dependency_gate(&ctx);
 
