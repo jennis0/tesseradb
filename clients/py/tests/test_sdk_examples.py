@@ -229,7 +229,6 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk, maps):
     want = expected(walk["DATA"], walk["years"])
 
     # Section 1: the frame, built and counted.
-    assert walk["frame"].shape[0] == want["papers"]
     assert walk["first_count"] == want["papers"]
 
     # Section 2: the database without the held-back week, as three readers count it.
@@ -247,10 +246,17 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk, maps):
         "cs since 2020, 'transformer' in the title": want["transformer since 2020"],
     }
 
+    # Section 4 and section 5 both commit, and neither was refused.
+    assert walk["yearly_report"].ok, walk["yearly_report"]
+    assert walk["week_report"].ok, walk["week_report"]
+
     # Section 5: the week arrives in both views it was inserted into.
     last = f"years:{walk['years'][-1]}"
     assert walk["before_week"] == {"papers": want["built"], last: want["last year before the week"]}
     assert walk["after_week"] == {"papers": want["papers"], last: want["last year"]}
+    # Every paper of the last year, the week's included, is in one of that year's clusters.
+    clusters = walk["db"].view(last).sample(layers=["yearly"]).artifacts
+    assert sum(clusters.column("masked_count").to_pylist()) == want["last year"]
 
     # Suppressing five machine-learning papers hides them from both readers, and lifting the
     # suppression shows them again.

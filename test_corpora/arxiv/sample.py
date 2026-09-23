@@ -4,9 +4,9 @@ Every file of the source is written again restricted to the sampled papers: the 
 members table are filtered to them, and the artifact tables, the label tables and the two
 vocabularies are copied whole, so one notebook reads either directory with the same code.
 
-One exception: a label with a content whose generating papers were all left out of the sample is
-dropped with its member rows. That content would have an empty generating set, which the build
-refuses.
+One exception: a label whose title, the content at rank 0, has none of its generating papers left
+in the sample is dropped with its member rows. That title would have an empty generating set, which
+the build refuses. The notebook inserts titles alone, so the other ranks do not decide it.
 
 ```bash
 python -m test_corpora.arxiv.sample --source data/notebook-2m4-live --out data/notebook-sample \
@@ -42,13 +42,13 @@ def filter_file(source: Path, out: Path, column: str, keep: pa.Array) -> None:
 
 
 def drop_labels_with_no_generating_set(artifacts: Path, members: Path, source: Path) -> None:
-    """Drop each label, and its member rows, that has a content rank with no generating paper left
-    in `members`."""
-    def ranked(path):
-        table = pq.read_table(path, columns=["key", "rank"]).to_pandas().dropna()
-        return set(zip(table["key"], table["rank"]))
+    """Drop each label, and its member rows, whose title (rank 0) has no generating paper left in
+    `members`."""
+    def titled(path):
+        table = pq.read_table(path, columns=["key", "rank"]).to_pandas()
+        return set(table["key"][table["rank"] == 0])
 
-    emptied = {key for key, _ in ranked(source) - ranked(members)}
+    emptied = titled(source) - titled(members)
     table = pq.read_table(artifacts)
     kept = table.filter(pc.invert(pc.is_in(table["key"], pa.array(sorted(emptied), pa.string()))))
     pq.write_table(kept, artifacts)

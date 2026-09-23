@@ -310,8 +310,8 @@ def _(mo):
     This time each column is declared on its own, with more control over each.
 
     `declare_view_group("years")` declares a **view group**: a set of views that share their
-    settings and differ by a key, here the year. Its views are listed in a roster when the data
-    is inserted.
+    settings and differ by a key, here the year. Its views are named when the data is inserted,
+    in a table with one row per year.
 
     A **vocabulary** is the set of values a category column takes, such as arXiv's archives.
     `closed=True` means no other values are accepted, and `width` is how many bytes each value's
@@ -324,11 +324,10 @@ def _(mo):
     column with neither is stored with the paper and shown when you open it.
 
     The clustering is a layer. `views` says which views it is drawn on. `kind="tiered"` means
-    fixed levels, from coarse to fine, which `levels` names. `computed` is what the server works
-    out for each cluster for each reader, such as its centre and its bounding box.
+    fixed levels, from coarse to fine, which `levels` names.
 
     Two settings decide what a reader is shown. `require_member_visibility` shows a cluster to
-    a reader only when they can see enough of its papers. `content_requires="all"` shows a
+    a reader only when they can see at least the number of its papers set below. `content_requires="all"` shows a
     topic's name only to a reader who can see every paper the name was written from.
     """)
     return
@@ -378,6 +377,8 @@ def _(mo):
     it, as before: `parent` is a cluster's parent in the hierarchy, `contents` is a label's
     text, `attached_layer`, `attached_level` and `attached_key` name the cluster a label
     belongs to, and `rank` in a members table marks the papers a topic name was written from.
+    The clusters' members table carries `rank` empty, and a column a table carries is always
+    named.
     """)
     return
 
@@ -410,8 +411,9 @@ def _(DATA, db, members, pa, points, named_topics, years):
 def _(mo):
     mo.md("""
     The commit checks the declaration against the tables, builds the database and starts its
-    server. `check()` above is the same check with nothing built. At the whole scale the
-    commit took 139 seconds on a 12-core AMD Ryzen 9 5900X that was also running other work.
+    server. `check()` above is the same check with nothing built. The commit report gives the
+    time it took. On the whole corpus it was 144 seconds on a 12-core AMD Ryzen 9
+    5900X that was also running other work.
     """)
     return
 
@@ -646,7 +648,8 @@ def _(mo):
     `scope={"group": "years"}` puts the layer on every view of the `years` group, with separate
     clusters in each, and on no other view. The insert names the cluster column with `key`, as
     in section 1, and the year column with `view`. Each year numbers its clusters from `"00"`,
-    and the same key in two years names two different clusters.
+    and the same key in two years names two different clusters. Each year's fitted k-means is
+    kept, so that section 5 can place new papers in that year's clusters.
 
     The clusters are computed from each paper's position on the map, so they group papers that
     sit together in that year.
@@ -655,21 +658,20 @@ def _(mo):
 
 
 @app.cell
-def _(KMeans, db, pd, points):
-    def _clusters(papers):
-        k = min(20, max(1, len(papers) // 250))
-        labels = KMeans(n_clusters=k, n_init=1, random_state=0).fit_predict(papers[["x", "y"]])
-        return pd.Series([f"{label:02d}" for label in labels], index=papers.index)
-
+def _(KMeans, db, points):
     yearly = points.select(["entity_id", "x", "y", "year"]).to_pandas()
-    yearly["cluster"] = yearly.groupby("year", group_keys=False)[["x", "y"]].apply(_clusters)
+    fitted = {}
+    for _year, _papers in yearly.groupby("year"):
+        _k = min(20, max(1, len(_papers) // 250))
+        fitted[_year] = KMeans(n_clusters=_k, n_init=1, random_state=0).fit(_papers[["x", "y"]])
+        yearly.loc[_papers.index, "cluster"] = [f"{one:02d}" for one in fitted[_year].labels_]
 
     db.declare_layer("yearly", kind="flat", scope={"group": "years"},
                      require_member_visibility={"count": 1}, title="Clusters of each year")
     db.insert("yearly", yearly, id="entity_id", key="cluster", view="year")
     yearly_report = db.commit()
     yearly_report
-    return (yearly_report,)
+    return fitted, yearly_report
 
 
 @app.cell
@@ -687,7 +689,8 @@ def _(mo):
     The week held back in section 2 goes into the running database with the same calls as
     before. Its papers go into `papers` and into the `years` group. Its memberships go into
     `topics`, and the topic names held back with it go into `topic_names`, with the rows that
-    say which of the week's papers each title was written from.
+    say which of the week's papers each title was written from. Each paper also joins the
+    cluster of `yearly` that its year's k-means from section 4 predicts for it.
 
     After the first commit, a commit sends its inserts to the running server, which takes them
     while it goes on answering readers. There is no rebuild. The commit waits until the new
@@ -706,7 +709,7 @@ def _(db, years):
 
 
 @app.cell
-def _(before_week, db, pd, visible, week, week_members, week_topics):
+def _(db, fitted, week, week_members, week_topics):
     db.insert("papers", week, id="entity_id", x="x", y="y", access="categories")
     db.insert("years", week.select(["entity_id", "x", "y", "categories", "year"]),
               id="entity_id", x="x", y="y", access="categories", view="year")
@@ -717,7 +720,21 @@ def _(before_week, db, pd, visible, week, week_members, week_topics):
               attached_level="attached_level", attached_key="attached_key")
     db.insert("topic_names", members=week_members["topics-toponymy"], id="entity", key="key",
               level="level", rank="rank")
-    print(db.commit())
+
+    _placed = week.select(["entity_id", "x", "y", "year"]).to_pandas()
+    for _year, _papers in _placed.groupby("year"):
+        _predicted = fitted[_year].predict(_papers[["x", "y"]])
+        _placed.loc[_papers.index, "cluster"] = [f"{one:02d}" for one in _predicted]
+    db.insert("yearly", _placed, id="entity_id", key="cluster", view="year")
+
+    week_report = db.commit()
+    week_report
+    return (week_report,)
+
+
+@app.cell
+def _(before_week, db, pd, visible, week_report):
+    _ = week_report  # counts after the commit that adds the week
     after_week = visible(db)
     pd.DataFrame({"before": before_week, "after": after_week})
     return (after_week,)
@@ -735,7 +752,8 @@ def _(mo):
 
 
 @app.cell
-def _(db, learning, pd, visible, week):
+def _(db, learning, pd, visible, week, week_report):
+    _ = week_report  # the papers suppressed here are the ones the week's commit added
     _is_learning = [bool({"cs.LG", "stat.ML"} & set(one)) for one in week["categories"].to_pylist()]
     hidden = [one for one, keep in zip(week["entity_id"].to_pylist(), _is_learning) if keep][:5]
 
