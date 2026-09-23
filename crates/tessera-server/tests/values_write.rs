@@ -181,13 +181,27 @@ async fn declare(served: &Served, body: Value) {
 
 /// Ingest one point and answer its `tessera_id`.
 async fn ingest_point(served: &Served, batch_id: &str, external_id: &str) -> u64 {
-    let body = json!([{
+    ingest_point_with(served, batch_id, external_id, json!({})).await
+}
+
+/// [`ingest_point`], with `columns` added to the row.
+async fn ingest_point_with(
+    served: &Served,
+    batch_id: &str,
+    external_id: &str,
+    columns: Value,
+) -> u64 {
+    let mut row = json!({
         "external_id": base64_of(external_id),
         "x": 500.0,
         "y": 500.0,
         "access": ["0"],
         "score": 1.0,
-    }]);
+    });
+    for (name, value) in columns.as_object().unwrap() {
+        row[name] = value.clone();
+    }
+    let body = json!([row]);
     let resp = served
         .server
         .client
@@ -426,6 +440,87 @@ async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
         item_fields(&served, second).await["grade"].is_null(),
         "a flush after the restart publishes"
     );
+}
+
+/// The keys of the artifacts a viewport over the whole frame serves from `layer`.
+async fn served_keys(served: &Served, layer: &str) -> Vec<String> {
+    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+            "layers": "all"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let mut keys: Vec<String> = decode_viewport_frames(&resp.bytes().await.unwrap())
+        .artifacts
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.layer == layer)
+        .filter_map(|a| a.key)
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// A layer whose artifacts are the values of a column gets an artifact for a new value whether
+/// the value arrives by ingest or by a values batch, and both survive a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_value_filled_by_a_values_batch_derives_its_artifact_as_ingest_does() {
+    let served = serve().await;
+    declare(
+        &served,
+        json!({"name": "grade", "type": "category", "vocabulary": "grade", "index": true}),
+    )
+    .await;
+    let resp = served
+        .server
+        .client
+        .put(served.server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "name": "grades",
+            "title": "Grades",
+            "views": ["s0"],
+            "membership": { "attribute": "grade" },
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+            "content": { "computed": [], "supplied": [] },
+            "depends_on": [],
+            "levels": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap_or_default());
+
+    ingest_point_with(&served, "points-1", "by-ingest", json!({"grade": "g1"})).await;
+    ingest_point(&served, "points-2", "by-values").await;
+    flush(&served).await;
+    let (status, answer) = values(
+        &served,
+        "values-1",
+        Some("s0"),
+        json!([{"external_id": base64_of("by-values"), "grade": "g2"}]),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    flush(&served).await;
+    assert_eq!(served_keys(&served, "grades").await, ["g1", "g2"]);
+
+    let served = restart(served).await;
+    assert_eq!(served_keys(&served, "grades").await, ["g1", "g2"]);
 }
 
 /// **The same batch as JSON and as Arrow lands identical values** (`ingest.md` §1.2). Nothing
