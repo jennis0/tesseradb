@@ -23,8 +23,8 @@ use tessera_build::{build, BuildArgs};
 
 const N: u64 = 40;
 
-/// One rendered, indexed `f32` at the build, and a `public` vocabulary no build column names, so
-/// a runtime category over it fixes the width at the declaration.
+/// One rendered, indexed `f32` at the build, and two `public` vocabularies no build column names,
+/// one closed and one open, so a runtime category over either fixes the width at the declaration.
 const SCHEMA_TOML: &str = r#"
 [[vocabulary]]
 name       = "dept"
@@ -34,6 +34,12 @@ visibility = "public"
   [vocabulary.values]
   eng = 5
   ops = 6
+
+[[vocabulary]]
+name       = "grade"
+width      = "u16"
+value_set  = "open"
+visibility = "public"
 
 [[attribute]]
 name   = "score"
@@ -140,6 +146,19 @@ async fn serve() -> Served {
     )
     .await;
     served
+}
+
+/// Stop the server and open the same bundle and log again.
+async fn restart(served: Served) -> Served {
+    let Served { server, tmp } = served;
+    server.shutdown().await;
+    let server = spawn_server(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+    Served { server, tmp }
 }
 
 async fn declare(served: &Served, body: Value) {
@@ -360,6 +379,52 @@ async fn the_values_route_fills_restates_and_refuses() {
     assert!(
         answer.to_string().contains("row 0"),
         "the refusal names the row and not the id: {answer}"
+    );
+}
+
+/// A key of an open vocabulary that no ingest has used is minted by the values batch that names
+/// it, and the cell is served after a flush and after a restart. A closed vocabulary's unknown key
+/// is refused with nothing written, and the next flush still publishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_values_batch_mints_a_new_key_of_an_open_vocabulary() {
+    let served = serve().await;
+    declare(
+        &served,
+        json!({"name": "grade", "type": "category", "vocabulary": "grade", "index": true}),
+    )
+    .await;
+    let id = ingest_point(&served, "points-1", "subject").await;
+    flush(&served).await;
+
+    let (status, answer) = values(
+        &served,
+        "values-1",
+        Some("s0"),
+        json!([{"external_id": base64_of("subject"), "grade": "g0"}]),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["filled"], 1, "{answer}");
+
+    let (status, answer) = values(
+        &served,
+        "values-2",
+        Some("s0"),
+        json!([{"external_id": base64_of("subject"), "dept": "legal"}]),
+    )
+    .await;
+    assert_eq!(status, 422, "a closed vocabulary's unknown key is refused: {answer}");
+
+    flush(&served).await;
+    assert_eq!(item_fields(&served, id).await["grade"], json!("g0"));
+
+    let served = restart(served).await;
+    assert_eq!(item_fields(&served, id).await["grade"], json!("g0"));
+    let second = ingest_point(&served, "points-2", "second").await;
+    flush(&served).await;
+    assert!(
+        item_fields(&served, second).await["grade"].is_null(),
+        "a flush after the restart publishes"
     );
 }
 
