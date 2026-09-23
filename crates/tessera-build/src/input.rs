@@ -38,6 +38,7 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_spatial::{fixed32, Bounds, Projection};
+use tessera_store::scalar_column::{self, ScalarColumn};
 use tessera_store::vocabulary::VocabularyMinter;
 
 use crate::config::{Fields, ViewSelector, ENTITY_ID};
@@ -2381,57 +2382,22 @@ pub struct AttributeBatch<'a> {
     pub decoded: &'a [BatchColumn],
 }
 
-/// One batch's worth of a declared column, decoded to the shape the row loop indexes, together
-/// with the source's own record of which rows carry nothing.
+/// One batch's worth of a declared column, decoded to the shape the row loop indexes.
 ///
-/// **The null buffer is kept rather than dropped, and that is the whole of decision 0064's build
-/// half.** Every numeric variant below is built from `values()`, which is the values buffer alone:
-/// a null slot holds whatever is in it, which for every Arrow numeric is `0`. Reading that back
-/// stores an item with no score as one scoring zero — present, and indistinguishable from a real
-/// zero — so it matches a range containing zero, which is a wrong answer rather than an absent
-/// feature. `NullBuffer` is an `Arc`'d bitmap, so carrying it costs a clone of a pointer.
-///
-/// The two families that already had somewhere to put absence keep doing so and do not consult
-/// this: a category spends the reserved code 0, and `Text` carries its own null through to
-/// `ScalarValue::Null`.
+/// A category keeps absence in band as the reserved code 0; every other declaration is read by
+/// [`tessera_store::scalar_column`], the rule an ingest batch is read by.
 pub struct BatchColumn {
-    nulls: Option<arrow::buffer::NullBuffer>,
     values: BatchValues,
 }
 
-/// The *source* shapes, not the declared types: several declarations read from one shape (every
-/// integer width from `Ints`), and the declaration decides what a row's value becomes, not what the
-/// file holds.
 enum BatchValues {
     /// Category keys under a **declared** vocabulary, resolved per row: `value` looks each key up
-    /// against `schema_decl` and refuses an unknown one (§5's declare-then-use).
+    /// against `schema_decl` and refuses an unknown one.
     Keys(crate::utf8::Utf8Values),
     /// Category codes under a **discovered** vocabulary, already resolved by the batch-level mint
-    /// pre-pass in `decode` — every key this batch carries was minted or found bound before this
-    /// variant exists, so `value` is a pure index, exactly as every other variant's is.
+    /// pre-pass in `decode`, so `value` is a pure index.
     Discovered(Vec<u32>),
-    Bool(arrow::array::BooleanArray),
-    /// Every integer column, widened to `i64` once. `narrow` puts each value back inside its
-    /// declared width, refusing rather than truncating.
-    Ints(Vec<i64>),
-    /// A `u64` column read from a `u64` source, kept unwidened.
-    ///
-    /// **The one integer that cannot go through `Ints`.** Widening to `i64` is lossless for every
-    /// other width, but a `u64` above `i64::MAX` — an ordinary hash, which is what a stable
-    /// per-item identifier usually is — reads as negative and is then refused as out of range.
-    /// Caught by the packed fixture on its first build, where `id_hash` is a blake2b digest and
-    /// half of them have the high bit set.
-    U64(Vec<u64>),
-    F32(Vec<f32>),
-    F64(Vec<f64>),
-    /// A per-item string, for an `index`-only `utf8` column.
-    ///
-    /// **Not a category**, and the distinction is the data model rather than the encoding: a
-    /// category's value is a vocabulary entry with an identity, a pinned code and a lifecycle,
-    /// existing independently of any row; a string is row data whose visibility is the visibility
-    /// of the rows carrying it. So this variant resolves nothing against a vocabulary and mints
-    /// nothing — the bytes are the value (per-point-attributes; filter-index §2.3).
-    Text(crate::utf8::Utf8Values),
+    Scalar(ScalarColumn),
 }
 
 impl BatchColumn {
@@ -2441,9 +2407,7 @@ impl BatchColumn {
         attribute: &crate::config::Attribute,
         minters: &mut HashMap<String, VocabularyMinter>,
     ) -> Result<Self> {
-        let nulls = column.nulls().cloned();
         Ok(BatchColumn {
-            nulls,
             values: Self::decode_values(path, column, attribute, minters)?,
         })
     }
@@ -2454,29 +2418,6 @@ impl BatchColumn {
         attribute: &crate::config::Attribute,
         minters: &mut HashMap<String, VocabularyMinter>,
     ) -> Result<BatchValues> {
-        let mismatch = || BuildError::Schema {
-            path: path.to_path_buf(),
-            detail: format!(
-                "attribute '{}' is declared '{}', but the points file holds {:?}. The width is \
-                 baked into every row and changing it rewrites the corpus (per-point-attributes \
-                 §2.2), so it is taken from the declaration and the data must match it.{}",
-                attribute.name,
-                attribute.ty.arrow_type_name(),
-                column.data_type(),
-                match column.data_type() {
-                    // The one mismatch a caller is likely to hit while doing everything right: a
-                    // timestamp column is an `i64` and reads as one, but only in microseconds.
-                    DataType::Timestamp(unit, _) if *unit != TimeUnit::Microsecond => format!(
-                        " This is a timestamp in {unit:?}, and only microseconds are accepted: \
-                         nothing records a unit, so accepting two would store incomparable \
-                         numbers under one declaration. Cast the column to timestamp[us] (or to \
-                         a plain i64 of whatever unit you mean) before building"
-                    ),
-                    _ => String::new(),
-                }
-            ),
-        };
-        let any = column.as_any();
         if let Some(vocabulary) = &attribute.vocabulary {
             // A category arrives as its *key*, never as a code: §3.1 — the key in the row is not
             // the display name, and the code is assigned once and pinned, so a data file
@@ -2510,101 +2451,36 @@ impl BatchColumn {
                 _ => Ok(BatchValues::Keys(keys)),
             };
         }
-        Ok(match attribute.ty {
-            ScalarType::Bool => BatchValues::Bool(
-                any.downcast_ref::<arrow::array::BooleanArray>()
-                    .ok_or_else(mismatch)?
-                    .clone(),
-            ),
-            // **`f32` accepts `f64` and rounds; `f64` accepts `f32` and widens.** Neither is the
-            // refusal an out-of-range integer gets, and the asymmetry is deliberate: narrowing an
-            // integer produces a *different* value (a `u8` given 300 stores 44), narrowing a float
-            // produces the nearest value the declared width holds, which is what declaring `f32`
-            // asks for. A caller who wants the precision declares `f64`.
-            ScalarType::F32 => {
-                BatchValues::F32(if let Some(a) = any.downcast_ref::<Float32Array>() {
-                    a.values().to_vec()
-                } else if let Some(a) = any.downcast_ref::<Float64Array>() {
-                    a.values().iter().map(|v| *v as f32).collect()
-                } else {
-                    return Err(mismatch());
-                })
-            }
-            ScalarType::F64 => {
-                BatchValues::F64(if let Some(a) = any.downcast_ref::<Float64Array>() {
-                    a.values().to_vec()
-                } else if let Some(a) = any.downcast_ref::<Float32Array>() {
-                    a.values().iter().map(|v| *v as f64).collect()
-                } else {
-                    return Err(mismatch());
-                })
-            }
-            // Reached only by an `index`-only column: `render` on either string type is still
-            // refused at parse (§4.3 — the hot column is a fixed-width slot per row), but an
-            // indexed column lives in entity space and costs the hot column nothing.
-            //
-            // **A keyword reads exactly as a `utf8` does, and that is the family's whole input
-            // contract.** The dictionary and the ordinal are storage, minted where the layer is
-            // written; a points file carries the values themselves, so there is nothing here to
-            // resolve and no ordinal to be wrong about (records §7, "ingest wire").
-            //
-            // **Text reads the same way, for the same reason and one more.** Its terms are minted
-            // by an analyser at index time and its prose goes to the record blob, so what a points
-            // file carries is the prose and nothing else — there is no term column to supply and
-            // no analyser to run this side of the declaration (records §4.4).
-            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-                BatchValues::Text(crate::utf8::Utf8Values::new(column).ok_or_else(mismatch)?)
-            }
-            // A `u64` declaration over a `u64` source keeps the full range; every other
-            // combination widens, which is lossless for it.
-            ScalarType::U64 if any.is::<UInt64Array>() => BatchValues::U64(
-                any.downcast_ref::<UInt64Array>()
-                    .expect("checked by is::<>")
-                    .values()
-                    .to_vec(),
-            ),
-            _ => BatchValues::Ints(read_integer(any, column.data_type()).ok_or_else(mismatch)?),
-        })
+        ScalarColumn::new(column, attribute.ty)
+            .map(BatchValues::Scalar)
+            .ok_or_else(|| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "attribute '{}' is declared '{}' and the points file holds {:?}, which cannot \
+                     carry it; convert the column or change the declaration{}",
+                    attribute.name,
+                    attribute.ty.arrow_type_name(),
+                    column.data_type(),
+                    match column.data_type() {
+                        DataType::Timestamp(unit, _) if *unit != TimeUnit::Microsecond => {
+                            " (a timestamp is read only in microseconds, so cast it to \
+                             timestamp[us])"
+                        }
+                        _ => "",
+                    }
+                ),
+            })
     }
 
-    /// Whether a source column of type `found` can carry an attribute declared as `attribute` —
-    /// **the schema-only half of [`BatchColumn::decode_values`]**, which is what `tessera check`
-    /// can answer without reading a row.
-    ///
-    /// It restates the downcasts above rather than sharing them, because a schema has no array to
-    /// downcast; the two are held together by `column_carries_agrees_with_the_decoder`, which
-    /// walks every declared type against every Arrow type this build can meet and asserts the two
-    /// give one answer. Without that test this function is a second opinion, and a check that says
-    /// *fine* where the build says *mismatch* is worse than no check at all.
+    /// Whether a source column of type `found` can carry an attribute declared as `attribute`:
+    /// the schema-only half of [`BatchColumn::decode_values`], which is what `tessera check` can
+    /// answer without reading a row. `column_carries_agrees_with_the_decoder` holds the two to one
+    /// answer.
     fn carries(attribute: &crate::config::Attribute, found: &DataType) -> bool {
         if attribute.vocabulary.is_some() {
-            // A category arrives as its *key*, never as a code.
             return crate::utf8::is_utf8(found);
         }
-        match attribute.ty {
-            ScalarType::Bool => matches!(found, DataType::Boolean),
-            // `f32` accepts `f64` and rounds; `f64` accepts `f32` and widens.
-            ScalarType::F32 | ScalarType::F64 => {
-                matches!(found, DataType::Float32 | DataType::Float64)
-            }
-            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-                crate::utf8::is_utf8(found)
-            }
-            // Every integer family widens to `i64` and is range-checked per row, which a schema
-            // cannot anticipate — so this is presence and family, never fit.
-            _ => matches!(
-                found,
-                DataType::UInt8
-                    | DataType::UInt16
-                    | DataType::UInt32
-                    | DataType::UInt64
-                    | DataType::Int8
-                    | DataType::Int16
-                    | DataType::Int32
-                    | DataType::Int64
-                    | DataType::Timestamp(TimeUnit::Microsecond, _)
-            ),
-        }
+        scalar_column::carries(attribute.ty, found)
     }
 
     pub fn value(
@@ -2613,32 +2489,7 @@ impl BatchColumn {
         attribute: &crate::config::Attribute,
         schema_decl: &crate::config::Schema,
     ) -> Result<ScalarValue> {
-        // **Absence, for every family that has no in-band marker.** The two that do are handled in
-        // their own arms below and never reach this: a category spends the reserved code 0, and
-        // `Text` carries the source's null through itself. Everything else is a number, whose every
-        // bit pattern is a legal value — so the source's null buffer is the only thing that
-        // distinguishes "carries no score" from "scores zero", and reading `values()` past it
-        // silently makes the two the same (decision 0064).
-        if self.nulls.as_ref().is_some_and(|n| n.is_null(row))
-            && !matches!(
-                self.values,
-                BatchValues::Keys(_) | BatchValues::Discovered(_) | BatchValues::Text(_)
-            )
-        {
-            return Ok(ScalarValue::Null);
-        }
         Ok(match &self.values {
-            // A null is *absent*; the empty string is a value the caller supplied. Carried apart
-            // rather than folded together, because a string has no spare in-band value to spend on
-            // absence the way a category spends code 0 — and folding them would report an item as
-            // matching a value it does not have.
-            BatchValues::Text(values) => {
-                if values.is_null(row) {
-                    ScalarValue::Null
-                } else {
-                    ScalarValue::Utf8(values.value(row).to_string())
-                }
-            }
             BatchValues::Keys(keys) => {
                 let code = if keys.is_null(row) {
                     crate::config::ABSENT_CODE
@@ -2666,36 +2517,17 @@ impl BatchColumn {
             // Already resolved by `decode`'s mint pre-pass — a pure index, like every other
             // variant here, and no lookup against `schema_decl` at all.
             BatchValues::Discovered(codes) => code_as(attribute.ty, codes[row]),
-            BatchValues::Bool(values) => ScalarValue::Bool(values.value(row)),
-            BatchValues::U64(values) => ScalarValue::U64(values[row]),
-            BatchValues::F32(values) => ScalarValue::F32(values[row]),
-            BatchValues::F64(values) => ScalarValue::F64(values[row]),
-            BatchValues::Ints(values) => {
-                let v = values[row];
-                let range = |min: i64, max: i64| narrow(v, min, max, attribute);
-                match attribute.ty {
-                    ScalarType::U8 => ScalarValue::U8(range(0, u8::MAX as i64)? as u8),
-                    ScalarType::U16 => ScalarValue::U16(range(0, u16::MAX as i64)? as u16),
-                    ScalarType::U32 => ScalarValue::U32(range(0, u32::MAX as i64)? as u32),
-                    ScalarType::U64 => ScalarValue::U64(range(0, i64::MAX)? as u64),
-                    ScalarType::I8 => ScalarValue::I8(range(i8::MIN as i64, i8::MAX as i64)? as i8),
-                    ScalarType::I16 => {
-                        ScalarValue::I16(range(i16::MIN as i64, i16::MAX as i64)? as i16)
-                    }
-                    ScalarType::I32 => {
-                        ScalarValue::I32(range(i32::MIN as i64, i32::MAX as i64)? as i32)
-                    }
-                    ScalarType::I64 => ScalarValue::I64(v),
-                    ScalarType::TimestampUs => ScalarValue::TimestampUs(v),
-                    other => {
-                        return Err(BuildError::Invalid(format!(
-                            "attribute '{}': '{}' is not an integer declaration",
-                            attribute.name,
-                            other.arrow_type_name()
-                        )))
-                    }
-                }
-            }
+            BatchValues::Scalar(column) => column.value(row).map_err(|e| {
+                crate::config::declaration_error(format!(
+                    "attribute '{}': the points file carries {}, which does not fit its declared \
+                     '{}' ({}..={}); declare a wider type and rebuild",
+                    attribute.name,
+                    e.value,
+                    attribute.ty.arrow_type_name(),
+                    e.min,
+                    e.max
+                ))
+            })?,
         })
     }
 }
@@ -2764,69 +2596,10 @@ fn mint_batch(
         .collect())
 }
 
-/// Any integer parquet column as `i64` — one conversion per batch, never per row.
-fn read_integer(any: &dyn std::any::Any, ty: &DataType) -> Option<Vec<i64>> {
-    use arrow::array::{
-        Int16Array, Int32Array, Int64Array, Int8Array, TimestampMicrosecondArray, UInt16Array,
-        UInt32Array, UInt64Array, UInt8Array,
-    };
-    macro_rules! widen {
-        ($($dt:pat => $arr:ident),* $(,)?) => {
-            match ty {
-                $($dt => any
-                    .downcast_ref::<$arr>()?
-                    .values()
-                    .iter()
-                    .map(|v| *v as i64)
-                    .collect(),)*
-                // **Microseconds only, and the other units are refused.** Nothing records a unit:
-                // `MANIFEST.declared_scalars` says `i64` (or `timestamp_us`, which fixes it). So a
-                // build that silently took milliseconds from one source and microseconds from
-                // another would store two incomparable numbers under one declaration, and the
-                // difference would surface as dates a thousandfold wrong rather than as an error.
-                // Normalising here was the alternative and is worse: it rewrites the caller's
-                // values on a rule they never stated.
-                DataType::Timestamp(TimeUnit::Microsecond, _) => {
-                    any.downcast_ref::<TimestampMicrosecondArray>()?.values().to_vec()
-                }
-                _ => return None,
-            }
-        };
-    }
-    Some(widen! {
-        DataType::UInt8 => UInt8Array,
-        DataType::UInt16 => UInt16Array,
-        DataType::UInt32 => UInt32Array,
-        DataType::UInt64 => UInt64Array,
-        DataType::Int8 => Int8Array,
-        DataType::Int16 => Int16Array,
-        DataType::Int32 => Int32Array,
-        DataType::Int64 => Int64Array,
-    })
-}
-
 /// Whether an attribute source's column of type `found` can carry `attribute` — see
 /// [`BatchColumn::carries`], whose rule this is.
 pub fn column_carries(attribute: &crate::config::Attribute, found: &DataType) -> bool {
     BatchColumn::carries(attribute, found)
-}
-
-/// A value that must fit the declared width, refused rather than truncated.
-///
-/// **The refusal is the point.** A `u8` category column whose data carries 300 is a build that
-/// would otherwise write 44 — a different value, in a column whose width cannot be changed
-/// without rewriting the corpus, with nothing downstream able to notice.
-fn narrow(value: i64, min: i64, max: i64, attribute: &crate::config::Attribute) -> Result<i64> {
-    if value < min || value > max {
-        return Err(crate::config::declaration_error(format!(
-            "attribute '{}': the points file carries {value}, which does not fit its declared \
-             '{}' ({min}..={max}). Refused rather than truncated — the width is baked into every \
-             row and the remedy is a rebuild at a wider declaration (per-point-attributes §3.6)",
-            attribute.name,
-            attribute.ty.arrow_type_name()
-        )));
-    }
-    Ok(value)
 }
 
 #[cfg(test)]
@@ -2925,6 +2698,52 @@ mod tests {
             &attribute(ScalarType::TimestampUs, None),
             &DataType::Timestamp(TimeUnit::Millisecond, None)
         ));
+    }
+
+    /// A roster integer is held as an `i64`, so a `uint64` past `i64::MAX` is refused rather
+    /// than wrapped to a negative number.
+    #[test]
+    fn a_roster_uint64_past_i64_max_is_refused() {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::datatypes::{Field, Schema as ArrowSchema};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roster.parquet");
+        let read = |rank: u64| {
+            let schema = Arc::new(ArrowSchema::new(vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("rank", DataType::UInt64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["a"])),
+                    Arc::new(UInt64Array::from(vec![rank])),
+                ],
+            )
+            .unwrap();
+            let mut writer =
+                parquet::arrow::ArrowWriter::try_new(File::create(&path).unwrap(), schema, None)
+                    .unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            read_roster_table(
+                &path,
+                &crate::config::Fields::canonical("roster"),
+                &[crate::config::ViewMetadata {
+                    name: "rank".to_string(),
+                    ty: ScalarType::U64,
+                    vocabulary: None,
+                }],
+            )
+        };
+        let rows = read(7).expect("a rank an i64 holds is read");
+        assert!(matches!(
+            rows[0].metadata["rank"],
+            crate::config::MetadataValue::Int(7)
+        ));
+        assert!(read(1 << 63).is_err(), "a rank past i64::MAX is refused");
     }
 
     #[test]
@@ -3202,30 +3021,43 @@ pub fn read_roster_table(
                             .collect::<Result<_>>()?
                     }
                     ty => {
-                        let widened = read_integer(column.as_any(), column.data_type())
-                            .ok_or_else(|| BuildError::Schema {
+                        // Every integer width is held as an `i64`, so it is read as one.
+                        let held_as = match ty {
+                            ScalarType::TimestampUs => ScalarType::TimestampUs,
+                            _ => ScalarType::I64,
+                        };
+                        let read = ScalarColumn::new(column, held_as).ok_or_else(|| {
+                            BuildError::Schema {
                                 path: path.to_path_buf(),
                                 detail: format!(
                                     "the roster column '{name}' has type {:?}, and this group \
-                                         declares it '{}'. A `timestamp_us` reads a microsecond \
-                                         timestamp or an `i64`, and nothing else — a millisecond \
-                                         column read here would be a date a thousandfold wrong",
+                                     declares it '{}'. A `timestamp_us` reads a microsecond \
+                                     timestamp or an `i64`, and nothing else — a millisecond \
+                                     column read here would be a date a thousandfold wrong",
                                     column.data_type(),
                                     ty.arrow_type_name()
                                 ),
-                            })?;
-                        let nulls = column.nulls().cloned();
-                        widened
-                            .into_iter()
-                            .enumerate()
-                            .map(|(row, value)| {
-                                if nulls.as_ref().is_some_and(|n| n.is_null(row)) {
-                                    return Err(missing(row));
+                            }
+                        })?;
+                        (0..column.len())
+                            .map(|row| match read.value(row) {
+                                Ok(ScalarValue::Null) => Err(missing(row)),
+                                Ok(ScalarValue::TimestampUs(value)) => {
+                                    Ok(MetadataValue::TimestampUs(value))
                                 }
-                                Ok(match ty {
-                                    ScalarType::TimestampUs => MetadataValue::TimestampUs(value),
-                                    _ => MetadataValue::Int(value),
-                                })
+                                Ok(ScalarValue::I64(value)) => Ok(MetadataValue::Int(value)),
+                                Ok(other) => {
+                                    unreachable!("read as an i64 or a timestamp: {other:?}")
+                                }
+                                Err(e) => Err(BuildError::Schema {
+                                    path: path.to_path_buf(),
+                                    detail: format!(
+                                        "the roster column '{name}' carries {} at row {row}, \
+                                         which does not fit an i64 ({}..={}); write a value in \
+                                         that range",
+                                        e.value, e.min, e.max
+                                    ),
+                                }),
                             })
                             .collect::<Result<_>>()?
                     }

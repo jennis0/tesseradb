@@ -4625,10 +4625,9 @@ fn build_scalar_tail_ingest_batch() -> Vec<u8> {
 /// (`filter-index.md` §5), so the value that answers has crossed the whole seam: Arrow decode to
 /// `WalScalar`, WAL, buffer, and the flush extent the filter scans.
 ///
-/// This is the regression test for the missing-arm defect (`control.rs`'s `scalar_at` doc): six of
-/// these twelve types were declarable and buildable but refused at ingest with a 422, so the 200
-/// asserted first is half the test. Enumerating [`SCALAR_TAIL_TYPES`] rather than naming the six
-/// keeps the assertion complete against the next type the set grows by.
+/// The 200 asserted first is half the test: a type the build reads and the ingest refuses is one
+/// this catches. Enumerating [`SCALAR_TAIL_TYPES`] keeps the assertion complete against the next
+/// type the set grows by.
 #[tokio::test]
 async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
     let tmp = TempDir::new().unwrap();
