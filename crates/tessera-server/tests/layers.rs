@@ -101,7 +101,7 @@ async fn the_meta_layer_list_is_filtered_per_principal() {
 async fn a_published_layer_carries_its_declaration_and_never_its_cardinality() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    put_layer(&server, declaration("clusters/a", Some("0"))).await;
+    register(&server, declaration("clusters/a", Some("0"))).await;
 
     let layers = meta_layers(&server, &["0"]).await;
     let layer = &layers[0];
@@ -170,7 +170,7 @@ async fn an_incoherent_declaration_is_refused_with_a_reason() {
 async fn a_dropped_name_is_gone_from_meta_and_refused_on_recreation() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    put_layer(&server, declaration("clusters/a", None)).await;
+    register(&server, declaration("clusters/a", None)).await;
     assert_eq!(meta_layers(&server, &["0"]).await.len(), 1);
 
     let resp = server
@@ -381,7 +381,7 @@ async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() 
 async fn an_unresolvable_member_refuses_the_whole_batch() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    put_layer(&server, declaration("clusters/a", None)).await;
+    register(&server, declaration("clusters/a", None)).await;
 
     let nonexistent = member(u64::MAX);
     let (status, body) = publish(
@@ -423,7 +423,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says
     predicate["hierarchy"] = json!({ "kind": "flat", "prune_children": false });
     predicate["content"] =
         json!({ "computed": [], "supplied": [] });
-    assert_eq!(put_layer(&server, predicate).await.0, 201);
+    register(&server, predicate).await;
 
     let (status, body) = publish(
         &server,
@@ -484,7 +484,7 @@ async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
     let server = serve(&tmp).await;
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
-    assert_eq!(put_layer(&server, d).await.0, 201);
+    register(&server, d).await;
 
     // 300 documents; the fixture gives term 1 to every third source id.
     let members: Vec<String> = (0..300u64).map(member).collect();
@@ -536,7 +536,7 @@ async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
 
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
-    put_layer(&server, d).await;
+    register(&server, d).await;
     publish(
         &server,
         "clusters/a",
@@ -571,7 +571,7 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
     let server = serve(&tmp).await;
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
-    put_layer(&server, d).await;
+    register(&server, d).await;
     publish(
         &server,
         "clusters/a",
@@ -627,7 +627,7 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
     let expected_narrow = (0..300u64).filter(|s| terms_of(*s).contains(&1)).count() as u64;
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = json!({ "count": expected_narrow + 1 });
-    assert_eq!(put_layer(&server, d).await.0, 201);
+    register(&server, d).await;
     let members: Vec<String> = (0..300u64).map(member).collect();
     let (status, _) = publish(
         &server,
@@ -679,7 +679,7 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
 async fn an_idset_is_required_with_identifiers_and_refused_beside_external_ids() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    put_layer(&server, declaration("clusters/a", None)).await;
+    register(&server, declaration("clusters/a", None)).await;
 
     let (status, body) = publish(
         &server,
@@ -718,7 +718,7 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
     let server = serve(&tmp).await;
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
-    assert_eq!(put_layer(&server, d).await.0, 201);
+    register(&server, d).await;
 
     let members: Vec<String> = (0..300u64).map(member).collect();
     let (status, body) = publish(
@@ -794,10 +794,7 @@ fn tiered_zoomed(name: &str) -> serde_json::Value {
 
 /// Plant one artifact at each of three levels of `admin/boundaries`.
 async fn plant_three_levels(server: &TestServer) {
-    assert_eq!(
-        put_layer(server, tiered_zoomed("admin/boundaries")).await.0,
-        201
-    );
+    register(server, tiered_zoomed("admin/boundaries")).await;
     for (level, key) in [(0u32, "country"), (1, "state"), (2, "county")] {
         let members: Vec<String> = (0..300u64).map(member).collect();
         let (status, body) = publish(
@@ -928,7 +925,7 @@ async fn computed_row(server: &TestServer, extra: serde_json::Value) -> Artifact
 async fn one_cluster(server: &TestServer) {
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
-    assert_eq!(put_layer(server, d).await.0, 201);
+    register(server, d).await;
     let members: Vec<String> = (0..300u64).map(member).collect();
     let (status, body) = publish(
         server,
@@ -1179,7 +1176,7 @@ async fn the_shape_columns_trail_and_are_absent_when_no_served_layer_declares_on
     // The default `declaration` computes a hull, so serving it puts the two columns at the tail.
     let mut d = declaration("clusters/hulled", None);
     d["require_member_visibility"] = serde_json::Value::Null;
-    assert_eq!(put_layer(&server, d).await.0, 201);
+    register(&server, d).await;
     let (status, body) = publish(
         &server,
         "clusters/hulled",
@@ -1245,12 +1242,7 @@ const SQUARE: &str = "POLYGON ((100 100, 500 100, 500 500, 100 500, 100 100), (2
 async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_principal() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    assert_eq!(
-        put_layer(&server, spatial_declaration("boundaries/b"))
-            .await
-            .0,
-        201
-    );
+    register(&server, spatial_declaration("boundaries/b")).await;
     let (status, body) = publish(
         &server,
         "boundaries/b",
@@ -1319,12 +1311,7 @@ async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_princi
 async fn a_shape_published_into_a_warm_level_is_served() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    assert_eq!(
-        put_layer(&server, spatial_declaration("boundaries/b"))
-            .await
-            .0,
-        201
-    );
+    register(&server, spatial_declaration("boundaries/b")).await;
 
     let (status, body) = publish(
         &server,
@@ -1416,7 +1403,7 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
             { "name": "outline", "type": "polygon", "require_member_visibility": "inherited" }
         ]
     });
-    assert_eq!(put_layer(&server, d).await.0, 201);
+    register(&server, d).await;
     let kinds: Vec<serde_json::Value> = meta_layers(&server, &["0"]).await.iter().map(|l| l["shape"].clone()).collect();
     assert_eq!(kinds, vec![json!("authored")]);
 
