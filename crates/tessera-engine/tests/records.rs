@@ -2351,3 +2351,81 @@ fn rows_a_refreshed_projection_makes_visible_are_served_and_matched() {
         }
     }
 }
+
+/// The bytes the arrays of `batch` hold in their buffers: values, offsets and validity, and their
+/// children's.
+fn buffer_bytes(batch: &RecordBatch) -> usize {
+    fn of(data: &arrow::array::ArrayData) -> usize {
+        data.buffers().iter().map(|b| b.len()).sum::<usize>()
+            + data.nulls().map_or(0, |n| n.buffer().len())
+            + data.child_data().iter().map(of).sum::<usize>()
+    }
+    batch.columns().iter().map(|c| of(&c.to_data())).sum()
+}
+
+/// The bytes `batch` comes to as an Arrow IPC stream, schema and all.
+fn encoded_bytes(batch: &RecordBatch) -> usize {
+    let mut writer =
+        arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &batch.schema()).unwrap();
+    writer.write(batch).unwrap();
+    writer.finish().unwrap();
+    writer.into_inner().unwrap().len()
+}
+
+/// **A page's bytes are the bytes its columns' buffers hold**, strings included, and the page is
+/// held to the ceiling by them: the batch's own buffers, and its encoded size less framing, come
+/// to what the page end reports.
+#[test]
+fn a_pages_bytes_are_its_buffers_and_the_ceiling_holds_on_them() {
+    let fx = Fx::new();
+    let session = fx.engine.authorise(&both_credential()).unwrap();
+    let fields = names(&["note", "prose", "tag", "band", "score", "when"]);
+    let system = names(&["labels", "external_id", "position"]);
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let mut req = request("s0", &fields);
+        req.system_fields = &system;
+        req.order = Some(order);
+        req.limits.max_page_bytes = 8192;
+        let read = read_all(&fx.engine, &session, &req);
+        assert_each_once(&read.ids());
+        assert_eq!(read.ids().len() as u64, N, "{order:?}");
+        for (batch, end) in &read.pages {
+            assert_eq!(end.bytes, buffer_bytes(batch), "{order:?}: the page's buffers");
+            assert!(end.bytes <= 8192 || batch.num_rows() == 1, "{order:?}: the ceiling");
+            let encoded = encoded_bytes(batch);
+            let framing = 8 * 3 * batch.num_columns() + 4096;
+            assert!(
+                end.bytes <= encoded && encoded <= end.bytes + framing,
+                "{order:?}: {} bytes counted, {encoded} encoded",
+                end.bytes
+            );
+        }
+    }
+}
+
+/// **A row the byte ceiling cuts from a page adds no key to that page's dictionary**: every
+/// page's dictionary holds exactly the keys its rows carry.
+#[test]
+fn a_row_cut_by_the_ceiling_adds_no_key_to_the_dictionary() {
+    let fx = Fx::new();
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&["band"]);
+    let mut req = request("s0", &fields);
+    req.limits.max_page_bytes = 40;
+    req.pages = Some(200);
+    let (sink, _) = respond(&fx.engine, &session, req).unwrap();
+    assert!(
+        sink.pages.iter().all(|(_, end)| end.ended_by == PageEndedBy::Bytes),
+        "every page is cut by the ceiling"
+    );
+    for (batch, _) in &sink.pages {
+        let band = col::<DictionaryArray<Int32Type>>(batch, "band");
+        let keys = band.values().as_any().downcast_ref::<StringArray>().unwrap();
+        let dictionary: BTreeSet<&str> = keys.iter().map(|k| k.unwrap()).collect();
+        let carried: BTreeSet<&str> = (0..band.len())
+            .filter_map(|i| band.key(i))
+            .map(|k| keys.value(k))
+            .collect();
+        assert_eq!(dictionary, carried);
+    }
+}
