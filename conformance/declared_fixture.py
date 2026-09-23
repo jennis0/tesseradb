@@ -460,7 +460,8 @@ def observe(server, plan: Plan) -> Observation:
 
 
 def _category_columns(meta: dict) -> set[str]:
-    """Category columns, whose codes both deployments draw at random."""
+    """Category columns. No vocabulary here pins a code, so both deployments draw every code at
+    random."""
     families = meta.get("declared_scalars", []) + meta.get("scoped_scalars", [])
     return {d["name"] for d in families if d.get("category")}
 
