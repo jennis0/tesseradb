@@ -128,6 +128,7 @@ jobs:
       - name: coverage report
         if: ${{ !cancelled() }}
         run: |
+          source <(cargo llvm-cov show-env --sh)
           cargo llvm-cov report --lcov --output-path rust.lcov
           sed -i "s|^SF:$PWD/|SF:|" rust.lcov
       - uses: actions/upload-artifact@v4
