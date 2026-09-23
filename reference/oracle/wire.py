@@ -81,6 +81,9 @@ class Artifact(NamedTuple):
     #: The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2), and `None`
     #: where the request carried no `highlight`.
     highlighted: bool | None
+    #: The identifier of the artifact this row is attached to, a row of the same response, or
+    #: `None` for a row attached to nothing.
+    target: int | None = None
 
 
 FRAME_TILES = 1
@@ -258,6 +261,7 @@ def decode_frames(data: bytes):
                         "rung",
                         "matched",
                         "highlighted",
+                        "target",
                     )
                 }
                 shapes = "shape_x" in names
@@ -295,6 +299,7 @@ def decode_frames(data: bytes):
                             parent_ids=list(columns["parent_ids"][row] or []),
                             matched=columns["matched"][row],
                             highlighted=columns["highlighted"][row],
+                            target=columns["target"][row],
                         )
                     )
             if not artifacts:

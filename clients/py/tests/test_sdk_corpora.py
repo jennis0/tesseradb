@@ -74,10 +74,14 @@ def points(db, view: str, columns, file: str | None = None) -> None:
     db.insert(view, parquet(db, name, every), **named)
 
 
-def artifacts(db, layer: str, columns=("key",), view: str | None = None) -> None:
+def artifacts(
+    db, layer: str, columns=("key",), view: str | None = None, access: str | None = None
+) -> None:
     named = {"key": "key"}
     if view is not None:
         named["view"] = view
+    if access is not None:
+        named["access"] = access
     db.insert(
         layer,
         artifacts=parquet(db, f"{layer}_artifacts".replace("/", "_"), columns),
@@ -208,7 +212,6 @@ def test_multiview(tmp_path):
         "collections",
         kind="flat",
         views=["world", "quarter"],
-        artifact_visibility={"field": "access", "default": "inherited"},
         require_member_visibility="all",
         computed=(),
         supplied=[("tag", "text", "inherited")],
@@ -301,6 +304,6 @@ def test_multiview(tmp_path):
         value="coverage",
         view="quarter",
     )
-    artifacts(db, "collections")
+    artifacts(db, "collections", ("key", "access"), access="access")
     artifacts(db, "quarter_clusters", ("key", "quarter"), view="quarter")
     accepts(db)

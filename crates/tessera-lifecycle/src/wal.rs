@@ -713,6 +713,8 @@ pub enum ArtifactPart {
         values: Vec<String>,
         digest: [u8; 32],
     },
+    /// The access label, as descriptors in [`crate::membership::canonical_access`]'s order.
+    Access(Vec<Vec<u8>>),
 }
 
 /// One row of a [`WalRecord::ValuesBatch`]: the entity the values fill, resolved at admission from
@@ -874,6 +876,9 @@ pub struct PublishedArtifact {
     /// layer is the reader's own; and unlike an attachment this is not a visibility term — a
     /// node's verdict is its own (decision 0080) — so there is no target entity to test.
     pub parents: Vec<ParentRef>,
+    /// The artifact's own access label, as descriptors in
+    /// [`crate::membership::canonical_access`]'s order. Empty is no label.
+    pub access: Vec<Vec<u8>>,
 }
 
 /// One resolved parent of an artifact, inside its own layer.
@@ -1048,7 +1053,9 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // is positional, so a 20 growth read at 21 takes the next record's leading bytes for the leaving
 // set it does not carry, and a 20 publication takes the members' length for the view's; a log at
 // 20 is refused.
-const WAL_VERSION: u16 = 21;
+// **22**: `PublishedArtifact` gained `access`, an artifact's own access label, and `ArtifactPart`
+// gained `Access`. A log at 21 is refused.
+const WAL_VERSION: u16 = 22;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2500,6 +2507,7 @@ mod tests {
                     attached_to: None,
                     parents: Vec::new(),
                     shape: None,
+                    access: Vec::new(),
                 },
                 // An artifact whose members have all been deleted is a real state, and an
                 // absent `key` is the other optional field — both under postcard, which
@@ -2553,6 +2561,7 @@ mod tests {
                         "s0".into(),
                         vec![1, 2, 3],
                     )]),
+                    access: vec![b"team-a".to_vec(), b"team-b".to_vec()],
                 },
             ],
         };

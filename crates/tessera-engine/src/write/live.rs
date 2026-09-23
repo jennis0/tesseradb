@@ -274,10 +274,9 @@ impl LiveState {
     /// set probe answers a gate-failed name and a never-registered one alike.
     pub(crate) fn resolve_layers(
         &self,
-        is_satisfied: impl Fn(tessera_types::TermId) -> bool,
-        resolve_label: impl Fn(&str) -> Option<tessera_types::TermId>,
+        admits: impl Fn(&str) -> bool,
     ) -> tessera_lifecycle::ResolvedLayers {
-        lock_recover(&self.registry).resolve_for(is_satisfied, resolve_label)
+        lock_recover(&self.registry).resolve_for(admits)
     }
 
     /// Every registered layer, as the registry holds it: the declarations, never a decision. The

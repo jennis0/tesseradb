@@ -8,3 +8,4 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+tessera-types = { path = "../tessera-types" }

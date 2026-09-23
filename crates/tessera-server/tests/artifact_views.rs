@@ -1306,6 +1306,60 @@ async fn a_recreated_view_the_size_of_its_predecessor_serves_its_own_items_after
     );
 }
 
+/// **A growth names the view its artifact belongs to**, as a publication does: on a group-scoped
+/// layer the same key in two views is two artifacts, and `PATCH` grows the one in the view it
+/// names. Naming none is refused. The Arrow form's case is below.
+#[tokio::test]
+async fn a_growth_grows_the_artifact_in_the_view_it_names() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([
+            { "key": "c1", "view": "q1", "members": members(0..10) },
+            { "key": "c1", "view": "q2", "members": members(0..10) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let patch = |body: serde_json::Value| {
+        server
+            .client
+            .patch(server.control_url(&format!(
+                "/control/layers/{}/artifacts",
+                SCOPED.replace('/', "%2F")
+            )))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+    };
+    let resp = patch(json!({ "addressing": "external", "artifacts": [
+        { "key": "c1", "members": members(10..20) }
+    ] }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 422);
+
+    let resp = patch(json!({ "addressing": "external", "artifacts": [
+        { "key": "c1", "view": "q2", "members": members(10..25) }
+    ] }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{:?}", resp.text().await);
+    ticked(&server).await;
+    assert_eq!(
+        served(&server, "quarter:q1", SCOPED).await,
+        vec![("c1".to_string(), 10)]
+    );
+    assert_eq!(
+        served(&server, "quarter:q2", SCOPED).await,
+        vec![("c1".to_string(), 25)]
+    );
+}
+
 /// A view dropped while its first flush is in flight takes none of that flush's rows, whether its
 /// key is created again during the flight or only after it, live and after a restart.
 #[tokio::test]
@@ -1350,4 +1404,88 @@ async fn a_view_dropped_during_its_first_flush_takes_none_of_its_rows() {
         );
         server.shutdown().await;
     }
+}
+
+
+/// One Arrow growth body: `key`, `members` and, where given, a `view` column of the type named.
+fn arrow_growth(key: &str, members: Vec<String>, view: Option<(DataType, Option<&str>)>) -> Vec<u8> {
+    use arrow::array::{ArrayRef, Int64Array, ListBuilder, StringArray, StringBuilder};
+    let mut list = ListBuilder::new(StringBuilder::new());
+    for member in members {
+        list.values().append_value(member);
+    }
+    list.append(true);
+    let list: ArrayRef = Arc::new(list.finish());
+    let mut fields = vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("members", list.data_type().clone(), false),
+    ];
+    let mut columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![key])), list];
+    if let Some((ty, value)) = view {
+        fields.push(Field::new("view", ty.clone(), true));
+        columns.push(match ty {
+            DataType::Utf8 => Arc::new(StringArray::from(vec![value])),
+            _ => Arc::new(Int64Array::from(vec![Some(2)])),
+        });
+    }
+    let metadata = [("addressing".to_string(), "external".to_string())].into_iter().collect();
+    let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.finish().unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// The Arrow form of `PATCH` names a group-scoped artifact's view in a `view` column: a growth
+/// naming one grows that view's artifact, and one with no column, a null cell or a column that is
+/// not text is refused with nothing applied.
+#[tokio::test]
+async fn an_arrow_growth_grows_the_artifact_in_the_view_its_view_column_names() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([
+            { "key": "c1", "view": "q1", "members": members(0..10) },
+            { "key": "c1", "view": "q2", "members": members(0..10) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let patch = |body: Vec<u8>| {
+        server
+            .client
+            .patch(server.control_url(&format!(
+                "/control/layers/{}/artifacts",
+                SCOPED.replace('/', "%2F")
+            )))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .header("content-type", "application/vnd.apache.arrow.stream")
+            .body(body)
+            .send()
+    };
+    for refused in [
+        arrow_growth("c1", members(10..20), None),
+        arrow_growth("c1", members(10..20), Some((DataType::Utf8, None))),
+        arrow_growth("c1", members(10..20), Some((DataType::Int64, None))),
+    ] {
+        let resp = patch(refused).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 422);
+    }
+    let resp = patch(arrow_growth("c1", members(10..25), Some((DataType::Utf8, Some("q2")))))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{:?}", resp.text().await);
+    ticked(&server).await;
+    assert_eq!(
+        served(&server, "quarter:q1", SCOPED).await,
+        vec![("c1".to_string(), 10)]
+    );
+    assert_eq!(
+        served(&server, "quarter:q2", SCOPED).await,
+        vec![("c1".to_string(), 25)]
+    );
 }

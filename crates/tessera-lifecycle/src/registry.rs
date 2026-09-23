@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tessera_types::layer::{
     DeclarationError, EntityRun, LayerDeclaration, MembershipSource, RegisteredLayer, ReservedRuns,
 };
-use tessera_types::{EntityId, TermId};
+use tessera_types::EntityId;
 
 use crate::alloc::{AllocError, Allocator};
 use crate::membership::{serialise_members, ArtifactStore, IncomingArtifact};
@@ -76,6 +76,11 @@ pub enum RegistryError {
     /// tested is refused for the opposite reason: a claim the service carries and never checks
     /// reads, to anyone auditing it, as a control that is running.
     Content { layer: String, detail: String },
+    /// An artifact carries an access label on a layer whose `artifact_visibility` names no field,
+    /// so nothing would read it.
+    Access { layer: String, key: Option<String> },
+    /// An artifact's access labels are more, or longer, than a stored record can hold.
+    AccessTooLong { layer: String, key: Option<String> },
     /// A layer named in `depends_on` is not registered. Refused at create rather than discovered at
     /// the first edge, because an edge's target must exist before the edge (`annotation-write-cycle.md`
     /// §5.0.4) and a dangling dependency is that ordering constraint already broken.
@@ -436,6 +441,27 @@ impl std::fmt::Display for RegistryError {
             RegistryError::Content { layer, detail } => {
                 write!(f, "{layer}: {detail}")
             }
+            RegistryError::AccessTooLong { layer, key } => write!(
+                f,
+                "{layer}: the artifact{} carries more than {} access labels, or one longer than {} \
+                 bytes; send fewer or shorter labels",
+                match key {
+                    Some(key) => format!(" keyed {key}"),
+                    None => String::new(),
+                },
+                u16::MAX - 1,
+                u16::MAX - 1
+            ),
+            RegistryError::Access { layer, key } => write!(
+                f,
+                "{layer}: the artifact{} carries an access label, and this layer's \
+                 `artifact_visibility` names no field, so nothing would read it. Declare \
+                 `artifact_visibility.field` on the layer, or send the artifact without `access`",
+                match key {
+                    Some(key) => format!(" keyed {key}"),
+                    None => String::new(),
+                }
+            ),
             RegistryError::MissingDependency { layer, depends_on } => write!(
                 f,
                 "{layer} declares depends_on {depends_on}, which is not registered — an edge's \
@@ -716,6 +742,34 @@ fn scoped_view<'a>(
             ),
         }),
     }
+}
+
+/// The one rule on what access label an artifact may carry: any a stored record can hold, on a
+/// layer whose `artifact_visibility` names a field, and none elsewhere.
+fn check_access(
+    layer_name: &str,
+    declaration: &LayerDeclaration,
+    key: Option<&str>,
+    access: &[Vec<u8>],
+) -> Result<(), RegistryError> {
+    if access.is_empty() {
+        return Ok(());
+    }
+    if !declaration.artifact_visibility.carries_own_labels() {
+        return Err(RegistryError::Access {
+            layer: layer_name.to_string(),
+            key: key.map(str::to_string),
+        });
+    }
+    // A packed record counts its labels and their lengths in a `u16`, whose top value marks a
+    // record it could not write.
+    if access.len() >= u16::MAX as usize || access.iter().any(|d| d.len() >= u16::MAX as usize) {
+        return Err(RegistryError::AccessTooLong {
+            layer: layer_name.to_string(),
+            key: key.map(str::to_string),
+        });
+    }
+    Ok(())
 }
 
 impl std::error::Error for RegistryError {}
@@ -1103,6 +1157,7 @@ impl LayerRegistry {
                     .map(|(rank, content)| (rank as u16, content.values.clone()))
                     .collect(),
                 shape: artifact.shape.clone(),
+                access: artifact.access.clone(),
             };
             let prepared = self.prepare_fills(
                 layer_name,
@@ -1330,6 +1385,16 @@ impl LayerRegistry {
                 None => fills.push(ArtifactPart::Shape(shape.clone())),
                 Some(held) if held.digest() == shape.digest() => {}
                 Some(_) => return Err(conflict("shape".to_string())),
+            }
+        }
+
+        if !parts.access.is_empty() {
+            check_access(layer_name, &layer.declaration, Some(key), &parts.access)?;
+            let access = crate::membership::canonical_access(&parts.access);
+            if record.access.is_empty() {
+                fills.push(ArtifactPart::Access(access));
+            } else if record.access != access {
+                return Err(conflict("access".to_string()));
             }
         }
 
@@ -1574,6 +1639,7 @@ impl LayerRegistry {
                 attached_to: None,
                 parent_keys: Vec::new(),
                 shape: None,
+                access: Vec::new(),
             })
             .collect();
         self.prepare_artifacts(
@@ -1672,6 +1738,14 @@ impl LayerRegistry {
             .iter()
             .filter(|artifact| !declared.is_empty() && artifact.contents.is_empty())
             .count() as u64;
+        for artifact in incoming {
+            check_access(
+                layer_name,
+                &layer.declaration,
+                artifact.key.as_deref(),
+                &artifact.access,
+            )?;
+        }
         for (i, artifact) in incoming.iter().enumerate() {
             let refuse = |detail: String| {
                 Err(RegistryError::Content {
@@ -2012,6 +2086,7 @@ impl LayerRegistry {
                         }),
                     parents: parents[i].clone(),
                     shape: artifact.shape.clone(),
+                    access: crate::membership::canonical_access(&artifact.access),
                 }
             })
             .collect();
@@ -2097,11 +2172,10 @@ impl LayerRegistry {
         // design does not answer; a caller who wants two pages sends two requests, and each one's
         // ranks are read against the state the previous acknowledgement reported.
         //
-        // The growth route carries no view and addresses no group-scoped layer
-        // (`resolve_growth_key`), so every key here is in the one set.
+        // Per `(view, key)`: on a group-scoped layer one key in two views is two artifacts.
         if let Some(key) = repeated_key_with_parts(incoming.iter().map(|join| {
             (
-                None,
+                join.view.as_deref(),
                 Some(join.key.as_str()),
                 !join.parts.is_empty() || join.rank.is_some(),
             )
@@ -2114,7 +2188,8 @@ impl LayerRegistry {
         let mut batch_edges = BTreeMap::new();
         let mut withdrawn = Vec::new();
         for (index, join) in incoming.iter().enumerate() {
-            let ordinal = self.resolve_growth_key(layer_name, level, None, &join.key, store)?;
+            let ordinal =
+                self.resolve_growth_key(layer_name, level, join.view.as_deref(), &join.key, store)?;
             if let Some(rank) = join.rank {
                 if !join.parts.is_empty() {
                     return Err(RegistryError::SetBesidePart {
@@ -2150,7 +2225,7 @@ impl LayerRegistry {
                 layer_name,
                 level,
                 ordinal,
-                None,
+                join.view.as_deref(),
                 &join.key,
                 &join.parts,
                 store,
@@ -2750,17 +2825,13 @@ impl LayerRegistry {
     /// label join: a join yields an empty required set for a disjunctive gate and would admit every
     /// principal. That error has been made once already in this codebase, in the view gate, and
     /// was caught in review.
-    pub fn resolve_for(
-        &self,
-        is_satisfied: impl Fn(TermId) -> bool,
-        resolve_label: impl Fn(&str) -> Option<TermId>,
-    ) -> ResolvedLayers {
+    pub fn resolve_for(&self, admits: impl Fn(&str) -> bool) -> ResolvedLayers {
         let names = self
             .layers
             .iter()
             .filter(|(_, layer)| match &layer.declaration.visibility {
                 None => true,
-                Some(label) => resolve_label(label).is_some_and(&is_satisfied),
+                Some(label) => admits(label),
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -2918,13 +2989,7 @@ mod tests {
         .unwrap();
         register(&mut reg, &mut alloc, declaration("clusters/open")).unwrap();
 
-        let resolved = reg.resolve_for(
-            |t| t == TermId::new(7),
-            |label| match label {
-                "clearance:ts" => Some(TermId::new(99)),
-                _ => None,
-            },
-        );
+        let resolved = reg.resolve_for(|_| false);
 
         assert!(resolved.contains("clusters/open"));
         assert!(!resolved.contains("clusters/secret"));
@@ -2933,27 +2998,8 @@ mod tests {
         assert_eq!(resolved.names().collect::<Vec<_>>(), vec!["clusters/open"]);
 
         // And with the term: the same layer resolves.
-        let cleared = reg.resolve_for(
-            |t| t == TermId::new(7) || t == TermId::new(99),
-            |label| match label {
-                "clearance:ts" => Some(TermId::new(99)),
-                _ => None,
-            },
-        );
+        let cleared = reg.resolve_for(|label| label == "clearance:ts");
         assert!(cleared.contains("clusters/secret"));
-    }
-
-    #[test]
-    fn a_gate_label_the_dictionary_does_not_hold_reaches_nobody() {
-        // Fail-closed. Treating an unresolvable label as "no gate" would publish the layer to
-        // everyone, which is the direction a mistake must never take.
-        let mut reg = LayerRegistry::new();
-        let mut alloc = Allocator::new(0);
-        register(&mut reg, &mut alloc, gated("clusters/x", "team:nobody")).unwrap();
-
-        let resolved = reg.resolve_for(|_| true, |_| None);
-        assert!(!resolved.contains("clusters/x"));
-        assert_eq!(resolved.names().count(), 0);
     }
 
     #[test]
@@ -2963,7 +3009,7 @@ mod tests {
         let mut reg = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
-        let resolved = reg.resolve_for(|_| false, |_| None);
+        let resolved = reg.resolve_for(|_| false);
         assert!(resolved.is_current_for(reg.version()));
 
         register(&mut reg, &mut alloc, declaration("clusters/b")).unwrap();
@@ -3096,6 +3142,7 @@ mod tests {
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
+            access: Vec::new(),
         }
     }
 
@@ -4463,10 +4510,10 @@ mod tests {
         );
     }
 
-    /// The growth route carries no view, so it addresses no group-scoped layer: refused naming
-    /// what the caller has instead, rather than resolving one view's artifact by accident.
+    /// A growth naming no view on a group-scoped layer is refused rather than resolving one
+    /// view's artifact by accident.
     #[test]
-    fn the_growth_route_refuses_a_group_scoped_layer() {
+    fn a_growth_naming_no_view_on_a_group_scoped_layer_is_refused() {
         let mut reg = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
         let store = ArtifactStore::default();
@@ -4508,5 +4555,136 @@ mod tests {
             matches!(refused, Err(RegistryError::ViewIdentity { .. })),
             "{refused:?}"
         );
+    }
+
+    /// A growth on a group-scoped layer reaches the artifact in the view it names, and the same
+    /// key in another view is another artifact.
+    #[test]
+    fn a_growth_reaches_the_artifact_in_the_view_it_names() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        register(&mut reg, &mut alloc, scoped("clusters/q", "quarter")).unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/q",
+            &[in_view("c1", "q1", &[1]), in_view("c1", "q2", &[2])],
+        )
+        .unwrap();
+        let mut join = crate::membership::IncomingGrowth::from_entities(
+            "c1".into(),
+            [EntityId::new(7)],
+        );
+        join.view = Some("q2".into());
+        let prepared = reg.prepare_grow("clusters/q", 0, &[join], &store).unwrap();
+        let record = prepared.growth.expect("a join");
+        assert_eq!(store.apply(&record, 0), 0);
+        let q1 = store.ordinal_of_key("clusters/q", 0, Some("q1"), "c1").unwrap();
+        let q2 = store.ordinal_of_key("clusters/q", 0, Some("q2"), "c1").unwrap();
+        assert!(!store.get("clusters/q", 0, q1).unwrap().members.contains(7));
+        assert!(store.get("clusters/q", 0, q2).unwrap().members.contains(7));
+    }
+
+    /// A label on a layer whose `artifact_visibility` names no field is refused at publication
+    /// and at a fill, before anything is allocated.
+    #[test]
+    fn an_access_label_on_a_layer_naming_no_field_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        let mut labelled = incoming("c1", &[1]);
+        labelled.access = vec![b"team-a".to_vec()];
+        let refused = reg
+            .prepare_put("clusters/a", 0, std::slice::from_ref(&labelled), &store, &mut alloc)
+            .unwrap_err();
+        assert!(matches!(refused, RegistryError::Access { .. }), "{refused:?}");
+
+        publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[incoming("c1", &[1])]).unwrap();
+        let refused = reg
+            .prepare_put("clusters/a", 0, &[labelled], &store, &mut alloc)
+            .unwrap_err();
+        assert!(matches!(refused, RegistryError::Access { .. }), "{refused:?}");
+    }
+
+    /// On a layer naming a field, a label is published in canonical order, filled once on a held
+    /// artifact that has none, accepted again unchanged, and a different one is a part conflict.
+    #[test]
+    fn an_access_label_is_published_and_filled_on_the_fill_rule() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let mut d = declaration("clusters/a");
+        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        register(&mut reg, &mut alloc, d).unwrap();
+
+        let mut first = incoming("c1", &[1]);
+        first.access = vec![b"b".to_vec(), b"a".to_vec(), b"b".to_vec()];
+        let prepared = reg
+            .prepare_put("clusters/a", 0, &[first, incoming("c2", &[2])], &store, &mut alloc)
+            .unwrap();
+        apply_put(&mut reg, &mut store, &prepared);
+        assert_eq!(
+            store.get("clusters/a", 0, 0).unwrap().access,
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+        assert!(store.get("clusters/a", 0, 1).unwrap().access.is_empty());
+
+        let mut fill = incoming("c2", &[]);
+        fill.access = vec![b"c".to_vec()];
+        let prepared = reg
+            .prepare_put("clusters/a", 0, std::slice::from_ref(&fill), &store, &mut alloc)
+            .unwrap();
+        assert!(matches!(
+            part_of(&prepared.fills[0]),
+            crate::wal::ArtifactPart::Access(_)
+        ));
+        apply_put(&mut reg, &mut store, &prepared);
+        assert_eq!(store.get("clusters/a", 0, 1).unwrap().access, vec![b"c".to_vec()]);
+
+        let again = reg
+            .prepare_put("clusters/a", 0, std::slice::from_ref(&fill), &store, &mut alloc)
+            .unwrap();
+        assert!(again.fills.is_empty());
+
+        let mut other = incoming("c2", &[]);
+        other.access = vec![b"d".to_vec()];
+        let refused = reg
+            .prepare_put("clusters/a", 0, &[other], &store, &mut alloc)
+            .unwrap_err();
+        assert!(matches!(refused, RegistryError::PartConflict { .. }), "{refused:?}");
+    }
+
+    /// A label longer than a stored record can hold, or more labels than it can count, is refused
+    /// at publication and at a fill, rather than packed into a record the next open cannot read.
+    #[test]
+    fn an_access_label_too_long_to_store_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let mut d = declaration("clusters/a");
+        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        register(&mut reg, &mut alloc, d).unwrap();
+        publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[incoming("held", &[1])]).unwrap();
+
+        let long = vec![b'x'; u16::MAX as usize];
+        let many: Vec<Vec<u8>> = (0..u16::MAX as u32).map(|i| i.to_le_bytes().to_vec()).collect();
+        for access in [vec![long.clone()], many.clone()] {
+            let mut fresh = incoming("c1", &[1]);
+            fresh.access = access.clone();
+            assert!(reg
+                .prepare_put("clusters/a", 0, &[fresh], &store, &mut alloc)
+                .is_err());
+            let mut fill = incoming("held", &[]);
+            fill.access = access;
+            assert!(reg
+                .prepare_put("clusters/a", 0, &[fill], &store, &mut alloc)
+                .is_err());
+        }
+        let mut fits = incoming("c2", &[1]);
+        fits.access = vec![vec![b'x'; u16::MAX as usize - 1]];
+        assert!(reg.prepare_put("clusters/a", 0, &[fits], &store, &mut alloc).is_ok());
     }
 }
