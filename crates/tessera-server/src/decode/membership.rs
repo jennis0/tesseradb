@@ -6,13 +6,7 @@ use tessera_lifecycle::{BatchArtifacts, BatchEdge, BatchMembership};
 
 use super::DecodeError;
 
-/// A column named for a declared layer, and what its cells mean.
-///
-/// **Named for the layer, exactly as an attribute column is named for the attribute** — the
-/// declaration's own `name`, never an acquisition-side spelling. `fields` on `[layer.members]` maps
-/// a *file's* column name onto the canonical meaning and is build-only for that reason
-/// (`configuration.md` §2): a deployment that never builds has no file to map from, and a name a
-/// running node had to be told about could not be checked against anything.
+/// A column named for a declared layer, by the layer's own `name`, and what its cells mean.
 pub(super) struct MembershipColumn<'a> {
     layer: &'a str,
     /// The key of the view the column's artifacts are in, on a group-scoped layer.
@@ -26,24 +20,19 @@ pub(super) struct MembershipColumn<'a> {
 /// A key column's shape: one artifact per row, or a list of them.
 enum KeyCells<'a> {
     Scalar,
-    /// A `List`, whose rows may differ in length — which is what a lineage is.
+    /// A `List`, whose rows may differ in length, as a lineage's do.
     Variable(&'a arrow::array::ListArray),
     /// A `FixedSizeList`, every row of the arity its own type states.
     Fixed(&'a arrow::array::FixedSizeListArray),
 }
 
 impl KeyCells<'_> {
-    /// Whether the cells are lists — a scalar carries one artifact per row and has no arity to
-    /// disagree with a declaration.
     fn is_list(&self) -> bool {
         !matches!(self, KeyCells::Scalar)
     }
 
-    /// The range of the keys one row occupies, or `None` where the row named no artifact at all.
-    ///
-    /// **A null cell and an empty list are the whole row's "in no artifact"**, which is the scalar
-    /// rule applied to a cell that holds no key: a point may be in no artifact at any resolution,
-    /// and a clusterer that emitted nothing for it is the ordinary way of saying so.
+    /// The range of the keys one row occupies, or `None` where the row names no artifact: a null
+    /// cell and an empty list both mean the point is in no artifact.
     fn entries(&self, row: usize) -> Option<std::ops::Range<usize>> {
         let (start, end) = match self {
             KeyCells::Scalar => (row, row + 1),
@@ -66,14 +55,9 @@ impl KeyCells<'_> {
     }
 }
 
-/// Read one column named for a layer, at the shapes that layer may carry.
-///
-/// **Two refusals, and both are the declaration and the data disagreeing about arity.** A
-/// `FixedSizeList` states its length in its own type, so a levelled layer's is checked once here; a
-/// nested layer's lineage is as deep as each point's own branch and has no fixed arity at all. A
-/// plain list states its length a row at a time, and that check is in the row loop — reading the
-/// type alone would refuse every producer whose Arrow binding writes a plain list, which is most of
-/// them.
+/// Reads one column named for a layer. A `FixedSizeList` states its arity in its type, so it is
+/// checked once here, and a nested layer refuses one; a plain list's arity is checked row by row
+/// in [`MembershipTally::read`].
 pub(super) fn membership_column<'a>(
     body_name: &str,
     name: &'a str,
@@ -84,10 +68,7 @@ pub(super) fn membership_column<'a>(
     use arrow::array::{FixedSizeListArray, ListArray};
     use arrow::datatypes::DataType;
 
-    // A predicate layer's membership is *evaluated* per request, so there is nothing for a column
-    // to say: a stored answer beside a live predicate is what the artifact store refuses a
-    // publication for, and this is the same refusal one step earlier, where the batch can still be
-    // rejected without effect.
+    // A predicate layer's membership is evaluated per request, so there is nothing to store.
     if declaration.membership != tessera_types::layer::MembershipSource::Enumerated {
         return Err(DecodeError(format!(
             "{body_name}: column '{name}' names a layer whose membership is evaluated per \
@@ -161,12 +142,8 @@ pub(super) fn membership_column<'a>(
     })
 }
 
-/// What one batch's membership columns said, gathered as the executor takes it.
-///
-/// **Keyed by `(layer, level, key)` and carrying row positions**, because a batch's entity ids do
-/// not exist until its commit window closes. The executor resolves the key to an ordinal at
-/// admission and turns the positions into entities after the assignment — see
-/// [`tessera_lifecycle::BatchMembership`].
+/// What one batch's membership columns said, keyed by layer, level, view and key, with row
+/// positions rather than entities, which do not exist until the batch's commit window closes.
 #[derive(Default)]
 pub(super) struct MembershipTally {
     rows_of: std::collections::BTreeMap<(String, u32, Option<String>, String), Vec<u32>>,
@@ -174,10 +151,8 @@ pub(super) struct MembershipTally {
 }
 
 impl MembershipTally {
-    /// One row's cells of one membership column.
-    ///
-    /// `offset` is where this batch's rows start in the request's own numbering, since an Arrow IPC
-    /// stream may carry several record batches and the executor indexes one flat list of rows.
+    /// One row's cells of one membership column. `offset` is where this record batch's rows start
+    /// in the request, since an Arrow IPC stream may carry several.
     pub(super) fn read(
         &mut self,
         body_name: &str,
@@ -188,15 +163,9 @@ impl MembershipTally {
         let Some(entries) = column.cells.entries(row) else {
             return Ok(());
         };
-        // **The declaration and the data must agree — where the data is a list.** A stacked or
-        // tiered layer's list is one entry per declared level, that being what makes entry k mean
-        // level k, so a row of any other length is a lineage against a levelled declaration and
-        // guessing which of the two the caller meant would store a hierarchy they did not write.
-        //
-        // **A scalar is not a short list**: it names one artifact at level 0, which is exactly what
-        // a member table with no `level` column means on a levelled layer. Applying the arity check
-        // to it would make the two entry points read one spelling two ways, which is the drift this
-        // whole column is written against.
+        // A list on a levelled layer has one entry per declared level, so another length is
+        // refused rather than guessed. A scalar is not a short list: it names one artifact at
+        // level 0, as a member table with no `level` column does.
         if let Some(levels) = column.meaning.arity().filter(|_| column.cells.is_list()) {
             if entries.len() != levels {
                 return Err(DecodeError(format!(
@@ -208,9 +177,8 @@ impl MembershipTally {
                 )));
             }
         }
-        // **Each entry carries its own position**, so the edge below reads the child's level off
-        // the entry rather than searching for its key — a lineage may legitimately name one key
-        // twice, and a search would then charge the edge to the wrong level.
+        // Each entry keeps its position, so its level is not found by searching for its key: a
+        // lineage may name one key twice.
         let keys: Vec<Option<(u32, String)>> = entries
             .enumerate()
             .map(|(position, index)| {
@@ -230,16 +198,14 @@ impl MembershipTally {
                     key.clone(),
                 ))
                 .or_default();
-            // A row naming one artifact twice — a lineage that repeats a key — joins it once.
+            // A row naming one artifact twice joins it once.
             let index = (offset + row) as u32;
             if at.last() != Some(&index) {
                 at.push(index);
             }
         }
         if column.meaning.declares_edges() {
-            // The adjacency is `tessera_types::layer::parent_edges`' — the same function a build
-            // reads a member table's list column by, which is what keeps the two entry points from
-            // inferring different trees from one file.
+            // The same adjacency function a build reads a member table's list column by.
             for ((_, parent), (level, child)) in tessera_types::layer::parent_edges(&keys) {
                 self.edges.insert((
                     column.layer.to_string(),

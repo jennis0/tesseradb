@@ -36,13 +36,16 @@ if str(_REFERENCE) not in sys.path:
 
 from .battery import (  # noqa: E402
     Absent,
+    ArtifactCard,
     Battery,
+    Browse,
     Categories,
     Item,
     Meta,
     Query,
     Recorded,
     Region,
+    Suggest,
     Viewport,
     build_battery,
     record,
@@ -62,8 +65,10 @@ from .entitlement import (  # noqa: E402
 
 __all__ = [
     "Absent",
+    "ArtifactCard",
     "Batches",
     "Battery",
+    "Browse",
     "Canonical",
     "CappedDelta",
     "Categories",
@@ -78,6 +83,7 @@ __all__ = [
     "Region",
     "Rows",
     "Streamed",
+    "Suggest",
     "Uncheckable",
     "Unexplained",
     "Viewport",

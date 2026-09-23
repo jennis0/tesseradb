@@ -5,6 +5,12 @@ import urllib.parse
 
 import requests
 
+
+def quote(segment: str) -> str:
+    """One URL path segment, every reserved character percent-encoded."""
+    return urllib.parse.quote(segment, safe="")
+
+
 # ---------------------------------------------------------------------------------------------
 # The control plane
 # ---------------------------------------------------------------------------------------------
@@ -47,6 +53,23 @@ class Control:
     def compact(self):
         return requests.post(f"{self.base}/control/compact", headers=self.headers, timeout=60)
 
+    def drop_view(self, group: str, key: str):
+        """`DELETE /control/views/{group}/{key}`: the key's view in every group sharing it."""
+        return requests.delete(
+            f"{self.base}/control/views/{quote(group)}/{quote(key)}",
+            headers=self.headers,
+            timeout=120,
+        )
+
+    def create_view(self, group: str, key: str, record: dict):
+        """`PUT /control/views/{group}/{key}`: the roster record, which creates the view empty."""
+        return requests.put(
+            f"{self.base}/control/views/{quote(group)}/{quote(key)}",
+            headers=self.headers,
+            json=record,
+            timeout=120,
+        )
+
     def register_layer(self, declaration: dict):
         return requests.put(
             f"{self.base}/control/layers", headers=self.headers, json=declaration, timeout=120
@@ -56,7 +79,7 @@ class Control:
         """`PATCH /control/layers/{name}/artifacts`: more members for artifacts already held."""
         t0 = time.perf_counter()
         r = session.patch(
-            f"{self.base}/control/layers/{urllib.parse.quote(layer, safe='')}/artifacts",
+            f"{self.base}/control/layers/{quote(layer)}/artifacts",
             headers=self.headers | {"Content-Type": "application/json"},
             data=body,
             timeout=timeout,
@@ -65,12 +88,12 @@ class Control:
 
     def publish(self, layer: str, body: bytes, session: requests.Session, timeout=1800):
         """`PUT /control/layers/{name}/artifacts`, with the body already serialised as bytes by
-        [`Publication`] rather than through `json=`. The layer name is percent-encoded, since
-        this rung's names are path-shaped and would otherwise 404 at the router.
+        [`Publication`] rather than through `json=`. The layer name is percent-encoded, since a
+        path-shaped name would otherwise 404 at the router.
         """
         t0 = time.perf_counter()
         r = session.put(
-            f"{self.base}/control/layers/{urllib.parse.quote(layer, safe='')}/artifacts",
+            f"{self.base}/control/layers/{quote(layer)}/artifacts",
             headers=self.headers | {"Content-Type": "application/json"},
             data=body,
             timeout=timeout,

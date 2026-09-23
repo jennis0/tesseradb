@@ -11,6 +11,7 @@
 //! store-free, and which `tessera-server` names when it maps a failure to a status.
 
 use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::Arc;
 
 use tessera_lifecycle::command::{
     AttributeRequest, BatchArtifacts, DeclaredValue, ExecError, MembershipGrown, SubmitError,
@@ -20,13 +21,16 @@ use tessera_lifecycle::membership::{IncomingArtifact, IncomingGrowth};
 use tessera_lifecycle::wal::{ChangeOp, PlainViewDeclaration, ViewGroupDeclaration};
 use tessera_types::EntityId;
 
-use super::{AcceptError, PublishedBatch, ValuesReceipt};
+use super::{AcceptError, ExecutorHealth, PublishedBatch, ValuesReceipt};
 
 /// Where a command is answered. Every answer goes out through [`Reply::ack`] or [`Reply::fail`],
 /// so under fault injection every command's answer passes the `BeforeAck` pause and is recorded
 /// as a step, whichever handler sends it.
 pub(crate) struct Reply<T> {
     tx: SyncSender<Result<T, ExecError>>,
+    /// Set on a work-lane job's reply: the job is counted completed just before it is answered, so
+    /// a caller that reads the stats after its answer sees its own job.
+    work: Option<Arc<ExecutorHealth>>,
     #[cfg(feature = "fault-injection")]
     faults: Faults,
 }
@@ -37,11 +41,13 @@ pub(crate) type Faults = Option<std::sync::Arc<tessera_lifecycle::faults::FaultS
 
 impl<T> Reply<T> {
     pub(crate) fn channel(
+        work: Option<Arc<ExecutorHealth>>,
         #[cfg(feature = "fault-injection")] faults: Faults,
     ) -> (Reply<T>, Pending<T>) {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let reply = Reply {
             tx,
+            work,
             #[cfg(feature = "fault-injection")]
             faults,
         };
@@ -49,7 +55,8 @@ impl<T> Reply<T> {
     }
 
     /// Answers the command. A caller that has gone away is not an error: the effect stands.
-    pub(super) fn ack(&self, value: T) {
+    pub(super) fn ack(self, value: T) {
+        self.count_work();
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
             use tessera_lifecycle::faults::{PauseAction, PauseSite, Step};
@@ -61,12 +68,19 @@ impl<T> Reply<T> {
         let _ = self.tx.send(Ok(value));
     }
 
-    pub(super) fn fail(&self, error: ExecError) {
+    pub(super) fn fail(self, error: ExecError) {
+        self.count_work();
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
             faults.record(tessera_lifecycle::faults::Step::Ack);
         }
         let _ = self.tx.send(Err(error));
+    }
+
+    fn count_work(&self) {
+        if let Some(health) = &self.work {
+            health.note_work_finished();
+        }
     }
 }
 
@@ -291,6 +305,7 @@ mod tests {
     fn every_change_rides_the_never_shed_lane_and_no_ingest_does() {
         for op in [ChangeOp::Delete, ChangeOp::Suppress, ChangeOp::Unsuppress] {
             let (reply, _pending) = Reply::channel(
+                None,
                 #[cfg(feature = "fault-injection")]
                 None,
             );
@@ -302,6 +317,7 @@ mod tests {
             assert!(cmd.is_never_shed(), "{op:?} must not be sheddable for load");
         }
         let (reply, _pending) = Reply::channel(
+                None,
                 #[cfg(feature = "fault-injection")]
                 None,
             );

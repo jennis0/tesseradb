@@ -459,14 +459,15 @@ export class TesseraExplorer extends TesseraElement {
     const meta = s?.get('meta');
     const a = s?.get('artifacts');
     if (!s || !meta || !a) return null;
-    const layer = clusterLayerOf(s.get('legend').colourBy) ?? a.layers[0] ?? null;
+    const coloured = clusterLayerOf(s.get('legend').colourBy);
+    const layer = coloured ?? a.layers[0] ?? null;
     const declared = layer ? meta.layers.find((l) => l.name === layer) : null;
     if (!declared || declared.levels.length === 0) return null;
     // **The served artifact's own `rung`**, straight off the wire — on a levelled layer, which is
     // the only kind reaching here, that is its declared level (contracts §3.2 r44), and never a
     // count of parent links, which answered a different question.
     const counts: number[] = [];
-    for (const x of a.served) {
+    for (const x of coloured ? a.colourServed : a.served) {
       if (x.layer !== layer) continue;
       counts[x.rung] = (counts[x.rung] ?? 0) + 1;
     }

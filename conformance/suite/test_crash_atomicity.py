@@ -66,7 +66,7 @@ from .driver import (
     SuiteHarness,
     Write,
     _PREFIX_RE,
-    _poll,
+    poll,
     check,
     run_plan,
 )
@@ -113,11 +113,11 @@ class FlushReplay(Stage):
         h.pull_tick()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: h.executor()["flush"]["flushes"] > self._snap["flushes"],
             "the replayed batch never flushed — was it lost with the crash?",
         )
-        _poll(
+        poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             "the post-replay refresh never replaced the resident projection",
         )

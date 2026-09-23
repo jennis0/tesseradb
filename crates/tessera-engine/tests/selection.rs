@@ -310,12 +310,12 @@ fn no_non_empty_tile_ever_serves_zero_marks() {
     }
 }
 
-/// Why `k_min = 0` is refused at config load rather than clamped.
+/// Why `Engine::open` refuses `k_min = 0` rather than clamping it.
 ///
 /// With no floor, `m = min(cap, max(0, C_θ))` is 0 whenever the threshold admits nothing, and the
 /// tile goes blank despite having visible items — I7 gone, with no error anywhere. This test pins
-/// the consequence so the `ConfigError::FloorClauseDisabled` refusal has a demonstrated reason
-/// rather than an asserted one, and so nobody "simplifies" the refusal away later.
+/// the consequence so the refusal has a demonstrated reason rather than an asserted one, and so
+/// nobody "simplifies" the refusal away later.
 #[test]
 fn a_zero_floor_would_blank_a_tile_which_is_why_config_refuses_it() {
     let points: Vec<(f32, f32, u64)> = (0..12u64)
@@ -330,7 +330,7 @@ fn a_zero_floor_would_blank_a_tile_which_is_why_config_refuses_it() {
     assert!(
         got.is_empty(),
         "a zero floor is expected to blank a tile whose items are all above the threshold — if \
-         this no longer holds, revisit ConfigError::FloorClauseDisabled"
+         this no longer holds, revisit Engine::open's refusal of k_min = 0"
     );
 
     // The same tile with the smallest legal floor is not blank.
