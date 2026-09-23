@@ -608,11 +608,12 @@ struct ValuesResp {
 /// its own, with its own entity, as the ingest door's are — what the route does not create is a
 /// *point*.
 ///
-/// **The view header decides which group-scoped families this batch may name.** A batch that gave
-/// none may name none, whatever the deployment's view count, so a scoped column on a viewless
-/// batch takes the undeclared-column refusal — and one that did gets the families whose owning
+/// **The view header decides which group-scoped families and layers this batch may name.** A batch
+/// that gave none may name none, whatever the deployment's view count, so a scoped column on a
+/// viewless batch takes the undeclared-column refusal, and its entity-scoped cells are written
+/// under the deployment's first view. One that gave a header gets the families whose owning
 /// group's key set holds that view's key, which is the same check the ingest route runs at the
-/// join (contracts §3.4 r68, decision 0116).
+/// join.
 async fn values(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
@@ -662,19 +663,18 @@ fn run_values(
 ) -> Result<ValuesResp, ApiError> {
     let body_hash: [u8; 32] = Sha256::digest(body).into();
     let meta = state.engine.meta();
-    // The view the fills belong to: the header where one was given, and the deployment's only
-    // view otherwise, on `/control/ingest`'s rule. It decides which flush pass writes the cells,
-    // so with no header and several views it is refused below only if the batch fills a cell.
-    let resolved = match resolve_view(view, &meta) {
-        Ok(resolved) => Ok(resolved.id.clone()),
-        Err(ambiguous) if view.is_none() => Err(ambiguous),
-        Err(unknown) => return Err(unknown),
+    // The view whose flush pass writes the cells: the header's, or the deployment's first view.
+    // A batch naming no view can name no group-scoped column or layer, so every cell it fills is
+    // the entity's own and any view's pass writes it.
+    let resolved = match view {
+        Some(_) => Some(resolve_view(view, &meta)?.id.clone()),
+        None => meta.views.first().map(|v| v.id.clone()),
     };
     // **The families and group-scoped layers this batch may name, and the header is half the
     // answer** (`views.md` §5, decision 0116). The key is what addresses a scoped cell or artifact,
     // so the check is `EngineMeta::owning_key` exactly as the ingest door's is — and the header is
     // required beside it, because a batch that named no view has not said which key it is writing.
-    let named = view.and(resolved.as_ref().ok());
+    let named = view.and(resolved.as_ref());
     let scoped: Vec<ScopedScalar> = match named {
         None => Vec::new(),
         Some(resolved) => meta
@@ -699,11 +699,11 @@ fn run_values(
         &view_in,
     )
     .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
-    let resolved = match resolved {
-        Ok(resolved) => Some(resolved),
-        Err(_) if columns.is_empty() => None,
-        Err(ambiguous) => return Err(ambiguous),
-    };
+    if resolved.is_none() && !columns.is_empty() {
+        return Err(ApiError::Contract(
+            "this deployment has no view to write the values under; create a view first".into(),
+        ));
+    }
 
     // The row cap, on `/control/ingest`'s rule and with its cost: the whole decode is spent
     // before the count is knowable, which is why the byte cap sits on the route.
