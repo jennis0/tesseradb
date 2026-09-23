@@ -666,13 +666,13 @@ def test_every_scan_mechanism_catches_a_planted_entity_id():
 
 
 @pytest.fixture(scope="module")
-def byte_scan_server(tmp_path_factory, catalogue_bundle_root):
+def byte_scan_server(tmp_path_factory, private_catalogue_bundle):
     """A dedicated server instance for this module, logging to a file (not an unread pipe) so the
     full RUST_LOG=info output can be scanned after the run."""
     tmp_dir = tmp_path_factory.mktemp("byte-scan-server")
     log_path = tmp_dir / "server.log"
     srv, proc = spawn_server(
-        catalogue_bundle_root,
+        private_catalogue_bundle("byte-scan"),
         tmp_dir,
         log_path=log_path,
         env_extra={"RUST_LOG": "info"},
@@ -935,7 +935,10 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
         f"server's log output: {sorted(leaked_in_logs_binary)[:20]}"
     )
 
-    log_decimal_windows = _decimal_windows(log_bytes, SAFE_ID_FLOOR)
+    # Each log line's timestamp is removed first: its microseconds are a run of six digits that can
+    # equal an entity id by chance.
+    log_without_times = re.sub(rb"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z", b"", log_bytes)
+    log_decimal_windows = _decimal_windows(log_without_times, SAFE_ID_FLOOR)
     leaked_in_logs_decimal = log_decimal_windows & target_ids_high
     assert not leaked_in_logs_decimal, (
         f"found {len(leaked_in_logs_decimal)} entity id(s) as an ASCII decimal string in the "

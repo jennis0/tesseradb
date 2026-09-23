@@ -116,8 +116,8 @@ def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_ma
             server, addressing="tessera", idset=idset, artifacts=[{"key": "whole", "members": joining}]
         )
         assert resp.status_code == 200, resp.text
-        receipt = resp.json()["artifacts"]
-        assert receipt == [{"key": "whole", "tessera_id": tessera_id, "joined": len(joining)}], receipt
+        (row,) = resp.json()["artifacts"]
+        assert (row["key"], row["tessera_id"], row["joined"]) == ("whole", tessera_id, len(joining)), row
 
     for terms in PRINCIPALS:
         expected = len(visible(points, terms))
