@@ -3286,6 +3286,37 @@ async fn a_body_of_the_wrong_shape_is_a_contract_refusal_on_every_json_control_r
     }
 }
 
+/// A body the route accepts, plus one field it does not define, is refused before anything
+/// is resolved or armed.
+#[tokio::test]
+async fn an_unknown_field_is_a_contract_refusal_on_the_changes_and_fault_routes() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    let unseen = base64::engine::general_purpose::STANDARD.encode(b"never-ingested");
+    let bodies = [
+        (
+            "/control/changes",
+            serde_json::json!([{ "external_id": unseen, "op": "suppress", "unknown_field": 1 }]),
+        ),
+        (
+            "/control/faults/arm",
+            serde_json::json!({ "site": "after_fsync", "unknown_field": 1 }),
+        ),
+    ];
+    for (path, body) in bodies {
+        let resp = server
+            .client
+            .post(server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused(resp, 422).await, "contract", "POST {path}");
+    }
+}
+
 /// **No request body is buffered on behalf of an unauthenticated caller** — the first and largest of
 /// the three things the router-level credential layer buys, demonstrated rather than argued from
 /// where the code sits.

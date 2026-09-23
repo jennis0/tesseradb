@@ -557,6 +557,7 @@ async fn suggest(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ViewportReq {
     view: String,
     zoom: u8,
@@ -1304,6 +1305,7 @@ fn column_ref(buf: &tessera_engine::ColumnBuf) -> ScalarColumn<'_> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ItemReq {
     #[allow(dead_code)]
     #[serde(default)]
@@ -1423,6 +1425,7 @@ fn scalar_out_json(value: tessera_engine::ScalarOut) -> serde_json::Value {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ArtifactReq {
     /// The view whose row space the count is taken in. Required, since a masked count is per view
     /// while a record is not.
