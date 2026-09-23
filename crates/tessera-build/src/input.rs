@@ -2519,13 +2519,10 @@ impl BatchColumn {
             BatchValues::Discovered(codes) => code_as(attribute.ty, codes[row]),
             BatchValues::Scalar(column) => column.value(row).map_err(|e| {
                 crate::config::declaration_error(format!(
-                    "attribute '{}': the points file carries {}, which does not fit its declared \
-                     '{}' ({}..={}); declare a wider type and rebuild",
+                    "attribute '{}' (declared '{}'): the points file carries {e}; declare a wider \
+                     type and rebuild",
                     attribute.name,
-                    e.value,
                     attribute.ty.arrow_type_name(),
-                    e.min,
-                    e.max
                 ))
             })?,
         })
@@ -3052,10 +3049,8 @@ pub fn read_roster_table(
                                 Err(e) => Err(BuildError::Schema {
                                     path: path.to_path_buf(),
                                     detail: format!(
-                                        "the roster column '{name}' carries {} at row {row}, \
-                                         which does not fit an i64 ({}..={}); write a value in \
-                                         that range",
-                                        e.value, e.min, e.max
+                                        "the roster column '{name}' carries {e} at row {row}; \
+                                         write a value in that range"
                                     ),
                                 }),
                             })

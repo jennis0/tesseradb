@@ -69,12 +69,19 @@ fn write_points(path: &Path) {
 
 /// The fixture's points file with `score`, declared `i64`, carried by `score` as written.
 fn write_points_scored(path: &Path, score: arrow::array::ArrayRef) {
+    let weight = Float32Array::from_iter_values((0..N).map(|e| e as f32 / 4.0));
+    write_points_with(path, score, Arc::new(weight));
+}
+
+/// The fixture's points file with `score` (declared `i64`) and `weight` (declared `f32`) carried
+/// by the columns given.
+fn write_points_with(path: &Path, score: arrow::array::ArrayRef, weight: arrow::array::ArrayRef) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
         Field::new("score", score.data_type().clone(), true),
-        Field::new("weight", DataType::Float32, true),
+        Field::new("weight", weight.data_type().clone(), true),
         Field::new("big", DataType::UInt64, true),
         Field::new(
             "seen",
@@ -95,9 +102,7 @@ fn write_points_scored(path: &Path, score: arrow::array::ArrayRef) {
                 ids.iter().map(|e| ((e * 53) % 1000) as f64),
             )),
             score,
-            Arc::new(Float32Array::from_iter_values(
-                ids.iter().map(|e| *e as f32 / 4.0),
-            )),
+            weight,
             Arc::new(UInt64Array::from_iter_values(ids.iter().map(|e| e * 1_000))),
             Arc::new(TimestampMicrosecondArray::from_iter_values(
                 ids.iter().map(|e| *e as i64 * 1_000_000),
@@ -1607,4 +1612,96 @@ async fn a_wrong_typed_column_in_an_empty_batch_is_refused() {
     let (status, answer) = post_values(&server, "empty", writer.into_inner().unwrap()).await;
     assert_eq!(status, 422, "{answer}");
     assert_eq!(answer["error"], "contract", "{answer}");
+}
+
+/// An ingest batch carrying `weight` (`f32`) as a `float64` column.
+fn weights_body(ids: &[u64], weights: &[f64]) -> Vec<u8> {
+    let access = access_column(ids.iter().map(|_| "0"));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        access_field(&access),
+        Field::new("weight", DataType::Float64, true),
+    ]));
+    let external: Vec<Vec<u8>> = ids.iter().map(|id| external_id_of(*id)).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(
+                external.iter().map(|v| v.as_slice()),
+            )),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 10.0))),
+            Arc::new(Float32Array::from_iter_values(ids.iter().map(|_| 20.0))),
+            Arc::new(access),
+            Arc::new(Float64Array::from(weights.to_vec())),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// **A finite number too large for an `f32` attribute is refused at every path**: an Arrow batch,
+/// a JSON batch and a build over a points file. An infinity or a NaN the column already holds is
+/// kept as it is.
+#[tokio::test]
+async fn a_finite_float_past_f32_is_refused_at_every_path() {
+    let (_tmp, server) = served_declared().await;
+    let high_water = control_status(&server).await["entity_id_high_water"].clone();
+
+    let (status, answer) = ingest(
+        &server,
+        "past-f32-arrow",
+        Some(ARROW),
+        weights_body(&[1000, 1001], &[0.5, 1e300]),
+    )
+    .await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
+
+    let mut records: Vec<Value> = rows(1000..1002).iter().map(json_record).collect();
+    for record in &mut records {
+        record.as_object_mut().unwrap().remove(LAYER);
+    }
+    records[1]["weight"] = json!(1e300);
+    let (status, answer) = ingest(
+        &server,
+        "past-f32-json",
+        Some("application/json"),
+        Value::Array(records).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, 422, "{answer}");
+    assert_eq!(answer["error"], "contract", "{answer}");
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water,
+        "no refused batch allocated an entity"
+    );
+
+    let (status, answer) = ingest(
+        &server,
+        "infinite",
+        Some(ARROW),
+        weights_body(&[1002, 1003, 1004], &[f64::INFINITY, f64::NEG_INFINITY, f64::NAN]),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["accepted"], 3, "{answer}");
+
+    let tmp = TempDir::new().unwrap();
+    let points = tmp.path().join("points.parquet");
+    write_points_with(
+        &points,
+        Arc::new(Int64Array::from_iter_values((0..N).map(|e| e as i64))),
+        Arc::new(Float64Array::from_iter_values(
+            (0..N).map(|e| if e == 3 { 1e300 } else { e as f64 }),
+        )),
+    );
+    assert!(
+        build_over(tmp.path(), points).is_err(),
+        "the build refuses the same column"
+    );
 }
