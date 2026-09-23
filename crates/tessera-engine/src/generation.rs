@@ -68,9 +68,9 @@ pub struct GenerationParts {
     /// One sparse delta postings tier per flush segment, in publication order.
     ///
     /// A fragment build unions the base with every live tier over the session's satisfied terms
-    /// (§5.2). They live on the generation rather than on the engine for the same reason the
-    /// dictionary does: a flush publishes one, and a merge coalesces several into one, so the set
-    /// changes exactly when geometry does. Empty in a bundle straight out of `tessera build`.
+    /// (§5.2). They live on the generation rather than on the engine: a flush publishes one and
+    /// the entity-space coalesce merges several into one, so the set changes with each
+    /// publication. Empty in a bundle straight out of `tessera build`.
     pub delta_postings: Vec<Arc<DeltaTier>>,
     /// Monotone counter bumped on every overlay/buffer swap (independent of `segments_version` —
     /// an overlay change never touches the bundle).
