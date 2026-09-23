@@ -116,10 +116,14 @@ impl Executor {
         let Some(TickDue { due, period_due }) = self.tick_due() else {
             return;
         };
-        // Outstanding, not in flight: a flush handed back after this loop's drain is not yet in
-        // the generation, and a plan taken now would carry its rows again at its `row_base`.
-        let flush_outstanding = self.flush.outstanding();
-        if !flush_outstanding {
+        // A flush handed back after this loop's drain is not yet in the generation, and a plan
+        // taken now would carry its rows again at its `row_base`. It is not a tick behind a
+        // running flush either: the next loop drains it and ticks straight away.
+        let flush_in_flight = self.flush.in_flight();
+        if !flush_in_flight && self.flush.completed_pending() {
+            return;
+        }
+        if !flush_in_flight {
             self.health.open_publication_cycle();
         }
         self.sample_wal_gauge();
@@ -133,7 +137,7 @@ impl Executor {
         let generation = self.generation.load_full();
 
         // A period tick during a flush is skipped, not queued; a requested flush stays armed.
-        if flush_outstanding {
+        if flush_in_flight {
             if due {
                 self.tick_behind_flush(&generation, period_due);
             }

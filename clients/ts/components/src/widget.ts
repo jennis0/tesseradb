@@ -1,4 +1,6 @@
 import {
+  CLUSTER_PREFIX,
+  colourLayers,
   createStore,
   emptyDraft,
   type ColumnDraft,
@@ -292,6 +294,20 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     }
   };
 
+  /**
+   * A `cluster:<layer>` naming no layer this view can colour by is reported, as a bad filter is;
+   * the store still takes it and draws the points uniform. Checked once `/v1/meta` is in hand.
+   */
+  const checkColour = (store: Store, colourBy: unknown) => {
+    const meta = store.get('meta');
+    if (!meta || typeof colourBy !== 'string' || !colourBy.startsWith(CLUSTER_PREFIX)) return;
+    const offered = colourLayers(meta.layers).map((l) => l.name);
+    const layer = colourBy.slice(CLUSTER_PREFIX.length);
+    if (offered.includes(layer)) return;
+    const instead = offered.length === 0 ? 'this view has no layer to colour by' : `use one of ${offered.map((n) => CLUSTER_PREFIX + n).join(', ')}`;
+    report('colour_by', new Error(`${layer} is not a layer this view can colour by; ${instead}`));
+  };
+
   // Down-sync: what the kernel holds, applied to one store (a new one, or one whose meta arrived).
   const applyControls = (store: Store) => {
     // `null` leaves the explorer's default; `[]` is none.
@@ -320,6 +336,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
         metaSeen = true;
         const filters = model.get('filters');
         if (filters !== null && filters !== undefined) applyFilters(store, filters as FilterExpr);
+        checkColour(store, model.get('colour_by'));
         if (state.pendingFit) fit(state.pendingFit);
       }
       if (state.active !== v) return;
@@ -411,7 +428,11 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   model.on('change:colour_by', () => {
     if (state.syncingUp) return;
     const c = model.get('colour_by');
-    for (const v of state.views.values()) v.store?.setColourBy(typeof c === 'string' && c ? c : null);
+    for (const v of state.views.values()) {
+      if (!v.store) continue;
+      v.store.setColourBy(typeof c === 'string' && c ? c : null);
+      checkColour(v.store, c);
+    }
   });
   model.on('change:filters', () => {
     if (state.syncingUp) return;

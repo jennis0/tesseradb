@@ -21,36 +21,24 @@ use super::{
 
 #[derive(Debug)]
 pub(crate) struct RawIngestItem {
-    /// Optional (contracts §3.4): `None` when the caller supplied no external id. Such an item
-    /// gets no sidecar entry and is addressable only by its `tessera_id` (returned per row in
-    /// [`IngestResp`]).
+    /// `None` when the caller sent no external id; the item is then addressable only by its
+    /// `tessera_id`.
     pub(crate) external_id: Option<Vec<u8>>,
-    /// **The view's frame, never longitude and latitude** — the transform has already run
-    /// (`projections.md` §3). Everything downstream of the decode reads a frame coordinate: the
-    /// engine's out-of-frame check, the WAL record, the buffer and the flush's quantiser.
+    /// In the view's frame, never longitude and latitude: the projection has already run.
     pub(crate) x: f64,
     pub(crate) y: f64,
-    /// The row's labels, one element of the wire's `access` list each, verbatim (decision 0129).
-    /// Empty for a row that carries none, which the view's `point_default` then fills or refuses
-    /// (decision 0133); a null list or a null element is refused at the parse.
+    /// The row's `access` labels, verbatim. Empty for a row with none, which the view's
+    /// `point_default` fills or refuses.
     pub(crate) labels: Vec<Vec<u8>>,
     pub(crate) scalars: Vec<WalScalar>,
-    /// The group-scoped values this row carries for its view's group, positional against the
-    /// families the batch was parsed with (`views.md` §5). Empty for a plain view and for a group
-    /// that owns no family.
+    /// Group-scoped values for the view's group, positional against the families the batch was
+    /// parsed with; empty where the view's group owns none.
     pub(crate) scoped: Vec<WalScalar>,
 }
 
-/// What this view's coordinate columns are called, and what the wrong spelling would have meant.
-///
-/// **A projected view spells them `lon` and `lat`; a view with no projection spells them `x` and
-/// `y`** (`projections.md` §2). Longitude-then-latitude is the order GeoJSON and WKT use and the
-/// opposite of the order many sources publish, and a corpus written with the two exchanged is
-/// silently mirrored about the diagonal — so the axes are named for what they hold rather than
-/// documented. The build applies the same rule to a points file's columns
-/// (`tessera_build::config`'s `compile_projected_fields`), and it has to exist on both paths or a
-/// projected view is something that can be built correctly and ingested into wrongly
-/// (decision 0091).
+/// A projected view's coordinate columns are `lon` and `lat`, an unprojected view's `x` and `y`,
+/// as at the build. Naming the axes for what they hold catches a corpus written with the two
+/// exchanged, which would otherwise be silently mirrored.
 fn coordinate_columns(projection: Projection) -> (&'static str, &'static str) {
     match projection {
         Projection::None => ("x", "y"),
@@ -58,26 +46,21 @@ fn coordinate_columns(projection: Projection) -> (&'static str, &'static str) {
     }
 }
 
-/// One ingest batch, decoded: its rows, what its membership columns said, and how many of those
-/// rows the view's projection clipped.
+/// One ingest batch, decoded, with what its membership columns said.
 pub(crate) struct ParsedBatch {
     pub(crate) items: Vec<RawIngestItem>,
     pub(crate) artifacts: BatchArtifacts,
-    /// How many declared columns the batch omitted, each padded with its absence in every row
-    /// (`ingest.md` §7.1). Reported so a pipeline that stopped sending a column is seen.
+    /// Declared columns the batch omitted, each absent on every row; reported so a pipeline that
+    /// stopped sending one is seen.
     pub(crate) padded_columns: u64,
-    /// Rows whose latitude fell outside the projection's own domain and were moved onto the
-    /// frame's edge (`projections.md` §7). Always `0` under `projection = "none"`, which has no
-    /// domain.
+    /// Rows whose latitude lay outside the projection's domain and were moved onto the frame's
+    /// edge; always `0` for an unprojected view.
     pub(crate) clipped: u64,
 }
 
-/// One category cell: its value key resolved to the pinned code, at the column's declared width.
-///
-/// **Resolution, never minting.** A handler that minted would let two requests racing one novel key
-/// draw two codes for it, splitting its rows between them, and whichever binding survived would
-/// recolour the other's. Minting happens once, on the write executor, where windows close serially
-/// (write-path §1.1).
+/// One category cell: its key resolved to the bound code, at the column's declared width. Codes
+/// are resolved here and never minted: minting happens once, on the write executor, so two
+/// requests racing one novel key cannot draw two codes for it.
 fn category_code(
     body_name: &str,
     col: &dyn Array,
@@ -115,10 +98,8 @@ fn category_code(
         return Ok(code_at(declared.arrow_type, code));
     }
     match minter.kind() {
-        // Declare-then-use: the value set is closed, so a key nothing binds is a typo — and a
-        // category carries properties and, through its postings, a visibility consequence. The
-        // refusal is here rather than on the executor because the whole batch can still be
-        // rejected without effect at this point, which is what a 422 promises.
+        // A declared vocabulary is closed, so an unbound key is refused here, where the whole
+        // batch can still be rejected without effect.
         VocabularyKind::Declared => Err(DecodeError(format!(
             "{body_name}: column '{}' carries value '{key}', which vocabulary '{vocabulary}' \
              does not list. Under `vocabulary = \"declared\"` there is no auto-mint: a category \
@@ -126,16 +107,14 @@ fn category_code(
              must not create one (per-point-attributes §5)",
             declared.name
         ))),
-        // **The key travels as a key.** This handler must not mint: two requests racing one novel
-        // key would each draw, and that key would end up with two codes and its rows split
-        // between them. The commit-window close resolves it — serially, against the live bindings
-        // — and the row's scalar becomes the code there, before the WAL append.
+        // A novel key travels as a key; the executor mints its code when the commit window
+        // closes, before the WAL append.
         VocabularyKind::Discovered => Ok(WalScalar::Utf8(key.to_string())),
     }
 }
 
-/// A code at its column's declared width. `is_category_width` admits `u8`/`u16`/`u32` only, so the
-/// fallthrough is `u32` — the widest, which cannot truncate a code the other two could hold.
+/// A code at its column's declared width. A category is `u8`, `u16` or `u32` wide, so the
+/// fallthrough is `u32`.
 pub(super) fn code_at(width: ScalarType, code: u32) -> WalScalar {
     match width {
         ScalarType::U8 => WalScalar::U8(code as u8),
@@ -144,9 +123,8 @@ pub(super) fn code_at(width: ScalarType, code: u32) -> WalScalar {
     }
 }
 
-/// The body's record batches, whichever encoding carried it. A JSON body is coerced into one
-/// record batch against the declared column types (`json::record_batch`) and then read by every
-/// rule the Arrow batches are.
+/// The body's record batches. A JSON body becomes one record batch, read by the same rules as
+/// an Arrow one.
 fn record_batches<'a>(
     body_name: &'static str,
     encoding: BodyEncoding,
@@ -169,13 +147,9 @@ fn record_batches<'a>(
     })
 }
 
-/// Whole-batch schema validation, before a single row is read: a batch whose columns do not match
-/// the declarations has no effect at all, exactly as a duplicate 409 does. Returns the batch's
-/// layer columns.
-///
-/// A name is the route's own, a declared scalar, a group-scoped family in `scoped`, or a
-/// registered layer's, and is refused otherwise. A declared or scoped column present at the wrong
-/// type is refused; one the batch omits is for the route to read.
+/// Checks a batch's columns before any row is read and returns its layer columns. A name is the
+/// route's own, a declared scalar, a family in `scoped` or a registered layer's, matched in that
+/// order, so a layer cannot redefine `x`; a declared or scoped column at the wrong type is refused.
 fn check_columns<'b>(
     body_name: &str,
     batch: &'b RecordBatch,
@@ -190,11 +164,8 @@ fn check_columns<'b>(
         let name = field.name().as_str();
         if fixed.iter().any(|f| f.name() == name)
             || declared.iter().any(|d| d.name == name)
-            // **A group-scoped family, under its plain name** (`views.md` §5): the view is
-            // known from the header, so the column is not qualified and the view decides
-            // which of the family's columns the value lands in. `scoped` is empty for every
-            // view outside a scope, so the refusal below is unchanged there — which is what
-            // keeps a scoped column un-nameable on an entity-space batch.
+            // A family under its plain name; `scoped` is empty for a view outside a group, so
+            // there such a column is refused below.
             || scoped.iter().any(|f| f.name == name)
         {
             continue;
@@ -236,8 +207,7 @@ fn check_columns<'b>(
             )));
         }
     }
-    // **The scoped families' columns, checked on the declared ones' rule** (`views.md` §5): a
-    // value decoded against the wrong declaration is a wrong value stored with no error anywhere.
+    // Scoped families' columns are type-checked on the declared columns' rule.
     for f in scoped {
         let Some(col) = batch.column_by_name(&f.name) else {
             continue;
@@ -256,8 +226,7 @@ fn check_columns<'b>(
 }
 
 /// Whether a batch column of Arrow type `found` carries `declared`. A category's column is its
-/// value keys as `utf8`; every other declaration is read by the rule a build reads a points file
-/// by.
+/// keys as `utf8`; any other is read by the rule a build reads a points file by.
 fn wire_carries(declared: &DeclaredScalar, found: &arrow::datatypes::DataType) -> bool {
     match declared.vocabulary {
         Some(_) => *found == arrow::datatypes::DataType::Utf8,
@@ -284,9 +253,8 @@ impl<'b> Cells<'b> {
     }
 }
 
-/// One row's value of a column, read against `declared`: a scoped family's column is read against
-/// [`scoped_as_declared`]'s declaration. `request_row` is the row's number in the request, for a
-/// refusal to name.
+/// One row's value of a column, read against `declared`. `request_row` is the row's number in
+/// the request, for a refusal to name.
 fn cell(
     body_name: &str,
     cells: &Cells<'_>,
@@ -327,7 +295,6 @@ fn wal_scalar(value: ScalarValue) -> WalScalar {
     same!(Bool, U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, TimestampUs, Utf8)
 }
 
-/// Contracts §1: a typed error, never a truncation -- see `EXTERNAL_ID_MAX_LEN`'s doc.
 fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
     if external_id.len() > EXTERNAL_ID_MAX_LEN {
         return Err(DecodeError(format!(
@@ -339,79 +306,16 @@ fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
     Ok(())
 }
 
-/// Parse `/control/ingest`'s body: one Arrow IPC stream, schema
-/// `(external_id: binary, x: float32|float64, y: float32|float64, access: utf8, node_id: utf8?,
-/// ...scalars)` (R5). The coordinate columns take either float width and the narrower is widened —
-/// see [`coordinate_col`] for why the widening runs in that one direction. `node_id` is accepted
-/// — so a well-formed client request is never rejected for including it — but not stored: `WalRow`
-/// has no `node_id` field, because a buffered item has no row geometry until the next build and
-/// `node_id` is a segment-column concept.
-///
-/// # The scalar tail is validated against `MANIFEST.declared_scalars`, and misalignment is a 422
-///
-/// A row's scalars are stored **positionally**, against the manifest's declared order — nothing
-/// downstream carries a name. So a batch whose scalar columns are not within the declared set
-/// cannot be read back correctly, and two defects are the same defect:
-///
-/// * a column the manifest does not declare;
-/// * a declared column present at the wrong arrow type.
-///
-/// Each is refused with **422 naming the column** (contracts §3.1's "malformed request"), and the
-/// scalar vector is built in **declared** order rather than schema order, which is what makes the
-/// positional read safe. **A declared column the batch omits is absent in every row**
-/// (`ingest.md` §7.1): the vector still takes the column's slot, holding its absence, so the
-/// omission misaligns nothing, and a column declared at a running service is one an older
-/// client's batches do not carry. Silently dropping a column would shorten the vector and shift
-/// every later scalar by one: positional misalignment wearing a success's clothes, acknowledged
-/// with a 200.
-///
-/// # A category arrives as its key, and the key is checked for membership
-///
-/// The expected type is [`DeclaredScalar::wire_type`], not the declared width: a category column
-/// is `utf8` value keys on the wire, whatever width stores its codes. Codes are the server's to
-/// assign (per-point-attributes §3.1, §5), so a caller supplying one would be the minting
-/// authority, and the server could then guarantee neither the scatter nor never-reuse that §3.4
-/// exists for.
-///
-/// **This is what makes a category's value checkable at all.** A code can only be range-checked —
-/// a `u16` column accepted any `u16`, so an unassigned code, a `reserved` code or a typo was stored
-/// with no error anywhere and the row carried a code no key explains. A key can be
-/// membership-checked, and membership is the rule: an unknown key under `value_set = "closed"`
-/// is a 422 naming the column and the key, whole batch without effect (declare-then-use, §5,
-/// views §80).
-///
-/// It also makes a schema/client disagreement visible: a plain `u16` scalar and a `u16` category
-/// are now different types on the wire, so a client that thinks a column is one when the bundle
-/// says the other gets a 422 naming it rather than plausible integers stored as codes.
-///
-/// A **null** key is *absent* — [`ABSENT_CODE`], the reserved sentinel (§3.6). The **empty string**
-/// is not: it is what an unset field and a client bug both produce, so it is refused rather than
-/// folded into absence, which would accept the same defect silently.
-///
-/// # A column named for a declared layer is that point's artifacts
-///
-/// The acceptance rule is **reserved, or a declared attribute's name, or a declared layer's name**
-/// (`artifacts-from-points.md` §6.2) — the third being what
-/// [decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md) obliges:
-/// a point may name its artifacts in a file, so it may name them on the wire. The cell is a key, or
-/// a list of keys, on exactly the rules a build reads a member table by — `tessera_types::layer`
-/// holds them, and holds them for both readers.
-///
-/// **The layer's own `name`, exactly as an attribute column is named for the attribute's `name`.**
-/// `fields` on `[layer.members]` renames a *file's* columns and is build-only for the same reason
-/// `source` is: it says where rows come from rather than what they mean.
-///
-/// Reserved names are matched first and declared scalars second, so a layer sharing a name with
-/// either is read as the other — a layer called `x` cannot make the geometry column mean a cluster.
+/// Decodes a `/control/ingest` body against the view's projection, its declared scalars, its
+/// group's scoped families and the layer registry. `node_id` is accepted and not stored. Any
+/// refusal refuses the whole batch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_ingest_batch(
     encoding: BodyEncoding,
     body: &[u8],
     projection: Projection,
     declared: &[DeclaredScalar],
-    // The **group-scoped** attribute families this view's batch may carry, under their plain
-    // names — the families of the group that owns the view, in manifest order, and empty for
-    // every view outside a scope (`views.md` §5). See the section on them in this function's doc.
+    // The families of the group that owns the view, in manifest order; empty outside a group.
     scoped: &[ScopedScalar],
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
@@ -452,16 +356,13 @@ pub(crate) fn parse_ingest_batch(
                 .filter(|d| batch.column_by_name(&d.name).is_none())
                 .map(|d| d.name.as_str()),
         );
-        // Where this record batch's rows start in the request's own row numbering — what a
-        // membership names, since the executor indexes one flat list of rows per batch id.
+        // Where this record batch's rows start in the request's numbering, which a membership
+        // names.
         let offset = items.len();
 
         let ext = optional_binary_col(body_name, &batch, "external_id")?;
-        // **The spelling is checked before the columns are read**, so a batch that used the other
-        // one meets a refusal naming what this view calls its axes rather than a bare "column 'x'
-        // missing". Only fired where the right column is absent, so a `projection = "none"` view
-        // whose declared scalars happen to include a `lon` is unaffected: this is the surface
-        // every existing ingest uses.
+        // Only where the right column is absent, so an unprojected view with a declared scalar
+        // called `lon` is unaffected.
         for (wrong, right) in wrong_spellings(projection) {
             if batch.column_by_name(wrong).is_some() && batch.column_by_name(right).is_none() {
                 return Err(DecodeError(format!(
@@ -480,9 +381,8 @@ pub(crate) fn parse_ingest_batch(
         }
         let mut x = coordinate_col(&batch, x_name, offset)?;
         let mut y = coordinate_col(&batch, y_name, offset)?;
-        // **The transform runs here, at the boundary, before anything else looks at the numbers**
-        // (`projections.md` §3) — the same place `tessera_build::input` runs it, which is what
-        // makes a projected view ingestable rather than only buildable (decision 0091).
+        // The projection runs here, before anything else reads the coordinates, as the build
+        // runs it on a points file.
         clipped += project_columns(projection, &mut x, &mut y)?;
         let access = labels_col(&batch, "access")?;
 
@@ -498,39 +398,26 @@ pub(crate) fn parse_ingest_batch(
             .collect();
 
         for i in 0..batch.num_rows() {
-            // The artifacts this row names, read before its scalars so a malformed membership
-            // column refuses the batch with nothing decoded into `items` — the whole-batch rule
-            // every other refusal here is held to.
             for column in &memberships {
                 tally.read(body_name, column, i, offset)?;
             }
-            // Built in DECLARED order, not schema order — the vector is read back by position and
-            // nothing downstream carries a name. **A declared column the batch omits is absent in
-            // every row** (`ingest.md` §7.1): an omission misaligns nothing, and a column declared
-            // at a running service is one an older client's batches do not carry.
+            // In declared order, not schema order: the vector is read back by position. A
+            // declared column the batch omits keeps its slot, absent, so an older client's batch
+            // misaligns nothing.
             let mut scalars = Vec::with_capacity(declared.len());
             for (d, cells) in declared.iter().zip(&declared_cells) {
                 let Some(cells) = cells else {
-                    // The batch omits the column: this row's absence, on the family's own
-                    // spelling (`scoped_absent`'s rule, for a declared scalar).
                     scalars.push(scoped_absent(&declared_as_scoped(d)));
                     continue;
                 };
                 scalars.push(cell(body_name, cells, i, offset + i, d, vocabularies)?);
             }
-            // **The scoped tail, in the families' own order** — a second positional list rather
-            // than more slots in the one above, because the two are indexed against different
-            // declarations (`WalRow::scoped`). Absence takes each family's ordinary route: the
-            // reserved code 0 for a category, `WalScalar::Null` for everything else, which is
-            // decision 0064's presence bitmap.
+            // The scoped values are a second positional list, in the families' order, since the
+            // two lists are indexed against different declarations.
             let mut scoped_values = Vec::with_capacity(scoped.len());
             let families = scoped.iter().zip(&scoped_declared).zip(&scoped_cells);
             for ((f, as_declared), cells) in families {
                 let value = match cells {
-                    // A family the batch does not mention: every row is absent in it, which is
-                    // an ordinary state and not the omission a declared scalar's would be. A
-                    // family has no bundle-wide column, so nothing downstream is misaligned by a
-                    // batch that carries none of them.
                     None => scoped_absent(f),
                     Some(cells) => {
                         cell(body_name, cells, i, offset + i, as_declared, vocabularies)?
@@ -538,16 +425,13 @@ pub(crate) fn parse_ingest_batch(
                 };
                 scoped_values.push(value);
             }
-            // Contracts §3.4: `external_id` is optional. Neither a missing column nor a null
-            // within the column is an error -- both simply mean this item has no caller-supplied
-            // external id and is addressable only by its `tessera_id`.
+            // A missing column and a null cell both mean the item has no external id.
             let external_id = match &ext {
                 Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
                 _ => None,
             };
-            // Checked here, inside the whole-batch parse, so an over-length id anywhere in the
-            // batch fails the parse before anything downstream (replay check, dedup, allocation,
-            // WAL append) ever runs: the batch has no effect, exactly as a duplicate 409 must.
+            // Checked inside the parse, so an over-length id anywhere refuses the whole batch
+            // before deduplication, allocation or the WAL append.
             if let Some(external_id) = &external_id {
                 check_external_id(external_id)?;
             }
@@ -584,18 +468,9 @@ pub(crate) struct ParsedValuesRow {
     pub(crate) values: Vec<WalScalar>,
 }
 
-/// Decode one `POST /control/values` body (`ingest.md` §1.2, §1.4), in whichever encoding carried
-/// it, into named columns and rows.
-///
-/// **The same rules as the ingest door, minus the ones about creating an entity.** A values row
-/// carries no coordinates and no `access` list, and names its entity by exactly one of
-/// `external_id` and `tessera_id`; a declared column present at the wrong type refuses the batch,
-/// an undeclared name refuses it, and a layer column is a membership join.
-///
-/// **A group-scoped column is nameable only where `scoped` holds its family**, which the caller
-/// resolves from the batch's own view header — so a batch that named no view meets the
-/// undeclared-column refusal for one, and so does a batch whose view's key is in no scope
-/// (`views.md` §5, decision 0116).
+/// Decodes a `/control/values` body into named columns and rows. A row carries no coordinates
+/// or `access` and names its entity by exactly one of `external_id` and `tessera_id`. A scoped
+/// column is refused unless `scoped`, which the caller resolves from the view header, holds it.
 pub(crate) fn parse_values_batch(
     encoding: BodyEncoding,
     body: &[u8],
@@ -614,10 +489,7 @@ pub(crate) fn parse_values_batch(
         body,
         &JsonColumns {
             fixed: &fixed,
-            // A values batch carries the subset of the schema the caller has, and a row of it may
-            // leave a column out, which is that cell unfilled rather than a malformed row. The
-            // ingest door's stricter reading is about a row that creates an entity, where a
-            // half-carried column shifts the positional tail.
+            // A values row may leave a column out, which leaves that cell unfilled.
             declared_on_every_row: false,
             declared,
             scoped,
@@ -633,8 +505,7 @@ pub(crate) fn parse_values_batch(
         let batch = batch?;
         let offset = rows.len();
 
-        // Which of the schema's names this batch's cells are, in one order for every row: the
-        // declared columns, then the group-scoped families.
+        // The batch's cells, in one order for every row: declared columns, then scoped families.
         let carried: Vec<&DeclaredScalar> = declared
             .iter()
             .chain(&scoped_declared)
@@ -730,10 +601,8 @@ pub(crate) fn parse_values_batch(
                             rows.len()
                         ))
                     })?;
-                    // **Required with a `tessera_id`, refused without it** — `/control/changes`'s
-                    // rule, and it guards the same thing: an identifier's meaning depends on the
-                    // set it was minted under, and a rotation would otherwise silently redirect
-                    // the fill onto another entity.
+                    // An idset is required beside a `tessera_id`, as on `/control/changes`: an
+                    // id names an entity only under the set it was minted in.
                     let Some(set) = idset.as_ref().filter(|arr| !arr.is_null(i)) else {
                         return Err(DecodeError(format!(
                             "values body: row {} names a tessera_id with no idset; the \
@@ -762,11 +631,7 @@ pub(crate) fn parse_values_batch(
     })
 }
 
-/// The coordinate columns a batch for this view must *not* carry, each paired with what it should
-/// have been called.
-///
-/// `x`/`y` and `lon`/`lat` are the only two spellings, so each view refuses exactly the other one
-/// and the pair is total rather than a list that could be empty.
+/// The coordinate columns a batch for this view must not carry, each paired with its right name.
 fn wrong_spellings(projection: Projection) -> [(&'static str, &'static str); 2] {
     match projection {
         Projection::None => [("lon", "x"), ("lat", "y")],
@@ -774,33 +639,9 @@ fn wrong_spellings(projection: Projection) -> [(&'static str, &'static str); 2] 
     }
 }
 
-/// Project a batch's coordinate columns in place, returning how many rows the projection
-/// **clipped** (`projections.md` §3, §7).
-///
-/// # Two things go wrong here and they are not the same thing
-///
-/// A coordinate outside WGS84's own range is **not a coordinate** and is refused, exactly as the
-/// build refuses it (`projections.md` §2): the accepted input coordinate system is longitude
-/// within ±180 and latitude within ±90, and a caller holding anything else converts before
-/// arriving.
-///
-/// A latitude inside that range but outside the *projection's* domain — beyond ±85.0511287798066°
-/// for `web_mercator` — is **clipped onto the frame's edge, counted, and never refused** (§7). The
-/// same row builds, and a row a build accepts and an ingest rejects is a defect rather than a
-/// policy. Clipping never earns a refusal at any proportion: a clipped point's position is the
-/// projection's own domain boundary, which no choice of frame moves.
-///
-/// # Why the count is taken here and not downstream
-///
-/// The engine's out-of-frame check runs on what this function returns, and the frame's edge is
-/// exactly where the quantisation rule says a point is *not* out of frame — so at the whole-world
-/// frame that check structurally cannot see a single clipped row, however many there are. At a
-/// sub-square frame the two do overlap, a clipped point landing on the *world's* edge and so
-/// outside a frame that does not reach it; such a row is both clipped here and refused there,
-/// which §7 states as correct rather than as an exception to carve out.
-///
-/// `Projection::None` returns without touching either column — the identity, bit for bit, which is
-/// what keeps every existing ingest exactly as it was.
+/// Projects the coordinate columns in place, returning how many rows were clipped. A point
+/// outside WGS84's range is refused, as at the build; one outside only the projection's domain
+/// is moved onto the frame's edge and counted, never refused.
 fn project_columns(
     projection: Projection,
     x: &mut [f64],
@@ -820,6 +661,8 @@ fn project_columns(
                 projection.name()
             )));
         }
+        // Counted here because the engine's out-of-frame check reads the frame's edge as inside,
+        // so at the whole-world frame it never sees a clipped row.
         clipped += u64::from(projection.is_clipped(*lat));
         let (px, py) = projection.forward(*lon, *lat);
         (*lon, *lat) = (px, py);
@@ -827,9 +670,7 @@ fn project_columns(
     Ok(clipped)
 }
 
-/// A binary column that may be null-within (any row) or absent entirely (contracts §3.4:
-/// `external_id` is optional). A present-but-wrong-typed column is still a typed error — only
-/// "missing" and "null at this row" mean "no external id", never "this batch is malformed".
+/// An optional binary column: `None` when absent, refused when present at another type.
 fn optional_binary_col<'a>(
     body_name: &str,
     batch: &'a arrow::record_batch::RecordBatch,
@@ -849,19 +690,9 @@ fn optional_binary_col<'a>(
     }
 }
 
-/// A coordinate column, as `f64` — **`float32` and `float64` are both accepted and the narrower is
-/// widened**, which is the rule the build reads a points file's coordinate columns by
-/// (`tessera_build::input`'s `read_f64_column`), stated here because ingest and build must not
-/// disagree about which files can be loaded (decision 0091).
-///
-/// The widening direction is the only one: an `f64` column is never narrowed. A frame at zoom
-/// offset *k* resolves `2^(8−k)` `f32` steps per cell, so past roughly offset 8 the narrowing would
-/// decide the **cell** a point occupies (`projections.md` §6), and it would do so inside a request
-/// the caller was acked for. A whole-world frame is served perfectly well by `float32`, which is
-/// why the narrower width stays acceptable rather than being refused.
-///
-/// `offset` is where this record batch's rows start in the request, so a null names the request's
-/// row.
+/// A coordinate column as `f64`: `float32` is widened, as the build reads a points file, and
+/// `float64` is never narrowed, since at deep zoom narrowing would move a point to another cell.
+/// `offset` is where this record batch's rows start in the request, so a null names its row.
 fn coordinate_col(
     batch: &arrow::record_batch::RecordBatch,
     name: &str,
@@ -891,15 +722,9 @@ fn coordinate_col(
     }
 }
 
-/// The `access` column: one list of labels per row, `list<utf8>` or `large_list<utf8>`
-/// (contracts §3.4, decision 0129).
-///
-/// **A list, because that is what the data is.** Each element is one label and is taken verbatim
-/// — the plugin's [`tessera_plugin::Plugin::terms_of_labels`], the same call a build puts a
-/// points file's term column through — so a label containing whatever separator a grammar might
-/// have chosen is one term, as it is at the build. A scalar `utf8` column is refused at the
-/// schema rather than read as a one-label row: it is the shape a separator grammar lived in, and
-/// accepting it beside the list would leave two spellings for one column.
+/// The `access` column, `list<utf8>` or `large_list<utf8>`: each element is one label, taken
+/// verbatim, so a label containing a separator is one term, as at the build. A scalar `utf8`
+/// column is refused rather than read as one label per row.
 enum LabelCells<'a> {
     List(&'a arrow::array::ListArray),
     Large(&'a arrow::array::LargeListArray),
@@ -931,11 +756,9 @@ impl LabelCells<'_> {
         }
     }
 
-    /// Row `row`'s labels, verbatim and in order. **A null list and an empty list are one case,
-    /// a row with no label** (decision 0133), which the view's declared default fills or, where
-    /// none is declared, refuses with the count; the JSON door reads an absent or null `access`
-    /// the same way, so the two doors agree. A whole column absent is still refused at the
-    /// schema. A null element has no bytes to be a label and is refused naming the row.
+    /// Row `row`'s labels, verbatim and in order. A null or empty list is a row with no label,
+    /// which the view's declared default fills or refuses, as the JSON decode reads a null
+    /// `access`; a null element is refused.
     fn labels_at(&self, row: usize) -> Result<Vec<Vec<u8>>, DecodeError> {
         let Some(entries) = self.entries(row) else {
             return Ok(Vec::new());
@@ -1065,7 +888,6 @@ mod category_wire {
 
     /// One batch of the fixed columns plus `department` (as `column`) and `score`.
     fn body(column: arrow::array::ArrayRef, nullable: bool) -> Vec<u8> {
-        // One label per row, as a list (decision 0129).
         let mut access = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
         access.values().append_value("public");
         access.append(true);
@@ -1114,15 +936,11 @@ mod category_wire {
         .map(|parsed| parsed.items)
     }
 
-    /// These fixtures declare no layer, so every column here is a scalar or a refusal —
-    /// the membership column has its own cases in `tests/membership_column.rs`, over HTTP and
-    /// against a registry that holds one.
+    /// No layer is registered, so every column here is a scalar or a refusal.
     fn no_layers(_: &str) -> Option<tessera_types::layer::LayerDeclaration> {
         None
     }
 
-    /// A known key becomes its **pinned** code at the column's declared width. The code is
-    /// never re-derived from the data, so this is the whole of what the wire decides.
     #[test]
     fn a_known_key_is_stored_as_its_pinned_code() {
         let items = parse(Arc::new(StringArray::from(vec!["ops"])), false)
@@ -1134,9 +952,6 @@ mod category_wire {
         );
     }
 
-    /// **Declare-then-use** (§5, views §80): a category carries properties and a visibility
-    /// consequence, so a typo must not create one. The refusal names both the column and the
-    /// key, and the whole batch is without effect.
     #[test]
     fn an_unknown_key_is_refused_naming_the_column_and_the_key() {
         let err = parse(Arc::new(StringArray::from(vec!["k9-unit"])), false)
@@ -1146,9 +961,7 @@ mod category_wire {
         assert!(detail.contains("k9-unit"), "{detail}");
     }
 
-    /// **The hole this closes.** A code on the wire was accepted by range alone, so an
-    /// unassigned code, a `reserved` code or a typo was stored with no error anywhere. The
-    /// wire type is now `utf8`, so the same batch is a 422 naming the column.
+    /// A category is `utf8` on the wire, so a code sent in place of its key is refused.
     #[test]
     fn a_code_on_the_wire_is_refused_where_it_used_to_be_stored() {
         let err = parse(Arc::new(UInt8Array::from(vec![9u8])), false)
@@ -1158,8 +971,6 @@ mod category_wire {
         assert!(detail.contains("utf8"), "{detail}");
     }
 
-    /// Null means *absent* — the reserved code 0, which is why a `u8` category holds 255
-    /// values and not 256.
     #[test]
     fn a_null_key_is_absent() {
         let items = parse(
@@ -1170,8 +981,7 @@ mod category_wire {
         assert_eq!(items[0].scalars[0], WalScalar::U16(ABSENT_CODE as u16));
     }
 
-    /// The empty string is **not** absence. It is what an unset field and a client bug both
-    /// produce, so folding it into code 0 would accept the same defect silently.
+    /// An unset field and a client bug both produce the empty string, so it is not absence.
     #[test]
     fn the_empty_string_is_refused_rather_than_folded_into_absence() {
         let err = parse(Arc::new(StringArray::from(vec![""])), false)
@@ -1180,13 +990,7 @@ mod category_wire {
         assert!(detail.contains("department"), "{detail}");
     }
 
-    /// **Under a discovered vocabulary a novel key travels as a key**, for the write executor
-    /// to mint against the live bindings.
-    ///
-    /// The handler must not mint it here. Two requests racing one novel key would each draw,
-    /// and that key would end up with two codes with its rows split between them — whichever
-    /// binding survived would recolour the other's rows, silently. Windows close serially, so
-    /// resolving there is what makes the two agree.
+    /// A novel key reaches the write executor as a key, for it to mint.
     #[test]
     fn a_novel_key_under_a_discovered_vocabulary_travels_unresolved() {
         let items = parse_ingest_batch(
@@ -1208,8 +1012,7 @@ mod category_wire {
         );
     }
 
-    /// A key the discovered vocabulary already binds resolves in the handler like any other —
-    /// only the *novel* case needs the executor, so the common path costs no extra work.
+    /// Only a novel key waits for the executor.
     #[test]
     fn a_bound_key_under_a_discovered_vocabulary_still_resolves_here() {
         let items = parse_ingest_batch(
@@ -1227,9 +1030,7 @@ mod category_wire {
         assert_eq!(items[0].scalars[0], WalScalar::U16(CODE_OPS as u16));
     }
 
-    /// A plain scalar of the same width is unchanged and still arrives as an integer — so a
-    /// client that thinks a column is a category when the bundle says otherwise gets a 422
-    /// naming it, rather than plausible integers stored as codes.
+    /// A plain scalar beside a category is read at its own type.
     #[test]
     fn a_plain_scalar_is_unaffected_by_the_category_rule() {
         let items = parse(Arc::new(StringArray::from(vec!["ops"])), false).unwrap();

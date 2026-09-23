@@ -184,8 +184,9 @@ pub struct ExecutorHealth {
     /// Rows a publication removed from the buffer, summed over every flush that swapped.
     pub(in crate::write) flush_rows_published: AtomicU64,
     pub(in crate::write) apply_nanos_max: AtomicU64,
-    /// Work-lane jobs finished. `work_submitted - work_completed` is the queue depth the 429's
-    /// `Retry-After` is derived from. Deny-lane jobs are not counted: their queue is unbounded.
+    /// Work-lane jobs answered, counted just before each answer is sent. `work_submitted -
+    /// work_completed` is the queue depth the 429's `Retry-After` is derived from. Deny-lane jobs
+    /// are not counted: their queue is unbounded.
     pub(in crate::write) work_completed: AtomicU64,
     /// An EWMA (weight 1/8) of one work-lane job's whole service time. A cumulative mean would keep
     /// reporting an old fast regime after the buffer has grown. Written when a job finishes, so see
@@ -466,7 +467,7 @@ pub struct ExecutorStats {
     pub wal_fsyncs: u64,
     /// See [`ExecutorHealth::wal_recoveries`].
     pub wal_recoveries: u64,
-    /// Work-lane jobs whose `execute` has returned.
+    /// Work-lane jobs answered. A caller that has its answer is already counted here.
     pub work_completed: u64,
     /// `work_submitted - work_completed`, saturating: the two are read separately, so completed
     /// may briefly exceed submitted.
@@ -1013,23 +1014,18 @@ impl ExecutorHealth {
     /// constructed only after the previous one has closed.
     pub(in crate::write) fn record_window_service(&self, entries: u64, elapsed_nanos: u64) {
         debug_assert!(entries > 0, "an empty window is never closed");
-        let entries = entries.max(1);
-        // `entries - 1` here and one more inside `record_work_service`: one completion per entry.
-        self.work_completed
-            .fetch_add(entries - 1, Ordering::Relaxed);
-        self.record_work_service(elapsed_nanos / entries);
+        self.record_work_service(elapsed_nanos / entries.max(1));
     }
 
-    /// One work-lane job that finished without a commit window closing over it: a publication, a
-    /// command applied on its own, an idempotent replay, a 409. It occupied a queue slot and was
-    /// counted at submission, so it must be counted here or [`ExecutorStats::work_depth`] drifts
-    /// upward forever and every 429 inherits the drift.
+    /// One work-lane job answered. Called by its reply just before the answer is sent, and only
+    /// for a job counted in `work_submitted`, so [`ExecutorStats::work_depth`] neither drifts nor
+    /// lags a caller that has its answer.
     pub(in crate::write) fn note_work_finished(&self) {
         self.work_completed.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// One work-lane job finished, and the EWMA observation for it. Called on the executor thread
-    /// and nowhere else, which is what lets the EWMA be a plain load/store rather than a CAS loop.
+    /// The EWMA observation for one work-lane job. Called on the executor thread and nowhere
+    /// else, which is what lets the EWMA be a plain load/store rather than a CAS loop.
     ///
     /// `sample_nanos` is the **per-job** service — the whole of what a queued job waits for: append,
     /// fsync, apply, swap and ack. A window divides its elapsed by its entry count before calling
@@ -1042,7 +1038,6 @@ impl ExecutorHealth {
         // stale (smaller) EWMA rather than an in-flight elapsed for a job that has finished. Both
         // orderings are honest; this one cannot over-report a drain that is already over.
         self.work_started_nanos.store(0, Ordering::Relaxed);
-        self.work_completed.fetch_add(1, Ordering::Relaxed);
         let prev = self.work_service_nanos_ewma.load(Ordering::Relaxed);
         let next = ewma_eighth(prev, sample_nanos);
         self.work_service_nanos_ewma.store(next, Ordering::Relaxed);
@@ -1376,7 +1371,7 @@ mod retry_after_tests {
     #[test]
     pub(in crate::write) fn work_depth_saturates_rather_than_underflowing() {
         let health = ExecutorHealth::new();
-        health.record_work_service(1);
+        health.note_work_finished();
         assert_eq!(health.stats().work_completed, 1);
         assert_eq!(health.stats().work_depth, 0);
     }

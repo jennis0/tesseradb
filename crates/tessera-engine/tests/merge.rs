@@ -1252,18 +1252,17 @@ fn the_merge_publication_seam_parks_the_executor_between_execution_and_publicati
     );
 }
 
-/// **A flush discarded at its rebase leaves a bundle a restart opens.**
+/// **A flush handed back while the executor is parked is published once, and the bundle reopens.**
 ///
-/// A tick may plan a flush of a view while that view's previous flush has finished on the pool
-/// and not yet been published: the in-flight flag clears when the unit is handed back, and the
-/// executor drains completed flushes before it ticks, so a unit handed back between the drain and
-/// the tick is invisible to the plan. The second flush then carries the first one's rows again at
-/// the same `row_base`, and its publication must come to nothing, on disc as well as in memory.
+/// The flush finishes on the pool after the executor's drain and before its tick, the window in
+/// which the flush is no longer running and not yet published. The tick that follows must not
+/// plan the same rows again, and every late item ends at one row, served once by this process and
+/// found at that row by a restart.
 ///
 /// The merge seam is the lever: the executor parks in `publish_merge`, after its drain and before
 /// its tick, and the held flush is released into that window.
 #[test]
-fn a_flush_discarded_at_its_rebase_leaves_a_bundle_a_restart_opens() {
+fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
     use tessera_lifecycle::faults::{PauseAction, PauseSite};
 
     let tmp = tempfile::TempDir::new().unwrap();

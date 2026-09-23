@@ -1863,6 +1863,10 @@ impl Executor {
         // dictionary it planned against; `Dict::load` reproduces them only if its extent lands
         // where the flush assumed. Scoped to flushes that wrote an extent, since one that
         // promoted nothing carries only ordinals append-only extension preserves.
+        //
+        // The flush is the only other writer of the dictionary under one prefix, and one flush is
+        // outstanding at a time, so what this guards is `Engine::publish_geometry` swapping in a
+        // dictionary during the flight without moving the prefix.
         if dictionary_moved_under(completed.promoted_from_dict_len, live.dict.len()) {
             tracing::warn!(
                 planned = completed.promoted_from_dict_len,
@@ -1885,20 +1889,22 @@ impl Executor {
             );
             return false;
         };
-        // The rebase is asked before anything is written, as a merge's is: a side-manifest naming
-        // a segment the row space refuses is one a restart cannot open. The row space moves under
-        // a flush when the view is dropped or created again during its flight.
+        // Asked before anything is written: a side-manifest naming a segment the row space
+        // refuses is one a restart cannot open. A view dropped during the flight has no row
+        // space, or a new incarnation's; its rows went with the drop, and the segment takes
+        // neither, even where the new incarnation's empty row space would continue it.
         if let Some(segment) = &completed.segment {
             let continues = partition_data
                 .views
                 .get(&completed.view)
+                .filter(|view| view.incarnation == segment.descriptor.incarnation)
                 .and_then(|view| view.row_space.with_extent(segment.extent.clone()))
                 .is_some();
             if !continues {
                 tracing::warn!(
                     view = %completed.view,
-                    "discarding a completed flush whose segment no longer continues its view's \
-                     row space"
+                    "discarding a completed flush whose view was dropped during its flight, or \
+                     whose segment no longer continues the view's row space"
                 );
                 return false;
             }
@@ -2166,13 +2172,16 @@ impl Executor {
                 ) {
                     Ok(bundle) => bundle,
                     Err(e) => {
-                        // Unreachable: the same rebase was asked of the same generation before
-                        // the commit. The manifest just committed names this segment, so a
-                        // restart before the next publication would refuse to open.
-                        discard(&format!(
-                            "its segment no longer rebases after its side-manifest was committed \
-                             ({e})"
-                        ));
+                        // Unreachable: the check before the commit asked this of the same
+                        // generation. Were it reached, the committed manifest names a segment this
+                        // process does not serve.
+                        self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                        tracing::error!(
+                            error = %e,
+                            "ALARM: a flush's side-manifest was committed naming a segment its \
+                             view's row space refuses. This process does not serve the segment, \
+                             and a restart before the next publication refuses to open the bundle"
+                        );
                         return false;
                     }
                 };
