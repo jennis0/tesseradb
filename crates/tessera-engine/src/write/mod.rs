@@ -567,6 +567,7 @@ impl WritePath {
     /// command's reply is typed to carry.
     fn submit<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, AcceptError> {
         let (reply, pending) = Reply::channel(
+            Some(Arc::clone(&self.health)),
             #[cfg(feature = "fault-injection")]
             self.faults.clone(),
         );
@@ -782,6 +783,7 @@ impl WritePath {
         op: ChangeOp,
     ) -> Result<PendingChange, AcceptError> {
         let (reply, pending) = Reply::channel(
+            None,
             #[cfg(feature = "fault-injection")]
             self.faults.clone(),
         );
