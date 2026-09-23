@@ -32,11 +32,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array, UInt64Array};
+use arrow::array::{Float32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tessera_build::config::Attribute;
@@ -98,50 +97,29 @@ fn position(view: &str, e: u64) -> (f64, f64) {
 
 /// A points file. A view of a group carries the `heat` column its family reads from it; the plain
 /// view carries none, which is what it means for the family to be the group's.
-fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option<usize>) {
-    let mut fields = vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ];
-    if slot.is_some() {
-        fields.push(Field::new("heat", DataType::Float32, true));
+fn write_view_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option<usize>) {
+    let ids: Vec<u64> = ids.collect();
+    let mut extra = Vec::new();
+    if let Some(slot) = slot {
+        let heat = Float32Array::from(ids.iter().map(|&e| heat(slot, e)).collect::<Vec<_>>());
         // The two families the two-door work added: a `text` one, whose stored value cannot be
         // compared once flushed, and one carrying neither flag, which is stored and served at the
         // drill-down without being searchable or drawn.
-        fields.push(Field::new("note", DataType::Utf8, true));
-        fields.push(Field::new("tag", DataType::Float32, true));
-    }
-    let schema = Arc::new(ArrowSchema::new(fields));
-    let ids: Vec<u64> = ids.collect();
-    let mut columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(UInt64Array::from(ids.clone())),
-        Arc::new(Float64Array::from(
-            ids.iter().map(|&e| position(view, e).0).collect::<Vec<_>>(),
-        )),
-        Arc::new(Float64Array::from(
-            ids.iter().map(|&e| position(view, e).1).collect::<Vec<_>>(),
-        )),
-    ];
-    if let Some(slot) = slot {
-        columns.push(Arc::new(Float32Array::from(
-            ids.iter().map(|&e| heat(slot, e)).collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(arrow::array::StringArray::from(
+        let note = arrow::array::StringArray::from(
             ids.iter()
                 .map(|&e| Some(format!("built prose for {e} in {slot}")))
                 .collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(Float32Array::from(
+        );
+        let tag = Float32Array::from(
             ids.iter()
                 .map(|&e| Some((e * 2 + slot as u64) as f32))
                 .collect::<Vec<_>>(),
-        )));
+        );
+        extra.push(column("heat", true, heat));
+        extra.push(column("note", true, note));
+        extra.push(column("tag", true, tag));
     }
-    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write_points(path, &ids, |e| position(view, e), extra);
 }
 
 /// The gate on `quarter:2026-Q2`, and on nothing else: the term a principal must hold to reach
@@ -197,13 +175,13 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
-    write_points(&world_points, "world", WORLD, None);
+    write_view_points(&world_points, "world", WORLD, None);
     let mut views = vec![gated_view("world", &world_points, &pairs, None)];
     let mut family_views = Vec::new();
     for (slot, (key, range)) in QUARTERS.iter().enumerate() {
         let id = format!("quarter:{key}");
         let points = dir.join(format!("quarter-{key}.parquet"));
-        write_points(&points, &id, range.clone(), Some(slot));
+        write_view_points(&points, &id, range.clone(), Some(slot));
         family_views.push(views.len());
         let gate = (*key == GATED_QUARTER).then_some(GATE_TERM);
         views.push(gated_view(&id, &points, &pairs, gate));
@@ -213,13 +191,13 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
     for (slot, (key, range)) in QUARTERS.iter().enumerate() {
         let id = format!("quarter_map:{key}");
         let points = dir.join(format!("map-{key}.parquet"));
-        write_points(&points, &id, range.clone(), Some(slot));
+        write_view_points(&points, &id, range.clone(), Some(slot));
         views.push(gated_view(&id, &points, &pairs, None));
     }
     // The sharing group's own key, which the owner acquires only while the service runs.
     let borrowed = format!("quarter_map:{BORROWED_KEY}");
     let borrowed_points = dir.join("map-borrowed.parquet");
-    write_points(&borrowed_points, &borrowed, BORROWED, None);
+    write_view_points(&borrowed_points, &borrowed, BORROWED, None);
     views.push(gated_view(&borrowed, &borrowed_points, &pairs, None));
     let out = dir.join("bundle");
     build(&BuildArgs {
@@ -321,39 +299,9 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
     out
 }
 
-struct Served {
-    server: TestServer,
-    token: String,
-    bundle: std::path::PathBuf,
-    _tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    serve_with(default_engine_config()).await
-}
-
-/// The fixture under a caller-chosen configuration — the lifecycle test below narrows
-/// `coalesce_width` so the entity-space coalesce is reachable from a handful of flushes.
-async fn serve_with(config: EngineConfig) -> Served {
-    let tmp = TempDir::new().unwrap();
-    let bundle = build_bundle(tmp.path(), true);
-    let server = spawn_server_with_config(
-        &bundle,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        config,
-    )
-    .await;
-    // Both terms, so every entity is visible and a view's answer is its population rather than a
-    // slice of it. The mask's own effect on the tail is `a_masked_row_carries_no_tail` below.
-    let auth = authorise(&server, &["0", "1"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
-    Served {
-        server,
-        token,
-        bundle,
-        _tmp: tmp,
-    }
+/// The fixture with its scoped render families declared.
+fn build_declared(dir: &Path) -> std::path::PathBuf {
+    build_bundle(dir, true)
 }
 
 async fn viewport_bytes(served: &Served, token: &str, view: &str) -> (u16, Vec<u8>) {
@@ -656,7 +604,7 @@ async fn by_entity(
 /// bundle-wide column can do.
 #[tokio::test]
 async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_values() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     let mut seen: Vec<BTreeMap<u64, f32>> = Vec::new();
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let view = format!("quarter:{key}");
@@ -700,7 +648,7 @@ async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_
 /// declaration must not move a byte of a row space no scope reaches.
 #[tokio::test]
 async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_family() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     let (status, body) = viewport_bytes(&served, &served.token, "world").await;
     assert_eq!(status, 200);
     let (names, values) = points_columns(&body);
@@ -750,7 +698,10 @@ async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_famil
         out.sort();
         out
     };
-    let (with, plain) = (segment_dir(&served.bundle), segment_dir(&without));
+    let (with, plain) = (
+        segment_dir(&served.tmp.path().join("bundle")),
+        segment_dir(&without),
+    );
     assert_eq!(
         listing(&with),
         listing(&plain),
@@ -768,7 +719,7 @@ async fn a_view_outside_the_group_is_byte_identical_to_a_build_without_the_famil
 /// own row order and its own geometry.
 #[tokio::test]
 async fn a_sharing_group_renders_the_owners_family_under_its_own_views() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let view = format!("quarter_map:{key}");
         let (status, body) = viewport_bytes(&served, &served.token, &view).await;
@@ -787,7 +738,7 @@ async fn a_sharing_group_renders_the_owners_family_under_its_own_views() {
 /// wire null — the same thing an entity-scoped render column's absence is.
 #[tokio::test]
 async fn an_entity_with_no_value_in_a_view_takes_the_render_placeholder() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     let (status, body) = viewport_bytes(&served, &served.token, "quarter:2026-Q1").await;
     assert_eq!(status, 200);
     let (_, values) = points_columns(&body);
@@ -809,11 +760,8 @@ async fn an_entity_with_no_value_in_a_view_takes_the_render_placeholder() {
 /// selection returned — and is asserted rather than assumed.
 #[tokio::test]
 async fn a_row_the_mask_excludes_carries_no_scoped_value() {
-    let served = serve().await;
-    let narrow = authorise(&served.server, &["1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let served = Served::build(build_declared).await;
+    let narrow = token_for(&served.server, &["1"]).await;
     let (status, body) = viewport_bytes(&served, &narrow, "quarter:2026-Q1").await;
     assert_eq!(status, 200);
     let (names, values) = points_columns(&body);
@@ -834,7 +782,7 @@ async fn a_row_the_mask_excludes_carries_no_scoped_value() {
 /// quarter's points batch and not in the plain view's.
 #[tokio::test]
 async fn meta_publishes_the_render_placement_and_the_views_that_have_a_column() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     let body: Value = served
         .server
         .client
@@ -903,7 +851,7 @@ async fn meta_publishes_the_render_placement_and_the_views_that_have_a_column() 
 /// today draws with its own numbers without a rebuild.
 #[tokio::test]
 async fn a_view_created_at_runtime_gains_its_scoped_column_at_the_first_flush() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     let resp = served
         .server
         .client
@@ -915,10 +863,7 @@ async fn a_view_created_at_runtime_gains_its_scoped_column_at_the_first_flush() 
         .unwrap();
     assert_eq!(resp.status().as_u16(), 201, "the view is created");
     // A session resolves its visible views once, so the new view needs a new session.
-    let token = authorise(&served.server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     let (status, body) = viewport_bytes(&served, &token, "quarter:2026-Q3").await;
     assert_eq!(status, 200, "an empty view serves");
     let (names, values) = points_columns(&body);
@@ -965,10 +910,7 @@ async fn a_view_created_at_runtime_gains_its_scoped_column_at_the_first_flush() 
     .await;
     flush(&served).await;
 
-    let token = authorise(&served.server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     let (names, values) = settled_points(&served, &token, "quarter:2026-Q3", 2).await;
     assert!(
         names.contains(&"heat".to_string()),
@@ -1040,7 +982,7 @@ async fn settled_points(
 /// about the response's schema changes — the column is the manifest's, not the segment's.
 #[tokio::test]
 async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_carried() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     // An entity the corpus has never seen, ingested into a view of the group.
     const NEW: u64 = 9_001;
     ingest_with_heat(
@@ -1086,7 +1028,7 @@ async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_car
 /// key at all, so this path is the one it always was.
 #[tokio::test]
 async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     let (status, body) = try_ingest_with_heat(
         &served,
         "heat-plain",
@@ -1110,7 +1052,7 @@ async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
 /// belongs to the `(entity, view)` pair the join is creating.
 #[tokio::test]
 async fn a_join_row_carries_this_views_scoped_value() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const NEW: u64 = 9_301;
     ingest_with_heat(
         &served,
@@ -1154,7 +1096,7 @@ async fn a_join_row_carries_this_views_scoped_value() {
 /// flushed row are read before the fold and again after, and both must be unchanged.
 #[tokio::test]
 async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const NEW: u64 = 9_401;
     ingest_with_heat(
         &served,
@@ -1175,10 +1117,7 @@ async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
 
     // A fold rewrites the whole prefix, so a session that authorised against the old one is asking
     // about a bundle that has gone; a fresh session is what a client would have.
-    let token = authorise(&served.server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     let (names, values) = settled_points(&served, &token, "quarter:2026-Q1", expected).await;
     assert!(
         names.contains(&"heat".to_string()),
@@ -1243,7 +1182,7 @@ async fn fold(served: &Served) {
 /// family at all; its own value is checked, so the column is being read rather than missing.
 #[tokio::test]
 async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const REJOINS: u64 = 9_901;
     const FRESH: u64 = 9_902;
     /// Create the key, which is a `201` whether or not it has been held before.
@@ -1261,10 +1200,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
     }
     create(&served).await;
     // A session resolves its visible views once, so every read below takes a fresh one.
-    let token = authorise(&served.server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     let (status, body) = try_ingest_families(
         &served,
         "heat-first-incarnation",
@@ -1295,10 +1231,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200, "the drop is accepted");
     create(&served).await;
-    let token = authorise(&served.server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     let (status, body) = try_ingest_families(
         &served,
         "heat-second-incarnation",
@@ -1386,34 +1319,15 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
 
     // The same two answers after a restart, which composes the extents the side-manifest names
     // rather than the columns this process holds.
-    let Served { server, bundle, _tmp, .. } = served;
-    server.shutdown().await;
-    let server = spawn_server(
-        &bundle,
-        &_tmp.path().join("cache"),
-        &_tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let served = Served {
-        server,
-        token: token.clone(),
-        bundle,
-        _tmp,
-    };
+    let served = served.restart().await;
+    let token = served.token.clone();
     rendered(&served, &token, REJOINS, FRESH).await;
     adopts_nothing(&served, &token, REJOINS, FRESH, "after a restart").await;
 
     fold(&served).await;
     // A fold rewrites the whole prefix, so a session authorised against the old one is asking
     // about a bundle that has gone.
-    let token = authorise(&served.server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     rendered(&served, &token, REJOINS, FRESH).await;
     assert_eq!(
         filtered_entities(&served, &token, "quarter:2026-Q3", range("heat")).await,
@@ -1433,7 +1347,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
 /// and a restart of the same bundle answers where the live generation answered.
 #[tokio::test]
 async fn a_borrowing_views_scoped_values_survive_a_restart() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const OWNED_ENTITY: u64 = 9_801;
     const BORROWED_ENTITY: u64 = 9_802;
     let owner = format!("quarter:{BORROWED_KEY}");
@@ -1486,10 +1400,7 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
     /// What the borrowing view owes about the value its own batch carried: the leaf, the text
     /// match and the drill-down, each over the column the owner's view names.
     async fn answers(served: &Served, borrower: &str, entity: u64, stage: &str) {
-        let token = authorise(&served.server, &["0", "1"]).await["token"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let token = token_for(&served.server, &["0", "1"]).await;
         let rows = (BORROWED.end - BORROWED.start) as usize + 1;
         settled_points(served, &token, borrower, rows).await;
         assert_eq!(
@@ -1519,29 +1430,7 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
 
     // The same answers after a restart, which composes the extents the side-manifest names rather
     // than the columns this process holds.
-    let Served {
-        server,
-        bundle,
-        _tmp,
-        ..
-    } = served;
-    server.shutdown().await;
-    let server = spawn_server(
-        &bundle,
-        &_tmp.path().join("cache"),
-        &_tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let served = Served {
-        server,
-        token,
-        bundle,
-        _tmp,
-    };
+    let served = served.restart().await;
     answers(&served, &borrower, BORROWED_ENTITY, "after a restart").await;
 }
 
@@ -1556,14 +1445,11 @@ async fn a_borrowing_views_scoped_values_survive_a_restart() {
 /// names it.
 #[tokio::test]
 async fn a_sharing_groups_view_is_listed_where_the_owners_gated_one_is_not() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     // Term `0` alone: every entity carries it, so this principal's mask is the whole corpus and
     // what it cannot reach is a *view* rather than an item. `quarter:2026-Q2`'s gate names term
     // `1`, which it does not hold, and every `quarter_map` view is public.
-    let outsider = authorise(&served.server, &["0"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let outsider = token_for(&served.server, &["0"]).await;
     let meta: Value = served
         .server
         .client
@@ -1673,7 +1559,7 @@ async fn filtered_entities(
 /// leaf resolves would pass one assertion and fail the other.
 #[tokio::test]
 async fn a_render_only_family_answers_a_bare_leaf_under_a_view_of_its_group() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     let mut answers = Vec::new();
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         // The gated quarter is reachable: this session holds both terms.
@@ -1706,7 +1592,7 @@ async fn a_render_only_family_answers_a_bare_leaf_under_a_view_of_its_group() {
 /// carry: `world` serves no points in this fixture.)
 #[tokio::test]
 async fn a_pin_of_a_render_only_family_reads_the_named_views_column() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     let answer = filtered_entities(
         &served,
         &served.token,
@@ -1735,7 +1621,7 @@ async fn a_pin_of_a_render_only_family_reads_the_named_views_column() {
 /// the resolution is one site and the licence is all that changed.
 #[tokio::test]
 async fn a_render_only_familys_leaf_takes_the_same_refusals_an_indexed_ones_does() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     let (status, body) = filtered_bytes(&served, &served.token, "world", range("heat")).await;
     assert_eq!(status, 422, "a bare leaf on a plain view decides nothing");
     let detail = String::from_utf8_lossy(&body).to_string();
@@ -1757,7 +1643,7 @@ async fn a_render_only_familys_leaf_takes_the_same_refusals_an_indexed_ones_does
 /// arrived by ingest answers the leaf that the build's rows answer, before and after the rewrite.
 #[tokio::test]
 async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_fold() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const NEW: u64 = 9_501;
     ingest_with_heat(
         &served,
@@ -1786,10 +1672,7 @@ async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_f
     fold(&served).await;
     // A fold rewrites the whole prefix, so a session authorised against the old one is asking
     // about a bundle that has gone.
-    let token = authorise(&served.server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"]).await;
     settled_points(&served, &token, "quarter:2026-Q1", members(0).count() + 1).await;
     let after = filtered_entities(&served, &token, "quarter:2026-Q1", range("heat")).await;
     assert_eq!(
@@ -1815,7 +1698,7 @@ async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_f
 /// row space entirely, and by one under `quarter_map:2026-Q1` beside it.
 #[tokio::test]
 async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const NEW: u64 = 9_401;
     // Above the fixture's threshold, so the leaf below separates it from the absent rows.
     const VALUE: f32 = 77.5;
@@ -1870,7 +1753,7 @@ async fn a_sharing_groups_door_writes_the_cell_the_owners_view_addresses() {
 /// who owns the family.
 #[tokio::test]
 async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_different_one() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const AGREES: u64 = 9_501;
     const DISAGREES: u64 = 9_502;
     const VALUE: f32 = 88.25;
@@ -1931,7 +1814,7 @@ async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_diff
 #[tokio::test]
 async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
     use base64::Engine as _;
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const AGREES: u64 = 9_601;
     const DISAGREES: u64 = 9_602;
     const VALUE: f32 = 5.0;
@@ -2011,7 +1894,7 @@ async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
 /// refused before any cell is read.
 #[tokio::test]
 async fn a_written_cell_of_an_unflagged_family_dedupes_or_is_refused() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     // An entity the build placed in `2026-Q1`, whose `tag` the build wrote: slot 0, so `e * 2`.
     const CELL: u64 = 4;
     const HELD: f32 = (CELL * 2) as f32;
@@ -2074,7 +1957,7 @@ async fn fill(
 /// what cannot be established. Omitting the column passes, and leaves the cell as it stands.
 #[tokio::test]
 async fn a_flushed_text_cell_refuses_a_second_value_equal_or_not() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const A: u64 = 9_601;
     const B: u64 = 9_602;
     const C: u64 = 9_603;
@@ -2161,7 +2044,7 @@ async fn a_flushed_text_cell_refuses_a_second_value_equal_or_not() {
 /// the fail-closed arm above would read as the rule for text rather than as the cost of a flush.
 #[tokio::test]
 async fn a_same_window_text_cell_still_dedupes_and_refuses_exactly() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const AGREES: u64 = 9_701;
     const DISAGREES: u64 = 9_702;
     let prose = "prose still sitting in the buffer";
@@ -2231,7 +2114,7 @@ async fn a_same_window_text_cell_still_dedupes_and_refuses_exactly() {
 /// proved here is that the values are on disc, in the manifest, and survive a rewrite.
 #[tokio::test]
 async fn a_neither_flag_family_gains_its_column_from_a_flush_and_keeps_it_through_a_fold() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const NEW: u64 = 9_801;
     let (status, body) = try_ingest_families(
         &served,
@@ -2384,7 +2267,7 @@ fn views_of(e: u64) -> Vec<String> {
 /// projection being the view's own (decision 0040).
 #[tokio::test]
 async fn the_drill_down_names_every_view_the_point_is_in_with_its_position_there() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     // In the plain view and in both quarters, so the sharing group's two layouts hold it as well.
     const ENTITY: u64 = 10;
     let id = id_of(&served, &served.token, "world", ENTITY).await;
@@ -2430,7 +2313,7 @@ async fn the_drill_down_names_every_view_the_point_is_in_with_its_position_there
 /// serving the same number twice would be reading a bundle-wide column under a scoped name.
 #[tokio::test]
 async fn the_drill_down_serves_the_scoped_values_keyed_by_the_groups_key() {
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     const ENTITY: u64 = 10;
     let id = id_of(&served, &served.token, "world", ENTITY).await;
     let body = item(&served, &served.token, id).await;
@@ -2472,11 +2355,8 @@ async fn the_drill_down_serves_the_scoped_values_keyed_by_the_groups_key() {
 /// can.
 #[tokio::test]
 async fn a_gate_failed_view_is_absent_from_the_drill_down_and_its_key_is_not() {
-    let served = serve().await;
-    let narrow = authorise(&served.server, &["0"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let served = Served::build(build_declared).await;
+    let narrow = token_for(&served.server, &["0"]).await;
     const ENTITY: u64 = 10;
     let id = id_of(&served, &narrow, "world", ENTITY).await;
     let body = item(&served, &narrow, id).await;
@@ -2518,7 +2398,7 @@ async fn a_gate_failed_view_is_absent_from_the_drill_down_and_its_key_is_not() {
 #[tokio::test]
 async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
     use base64::Engine as _;
-    let served = serve().await;
+    let served = Served::build(build_declared).await;
     // An entity ingested and published, so the cell this fills is empty and nothing else is
     // buffered. A built cell holds the build's own value, which the fill would be refused for.
     const FRESH: u64 = 9_801;
@@ -2562,9 +2442,8 @@ async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
         "nothing buffered holds the log"
     );
 
-    let Served { server, _tmp, bundle, .. } = served;
-    server.shutdown().await;
-    let server = spawn_server(&bundle, &_tmp.path().join("cache"), &_tmp.path().join("wal.log")).await;
+    let Served { server, tmp, .. } = served;
+    let server = restart(server, &tmp).await;
     assert_eq!(
         server.state.engine.generation().buffer.oldest_wal_pos(),
         None,
@@ -2657,10 +2536,7 @@ fn rendered_heat(view: &str, entity: u64) -> f32 {
 
 /// A fresh session, which is what a client holds after a publication it did not authorise against.
 async fn session(served: &Served) -> String {
-    authorise(&served.server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    token_for(&served.server, &["0", "1"]).await
 }
 
 /// Everything the three families owe under every view they were written to, at one stage of the
@@ -2778,7 +2654,7 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
         coalesce_width: Some(2),
         ..default_engine_config()
     };
-    let served = serve_with(config()).await;
+    let served = Served::build_with(build_declared, config()).await;
     let resp = served
         .server
         .client
@@ -2835,7 +2711,7 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
     serves_everything(&served, &token, "after a coalesce").await;
 
     // ---- a restart, which composes the extents the side-manifest names ------------------------
-    let served = reopen(served, config()).await;
+    let served = served.restart_with(config()).await;
     serves_everything(&served, &served.token, "after a restart").await;
 
     // ---- the fold, which rewrites every column the manifest names -----------------------------
@@ -2844,24 +2720,6 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
     serves_everything(&served, &token, "after a fold").await;
 
     // ---- and a restart over what the fold wrote -----------------------------------------------
-    let served = reopen(served, config()).await;
+    let served = served.restart_with(config()).await;
     serves_everything(&served, &served.token, "after a second restart").await;
-}
-
-/// Stop the server and open the same bundle, cache and log again, under the same configuration.
-async fn reopen(served: Served, config: EngineConfig) -> Served {
-    let Served { server, bundle, _tmp, .. } = served;
-    server.shutdown().await;
-    let server = spawn_server_with_config(
-        &bundle,
-        &_tmp.path().join("cache"),
-        &_tmp.path().join("wal.log"),
-        config,
-    )
-    .await;
-    let token = authorise(&server, &["0", "1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    Served { server, token, bundle, _tmp }
 }

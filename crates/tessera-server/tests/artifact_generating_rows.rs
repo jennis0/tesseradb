@@ -24,12 +24,6 @@ use tessera_engine::EngineConfig;
 
 const TOPICS: &str = "topics/generating";
 
-/// A built item's member address.
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
 /// An ingested item's member address. Its external id is the caller's own bytes.
 fn ingested(name: &str) -> String {
     use base64::Engine as _;
@@ -65,53 +59,6 @@ fn ingest_batch(rows: &[(&str, f32, f32, &[&str])]) -> Vec<u8> {
     let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
     writer.write(&batch).unwrap();
     writer.into_inner().unwrap()
-}
-
-async fn open(tmp: &TempDir) -> TestServer {
-    spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
-async fn serve(tmp: &TempDir) -> TestServer {
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    open(tmp).await
-}
-
-/// A layer whose one supplied content is gated on **every** member of its generating set.
-async fn register(server: &TestServer) {
-    let declaration = json!({
-        "name": TOPICS,
-        "title": TOPICS,
-        "views": ["s0"],
-        "membership": "enumerated",
-        "value_set": "closed",
-        "visibility": null,
-        "artifact_visibility": { "field": null, "default": "inherited" },
-        "require_member_visibility": null,
-        "hierarchy": { "kind": "flat", "prune_children": true },
-        "content": { "computed": [], "supplied": [
-            { "name": "topic", "type": "text", "require_member_visibility": "all" }
-        ] },
-        "depends_on": [],
-        "levels": []
-    });
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "the layer registers");
 }
 
 fn artifacts_url(server: &TestServer) -> String {
@@ -258,7 +205,12 @@ fn all_keys() -> Vec<String> {
 /// carries the labels its batch gave it, so a set can be made to hold exactly one member the
 /// narrow principal cannot see.
 async fn build_matrix(server: &TestServer) {
-    register(server).await;
+    let mut topics = flat_layer(TOPICS);
+    topics["hierarchy"]["prune_children"] = json!(true);
+    topics["content"]["supplied"] = json!([
+        { "name": "topic", "type": "text", "require_member_visibility": "all" }
+    ]);
+    register(server, topics).await;
 
     // Members whose rows the build wrote. `0`, `3` and `6` carry both terms; `1` carries only the
     // broad principal's, and is the one member the narrow principal lacks.

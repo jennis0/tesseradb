@@ -14,14 +14,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array, StringArray, UInt64Array};
+use arrow::array::{Float32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
-use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 
 const N: u64 = 60;
 
@@ -44,88 +41,8 @@ render = true
 index  = true
 "#;
 
-fn write_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("score", DataType::Float32, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let scores: Vec<f32> = ids.iter().map(|e| (*e % 7) as f32).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(Float32Array::from(scores)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
-    let points = dir.join("points.parquet");
-    let pairs = dir.join("pairs.parquet");
-    write_points(&points, N);
-    write_pairs_n(&pairs, N);
-    let schema_path = dir.join("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let out = dir.join("bundle");
-    build(&BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        schema,
-        ..build_args(
-            &out,
-            vec![view_args("s0", &points, AccessInput::relation(pairs))],
-        )
-    })
-    .expect("fixture build should succeed");
-    out
-}
-
-struct Served {
-    server: TestServer,
-    token: String,
-    tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    build_fixture_bundle(tmp.path());
-    open(tmp).await
-}
-
-async fn open(tmp: TempDir) -> Served {
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    Served { server, token, tmp }
-}
-
-/// Reopen the same bundle and the same log: the restart every durability claim below is made
-/// against. The old server is stopped and waited for first, so its executor has released the
-/// bundle root's write lock before the new one takes it.
-async fn restart(served: Served) -> Served {
-    let Served { server, tmp, .. } = served;
-    server.shutdown().await;
-    open(tmp).await
+fn fixture(dir: &Path) -> std::path::PathBuf {
+    build_scored(dir, N, SCHEMA_TOML)
 }
 
 async fn declare(served: &Served, body: Value) -> (u16, Value) {
@@ -272,10 +189,7 @@ async fn flush(served: &Served) {
 /// The `tessera_id`s a filtered viewport answers, from a fresh session so the rows flushed since
 /// the last one are in the answer (`views_write.rs`'s note on `points`).
 async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"][..]).await;
     let resp = served
         .server
         .client
@@ -327,7 +241,7 @@ fn tag() -> Value {
 /// schema's rules refuse, and `/v1/meta` listing the column from the answer.
 #[tokio::test]
 async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_refuses() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declared_names(&meta(&served).await), ["score"]);
 
     let (status, body) = declare(&served, sentiment()).await;
@@ -389,7 +303,7 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
 /// filter, the drill-down, and the categories vocabulary of a runtime category.
 #[tokio::test]
 async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declare(&served, sentiment()).await.0, 201);
     assert_eq!(declare(&served, tag()).await.0, 201);
 
@@ -535,10 +449,10 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
 /// the segments manifest after one, and the column keeps answering over both.
 #[tokio::test]
 async fn a_declaration_survives_a_restart_before_and_after_a_publication() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declare(&served, sentiment()).await.0, 201);
     assert_eq!(declare(&served, tag()).await.0, 201);
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         declared_names(&meta(&served).await),
         ["score", "sentiment", "tag"],
@@ -564,7 +478,7 @@ async fn a_declaration_survives_a_restart_before_and_after_a_publication() {
     )
     .await;
     flush(&served).await;
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         declared_names(&meta(&served).await),
         ["score", "sentiment", "tag"],

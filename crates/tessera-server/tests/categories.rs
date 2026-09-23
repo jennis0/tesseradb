@@ -17,16 +17,11 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow::array::{Float64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
+use arrow::array::StringArray;
 use tempfile::TempDir;
 
 use common::*;
-use tessera_build::{build, BuildArgs};
 
 const N: u64 = 64;
 
@@ -143,79 +138,48 @@ fn department_of(entity: u64) -> String {
     }
 }
 
-fn write_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("archive", DataType::Utf8, false),
-        Field::new("department", DataType::Utf8, false),
-        Field::new("origin", DataType::Utf8, false),
-        Field::new("score", DataType::Float32, true),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let archives: Vec<&str> = ids.iter().map(|&e| archive_of(e)).collect();
-    let departments: Vec<String> = ids.iter().map(|&e| department_of(e)).collect();
-    let origins: Vec<&str> = ids.iter().map(|&e| origin_of(e)).collect();
-    let scores: Vec<Option<f32>> = ids.iter().map(|&e| score_of(e)).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(StringArray::from(archives)),
-            Arc::new(StringArray::from(departments)),
-            Arc::new(StringArray::from(origins)),
-            Arc::new(arrow::array::Float32Array::from(scores)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
-    write_points(points, N);
+    let ids: Vec<u64> = (0..N).collect();
+    write_points(
+        points,
+        &ids,
+        scatter,
+        vec![
+            column(
+                "archive",
+                false,
+                StringArray::from_iter_values(ids.iter().map(|&e| archive_of(e))),
+            ),
+            column(
+                "department",
+                false,
+                StringArray::from_iter_values(ids.iter().map(|&e| department_of(e))),
+            ),
+            column(
+                "origin",
+                false,
+                StringArray::from_iter_values(ids.iter().map(|&e| origin_of(e))),
+            ),
+            column(
+                "score",
+                true,
+                arrow::array::Float32Array::from_iter(ids.iter().map(|&e| score_of(e))),
+            ),
+        ],
+    );
     write_pairs_n(pairs, N);
-    let schema_path = points.with_file_name("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let args = BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(
-            points.to_path_buf(),
-            &schema,
-        ),
-        schema,
-        ..build_args(
-            out,
-            vec![view_args("s0", points, AccessInput::relation(pairs))],
-        )
-    };
-    build(&args).expect("fixture build should succeed");
+    build_declared(out, points, pairs, SCHEMA_TOML);
 }
 
 /// A server over the categories fixture, plus a session token for a fully-granted principal.
 async fn serve(tmp: &TempDir) -> (TestServer, String) {
-    let bundle_root = tmp.path().join("bundle");
     build_fixture_with_categories(
-        &bundle_root,
+        &tmp.path().join("bundle"),
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
     );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let server = open(tmp).await;
+    let token = token_for(&server, &["0"]).await;
     (server, token)
 }
 
@@ -488,10 +452,7 @@ async fn enumeration_pages_in_key_order_and_the_cursor_resumes() {
 async fn a_derived_value_set_is_filtered_per_principal() {
     let tmp = TempDir::new().unwrap();
     let (server, wide) = serve(&tmp).await;
-    let narrow = authorise(&server, &["1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let narrow = token_for(&server, &["1"]).await;
 
     assert_eq!(
         page_all(&server, &wide, "/v1/categories/department").await,
@@ -511,10 +472,7 @@ async fn a_derived_value_set_is_filtered_per_principal() {
 async fn the_membership_gate_applies_to_both_request_forms() {
     let tmp = TempDir::new().unwrap();
     let (server, _wide) = serve(&tmp).await;
-    let narrow = authorise(&server, &["1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let narrow = token_for(&server, &["1"]).await;
 
     // 101 is visible to this principal, 102 exists but none of its members are, 100 is declared and
     // carried by nobody, 199 is bound to nothing at all.
@@ -542,10 +500,7 @@ async fn the_membership_gate_applies_to_both_request_forms() {
 async fn a_derived_page_is_filled_with_visible_values() {
     let tmp = TempDir::new().unwrap();
     let (server, _wide) = serve(&tmp).await;
-    let narrow = authorise(&server, &["1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let narrow = token_for(&server, &["1"]).await;
 
     let (status, first) = get(&server, &narrow, "/v1/categories/department").await;
     assert_eq!(status, 200, "{first}");
@@ -571,10 +526,7 @@ async fn a_derived_page_is_filled_with_visible_values() {
 async fn a_principal_who_can_see_nothing_is_offered_an_empty_set() {
     let tmp = TempDir::new().unwrap();
     let (server, _wide) = serve(&tmp).await;
-    let none = authorise(&server, &[]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let none = token_for(&server, &[]).await;
 
     let (status, body) = get(&server, &none, "/v1/categories/department").await;
     assert_eq!(status, 200, "{body}");

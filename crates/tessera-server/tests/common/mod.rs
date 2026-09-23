@@ -15,7 +15,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, Float32Array, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{
+    Array, ArrayRef, BinaryArray, Float32Array, Float64Array, UInt32Array, UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
@@ -23,6 +25,7 @@ use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use parking_lot::Mutex;
 use parquet::arrow::ArrowWriter;
+use tempfile::TempDir;
 
 pub use tessera_build::config::AccessInput;
 use tessera_build::{build, BuildArgs, ViewArgs};
@@ -88,62 +91,90 @@ pub fn terms_of(source_id: u64) -> Vec<u64> {
     }
 }
 
-/// Parameterised over the item count — see [`build_fixture_n`]'s doc for why (calibration task:
-/// the byte-equality tests in `tests/http.rs` need a genuinely multi-tile, multi-thousand-row
-/// regime, well above this module's default `N_ITEMS` — see that file's `PARALLEL_HEADLINE_ITEMS`
-/// doc for how they reach the parallel branch specifically, which item count alone no longer does
-/// post-§14).
+/// Write `columns`, in order, as one parquet file at `path`.
+pub fn write_parquet(path: &Path, columns: Vec<(Field, ArrayRef)>) {
+    let (fields, arrays): (Vec<Field>, Vec<ArrayRef>) = columns.into_iter().unzip();
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// Write the points `ids` as a parquet file at `path`: `entity_id`, `x` and `y` placed by
+/// `position`, then the `extra` columns.
+pub fn write_points(
+    path: &Path,
+    ids: &[u64],
+    position: impl Fn(u64) -> (f64, f64),
+    extra: Vec<(Field, ArrayRef)>,
+) {
+    let (xs, ys): (Vec<f64>, Vec<f64>) = ids.iter().map(|&e| position(e)).unzip();
+    let mut columns = vec![
+        column("entity_id", false, UInt64Array::from(ids.to_vec())),
+        column("x", false, Float64Array::from(xs)),
+        column("y", false, Float64Array::from(ys)),
+    ];
+    columns.extend(extra);
+    write_parquet(path, columns);
+}
+
+/// A column named `name` for [`write_points`] or [`write_parquet`], typed by its array.
+pub fn column(name: &str, nullable: bool, array: impl Array + 'static) -> (Field, ArrayRef) {
+    (
+        Field::new(name, array.data_type().clone(), nullable),
+        Arc::new(array),
+    )
+}
+
+/// Where the fixture places entity `e` in [`extent`].
+pub fn scatter(e: u64) -> (f64, f64) {
+    (((e * 37) % 1000) as f64, ((e * 53) % 1000) as f64)
+}
+
+/// Entities `0..n`, placed by [`scatter`], with no other column.
 pub fn write_points_n(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write_points(path, &(0..n).collect::<Vec<_>>(), scatter, Vec::new());
 }
 
-/// Parameterised over the item count — see [`build_fixture_n`]'s doc for why.
+/// The pairs relation over `rows`: each entity holds the terms [`terms_of`] gives it.
+pub fn write_pairs(path: &Path, rows: &[u64]) {
+    let (entities, terms): (Vec<u64>, Vec<u32>) = rows
+        .iter()
+        .flat_map(|&e| terms_of(e).into_iter().map(move |t| (e, t as u32)))
+        .unzip();
+    write_parquet(
+        path,
+        vec![
+            column("entity_id", false, UInt64Array::from(entities)),
+            column("term_id", false, UInt32Array::from(terms)),
+        ],
+    );
+}
+
+/// [`write_pairs`] over the entities `0..n`.
 pub fn write_pairs_n(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities = Vec::new();
-    let mut terms = Vec::new();
-    for e in 0..n {
-        for t in terms_of(e) {
-            entities.push(e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write_pairs(path, &(0..n).collect::<Vec<_>>());
 }
 
-/// See [`build_fixture`] — parameterised, same reason as [`write_points_n`].
+/// Entities `0..places.len()`, each at its `(lon, lat)`, as a parquet file at `path`.
+pub fn write_lon_lat(path: &Path, places: &[(f64, f64)]) {
+    let (lons, lats): (Vec<f64>, Vec<f64>) = places.iter().copied().unzip();
+    write_parquet(
+        path,
+        vec![
+            column(
+                "entity_id",
+                false,
+                UInt64Array::from_iter_values(0..places.len() as u64),
+            ),
+            column("lon", false, Float64Array::from(lons)),
+            column("lat", false, Float64Array::from(lats)),
+        ],
+    );
+}
+
+/// [`build_fixture`] over `n` items.
 pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
     build_fixture_with_access(
         out,
@@ -215,6 +246,51 @@ pub fn view_args(view_id: &str, points: &Path, access: AccessInput) -> ViewArgs 
 
 pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
     build_fixture_n(out, points_path, pairs_path, N_ITEMS)
+}
+
+/// [`build_fixture_n`] into `dir/bundle`, with its points and pairs files beside it in `dir`.
+pub fn fixture_in(dir: &Path, n: u64) -> std::path::PathBuf {
+    let out = dir.join("bundle");
+    build_fixture_n(
+        &out,
+        &dir.join("points.parquet"),
+        &dir.join("pairs.parquet"),
+        n,
+    );
+    out
+}
+
+/// Build one plain view, `s0`, over `points` and `pairs` into `out`, declaring the attributes and
+/// vocabularies in `schema_toml` and reading each attribute from `points`.
+pub fn build_declared(out: &Path, points: &Path, pairs: &Path, schema_toml: &str) {
+    let schema_path = points.with_file_name("schema.toml");
+    std::fs::write(&schema_path, schema_toml).unwrap();
+    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+        .unwrap()
+        .schema;
+    build(&BuildArgs {
+        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
+        schema,
+        ..build_args(
+            out,
+            vec![view_args("s0", points, AccessInput::relation(pairs))],
+        )
+    })
+    .expect("fixture build should succeed");
+}
+
+/// Build `n` items placed by [`scatter`], each with a non-null `f32` `score` of `e % 7`, into
+/// `dir/bundle` under the attributes and vocabularies `schema_toml` declares.
+pub fn build_scored(dir: &Path, n: u64, schema_toml: &str) -> std::path::PathBuf {
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
+    let ids: Vec<u64> = (0..n).collect();
+    let score = Float32Array::from_iter_values(ids.iter().map(|e| (e % 7) as f32));
+    write_points(&points, &ids, scatter, vec![column("score", false, score)]);
+    write_pairs_n(&pairs, n);
+    let out = dir.join("bundle");
+    build_declared(&out, &points, &pairs, schema_toml);
+    out
 }
 
 /// `tessera_build`'s external-id convention (see its `write_external_ids` doc): the source
@@ -366,6 +442,87 @@ pub async fn spawn_server_with_stream_flush(
 
 pub async fn spawn_server(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> TestServer {
     spawn_server_with_config(bundle_root, cache_dir, wal_path, default_engine_config()).await
+}
+
+/// A server over the bundle at `dir/bundle`, keeping its cache and write-ahead log in `dir`.
+pub async fn open(dir: impl AsRef<Path>) -> TestServer {
+    open_with(dir, default_engine_config()).await
+}
+
+/// [`open`] under `config`.
+pub async fn open_with(dir: impl AsRef<Path>, config: EngineConfig) -> TestServer {
+    let dir = dir.as_ref();
+    spawn_server_with_config(
+        &dir.join("bundle"),
+        &dir.join("cache"),
+        &dir.join("wal.log"),
+        config,
+    )
+    .await
+}
+
+/// Build the standard fixture ([`build_fixture`]) into `dir` and serve it.
+pub async fn serve(dir: impl AsRef<Path>) -> TestServer {
+    fixture_in(dir.as_ref(), N_ITEMS);
+    open(dir).await
+}
+
+/// Stop `server` and serve the bundle in `dir` again, over the same cache and log.
+pub async fn restart(server: TestServer, dir: impl AsRef<Path>) -> TestServer {
+    server.shutdown().await;
+    open(dir).await
+}
+
+/// A running server, a token for a principal holding both fixture terms, and the directory that
+/// holds the bundle, cache and log, kept for as long as the server runs.
+pub struct Served {
+    pub server: TestServer,
+    pub token: String,
+    pub tmp: TempDir,
+}
+
+impl Served {
+    /// Build a bundle into a fresh directory with `build` and serve it.
+    pub async fn build<R>(build: impl FnOnce(&Path) -> R) -> Served {
+        Served::build_with(build, default_engine_config()).await
+    }
+
+    /// [`Served::build`] under `config`.
+    pub async fn build_with<R>(build: impl FnOnce(&Path) -> R, config: EngineConfig) -> Served {
+        let tmp = TempDir::new().unwrap();
+        build(tmp.path());
+        Served::open_with(tmp, config).await
+    }
+
+    /// Serve the bundle already built in `tmp`.
+    pub async fn open(tmp: TempDir) -> Served {
+        Served::open_with(tmp, default_engine_config()).await
+    }
+
+    /// [`Served::open`] under `config`.
+    pub async fn open_with(tmp: TempDir, config: EngineConfig) -> Served {
+        let server = open_with(&tmp, config).await;
+        let token = token_for(&server, &["0", "1"]).await;
+        Served { server, token, tmp }
+    }
+
+    /// Take a fresh token for the same principal. The views a session may see are resolved when
+    /// it authorises, so a test that creates a view and then reads it takes a new one first.
+    pub async fn reauthorise(&mut self) {
+        self.token = token_for(&self.server, &["0", "1"]).await;
+    }
+
+    /// Stop the server and serve the same bundle, cache and log again, with a fresh token.
+    pub async fn restart(self) -> Served {
+        self.restart_with(default_engine_config()).await
+    }
+
+    /// [`Served::restart`] under `config`.
+    pub async fn restart_with(self, config: EngineConfig) -> Served {
+        let Served { server, tmp, .. } = self;
+        server.shutdown().await;
+        Served::open_with(tmp, config).await
+    }
 }
 
 /// The default test gate: generous enough that no test which issues a handful of sequential
@@ -795,6 +952,111 @@ pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value
         assert_eq!(resp.status(), 200, "authorise should succeed");
         return resp.json().await.unwrap();
     }
+}
+
+/// The token [`authorise`] returns for a principal holding `terms`.
+pub async fn token_for(server: &TestServer, terms: &[&str]) -> String {
+    authorise(server, terms).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// `bytes` in standard base64, the way the wire carries an external id.
+pub fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// A built item's member address: its external id ([`external_id_of`]) in base64.
+pub fn member(source_id: u64) -> String {
+    b64(&external_id_of(source_id))
+}
+
+/// [`member`] for each of `range`.
+pub fn members(range: std::ops::Range<u64>) -> Vec<String> {
+    range.map(member).collect()
+}
+
+/// `PUT /control/layers` with `declaration`: the status and the body, or null where there is none.
+pub async fn put_layer(
+    server: &TestServer,
+    declaration: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&declaration)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// Register the layer `declaration` names, failing the test unless it is created.
+pub async fn register(server: &TestServer, declaration: serde_json::Value) {
+    let (status, body) = put_layer(server, declaration).await;
+    assert_eq!(status, 201, "the layer registers: {body}");
+}
+
+/// A flat layer `name` over `s0` whose artifacts list their members, with a closed value set, no
+/// gate, and no content. A test changes a field by indexing the value.
+pub fn flat_layer(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "title": name,
+        "views": ["s0"],
+        "membership": "enumerated",
+        "value_set": "closed",
+        "visibility": null,
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": null,
+        "hierarchy": { "kind": "flat", "prune_children": false },
+        "content": { "computed": [], "supplied": [] },
+        "depends_on": [],
+        "levels": []
+    })
+}
+
+/// Poll `attempt` until it gives a value, failing the test if it has not within `within`.
+pub async fn wait_for<T>(
+    what: &str,
+    within: std::time::Duration,
+    mut attempt: impl AsyncFnMut() -> Option<T>,
+) -> T {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        if let Some(value) = attempt().await {
+            return value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what}: not within {within:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Poll `done` until it holds, failing the test if it has not within `within`.
+pub async fn wait_until(
+    what: &str,
+    within: std::time::Duration,
+    mut done: impl AsyncFnMut() -> bool,
+) {
+    wait_for(what, within, async || done().await.then_some(())).await
+}
+
+/// Poll the write executor's counters until `done` holds, failing the test after two minutes.
+pub async fn wait_for_executor(
+    server: &TestServer,
+    what: &str,
+    done: impl Fn(&tessera_engine::ExecutorStats) -> bool,
+) {
+    wait_until(what, std::time::Duration::from_secs(120), async || {
+        done(&server.state.engine.write_executor_stats())
+    })
+    .await
 }
 
 /// Force a publication and wait for it to complete: the moment a level's row forms, and the rows

@@ -19,13 +19,8 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow::array::{Float64Array, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::json;
 use tempfile::TempDir;
 use tessera_build::config::Fields;
@@ -56,32 +51,6 @@ fn europe_frame() -> Bounds {
     }
 }
 
-fn write_lon_lat_points(path: &Path) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("lon", DataType::Float64, false),
-        Field::new("lat", DataType::Float64, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(UInt64Array::from(
-                (0..PLACES.len() as u64).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                PLACES.iter().map(|p| p.0).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                PLACES.iter().map(|p| p.1).collect::<Vec<_>>(),
-            )),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 fn view(id: &str, extent: Bounds, projection: Projection, points: &Path, pairs: &Path) -> ViewArgs {
     ViewArgs {
         projection,
@@ -97,7 +66,7 @@ async fn serve_two_frames(tmp: &TempDir) -> TestServer {
     let dir = tmp.path();
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
-    write_lon_lat_points(&points);
+    write_lon_lat(&points, PLACES);
     write_pairs_n(&pairs, PLACES.len() as u64);
     let bundle = dir.join("bundle");
     build(&build_args(
@@ -133,7 +102,7 @@ async fn serve_two_frames(tmp: &TempDir) -> TestServer {
         ],
     ))
     .expect("the two-frame fixture builds");
-    spawn_server(&bundle, &dir.join("cache"), &dir.join("wal.log")).await
+    open(dir).await
 }
 
 fn spatial_layer(name: &str, views: &[&str]) -> serde_json::Value {
@@ -150,19 +119,6 @@ fn spatial_layer(name: &str, views: &[&str]) -> serde_json::Value {
         "depends_on": [],
         "levels": []
     })
-}
-
-async fn register(server: &TestServer, declaration: serde_json::Value) -> (u16, serde_json::Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
 async fn publish(
@@ -220,7 +176,7 @@ async fn one_wgs84_shape_is_canonicalised_per_view_and_served_per_view() {
     let tmp = TempDir::new().unwrap();
     let server = serve_two_frames(&tmp).await;
     assert_eq!(
-        register(&server, spatial_layer("regions/uk", &["world", "europe"]))
+        put_layer(&server, spatial_layer("regions/uk", &["world", "europe"]))
             .await
             .0,
         201
@@ -272,7 +228,7 @@ async fn a_shape_outside_one_views_extent_is_published_and_reported_not_refused(
     let tmp = TempDir::new().unwrap();
     let server = serve_two_frames(&tmp).await;
     assert_eq!(
-        register(&server, spatial_layer("regions/nz", &["world", "europe"]))
+        put_layer(&server, spatial_layer("regions/nz", &["world", "europe"]))
             .await
             .0,
         201
@@ -308,7 +264,7 @@ async fn a_shape_outside_one_views_extent_is_published_and_reported_not_refused(
 async fn a_shape_layer_spanning_a_projected_and_an_unprojected_view_is_refused_at_declaration() {
     let tmp = TempDir::new().unwrap();
     let server = serve_two_frames(&tmp).await;
-    let (status, body) = register(
+    let (status, body) = put_layer(
         &server,
         spatial_layer("regions/mixed", &["world", "embedding"]),
     )
@@ -321,7 +277,7 @@ async fn a_shape_layer_spanning_a_projected_and_an_unprojected_view_is_refused_a
 
     // The same declaration over the two projected views is accepted: what is refused is the mix.
     assert_eq!(
-        register(&server, spatial_layer("regions/ok", &["world", "europe"]))
+        put_layer(&server, spatial_layer("regions/ok", &["world", "europe"]))
             .await
             .0,
         201
@@ -335,7 +291,7 @@ async fn a_view_space_shape_over_two_frames_is_refused_at_the_row() {
     let tmp = TempDir::new().unwrap();
     let server = serve_two_frames(&tmp).await;
     assert_eq!(
-        register(&server, spatial_layer("regions/vs", &["world", "europe"]))
+        put_layer(&server, spatial_layer("regions/vs", &["world", "europe"]))
             .await
             .0,
         201

@@ -159,18 +159,7 @@ fn build_ingest_batch_raw(rows: &[(&[u8], f32, f32, &str)]) -> Vec<u8> {
 #[tokio::test]
 async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -217,18 +206,7 @@ async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
 #[tokio::test]
 async fn f_ingest_is_wal_before_ack_and_idempotent() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let body = build_ingest_batch(&[(N_ITEMS + 1, 10.0, 10.0, "0")]);
 
@@ -280,18 +258,7 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
 #[tokio::test]
 async fn ingest_rejects_duplicate_external_ids_within_one_batch() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
@@ -329,18 +296,7 @@ async fn ingest_rejects_duplicate_external_ids_within_one_batch() {
 #[tokio::test]
 async fn ingest_rejects_an_external_id_ingested_after_the_build() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let first_body = build_ingest_batch_raw(&[(b"z".as_slice(), 1.0, 1.0, "0")]);
     let resp = server
@@ -386,18 +342,7 @@ async fn ingest_rejects_an_external_id_ingested_after_the_build() {
 #[tokio::test]
 async fn ingest_rejects_an_external_id_already_in_the_bundle() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
@@ -429,18 +374,7 @@ async fn ingest_rejects_an_external_id_already_in_the_bundle() {
 #[tokio::test]
 async fn an_idempotent_retry_of_an_accepted_batch_is_a_200_not_a_409() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let body = build_ingest_batch_raw(&[(b"replay-me".as_slice(), 1.0, 1.0, "0")]);
     let resp = server
@@ -478,18 +412,7 @@ async fn an_idempotent_retry_of_an_accepted_batch_is_a_200_not_a_409() {
 #[tokio::test]
 async fn ingest_external_id_cap_is_64_bytes_exactly() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let exactly_64 = vec![b'x'; 64];
     let body = build_ingest_batch_raw(&[(exactly_64.as_slice(), 1.0, 1.0, "0")]);
@@ -541,18 +464,7 @@ async fn ingest_external_id_cap_is_64_bytes_exactly() {
 #[tokio::test]
 async fn a_batch_resolution_opens_each_extent_at_most_once() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let rows: Vec<(u64, f32, f32, &str)> = (0..2_000)
         .map(|i| (N_ITEMS + 10_000 + i, in_extent(i), in_extent(i), "0"))
@@ -579,18 +491,7 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
 #[tokio::test]
 async fn control_status_requires_bearer() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let resp = server
         .client
@@ -626,18 +527,7 @@ async fn control_status_requires_bearer() {
 #[tokio::test]
 async fn changes_batch_validates_before_applying_anything() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -842,18 +732,7 @@ fn concurrent_ingest_and_change_both_survive() {
 #[tokio::test]
 async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_id() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let body = build_ingest_batch_optional(&[(None, 20.0, 20.0, "0")]);
     let resp = server
@@ -903,18 +782,7 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
 #[tokio::test]
 async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let body = build_ingest_batch_optional(&[
         (Some(b"mixed-a".as_slice()), 1.0, 1.0, "0"),
@@ -962,18 +830,7 @@ async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
 #[tokio::test]
 async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let body = build_ingest_batch_optional(&[(None, 1.0, 1.0, "0"), (None, 2.0, 2.0, "0")]);
     let resp = server
@@ -1051,8 +908,7 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let viewer_url = server.viewer_url("/v1/viewport");
     let client = server.client.clone();
@@ -1176,18 +1032,7 @@ const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
 #[tokio::test]
 async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // Starts here, not just before the suppress request below: `total_ingest_elapsed` (used for
     // the self-scaling bound at the end of this test) must cover every batch's full wall-clock
@@ -1480,18 +1325,7 @@ async fn an_engine_without_a_write_executor_is_not_ready() {
 #[tokio::test]
 async fn a_healthy_server_is_ready_on_every_listener_that_serves_the_probe() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     for url in [
         server.viewer_url("/readyz"),
@@ -1925,8 +1759,7 @@ async fn parked_fixture(tmp: &TempDir) -> ParkedFixture {
     // connection's DNS resolution goes through `spawn_blocking` — on this deliberately tiny pool
     // that would queue behind the parked handlers and turn a real result into a hang. One
     // round-trip per plane now means every later request rides a pooled keep-alive connection.
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
     assert_eq!(viewport_status(&server, &token).await, 200);
     assert_eq!(control_status(&server).await["ingest"]["in_flight"], 0);
 
@@ -2151,18 +1984,7 @@ async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
 #[tokio::test]
 async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let post = |batch_id: &'static str, rows: Vec<(u64, f64, f64, &'static str)>| {
         let body = build_ingest_batch_f64(&rows);
@@ -2212,18 +2034,7 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
 #[tokio::test]
 async fn control_flush_is_accepted_and_deferred() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let response = server
         .client
@@ -2269,18 +2080,7 @@ async fn control_flush_is_accepted_and_deferred() {
 #[tokio::test]
 async fn control_compact_is_accepted_and_deferred() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let response = server
         .client
@@ -2359,18 +2159,7 @@ async fn control_compact_is_accepted_and_deferred() {
 #[tokio::test]
 async fn status_stage_barriers_move_when_their_stages_run() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // A resident projection for the refresh to replace: authorise and view once, before any flush.
     let auth = authorise(&server, &["0"]).await;
@@ -3456,18 +3245,7 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
 #[tokio::test]
 async fn every_path_on_the_control_listener_needs_the_credential() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let mounted = [
         ("POST", "/control/ingest"),
@@ -3556,18 +3334,7 @@ async fn an_unauthenticated_caller_never_gets_a_byte_of_body_buffered() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let mut sock = tokio::net::TcpStream::connect(server.control_addr)
         .await
@@ -3630,18 +3397,7 @@ async fn an_unauthenticated_caller_never_gets_a_byte_of_body_buffered() {
 async fn a_change_batch_of_n_costs_one_fsync() {
     const N: u64 = 200;
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let before = control_status(&server).await;
     let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
@@ -3726,8 +3482,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
     let viewport_req = serde_json::json!({
         "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
     });
@@ -3817,18 +3572,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
 #[tokio::test]
 async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishes() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let before = control_status(&server).await;
     let frag = &before["fragmentation"];
@@ -3929,18 +3673,7 @@ async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishe
 #[tokio::test]
 async fn control_status_publishes_the_live_segment_count_per_view() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // A build writes exactly one segment per (partition, view) — contracts §2.1.
     let before = control_status(&server).await;
@@ -4030,18 +3763,7 @@ async fn control_status_publishes_the_live_segment_count_per_view() {
 #[tokio::test]
 async fn an_undeclared_ingest_column_is_422_naming_the_column() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // Two extra columns: one of a type the old code would have stored, one of a type it dropped in
     // silence. Both are undeclared, so both are refused — and the refusal is about the declaration,
@@ -4107,18 +3829,7 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
 #[tokio::test]
 async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
@@ -4192,18 +3903,7 @@ async fn over_bound_ids_are_base64_not_lossy_utf8() {
     use base64::Engine as _;
 
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // Passthrough declares `max_terms_per_item = 4096`; one more descriptor than that is the warn.
     let labels = (0..4_097).map(|i| format!("t{i}")).collect::<Vec<_>>();
@@ -4248,18 +3948,7 @@ async fn over_bound_ids_are_base64_not_lossy_utf8() {
 #[tokio::test]
 async fn the_predicate_op_is_refused_with_a_422() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
     let resp = server
@@ -4284,18 +3973,7 @@ async fn the_predicate_op_is_refused_with_a_422() {
 #[tokio::test]
 async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
     let ingest = |batch: &'static str, ids: Vec<u64>| {
         let client = server.client.clone();
@@ -4480,59 +4158,23 @@ fn scalar_tail_column(
 
 /// A bundle whose schema declares the full scalar tail, over [`SCALAR_TAIL_N`] base items.
 fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
-    use parquet::arrow::ArrowWriter;
-    use tessera_build::{build, BuildArgs};
-
     let points = tmp.join("points.parquet");
     let pairs = tmp.join("pairs.parquet");
     let n = SCALAR_TAIL_N as usize;
-    let mut fields = vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ];
-    let mut columns: Vec<Arc<dyn arrow::array::Array>> = vec![
-        Arc::new(arrow::array::UInt64Array::from_iter_values(
-            0..SCALAR_TAIL_N,
-        )),
-        Arc::new(arrow::array::Float64Array::from_iter_values(
-            (0..SCALAR_TAIL_N).map(|e| ((e * 37) % 1000) as f64),
-        )),
-        Arc::new(arrow::array::Float64Array::from_iter_values(
-            (0..SCALAR_TAIL_N).map(|e| ((e * 53) % 1000) as f64),
-        )),
-    ];
-    for ty in SCALAR_TAIL_TYPES {
-        let column = scalar_tail_base_column(ty, n);
-        fields.push(Field::new(
-            format!("c_{ty}"),
-            column.data_type().clone(),
-            false,
-        ));
-        columns.push(column);
-    }
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let mut w =
-        ArrowWriter::try_new(std::fs::File::create(&points).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    let ids: Vec<u64> = (0..SCALAR_TAIL_N).collect();
+    let extra = SCALAR_TAIL_TYPES
+        .into_iter()
+        .map(|ty| {
+            let column = scalar_tail_base_column(ty, n);
+            (
+                Field::new(format!("c_{ty}"), column.data_type().clone(), false),
+                column,
+            )
+        })
+        .collect();
+    write_points(&points, &ids, scatter, extra);
     write_pairs_n(&pairs, SCALAR_TAIL_N);
-
-    let schema_path = tmp.join("scalar-tail-schema.toml");
-    std::fs::write(&schema_path, scalar_tail_schema_toml()).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let args = BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        schema,
-        ..build_args(
-            out,
-            vec![view_args("s0", &points, AccessInput::relation(pairs))],
-        )
-    };
-    build(&args).expect("the scalar-tail fixture build should succeed");
+    build_declared(out, &points, &pairs, &scalar_tail_schema_toml());
 }
 
 /// One ingest batch of one item, carrying [`scalar_tail_planted`]'s value in every declared column
@@ -4583,12 +4225,7 @@ async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_scalar_tail_fixture(&bundle_root, tmp.path());
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = open(&tmp).await;
 
     let resp = server
         .client

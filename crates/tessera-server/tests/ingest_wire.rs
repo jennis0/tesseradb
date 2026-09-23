@@ -22,7 +22,6 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tessera_build::{build, BuildArgs};
@@ -62,11 +61,6 @@ index = true
 
 const N: u64 = 20;
 
-fn write_points(path: &Path) {
-    let score = Int64Array::from_iter_values((0..N).map(|e| -(e as i64)));
-    write_points_scored(path, Arc::new(score));
-}
-
 /// The fixture's points file with `score`, declared `i64`, carried by `score` as written.
 fn write_points_scored(path: &Path, score: arrow::array::ArrayRef) {
     let weight = Float32Array::from_iter_values((0..N).map(|e| e as f32 / 4.0));
@@ -76,51 +70,32 @@ fn write_points_scored(path: &Path, score: arrow::array::ArrayRef) {
 /// The fixture's points file with `score` (declared `i64`) and `weight` (declared `f32`) carried
 /// by the columns given.
 fn write_points_with(path: &Path, score: arrow::array::ArrayRef, weight: arrow::array::ArrayRef) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("score", score.data_type().clone(), true),
-        Field::new("weight", weight.data_type().clone(), true),
-        Field::new("big", DataType::UInt64, true),
-        Field::new(
-            "seen",
-            DataType::Timestamp(TimeUnit::Microsecond, None),
-            true,
-        ),
-        Field::new("tag", DataType::Utf8, true),
-    ]));
     let ids: Vec<u64> = (0..N).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
+    let big = UInt64Array::from_iter_values(ids.iter().map(|e| e * 1_000));
+    let seen =
+        TimestampMicrosecondArray::from_iter_values(ids.iter().map(|e| *e as i64 * 1_000_000));
+    let tag = StringArray::from_iter_values(ids.iter().map(|e| format!("built-{e}")));
+    write_points(
+        path,
+        &ids,
+        scatter,
         vec![
-            Arc::new(UInt64Array::from(ids.clone())),
-            Arc::new(Float64Array::from_iter_values(
-                ids.iter().map(|e| ((e * 37) % 1000) as f64),
-            )),
-            Arc::new(Float64Array::from_iter_values(
-                ids.iter().map(|e| ((e * 53) % 1000) as f64),
-            )),
-            score,
-            weight,
-            Arc::new(UInt64Array::from_iter_values(ids.iter().map(|e| e * 1_000))),
-            Arc::new(TimestampMicrosecondArray::from_iter_values(
-                ids.iter().map(|e| *e as i64 * 1_000_000),
-            )),
-            Arc::new(StringArray::from_iter_values(
-                ids.iter().map(|e| format!("built-{e}")),
-            )),
+            (Field::new("score", score.data_type().clone(), true), score),
+            (
+                Field::new("weight", weight.data_type().clone(), true),
+                weight,
+            ),
+            column("big", true, big),
+            column("seen", true, seen),
+            column("tag", true, tag),
         ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    );
 }
 
 fn build_bundle(dir: &Path) -> std::path::PathBuf {
     let points = dir.join("points.parquet");
-    write_points(&points);
+    let score = Int64Array::from_iter_values((0..N).map(|e| -(e as i64)));
+    write_points_scored(&points, Arc::new(score));
     build_over(dir, points).expect("the build succeeds")
 }
 
@@ -264,11 +239,6 @@ fn arrow_body(rows: &[Row]) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-fn b64(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
 /// One JSON record. `big` travels as a string of digits, which is what a JavaScript client would
 /// have to send; `seen` as the integer microseconds the roster's `timestamp_us` takes.
 fn json_record(row: &Row) -> Value {
@@ -320,28 +290,9 @@ async fn ingest(
 }
 
 async fn register_layer(server: &TestServer, value_set: &str) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
-            "name": LAYER,
-            "title": LAYER,
-            "views": ["s0"],
-            "membership": "enumerated",
-            "value_set": value_set,
-            "visibility": null,
-            "artifact_visibility": { "field": null, "default": "inherited" },
-            "require_member_visibility": null,
-            "hierarchy": { "kind": "flat", "prune_children": false },
-            "content": { "computed": [], "supplied": [] },
-            "depends_on": [],
-            "levels": []
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "the layer registers");
+    let mut layer = flat_layer(LAYER);
+    layer["value_set"] = json!(value_set);
+    register(server, layer).await;
 }
 
 fn artifacts_url(server: &TestServer) -> String {
@@ -648,12 +599,7 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
                 default: default.map(str::to_string),
             },
         );
-        let server = spawn_server(
-            &bundle_root,
-            &tmp.path().join("cache"),
-            &tmp.path().join("wal.log"),
-        )
-        .await;
+        let server = open(&tmp).await;
         (tmp, server)
     }
     fn body() -> Vec<u8> {
@@ -721,10 +667,6 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
     assert_eq!(status, 422, "an empty element is no label at all: {resp}");
 }
 
-fn member(source_id: u64) -> String {
-    b64(&external_id_of(source_id))
-}
-
 /// Rows at the plain fixture's shape, which declares no scalar tail.
 fn plain_json_body(ids: std::ops::Range<u64>) -> Vec<u8> {
     Value::Array(
@@ -740,10 +682,6 @@ fn plain_json_body(ids: std::ops::Range<u64>) -> Vec<u8> {
     )
     .to_string()
     .into_bytes()
-}
-
-fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
 }
 
 fn publish_body(artifacts: &[(&str, Vec<String>)]) -> Vec<u8> {

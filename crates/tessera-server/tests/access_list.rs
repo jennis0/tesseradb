@@ -18,14 +18,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryArray, Float32Array, Float64Array, ListArray, ListBuilder, StringArray,
-    StringBuilder, UInt64Array,
+    ArrayRef, BinaryArray, Float32Array, ListArray, ListBuilder, StringArray, StringBuilder,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use common::*;
@@ -126,18 +124,7 @@ async fn flush(server: &TestServer) {
 
 async fn served() -> (TempDir, TestServer) {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     (tmp, server)
 }
 
@@ -156,12 +143,7 @@ async fn served_with_default(default: Option<&str>) -> (TempDir, TestServer) {
             default: default.map(str::to_string),
         },
     );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = open(&tmp).await;
     (tmp, server)
 }
 
@@ -171,19 +153,7 @@ async fn served_with_default(default: Option<&str>) -> (TempDir, TestServer) {
 const NULL_ROW: u64 = 5;
 
 fn write_field_points(path: &Path) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new(
-            "categories",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-            true,
-        ),
-    ]));
     let ids: Vec<u64> = (0..N_ITEMS).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let mut offsets: Vec<i32> = vec![0];
     let mut flat: Vec<&str> = Vec::new();
     let mut present: Vec<bool> = Vec::new();
@@ -203,19 +173,7 @@ fn write_field_points(path: &Path) {
         values,
         Some(present.into()),
     );
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(list),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write_points(path, &ids, scatter, vec![column("categories", true, list)]);
 }
 
 /// A server over a field-sourced view (`point_visibility = { field = "categories", default }`)
@@ -234,12 +192,7 @@ async fn served_field_sourced(default: &str) -> (TempDir, TestServer) {
         vec![view_args("s0", &points, access)],
     ))
     .expect("a field-sourced view with a null row builds under a declared default");
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = open(&tmp).await;
     (tmp, server)
 }
 

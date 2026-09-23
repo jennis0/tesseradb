@@ -15,44 +15,13 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 
-use arrow::array::{Float64Array, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::Value;
 use tempfile::TempDir;
 use tessera_build::build;
 use tessera_spatial::frame::AlignedSquare;
 use tessera_spatial::{Bounds, Projection};
-
-/// A points file in **longitude and latitude**, which is the only spelling a projected view reads
-/// (`projections.md` §2). The coordinates are a coarse graticule over the whole world, so every
-/// frame below holds some of them and none of the builds refuses for want of data.
-fn write_lon_lat_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("lon", DataType::Float64, false),
-        Field::new("lat", DataType::Float64, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let lons: Vec<f64> = ids.iter().map(|e| -180.0 + (e % 360) as f64).collect();
-    let lats: Vec<f64> = ids.iter().map(|e| -80.0 + (e % 160) as f64).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(lons)),
-            Arc::new(Float64Array::from(lats)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
 
 /// A bundle built under `projection` against `frame`.
 ///
@@ -65,7 +34,12 @@ fn build_projected(out: &Path, tmp: &Path, projection: Projection, frame: Bounds
         out.display().to_string().len()
     ));
     let pairs = tmp.join(format!("pairs-{}.parquet", out.display().to_string().len()));
-    write_lon_lat_points(&points, N_ITEMS);
+    // A coarse graticule over the whole world, so every frame below holds some of it and no build
+    // refuses for want of data.
+    let places: Vec<(f64, f64)> = (0..N_ITEMS)
+        .map(|e| (-180.0 + (e % 360) as f64, -80.0 + (e % 160) as f64))
+        .collect();
+    write_lon_lat(&points, &places);
     write_pairs_n(&pairs, N_ITEMS);
     let args = build_args(
         out,

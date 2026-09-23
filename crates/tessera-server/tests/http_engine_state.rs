@@ -22,18 +22,7 @@ use common::*;
 #[tokio::test]
 async fn c_revoke_then_viewport_is_rejected() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap().to_string();
@@ -76,18 +65,7 @@ async fn c_revoke_then_viewport_is_rejected() {
 #[tokio::test]
 async fn a_superseded_stamp_is_answered_with_the_staleness_signal() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -134,18 +112,7 @@ async fn a_superseded_stamp_is_answered_with_the_staleness_signal() {
 #[tokio::test]
 async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -228,18 +195,7 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
 #[tokio::test]
 async fn revoke_prunes_the_token() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let doomed = authorise(&server, &["0"]).await;
     let survivor = authorise(&server, &["0"]).await;
@@ -312,18 +268,7 @@ async fn revoke_prunes_the_token() {
 #[tokio::test]
 async fn check_bearer_rejects_prefixes_extensions_and_the_empty_string() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let auth_data = base64::engine::general_purpose::STANDARD
         .encode(serde_json::json!({ "terms": ["0"] }).to_string());
@@ -451,18 +396,7 @@ async fn expired_sessions_do_not_accumulate_in_the_registry() {
 #[tokio::test]
 async fn the_sweep_keeps_every_live_session() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     const MINTED: usize = 40;
     let sessions = authorise_n(&server, MINTED).await;
@@ -573,18 +507,7 @@ async fn the_sweep_prunes_what_the_engine_holds_for_an_expired_session() {
 #[tokio::test]
 async fn revocation_takes_effect_without_waiting_for_a_sweep() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let doomed = authorise(&server, &["0"]).await;
     let survivor = authorise(&server, &["0"]).await;

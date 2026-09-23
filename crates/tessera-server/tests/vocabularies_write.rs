@@ -14,13 +14,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array, StringArray, UInt64Array};
+use arrow::array::{Float32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::{json, Value};
-use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 
 const N: u64 = 40;
 
@@ -44,90 +42,8 @@ render = true
 index  = true
 "#;
 
-fn write_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("score", DataType::Float32, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let scores: Vec<f32> = ids.iter().map(|e| (*e % 7) as f32).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(Float32Array::from(scores)),
-        ],
-    )
-    .unwrap();
-    let mut w =
-        parquet::arrow::ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None)
-            .unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
-    let points = dir.join("points.parquet");
-    let pairs = dir.join("pairs.parquet");
-    write_points(&points, N);
-    write_pairs_n(&pairs, N);
-    let schema_path = dir.join("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let out = dir.join("bundle");
-    build(&BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        schema,
-        ..build_args(
-            &out,
-            vec![view_args("s0", &points, AccessInput::relation(pairs))],
-        )
-    })
-    .expect("fixture build should succeed");
-    out
-}
-
-struct Served {
-    server: TestServer,
-    token: String,
-    tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    build_fixture_bundle(tmp.path());
-    open(tmp).await
-}
-
-async fn open(tmp: TempDir) -> Served {
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    Served { server, token, tmp }
-}
-
-/// Reopen the same bundle and the same log: the restart every durability claim below is made
-/// against. The old server is stopped and waited for first, so its executor has released the
-/// bundle root's write lock before the new one takes it.
-async fn restart(served: Served) -> Served {
-    let Served { server, tmp, .. } = served;
-    server.shutdown().await;
-    open(tmp).await
+fn fixture(dir: &Path) -> std::path::PathBuf {
+    build_scored(dir, N, SCHEMA_TOML)
 }
 
 async fn declare(served: &Served, name: &str, body: Value) -> (u16, Value) {
@@ -205,10 +121,7 @@ async fn categories(served: &Served, column: &str) -> Vec<(String, u64)> {
 /// The same, with each value's **title** — the property a page supplies and every durable home
 /// has to carry, or a fold destroys the names a client draws while keeping the codes.
 async fn titled(served: &Served, column: &str) -> Vec<(String, u64, Option<String>)> {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"][..]).await;
     let resp = served
         .server
         .client
@@ -375,10 +288,7 @@ async fn fold(served: &Served) {
 /// The `tessera_id`s a filtered viewport answers, from a fresh session so the rows flushed since
 /// the last one are in the answer.
 async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"][..]).await;
     let resp = served
         .server
         .client
@@ -409,7 +319,7 @@ async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
 /// names none, and a request that tries to is refused rather than read past.
 #[tokio::test]
 async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_refuses() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
 
     let (status, body) = declare(&served, "severity", severity()).await;
     assert_eq!(status, 201, "{body}");
@@ -481,7 +391,7 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
 /// vocabulary this deployment does not carry is the same `404` an unknown view is.
 #[tokio::test]
 async fn a_value_page_adds_values_and_a_held_title_upserts() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declare(&served, "severity", severity()).await.0, 201);
     // A column over it, so the values are readable back through `/v1/categories`.
     assert_eq!(
@@ -578,7 +488,7 @@ async fn a_value_page_adds_values_and_a_held_title_upserts() {
 /// does not hold is the declare-then-use refusal (per-point-attributes §5).
 #[tokio::test]
 async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declare(&served, "severity", severity()).await.0, 201);
     let (status, body) = declare_attribute(
         &served,
@@ -650,7 +560,7 @@ async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
 /// title nothing holds afterwards while every key keeps its code.
 #[tokio::test]
 async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(
         declare_attribute(
             &served,
@@ -689,7 +599,7 @@ async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() 
         before,
         "the fold folds the extension into MANIFEST.vocabularies with its titles"
     );
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         titled(&served, "built").await,
         before,
@@ -723,7 +633,7 @@ async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() 
 /// the code, so a value survives under the name it was recoloured away from.
 #[tokio::test]
 async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     // The build's vocabulary, through a column over it; and one declared here.
     assert_eq!(
         declare_attribute(
@@ -816,7 +726,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
     );
 
     // The fold rotates the log, so MANIFEST.json is the only copy left.
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         title_of(titled(&served, "built").await, "seed"),
         built_before,
@@ -843,7 +753,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
         200
     );
     flush(&served).await;
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         title_of(titled(&served, "built").await, "seed"),
         (built_before.0, Some("Planted".to_string())),
@@ -856,7 +766,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
 /// `MANIFEST.json` after the fold that writes them there.
 #[tokio::test]
 async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declare(&served, "severity", severity()).await.0, 201);
     assert_eq!(
         page(
@@ -888,7 +798,7 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
     );
 
     // Replayed from the log, nothing having been published yet.
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         titled(&served, "severity").await,
         before,
@@ -908,7 +818,7 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
         200
     );
     flush(&served).await;
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         titled(&served, "severity").await,
         before,
@@ -924,7 +834,7 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
         before,
         "the fold in this process run keeps every title"
     );
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         titled(&served, "severity").await,
         before,

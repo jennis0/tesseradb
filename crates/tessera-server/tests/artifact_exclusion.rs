@@ -21,33 +21,6 @@ const LAYER: &str = "clusters/excluded";
 /// tenths of the **declared** membership, which is what makes the denominator observable.
 const PROPORTIONAL: &str = "clusters/proportional";
 
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
-fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
-}
-
-async fn open(tmp: &TempDir) -> TestServer {
-    spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
-async fn serve(tmp: &TempDir) -> TestServer {
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    open(tmp).await
-}
-
 fn declaration(name: &str, criterion: serde_json::Value) -> serde_json::Value {
     json!({
         "name": name,
@@ -63,18 +36,6 @@ fn declaration(name: &str, criterion: serde_json::Value) -> serde_json::Value {
         "depends_on": [],
         "levels": []
     })
-}
-
-async fn register(server: &TestServer, declaration: serde_json::Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "the layer registers");
 }
 
 fn artifacts_url(server: &TestServer, layer: &str) -> String {
@@ -215,8 +176,7 @@ async fn an_exclusion_serves_what_the_inclusion_spelling_serves_and_replays() {
     assert!(narrow[0].1 < broad[0].1, "{narrow:?} against {broad:?}");
 
     // The record carries the inclusion, so replay lands the same membership.
-    server.shutdown().await;
-    let server = open(&tmp).await;
+    let server = restart(server, &tmp).await;
     assert_eq!(
         served(&server, LAYER, &["0"]).await,
         broad,

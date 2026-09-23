@@ -9,17 +9,13 @@
 
 mod common;
 
-use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array, StringArray, UInt64Array};
+use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
-use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 
 const N: u64 = 40;
 
@@ -42,74 +38,10 @@ render = true
 index  = true
 "#;
 
-fn write_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("score", DataType::Float32, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let scores: Vec<f32> = ids.iter().map(|e| (*e % 7) as f32).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(Float32Array::from(scores)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
-    let points = dir.join("points.parquet");
-    let pairs = dir.join("pairs.parquet");
-    write_points(&points, N);
-    write_pairs_n(&pairs, N);
-    let schema_path = dir.join("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let out = dir.join("bundle");
-    build(&BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        schema,
-        ..build_args(
-            &out,
-            vec![view_args("s0", &points, AccessInput::relation(pairs))],
-        )
-    })
-    .expect("fixture build should succeed");
-    out
-}
-
-struct Served {
-    server: TestServer,
-    /// Held so the tempdir outlives the server it serves from.
-    #[allow(dead_code)]
-    tmp: TempDir,
-}
-
 /// A served fixture with two runtime columns declared: an indexed keyword and an indexed
 /// category, each of which a values batch can fill.
 async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    build_fixture_bundle(tmp.path());
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let served = Served { server, tmp };
+    let served = Served::build(|dir| build_scored(dir, N, SCHEMA_TOML)).await;
     declare(&served, json!({"name": "tag", "type": "keyword", "index": true})).await;
     declare(
         &served,
@@ -236,10 +168,7 @@ async fn flush(served: &Served) {
 
 /// The drill-down's fields for one `tessera_id`, by name.
 async fn item_fields(served: &Served, id: u64) -> Value {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"][..]).await;
     let resp = served
         .server
         .client

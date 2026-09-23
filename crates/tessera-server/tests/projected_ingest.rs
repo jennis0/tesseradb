@@ -25,11 +25,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, UInt64Array};
+use arrow::array::{BinaryArray, Float64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use tessera_build::build;
@@ -70,33 +69,6 @@ fn places() -> Vec<(f64, f64)> {
 /// The one row `places()` clips.
 const POLAR: usize = 11;
 
-/// A points file under the names a projected view reads (`projections.md` §2).
-fn write_lon_lat_points(path: &Path, points: &[(f64, f64)]) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("lon", DataType::Float64, false),
-        Field::new("lat", DataType::Float64, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(UInt64Array::from(
-                (0..points.len() as u64).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                points.iter().map(|p| p.0).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                points.iter().map(|p| p.1).collect::<Vec<_>>(),
-            )),
-        ],
-    )
-    .expect("the fixture batch is well-formed");
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 /// A bundle whose one view is projected `web_mercator` against the whole world.
 ///
 /// `Fields::moved` is what a projected `[[view]]` compiles to — the geographic names carried on the
@@ -104,7 +76,7 @@ fn write_lon_lat_points(path: &Path, points: &[(f64, f64)]) {
 fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
     let points_path = tmp.join("points.parquet");
     let pairs_path = tmp.join("pairs.parquet");
-    write_lon_lat_points(&points_path, points);
+    write_lon_lat(&points_path, points);
     write_pairs_n(&pairs_path, points.len() as u64);
     build(&build_args(
         out,

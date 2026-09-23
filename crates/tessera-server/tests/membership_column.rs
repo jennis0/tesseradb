@@ -33,14 +33,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, Float32Array, Float64Array, Int64Array, ListArray, StringArray,
-    UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, Float32Array, Int64Array, ListArray, StringArray, UInt32Array,
+    UInt64Array,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -153,7 +152,7 @@ content = {{ computed = ["centroid", "box"] }}
 ///
 /// `rows` is which of the corpus's points this file carries — the whole of it on the built side, its
 /// seed on the ingested one.
-fn write_points(path: &Path, rows: &[u64]) {
+fn write_membership_points(path: &Path, rows: &[u64]) {
     let item = Arc::new(Field::new("item", DataType::Int64, true));
     let mut offsets: Vec<i32> = vec![0];
     let mut entries: Vec<Option<i64>> = Vec::new();
@@ -161,74 +160,22 @@ fn write_points(path: &Path, rows: &[u64]) {
         entries.extend(lineage_of(*e));
         offsets.push(entries.len() as i32);
     }
-    let lineage: ArrayRef = Arc::new(ListArray::new(
+    let lineage = ListArray::new(
         item,
         OffsetBuffer::new(offsets.into()),
         Arc::new(Int64Array::from(entries)) as ArrayRef,
         None,
-    ));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("cluster", DataType::Int64, true),
-        Field::new("lineage", lineage.data_type().clone(), true),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
+    );
+    let cluster = Int64Array::from(rows.iter().map(|e| cluster_of(*e)).collect::<Vec<_>>());
+    write_points(
+        path,
+        rows,
+        |e| (x_of(e), y_of(e)),
         vec![
-            Arc::new(UInt64Array::from(rows.to_vec())) as ArrayRef,
-            Arc::new(Float64Array::from(
-                rows.iter().map(|e| x_of(*e)).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                rows.iter().map(|e| y_of(*e)).collect::<Vec<_>>(),
-            )),
-            Arc::new(Int64Array::from(
-                rows.iter().map(|e| cluster_of(*e)).collect::<Vec<_>>(),
-            )),
-            lineage,
+            column("cluster", true, cluster),
+            column("lineage", true, lineage),
         ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-/// The access relation, in the same shape [`common::terms_of`] gives the shared fixture — so an
-/// ingested row's `access` string and a built row's pairs rows describe one labelling.
-fn write_pairs(path: &Path, rows: &[u64]) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities = Vec::new();
-    let mut terms = Vec::new();
-    for e in rows {
-        for t in terms_of(*e) {
-            entities.push(*e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-/// An external id as `/control/layers/{name}/artifacts` addresses one: base64 of the bytes the
-/// build minted, which is the same convention `/control/changes` uses.
-fn base64_external_id(e: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(e))
+    );
 }
 
 /// The labels an ingested row carries, one per term — the same terms the pairs file gives a
@@ -239,7 +186,6 @@ fn access_of(e: u64) -> Vec<String> {
 
 struct Built {
     _tmp: TempDir,
-    root: PathBuf,
     dir: PathBuf,
 }
 
@@ -250,13 +196,12 @@ fn build_side(rows: &[u64], layer: &str) -> Built {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     let config_path = dir.join("config.toml");
-    write_points(&points, rows);
+    write_membership_points(&points, rows);
     write_pairs(&pairs, rows);
     std::fs::write(&config_path, format!("{VIEW_TOML}{layer}")).unwrap();
 
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture declaration parses");
-    let root = dir.join("bundle");
     let args = BuildArgs {
         attribute_sources: tessera_build::config::AttributeSource::over(
             points.clone(),
@@ -266,25 +211,12 @@ fn build_side(rows: &[u64], layer: &str) -> Built {
         layer_inputs: config.layer_sources,
         schema: config.schema,
         ..build_args(
-            &root,
+            &dir.join("bundle"),
             vec![view_args("s0", &points, AccessInput::relation(pairs))],
         )
     };
     build(&args).expect("the fixture build succeeds");
-    Built {
-        _tmp: tmp,
-        root,
-        dir,
-    }
-}
-
-async fn serve(built: &Built) -> TestServer {
-    spawn_server(
-        &built.root,
-        &built.dir.join("cache"),
-        &built.dir.join("wal"),
-    )
-    .await
+    Built { _tmp: tmp, dir }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -377,28 +309,11 @@ async fn register_layer(
         .as_object()
         .is_some_and(|c| !c.is_empty())
         .then_some(criterion);
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
-            "name": name,
-            "title": name,
-            "views": ["s0"],
-            "membership": "enumerated",
-            "value_set": value_set,
-            "visibility": null,
-            "artifact_visibility": { "field": null, "default": "inherited" },
-            "require_member_visibility": criterion,
-            "hierarchy": { "kind": kind, "prune_children": false },
-            "content": { "computed": [], "supplied": [] },
-            "depends_on": [],
-            "levels": []
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "the fixture layer registers");
+    let mut layer = flat_layer(name);
+    layer["value_set"] = json!(value_set);
+    layer["require_member_visibility"] = json!(criterion);
+    layer["hierarchy"]["kind"] = json!(kind);
+    register(server, layer).await;
 }
 
 /// Publish artifacts into a registered layer, returning the response's per-artifact rows — which is
@@ -507,7 +422,7 @@ async fn flush(server: &TestServer) {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
-    wait_until(server, "the flush published", move |now| {
+    wait_for_executor(server, "the flush published", move |now| {
         now.flushes > before.flushes
     })
     .await;
@@ -523,7 +438,7 @@ async fn fold(server: &TestServer) {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
-    wait_until(server, "the fold published", move |now| {
+    wait_for_executor(server, "the fold published", move |now| {
         assert_eq!(
             now.fold_failures, before.fold_failures,
             "the fold was discarded rather than published"
@@ -531,24 +446,6 @@ async fn fold(server: &TestServer) {
         now.folds > before.folds
     })
     .await;
-}
-
-async fn wait_until(
-    server: &TestServer,
-    what: &str,
-    done: impl Fn(&tessera_engine::ExecutorStats) -> bool,
-) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        if done(&server.state.engine.write_executor_stats()) {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{what}: never happened"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -825,8 +722,8 @@ async fn a_scalar_membership_column_ingests_the_database_a_member_table_builds()
     let seed: Vec<u64> = (0..SEED).collect();
     let ingested = build_side(&seed, &layer);
 
-    let built = serve(&built).await;
-    let ingested = serve(&ingested).await;
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
     let minted = ingest_tail(&ingested, LAYER, scalar_keys, SEED).await;
     assert_eq!(
         minted, 0,
@@ -854,8 +751,8 @@ async fn a_wholly_ingested_corpus_is_the_database_a_build_produces() {
     // No points at all: the frame is stated, so there is nothing to fit and nothing to hold.
     let ingested = build_side(&[], &layer);
 
-    let built = serve(&built).await;
-    let ingested = serve(&ingested).await;
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
 
     // The empty bundle serves before a byte is written to it: ready, well-formed metadata, and
     // zero everywhere under every principal — rather than a refusal or an error.
@@ -894,8 +791,8 @@ async fn a_lineage_column_ingests_the_database_a_member_table_builds() {
     let seed: Vec<u64> = (0..SEED).collect();
     let ingested = build_side(&seed, &layer);
 
-    let built = serve(&built).await;
-    let ingested = serve(&ingested).await;
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
     let minted = ingest_tail(&ingested, LAYER, lineage_keys, SEED).await;
     assert_eq!(minted, 0, "growth alone, as the scalar case above");
 
@@ -926,12 +823,12 @@ async fn a_closed_layer_refuses_an_unknown_key_and_ingests_nothing() {
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("flat", "cluster"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
     register_layer(&server, "closed/x", "flat", "closed", json!({})).await;
     publish_artifacts(
         &server,
         "closed/x",
-        json!([{ "key": "3", "members": (0..4u64).map(base64_external_id).collect::<Vec<_>>() }]),
+        json!([{ "key": "3", "members": members(0..4u64) }]),
     )
     .await;
 
@@ -984,8 +881,8 @@ async fn a_scalar_column_mints_the_clusters_its_seed_never_held() {
     let built = build_side(&all, &layer);
     let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
 
-    let built = serve(&built).await;
-    let ingested = serve(&ingested).await;
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
     let minted = ingest_tail(&ingested, LAYER, scalar_keys, MINT_SEED).await;
     assert!(
         minted > 0,
@@ -1008,8 +905,8 @@ async fn a_lineage_column_mints_the_chain_and_the_edges_it_declares() {
     let built = build_side(&all, &layer);
     let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
 
-    let built = serve(&built).await;
-    let ingested = serve(&ingested).await;
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
     let minted = ingest_tail(&ingested, LAYER, lineage_keys, MINT_SEED).await;
     assert!(minted > 0, "the seed does not hold this tree");
 
@@ -1046,8 +943,8 @@ async fn a_dag_list_column_ingests_memberships_and_no_edges() {
     let built = build_side(&all, &layer);
     let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
 
-    let built = serve(&built).await;
-    let ingested = serve(&ingested).await;
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
     let minted = ingest_tail(&ingested, LAYER, lineage_keys, MINT_SEED).await;
     assert!(minted > 0, "the seed does not hold every key");
 
@@ -1077,8 +974,8 @@ async fn a_tiered_column_mints_the_coarse_level_before_the_fine_one() {
     let built = build_side(&all, &layer);
     let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
 
-    let built = serve(&built).await;
-    let ingested = serve(&ingested).await;
+    let built = open(&built.dir).await;
+    let ingested = open(&ingested.dir).await;
     let minted = ingest_tail(&ingested, LAYER, lineage_keys, MINT_SEED).await;
     assert!(minted > 0, "the seed does not hold this taxonomy");
 
@@ -1110,7 +1007,7 @@ async fn one_unknown_key_mints_one_artifact_however_many_points_name_it() {
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("flat", "cluster"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
     let before = server.state.engine.published_artifacts();
 
     let rows: Vec<u64> = (SEED..SEED + 6).collect();
@@ -1178,12 +1075,12 @@ async fn a_suppressed_artifacts_key_mints_nothing_and_the_point_joins_it() {
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("flat", "cluster"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
     register_layer(&server, "hidden/x", "flat", "open", json!({ "count": 1 })).await;
     let published = publish_artifacts(
         &server,
         "hidden/x",
-        json!([{ "key": "k", "members": (0..4u64).map(base64_external_id).collect::<Vec<_>>() }]),
+        json!([{ "key": "k", "members": members(0..4u64) }]),
     )
     .await;
     let id = published[0]["tessera_id"].as_str().unwrap().to_string();
@@ -1245,12 +1142,12 @@ async fn a_deleted_key_that_returns_is_a_new_artifact() {
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("flat", "cluster"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
     register_layer(&server, "gone/x", "flat", "open", json!({ "count": 1 })).await;
     let published = publish_artifacts(
         &server,
         "gone/x",
-        json!([{ "key": "k", "members": (0..4u64).map(base64_external_id).collect::<Vec<_>>() }]),
+        json!([{ "key": "k", "members": members(0..4u64) }]),
     )
     .await;
     let id = published[0]["tessera_id"].as_str().unwrap().to_string();
@@ -1298,7 +1195,7 @@ async fn a_layer_declaring_supplied_content_refuses_to_mint() {
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("flat", "cluster"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
     let resp = server
         .client
         .put(server.control_url("/control/layers"))
@@ -1347,7 +1244,7 @@ async fn a_column_naming_neither_an_attribute_nor_a_layer_is_refused() {
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("flat", "cluster"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
 
     let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3)]));
     let (status, detail) = post_ingest(
@@ -1373,7 +1270,7 @@ async fn the_build_time_field_name_is_not_a_wire_column() {
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("flat", "cluster"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
 
     let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3)]));
     let (status, detail) =
@@ -1390,7 +1287,7 @@ async fn a_row_whose_list_is_not_one_entry_per_level_is_refused() {
     let mut layer = layer_toml("tiered", "lineage");
     layer.push_str("\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n");
     let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer);
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
 
     let item = Arc::new(Field::new("item", DataType::Int64, true));
     let keys: ArrayRef = Arc::new(ListArray::new(
@@ -1415,7 +1312,7 @@ async fn a_column_naming_a_predicate_layer_is_refused() {
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("flat", "cluster"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
 
     let resp = server
         .client
@@ -1466,7 +1363,7 @@ async fn a_lineage_naming_an_edge_the_layer_does_not_hold_records_it() {
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("flat", "cluster"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
 
     let resp = server
         .client
@@ -1490,7 +1387,7 @@ async fn a_lineage_naming_an_edge_the_layer_does_not_hold_records_it() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 201);
 
-    let members: Vec<String> = (0..4u64).map(base64_external_id).collect();
+    let members: Vec<String> = members(0..4u64);
     let resp = server
         .client
         // A layer name is path-shaped, so its slash is percent-encoded into the one path segment
@@ -1553,7 +1450,7 @@ async fn a_scalar_column_on_a_levelled_layer_names_level_zero() {
     let mut layer = layer_toml("tiered", "lineage");
     layer.push_str("\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n");
     let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer);
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
 
     // Key 1 is the root, published at level 0 by the seed's own lineage column.
     let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(1)]));
@@ -1571,7 +1468,7 @@ async fn a_lineage_contradicting_the_stored_edge_refuses_the_batch() {
         &(0..SEED).collect::<Vec<_>>(),
         &layer_toml("nested", "lineage"),
     );
-    let server = serve(&built).await;
+    let server = open(&built.dir).await;
 
     // 100's parent is 10 in every row of the seed; this point says it is 11.
     let item = Arc::new(Field::new("item", DataType::Int64, true));

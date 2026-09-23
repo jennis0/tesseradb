@@ -17,96 +17,17 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::{json, Value};
-use tempfile::TempDir;
-use tessera_build::build;
 
 const N: u64 = 20;
 
-fn write_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-        ],
-    )
-    .unwrap();
-    let mut w =
-        parquet::arrow::ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None)
-            .unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 /// One plain view, `s0`, and no group at all: every group and every other view below is one the
 /// running service declared.
-fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
-    let points = dir.join("points.parquet");
-    let pairs = dir.join("pairs.parquet");
-    write_points(&points, N);
-    write_pairs_n(&pairs, N);
-    let out = dir.join("bundle");
-    build(&build_args(
-        &out,
-        vec![view_args("s0", &points, AccessInput::relation(pairs))],
-    ))
-    .expect("fixture build should succeed");
-    out
-}
-
-struct Served {
-    server: TestServer,
-    token: String,
-    tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    build_fixture_bundle(tmp.path());
-    open(tmp).await
-}
-
-async fn open(tmp: TempDir) -> Served {
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    Served { server, token, tmp }
-}
-
-/// **A fresh session** (`views.md` §6): the visible-view set is resolved once at authorise, so a
-/// view declared since is a 404 to a session that predates it.
-async fn reauthorise(served: &mut Served) {
-    served.token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-}
-
-async fn restart(served: Served) -> Served {
-    let Served { server, tmp, .. } = served;
-    server.shutdown().await;
-    open(tmp).await
+fn fixture(dir: &Path) -> std::path::PathBuf {
+    fixture_in(dir, N)
 }
 
 async fn put(served: &Served, path: &str, body: Value) -> (u16, Value) {
@@ -316,7 +237,7 @@ async fn points(served: &Served, view: &str) -> Vec<u64> {
 /// refuse, and `404` for a `members` group naming a group this deployment does not carry.
 #[tokio::test]
 async fn the_group_route_declares_answers_redeclarations_and_refuses_what_the_rules_refuse() {
-    let mut served = serve().await;
+    let mut served = Served::build(fixture).await;
     assert!(group_names(&served).await.is_empty());
 
     let (status, body) = declare_group(&served, "quarter", quarter()).await;
@@ -378,7 +299,7 @@ async fn the_group_route_declares_answers_redeclarations_and_refuses_what_the_ru
     let (status, body) = declare_group(&served, "s0", quarter()).await;
     assert_eq!(status, 422, "{body}");
 
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     assert_eq!(group_names(&served).await, ["quarter", "quarter_map"]);
 }
 
@@ -387,7 +308,7 @@ async fn the_group_route_declares_answers_redeclarations_and_refuses_what_the_ru
 /// a build-declared group already gets (`views.md` §3.2).
 #[tokio::test]
 async fn a_group_created_at_runtime_accepts_a_view_under_it() {
-    let mut served = serve().await;
+    let mut served = Served::build(fixture).await;
     assert_eq!(declare_group(&served, "quarter", quarter()).await.0, 201);
 
     let (status, body) = put(
@@ -407,7 +328,7 @@ async fn a_group_created_at_runtime_accepts_a_view_under_it() {
     .await;
     assert_eq!(status, 422, "{body}");
 
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     let ids = view_ids(&served).await;
     assert!(
         ids.contains(&"quarter:2026-Q1".to_string()),
@@ -423,7 +344,7 @@ async fn a_group_created_at_runtime_accepts_a_view_under_it() {
         200
     );
     flush(&served).await;
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     assert_eq!(
         points(&served, "quarter:2026-Q1").await.len(),
         1,
@@ -436,7 +357,7 @@ async fn a_group_created_at_runtime_accepts_a_view_under_it() {
 /// served as written.
 #[tokio::test]
 async fn a_roster_integer_past_its_declared_width_is_refused_at_a_create() {
-    let mut served = serve().await;
+    let mut served = Served::build(fixture).await;
     let group = json!({
         "extent": frame(),
         "point_visibility": { "default": "public" },
@@ -460,7 +381,7 @@ async fn a_roster_integer_past_its_declared_width_is_refused_at_a_create() {
     .await;
     assert_eq!(status, 201, "{body}");
 
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     let document = meta(&served).await;
     let views = document["views"].as_array().unwrap();
     assert!(
@@ -479,7 +400,7 @@ async fn a_roster_integer_past_its_declared_width_is_refused_at_a_create() {
 /// groups.
 #[tokio::test]
 async fn a_plain_view_created_at_runtime_takes_rows_at_its_first_flush() {
-    let mut served = serve().await;
+    let mut served = Served::build(fixture).await;
     let (status, body) = declare_view(&served, "embedding", embedding()).await;
     assert_eq!(status, 201, "{body}");
     assert_eq!(
@@ -516,7 +437,7 @@ async fn a_plain_view_created_at_runtime_takes_rows_at_its_first_flush() {
     let (status, body) = declare_view(&served, "quarter", embedding()).await;
     assert_eq!(status, 422, "a group's name is not free for a view: {body}");
 
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     let ids = view_ids(&served).await;
     assert!(ids.contains(&"embedding".to_string()), "{ids:?}");
     assert!(
@@ -535,7 +456,7 @@ async fn a_plain_view_created_at_runtime_takes_rows_at_its_first_flush() {
         200
     );
     flush(&served).await;
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     assert_eq!(points(&served, "embedding").await.len(), 2);
     assert_eq!(
         points(&served, "s0").await.len(),
@@ -548,7 +469,7 @@ async fn a_plain_view_created_at_runtime_takes_rows_at_its_first_flush() {
 /// cannot read is refused rather than stored as a gate nobody could satisfy.
 #[tokio::test]
 async fn a_gate_is_one_label_or_a_list_on_both_routes() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
 
     let mut one = embedding();
     one["visibility"] = json!("0");
@@ -575,10 +496,7 @@ async fn a_gate_is_one_label_or_a_list_on_both_routes() {
 
     // The stored gate is the list as written, so a view gated on a label this session holds is
     // served and one gated on a label it does not is a 404.
-    let token = authorise(&served.server, &["0"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0"][..]).await;
     let resp = served
         .server
         .client
@@ -603,10 +521,7 @@ async fn a_gate_is_one_label_or_a_list_on_both_routes() {
     // **And the half that matters**: a principal holding none of a gate's terms cannot see the
     // view exists, and a request naming it is the 404 an unknown name is (`views.md` §6). The
     // fixture's principal `1` holds term `1` and not term `0`.
-    let outside = authorise(&served.server, &["1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let outside = token_for(&served.server, &["1"][..]).await;
     let resp = served
         .server
         .client
@@ -655,7 +570,7 @@ async fn a_gate_is_one_label_or_a_list_on_both_routes() {
 /// two refusals, transcribed.
 #[tokio::test]
 async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
 
     // The plugin arm is exercised by no case here: this fixture's plugin reads every non-empty
     // label as a term, so a label it *cannot* read has no spelling. What the two cases below
@@ -686,7 +601,7 @@ async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
 /// is what the manifest's merge order exists for.
 #[tokio::test]
 async fn the_declarations_survive_a_restart_and_a_fold() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declare_group(&served, "quarter", quarter()).await.0, 201);
     assert_eq!(declare_view(&served, "embedding", embedding()).await.0, 201);
     assert_eq!(
@@ -701,8 +616,8 @@ async fn the_declarations_survive_a_restart_and_a_fold() {
     );
 
     // Replayed from the log, nothing having been published yet.
-    let mut served = restart(served).await;
-    reauthorise(&mut served).await;
+    let mut served = served.restart().await;
+    served.reauthorise().await;
     assert_eq!(group_names(&served).await, ["quarter"]);
     let ids = view_ids(&served).await;
     assert!(ids.contains(&"embedding".to_string()), "{ids:?}");
@@ -722,15 +637,15 @@ async fn the_declarations_survive_a_restart_and_a_fold() {
         200
     );
     flush(&served).await;
-    let mut served = restart(served).await;
-    reauthorise(&mut served).await;
+    let mut served = served.restart().await;
+    served.reauthorise().await;
     assert_eq!(group_names(&served).await, ["quarter"]);
     assert_eq!(points(&served, "embedding").await.len(), 1);
 
     // Folded into `MANIFEST.json`, then replayed from it.
     fold(&served).await;
-    let mut served = restart(served).await;
-    reauthorise(&mut served).await;
+    let mut served = served.restart().await;
+    served.reauthorise().await;
     assert_eq!(group_names(&served).await, ["quarter"]);
     let ids = view_ids(&served).await;
     assert!(ids.contains(&"embedding".to_string()), "{ids:?}");

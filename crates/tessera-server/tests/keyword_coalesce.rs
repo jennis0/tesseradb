@@ -14,14 +14,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, UInt64Array};
+use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 
 /// The one declared column: a keyword, indexed, so every flush writes an extent with its own
 /// dictionary and the coalesce has a window to take.
@@ -42,57 +40,15 @@ const KEYS: [&str; 8] = [
 /// and every `prefix`/`contains` below reaches both the base and the window.
 const N: u64 = 20;
 
-fn write_points(path: &Path) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("tag", DataType::Utf8, true),
-    ]));
-    let ids: Vec<u64> = (0..N).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids.clone())),
-            Arc::new(Float64Array::from_iter_values(
-                ids.iter().map(|e| ((e * 37) % 1000) as f64),
-            )),
-            Arc::new(Float64Array::from_iter_values(
-                ids.iter().map(|e| ((e * 53) % 1000) as f64),
-            )),
-            Arc::new(arrow::array::StringArray::from_iter_values(
-                ids.iter().map(|e| format!("built-{e}")),
-            )),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 fn build_bundle(dir: &Path) -> std::path::PathBuf {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
-    write_points(&points);
+    let ids: Vec<u64> = (0..N).collect();
+    let tag = StringArray::from_iter_values(ids.iter().map(|e| format!("built-{e}")));
+    write_points(&points, &ids, scatter, vec![column("tag", true, tag)]);
     write_pairs_n(&pairs, N);
-    let schema_path = dir.join("schema.toml");
-    std::fs::write(&schema_path, SCHEMA).unwrap();
-    let config = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .expect("the declaration parses");
     let out = dir.join("bundle");
-    build(&BuildArgs {
-        attribute_sources: tessera_build::config::AttributeSource::over(
-            points.clone(),
-            &config.schema,
-        ),
-        schema: config.schema,
-        ..build_args(
-            &out,
-            vec![view_args("s0", &points, AccessInput::relation(&pairs))],
-        )
-    })
-    .expect("the build succeeds");
+    build_declared(&out, &points, &pairs, SCHEMA);
     out
 }
 
@@ -265,16 +221,8 @@ fn tag_extents(root: &Path) -> Vec<Value> {
 async fn a_keyword_filter_serves_the_same_set_before_and_after_the_coalesce() {
     let tmp = TempDir::new().unwrap();
     let root = build_bundle(tmp.path());
-    let server = spawn_server(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let server = open(&tmp).await;
+    let token = token_for(&server, &["0"]).await;
     server.state.engine.set_coalesce_for_test(false);
 
     for (i, key) in KEYS.iter().enumerate() {
@@ -329,17 +277,8 @@ async fn a_keyword_filter_serves_the_same_set_before_and_after_the_coalesce() {
     assert_eq!(after, before, "a served answer moved across the coalesce");
 
     // A restart opens the coalesced extent from the manifest entry.
-    server.shutdown().await;
-    let server = spawn_server(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let server = restart(server, &tmp).await;
+    let token = token_for(&server, &["0"]).await;
     let reopened = answers(&server, &token).await;
     assert_eq!(reopened, before, "a served answer moved across the restart");
 }

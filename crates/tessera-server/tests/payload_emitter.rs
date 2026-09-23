@@ -122,28 +122,10 @@ fn payloads(dir: &Path, declaration: &str) -> Value {
     tessera_build::config::control_payloads(&config)
 }
 
-struct Served {
-    server: TestServer,
-    _tmp: TempDir,
-}
-
 /// A built bundle carrying one view, `s0`, and nothing this declaration names: every object below
 /// is one the running service created from a payload.
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    let points = tmp.path().join("points.parquet");
-    let pairs = tmp.path().join("pairs.parquet");
-    write_points_n(&points, 64);
-    write_pairs_n(&pairs, 64);
-    let bundle = tmp.path().join("bundle");
-    build_fixture_n(&bundle, &points, &pairs, 64);
-    let server = spawn_server(
-        &bundle,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    Served { server, _tmp: tmp }
+fn fixture(dir: &Path) -> std::path::PathBuf {
+    fixture_in(dir, 64)
 }
 
 async fn put(served: &Served, path: &str, body: &Value) -> (u16, Value) {
@@ -179,7 +161,7 @@ fn accepted(status: u16, answer: &Value, what: &str) {
 /// before the layer drawn on it.
 #[tokio::test]
 async fn every_emitted_body_is_taken_by_its_route() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     let dir = TempDir::new().unwrap();
     let payloads = payloads(dir.path(), DECLARATION);
 
@@ -255,7 +237,7 @@ async fn every_emitted_body_is_taken_by_its_route() {
 /// a column quietly declared without it.
 #[tokio::test]
 async fn the_route_refuses_render_and_says_why() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     let dir = TempDir::new().unwrap();
     let payloads = payloads(
         dir.path(),

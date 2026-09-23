@@ -154,18 +154,7 @@ async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
 #[tokio::test]
 async fn the_arming_surface_is_gated_and_names_its_sites() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let resp = server
         .client

@@ -18,7 +18,6 @@ mod common;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use base64::Engine as _;
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -28,21 +27,6 @@ use tessera_plugin::Passthrough;
 
 /// Long enough for a slow machine and short enough to fail rather than hang.
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
-
-async fn serve(tmp: &TempDir) -> TestServer {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
 
 async fn status(server: &TestServer) -> Value {
     let resp = server
@@ -117,17 +101,10 @@ async fn declare_attribute(server: &TestServer, body: Value) {
     );
 }
 
-fn b64(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
 /// The `tessera_id`s a filtered viewport answers, from a fresh session so anything published
 /// since the last one is in the answer.
 async fn filtered(server: &TestServer, filters: Value) -> BTreeSet<u64> {
-    let token = authorise(server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(server, &["0", "1"][..]).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -148,10 +125,7 @@ async fn filtered(server: &TestServer, filters: Value) -> BTreeSet<u64> {
 /// enough that the fixture's own rows, which sit on a grid across the frame, cannot fill the k
 /// budget and hide the row a test is asking about.
 async fn points_near(server: &TestServer, x: f64, y: f64) -> BTreeSet<u64> {
-    let token = authorise(server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(server, &["0", "1"][..]).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -171,10 +145,7 @@ async fn points_near(server: &TestServer, x: f64, y: f64) -> BTreeSet<u64> {
 
 /// The `tessera_id`s one view serves, from a fresh session.
 async fn points_in(server: &TestServer, view: &str) -> BTreeSet<u64> {
-    let token = authorise(server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(server, &["0", "1"][..]).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -292,10 +263,7 @@ async fn an_artifacts_only_commit_is_served_once_the_counter_reaches_the_answer(
     let n = request_flush(&server).await;
     await_publication(&server, n).await;
 
-    let token = authorise(&server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&server, &["0", "1"][..]).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -615,37 +583,25 @@ async fn ingest_one(server: &TestServer, batch_id: &str, external_id: &[u8]) -> 
 
 /// The layer the artifact tests publish into.
 async fn declare_clusters(server: &TestServer) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
-            "name": "clusters",
-            "title": "clusters (title)",
-            "views": ["s0"],
-            "membership": "enumerated",
-            "visibility": null,
-            "artifact_visibility": { "field": null, "default": "inherited" },
-            "require_member_visibility": { "count": 1 },
-            "hierarchy": { "kind": "nested", "prune_children": true },
-            "content": { "computed": ["centroid", "hull"], "supplied": [] },
-            "depends_on": [],
-            "levels": []
-        }))
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    let answer: Value = resp.json().await.unwrap_or(Value::Null);
-    assert_eq!(status, 201, "the layer is declared: {answer}");
+    let declaration = json!({
+        "name": "clusters",
+        "title": "clusters (title)",
+        "views": ["s0"],
+        "membership": "enumerated",
+        "visibility": null,
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": { "count": 1 },
+        "hierarchy": { "kind": "nested", "prune_children": true },
+        "content": { "computed": ["centroid", "hull"], "supplied": [] },
+        "depends_on": [],
+        "levels": []
+    });
+    register(server, declaration).await;
 }
 
 /// How many artifacts the viewport's frame carries for a full principal.
 async fn artifacts_served(server: &TestServer) -> usize {
-    let token = authorise(server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(server, &["0", "1"][..]).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))

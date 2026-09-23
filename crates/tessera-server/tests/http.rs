@@ -45,18 +45,7 @@ const _: () = assert!(PARALLEL_HEADLINE_ITEMS < SERIAL_FALLBACK_MAX_ROWS);
 #[tokio::test]
 async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -93,18 +82,7 @@ async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
 #[tokio::test]
 async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requests() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -177,18 +155,7 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
 #[tokio::test]
 async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -238,18 +205,7 @@ async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
 #[tokio::test]
 async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -322,18 +278,7 @@ async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
 #[tokio::test]
 async fn i_item_404s_identically_for_unknown_and_invisible() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // Session A: term "0" -- every item carries it, so A sees the whole bundle.
     let auth_a = authorise(&server, &["0"]).await;
@@ -398,18 +343,7 @@ async fn i_item_404s_identically_for_unknown_and_invisible() {
 #[tokio::test]
 async fn b_missing_or_garbage_token_is_401() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let body = serde_json::json!({
         "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
@@ -438,18 +372,7 @@ async fn b_missing_or_garbage_token_is_401() {
 #[tokio::test]
 async fn d_unknown_view_404_and_malformed_bbox_422() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -531,18 +454,7 @@ async fn h_config_missing_disclosure_refuses_to_start() {
 #[tokio::test]
 async fn viewer_meta_requires_bearer() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let resp = server
         .client
@@ -570,18 +482,7 @@ async fn viewer_meta_requires_bearer() {
 #[tokio::test]
 async fn viewer_meta_reports_the_idset_and_never_the_key() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -612,18 +513,7 @@ async fn viewer_meta_reports_the_idset_and_never_the_key() {
 #[tokio::test]
 async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -703,18 +593,7 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
 #[tokio::test]
 async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -952,8 +831,7 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let viewer_url = server.viewer_url("/v1/viewport");
     let client = server.client.clone();
@@ -1029,8 +907,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     // path (it shares the viewer/session compute budget), so acquiring a *second*
     // session token during saturation would itself race the gate rather than testing the
     // never-gated routes this test is actually about.
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
     let second_auth = authorise(&server, &["0"]).await;
     let second_token_id = second_auth["token_id"].as_u64().unwrap();
 
@@ -1131,8 +1008,7 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let viewer_url = server.viewer_url("/v1/viewport");
     let client = server.client.clone();
@@ -1235,8 +1111,7 @@ async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     // Baseline: a solo fast request with no contention at all.
     let baseline_resp = server
@@ -1402,8 +1277,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     // Warm-session scope (see this test's doc): warms this token/view's row-projection cache
     // before either slow request below.
@@ -1804,17 +1678,11 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
         &tmp.path().join("pairs.parquet"),
         PARALLEL_HEADLINE_ITEMS,
     );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = open(&tmp).await;
 
     // The generous default gate: 48 admission permits against the handful of requests below, so
     // any 429 here would be the single-flight builder's and not the gate's.
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let mut racers = Vec::new();
     for _ in 0..8 {
@@ -1951,18 +1819,7 @@ async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content
 #[tokio::test]
 async fn viewport_tiles_are_served_in_request_order_with_first_occurrence_dedup() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 

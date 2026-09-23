@@ -34,35 +34,9 @@ fn build_fixture_minting(out: &Path, dir: &Path, mint_external_ids: bool) {
 
 async fn serve_fixture(mint_external_ids: bool) -> (TempDir, TestServer) {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture_minting(&root, tmp.path(), mint_external_ids);
-    let server = spawn_server(&root, &tmp.path().join("cache"), &tmp.path().join("wal")).await;
+    build_fixture_minting(&tmp.path().join("bundle"), tmp.path(), mint_external_ids);
+    let server = open(&tmp).await;
     (tmp, server)
-}
-
-async fn register_flat_layer(server: &TestServer, name: &str) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
-            "name": name,
-            "title": name,
-            "views": ["s0"],
-            "membership": "enumerated",
-            "value_set": "closed",
-            "visibility": null,
-            "artifact_visibility": { "field": null, "default": "inherited" },
-            "require_member_visibility": null,
-            "hierarchy": { "kind": "flat", "prune_children": false },
-            "content": { "computed": [], "supplied": [] },
-            "depends_on": [],
-            "levels": []
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "the layer registers");
 }
 
 /// Publish one artifact whose members are the given external ids; return status and body text.
@@ -91,7 +65,7 @@ async fn publish(server: &TestServer, layer: &str, members: &[u64]) -> (u16, Str
 #[tokio::test]
 async fn a_bundle_with_no_external_ids_refuses_the_publication_once_and_says_why() {
     let (_tmp, server) = serve_fixture(false).await;
-    register_flat_layer(&server, "flat/x").await;
+    register(&server, flat_layer("flat/x")).await;
     let (status, body) = publish(&server, "flat/x", &[1, 2, 3]).await;
     assert_eq!(status, 422, "{body}");
     assert!(
@@ -107,7 +81,7 @@ async fn a_bundle_with_no_external_ids_refuses_the_publication_once_and_says_why
 #[tokio::test]
 async fn a_bundle_with_external_ids_still_refuses_an_unknown_member_by_position() {
     let (_tmp, server) = serve_fixture(true).await;
-    register_flat_layer(&server, "flat/x").await;
+    register(&server, flat_layer("flat/x")).await;
     // 1 and 2 exist; 10_000 names nothing. The member is reported by its position.
     let (status, body) = publish(&server, "flat/x", &[1, 2, 10_000]).await;
     assert_eq!(status, 404, "{body}");
