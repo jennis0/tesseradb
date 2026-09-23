@@ -394,6 +394,7 @@ async fn a_bare_leaf_under_an_unrelated_view_is_a_422_naming_the_group() {
 #[tokio::test]
 async fn a_pin_naming_nothing_is_the_unknown_view_404() {
     let served = Served::build(build_scoped).await;
+    let mut shapes = std::collections::BTreeSet::new();
     for pin in ["2099-Q9", "#3"] {
         let leaf = format!("sentiment@{pin}");
         let resp = viewport(&served, &served.token, "world", Some(range(&leaf))).await;
@@ -401,10 +402,15 @@ async fn a_pin_naming_nothing_is_the_unknown_view_404() {
         let body: Value = resp.json().await.unwrap();
         assert_eq!(body["error"], "unknown", "{body}");
         let detail = body["detail"].as_str().unwrap();
-        assert!(
-            detail.contains(pin) && detail.contains("quarter"),
-            "it names the pin and the group: {body}"
-        );
+        assert!(detail.contains(pin), "it names the pin: {body}");
+        shapes.insert(detail.replace(pin, ""));
+    }
+    assert_eq!(shapes.len(), 1, "one detail for every pin naming nothing: {shapes:?}");
+    // And nothing the group holds: no key of its roster.
+    for shape in &shapes {
+        for (key, _) in QUARTERS {
+            assert!(!shape.contains(key), "{key} in {shape}");
+        }
     }
 }
 

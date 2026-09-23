@@ -440,4 +440,12 @@ async fn an_unknown_view_and_an_absent_key_are_the_same_404() {
         shapes.insert(body["detail"].as_str().unwrap().replace(view, ""));
     }
     assert_eq!(shapes.len(), 1, "one detail for every unknown name: {shapes:?}");
+    // And nothing the bundle holds: no view, group or key of its roster.
+    let shape = shapes.first().unwrap();
+    for name in ["world", "quarter"]
+        .into_iter()
+        .chain(QUARTERS.iter().map(|(key, _, _)| *key))
+    {
+        assert!(!shape.contains(name), "{name} in {shape}");
+    }
 }
