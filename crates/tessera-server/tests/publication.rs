@@ -744,6 +744,10 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
         "and nothing was published, which is why the number was not reached"
     );
     assert!(
+        !executor.flush_in_flight && executor.flush_executions == 0,
+        "and no flush was dispatched past the refused gate: {executor:?}"
+    );
+    assert!(
         publication(&server).await < n,
         "the counter must not pass a cycle whose gate refused it"
     );
