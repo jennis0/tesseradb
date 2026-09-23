@@ -19,18 +19,11 @@
 
 mod common;
 
-use std::path::Path;
-use std::sync::Arc;
-
-use arrow::array::{Float32Array, Float64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::array::{Float32Array, StringArray};
 use base64::Engine as _;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 use tessera_server::state::ComputeGate;
 
 // ---------------------------------------------------------------------------------------------
@@ -136,90 +129,27 @@ type     = "f32"
 render   = true
 "#;
 
-fn write_points(path: &Path) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("archive", DataType::Utf8, false),
-        Field::new("score", DataType::Float32, true),
-    ]));
-    let ids: Vec<u64> = (0..N).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let archives: Vec<&str> = ids
-        .iter()
-        .map(|&e| ["astro", "cond", "hep"][(e % 3) as usize])
-        .collect();
-    let scores: Vec<Option<f32>> = ids.iter().map(|&e| Some((e % 97) as f32 * 0.5)).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(StringArray::from(archives)),
-            Arc::new(Float32Array::from(scores)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn build_fixture_with_schema(out: &Path, points: &Path, pairs: &Path) {
-    write_points(points);
-    write_pairs_n(pairs, N);
-    let schema_path = points.with_file_name("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.to_path_buf(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
-            points.to_path_buf(),
-            &schema,
-        ),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    };
-    build(&args).expect("fixture build should succeed");
-}
-
 fn build_bundle(tmp: &TempDir) -> std::path::PathBuf {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_with_schema(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
+    let points = tmp.path().join("points.parquet");
+    let pairs = tmp.path().join("pairs.parquet");
+    let ids: Vec<u64> = (0..N).collect();
+    let archive = StringArray::from_iter_values(
+        ids.iter()
+            .map(|&e| ["astro", "cond", "hep"][(e % 3) as usize]),
     );
+    let score = Float32Array::from_iter(ids.iter().map(|&e| Some((e % 97) as f32 * 0.5)));
+    write_points(
+        &points,
+        &ids,
+        scatter,
+        vec![
+            column("archive", false, archive),
+            column("score", true, score),
+        ],
+    );
+    write_pairs_n(&pairs, N);
+    let bundle_root = tmp.path().join("bundle");
+    build_declared(&bundle_root, &points, &pairs, SCHEMA_TOML);
     bundle_root
 }
 
@@ -258,9 +188,7 @@ async fn publish_layer(server: &TestServer) -> Vec<String> {
         resp.text().await.unwrap()
     );
 
-    let member = |source_id: u64| {
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-    };
+    let member = |source_id: u64| member(source_id);
     let members_all: Vec<String> = (0..12u64).map(member).collect();
     let members_broad: Vec<String> = (12..24u64).filter(|s| s % 3 != 0).map(member).collect();
     let resp = server
@@ -299,13 +227,8 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = build_bundle(&tmp);
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    build_bundle(&tmp);
+    let server = open(&tmp).await;
     let artifacts = publish_layer(&server).await;
     Fixture {
         _tmp: tmp,

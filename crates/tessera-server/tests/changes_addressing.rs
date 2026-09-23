@@ -12,7 +12,6 @@
 
 mod common;
 
-use base64::Engine as _;
 use common::*;
 use tempfile::TempDir;
 
@@ -85,18 +84,7 @@ async fn ingest_anonymous(server: &TestServer, batch_id: &str) -> u64 {
 #[tokio::test]
 async fn an_item_ingested_without_an_external_id_is_suppressible_by_tessera_id() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let _ = authorise(&server, &["0"]).await;
     // No token needed: this case asserts acceptance, not a count (see below).
 
@@ -136,23 +124,11 @@ async fn an_item_ingested_without_an_external_id_is_suppressible_by_tessera_id()
 #[tokio::test]
 async fn a_mixed_bulk_batch_applies_both_address_forms() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let server = serve(&tmp).await;
+    let token = token_for(&server, &["0"]).await;
 
     // Two different fixture items, named two different ways.
-    let by_external = base64::engine::general_purpose::STANDARD.encode(external_id_of(5));
+    let by_external = member(5);
     let by_tessera = a_drawn_tessera_id(&server, &token).await;
     let before = visible(&server, &token).await;
 
@@ -178,20 +154,8 @@ async fn a_mixed_bulk_batch_applies_both_address_forms() {
 #[tokio::test]
 async fn an_out_of_range_tessera_id_refuses_the_whole_batch() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let server = serve(&tmp).await;
+    let token = token_for(&server, &["0"]).await;
 
     let good = ingest_anonymous(&server, "anon-1").await;
     let before = visible(&server, &token).await;
@@ -218,20 +182,8 @@ async fn an_out_of_range_tessera_id_refuses_the_whole_batch() {
 #[tokio::test]
 async fn a_stale_idset_is_refused_before_inversion() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let server = serve(&tmp).await;
+    let token = token_for(&server, &["0"]).await;
 
     let id = ingest_anonymous(&server, "anon-1").await;
     let before = visible(&server, &token).await;
@@ -252,23 +204,11 @@ async fn a_stale_idset_is_refused_before_inversion() {
 #[tokio::test]
 async fn an_element_names_exactly_one_address_form() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let server = serve(&tmp).await;
+    let token = token_for(&server, &["0"]).await;
 
     let id = ingest_anonymous(&server, "anon-1").await;
-    let external = base64::engine::general_purpose::STANDARD.encode(external_id_of(5));
+    let external = member(5);
     let before = visible(&server, &token).await;
 
     for (what, body) in [
@@ -311,12 +251,7 @@ async fn an_element_names_exactly_one_address_form() {
 #[tokio::test]
 async fn a_tessera_addressed_deny_replays_to_the_same_entity() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let root = build_fixture(tmp.path(), N_ITEMS);
     let cache = tmp.path().join("cache");
     let wal = tmp.path().join("wal.log");
 
@@ -344,8 +279,7 @@ async fn a_tessera_addressed_deny_replays_to_the_same_entity() {
 
     // Reopened on the same WAL: replay is the only thing that can carry the suppression forward.
     let restarted = spawn_server(&root, &tmp.path().join("cache-2"), &wal).await;
-    let auth = authorise(&restarted, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&restarted, &["0"]).await;
     assert_eq!(
         visible(&restarted, &token).await,
         before_suppression - 1,

@@ -27,16 +27,14 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, Quantisation,
-    ViewArgs, ViewMetadataType, ViewMetadataValue,
+    build, BuildArgs, GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewArgs,
+    ViewMetadataType, ViewMetadataValue,
 };
 
 const ENTITIES: u64 = 20;
@@ -54,62 +52,20 @@ fn position(view: &str, e: u64) -> (f64, f64) {
 
 /// One view's points. `key` is the discriminator value every row carries, for the group whose
 /// points are one file behind `fields.view`; `None` is a file that *is* the view.
-fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, key: Option<&str>) {
-    let mut fields = vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        // One declared attribute, so the join rule's entity-scoped arm has a column to disagree
-        // about (`views.md` §4).
-        Field::new("score", DataType::Int32, true),
-    ];
-    if key.is_some() {
-        fields.push(Field::new("quarter", DataType::Utf8, false));
-    }
-    let schema = Arc::new(Schema::new(fields));
+fn write_view_points(path: &Path, view: &str, ids: std::ops::Range<u64>, key: Option<&str>) {
     let ids: Vec<u64> = ids.collect();
-    let xs: Vec<f64> = ids.iter().map(|&e| position(view, e).0).collect();
-    let ys: Vec<f64> = ids.iter().map(|&e| position(view, e).1).collect();
-    let scores: Vec<i32> = ids.iter().map(|&e| e as i32).collect();
-    let mut columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(UInt64Array::from(ids.clone())),
-        Arc::new(Float64Array::from(xs)),
-        Arc::new(Float64Array::from(ys)),
-        Arc::new(arrow::array::Int32Array::from(scores)),
-    ];
+    let score = arrow::array::Int32Array::from(ids.iter().map(|&e| e as i32).collect::<Vec<_>>());
+    // One declared attribute, so the join rule's entity-scoped arm has a column to disagree
+    // about.
+    let mut extra = vec![column("score", true, score)];
     if let Some(key) = key {
-        columns.push(Arc::new(arrow::array::StringArray::from(vec![
-            key;
-            ids.len()
-        ])));
+        extra.push(column(
+            "quarter",
+            false,
+            arrow::array::StringArray::from(vec![key; ids.len()]),
+        ));
     }
-    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
-    ViewArgs {
-        visibility: None,
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Default::default(),
-        select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-    }
-}
-
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
-    }
+    write_points(path, &ids, |e| position(view, e), extra);
 }
 
 /// One plain view, a group of one view carrying two metadata names, and a second group over the
@@ -118,13 +74,17 @@ fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
-    write_points(&world_points, "world", WORLD, None);
-    let mut views = vec![view_args("world", &world_points, &pairs)];
+    write_view_points(&world_points, "world", WORLD, None);
+    let mut views = vec![view_args(
+        "world",
+        &world_points,
+        AccessInput::relation(&pairs),
+    )];
     for group in ["quarter", "quarter_map"] {
         let id = format!("{group}:2026-Q1");
         let points = dir.join(format!("{group}-q1.parquet"));
-        write_points(&points, &id, Q1, None);
-        views.push(view_args(&id, &points, &pairs));
+        write_view_points(&points, &id, Q1, None);
+        views.push(view_args(&id, &points, AccessInput::relation(&pairs)));
     }
     let roster = |with_metadata: bool| {
         vec![GroupViewDescriptor {
@@ -173,8 +133,6 @@ render = true
         .expect("the fixture declaration parses");
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
         groups: vec![
             GroupDescriptor {
                 title: None,
@@ -212,76 +170,15 @@ render = true
                 views: roster(false),
             },
         ],
-        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             dir.join("world.parquet"),
             &config.schema,
         ),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(&out, views)
     })
     .expect("a three-view build succeeds");
     out
-}
-
-struct Served {
-    server: TestServer,
-    token: String,
-    tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    let bundle = build_fixture_bundle(tmp.path());
-    let served = open(tmp).await;
-    assert!(bundle.exists());
-    served
-}
-
-async fn open(tmp: TempDir) -> Served {
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let auth = authorise(&server, &["0", "1"][..]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
-    Served { server, token, tmp }
-}
-
-/// **Take a fresh session** (`views.md` §6). The visible-view set is resolved once at authorise
-/// and is fixed for the session's life, so a view created since is a 404 to a session that
-/// predates it — deliberately, and the owner's ruling. A test that creates a view and then reads
-/// it therefore re-authorises first, exactly as a client would; `tests/views_gate.rs` is where
-/// the *not*-re-authorising case is asserted.
-async fn reauthorise(served: &mut Served) {
-    served.token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-}
-
-/// Reopen the same bundle and the same WAL — the restart every durability claim below is made
-/// against. The old server is stopped and waited for first, so its executor has released the
-/// bundle root's write lock before the new one takes it.
-async fn restart(served: Served) -> Served {
-    let Served { server, tmp, .. } = served;
-    server.shutdown().await;
-    open(tmp).await
 }
 
 async fn create(served: &Served, group: &str, key: &str, record: Value) -> reqwest::Response {
@@ -348,37 +245,11 @@ async fn viewport(served: &Served, view: &str) -> reqwest::Response {
 }
 
 async fn points(served: &Served, view: &str) -> Vec<PointRow> {
-    // Two responses here are the server behaving as specified under machine load, and neither is
-    // the answer under test. A 429 is the admission gate shedding (contracts §3.1) — honour
-    // `Retry-After` and ask again. `x-tessera-stale: 1` says the client's *presented* stamp was
-    // not the generation answered from (`geometry-pinning.md` §7) — so wait for a fresh one.
-    // **It is not a signal that a session's projection is one publication behind**: a session
-    // whose cache entry predates the last flush is served from that entry while the refresh runs
-    // on the pool, with no header, since this helper presents no stamp. A test that reads rows
-    // published since its session was authorised must re-authorise first (a fresh session builds
-    // at the live generation), or poll for the count it expects, as `scoped_render.rs` does.
-    // Anything else is asserted as the real response.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let resp = viewport(served, view).await;
-        let unsettled = std::time::Instant::now() < deadline;
-        if resp.status().as_u16() == 429 && unsettled {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        }
-        assert_eq!(resp.status().as_u16(), 200, "a served view answers: {view}");
-        if resp
-            .headers()
-            .get("x-tessera-stale")
-            .is_some_and(|v| v == "1")
-            && unsettled
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            continue;
-        }
-        let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
-        return points;
-    }
+    // A session whose cache entry predates the last flush is served from that entry while the
+    // refresh runs, with no header, so a test that reads rows published since its session was
+    // authorised re-authorises first or polls for the count it expects.
+    let resp = settled(async || viewport(served, view).await).await;
+    decode_viewport(&resp.bytes().await.unwrap()).1
 }
 
 /// One ingest batch of `(external id, x, y, access)` rows into `view`.
@@ -442,41 +313,6 @@ async fn ingest(
         .unwrap()
 }
 
-/// Flush until the buffer is empty — **a flush unit is one view**, and a tick publishes one of
-/// them, so a batch that landed in two views needs two ticks (write path's `dispatch_flushes`).
-async fn flush(served: &Served) {
-    // Always drive at least one flush: `buffered_items()` lags by up to one apply — its own doc
-    // says so, deliberately — so an acked batch can still read as 0 here, and gating the first
-    // flush on it skips the flush entirely under load. Every caller flushes straight after an
-    // acked ingest, so the buffer is genuinely non-empty on the first iteration and the flush
-    // counter is guaranteed to move.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = served.server.state.engine.write_executor_stats().flushes;
-        let resp = served
-            .server
-            .client
-            .post(served.server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while served.server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published: {} rows buffered, {} flushes",
-                served.server.state.engine.buffered_items(),
-                served.server.state.engine.write_executor_stats().flushes
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if served.server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
 /// The roster entry `/v1/meta` publishes for one view id, or `None` where the document does not
 /// carry the view at all.
 fn roster_of(meta: &Value, id: &str) -> Option<Value> {
@@ -503,7 +339,7 @@ fn view_ids(meta: &Value) -> Vec<String> {
 /// from the segments manifest and the log.
 #[tokio::test]
 async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
 
     let resp = create(
         &served,
@@ -518,7 +354,7 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
     assert_eq!(body["key"], "2026-Q5");
     // The visible-view set is fixed per session (`views.md` §6), so a reader of the newly created
     // view takes a new session, exactly as a client would.
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
 
     // On `/v1/meta`, after the view it was created behind — and on the sharing group too, because
     // a key belongs to the group that owns the views (`views.md` §3.3).
@@ -562,27 +398,28 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
         .collect();
     let resp = ingest(&served, "q5-batch", "quarter:2026-Q5", &rows).await;
     assert_eq!(resp.status(), 200, "a created view accepts rows");
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The flush's publication and a live session's sight of the entities it minted are two
     // events, and the second follows the first by an asynchronous refresh with no wire signal on
     // the interim response — a viewport between them is a fresh 200 serving the pre-flush answer.
     // So wait for the settled count rather than asserting the first response.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let mut served_points = points(&served, "quarter:2026-Q5").await;
-    while served_points.len() != 4 && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        served_points = points(&served, "quarter:2026-Q5").await;
-    }
-    assert_eq!(
-        served_points.len(),
-        4,
-        "the first flush gives a created view its row space"
-    );
+    wait_until(
+        "the first flush gives a created view its row space",
+        std::time::Duration::from_secs(60),
+        async || {
+            let settled = points(&served, "quarter:2026-Q5").await.len() == 4;
+            if !settled {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            }
+            settled
+        },
+    )
+    .await;
 
     // The restart: the roster comes back from the segments manifest, and the rows from the
     // segment the flush published.
-    let served = restart(served).await;
+    let served = served.restart().await;
     let document = meta(&served).await;
     let entry = roster_of(&document, "quarter:2026-Q5").expect("the roster survives a restart");
     assert_eq!(entry["metadata"]["label"]["value"], "Q5 2026");
@@ -605,7 +442,7 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
 /// know what exists, and would create it again and take the 409.
 #[tokio::test]
 async fn a_created_view_with_no_rows_survives_a_flush_and_is_listed_once() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
 
     let resp = create(
         &served,
@@ -615,7 +452,7 @@ async fn a_created_view_with_no_rows_survives_a_flush_and_is_listed_once() {
     )
     .await;
     assert_eq!(resp.status(), 201, "a free key on a declared group creates");
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
 
     let listed = |document: &Value| {
         view_ids(document)
@@ -650,8 +487,8 @@ async fn a_created_view_with_no_rows_survives_a_flush_and_is_listed_once() {
     )
     .await;
     assert_eq!(resp.status(), 200);
-    flush(&served).await;
-    reauthorise(&mut served).await;
+    drain(&served.server).await;
+    served.reauthorise().await;
 
     let document = meta(&served).await;
     assert_eq!(
@@ -665,8 +502,8 @@ async fn a_created_view_with_no_rows_survives_a_flush_and_is_listed_once() {
         "it still answers a viewer verb, empty"
     );
 
-    let mut served = restart(served).await;
-    reauthorise(&mut served).await;
+    let mut served = served.restart().await;
+    served.reauthorise().await;
     let document = meta(&served).await;
     assert_eq!(
         listed(&document),
@@ -681,7 +518,7 @@ async fn a_created_view_with_no_rows_survives_a_flush_and_is_listed_once() {
 /// is one to replace, and an unknown group is not a view at all.
 #[tokio::test]
 async fn a_create_refuses_a_taken_key_a_bad_key_a_wrong_record_and_an_unknown_group() {
-    let served = serve().await;
+    let served = Served::build(build_fixture_bundle).await;
 
     assert_eq!(
         create(&served, "quarter", "2026-Q1", q_record("again", 1))
@@ -790,7 +627,7 @@ async fn a_create_refuses_a_taken_key_a_bad_key_a_wrong_record_and_an_unknown_gr
 /// fresh incarnation, so the recreated view is empty rather than the old one under a new record.
 #[tokio::test]
 async fn a_drop_frees_the_key_and_the_drop_survives_a_restart() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
     let created = create(&served, "quarter", "2026-Q5", q_record("Q5", 1)).await;
     assert_eq!(created.status(), 201);
 
@@ -822,7 +659,7 @@ async fn a_drop_frees_the_key_and_the_drop_survives_a_restart() {
     );
     // A view created since this session authorised is a 404 to it until it re-authorises
     // (`views.md` §6), and that is as true of a recreate as of a first create.
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     let document = meta(&served).await;
     assert_eq!(
         roster_of(&document, "quarter:2026-Q5").unwrap()["metadata"]["label"]["value"],
@@ -837,7 +674,7 @@ async fn a_drop_frees_the_key_and_the_drop_survives_a_restart() {
     assert_eq!(resp.status(), 201);
 
     // And all of it comes back from the segments manifest.
-    let served = restart(served).await;
+    let served = served.restart().await;
     let document = meta(&served).await;
     assert!(roster_of(&document, "quarter:2026-Q5").is_none());
     assert_eq!(
@@ -866,7 +703,7 @@ async fn a_drop_frees_the_key_and_the_drop_survives_a_restart() {
 /// update — and the arms below are the ways a caller could try to make it an update by accident.
 #[tokio::test]
 async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
             .await
@@ -875,7 +712,7 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
     );
     // The visible-view set is fixed per session (`views.md` §6), so a reader of the
     // newly created view takes a new session, exactly as a client would.
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
 
     let id = b"joiner".to_vec();
     assert_eq!(
@@ -904,7 +741,7 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
         "a known external id naming a view the entity is not in is a join: {:?}",
         resp.text().await
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     let in_world = points(&served, "world").await;
     let in_q5 = points(&served, "quarter:2026-Q5").await;
@@ -948,7 +785,7 @@ async fn a_known_external_id_joins_a_second_view_and_is_placed_in_each() {
 /// through a second view's row (`views.md` §4).
 #[tokio::test]
 async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
-    let served = serve().await;
+    let served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
             .await
@@ -1035,7 +872,7 @@ async fn a_join_refuses_a_second_row_a_relabel_and_a_changed_attribute() {
 /// the suppressed entity creates no copy. **The suppression retires only by unsuppress** (Rule S).
 #[tokio::test]
 async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppressed() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
             .await
@@ -1044,7 +881,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
     );
     // The visible-view set is fixed per session (`views.md` §6), so a reader of the
     // newly created view takes a new session, exactly as a client would.
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     let id = b"hidden".to_vec();
     let resp = ingest(
         &served,
@@ -1057,7 +894,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
     let tessera_id: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
         .expect("the 200 returns one identifier per accepted row");
-    flush(&served).await;
+    drain(&served.server).await;
     assert!(
         points(&served, "world")
             .await
@@ -1099,7 +936,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
         200,
         "a suppressed holder takes the same arms as a live one"
     );
-    flush(&served).await;
+    drain(&served.server).await;
     assert!(
         !points(&served, "quarter:2026-Q5")
             .await
@@ -1145,7 +982,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
 /// question rather than a shorthand for "delete everything this view could see".
 #[tokio::test]
 async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
-    let served = serve().await;
+    let served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
             .await
@@ -1181,7 +1018,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         200,
         "one new entity and one join"
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     // A third entity, still in the buffer when the drop runs: the probe counts the buffer as this
     // view's rows, or it would call an entity dangling that a caller was told had landed.
@@ -1293,7 +1130,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
         buffered_before + 1,
         "the dropped view's buffered row went with it, and the other stayed"
     );
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(
         ingest(
             &served,
@@ -1326,7 +1163,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
     let before: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
         .unwrap();
-    flush(&served).await;
+    drain(&served.server).await;
     let body = drop_view(&served, "quarter", "2026-Q6", false).await;
     assert_eq!(body["deleted"], 0);
 
@@ -1362,8 +1199,8 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
 fn build_minted_bundle(dir: &Path) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
-    write_points(&dir.join("world.parquet"), "world", WORLD, None);
-    write_points(
+    write_view_points(&dir.join("world.parquet"), "world", WORLD, None);
+    write_view_points(
         &dir.join("quarter.parquet"),
         "quarter:2026-Q1",
         Q1,
@@ -1422,29 +1259,14 @@ render = true
     let groups = config.group_registry(&registry, &views);
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
         anchor,
         groups,
-        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             dir.join("world.parquet"),
             &config.schema,
         ),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(&out, views)
     })
     .expect("the minted build succeeds");
     out
@@ -1460,7 +1282,7 @@ render = true
 async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     let tmp = TempDir::new().unwrap();
     build_minted_bundle(tmp.path());
-    let mut served = open(tmp).await;
+    let mut served = Served::open(tmp).await;
 
     // The minted key is served like a declared one, carrying no record of its own.
     let document = meta(&served).await;
@@ -1490,7 +1312,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     assert!(view_ids(&meta(&served).await).contains(&"quarter:2026-Q2".to_string()));
     assert_eq!(viewport(&served, "quarter:2026-Q2").await.status(), 200);
 
@@ -1512,8 +1334,8 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     let joined = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
         .unwrap();
-    flush(&served).await;
-    reauthorise(&mut served).await;
+    drain(&served.server).await;
+    served.reauthorise().await;
     let in_q2 = points(&served, "quarter:2026-Q2").await;
     assert_eq!(in_q2.len(), 1, "the joined row, and only it");
     assert_eq!(
@@ -1538,7 +1360,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     // **Drop**, and the key is freed — on a minted view exactly as on a declared one.
     let body = drop_view(&served, "quarter", "2026-Q1", false).await;
     assert_eq!(body["deleted"], 0);
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     assert!(!view_ids(&meta(&served).await).contains(&"quarter:2026-Q1".to_string()));
     assert_eq!(viewport(&served, "quarter:2026-Q1").await.status(), 404);
     assert_eq!(
@@ -1548,41 +1370,6 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
         201,
         "a dropped key is reusable (decision 0115)"
     );
-}
-
-/// Request a compaction fold and block until it has published (`POST /control/compact`,
-/// contracts §3.4). The counter is the only "done" there is: the fold runs on its own thread and
-/// publishes at the executor's next loop iteration, so the acceptance code says nothing about
-/// completion.
-async fn fold(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().folds;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202, "a fold is accepted at any time");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let stats = served.server.state.engine.write_executor_stats();
-        assert_eq!(
-            stats.fold_failures, 0,
-            "the fold failed rather than publishing"
-        );
-        if stats.folds > before {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published: {} folds, {} discarded",
-            stats.folds,
-            stats.fold_failures
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 }
 
 /// The prefix `CURRENT` names, and the directory it is.
@@ -1669,7 +1456,7 @@ fn view_dirs(root: &Path, group: &str, key: &str) -> Vec<std::path::PathBuf> {
 ///   that executes them, and their overlay entries retire there (Rule F) rather than at the drop.
 #[tokio::test]
 async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_nothing() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
 
     // A second key, so the group still has a view after the drop and the survivors are a set
     // rather than one plain view. Its rows arrive through ingest, so the dropped view is not the
@@ -1680,7 +1467,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     let rows: Vec<Row<'_>> = (0..4)
         .map(|i| {
             (
@@ -1698,7 +1485,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
             .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     let (_, base_dir) = live_prefix(&served);
     assert_eq!(
@@ -1715,7 +1502,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
     let body = drop_view(&served, "quarter", "2026-Q1", false).await;
     assert_eq!(body["deleted"], 0, "a drop by itself deletes no entity");
 
-    fold(&served).await;
+    fold(&served.server).await;
     let (folded, folded_dir) = live_prefix(&served);
     assert_ne!(folded, "v00000", "the fold published a new prefix");
 
@@ -1742,7 +1529,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
     // (c) A restart serves the survivors and still 404s the dropped key. The restart is also what
     // makes the reclamation deterministic: the superseded prefix is reclaimed when its last reader
     // lets go, and the startup sweep takes any that stands.
-    let served = restart(served).await;
+    let served = served.restart().await;
     let root = served.tmp.path().join("bundle");
     assert!(
         view_dirs(&root, "quarter", "2026-Q1").is_empty(),
@@ -1780,14 +1567,14 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
         "a key dropped before the fold is free after it"
     );
     let mut served = served;
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     assert_eq!(
         points(&served, "quarter:2026-Q1").await.len(),
         0,
         "the recreated key is an empty view, not the build's own rows under a new record"
     );
     drop_view(&served, "quarter", "2026-Q1", false).await;
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
 
     // (e) **`delete_dangling`'s deletions retire at the fold that omits their view's segments**
     // (`views.md` §3.4, Rule F, write-path §5.4). The two removal rules meet here and only here:
@@ -1811,7 +1598,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
         "the dangling entities are ordinary deletions and enter the overlay"
     );
 
-    fold(&served).await;
+    fold(&served.server).await;
     assert_eq!(
         served.server.state.engine.retirable_deletions(),
         0,
@@ -1836,7 +1623,7 @@ async fn a_fold_after_a_drop_reclaims_the_dropped_view_and_a_recreate_adopts_not
 /// test that skipped the flush would pass against the code this one exists to check.
 #[tokio::test]
 async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed() {
-    let served = serve().await;
+    let served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
             .await
@@ -1855,7 +1642,7 @@ async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed
         .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     let resp = ingest(
         &served,
@@ -1954,53 +1741,27 @@ vocabulary = "archive"
 "#;
 
 fn write_families_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("score", DataType::Int32, true),
-        Field::new("depth", DataType::Int32, true),
-        Field::new("tag", DataType::Utf8, true),
-        Field::new("note", DataType::Utf8, true),
-        Field::new("archive", DataType::Utf8, false),
-    ]));
     let ids: Vec<u64> = ids.collect();
-    let xs: Vec<f64> = ids.iter().map(|&e| position(view, e).0).collect();
-    let ys: Vec<f64> = ids.iter().map(|&e| position(view, e).1).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids.clone())),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(arrow::array::Int32Array::from_iter(
-                ids.iter().map(|&e| Some(e as i32)),
-            )),
-            Arc::new(arrow::array::Int32Array::from_iter(
-                ids.iter().map(|&e| Some(e as i32)),
-            )),
-            Arc::new(arrow::array::StringArray::from_iter_values(
-                ids.iter().map(|e| format!("t{e}")),
-            )),
-            Arc::new(arrow::array::StringArray::from_iter_values(
-                ids.iter().map(|e| format!("n{e}")),
-            )),
-            Arc::new(arrow::array::StringArray::from_iter_values(
-                ids.iter()
-                    .map(|e| ["astro", "cond", "hep"][(e % 3) as usize]),
-            )),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    let ints = || arrow::array::Int32Array::from_iter(ids.iter().map(|&e| Some(e as i32)));
+    let text = |prefix: &str| {
+        arrow::array::StringArray::from_iter_values(ids.iter().map(|e| format!("{prefix}{e}")))
+    };
+    let archive = arrow::array::StringArray::from_iter_values(
+        ids.iter()
+            .map(|e| ["astro", "cond", "hep"][(e % 3) as usize]),
+    );
+    let extra = vec![
+        column("score", true, ints()),
+        column("depth", true, ints()),
+        column("tag", true, text("t")),
+        column("note", true, text("n")),
+        column("archive", false, archive),
+    ];
+    write_points(path, &ids, |e| position(view, e), extra);
 }
 
 /// One plain view and one group, as the fixture above, over [`FAMILIES_SCHEMA`]'s five columns.
-async fn serve_families() -> Served {
-    let tmp = TempDir::new().unwrap();
-    let dir = tmp.path();
+fn build_families(dir: &Path) {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
@@ -2013,11 +1774,6 @@ async fn serve_families() -> Served {
         .expect("the families declaration parses");
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views: vec![
-            view_args("world", &world_points, &pairs),
-            view_args("quarter:2026-Q1", &q1_points, &pairs),
-        ],
-        anchor: 0,
         groups: vec![GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
@@ -2034,29 +1790,20 @@ async fn serve_families() -> Served {
                 metadata: Default::default(),
             }],
         }],
-        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             world_points.clone(),
             &config.schema,
         ),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(
+            &out,
+            vec![
+                view_args("world", &world_points, AccessInput::relation(&pairs)),
+                view_args("quarter:2026-Q1", &q1_points, AccessInput::relation(&pairs)),
+            ],
+        )
     })
     .expect("the families build succeeds");
-    open(tmp).await
 }
 
 /// One value per declared column, in declaration order, at the shape the wire carries: `None` is a
@@ -2140,14 +1887,14 @@ async fn families_ingest(
 /// absent one is not disagreement.
 #[tokio::test]
 async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
-    let mut served = serve_families().await;
+    let mut served = Served::build(build_families).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
             .await
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
 
     let id = b"families".to_vec();
     assert_eq!(
@@ -2158,7 +1905,7 @@ async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
     );
     // **The flush is the whole point**: past it the entity's own row is out of the buffer, and
     // every comparison below is made against the bundle.
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(served.server.state.engine.buffered_items(), 0);
 
     // (a) The same values, in a view the entity is not in: a join.
@@ -2267,14 +2014,14 @@ async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
 /// that moves.
 #[tokio::test]
 async fn a_join_may_carry_a_value_for_a_column_the_entity_never_held() {
-    let mut served = serve_families().await;
+    let mut served = Served::build(build_families).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
             .await
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
 
     let id = b"never-held".to_vec();
     // **`archive` is absent too, and a category says that with its reserved code** rather than a
@@ -2294,7 +2041,7 @@ async fn a_join_may_carry_a_value_for_a_column_the_entity_never_held() {
             .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     assert_eq!(
         families_ingest(
@@ -2328,14 +2075,14 @@ async fn a_join_may_carry_a_value_for_a_column_the_entity_never_held() {
 /// place the two comparisons drifted apart.
 #[tokio::test]
 async fn the_buffered_and_flushed_attribute_arms_refuse_identically() {
-    let mut served = serve_families().await;
+    let mut served = Served::build(build_families).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
             .await
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
 
     let flushed = b"arm-flushed".to_vec();
     assert_eq!(
@@ -2344,7 +2091,7 @@ async fn the_buffered_and_flushed_attribute_arms_refuse_identically() {
             .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The second entity is ingested *after* the flush, so its own row is still in the buffer.
     let buffered = b"arm-buffered".to_vec();
@@ -2386,11 +2133,8 @@ async fn the_buffered_and_flushed_attribute_arms_refuse_identically() {
 /// test here; a `render` column is filterable through the row route (decision 0068), and a filter
 /// evaluated against one view's rows is that view's tail and no other's.
 async fn filtered_points(served: &Served, view: &str, filter: Value) -> Vec<PointRow> {
-    // A 429 is the admission gate shedding under machine load and a stale hint is
-    // serve-stale-not-block — neither is the answer under test; retry both, as points() does.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let resp = served
+    let resp = settled(async || {
+        served
             .server
             .client
             .post(served.server.viewer_url("/v1/viewport"))
@@ -2401,28 +2145,10 @@ async fn filtered_points(served: &Served, view: &str, filter: Value) -> Vec<Poin
             }))
             .send()
             .await
-            .unwrap();
-        let unsettled = std::time::Instant::now() < deadline;
-        if resp.status().as_u16() == 429 && unsettled {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        }
-        assert_eq!(
-            resp.status().as_u16(),
-            200,
-            "a filtered view answers: {view}"
-        );
-        if resp
-            .headers()
-            .get("x-tessera-stale")
-            .is_some_and(|v| v == "1")
-            && unsettled
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            continue;
-        }
-        return decode_viewport(&resp.bytes().await.unwrap()).1;
-    }
+            .unwrap()
+    })
+    .await;
+    decode_viewport(&resp.bytes().await.unwrap()).1
 }
 
 /// **An omitted render value is backfilled into the joined view's tail** (`views.md` §4, owner
@@ -2434,14 +2160,14 @@ async fn filtered_points(served: &Served, view: &str, filter: Value) -> Vec<Poin
 /// value per entity (§5); a value that reads differently under two views is not one.
 #[tokio::test]
 async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
-    let mut served = serve_families().await;
+    let mut served = Served::build(build_families).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
             .await
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
 
     let id = b"backfill".to_vec();
     let resp = families_ingest(&served, "first", "world", &id, 10.0, 10.0, HELD).await;
@@ -2449,7 +2175,7 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
     let tessera_id: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
         .unwrap();
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The join omits every value, which the rule permits — and which is what would otherwise put
     // an absence in this view's tail.
@@ -2473,7 +2199,7 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
         .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     let score_is_one = json!({ "score": { "eq": 1 } });
     for view in ["world", "quarter:2026-Q5"] {
@@ -2503,7 +2229,7 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
 #[tokio::test]
 async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_value() {
     for attempt in 0..5 {
-        let mut served = serve_families().await;
+        let mut served = Served::build(build_families).await;
         for key in ["2026-Q5", "2026-Q6"] {
             assert_eq!(
                 create(&served, "quarter", key, json!({ "metadata": {} }))
@@ -2512,7 +2238,7 @@ async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_val
                 201
             );
         }
-        reauthorise(&mut served).await;
+        served.reauthorise().await;
 
         // Held in no view: `score` is absent where the entity was first ingested.
         let id = b"divergent".to_vec();
@@ -2529,7 +2255,7 @@ async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_val
                 .status(),
             200
         );
-        flush(&served).await;
+        drain(&served.server).await;
 
         // Accepted: an entity holding nothing for a column has nothing a joining row contradicts.
         // The joined view's tail now carries `4` where `world`'s carries an absence — the one
@@ -2552,7 +2278,7 @@ async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_val
             .status(),
             200
         );
-        flush(&served).await;
+        drain(&served.server).await;
 
         // A third view, a differing value: `409`, every time, whichever view the scan reaches
         // first. Reading `world`'s absence as the answer would accept it.
@@ -2603,7 +2329,7 @@ async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_val
 /// ordering answered `200` to both.
 #[tokio::test]
 async fn a_row_promoted_to_a_join_after_its_handler_pass_still_meets_the_arms() {
-    let served = serve().await;
+    let served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
             .await
@@ -2653,7 +2379,7 @@ async fn a_row_promoted_to_a_join_after_its_handler_pass_still_meets_the_arms() 
 /// name — and that neither the stored value nor the supplied one is in the body (**I10**).
 #[tokio::test]
 async fn the_join_rules_refusal_names_the_row_and_the_column() {
-    let served = serve().await;
+    let served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
             .await
@@ -2710,7 +2436,7 @@ async fn the_join_rules_refusal_names_the_row_and_the_column() {
 /// round asserts what holds either way: the row is taken and labelled, or it is refused.
 #[tokio::test]
 async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
     let id = b"demoted".to_vec();
     let resp = ingest(
         &served,
@@ -2723,7 +2449,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
     let first: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
         .as_u64()
         .unwrap();
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The holder is deleted, so the binding is dead bookkeeping: decision 0047 makes the
     // re-ingest below allocate rather than 409, and it is no longer a join.
@@ -2752,8 +2478,8 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         .as_u64()
         .unwrap();
     assert_ne!(second, first, "a fresh entity, not the dead binding's");
-    flush(&served).await;
-    reauthorise(&mut served).await;
+    drain(&served.server).await;
+    served.reauthorise().await;
 
     // The whole point: the fresh entity carries the label the batch named, so a principal that
     // satisfies it is served the row. A row that had arrived with its descriptors already dropped
@@ -2822,13 +2548,13 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
             other => panic!("round {round}: unexpected {other}: {text}"),
         }
     }
-    flush(&served).await;
+    drain(&served.server).await;
     // A fresh session, as the first half takes one: the session authorised before the race holds
     // a projection built at the previous generation, and until the pool's refresh lands it is
     // served from that entry — every pre-race row, none of the flush's — with no header to say
     // so (see `points`). Under load that read landed first and the rows below looked lost; they
     // were published, and a session built at the live generation sees them.
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     let served_ids: Vec<u64> = points(&served, "quarter:2026-Q1")
         .await
         .iter()
@@ -2872,14 +2598,14 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
 /// about *contents*: the recreated view holds the second batch's four rows and none of the first's.
 #[tokio::test]
 async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5 first", 1))
             .await
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
 
     // The first incarnation's rows, flushed, so the view owns a segment and a row space.
     let first: Vec<Row<'_>> = (0..6)
@@ -2899,7 +2625,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
             .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(points(&served, "quarter:2026-Q5").await.len(), 6);
 
     // **And rows that never flushed**, so the drop below meets them in the buffer and the restart
@@ -2936,7 +2662,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
         201,
         "a dropped key is reusable, and in the same window"
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     assert_eq!(
         points(&served, "quarter:2026-Q5").await.len(),
         0,
@@ -2963,8 +2689,8 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
     );
 
     // ---- the replay ------------------------------------------------------------------------
-    let mut served = restart(served).await;
-    reauthorise(&mut served).await;
+    let mut served = served.restart().await;
+    served.reauthorise().await;
     let document = meta(&served).await;
     assert_eq!(
         roster_of(&document, "quarter:2026-Q5").unwrap()["metadata"]["label"]["value"],
@@ -2973,7 +2699,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
     );
     // The rows are in the buffer and nowhere else, so the flush is what gives them geometry —
     // and what makes the count below a statement about *which* rows replay kept.
-    flush(&served).await;
+    drain(&served.server).await;
     let after_replay = points(&served, "quarter:2026-Q5").await;
     assert_eq!(
         after_replay.len(),
@@ -2983,13 +2709,13 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
     );
 
     // ---- the fold --------------------------------------------------------------------------
-    fold(&served).await;
+    fold(&served.server).await;
     let (_, folded_dir) = live_prefix(&served);
     assert!(
         segment_views(&folded_dir).contains(&"quarter:2026-Q5".to_string()),
         "the recreated view is folded like any other"
     );
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         points(&served, "quarter:2026-Q5").await.len(),
         4,
@@ -3022,7 +2748,7 @@ async fn a_recreated_key_holds_only_its_own_rows_across_a_replay_and_a_fold() {
 /// between them and the recreated key.
 #[tokio::test]
 async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
 
     // ---- (A) the live path: drop on the owner, rows buffered under the sharing group ---------
     assert_eq!(
@@ -3031,7 +2757,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     let shared: Vec<Row<'_>> = (0..5)
         .map(|i| {
             (
@@ -3062,7 +2788,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     // **One row of the new incarnation's own**, so the flush below has work and the count is a
     // statement rather than an empty buffer's silence: five stale rows would make it six.
     assert_eq!(
@@ -3076,7 +2802,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
         .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     for id in ["quarter:2026-Q5", "quarter_map:2026-Q5"] {
         assert_eq!(
             points(&served, id).await.len(),
@@ -3093,7 +2819,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
     let owned: Vec<Row<'_>> = (0..5)
         .map(|i| {
             (
@@ -3126,8 +2852,8 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
     );
     // **No flush before the restart**: the rows are in the log and nowhere else, so what keeps
     // them out of the recreated view is replay's own `ViewDrop` arm.
-    let mut served = restart(served).await;
-    reauthorise(&mut served).await;
+    let mut served = served.restart().await;
+    served.reauthorise().await;
     assert_eq!(
         ingest(
             &served,
@@ -3139,7 +2865,7 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
         .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     for id in ["quarter:2026-Q6", "quarter_map:2026-Q6"] {
         assert_eq!(
             points(&served, id).await.len(),
@@ -3224,7 +2950,7 @@ async fn a_view_created_and_fed_publishes_in_one_cycle(
         promised,
         "{created}: the counter names the cycle the rows are visible in and passes it no earlier"
     );
-    reauthorise(served).await;
+    served.reauthorise().await;
     for (view, wanted) in [(created, 4), (held, held_before + 4)] {
         assert_eq!(
             points(served, view).await.len(),
@@ -3243,7 +2969,7 @@ async fn a_view_created_and_fed_publishes_in_one_cycle(
 /// commit that creates it feeds it and a view the bundle already carried.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_group_view_created_in_a_commit_serves_its_rows_at_the_number_it_was_promised() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
     let resp = create(
         &served,
         "quarter",
@@ -3260,7 +2986,7 @@ async fn a_group_view_created_in_a_commit_serves_its_rows_at_the_number_it_was_p
 /// many views one commit feeds is — and these two are here to hold that true for both kinds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_plain_view_created_in_a_commit_serves_its_rows_at_the_number_it_was_promised() {
-    let mut served = serve().await;
+    let mut served = Served::build(build_fixture_bundle).await;
     let resp = served
         .server
         .client
@@ -3302,14 +3028,14 @@ async fn fill_depth(served: &Served, batch_id: &str, view: &str, id: &[u8], dept
 #[tokio::test]
 async fn an_entity_value_filled_through_a_view_dropped_before_the_tick_is_still_written() {
     const DEPTH: i32 = 4242;
-    let mut served = serve_families().await;
+    let mut served = Served::build(build_families).await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
             .await
             .status(),
         201
     );
-    reauthorise(&mut served).await;
+    served.reauthorise().await;
 
     let id = b"filled-through-a-dropped-view".to_vec();
     let sparse = Attrs {
@@ -3325,12 +3051,12 @@ async fn an_entity_value_filled_through_a_view_dropped_before_the_tick_is_still_
             .status(),
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     fill_depth(&served, "fill", "quarter:2026-Q5", &id, DEPTH).await;
     drop_view(&served, "quarter", "2026-Q5", false).await;
-    reauthorise(&mut served).await;
-    flush(&served).await;
+    served.reauthorise().await;
+    drain(&served.server).await;
 
     let holds_depth = json!({ "depth": { "eq": DEPTH } });
     assert_eq!(
@@ -3344,7 +3070,7 @@ async fn an_entity_value_filled_through_a_view_dropped_before_the_tick_is_still_
         "nothing buffered holds the log"
     );
 
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         filtered_points(&served, "world", holds_depth).await.len(),
         1,

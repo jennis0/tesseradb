@@ -27,45 +27,9 @@ const TOPICS: &str = "topics/labelled";
 /// `["1"]` sees the multiples of three alone and does not.
 const BAR: u64 = 20;
 
-fn member(source_id: u64) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
-}
-
-fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
-}
-
 /// How many of `range` carry term 1, which is the narrow principal's masked count.
 fn narrow_count(range: std::ops::Range<u64>) -> u64 {
     range.filter(|s| terms_of(*s).contains(&1)).count() as u64
-}
-
-async fn serve(tmp: &TempDir) -> TestServer {
-    build_fixture(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
-
-async fn register(server: &TestServer, declaration: serde_json::Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    assert_eq!(status, 201, "{}", resp.text().await.unwrap());
 }
 
 /// The clustering: no supplied content, and an absolute criterion the narrow principal fails.
@@ -643,101 +607,54 @@ hierarchy = { kind = "flat" }
 
 /// The points, with the cluster column the layer reads: the first thirty in `0`, the rest in `1`.
 fn write_clustered_points(path: &std::path::Path, n: u64) {
-    use arrow::array::{ArrayRef, Float64Array, StringArray, UInt64Array};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    let schema = std::sync::Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("cluster_id", DataType::Utf8, true),
-    ]));
     let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let clusters: Vec<String> = ids
-        .iter()
-        .map(|e| if *e < 30 { "0" } else { "1" }.to_string())
-        .collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            std::sync::Arc::new(UInt64Array::from(ids)) as ArrayRef,
-            std::sync::Arc::new(Float64Array::from(xs)),
-            std::sync::Arc::new(Float64Array::from(ys)),
-            std::sync::Arc::new(StringArray::from(clusters)),
-        ],
-    )
-    .unwrap();
-    write_parquet(path, schema, batch);
-}
-
-fn write_parquet(
-    path: &std::path::Path,
-    schema: std::sync::Arc<arrow::datatypes::Schema>,
-    batch: arrow::record_batch::RecordBatch,
-) {
-    let mut w =
-        parquet::arrow::ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None)
-            .unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    let clusters = arrow::array::StringArray::from_iter_values(ids.iter().map(|e| {
+        if *e < 30 {
+            "0"
+        } else {
+            "1"
+        }
+    }));
+    write_points(
+        path,
+        &ids,
+        scatter,
+        vec![column("cluster_id", true, clusters)],
+    );
 }
 
 /// One row per cluster: the roster the layer is named from.
 fn write_roster(path: &std::path::Path) {
-    use arrow::array::{ArrayRef, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    let schema = std::sync::Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![std::sync::Arc::new(StringArray::from(vec!["0", "1"])) as ArrayRef],
-    )
-    .unwrap();
-    write_parquet(path, schema, batch);
+    let keys = arrow::array::StringArray::from(vec!["0", "1"]);
+    write_parquet(path, vec![column("key", false, keys)]);
 }
 
 /// One label per cluster: a text, an attachment, and no members.
 fn write_labels(path: &std::path::Path) {
-    use arrow::array::{ArrayRef, ListBuilder, StringArray, StringBuilder};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    let ranked = DataType::List(std::sync::Arc::new(Field::new(
-        "item",
-        DataType::List(std::sync::Arc::new(Field::new(
-            "item",
-            DataType::Utf8,
-            true,
-        ))),
-        true,
-    )));
-    let schema = std::sync::Arc::new(Schema::new(vec![
-        Field::new("key", DataType::Utf8, false),
-        Field::new("contents", ranked, true),
-        Field::new("attached_layer", DataType::Utf8, true),
-        Field::new("attached_key", DataType::Utf8, true),
-    ]));
+    use arrow::array::{ListBuilder, StringArray, StringBuilder};
     let mut contents = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
     for text in ["the first thirty", "everything else"] {
         contents.values().values().append_value(text);
         contents.values().append(true);
         contents.append(true);
     }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
+    write_parquet(
+        path,
         vec![
-            std::sync::Arc::new(StringArray::from(vec!["l-0", "l-1"])) as ArrayRef,
-            std::sync::Arc::new(contents.finish()),
-            std::sync::Arc::new(StringArray::from(vec![
-                Some(BUILT_CLUSTERS),
-                Some(BUILT_CLUSTERS),
-            ])),
-            std::sync::Arc::new(StringArray::from(vec![Some("0"), Some("1")])),
+            column("key", false, StringArray::from(vec!["l-0", "l-1"])),
+            column("contents", true, contents.finish()),
+            column(
+                "attached_layer",
+                true,
+                StringArray::from(vec![Some(BUILT_CLUSTERS), Some(BUILT_CLUSTERS)]),
+            ),
+            column(
+                "attached_key",
+                true,
+                StringArray::from(vec![Some("0"), Some("1")]),
+            ),
         ],
-    )
-    .unwrap();
-    write_parquet(path, schema, batch);
+    );
 }
 
 /// Build the bundle the test above's rules are asserted over again, from a declaration rather
@@ -754,37 +671,15 @@ fn build_with_labels(dir: &std::path::Path) {
     let parsed = tessera_build::config::Config::parse(&config, &Default::default())
         .expect("the declaration parses");
     let args = tessera_build::BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            // The pairs relation, so a principal's mask is the fixture's own and the two
-            // principals below differ.
-            access: tessera_build::config::AccessInput::relation(pairs),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: dir.join("bundle"),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
         layers: parsed.layers,
         layer_inputs: parsed.layer_sources,
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: parsed.schema,
+        // The pairs relation, so a principal's mask is the fixture's own and the two principals
+        // below differ.
+        ..build_args(
+            &dir.join("bundle"),
+            vec![view_args("s0", &points, AccessInput::relation(pairs))],
+        )
     };
     tessera_build::build(&args).expect("the bundle builds");
 }
@@ -797,12 +692,7 @@ fn build_with_labels(dir: &std::path::Path) {
 async fn a_built_label_set_with_no_members_is_served_over_its_clustering() {
     let tmp = TempDir::new().unwrap();
     build_with_labels(tmp.path());
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = open(&tmp).await;
 
     let wide = built_rows(&server, &["0"]).await;
     for (cluster, label, text) in [

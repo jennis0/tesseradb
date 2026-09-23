@@ -14,13 +14,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array, StringArray, UInt64Array};
+use arrow::array::{Float32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use serde_json::{json, Value};
-use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 
 const N: u64 = 40;
 
@@ -44,113 +42,8 @@ render = true
 index  = true
 "#;
 
-fn write_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("score", DataType::Float32, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let scores: Vec<f32> = ids.iter().map(|e| (*e % 7) as f32).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(Float32Array::from(scores)),
-        ],
-    )
-    .unwrap();
-    let mut w =
-        parquet::arrow::ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None)
-            .unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
-    let points = dir.join("points.parquet");
-    let pairs = dir.join("pairs.parquet");
-    write_points(&points, N);
-    write_pairs_n(&pairs, N);
-    let schema_path = dir.join("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let out = dir.join("bundle");
-    build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    })
-    .expect("fixture build should succeed");
-    out
-}
-
-struct Served {
-    server: TestServer,
-    token: String,
-    tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    build_fixture_bundle(tmp.path());
-    open(tmp).await
-}
-
-async fn open(tmp: TempDir) -> Served {
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    Served { server, token, tmp }
-}
-
-/// Reopen the same bundle and the same log: the restart every durability claim below is made
-/// against. The old server is stopped and waited for first, so its executor has released the
-/// bundle root's write lock before the new one takes it.
-async fn restart(served: Served) -> Served {
-    let Served { server, tmp, .. } = served;
-    server.shutdown().await;
-    open(tmp).await
+fn fixture(dir: &Path) -> std::path::PathBuf {
+    build_scored(dir, N, SCHEMA_TOML)
 }
 
 async fn declare(served: &Served, name: &str, body: Value) -> (u16, Value) {
@@ -228,10 +121,7 @@ async fn categories(served: &Served, column: &str) -> Vec<(String, u64)> {
 /// The same, with each value's **title** — the property a page supplies and every durable home
 /// has to carry, or a fold destroys the names a client draws while keeping the codes.
 async fn titled(served: &Served, column: &str) -> Vec<(String, u64, Option<String>)> {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"][..]).await;
     let resp = served
         .server
         .client
@@ -334,74 +224,10 @@ async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> (u16, Value) 
     (status, resp.json().await.unwrap_or(Value::Null))
 }
 
-async fn flush(served: &Served) {
-    // 120 s, the fold helper's patience below, rather than the 60 s the older files use: a tick
-    // is 90 s by default and this box runs several test binaries at once, so the shorter deadline
-    // fails on load rather than on an answer.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let before = served.server.state.engine.write_executor_stats().flushes;
-        let resp = served
-            .server
-            .client
-            .post(served.server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while served.server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if served.server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
-}
-
-/// Request a compaction fold and block until it has published (contracts §3.4). The counter is
-/// the only "done" there is: the fold runs on its own thread and publishes at the executor's next
-/// loop iteration.
-async fn fold(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().folds;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202, "a fold is accepted at any time");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let stats = served.server.state.engine.write_executor_stats();
-        assert_eq!(
-            stats.fold_failures, 0,
-            "the fold failed rather than publishing"
-        );
-        if stats.folds > before {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
 /// The `tessera_id`s a filtered viewport answers, from a fresh session so the rows flushed since
 /// the last one are in the answer.
 async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"][..]).await;
     let resp = served
         .server
         .client
@@ -432,7 +258,7 @@ async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
 /// names none, and a request that tries to is refused rather than read past.
 #[tokio::test]
 async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_refuses() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
 
     let (status, body) = declare(&served, "severity", severity()).await;
     assert_eq!(status, 201, "{body}");
@@ -504,7 +330,7 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
 /// vocabulary this deployment does not carry is the same `404` an unknown view is.
 #[tokio::test]
 async fn a_value_page_adds_values_and_a_held_title_upserts() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declare(&served, "severity", severity()).await.0, 201);
     // A column over it, so the values are readable back through `/v1/categories`.
     assert_eq!(
@@ -601,7 +427,7 @@ async fn a_value_page_adds_values_and_a_held_title_upserts() {
 /// does not hold is the declare-then-use refusal (per-point-attributes §5).
 #[tokio::test]
 async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declare(&served, "severity", severity()).await.0, 201);
     let (status, body) = declare_attribute(
         &served,
@@ -644,7 +470,7 @@ async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
                 .unwrap()
         })
         .collect();
-    flush(&served).await;
+    drain(&served.server).await;
 
     let high = filtered(
         &served,
@@ -673,7 +499,7 @@ async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
 /// title nothing holds afterwards while every key keeps its code.
 #[tokio::test]
 async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(
         declare_attribute(
             &served,
@@ -705,14 +531,14 @@ async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() 
     // A row, so the flush has something to publish and the fold something to fold.
     let (status, body) = ingest(&served, "rows", batch(&[("b1", 1.0, None)], false)).await;
     assert_eq!(status, 200, "{body}");
-    flush(&served).await;
-    fold(&served).await;
+    drain(&served.server).await;
+    fold(&served.server).await;
     assert_eq!(
         titled(&served, "built").await,
         before,
         "the fold folds the extension into MANIFEST.vocabularies with its titles"
     );
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         titled(&served, "built").await,
         before,
@@ -746,7 +572,7 @@ async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() 
 /// the code, so a value survives under the name it was recoloured away from.
 #[tokio::test]
 async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     // The build's vocabulary, through a column over it; and one declared here.
     assert_eq!(
         declare_attribute(
@@ -817,7 +643,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
             .0,
         200
     );
-    flush(&served).await;
+    drain(&served.server).await;
     assert_eq!(
         title_of(titled(&served, "built").await, "seed"),
         built_before
@@ -827,7 +653,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
         severity_before
     );
 
-    fold(&served).await;
+    fold(&served.server).await;
     assert_eq!(
         title_of(titled(&served, "built").await, "seed"),
         built_before,
@@ -839,7 +665,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
     );
 
     // The fold rotates the log, so MANIFEST.json is the only copy left.
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         title_of(titled(&served, "built").await, "seed"),
         built_before,
@@ -865,8 +691,8 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
             .0,
         200
     );
-    flush(&served).await;
-    let served = restart(served).await;
+    drain(&served.server).await;
+    let served = served.restart().await;
     assert_eq!(
         title_of(titled(&served, "built").await, "seed"),
         (built_before.0, Some("Planted".to_string())),
@@ -879,7 +705,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
 /// `MANIFEST.json` after the fold that writes them there.
 #[tokio::test]
 async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declare(&served, "severity", severity()).await.0, 201);
     assert_eq!(
         page(
@@ -911,7 +737,7 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
     );
 
     // Replayed from the log, nothing having been published yet.
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         titled(&served, "severity").await,
         before,
@@ -930,8 +756,8 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
             .0,
         200
     );
-    flush(&served).await;
-    let served = restart(served).await;
+    drain(&served.server).await;
+    let served = served.restart().await;
     assert_eq!(
         titled(&served, "severity").await,
         before,
@@ -941,13 +767,13 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
     // Folded into `MANIFEST.json`, then replayed from it. **The fold is the step a title is lost
     // at if any home drops it**: the log rotates, so `MANIFEST.vocabularies` is the only copy
     // left, and it is written from the live minters and from `vocabulary_extensions`.
-    fold(&served).await;
+    fold(&served.server).await;
     assert_eq!(
         titled(&served, "severity").await,
         before,
         "the fold in this process run keeps every title"
     );
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         titled(&served, "severity").await,
         before,

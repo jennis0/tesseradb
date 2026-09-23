@@ -14,14 +14,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, UInt64Array};
+use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 
 /// The one declared column: a keyword, indexed, so every flush writes an extent with its own
 /// dictionary and the coalesce has a window to take.
@@ -42,80 +40,15 @@ const KEYS: [&str; 8] = [
 /// and every `prefix`/`contains` below reaches both the base and the window.
 const N: u64 = 20;
 
-fn write_points(path: &Path) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("tag", DataType::Utf8, true),
-    ]));
-    let ids: Vec<u64> = (0..N).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids.clone())),
-            Arc::new(Float64Array::from_iter_values(
-                ids.iter().map(|e| ((e * 37) % 1000) as f64),
-            )),
-            Arc::new(Float64Array::from_iter_values(
-                ids.iter().map(|e| ((e * 53) % 1000) as f64),
-            )),
-            Arc::new(arrow::array::StringArray::from_iter_values(
-                ids.iter().map(|e| format!("built-{e}")),
-            )),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 fn build_bundle(dir: &Path) -> std::path::PathBuf {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
-    write_points(&points);
+    let ids: Vec<u64> = (0..N).collect();
+    let tag = StringArray::from_iter_values(ids.iter().map(|e| format!("built-{e}")));
+    write_points(&points, &ids, scatter, vec![column("tag", true, tag)]);
     write_pairs_n(&pairs, N);
-    let schema_path = dir.join("schema.toml");
-    std::fs::write(&schema_path, SCHEMA).unwrap();
-    let config = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .expect("the declaration parses");
     let out = dir.join("bundle");
-    build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.clone()),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
-            points.clone(),
-            &config.schema,
-        ),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: config.schema,
-    })
-    .expect("the build succeeds");
+    build_declared(&out, &points, &pairs, SCHEMA);
     out
 }
 
@@ -165,32 +98,10 @@ async fn ingest(server: &TestServer, batch_id: &str, tag: &str, i: usize) {
     assert_eq!(resp.status(), 200, "{batch_id} lands");
 }
 
-/// Pull one tick and wait for the flush it publishes.
-async fn flush(server: &TestServer) {
-    let before = server.state.engine.write_executor_stats().flushes;
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while server.state.engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-}
-
 /// The `tessera_id`s a filtered full viewport serves.
 async fn matched(server: &TestServer, token: &str, filter: Value) -> BTreeSet<u64> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let resp = server
+    let resp = settled(async || {
+        server
             .client
             .post(server.viewer_url("/v1/viewport"))
             .bearer_auth(token)
@@ -200,28 +111,14 @@ async fn matched(server: &TestServer, token: &str, filter: Value) -> BTreeSet<u6
             }))
             .send()
             .await
-            .unwrap();
-        let unsettled = std::time::Instant::now() < deadline;
-        if resp.status().as_u16() == 429 && unsettled {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        }
-        assert_eq!(resp.status().as_u16(), 200, "a filtered viewport answers");
-        if resp
-            .headers()
-            .get("x-tessera-stale")
-            .is_some_and(|v| v == "1")
-            && unsettled
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            continue;
-        }
-        return decode_viewport(&resp.bytes().await.unwrap())
-            .1
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-    }
+            .unwrap()
+    })
+    .await;
+    decode_viewport(&resp.bytes().await.unwrap())
+        .1
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
 }
 
 /// Every keyword operator over `tag`, each with the set it serves.
@@ -288,21 +185,13 @@ fn tag_extents(root: &Path) -> Vec<Value> {
 async fn a_keyword_filter_serves_the_same_set_before_and_after_the_coalesce() {
     let tmp = TempDir::new().unwrap();
     let root = build_bundle(tmp.path());
-    let server = spawn_server(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let server = open(&tmp).await;
+    let token = token_for(&server, &["0"]).await;
     server.state.engine.set_coalesce_for_test(false);
 
     for (i, key) in KEYS.iter().enumerate() {
         ingest(&server, &format!("kw-{i}"), key, i).await;
-        flush(&server).await;
+        tick(&server).await;
     }
     let extents = tag_extents(&root);
     assert_eq!(
@@ -333,15 +222,10 @@ async fn a_keyword_filter_serves_the_same_set_before_and_after_the_coalesce() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while server.state.engine.write_executor_stats().coalesces == coalesces {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the coalesce never published: {:?}",
-            server.state.engine.write_executor_stats()
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    wait_for_executor(&server, "the coalesce published", move |now| {
+        now.coalesces > coalesces
+    })
+    .await;
     let extents = tag_extents(&root);
     assert_eq!(extents.len(), 1, "the window collapsed to one: {extents:?}");
     assert!(
@@ -352,17 +236,8 @@ async fn a_keyword_filter_serves_the_same_set_before_and_after_the_coalesce() {
     assert_eq!(after, before, "a served answer moved across the coalesce");
 
     // A restart opens the coalesced extent from the manifest entry.
-    server.shutdown().await;
-    let server = spawn_server(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let server = restart(server, &tmp).await;
+    let token = token_for(&server, &["0"]).await;
     let reopened = answers(&server, &token).await;
     assert_eq!(reopened, before, "a served answer moved across the restart");
 }

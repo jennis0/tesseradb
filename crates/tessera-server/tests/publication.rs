@@ -18,7 +18,6 @@ mod common;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use base64::Engine as _;
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -28,21 +27,6 @@ use tessera_plugin::Passthrough;
 
 /// Long enough for a slow machine and short enough to fail rather than hang.
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
-
-async fn serve(tmp: &TempDir) -> TestServer {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await
-}
 
 async fn status(server: &TestServer) -> Value {
     let resp = server
@@ -87,17 +71,15 @@ async fn request_flush(server: &TestServer) -> u64 {
 /// Read `/control/status` until its counter has reached `n`, which is the whole of what a
 /// client does.
 async fn await_publication(server: &TestServer, n: u64) {
-    let deadline = std::time::Instant::now() + DEADLINE;
-    loop {
-        if publication(server).await >= n {
-            return;
+    let what = format!("the publication counter reaching {n}");
+    wait_until(&what, DEADLINE, async || {
+        let now = publication(server).await;
+        match now >= n {
+            true => Ok(()),
+            false => Err(format!("the counter at {now}")),
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the publication counter never reached {n}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    })
+    .await;
 }
 
 async fn declare_attribute(server: &TestServer, body: Value) {
@@ -117,17 +99,10 @@ async fn declare_attribute(server: &TestServer, body: Value) {
     );
 }
 
-fn b64(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
 /// The `tessera_id`s a filtered viewport answers, from a fresh session so anything published
 /// since the last one is in the answer.
 async fn filtered(server: &TestServer, filters: Value) -> BTreeSet<u64> {
-    let token = authorise(server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(server, &["0", "1"][..]).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -148,10 +123,7 @@ async fn filtered(server: &TestServer, filters: Value) -> BTreeSet<u64> {
 /// enough that the fixture's own rows, which sit on a grid across the frame, cannot fill the k
 /// budget and hide the row a test is asking about.
 async fn points_near(server: &TestServer, x: f64, y: f64) -> BTreeSet<u64> {
-    let token = authorise(server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(server, &["0", "1"][..]).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -171,10 +143,7 @@ async fn points_near(server: &TestServer, x: f64, y: f64) -> BTreeSet<u64> {
 
 /// The `tessera_id`s one view serves, from a fresh session.
 async fn points_in(server: &TestServer, view: &str) -> BTreeSet<u64> {
-    let token = authorise(server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(server, &["0", "1"][..]).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -212,7 +181,7 @@ async fn a_values_only_commit_is_readable_once_the_counter_reaches_the_answer() 
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "values-1")
         .header("x-tessera-view", "s0")
-        .json(&json!([{"external_id": b64(&external_id_of(3)), "tag": "alpha"}]))
+        .json(&json!([{"external_id": member(3), "tag": "alpha"}]))
         .send()
         .await
         .unwrap();
@@ -279,7 +248,7 @@ async fn an_artifacts_only_commit_is_served_once_the_counter_reaches_the_answer(
             "addressing": "external",
             "artifacts": [{
                 "key": "k0",
-                "members": [b64(&external_id_of(1)), b64(&external_id_of(2))],
+                "members": [member(1), member(2)],
             }],
         }))
         .send()
@@ -292,10 +261,7 @@ async fn an_artifacts_only_commit_is_served_once_the_counter_reaches_the_answer(
     let n = request_flush(&server).await;
     await_publication(&server, n).await;
 
-    let token = authorise(&server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&server, &["0", "1"][..]).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -421,17 +387,19 @@ async fn rows_buffered_into_two_views_are_both_served_at_the_number() {
     // **The first of the two publications does not reach the number.** One plan is dispatched per
     // tick, so the cycle is still holding a view's rows when the first swaps; the counter moves at
     // the one that leaves nothing over.
-    let deadline = std::time::Instant::now() + DEADLINE;
-    while server.state.engine.write_executor_stats().flushes < 1 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the first view never published"
-        );
-        if publication(&server).await >= n {
-            panic!("the counter reached the number before either view had published");
+    // Polled every 2 ms: each poll is also a sample of the counter racing the first swap.
+    let every = std::time::Duration::from_millis(2);
+    poll("the first view published", DEADLINE, every, async || {
+        if server.state.engine.write_executor_stats().flushes >= 1 {
+            return Some(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    }
+        assert!(
+            publication(&server).await < n,
+            "the counter reached the number before either view had published"
+        );
+        None
+    })
+    .await;
 
     await_publication(&server, n).await;
     assert!(
@@ -462,12 +430,7 @@ async fn rows_buffered_into_two_views_are_both_served_at_the_number() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let config = default_engine_config();
     let max_k = config.max_k;
     let mut engine = Engine::open(
@@ -553,12 +516,7 @@ async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
 /// A served fixture whose write executor takes a fault switchboard, so a test can shut the
 /// flush's gate from inside the process.
 async fn serve_with_faults(tmp: &TempDir) -> (TestServer, Arc<FaultSwitchboard>) {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let config = default_engine_config();
     let max_k = config.max_k;
     let mut engine = Engine::open(
@@ -580,14 +538,12 @@ async fn serve_with_faults(tmp: &TempDir) -> (TestServer, Arc<FaultSwitchboard>)
 
 /// Wait until the executor is parked at the publication seam, so a cycle is open as a fact.
 async fn await_seam(faults: &Arc<FaultSwitchboard>) {
-    let deadline = std::time::Instant::now() + DEADLINE;
-    while faults.arrivals(tessera_lifecycle::faults::PauseSite::BeforeManifestPublish) < 1 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the executor never reached the publication seam"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    wait_until(
+        "the executor reached the publication seam",
+        DEADLINE,
+        async || faults.arrivals(tessera_lifecycle::faults::PauseSite::BeforeManifestPublish) >= 1,
+    )
+    .await;
 }
 
 /// One row into `s0`, accepted.
@@ -615,37 +571,25 @@ async fn ingest_one(server: &TestServer, batch_id: &str, external_id: &[u8]) -> 
 
 /// The layer the artifact tests publish into.
 async fn declare_clusters(server: &TestServer) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({
-            "name": "clusters",
-            "title": "clusters (title)",
-            "views": ["s0"],
-            "membership": "enumerated",
-            "visibility": null,
-            "artifact_visibility": { "field": null, "default": "inherited" },
-            "require_member_visibility": { "count": 1 },
-            "hierarchy": { "kind": "nested", "prune_children": true },
-            "content": { "computed": ["centroid", "hull"], "supplied": [] },
-            "depends_on": [],
-            "levels": []
-        }))
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    let answer: Value = resp.json().await.unwrap_or(Value::Null);
-    assert_eq!(status, 201, "the layer is declared: {answer}");
+    let declaration = json!({
+        "name": "clusters",
+        "title": "clusters (title)",
+        "views": ["s0"],
+        "membership": "enumerated",
+        "visibility": null,
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": { "count": 1 },
+        "hierarchy": { "kind": "nested", "prune_children": true },
+        "content": { "computed": ["centroid", "hull"], "supplied": [] },
+        "depends_on": [],
+        "levels": []
+    });
+    register(server, declaration).await;
 }
 
 /// How many artifacts the viewport's frame carries for a full principal.
 async fn artifacts_served(server: &TestServer) -> usize {
-    let token = authorise(server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(server, &["0", "1"][..]).await;
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -702,7 +646,7 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "op": "suppress", "external_id": b64(&external_id_of(1)) }]))
+        .json(&json!([{ "op": "suppress", "external_id": member(1) }]))
         .send()
         .await
         .unwrap();
@@ -717,22 +661,19 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
 
     // Until the node has recovered its WAL and a tick has planned over the request, which the
     // refused gate turns into a held cycle. The counter must stay short of the number throughout.
-    let deadline = std::time::Instant::now() + DEADLINE;
-    let executor = loop {
-        assert!(
-            publication(&server).await < n,
-            "the counter must not pass a cycle whose gate refused it"
-        );
-        let executor = server.state.engine.write_executor_stats();
-        if executor.wal_recoveries > 0 && executor.ticks > ticks {
-            break executor;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the node never recovered its WAL and ticked: {executor:?}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    };
+    let executor = wait_for(
+        "the node recovering its WAL and ticking",
+        DEADLINE,
+        async || {
+            assert!(
+                publication(&server).await < n,
+                "the counter must not pass a cycle whose gate refused it"
+            );
+            let executor = server.state.engine.write_executor_stats();
+            (executor.wal_recoveries > 0 && executor.ticks > ticks).then_some(executor)
+        },
+    )
+    .await;
 
     // **The operator plane says why**, which is what stops a stalled counter reading as a hung
     // server. The node recovered its WAL in process, so the posture is back to `running`; what
@@ -771,14 +712,7 @@ async fn a_publication_that_has_not_swapped_does_not_move_the_counter() {
     ingest_one(&server, "swap-1", &ext).await;
     let n = request_flush(&server).await;
 
-    let deadline = std::time::Instant::now() + DEADLINE;
-    while faults.arrivals(tessera_lifecycle::faults::PauseSite::BeforeManifestPublish) < 1 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the executor never reached the publication seam"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    await_seam(&faults).await;
 
     let executor = server.state.engine.write_executor_stats();
     assert_eq!(
@@ -879,7 +813,7 @@ async fn wait_visible_holds_an_artifact_publication_until_it_is_served() {
             "addressing": "external",
             "artifacts": [{
                 "key": "k0",
-                "members": [b64(&external_id_of(1)), b64(&external_id_of(2))],
+                "members": [member(1), member(2)],
             }],
         }))
         .send()
@@ -930,12 +864,7 @@ async fn wait_visible_holds_a_declaration_until_it_is_published() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_wait_is_bounded_and_says_so() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_visible_wait(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -974,12 +903,7 @@ async fn the_wait_is_bounded_and_says_so() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_largest_wait_ceiling_waits_for_the_publication() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_visible_wait(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1102,12 +1026,7 @@ async fn wait_visible_holds_a_flush_until_the_unwaited_pages_are_served() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_flush_wait_is_bounded_and_says_so() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_visible_wait(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1184,7 +1103,7 @@ async fn a_replayed_values_page_is_flagged() {
     )
     .await;
 
-    let body = json!([{"external_id": b64(&external_id_of(3)), "tag": "alpha"}]);
+    let body = json!([{"external_id": member(3), "tag": "alpha"}]);
     let first = post_values(&server, "values-1", &body).await;
     assert_eq!(first["filled"], json!(1));
     assert!(first.get("replayed").is_none(), "{first}");

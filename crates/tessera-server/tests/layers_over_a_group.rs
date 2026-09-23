@@ -14,7 +14,6 @@ use arrow::array::{ArrayRef, BinaryArray, Float64Array, StringArray, UInt64Array
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -38,21 +37,13 @@ fn yearly_of(e: u64) -> String {
     format!("{}-{}", year_of(e), e % 2)
 }
 
+/// [`write_parquet`] with every column nullable.
 fn write(path: &Path, columns: Vec<(&str, ArrayRef)>) {
-    let schema = Arc::new(Schema::new(
-        columns
-            .iter()
-            .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
-            .collect::<Vec<_>>(),
-    ));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        columns.into_iter().map(|(_, array)| array).collect(),
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    let columns = columns
+        .into_iter()
+        .map(|(name, array)| (Field::new(name, array.data_type().clone(), true), array))
+        .collect();
+    write_parquet(path, columns);
 }
 
 fn text(values: impl Iterator<Item = String>) -> ArrayRef {
@@ -230,51 +221,16 @@ fn build_side(layers: &str, keyed: &dyn Fn(u64) -> bool) -> Built {
         })
         .collect();
     build(&BuildArgs {
-        views,
         anchor,
         groups,
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: dir.join("bundle"),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers,
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
         schema: config.schema,
+        ..build_args(&dir.join("bundle"), views)
     })
     .expect("the fixture builds");
     Built { _tmp: tmp, dir }
-}
-
-async fn serve(built: &Built) -> TestServer {
-    spawn_server(
-        &built.dir.join("bundle"),
-        &built.dir.join("cache"),
-        &built.dir.join("wal"),
-    )
-    .await
-}
-
-async fn register(server: &TestServer, declaration: Value) -> (u16, Value) {
-    let resp = server
-        .client
-        .put(server.control_url("/control/layers"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&declaration)
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap_or(Value::Null))
 }
 
 /// `POST /control/values` in Arrow: an id column and a column named for the layer, under the view
@@ -386,12 +342,12 @@ async fn a_layer_naming_a_group_is_drawn_on_every_view_of_it_at_both_paths() {
         &layer_toml("clusters/topics", &["papers", "years"], "", "clusters"),
         &|_| true,
     );
-    let by_build = serve(&built).await;
+    let by_build = open(&built.dir).await;
     assert_eq!(drawn_on(&by_build, "clusters/topics").await, every_view());
 
     let built = build_side("", &|_| true);
-    let live = serve(&built).await;
-    let (status, body) = register(
+    let live = open(&built.dir).await;
+    let (status, body) = put_layer(
         &live,
         layer_json("clusters/topics", &["papers", "years"], None),
     )
@@ -413,8 +369,8 @@ async fn a_layer_naming_neither_a_view_nor_a_group_is_refused_at_both_paths() {
     .is_err());
 
     let built = build_side("", &|_| true);
-    let live = serve(&built).await;
-    let (status, body) = register(
+    let live = open(&built.dir).await;
+    let (status, body) = put_layer(
         &live,
         layer_json("clusters/lost", &["papers", "nowhere"], None),
     )
@@ -436,15 +392,15 @@ async fn a_group_scoped_layer_naming_a_view_outside_its_group_is_refused_at_both
     .is_err());
 
     let built = build_side("", &|_| true);
-    let live = serve(&built).await;
-    let (status, body) = register(
+    let live = open(&built.dir).await;
+    let (status, body) = put_layer(
         &live,
         layer_json(LAYER, &["papers", "years"], Some("years")),
     )
     .await;
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["error"], "contract", "{body}");
-    let (status, body) = register(&live, layer_json(LAYER, &["years"], Some("years"))).await;
+    let (status, body) = put_layer(&live, layer_json(LAYER, &["years"], Some("years"))).await;
     assert_eq!(status, 201, "{body}");
     assert_eq!(drawn_on(&live, LAYER).await.len(), YEARS.len());
 }
@@ -468,11 +424,11 @@ fn of_year(year: &str) -> Vec<u64> {
 async fn a_key_column_on_a_group_scoped_layer_mints_in_the_view_it_names() {
     const LAYER: &str = "clusters/yearly";
     let built = build_side(&layer_toml(LAYER, &["years"], "years", "yearly"), &|_| true);
-    let by_build = serve(&built).await;
+    let by_build = open(&built.dir).await;
 
     let built = build_side("", &|_| true);
-    let live = serve(&built).await;
-    let (status, body) = register(&live, layer_json(LAYER, &["years"], Some("years"))).await;
+    let live = open(&built.dir).await;
+    let (status, body) = put_layer(&live, layer_json(LAYER, &["years"], Some("years"))).await;
     assert_eq!(status, 201, "{body}");
     for year in YEARS {
         let view = format!("years:{year}");
@@ -484,7 +440,7 @@ async fn a_key_column_on_a_group_scoped_layer_mints_in_the_view_it_names() {
     tick(&live).await;
 
     live.shutdown().await;
-    let reopened = serve(&built).await;
+    let reopened = open(&built.dir).await;
     for year in YEARS {
         let view = format!("years:{year}");
         let expected = counts(of_year(year).into_iter(), &yearly_of);
@@ -506,10 +462,10 @@ async fn a_key_column_on_an_entity_scoped_layer_needs_no_view_header() {
     const SEEDED: u64 = 8;
     let layers = layer_toml(LAYER, &["papers"], "", "clusters");
     let built = build_side(&layers, &|_| true);
-    let by_build = serve(&built).await;
+    let by_build = open(&built.dir).await;
 
     let built = build_side(&layers, &|e| e < SEEDED);
-    let live = serve(&built).await;
+    let live = open(&built.dir).await;
     let tail: Vec<u64> = (SEEDED..ENTITIES).collect();
     let (status, body) = post_keys(&live, "week", None, LAYER, &tail, &cluster_of).await;
     assert_eq!(status, 200, "{body}");
@@ -520,14 +476,14 @@ async fn a_key_column_on_an_entity_scoped_layer_needs_no_view_header() {
     assert_eq!(browse(&by_build, "papers", LAYER).await, expected);
     assert_eq!(browse(&live, "papers", LAYER).await, expected);
     live.shutdown().await;
-    let live = serve(&built).await;
+    let live = open(&built.dir).await;
     assert_eq!(
         browse(&live, "papers", LAYER).await,
         expected,
         "a batch naming no view survives a restart"
     );
 
-    let (status, body) = register(
+    let (status, body) = put_layer(
         &live,
         layer_json("clusters/yearly", &["years"], Some("years")),
     )
