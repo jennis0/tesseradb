@@ -211,7 +211,7 @@ fn merge_values_window(
         .map_err(failed(format!("attr coalesce for '{column}'")))
 }
 
-/// The record extents concatenated and re-blocked toward the format's target block size.
+/// The record extents merged by entity and re-blocked toward the format's target block size.
 pub(super) fn coalesce_records(
     records: &[RecordExtent],
     ctx: &CoalesceContext,
