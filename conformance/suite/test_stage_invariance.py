@@ -11,8 +11,8 @@ A pulled tick dispatches *everything* eligible (§12.3), and the running system'
 are fixed (driver module doc: `tier_width` 4 and the coalesce width 8 are not reachable from
 configuration), so isolation is arithmetic:
 
-- flush extents and their merged outputs all clamp to the 16 MiB floor tier, and the merge cap in
-  the suite's config keeps the base segment out of every window — so merge eligibility is simply
+- flush extents and their merged outputs all clamp to the 16 MiB floor tier, and a merge selects
+  from them only, never the base segment — so merge eligibility is simply
   "four of them exist". Four writes, then the merge tick; three more (the merged segment counts as
   one), then the second merge tick. No write's own tick ever sees four, because the extent that
   write publishes is not yet published when its tick plans.

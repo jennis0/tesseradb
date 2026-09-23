@@ -27,9 +27,8 @@ and ``serve.segment_floor_bytes`` are parsed by the server's config and **never 
 engine** — `tessera_engine::session::merge_policy` hard-codes 4 and 16 MiB — and the coalesce's
 width is a `CoalescePolicy` default (8) with no config key at all. So the driver takes the ladder
 as found: merge eligibility is four same-tier segments, coalesce eligibility is eight same-tier
-delta-axis entries, and the one knob that *does* reach selection — ``max_merged_segment_bytes``,
-set here below the base segment's size — is what keeps the base segment out of every merge window
-(its own size bound is the exclusion; `tessera-store::merge`'s module doc).
+delta-axis entries. The base segment is in no merge window whatever ``max_merged_segment_bytes``
+says: a merge selects from the flushed segments only.
 
 ## Barriers
 

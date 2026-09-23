@@ -64,7 +64,6 @@ pub(crate) struct CompletedFold {
     pub(crate) external_id_run: Option<String>,
     /// Written unchanged into the new `SEGMENTS-<n>.json`.
     pub(crate) term_images: Vec<FoldedTermImages>,
-    pub(crate) base_segment_bytes: u64,
     pub(crate) cost: Vec<PassCost>,
     /// Publication's first cost row is measured from here.
     pub(crate) finished: std::time::Instant,
@@ -136,7 +135,7 @@ pub(crate) fn execute(
     let mut stairs = Staircase::start();
     stairs.record("entry");
 
-    let (segments, base_segment_bytes) = fold_row_spaces(&plan, &ctx, &mut out)?;
+    let segments = fold_row_spaces(&plan, &ctx, &mut out)?;
     stairs.record("1 row space");
 
     let postings_path = fold_postings(&plan, &ctx, &terms_dir, &mut out)?;
@@ -168,7 +167,6 @@ pub(crate) fn execute(
         files,
         external_id_run,
         term_images,
-        base_segment_bytes,
         cost: stairs.into_cost(),
         finished,
         attr_bytes_read: out.attr_read,
@@ -179,14 +177,13 @@ pub(crate) fn execute(
 }
 
 /// Pass 1: a new base segment and `permutation.bin` per view. Tombstoned rows are dropped, which
-/// shifts every later row id. Returns the descriptors and the largest segment's mapped bytes.
+/// shifts every later row id. Returns the descriptors.
 fn fold_row_spaces(
     plan: &FoldPlan,
     ctx: &FoldContext,
     output: &mut FoldOutput,
-) -> Result<(Vec<SegmentDescriptor>, u64), MaintenanceFailed> {
+) -> Result<Vec<SegmentDescriptor>, MaintenanceFailed> {
     let mut segments: Vec<SegmentDescriptor> = Vec::with_capacity(plan.views.len());
-    let mut base_segment_bytes = 0u64;
     for view in &plan.views {
         // An empty schema would write a segment with no scalar tail.
         let Some(view_schema) = ctx.scalar_schema.get(&view.view) else {
@@ -234,19 +231,13 @@ fn fold_row_spaces(
         )
         .map_err(|e| failed("pass 1 (row space)", &e))?;
 
-        let mut view_bytes = 0u64;
         for name in [
             "morton.u32",
             tessera_store::read::CutIndex::FILE,
             "columns.arrow",
         ] {
-            let path = segment_dir.join(name);
-            view_bytes += std::fs::metadata(&path)
-                .map_err(|e| failed("sizing the new base segment", &e))?
-                .len();
-            output.push(format!("{segment_rel}/{name}"), path);
+            output.push(format!("{segment_rel}/{name}"), segment_dir.join(name));
         }
-        base_segment_bytes = base_segment_bytes.max(view_bytes);
         for column in &out.presence_columns {
             output.push(
                 format!("{segment_rel}/{RENDER_PRESENCE_DIR}/{column}.roaring"),
@@ -267,7 +258,7 @@ fn fold_row_spaces(
         });
     }
 
-    Ok((segments, base_segment_bytes))
+    Ok(segments)
 }
 
 /// Pass 2: the new base postings and `pairs.parquet`. Every ordinal below `dict_len` gets a

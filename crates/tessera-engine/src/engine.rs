@@ -1018,9 +1018,6 @@ impl Engine {
             shapes: Arc::clone(&self.shapes),
             lineages: Arc::clone(&self.lineages),
             level_contents: Arc::clone(&self.level_contents),
-            // The configured value, not the resolved policy's: `tessera-server`'s loader checks
-            // only an explicitly set one.
-            configured_merge_bytes: self.config.max_merged_segment_bytes,
             suggest_dir: self.suggest_dir.clone(),
             compaction: self.config.compaction,
             switches: Arc::clone(&self.switches),

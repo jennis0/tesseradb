@@ -1578,8 +1578,7 @@ pub struct MortonSlice {
 }
 
 impl MortonSlice {
-    /// The mapped file's size in bytes — the operand of `tessera-server`'s merge-size relation
-    /// (§4's relation 2), which needs a segment's on-disk size and has no other way to ask for it.
+    /// The mapped file's size in bytes.
     pub fn byte_len(&self) -> u64 {
         self.mmap.len() as u64
     }
@@ -1787,9 +1786,7 @@ impl CutIndex {
         self.mmap.is_empty()
     }
 
-    /// This mapping's size in bytes — see [`MortonSlice::byte_len`], which this joins in the
-    /// merge-size relation's operand: the three files are mapped together and a segment's size is
-    /// all of them.
+    /// This mapping's size in bytes.
     pub fn byte_len(&self) -> u64 {
         self.mmap.len() as u64
     }
