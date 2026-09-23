@@ -13,6 +13,8 @@ pub(crate) struct ManifestSeed<'a> {
     pub low_water: u64,
     pub layers: &'a [tessera_types::layer::RegisteredLayer],
     pub tombstones: &'a [String],
+    /// The highest layer registry version counter any partition's manifest saved.
+    pub registry_version: u64,
     /// Every view created since the build, across every partition's manifest, and every
     /// incarnation that has died. The build's own roster is not here: it is in `MANIFEST.json`
     /// and is seeded separately.
@@ -190,7 +192,7 @@ impl WritePath {
         // postdates manifest state, so seeding afterwards would resurrect a layer dropped since the
         // last publication, gate and all.
         let mut registry = LayerRegistry::new();
-        registry.seed(seed.layers, seed.tombstones);
+        registry.seed(seed.layers, seed.tombstones, seed.registry_version);
         for record in &records {
             registry.apply(record);
         }

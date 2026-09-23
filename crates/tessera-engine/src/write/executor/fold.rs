@@ -1064,12 +1064,6 @@ impl Executor {
         let mut published_overlay = (*live.overlay).clone();
         published_overlay.retire(&executed);
 
-        // From the live registry, not the manifest beside it, which can be several publications
-        // behind: a fold that copied its (empty) layer list would publish a prefix whose
-        // membership extents name layers it does not declare.
-        let (registered_layers, registered_tombstones, registry_low_water) =
-            self.live.registry_for_publication();
-        let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
         let (runtime_attributes, runtime_scoped_attributes) =
             self.live.attributes_for_publication();
         let folded_vocabularies = self
@@ -1087,11 +1081,9 @@ impl Executor {
             watermark: live_manifest.watermark,
             entity_id_high_water: live_manifest.entity_id_high_water,
             // Live: the fold does not renumber the row-less region, so deriving this from the
-            // fold's inputs would hand the next registration ids a live layer already holds.
-            entity_id_low_water: live_manifest.entity_id_low_water.min(registry_low_water),
-            layers: registered_layers,
-            layer_tombstones: registered_tombstones,
-            views: created_views,
+            // fold's inputs would hand the next registration ids a live layer already holds. The
+            // commit lowers it to the allocator's mark and restates the registry and the roster.
+            entity_id_low_water: live_manifest.entity_id_low_water,
             // Only the declarations made since the fold planned: the fold's own `MANIFEST.json`
             // already states the rest, with a base written for each.
             attributes: runtime_attributes
@@ -1104,7 +1096,6 @@ impl Executor {
                 .filter(|f| !completed.runtime_scoped_attributes.contains(&f.name))
                 .cloned()
                 .collect(),
-            dead_view_incarnations,
             // The artifact pass's own output: paths are prefix-relative, so this is the only list
             // naming files the new prefix contains.
             membership_extents: repacked.clone(),

@@ -1540,12 +1540,6 @@ impl Executor {
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.manifest.clone();
             write_deny_state(&mut manifest, &live.overlay);
-            // The registry travels with this publication too, and not only with a flush. A
-            // manifest naming memberships for a layer it does not declare is internally
-            // inconsistent, and at open the layer's reserved runs are what turn an ordinal into
-            // an entity, so the extents would be skipped whole and every artifact would come back
-            // absent. The two are written together or the manifest is wrong.
-            self.write_live_state(&mut manifest, &live.vocabularies);
             // Membership extents are written before the manifest that names them, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -2023,14 +2017,6 @@ impl Executor {
                 .map(|s| s.entity_id_high_water)
                 .unwrap_or(0),
         );
-        // The row-less half of the same obligation. A flush is the routine publication, so it is
-        // where a registration, a create or a declaration made since the last one stops depending
-        // on the WAL surviving: rotation reclaims their records, and without this the mark and
-        // everything it covers go with them.
-        self.write_live_state(&mut manifest, &live.vocabularies);
-        n = self
-            .health
-            .flush_lap(crate::flush::FlushStage::ManifestLiveState, n);
         // And the group-scoped columns this flush gave a view its first of. Carried forward and
         // appended to, never restated: the list is what a restart recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
