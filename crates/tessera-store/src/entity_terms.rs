@@ -84,7 +84,7 @@
 //! read path it would only hide a label the viewer holds, which is the harmless direction — but
 //! the two share this reader, so it is held to the write path's standard.
 //!
-//! # The coalesce merges the extents, and it is a concatenation
+//! # The coalesce merges the extents by entity
 //!
 //! An entity-space coalesce takes a contiguous window of `entity_terms_extents` and replaces it
 //! with one extent ([`coalesce_entity_terms_extents`]) — the **record blob's** axis exactly: one
@@ -92,11 +92,10 @@
 //! the window's position. Without it the layers accumulate one per flush until the next fold, and the
 //! reader pays file handles and a base-plus-linear probe per lookup.
 //!
-//! **A merge here needs no remap and no dictionary**, which is what makes it a concatenation
-//! rather than the keyword axis's renumbering: the ordinals are dictionary positions, preserved by
-//! every rewrite for the reason above, and the layers are disjoint by **I9**. So the merge walks
-//! the inputs' entity sets in ascending order and copies each list verbatim — the same bytes in
-//! the same order, one file set instead of *k*.
+//! **A merge here needs no remap and no dictionary**, unlike the keyword axis's renumbering: the
+//! ordinals are dictionary positions, preserved by every rewrite for the reason above, and no
+//! entity is in two layers. The layers' entity ranges may interleave, so the merge walks entities
+//! in ascending order across every layer and copies each list verbatim into one file set.
 //!
 //! **It retires nothing.** There is no tombstone parameter to pass and no route to a deletion:
 //! Rule S and Rule F are the fold's (write-path §5.4), and an entity awaiting a deletion keeps
@@ -541,11 +540,10 @@ impl EntityTerms {
 /// The output's bases are the writer's own, computed from the running total as the lists are
 /// copied: the merge rebases as it goes and holds no absolute array.
 ///
-/// **A concatenation with bookkeeping, not a merge with a resolution rule.** The layers are
-/// disjoint in entity space (**I9**: an entity id is allocated once, and the flush that minted it
-/// wrote the only layer that holds its list), so no entity appears twice and no input can
-/// contradict another — the output is each entity's own list, byte-for-byte, gathered in ascending
-/// entity order. Term ordinals are positions in the concatenated dictionary extents and are
+/// **A merge by entity with no resolution rule.** An entity id is allocated once and the flush
+/// that minted it wrote the only layer holding its list, so no input can contradict another. The
+/// layers' ranges may interleave, and the merge walks entities in ascending order across them,
+/// copying each entity's own list byte for byte. Term ordinals are positions in the concatenated dictionary extents and are
 /// preserved by every rewrite of the corpus (see this module's doc), so nothing is remapped.
 ///
 /// **Byte-deterministic for a given input set**: the output is a pure function of the entity sets
@@ -680,11 +678,9 @@ impl EntityTermsStack {
         Ok(None)
     }
 
-    /// Every entity any layer holds a list for, ascending — the fold's walk. The layers are
-    /// disjoint by **I9**, so this is their concatenation in ascending order rather than a merge
-    /// with a dedup; it is built as a union bitmap anyway, because "disjoint" is a property of the
-    /// writers and this is the one place a violation would produce a layer with a repeated entity
-    /// instead of an error.
+    /// Every entity any layer holds a list for, ascending: the fold's walk. The layers hold
+    /// disjoint entities whose ranges may interleave, so the union walks entities in order across
+    /// every layer.
     /// Returned as a bitmap rather than an iterator so the caller iterates it in place: at 10⁹
     /// the materialised `Vec<u32>` is 4 GB, where the Roaring union of dense ascending runs is a
     /// few containers.
