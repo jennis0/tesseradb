@@ -802,9 +802,16 @@ impl Executor {
             }
         }
 
+        let columns = match values_columns(&generation.bundle.manifest, &request) {
+            Ok(columns) => columns,
+            Err(e) => {
+                reply.fail(e);
+                return;
+            }
+        };
         // An open vocabulary's new key is minted here as the ingest window mints it, so the cell
         // the fill rule compares and the log records is the code.
-        let minted = match self.mint_values_codes(&mut request) {
+        let minted = match mint_values_codes(&generation, &mut request, &columns) {
             Ok(minted) => minted,
             Err(e) => {
                 reply.fail(ExecError::VocabularyRefused {
@@ -815,7 +822,7 @@ impl Executor {
         };
         let vocabulary_records = minted.records();
 
-        let planned = match plan_fills(&generation, &request) {
+        let planned = match plan_fills(&generation, &request, &columns) {
             Ok(planned) => planned,
             Err(e) => {
                 reply.fail(e);

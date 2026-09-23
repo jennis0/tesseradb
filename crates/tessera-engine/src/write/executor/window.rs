@@ -206,6 +206,48 @@ fn mint_cells<'a>(
     Ok(())
 }
 
+/// Draw a code for every novel vocabulary key a values batch carries, by the ingest window's
+/// rule, and rewrite each cell to its code. `columns` is where each named column landed.
+pub(super) fn mint_values_codes(
+    generation: &Generation,
+    request: &mut tessera_lifecycle::ValuesRequest,
+    columns: &[ValuesColumn],
+) -> std::result::Result<MintedCodes, MintError> {
+    let manifest = &generation.bundle.manifest;
+    let families = request
+        .view
+        .as_deref()
+        .map(|view| scoped_families_of_view(manifest, view))
+        .unwrap_or_default();
+    let targets: Vec<(&str, Option<&str>, ScalarType)> = columns
+        .iter()
+        .map(|column| match column {
+            ValuesColumn::Entity(at) => {
+                let d = &manifest.declared_scalars[*at];
+                (d.name.as_str(), d.vocabulary.as_deref(), d.arrow_type)
+            }
+            ValuesColumn::Scoped(at) => {
+                let f = &families[*at];
+                (f.name.as_str(), f.vocabulary.as_deref(), f.arrow_type)
+            }
+        })
+        .collect();
+    let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
+    let mut fresh: Vec<(String, String, u32)> = Vec::new();
+    for row in &mut request.rows {
+        mint_cells(
+            &mut row.values,
+            targets.iter().copied(),
+            &mut vocabularies,
+            &mut fresh,
+        )?;
+    }
+    Ok(MintedCodes {
+        vocabularies,
+        fresh,
+    })
+}
+
 /// The window could not be allocated: nothing was appended, nothing applied, and the high-water
 /// mark did not move. The one exit outside [`ClosingWindow`], since allocation is what failed.
 fn fail_allocation(
@@ -508,56 +550,6 @@ impl Executor {
                     &mut fresh,
                 )?;
             }
-        }
-        Ok(MintedCodes {
-            vocabularies,
-            fresh,
-        })
-    }
-
-    /// Draw a code for every novel vocabulary key a values batch carries, by the ingest window's
-    /// rule, and rewrite each cell to its code. A column that is neither declared nor one of the
-    /// view's families is left for the fill rule to refuse.
-    pub(super) fn mint_values_codes(
-        &self,
-        request: &mut tessera_lifecycle::ValuesRequest,
-    ) -> std::result::Result<MintedCodes, MintError> {
-        let generation = self.generation.load_full();
-        let manifest = &generation.bundle.manifest;
-        let families = request
-            .view
-            .as_deref()
-            .map(|view| scoped_families_of_view(manifest, view))
-            .unwrap_or_default();
-        let columns: Vec<(&str, Option<&str>, ScalarType)> = request
-            .columns
-            .iter()
-            .map(|name| {
-                let declared = manifest
-                    .declared_scalars
-                    .iter()
-                    .find(|d| &d.name == name)
-                    .map(|d| (d.vocabulary.as_deref(), d.arrow_type));
-                let family = || {
-                    families
-                        .iter()
-                        .find(|f| &f.name == name)
-                        .map(|f| (f.vocabulary.as_deref(), f.arrow_type))
-                };
-                let (vocabulary, arrow_type) =
-                    declared.or_else(family).unwrap_or((None, ScalarType::U32));
-                (name.as_str(), vocabulary, arrow_type)
-            })
-            .collect();
-        let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
-        let mut fresh: Vec<(String, String, u32)> = Vec::new();
-        for row in &mut request.rows {
-            mint_cells(
-                &mut row.values,
-                columns.iter().copied(),
-                &mut vocabularies,
-                &mut fresh,
-            )?;
         }
         Ok(MintedCodes {
             vocabularies,
