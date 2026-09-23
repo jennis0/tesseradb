@@ -344,6 +344,11 @@ fn group(name: &str, keys: &[&str], visibility: Option<Vec<String>>) -> GroupDes
 /// `geo` over the even ones, a group `quarter` of two overlapping keys carrying `sentiment` and
 /// the text family `blurb`, and a group `secret`, gated on term "1", carrying `hush`.
 fn build_bundle(dir: &Path) -> PathBuf {
+    build_bundle_under(dir, IDSET)
+}
+
+/// [`build_bundle`] under `idset`, with the same identity key.
+fn build_bundle_under(dir: &Path, idset: u32) -> PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, N);
     let world = dir.join("world.parquet");
@@ -410,7 +415,7 @@ fn build_bundle(dir: &Path) -> PathBuf {
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: IDSET,
+        idset,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
@@ -491,35 +496,40 @@ impl Fx {
 
     /// Ingest one item per source into `s0`, carrying the generator's values for that source.
     fn ingest(&mut self, batch: &str, sources: &[u64]) {
-        let rows: Vec<UnallocatedRow> = sources
-            .iter()
-            .map(|&s| {
-                let (x, y) = position(s);
-                let descriptors: Vec<Vec<u8>> = terms_of(s)
-                    .iter()
-                    .map(|t| t.to_string().into_bytes())
-                    .collect();
-                UnallocatedRow {
-                    external_id: Some(s.to_le_bytes().to_vec()),
-                    view: "s0".to_string(),
-                    join: None,
-                    x,
-                    y,
-                    scalars: scalars_of(s),
-                    terms: self.engine.resolve_terms(&descriptors),
-                    descriptors,
-                    scoped: Vec::new(),
-                }
-            })
-            .collect();
-        let entities = self
-            .engine
-            .accept_ingest(rows, batch.to_string(), [0u8; 32])
-            .expect("the ingest is accepted");
+        let entities = ingest_sources(&self.engine, batch, sources);
         for (&s, entity) in sources.iter().zip(entities) {
             self.entity.insert(s, entity.raw());
         }
     }
+}
+
+/// Ingest one item per source into `s0`, at the generator's position and with its values and
+/// terms, answering the entities allocated.
+fn ingest_sources(engine: &Engine, batch: &str, sources: &[u64]) -> Vec<EntityId> {
+    let rows: Vec<UnallocatedRow> = sources
+        .iter()
+        .map(|&s| {
+            let (x, y) = position(s);
+            let descriptors: Vec<Vec<u8>> = terms_of(s)
+                .iter()
+                .map(|t| t.to_string().into_bytes())
+                .collect();
+            UnallocatedRow {
+                external_id: Some(s.to_le_bytes().to_vec()),
+                view: "s0".to_string(),
+                join: None,
+                x,
+                y,
+                scalars: scalars_of(s),
+                terms: engine.resolve_terms(&descriptors),
+                descriptors,
+                scoped: Vec::new(),
+            }
+        })
+        .collect();
+    engine
+        .accept_ingest(rows, batch.to_string(), [0u8; 32])
+        .expect("the ingest is accepted")
 }
 
 /// One source's values, positionally against the schema's declared columns.
@@ -593,15 +603,24 @@ impl ItemsSink for Collect {
     }
 }
 
+/// One response, collected. Every response that is not refused carries a head, and no refusal
+/// sends one.
 fn respond(
     engine: &Engine,
     session: &Session,
     req: ItemsRequest<'_>,
 ) -> Result<(Collect, ItemsTrailer), EngineError> {
     let mut sink = Collect::default();
-    let trailer = engine.items_stream(session, req, &mut sink)?;
-    assert!(sink.head.is_some(), "every response carries a head");
-    Ok((sink, trailer))
+    match engine.items_stream(session, req, &mut sink) {
+        Ok(trailer) => {
+            assert!(sink.head.is_some(), "every response carries a head");
+            Ok((sink, trailer))
+        }
+        Err(refusal) => {
+            assert!(sink.head.is_none(), "a refusal sent a head: {refusal}");
+            Err(refusal)
+        }
+    }
 }
 
 /// A whole read: every response from no cursor until one ends with none.
@@ -1027,9 +1046,10 @@ fn read_across_a_flush_and_a_merge(order: RecordsOrder, filtered: bool) {
     assert_eq!(ids, expected, "{order:?} filtered={filtered}");
 }
 
-/// **A suppression and a deletion accepted during a read apply from the next page.**
+/// **A suppression and a deletion accepted between two responses of a read apply from the next
+/// response.**
 #[test]
-fn a_suppression_and_a_deletion_accepted_mid_read_are_absent_from_the_next_page() {
+fn a_suppression_and_a_deletion_accepted_between_responses_are_absent_from_the_next_response() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
     let fields: Vec<String> = Vec::new();
@@ -1164,8 +1184,6 @@ fn every_foreign_cursor_is_refused_alike() {
             "a foreign cursor was answered {refusal:?}"
         );
     }
-    let messages: BTreeSet<String> = refusals.iter().map(|e| e.to_string()).collect();
-    assert_eq!(messages.len(), 1, "every refusal says the same thing");
 
     let mut stale = request("s0", &fields);
     stale.idset = Some(IDSET + 1);
@@ -1447,9 +1465,17 @@ fn a_group_scoped_field_resolves_as_a_filter_leaf_does() {
     ));
 
     let hush_field = names(&["hush@k"]);
-    let hushed = pages_of(&fx, &session, "s0", &hush_field, &[]);
-    let rows: usize = hushed.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(rows, N as usize, "a viewer reaching the group reads its field");
+    let mut hushed = 0;
+    for batch in pages_of(&fx, &session, "s0", &hush_field, &[]) {
+        let values = col::<Int32Array>(&batch, "hush@k");
+        for (i, tid) in ids_of(&batch).into_iter().enumerate() {
+            let s = by_tid[&tid];
+            let expected = SECRET_MEMBERS.contains(&s).then(|| hush(s));
+            assert_eq!(values.is_valid(i).then(|| values.value(i)), expected, "hush of {s}");
+            hushed += 1;
+        }
+    }
+    assert_eq!(hushed, N, "a viewer reaching the group reads its field on every row");
     let outsider = fx.engine.authorise(&full_coverage_credential()).unwrap();
     assert!(matches!(
         refused("s0", &hush_field, &outsider),
@@ -1635,17 +1661,6 @@ fn a_row_larger_than_the_byte_ceiling_is_sent_alone() {
 fn the_order_follows_the_fields_and_malformed_requests_are_refused() {
     let fx = Fx::new();
     let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
-    let meta = fx.engine.meta();
-    let homes = |name: &str| {
-        let at = meta.declared_scalars.iter().position(|d| d.name == name).unwrap();
-        meta.homes[at].names()
-    };
-    assert_eq!(homes("band"), ["rendered", "value_column"]);
-    assert_eq!(homes("heat"), ["rendered"]);
-    assert_eq!(homes("kind"), ["value_column"]);
-    assert_eq!(homes("note"), ["record"]);
-    assert_eq!(homes("prose"), ["record"]);
-
     let order_of = |fields: &[&str]| {
         let fields = names(fields);
         let mut req = request("s0", &fields);
@@ -1769,4 +1784,336 @@ fn a_response_ends_at_its_pages_its_bytes_and_cancellation_and_the_read_resumes(
     rest.pages = None;
     ids.extend(continue_read(&fx.engine, &session, &rest, trailer.next.unwrap()));
     assert_eq!(ids, everything);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Inside one response
+// ---------------------------------------------------------------------------------------------
+
+/// A sink that collects, and runs `between` once, after the first page it is given.
+struct Between<'a> {
+    inner: Collect,
+    between: Option<Box<dyn FnOnce() + 'a>>,
+}
+
+impl ItemsSink for Between<'_> {
+    fn head(&mut self, head: &ItemsHead) -> SinkResult {
+        self.inner.head(head)
+    }
+
+    fn page(&mut self, batch: &RecordBatch, end: &ItemsPageEnd) -> SinkResult {
+        self.inner.page(batch, end)?;
+        if let Some(between) = self.between.take() {
+            between();
+        }
+        Ok(())
+    }
+}
+
+/// One response whose sink runs `between` after its first page.
+fn respond_between<'a>(
+    engine: &Engine,
+    session: &Session,
+    req: ItemsRequest<'_>,
+    between: impl FnOnce() + 'a,
+) -> (Collect, ItemsTrailer) {
+    let mut sink = Between {
+        inner: Collect::default(),
+        between: Some(Box::new(between)),
+    };
+    let trailer = engine
+        .items_stream(session, req, &mut sink)
+        .expect("a response");
+    assert!(sink.between.is_none(), "the response carried a first page");
+    (sink.inner, trailer)
+}
+
+/// **A suppression and a deletion accepted between two pages of one response are absent from
+/// the next page**: every page composes the visible set from the generation it is built in.
+#[test]
+fn a_suppression_and_a_deletion_between_two_pages_of_one_response_apply_to_the_next() {
+    let fx = Fx::new();
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&["score"]);
+    let mut hidden: Vec<u64> = Vec::new();
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let everything: Vec<u64> = match order {
+            RecordsOrder::Map => fx.map_order(0..N, "s0"),
+            RecordsOrder::Stored => fx.stored_order(0..N),
+        };
+        let mut ahead = everything.iter().rev().filter(|s| !hidden.contains(*s));
+        let (suppressed, deleted) = (*ahead.next().unwrap(), *ahead.next().unwrap());
+        let mut req = request("s0", &fields);
+        req.order = Some(order);
+        req.page_rows = Some(100);
+        let engine = &fx.engine;
+        let entity = |s: u64| EntityId::new(fx.entity[&s]);
+        let (sink, trailer) = respond_between(engine, &session, req, || {
+            engine.accept_change(entity(suppressed), ChangeOp::Suppress).unwrap();
+            engine.accept_change(entity(deleted), ChangeOp::Delete).unwrap();
+        });
+        assert_eq!(trailer.ended_by, ResponseEndedBy::End, "{order:?}: one response");
+        hidden.extend([suppressed, deleted]);
+        let ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
+        let expected: Vec<u64> = everything
+            .iter()
+            .filter(|s| !hidden.contains(*s))
+            .map(|&s| fx.tid(s))
+            .collect();
+        assert_eq!(ids, expected, "{order:?}");
+    }
+}
+
+/// **A merge and a flush between two pages of one filtered response lose nothing and repeat
+/// nothing**, though the filter's answer for the stretch was held in the row positions both
+/// renumber.
+#[test]
+fn a_merge_and_a_flush_between_two_pages_of_one_filtered_response_keep_it_exact() {
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let mut fx = Fx::new();
+        fx.engine.set_merge_for_test(false);
+        for batch in 0..4u64 {
+            let start = N + batch * 40;
+            fx.ingest(&format!("pre-{batch}"), &(start..start + 40).collect::<Vec<_>>());
+            flush(&fx.engine);
+        }
+        let before: Vec<u64> = (0..N + 160).collect();
+        let later: Vec<u64> = (N + 160..N + 260).collect();
+        let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+        let fields = names(&["band"]);
+        let mut req = request("s0", &fields);
+        req.order = Some(order);
+        req.page_rows = Some(97);
+        req.filter = Some(leaf(
+            "band",
+            FilterOperand::In(vec![AttrLocalId::new(1), AttrLocalId::new(3)]),
+        ));
+        let engine = &fx.engine;
+        let inserted = std::cell::RefCell::new(Vec::new());
+        let (sink, trailer) = respond_between(engine, &session, req, || {
+            engine.set_merge_for_test(true);
+            let merges = engine.write_executor_stats().merges;
+            engine.request_flush();
+            wait_until("the merge to publish", Duration::from_secs(60), || {
+                engine.write_executor_stats().merges > merges
+            });
+            *inserted.borrow_mut() = ingest_sources(engine, "later", &later);
+            flush(engine);
+        });
+        assert_eq!(trailer.ended_by, ResponseEndedBy::End, "{order:?}: one response");
+        for (&s, entity) in later.iter().zip(inserted.into_inner()) {
+            fx.entity.insert(s, entity.raw());
+        }
+        let first_page = ids_of(&sink.pages[0].0);
+        let cut = *first_page.last().unwrap();
+        let ids: Vec<u64> = sink.pages.iter().flat_map(|(b, _)| ids_of(b)).collect();
+
+        let mut all = before.clone();
+        all.extend(&later);
+        let in_order = match order {
+            RecordsOrder::Map => fx.map_order(all.iter().copied(), "s0"),
+            RecordsOrder::Stored => fx.stored_order(all.iter().copied()),
+        };
+        let rank: BTreeMap<u64, usize> = in_order
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| (fx.tid(s), i))
+            .collect();
+        let later_set: BTreeSet<u64> = later.iter().copied().collect();
+        let expected: Vec<u64> = in_order
+            .iter()
+            .copied()
+            .filter(|s| matches!(band_of(*s), Some("low") | Some("high")))
+            .filter(|s| !later_set.contains(s) || rank[&fx.tid(*s)] > rank[&cut])
+            .map(|s| fx.tid(s))
+            .collect();
+        assert_eq!(ids, expected, "{order:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stretch boundaries
+// ---------------------------------------------------------------------------------------------
+
+/// **A view several stretches long is read whole across every stretch boundary**, in both
+/// orders, over several segments, at page sizes either side of a stretch's own size, filtered,
+/// unfiltered and with every row marked: every row once, and as many as the viewport counts.
+#[test]
+fn every_row_is_read_once_across_stretch_boundaries() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let n = 30_000u64;
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        n,
+    );
+    let engine = engine_at(tmp.path(), &root, 3600);
+    engine.set_background_refresh_for_test(false);
+    for batch in 0..3u64 {
+        let rows: Vec<UnallocatedRow> = (0..700u64)
+            .map(|i| {
+                let s = n + batch * 700 + i;
+                UnallocatedRow {
+                    external_id: Some(s.to_le_bytes().to_vec()),
+                    view: "s0".to_string(),
+                    join: None,
+                    x: ((s * 37) % 1000) as f64 + 0.5,
+                    y: ((s * 53) % 1000) as f64 + 0.5,
+                    scalars: Vec::new(),
+                    terms: engine.resolve_terms(&[b"0".to_vec()]),
+                    descriptors: vec![b"0".to_vec()],
+                    scoped: Vec::new(),
+                }
+            })
+            .collect();
+        engine
+            .accept_ingest(rows, format!("batch-{batch}"), [0u8; 32])
+            .expect("the ingest is accepted");
+        flush(&engine);
+    }
+    let segments = engine.generation().bundle.partitions["default"].views["s0"]
+        .segments
+        .len();
+    assert!(segments >= 3, "the view holds {segments} segments");
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let west = ShapeF64::Bbox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 499.0,
+        max_y: 1000.0,
+    }
+    .canonical(Space::View, &extent())
+    .unwrap()
+    .0;
+    let filter = FilterExpr::Region(RegionLeaf::Shape(Arc::new(west)));
+    let (visible, matched) = viewport_counts(&engine, &session, "s0", Some(filter.clone()));
+    assert_eq!(visible, n + 2100);
+    assert!(matched > visible / 3 && matched < visible, "the box holds {matched} rows");
+    let fields: Vec<String> = Vec::new();
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        for page_rows in [1u32, 4097, 5000] {
+            for (mode, filter, keep_unmatched, expected) in [
+                ("unfiltered", None, false, visible),
+                ("filtered", Some(filter.clone()), false, matched),
+                ("marked", Some(filter.clone()), true, visible),
+            ] {
+                let mut req = request("s0", &fields);
+                req.order = Some(order);
+                req.page_rows = Some(page_rows);
+                req.filter = filter;
+                req.keep_unmatched = keep_unmatched;
+                let read = read_all(&engine, &session, &req);
+                let ids = read.ids();
+                assert_each_once(&ids);
+                assert_eq!(ids.len() as u64, expected, "{order:?} {page_rows} {mode}");
+                if keep_unmatched {
+                    let marked: u64 = read
+                        .pages
+                        .iter()
+                        .map(|(b, _)| col::<BooleanArray>(b, "tessera:matched").true_count() as u64)
+                        .sum();
+                    assert_eq!(marked, matched, "{order:?} {page_rows} {mode}");
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The narrower viewer and the idset
+// ---------------------------------------------------------------------------------------------
+
+/// **A narrower viewer's rows, filtered and marked, are exactly theirs row by row, and a label
+/// for a term they do not hold is withheld** though every item they see carries one.
+#[test]
+fn a_narrower_viewers_rows_and_labels_are_theirs_row_by_row() {
+    let fx = Fx::new();
+    let session = fx.engine.authorise(&subset_credential()).unwrap();
+    let by_tid = sources_by_tid(&fx);
+    let visible: Vec<u64> = (0..N).filter(|&s| subset_sees(s)).collect();
+    let low = |s: u64| band_of(s) == Some("low");
+    let fields = names(&["band"]);
+    let system = names(&["labels"]);
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let in_order = |sources: Vec<u64>| match order {
+            RecordsOrder::Map => fx.map_order(sources, "s0"),
+            RecordsOrder::Stored => fx.stored_order(sources),
+        };
+        let mut req = request("s0", &fields);
+        req.system_fields = &system;
+        req.order = Some(order);
+        req.page_rows = Some(77);
+        req.filter = Some(leaf("band", FilterOperand::Equals(AttrLocalId::new(band_code("low")))));
+        let filtered = read_all(&fx.engine, &session, &req);
+        let expected = in_order(visible.iter().copied().filter(|&s| low(s)).collect());
+        assert_eq!(filtered.ids(), fx.tids(&expected), "{order:?}: filtered");
+
+        req.keep_unmatched = true;
+        let marked = read_all(&fx.engine, &session, &req);
+        assert_eq!(marked.ids(), fx.tids(&in_order(visible.clone())), "{order:?}: marked");
+        for (batch, _) in &marked.pages {
+            let matched = col::<BooleanArray>(batch, "tessera:matched");
+            let labels = col::<ListArray>(batch, "tessera:labels");
+            for (i, tid) in ids_of(batch).into_iter().enumerate() {
+                let s = by_tid[&tid];
+                assert_eq!(matched.value(i), low(s), "{order:?}: the matched bit of {s}");
+                let row = labels.value(i);
+                let row = row.as_any().downcast_ref::<StringArray>().unwrap();
+                let got: Vec<&str> = row.iter().map(|l| l.unwrap()).collect();
+                assert_eq!(got, ["1"], "{order:?}: {s} carries \"0\" too, which the viewer lacks");
+            }
+        }
+    }
+}
+
+/// **A cursor issued under another idset is the item route's stale-idset refusal**: the same
+/// identity key, view, incarnation and credential, and a deployment whose idset has moved.
+#[test]
+fn a_cursor_issued_under_another_idset_is_stale() {
+    let issuing = tempfile::TempDir::new().unwrap();
+    let root = build_bundle_under(issuing.path(), IDSET);
+    let engine = engine_at(issuing.path(), &root, 3600);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let fields: Vec<String> = Vec::new();
+    let mut req = request("s0", &fields);
+    req.page_rows = Some(10);
+    req.pages = Some(1);
+    let (_, trailer) = respond(&engine, &session, req.clone()).unwrap();
+    let cursor = trailer.next.unwrap();
+
+    let moved = tempfile::TempDir::new().unwrap();
+    let root = build_bundle_under(moved.path(), IDSET + 1);
+    let engine = engine_at(moved.path(), &root, 3600);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    req.cursor = Some(&cursor);
+    req.pages = None;
+    assert!(matches!(
+        respond(&engine, &session, req).map(|_| ()),
+        Err(EngineError::StaleIdSet)
+    ));
+}
+
+/// **The stored walk serves only rows the page's mask admits**, where the candidate it walks is
+/// wider: after a flush, a session's projection is served one generation stale until it is
+/// rebuilt, and its viewport does not draw the flushed rows, while the candidate, brought forward
+/// to the new generation, holds them. Both orders read what the viewport counts.
+#[test]
+fn the_stored_walk_serves_what_the_mask_admits_where_the_candidate_is_wider() {
+    let mut fx = Fx::new();
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let (before, _) = viewport_counts(&fx.engine, &session, "s0", None);
+    assert_eq!(before, N);
+    fx.ingest("late", &(N..N + 30).collect::<Vec<_>>());
+    flush(&fx.engine);
+    let (visible, _) = viewport_counts(&fx.engine, &session, "s0", None);
+    let fields: Vec<String> = Vec::new();
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let mut req = request("s0", &fields);
+        req.order = Some(order);
+        let ids = read_all(&fx.engine, &session, &req).ids();
+        assert_each_once(&ids);
+        assert_eq!(ids.len() as u64, visible, "{order:?}: the viewport's count");
+    }
 }

@@ -405,6 +405,41 @@ mod tests {
     }
 
 
+    /// Where each shape of declaration is read from: a rendered, indexed category is in the row
+    /// tail and its value column, a render-only number in the row tail alone, a category over a
+    /// `derived` vocabulary with neither flag in its value column, and a field with neither flag
+    /// or a text field in the record store.
+    #[test]
+    fn a_declarations_homes_follow_its_flags_and_its_vocabulary() {
+        use tessera_store::manifest::{ManifestVocabulary, Visibility, VocabularyKind};
+        let vocabulary = |name: &str, visibility| ManifestVocabulary {
+            name: name.to_string(),
+            kind: VocabularyKind::Declared,
+            visibility,
+            width: tessera_spatial::tiler::ScalarType::U8,
+            values: Vec::new(),
+            reserved: Vec::new(),
+        };
+        let vocabularies = [
+            vocabulary("band", Visibility::Public),
+            vocabulary("kind", Visibility::Derived),
+        ];
+        let shaped = |spelling: &str, vocabulary: Option<&str>, index: bool, render: bool| {
+            let mut d = declared("field", spelling);
+            d.vocabulary = vocabulary.map(String::from);
+            d.index = index;
+            d.render = render;
+            FieldHomes::of(&d, &vocabularies).names()
+        };
+        assert_eq!(shaped("u8", Some("band"), true, true), ["rendered", "value_column"]);
+        assert_eq!(shaped("f32", None, false, true), ["rendered"]);
+        assert_eq!(shaped("u8", Some("kind"), false, false), ["value_column"]);
+        assert_eq!(shaped("u8", Some("band"), false, false), ["record"]);
+        assert_eq!(shaped("keyword", None, false, false), ["record"]);
+        assert_eq!(shaped("keyword", None, true, false), ["value_column"]);
+        assert_eq!(shaped("text", None, true, false), ["record"]);
+    }
+
     /// Catches the keyword operator list or published name drifting from what the engine routes.
     #[test]
     fn the_keyword_family_publishes_the_four_string_operators() {
