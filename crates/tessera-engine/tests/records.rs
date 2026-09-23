@@ -2249,43 +2249,48 @@ fn cancelled_mid_scan(batches: u64) {
         req.filter = Some(band.clone());
         // Larger than the band holds, so a page is still gathering rows whenever it is cut.
         req.page_rows = Some(1000);
-        // Timed warm, so the cut falls inside a read no slower than the ones it cuts.
         let whole = read_all(&engine, &session, &req).ids();
+        assert_eq!(whole.len() as u64, matched, "{order:?}");
         let started = std::time::Instant::now();
         assert_eq!(read_all(&engine, &session, &req).ids(), whole, "{order:?}");
-        let cut = started.elapsed() / 3;
-        assert_eq!(whole.len() as u64, matched, "{order:?}");
-
-        let mut ids: Vec<u64> = Vec::new();
-        let mut cursor: Option<String> = None;
-        let mut responses = 0;
-        loop {
-            responses += 1;
-            assert!(responses <= 200, "{order:?} {batches}: the read made no progress");
-            let token = tessera_engine::CancelToken::new();
-            let deadline = {
-                let token = token.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(cut);
-                    token.cancel();
-                })
-            };
-            let mut next = req.clone();
-            next.cursor = cursor.as_deref();
-            next.cancel = Some(token);
-            let (sink, trailer) = respond(&engine, &session, next).unwrap();
-            deadline.join().unwrap();
-            for (batch, end) in &sink.pages {
-                assert_ne!(end.ended_by, PageEndedBy::Bytes, "{order:?}");
-                ids.extend(ids_of(batch));
+        // A third of a whole read, and halved until a cut lands inside a response, since the
+        // machine's load decides how long a read takes.
+        let mut cut = started.elapsed() / 3;
+        let mut was_cut = false;
+        while !was_cut && cut > Duration::from_micros(10) {
+            let mut ids: Vec<u64> = Vec::new();
+            let mut cursor: Option<String> = None;
+            let mut responses = 0;
+            loop {
+                responses += 1;
+                assert!(responses <= 200, "{order:?} {batches}: the read made no progress");
+                let token = tessera_engine::CancelToken::new();
+                let deadline = {
+                    let token = token.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(cut);
+                        token.cancel();
+                    })
+                };
+                let mut next = req.clone();
+                next.cursor = cursor.as_deref();
+                next.cancel = Some(token);
+                let (sink, trailer) = respond(&engine, &session, next).unwrap();
+                deadline.join().unwrap();
+                for (batch, end) in &sink.pages {
+                    assert_ne!(end.ended_by, PageEndedBy::Bytes, "{order:?}");
+                    ids.extend(ids_of(batch));
+                }
+                cursor = trailer.next;
+                if cursor.is_none() {
+                    break;
+                }
             }
-            cursor = trailer.next;
-            if cursor.is_none() {
-                break;
-            }
+            assert_eq!(ids, whole, "{order:?}: every row once, in order");
+            was_cut = responses > 1;
+            cut /= 2;
         }
-        assert!(responses > 1, "{order:?}: the cut ended at least one response");
-        assert_eq!(ids, whole, "{order:?}: every row once, in order");
+        assert!(was_cut, "{order:?}: a cut ended at least one response");
     }
 }
 
@@ -2459,6 +2464,67 @@ fn a_pages_bytes_are_its_buffers_and_the_ceiling_holds_on_them() {
                 "{order:?}: {} bytes counted, {encoded} encoded",
                 end.bytes
             );
+        }
+    }
+}
+
+/// **A column's first null does not take a page past its ceiling**: a builder makes its validity
+/// bitmap at a column's first null, a bit for every row the page holds by then, and the page
+/// counts it before the row. Six hundred items carry a score and one does not, and ceilings a
+/// byte apart put that item last in a first page that is full.
+#[test]
+fn a_columns_first_null_is_counted_against_the_ceiling() {
+    let fx = Fx::new();
+    let base = 1_700_000_000_000_000;
+    let late: Vec<u64> = (N..N + 600).collect();
+    let rows: Vec<UnallocatedRow> = late
+        .iter()
+        .map(|&s| {
+            let mut scalars = scalars_of(s);
+            scalars[2] = match s == N + 399 {
+                true => WalScalar::Null,
+                false => WalScalar::I32(1),
+            };
+            scalars[7] = WalScalar::TimestampUs(base + s as i64);
+            let (x, y) = position(s);
+            UnallocatedRow {
+                external_id: Some(s.to_le_bytes().to_vec()),
+                view: "s0".to_string(),
+                join: None,
+                x,
+                y,
+                scalars,
+                terms: fx.engine.resolve_terms(&[b"0".to_vec()]),
+                descriptors: vec![b"0".to_vec()],
+                scoped: Vec::new(),
+            }
+        })
+        .collect();
+    fx.engine.accept_ingest(rows, "late".to_string(), [0u8; 32]).unwrap();
+    flush(&fx.engine);
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&["score"]);
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let mut req = request("s0", &fields);
+        req.order = Some(order);
+        req.filter = Some(leaf("when", range(base + N as i64, base + N as i64 + 599)));
+        let whole = read_all(&fx.engine, &session, &req);
+        let scores = col::<Int32Array>(&whole.pages[0].0, "score");
+        let at = (0..scores.len()).find(|&i| scores.is_null(i)).expect("one score is absent");
+        // Each row before the null is a `tessera_id` and a score, twelve bytes.
+        let full = 12 * at;
+        for ceiling in full..full + 12 + (at + 1).div_ceil(8) + 4 {
+            req.limits.max_page_bytes = ceiling;
+            let read = read_all(&fx.engine, &session, &req);
+            assert_eq!(read.ids().len(), 600, "{order:?} under {ceiling}");
+            for (batch, end) in &read.pages {
+                assert_eq!(end.bytes, buffer_bytes(batch), "{order:?}: the page's buffers");
+                assert!(
+                    end.bytes <= ceiling || batch.num_rows() == 1,
+                    "{order:?}: {} bytes under a ceiling of {ceiling}",
+                    end.bytes
+                );
+            }
         }
     }
 }

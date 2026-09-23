@@ -307,15 +307,18 @@ fn positions(
         .collect())
 }
 
-/// The bytes one value of a fixed-width type adds to its column.
-fn width(ty: ScalarType) -> usize {
-    match ty {
-        ScalarType::Bool | ScalarType::U8 | ScalarType::I8 => 1,
-        ScalarType::U16 | ScalarType::I16 => 2,
-        ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
-        ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 8,
-        // A string's offset; its bytes are counted per value.
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => 4,
+/// The bytes a buffer of `bits`-wide values grows by from `rows` values to one more.
+fn bits_growth(rows: usize, bits: usize) -> usize {
+    ((rows + 1) * bits).div_ceil(8) - (rows * bits).div_ceil(8)
+}
+
+/// The bytes a builder's validity bitmap grows by from `rows` rows to one more, where it `held`
+/// one already: a builder makes one at its first null, a bit for every row it holds by then.
+fn validity_growth(held: bool, null: bool, rows: usize) -> usize {
+    match (held, null) {
+        (true, _) => bits_growth(rows, 1),
+        (false, true) => (rows + 1).div_ceil(8),
+        (false, false) => 0,
     }
 }
 
@@ -352,6 +355,26 @@ impl Column {
             ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
                 Column::Utf8(StringBuilder::new())
             }
+        }
+    }
+
+    /// Whether the column's builder holds a validity bitmap yet.
+    fn holds_nulls(&self) -> bool {
+        match self {
+            Column::Bool(b) => b.validity_slice().is_some(),
+            Column::U8(b) => b.validity_slice().is_some(),
+            Column::U16(b) => b.validity_slice().is_some(),
+            Column::U32(b) => b.validity_slice().is_some(),
+            Column::U64(b) => b.validity_slice().is_some(),
+            Column::I8(b) => b.validity_slice().is_some(),
+            Column::I16(b) => b.validity_slice().is_some(),
+            Column::I32(b) => b.validity_slice().is_some(),
+            Column::I64(b) => b.validity_slice().is_some(),
+            Column::F32(b) => b.validity_slice().is_some(),
+            Column::F64(b) => b.validity_slice().is_some(),
+            Column::TimestampUs(b) => b.validity_slice().is_some(),
+            Column::Utf8(b) => b.validity_slice().is_some(),
+            Column::Category { keys, .. } => keys.validity_slice().is_some(),
         }
     }
 
@@ -487,8 +510,10 @@ impl SystemColumn {
 }
 
 impl PageValues {
+    /// An empty page, whose bytes are what its builders hold before a row: a string's first
+    /// offset.
     fn new(plan: &FieldPlan, keep_unmatched: bool) -> PageValues {
-        PageValues {
+        let mut page = PageValues {
             rows: 0,
             tessera_ids: UInt64Builder::new(),
             named: plan
@@ -511,7 +536,9 @@ impl PageValues {
                 .collect(),
             matched: keep_unmatched.then(BooleanBuilder::new),
             bytes: 0,
-        }
+        };
+        page.bytes = page.measure();
+        page
     }
 
     /// The bytes every column's buffers hold.
@@ -523,7 +550,8 @@ impl PageValues {
     }
 
     /// Take `run`'s rows into the page in order while they fit `max_bytes`, and the first row
-    /// whatever it comes to. A row's bytes are reckoned before it is appended, from its values,
+    /// whatever it comes to. A row's bytes are reckoned before it is appended, from its values and
+    /// what each builder already holds, a validity bitmap made at a column's first null included,
     /// and the page's are measured from its buffers after. `false` once a row did not fit.
     fn take(
         &mut self,
@@ -534,22 +562,22 @@ impl PageValues {
         max_bytes: usize,
     ) -> Result<bool> {
         let vocabularies = &generation.vocabularies;
-        let validity_bytes = (self.named.len() + self.system.len()).div_ceil(8);
         let mut pending: Vec<Pending<'_>> = Vec::with_capacity(plan.named.len());
         for (i, row) in rows.iter().enumerate() {
             pending.clear();
-            let mut row_bytes = 8 + validity_bytes + usize::from(self.matched.is_some());
+            let n = self.rows;
+            let mut row_bytes = 8 + self.matched.as_ref().map_or(0, |_| bits_growth(n, 1));
             for ((field, (_, _, column)), raw) in
                 plan.named.iter().zip(&self.named).zip(&mut run.named)
             {
                 let value = raw[i].take();
+                let nulls = column.holds_nulls();
                 match column {
                     Column::Category {
                         vocabulary,
                         position,
                         ..
                     } => {
-                        row_bytes += 4;
                         let code = match value {
                             None => None,
                             Some(value) => Some(
@@ -560,6 +588,12 @@ impl PageValues {
                         let fresh = code
                             .filter(|code| !position.contains_key(code))
                             .map(|code| category_key(code, Some(vocabulary), vocabularies));
+                        let null = match (code, fresh) {
+                            (None, _) => true,
+                            (Some(_), Some(key)) => key.is_none(),
+                            (Some(code), None) => position[&code].is_none(),
+                        };
+                        row_bytes += 4 + validity_growth(nulls, null, n);
                         if let Some(Some(key)) = fresh {
                             row_bytes += 4 + key.len();
                         }
@@ -568,22 +602,28 @@ impl PageValues {
                     _ => {
                         let out =
                             value.and_then(|v| stored_field_out(v, field.ty, None, vocabularies));
-                        row_bytes += width(field.ty)
-                            + match &out {
-                                Some(ScalarOut::Utf8(s)) => s.len(),
-                                _ => 0,
+                        row_bytes += validity_growth(nulls, out.is_none(), n)
+                            + match (field.ty.row_bits(), &out) {
+                                (Some(bits), _) => bits_growth(n, bits as usize),
+                                (None, Some(ScalarOut::Utf8(s))) => 4 + s.len(),
+                                (None, _) => 4,
                             };
                         pending.push(Pending::Scalar(out));
                     }
                 }
             }
-            for values in &run.system {
-                row_bytes += match values {
-                    SystemValues::Position(_) => 16,
-                    SystemValues::ExternalId(ids) => 4 + ids[i].as_ref().map_or(0, Vec::len),
-                    SystemValues::Labels(labels) => {
+            for (column, values) in self.system.iter().zip(&run.system) {
+                row_bytes += match (column, values) {
+                    (_, SystemValues::Position(_)) => 16,
+                    (SystemColumn::ExternalId(b), SystemValues::ExternalId(ids)) => {
+                        let held = b.validity_slice().is_some();
+                        4 + ids[i].as_ref().map_or(0, Vec::len)
+                            + validity_growth(held, ids[i].is_none(), n)
+                    }
+                    (_, SystemValues::Labels(labels)) => {
                         4 + labels[i].iter().map(|l| 4 + l.len()).sum::<usize>()
                     }
+                    _ => unreachable!("a run's system fields are the page's, in the page's order"),
                 };
             }
             if self.rows > 0 && self.bytes + row_bytes > max_bytes {
