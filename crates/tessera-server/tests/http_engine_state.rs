@@ -143,9 +143,9 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
 /// the handler actually calls it, which is a separate failure — a pruner nothing invokes closes no
 /// deferral.
 ///
-/// The revoked session is unusable either way (the registry removal is what does that, and
-/// `c_revoke_then_viewport_is_rejected` above covers it), so the observable here is memory: the
-/// projection is gone from the cache.
+/// The revoked session is unusable either way (the registry removal does that, and
+/// `revocation_takes_effect_without_waiting_for_a_sweep` covers it), so the observable here is
+/// memory: the projection is gone from the cache.
 ///
 /// **The observable is `row_projection_cache_stats().entries`, read through `TestServer::state`,
 /// and that is the whole point of this test.** Asserting a 204 and that a survivor still gets 200

@@ -386,9 +386,8 @@ fn every_429_in_the_description_requires_retry_after() {
     }
 }
 
-/// The ruled `layers` semantics are in the schema: an array, or the literal string `"all"`, and
-/// nothing else. The server in this tree does not yet accept the string — see
-/// [`an_omitted_layers_field_means_no_artifacts_frame`] — so this is the shape alone.
+/// The `layers` field is an array or the literal string `"all"` in the schema, and nothing else.
+/// What the server does with each is `viewport_membership.rs`' to assert.
 #[test]
 fn the_layers_field_is_an_array_or_the_string_all() {
     let doc = description();
