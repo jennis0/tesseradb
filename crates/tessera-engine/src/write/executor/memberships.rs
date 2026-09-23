@@ -424,8 +424,8 @@ impl Executor {
             // Re-resolved here, not trusted from admission, since a publication may land between.
             let mut resolved: BTreeMap<MintKey, u32> = BTreeMap::new();
             // One publication per view, since a parent is resolved inside its child's view.
-            let mut to_mint: BTreeMap<(&str, u32, Option<&str>), Vec<(&str, &croaring::Bitmap)>> =
-                BTreeMap::new();
+            type Minting<'a> = Vec<(&'a str, &'a croaring::Bitmap)>;
+            let mut to_mint: BTreeMap<(&str, u32, Option<&str>), Minting<'_>> = BTreeMap::new();
             for (at, (_, members)) in wanted {
                 let (layer, level, view, key) = at;
                 match store.ordinal_of_key(layer, *level, view.as_deref(), key) {

@@ -411,6 +411,7 @@ fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
 ///
 /// Reserved names are matched first and declared scalars second, so a layer sharing a name with
 /// either is read as the other — a layer called `x` cannot make the geometry column mean a cluster.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_ingest_batch(
     encoding: BodyEncoding,
     body: &[u8],
