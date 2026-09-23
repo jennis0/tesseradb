@@ -3169,6 +3169,38 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
     }
 }
 
+/// **A JSON body of the wrong shape is refused with the error envelope and `contract` on every
+/// control route that takes one.**
+#[tokio::test]
+async fn a_body_of_the_wrong_shape_is_a_contract_refusal_on_every_json_control_route() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    let routes = [
+        ("PUT", "/control/layers"),
+        ("PUT", "/control/attributes"),
+        ("PUT", "/control/vocabularies/genre"),
+        ("PATCH", "/control/vocabularies/genre/values"),
+        ("PUT", "/control/view_groups/quarter"),
+        ("PUT", "/control/views/plain"),
+        ("PUT", "/control/views/quarter/2026-Q3"),
+        ("POST", "/control/changes"),
+        ("POST", "/control/faults/arm"),
+    ];
+    for (method, path) in routes {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        let resp = server
+            .client
+            .request(method.clone(), server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&serde_json::json!({ "unexpected": 1 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused(resp, 422).await, "contract", "{method} {path}");
+    }
+}
+
 /// **No request body is buffered on behalf of an unauthenticated caller** — the first and largest of
 /// the three things the router-level credential layer buys, demonstrated rather than argued from
 /// where the code sits.

@@ -1411,6 +1411,51 @@ fn viewer_body(path: &str) -> Value {
     }
 }
 
+/// **A JSON body of the wrong shape is refused with the error envelope and `contract` on every
+/// viewer and session route that takes one.** The item route's fields are all optional, so it is
+/// sent a wrong type rather than an unknown field.
+#[tokio::test]
+async fn a_body_of_the_wrong_shape_is_a_contract_refusal_on_every_json_route() {
+    let doc = description();
+    let f = fixture().await;
+    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let unknown = json!({ "unexpected": 1 });
+
+    let viewer = [
+        ("/v1/viewport", unknown.clone()),
+        ("/v1/items", unknown.clone()),
+        ("/v1/items/1", json!({ "idset": "one" })),
+        ("/v1/artifacts/1", unknown.clone()),
+        ("/v1/artifacts/browse", unknown.clone()),
+    ];
+    for (path, body) in viewer {
+        let resp = f
+            .server
+            .client
+            .post(f.server.viewer_url(path))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_refusal(&doc, resp, 422, "contract").await;
+    }
+
+    for path in ["/session/authorise", "/session/revoke"] {
+        let resp = f
+            .server
+            .client
+            .post(f.server.session_url(path))
+            .bearer_auth(SESSION_CREDENTIAL)
+            .json(&unknown)
+            .send()
+            .await
+            .unwrap();
+        assert_refusal(&doc, resp, 422, "contract").await;
+    }
+}
+
 /// **An underlay request that yields no cells carries a present, zero-row kind-2 frame — never no
 /// frame at all** (contracts §3.2 item 2: presence follows the request, not the result).
 ///
