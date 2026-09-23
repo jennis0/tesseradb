@@ -195,12 +195,13 @@ strings or a dictionary of strings, or from an inline row's `access`. At a runni
 record of a publication, and each JSON row of a growth, carries `"access": ["team-a", "team-b"]`; a
 record carrying one on a layer that names no field is refused, and so are labels the plugin maps to
 no term. On a layer scoped to a group a growth names the view its artifact belongs to, as a
-publication does: `view` on a JSON row, or a `view` column in the Arrow form. A viewer is admitted by holding any one of the labels. An artifact with no label
-takes the layer's `default`: `inherited` leaves it to the layer's own label and membership
-requirement, and a label treats it as carrying that label. A label is set once: an artifact
-published with none may be given one later, the same label again changes nothing, and a different
-one is refused. It takes effect when the level is next published, as every fill does. Changing a
-label means deleting the artifact and publishing it again, under a new identifier.
+publication does: `view` on a JSON row, or a `view` column in the Arrow form. A viewer is admitted
+by holding any one of the labels. An artifact with no label takes the layer's `default`: `inherited`
+leaves it to the layer's own label and membership requirement, and a label treats it as carrying
+that label. A label is set once: an artifact published with none may be given one later, the same
+label again changes nothing, and a different one is refused. It takes effect when the level is next
+published, as every fill does. Changing a label means deleting the artifact and publishing it again,
+under a new identifier.
 
 A label is compared with the descriptors the viewer's credential resolved to, so a label no item
 carries is still one a credential can hold. A layer's own label is compared the same way.
