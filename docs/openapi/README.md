@@ -117,8 +117,9 @@ kind 8  page end  one after each records frame JSON {next, ended_by}
 kind 4  trailer   exactly one, last           JSON {pages, rows, next, ended_by, stream_us}
 ```
 
-A reader keeps three rules. A body without a trailer is incomplete, and the read resumes from the
-cursor in the last page end received. A records frame that no page end follows is discarded. A
+A reader keeps three rules. A body without a trailer is incomplete, however it was cut, and the
+read resumes from the cursor in the last page end received, which both decoders below hand back
+with the pages before it. A records frame that no page end follows is discarded. A
 whole read passes the trailer's `next` back as `cursor` until it is null. With
 `compression: "zstd"` the batch's buffers are zstd-compressed inside the Arrow stream, and the
 reader needs a zstd codec for them; the framing, the schema and the JSON frames are never
@@ -137,13 +138,20 @@ import pyarrow.ipc as ipc
 HEAD, RECORDS, PAGE_END, TRAILER = 6, 7, 8, 4
 
 
+class IncompleteRead(Exception):
+    def __init__(self, cursor, batches):
+        super().__init__(f"no trailer; resume from cursor {cursor!r}")
+        self.cursor, self.batches = cursor, batches
+
+
 def frames(body: bytes):
+    # A cut frame ends the walk; the caller sees no trailer.
     at = 0
-    while at < len(body):
+    while len(body) - at >= 5:
         kind, length = struct.unpack_from("<BI", body, at)
         payload = body[at + 5 : at + 5 + length]
         if len(payload) != length:
-            raise ValueError("truncated body")
+            return
         yield kind, payload
         at += 5 + length
 
@@ -163,7 +171,8 @@ def decode_items(body: bytes):
         else:
             raise ValueError(f"unknown frame kind {kind}")
     if trailer is None:
-        raise ValueError(f"no trailer; resume from {cursor!r}")
+        # Incomplete: resume with the last page end's cursor, dropping any unfinished page.
+        raise IncompleteRead(cursor, batches)
     return head, batches, trailer
 
 
@@ -185,11 +194,12 @@ const text = new TextDecoder();
 
 function* frames(body) {
   const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-  for (let at = 0; at < body.length; ) {
+  // A cut frame ends the walk; the caller sees no trailer.
+  for (let at = 0; body.length - at >= 5; ) {
     const kind = body[at];
     const length = view.getUint32(at + 1, true);
     const payload = body.subarray(at + 5, at + 5 + length);
-    if (payload.length !== length) throw new Error("truncated body");
+    if (payload.length !== length) return;
     yield [kind, payload];
     at += 5 + length;
   }
@@ -207,7 +217,10 @@ function decodeItems(body) {
     } else if (kind === TRAILER) trailer = JSON.parse(text.decode(payload));
     else throw new Error(`unknown frame kind ${kind}`);
   }
-  if (!trailer) throw new Error(`no trailer; resume from ${cursor}`);
+  if (!trailer) {
+    // Incomplete: resume with the last page end's cursor, dropping any unfinished page.
+    throw Object.assign(new Error(`no trailer; resume from cursor ${cursor}`), { cursor, tables });
+  }
   return { head, tables, trailer };
 }
 
