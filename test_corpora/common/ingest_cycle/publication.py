@@ -237,8 +237,11 @@ class Publication:
         max_bytes: int,
         bucket_rows: int,
         limits: dict,
+        view_column: str | None = None,
     ):
         self.table = in_parent_order(roster_table(roster))
+        #: The roster column naming the view each artifact belongs to, on a group-scoped layer.
+        self.view_column = view_column
         self.rows = self.table.to_pylist()
         self.keys = [row["key"] for row in self.rows]
         self.held = set(self.keys)
@@ -281,9 +284,12 @@ class Publication:
     def members(self):
         """Yield `(roster index, {rank: entities})` for every artifact, parents before children."""
         if self.members_path is None:
-            self.stats["read_path"] = "no member table"
-            for i in range(len(self.rows)):
-                yield i, {}
+            # A roster may carry each artifact's members itself, as a list of entity ids.
+            inline = "members" in self.table.schema.names
+            self.stats["read_path"] = "the roster's members column" if inline else "no member table"
+            for i, row in enumerate(self.rows):
+                members = np.array(row["members"] or [], np.uint64) if inline else None
+                yield i, {} if members is None else {-1: members}
             return
         ranges = key_ranges(self.members_path)
         self.stats["row_groups"] = pq.ParquetFile(self.members_path).metadata.num_row_groups
@@ -400,7 +406,10 @@ class Publication:
     # -- bodies ----------------------------------------------------------------------------
 
     def _head(self, i: int) -> bytes:
-        return b'{"key":' + json.dumps(self.rows[i]["key"]).encode() + b',"members":'
+        view = b""
+        if self.view_column is not None:
+            view = b',"view":' + json.dumps(self.rows[i][self.view_column]).encode()
+        return b'{"key":' + json.dumps(self.rows[i]["key"]).encode() + view + b',"members":'
 
     def bodies(self):
         """Yield the requests in order: `("put", level, body, artifacts, members, edges)` per

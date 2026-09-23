@@ -13,6 +13,7 @@ from typing import Sequence
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 # ---------------------------------------------------------------------------------------------
@@ -20,11 +21,24 @@ import pyarrow.parquet as pq
 # ---------------------------------------------------------------------------------------------
 
 
-def split_entities(points: Path, fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
+def declared_entities(rung: Path) -> np.ndarray:
+    """Every entity id the rung's views hold: the anchor view's in file order, then each other
+    view's ids the ones before it did not hold."""
+    parts: list[np.ndarray] = []
+    seen = np.zeros(0, np.int64)
+    for path in dict.fromkeys(view["points"] for view in declared_views(rung)):
+        ids = pq.read_table(path, columns=["entity_id"]).column("entity_id").to_numpy()
+        fresh = ids[~in_sorted(ids, seen)] if len(seen) else ids
+        fresh = fresh[np.sort(np.unique(fresh, return_index=True)[1])]
+        parts.append(fresh)
+        seen = np.sort(np.concatenate([seen, fresh]))
+    return np.concatenate(parts) if parts else seen
+
+
+def split_entities(ids: np.ndarray, fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
     """`(base entity ids, hold-out entity ids)` — a seeded uniform hold-out of `fraction`, over
     entities rather than rows, which differ once a rung has several views.
     """
-    ids = pq.read_table(points, columns=["entity_id"]).column("entity_id").to_numpy()
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(ids))
     cut = int(round(fraction * len(ids)))
@@ -92,6 +106,117 @@ def ranks_file(rung: Path) -> Path:
     return candidates[0]
 
 
+def ranks_for(rung: Path, work: Path) -> tuple[Path, dict]:
+    """The rung's ranks file, or one derived into `work` where the rung has none, and a record
+    of which it was."""
+    try:
+        found = ranks_file(rung)
+    except FileNotFoundError:
+        work.mkdir(parents=True, exist_ok=True)
+        out = work / "derived-ranks.json"
+        return out, {"file": str(out), "derived": True, **derive_ranks(rung, out)}
+    return found, {"file": str(found), "derived": False}
+
+
+def derive_ranks(rung: Path, out: Path) -> dict:
+    """Write a ranks file counted from the data: each view's `point_visibility` field, one pair
+    per (entity, label) across every view's points, a missing label counted under the view's
+    declared default."""
+    pairs = []
+    fields = set()
+    for view in declared_views(rung):
+        field = view["point_visibility"].get("field")
+        default = view["point_visibility"].get("default")
+        if field is None:
+            continue
+        fields.add(field)
+        table = read_view_rows(view, ["entity_id", field])
+        labels = table.column(field).combine_chunks()
+        entities = table.column("entity_id").combine_chunks()
+        if pa.types.is_list(labels.type) or pa.types.is_large_list(labels.type):
+            unlabelled = entities.filter(pc.equal(pc.fill_null(pc.list_value_length(labels), 0), 0))
+            entities = pc.take(entities, pc.list_parent_indices(labels))
+            labels = pc.list_flatten(labels).cast(pa.string())
+        else:
+            labels = labels.cast(pa.string())
+            unlabelled = entities.filter(pc.is_null(labels))
+        pairs.append(pa.table({"entity": entities, "term": labels}).filter(pc.is_valid(labels)))
+        if isinstance(default, str) and len(unlabelled):
+            filled = pa.array([default] * len(unlabelled), pa.string())
+            pairs.append(pa.table({"entity": unlabelled, "term": filled}))
+    if not pairs:
+        raise ValueError(f"{rung}: no view declares a point_visibility field to count terms from")
+    distinct = pa.concat_tables(pairs).group_by(["entity", "term"]).aggregate([])
+    counted = distinct.group_by("term").aggregate([("entity", "count")])
+    terms = counted.column("term").to_pylist()
+    counts = counted.column("entity_count").to_pylist()
+    ranks = sorted(
+        ({"term": term, "pairs": int(n)} for term, n in zip(terms, counts)),
+        key=lambda rank: (-rank["pairs"], rank["term"]),
+    )
+    out.write_text(json.dumps(ranks))
+    return {"fields": sorted(fields), "terms": len(ranks)}
+
+
+def declared_views(rung: Path) -> list[dict]:
+    """Every view the declaration names, the allocation view first: a plain view by its name and
+    a group's view as `group:key`, the id the server gives it. `points` is the file its rows are
+    read from, and `select` the `(column, key)` picking them out of a file a group's views share.
+    `record` is a group view's own roster entry, on the group that owns the keys."""
+    declared = tomllib.loads((rung / "corpus.toml").read_text())
+    named = declared.get("sources", {})
+    defaults = declared.get("defaults", {})
+    default = defaults.get("source", "points")
+    views = [
+        {
+            "id": view["name"],
+            "group": None,
+            "owner": None,
+            "key": None,
+            "points": source_path(rung, named, view.get("source", default)),
+            "select": None,
+            "point_visibility": view.get("point_visibility") or {},
+            "record": None,
+        }
+        for view in declared.get("view", [])
+    ]
+    groups = {group["name"]: group for group in declared.get("view_group", [])}
+    for group in groups.values():
+        owner = groups.get(group.get("members"), group)
+        column = (group.get("fields") or {}).get("view")
+        for entry in owner.get("view", []):
+            own = entry.get("source") if owner is group else None
+            views.append(
+                {
+                    "id": f"{group['name']}:{entry['key']}",
+                    "group": group["name"],
+                    "owner": owner["name"],
+                    "key": entry["key"],
+                    "points": source_path(rung, named, own or group.get("source", default)),
+                    "select": None if own or column is None else (column, entry["key"]),
+                    "point_visibility": group.get("point_visibility") or {},
+                    "record": entry,
+                }
+            )
+    anchor = defaults.get("allocation_view") or declared.get("allocation_view")
+    anchor = anchor or (views[0]["id"] if views else None)
+    views.sort(key=lambda view: view["id"] != anchor)
+    return views
+
+
+def read_view_rows(view: dict, columns: Sequence[str], keep: np.ndarray | None = None) -> pa.Table:
+    """`columns` of one view's rows, picked out of a shared file by its discriminator, and kept to
+    the sorted entity ids `keep` where given."""
+    select = view["select"]
+    wanted = list(dict.fromkeys([*columns, *([select[0]] if select else [])]))
+    table = pq.read_table(view["points"], columns=wanted)
+    if select is not None:
+        table = table.filter(pc.equal(table.column(select[0]), select[1]))
+    if keep is not None:
+        table = table.filter(pa.array(in_sorted(table.column("entity_id").to_numpy(), keep)))
+    return table.select(list(columns))
+
+
 def bundle_manifest(bundle: Path) -> tuple[str, dict] | None:
     """`(version prefix, manifest)` of the bundle's current version, or None for no bundle: the
     version `CURRENT` names, not the lexicographically last `v*`, which can be abandoned.
@@ -152,8 +277,8 @@ def base_declaration(
     text: str, keep_members: Sequence[str] = (), keep_sources: Sequence[str] = ()
 ) -> tuple[str, list[dict]]:
     """The rung's `corpus.toml` as the base's: every layer stated, and only a column-route
-    layer's member table kept. A `[[layer]]`'s `source` and `[layer.members]` are build-only
-    acquisition, removed except where `keep_members` or `keep_sources` names the layer. Returns
+    layer's member table kept. A `[[layer]]`'s `source`, its `fields` and `[layer.members]` are
+    build-only acquisition, removed except where `keep_members` or `keep_sources` names the layer. Returns
     the rewritten text and one record per layer, saying what was removed."""
     out: list[str] = []
     removed: list[dict] = []
@@ -185,7 +310,8 @@ def base_declaration(
             continue
         if layer is not None and head.startswith("name") and layer["layer"] is None:
             layer["layer"] = head.split("=", 1)[1].strip().strip('"')
-        if section == "[[layer]]" and head.startswith("source") and "=" in head:
+        # A layer's `fields` map names columns of the file its `source` names, so it goes with it.
+        if section == "[[layer]]" and head.startswith(("source", "fields")) and "=" in head:
             if layer is None or layer["layer"] not in keep_sources:
                 if layer is not None:
                     layer["removed"].append(head)
@@ -231,6 +357,11 @@ def declared_layers(rung: Path) -> list[dict]:
                 "route": route,
                 "value_set": layer.get("value_set"),
                 "hierarchy": (layer.get("hierarchy") or {}).get("kind"),
+                # The roster column naming each artifact's view, on a group-scoped layer.
+                "view_column": (layer.get("fields") or {}).get("view")
+                if isinstance(layer.get("scope"), dict)
+                else None,
+                "inline": bool(layer.get("artifacts")),
             }
         )
     return out
@@ -302,24 +433,16 @@ def build_bundle(
 
 
 def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
-    """The complement's inputs: the points, the declaration, and a column-route layer's member
-    table over the base's rows. Nothing else: a publication-route layer's artifacts are
-    published on the wire after the points they depend on have been ingested. `corpus.toml` is
-    rewritten by [`base_declaration`]."""
+    """The complement's inputs: every file a view or an attribute reads, over the base's
+    entities, the declaration, and a column-route layer's member table over the base's rows.
+    Nothing else: a publication-route layer's artifacts are published on the wire after the
+    points they depend on have been ingested. `corpus.toml` is rewritten by
+    [`base_declaration`]."""
     out.mkdir(parents=True, exist_ok=True)
     layers = declared_layers(rung)
     published = [layer["name"] for layer in layers if layer["route"] == "publication"]
     on_column = [layer for layer in layers if layer["route"] == "column"]
-    kept: dict = {
-        "points": filter_parquet(
-            rung / "points.parquet", out / "points.parquet", "entity_id", base_ids, drop=published
-        ),
-        "dropped_membership_columns": [
-            name
-            for name in pq.ParquetFile(rung / "points.parquet").schema_arrow.names
-            if name in set(published)
-        ],
-    }
+    kept: dict = {"entities": len(base_ids)}
     kept["member_tables"], rosters = write_base_members(out, on_column, base_ids)
     if rosters:
         kept["rosters"] = rosters
@@ -332,6 +455,7 @@ def write_base_inputs(rung: Path, out: Path, base_ids: np.ndarray) -> dict:
     (out / "corpus.toml").write_text(declaration)
     kept["declaration_only"] = removed
     (out / "tessera.toml").write_text((rung / "tessera.toml").read_text())
+    (out / "base-inputs.json").write_text(json.dumps(kept))
     return kept
 
 
@@ -361,27 +485,27 @@ def copy_declared_inputs(
     rung: Path, out: Path, base_ids: np.ndarray, published: Sequence[str]
 ) -> dict:
     """Every other file the declaration still names, read off the declaration rather than listed
-    here: a vocabulary is copied whole, and any other view's points file is filtered by entity id
-    exactly as the anchor's is.
+    here: a vocabulary is copied whole, and every file a view or an attribute reads is filtered
+    to the base's entities, leaving out a publication-route layer's column.
     """
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
-    anchor = declared.get("defaults", {}).get("source", "points")
     kept: dict = {}
     for vocabulary in declared.get("vocabulary", []):
         got = source_path(rung, named, vocabulary.get("source"))
         if got is not None and got.exists():
             shutil.copy2(got, out / got.name)
             kept.setdefault("vocabularies", []).append(got.name)
-    for view in declared.get("view", []):
-        source = view.get("source", anchor)
-        if source == anchor:
-            continue
-        got = source_path(rung, named, source)
-        if got.exists():
-            kept.setdefault("views", {})[got.name] = filter_parquet(
-                got, out / got.name, "entity_id", base_ids, drop=published
-            )
+    entity_files = [view["points"] for view in declared_views(rung)] + [
+        source_path(rung, named, attribute.get("source"))
+        for attribute in declared.get("attribute", [])
+    ]
+    for got in dict.fromkeys(path for path in entity_files if path is not None):
+        dropped = [name for name in pq.ParquetFile(got).schema_arrow.names if name in set(published)]
+        kept.setdefault("entity_files", {})[got.name] = {
+            "rows": filter_parquet(got, out / got.name, "entity_id", base_ids, drop=published),
+            "dropped_membership_columns": dropped,
+        }
     for name in ("branch.parquet", ".env"):
         source = rung / name
         if source.exists() and not (out / name).exists():
