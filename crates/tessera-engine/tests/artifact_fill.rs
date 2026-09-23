@@ -421,7 +421,11 @@ fn a_mixed_put_mints_only_the_new_keys_and_an_identical_re_put_is_a_no_op() {
             ],
         )
         .expect("a held key beside a new one");
-    assert_eq!((mixed.created, mixed.joined, mixed.filled), (1, 0, 0));
+    assert_eq!(
+        (mixed.created, mixed.joined, mixed.filled),
+        (1, 100, 0),
+        "the created leaf's members are joined; the held root's are all held"
+    );
     assert_eq!(
         mixed.tessera_ids[1], first.tessera_ids[0],
         "the held key answers the artifact it names"

@@ -569,8 +569,8 @@ struct ValuesResp {
     filled: u64,
     /// Cells that already held the identical value, which the fill rule accepts with no effect.
     held: u64,
-    /// Members this batch's layer columns added to artifacts that already existed and did not
-    /// already hold them. An artifact this batch created is counted under `minted` alone.
+    /// Memberships this batch's layer columns added: every row placed in an artifact the batch
+    /// created, and every row an artifact already held did not yet hold.
     joined: u64,
     /// Artifacts this batch's layer columns **created**: a key no artifact held, on a layer whose
     /// value set is open (python-sdk §11.2 F). `/control/ingest`'s `minted` at this door.
@@ -3800,9 +3800,10 @@ async fn publish_artifacts(
     // where the layer declares no shape, so the enumerated case's response is unchanged.
     //
     // **The counts are the batch's own** (`ingest.md` §1.5): how many artifacts it created, how
-    // many of those carry no content on a layer declaring some (R5), and what it filled and joined
-    // on the keys the level held. `201` where anything was created, `200` where every key was
-    // held, on the growth route's rule.
+    // many of those carry no content on a layer declaring some (R5), what it filled on the keys
+    // the level held, and how many memberships it added, to created and held artifacts alike.
+    // `201` where anything was created, `200` where every key was held, on the growth route's
+    // rule.
     let mut body = serde_json::json!({
         "artifacts": published,
         "created": batch.created,
@@ -3925,8 +3926,8 @@ struct ContentFillBody {
 /// The response carries, per artifact, its `tessera_id`, how many of the joining members were
 /// not already in the membership, and how many parts were filled — **never an ordinal and never
 /// a membership size** (C8). `joined` does tell the caller how many of the members they sent
-/// were already members, a lower bound on the size the publication route never states; it is
-/// accepted as an operator-plane figure, the operator having written the membership it bounds.
+/// were already members, which bounds the size from below; it is accepted as an operator-plane
+/// figure, the operator having written the membership it bounds.
 /// `200` rather than `201`: nothing was created.
 async fn grow_memberships(
     State(state): State<Arc<AppState>>,
