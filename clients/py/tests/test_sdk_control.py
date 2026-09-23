@@ -23,6 +23,7 @@ from tesseradb._control import (
     batch_id,
     external_id,
 )
+from tesseradb._refusal import Refusal
 
 
 class _Backpressure(http.server.BaseHTTPRequestHandler):
@@ -153,8 +154,8 @@ def test_a_commit_whose_pages_reach_no_server_reports_it_and_does_not_raise(tmp_
         server.shutdown()
         server.server_close()
         monkeypatch.setattr(Database, "control", property(lambda self: Control(base, "c")))
-        report = db.commit()
-        assert not report.ok
-        assert [one["status"] for one in report.refusals] == [UNANSWERED]
+        with pytest.raises(Refusal) as raised:
+            db.commit()
+        assert [one["status"] for one in raised.value.report.refusals] == [UNANSWERED]
     finally:
         db.close()

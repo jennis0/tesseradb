@@ -344,7 +344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{results_dir} is inside a git repository and is not ignored, so a run would commit "
             f"a box-specific figure; pass --results pointing somewhere ignored"
         )
-    # The rung's own `.env` for the identity key, and a value for any credential variable neither
+    # The rung's own `.env`, and a value for any credential or identity-key variable neither
     # it nor the environment carries. Both drivers boot from the environment of this process.
     os.environ.update(read_env_file(rung_dir / ".env"))
     minted = minted_credentials(rung_dir)

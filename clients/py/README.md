@@ -189,6 +189,12 @@ print(db.commit())                             # the report
 returns the report: rows accepted per view, artifacts minted, memberships joined, parts already
 present, refusals by row and part, and how long the wait for its publication took.
 
+`commit()` raises `Refusal` when nothing it was asked to do happened: a pre-flight finding stopped
+it before a byte was sent, or the server refused every page. The exception's text is the report's,
+and `refusal.report` is the report itself. A commit some of whose pages landed has happened, and
+returns its report with the refused pages listed. `check()` is a query and returns its findings
+without raising.
+
 The order is fixed: declarations, then points per view with the allocation view first, then values
 on entities that already exist, then artifacts per layer in dependency order. Where a commit
 carries both rows and values, the rows are flushed between the two, so a value addresses a row the
@@ -212,17 +218,16 @@ request carries it again: a `429` is backpressure and is retried after its `Retr
 same id and identical bytes. Nothing is kept beyond the commit, and no id is derived from what a
 page contains, so the same frame inserted and committed five times is five loads — rows carrying an
 id column are refused as duplicates on the second, and rows without one are loaded again. A request
-that reached no server is reported as a refusal rather than raised; whether it landed is the
-database's to say. A value that changed is a `409` on that part, reported and not retried, because
+that reached no server is a refusal of that page; whether it landed is the database's to say. A value that changed is a `409` on that part, reported and not retried, because
 an edit is a delete and a re-ingest.
 
-The pre-flight runs before a byte is sent and it sends nothing while a finding stands: it reports,
-names the finding, and drops or rewrites no row. Rows outside a view's frame are listed with the
-frame, rows with no id where the insert names an id column are listed, a key column inserted into a
-layer that declares supplied content is named with the artifacts-table route as the remedy, a label
-insert whose clustering is neither held nor inserted is named, and a polygon inserted after the
-first commit as WKB is named with both encodings: the build reads a `geometry` column as WKB and
-the publication route takes WKT text.
+The pre-flight runs before a byte is sent and it sends nothing while a finding stands: `check()`
+reports the finding and `commit()` raises with it, and neither drops or rewrites a row. Rows
+outside a view's frame are listed with the frame, rows with no id where the insert names an id
+column are listed, a key column inserted into a layer that declares supplied content is named with
+the artifacts-table route as the remedy, a label insert whose clustering is neither held nor
+inserted is named, and a polygon inserted after the first commit as WKB is named with both
+encodings: the build reads a `geometry` column as WKB and the publication route takes WKT text.
 
 `remove(ids)`, `suppress(ids)` and `unsuppress(ids)` take the ids the id column holds, or the
 `tessera_id`s where no insert named one; a removed id inserted again goes as a point row.
@@ -235,7 +240,9 @@ its own session credential, operator credential and identity key under `.tessera
 owner-only. `commit()` starts `tessera serve` as a child process on loopback at port 0 and reads
 the three bound addresses from the JSON line the child prints once all three planes are listening;
 `db.viewer_url`, `db.session_url` and `db.session_credential` are what a token is minted against.
-The child is killed by its pid at `close()` and at interpreter exit.
+The child is killed by its pid at `close()` and at interpreter exit. A database `create()` made
+with no path is removed at both, after its child has stopped; a directory the user named, through
+`create(path)`, `open(path)` or `save(path)`, is never removed.
 
 The deployment file the SDK writes sets `serve.cors_loopback`, which admits a page served from a
 loopback address on the viewer plane. A notebook page's origin is the front end's, unknown at start
