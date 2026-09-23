@@ -1277,6 +1277,28 @@ def test_a_layer_declared_with_its_label_column_takes_labels_after_an_empty_comm
     assert db.check().ok
 
 
+def test_the_label_column_a_commit_sent_is_the_one_every_later_insert_names(served, corpus):
+    """Whichever commit first sends a layer's label column, from a build or a later declaration,
+    the local declaration records it and an insert naming another column is refused."""
+    import tomllib
+
+    def built(db):
+        clustering(db)
+        labelled_teams(db)
+
+    squad = pa.table(
+        {"key": pa.array(["blue-team"], pa.string()), "squad": pa.array([["blue"]], pa.list_(pa.string()))}
+    )
+    for db in (served(built), served(clustering)):
+        if "teams" not in [row[0] for row in artifact_rows_of(db)]:
+            labelled_teams(db)
+            assert db.commit().ok
+        layer = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "teams")
+        assert layer["artifact_visibility"]["field"] == "team"
+        with pytest.raises(Refusal):
+            db.insert("teams", artifacts=squad, key="key", access="squad")
+
+
 def test_a_growth_page_names_the_view_of_a_group_scoped_artifact():
     """A growth on a layer scoped to a group says which view's artifact it grows."""
     import json

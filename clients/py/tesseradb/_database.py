@@ -553,11 +553,7 @@ class Database:
         column = named.get("access")
         if kind != "layer" or role != "artifacts" or not column:
             return
-        held = {"artifact_visibility": block.get("artifact_visibility")}
-        for other in self.inserts + self.pending:
-            if other.target == target and other.role == "artifacts" and other.columns.get("access"):
-                D.carry_labels(target, held, other.columns["access"])
-        D.carry_labels(target, held, column)
+        D.carry_labels(target, {"artifact_visibility": block.get("artifact_visibility")}, column)
 
     def _refuse_a_second_view_without_its_labels(
         self, kind: str, role: str, target: str, insert: Insert
@@ -956,6 +952,7 @@ class Database:
         if build.returncode != 0:
             raise Refusal("commit: the build failed\n" + report.output, report)
         self.built = True
+        self._record_label_columns(document.get("layer", []))
         self._record_terms(document)
         self.serve()
         if self.listening is not None:
@@ -1007,6 +1004,7 @@ class Database:
         if report.findings:
             raise Refusal(str(report), report)
         accepted = C.run(control, pages, report)
+        self._record_label_columns(page.body for page in accepted if page.kind == "layer")
         self._record_terms(self._document())
         self.pending.clear()
         self._save_state()
@@ -1217,6 +1215,15 @@ class Database:
             f"rows are named by '{insert.id_column}' on the insert into "
             f"{insert.target!r}, read as {kind}"
         )
+
+    def _record_label_columns(self, layers: Iterable[dict]) -> None:
+        """Write onto the SDK's own layer blocks the label column each layer was committed with,
+        so a later insert naming another column is refused."""
+        for layer in layers:
+            field = dict(layer.get("artifact_visibility") or {}).get("field")
+            if field:
+                D.carry_labels(layer["name"], self.blocks.layer(layer["name"]), field)
+        self._save_state()
 
     def _record_terms(self, document: dict) -> None:
         """Remember every access label inserted so far: the terms `viewer()` holds by default."""
