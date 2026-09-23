@@ -1890,6 +1890,24 @@ impl Executor {
             );
             return false;
         };
+        // The rebase is asked before anything is written, as a merge's is: a side-manifest naming
+        // a segment the row space refuses is one a restart cannot open. The row space moves under
+        // a flush when the view is dropped or created again during its flight.
+        if let Some(segment) = &completed.segment {
+            let continues = partition_data
+                .views
+                .get(&completed.view)
+                .and_then(|view| view.row_space.with_extent(segment.extent.clone()))
+                .is_some();
+            if !continues {
+                tracing::warn!(
+                    view = %completed.view,
+                    "discarding a completed flush whose segment no longer continues its view's \
+                     row space"
+                );
+                return false;
+            }
+        }
         // Composed before the manifest is written, because a composition that refuses must not
         // leave a published manifest naming the extents it refused. The refusal is unreachable: an
         // extent covers entities that were just issued, which no earlier layer can hold. So this
@@ -2155,14 +2173,13 @@ impl Executor {
                 ) {
                     Ok(bundle) => bundle,
                     Err(e) => {
-                        // The row space moved under this flush: another publication landed
-                        // between the plan and here. Discarded, not forced: forcing would put the
-                        // segment at a `row_base` that is no longer the end of row space, aliasing
-                        // rows.
-                        tracing::warn!(
-                            error = %e,
-                            "discarding a completed flush that no longer rebases"
-                        );
+                        // Unreachable: the same rebase was asked of the same generation before
+                        // the commit. The manifest just committed names this segment, so a
+                        // restart before the next publication would refuse to open.
+                        discard(&format!(
+                            "its segment no longer rebases after its side-manifest was committed \
+                             ({e})"
+                        ));
                         return false;
                     }
                 };
