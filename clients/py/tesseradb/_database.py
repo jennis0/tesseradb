@@ -430,8 +430,6 @@ class Database:
                 f"insert into {kind} {target!r}: a {kind} takes no {role} table"
             )
         self._refuse_an_insert_the_target_cannot_take(target, kind, role, block, named)
-        if kind == "layer" and role == "artifacts" and named.get("access"):
-            D.carry_labels(target, block, named["access"])
         projected = kind in ("view", "view_group") and block.get("projection", "none") != "none"
         metadata = D.metadata_names(block) if role == "roster" else ()
         if kind == "labels" and role == "text":

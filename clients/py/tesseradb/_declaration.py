@@ -568,7 +568,11 @@ def _artifact_visibility(value: Any) -> Any:
 
 def carry_labels(layer: str, block: dict, column: str) -> None:
     """An artifacts insert naming `access=`: the layer's artifacts carry their own labels, read
-    from that column at a build and sent as each record's `access` at a running service."""
+    from that column. Written onto the declaration the build reads, or onto the declaration a
+    layer new to the server is sent with, and never onto the SDK's own blocks.
+
+    `block` is either spelling of `artifact_visibility`: the TOML block's, or the route's body.
+    """
     visibility = dict(block.get("artifact_visibility") or {})
     held = visibility.get("field")
     if held is not None and held != column:
@@ -791,6 +795,8 @@ class _Bind:
     def layer_artifacts(block: dict, insert: Any) -> None:
         block["source"] = insert.source
         _fields(block, _renamed(insert, ARTIFACT_FIELDS))
+        if insert.columns.get("access"):
+            carry_labels(insert.target, block, insert.columns["access"])
 
     @staticmethod
     def layer_members(block: dict, insert: Any) -> None:

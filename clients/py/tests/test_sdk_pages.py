@@ -1254,3 +1254,28 @@ def test_a_growth_page_names_the_view_of_a_group_scoped_artifact():
     body = json.loads(commit_module.patch_body(0, "c1", joining=["p0"], view="q2"))
     assert body["artifacts"][0]["view"] == "q2"
     assert "view" not in json.loads(commit_module.patch_body(0, "c1", joining=["p0"]))["artifacts"][0]
+
+
+def test_a_labelled_insert_into_a_held_layer_leaves_the_declaration_and_the_route_answers(
+    served, corpus
+):
+    """After the first commit a layer the server holds is the server's: labels sent into one whose
+    declaration names no label field are refused by the route, and the local declaration is not
+    changed to pretend otherwise."""
+    import tomllib
+
+    db = served(clustering)
+    before = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "clusters")
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {"key": pa.array(["c9"], pa.string()), "team": pa.array([["red"]], pa.list_(pa.string()))}
+        ),
+        key="key",
+        access="team",
+    )
+    after = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "clusters")
+    assert after == before
+    with pytest.raises(Refusal):
+        db.commit()
+    assert "c9" not in [row[1] for row in artifact_rows_of(db)]

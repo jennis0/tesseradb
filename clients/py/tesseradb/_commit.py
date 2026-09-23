@@ -333,6 +333,11 @@ class Planner:
             name = payload["name"]
             if name in self.held_layers:
                 continue
+            # A layer new to the server takes the label column its artifacts inserts named. One the
+            # server holds is sent the labels as they are, and the route answers for its fields.
+            for insert in self._for("layer", "artifacts", name):
+                if insert.columns.get("access"):
+                    _D.carry_labels(name, payload, insert.columns["access"])
             self.pages.append(
                 Page(
                     kind="layer",

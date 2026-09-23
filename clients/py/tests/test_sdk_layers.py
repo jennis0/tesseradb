@@ -269,3 +269,19 @@ def test_a_shape_declares_its_kind_and_nothing_else(db):
     with pytest.raises(Refusal):
         db.declare_layer("regions", kind="flat", membership="spatial",
                          shape={"kind": "bbox", "space": "wgs84"})
+
+
+def test_a_refused_labelled_insert_leaves_the_declaration_as_it_was(db):
+    """A misnamed label column is refused before anything is written, so the corrected call is
+    taken and the declaration names only the column it read."""
+    import tomllib
+
+    db.declare_layer("f", kind="flat")
+    table = pd.DataFrame({"key": ["a"], "team": ["x"]})
+    with pytest.raises(Refusal):
+        db.insert("f", artifacts=table, key="key", access="tema")
+    layer = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "f")
+    assert "field" not in layer["artifact_visibility"]
+    db.insert("f", artifacts=table, key="key", access="team")
+    layer = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "f")
+    assert layer["artifact_visibility"]["field"] == "team"
