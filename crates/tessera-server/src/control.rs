@@ -1923,14 +1923,15 @@ async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<Publicati
     Ok(await_publication(state, state.engine.request_flush_publication()).await)
 }
 
-/// Hold until the counter has reached `publication`, or until `serve.visible_wait_max_secs`.
+/// Hold until the counter has reached `publication`, or until `serve.visible_wait_max_secs`. A
+/// ceiling too large to add to the clock waits without one.
 ///
 /// Split out of [`publication_ack`] because [`flush`] arms its own cycle and then waits on the
 /// number that armed it: the request must be made once, not once by the route and again by the
 /// wait.
 async fn await_publication(state: &AppState, publication: u64) -> PublicationAck {
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(state.limits.visible_wait_max_secs);
+    let deadline = std::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(state.limits.visible_wait_max_secs));
     loop {
         if state.engine.publication() >= publication {
             return PublicationAck {
@@ -1938,7 +1939,7 @@ async fn await_publication(state: &AppState, publication: u64) -> PublicationAck
                 visible: Some(true),
             };
         }
-        if std::time::Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
             return PublicationAck {
                 publication,
                 visible: Some(false),
