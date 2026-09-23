@@ -180,6 +180,23 @@ def levels_compared(views: dict) -> tuple[bool, str]:
     return held, "; ".join(said) or "no layer"
 
 
+def views_compared(equivalence: dict) -> tuple[bool, str]:
+    """Whether the census reached every view the all-in build serves, and the filter and
+    category probes it compared across them."""
+    views = equivalence.get("views") or {}
+    nowhere = equivalence.get("views_compared_nowhere")
+    filters = [dig(view, "census_coverage", "filters", default={}) for view in views.values()]
+    said = (
+        f"{len(views) - len(nowhere or [])} of {len(views)} views, "
+        f"{sum(f.get('compared', 0) for f in filters)} filter probes "
+        f"({sum(f.get('matching', 0) for f in filters)} matching something) and "
+        f"{sum(f.get('category_columns', 0) for f in filters)} category lists"
+    )
+    if nowhere:
+        said += f"; nothing compared on {', '.join(nowhere)}"
+    return bool(views) and nowhere == [], said
+
+
 def correctness(result: dict) -> list[tuple[str, bool, str]]:
     """One `(check, held, the number that decides it)` per line of the correctness section."""
     rows = []
@@ -213,6 +230,8 @@ def correctness(result: dict) -> list[tuple[str, bool, str]]:
     batches = cycle.get("ingest_by_view") or {}
     rows += [
         ("census equal per view", *per_view(views, "equal")),
+        ("every declared view compared", *views_compared(cycle.get("equivalence") or {})),
+        ("filters and category lists equal per view", *per_view(views, "filters_equal")),
         ("artifact parents equal per view", *per_view(views, "parents_equal")),
         ("every declared layer level compared", *levels_compared(views)),
         ("write cycle counts", written == expected, f"{written} visible against {expected} expected"),

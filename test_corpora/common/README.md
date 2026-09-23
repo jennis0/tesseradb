@@ -207,7 +207,7 @@ view's, under `ingest_by_view` (below, under "Beyond the schema").
 | `bodies_split` | count | bodies over the cap, halved and re-encoded until each half fits; eight-way counts 7 |
 | `largest_body_bytes` | bytes | the largest body sent |
 | `bodies_over_cap` | count | single-row bodies over the cap, sent as they are and refused 422 |
-| `flush_s` | seconds | `POST /control/flush` to the `flushes` counter moving, or the buffer already empty |
+| `flush_s` | seconds | `POST /control/flush` to the buffer holding no row: every view's flush landed |
 | `visibility_s` | seconds | the same request to a zoom-0 viewport reaching the expected count, not `flush_s` |
 | `fold_s` | seconds | the server's own `compaction.last_secs`; compact answers 202 at once, and the wait ends when a fold lands or the server counts one discarded |
 | `fold_peak_rss` | bytes | the server's own `compaction.last_rss_bytes` |
@@ -243,8 +243,9 @@ is carried by the base build and published nowhere.
 | `declined` | object | declared layers not published, each with a `reason`: attribute membership, supplied content with no roster, or a failure. Every layer is under `layers`, `on_column` or here |
 | `edges_declared`, `edges_published` | count | the two summed over the layers |
 
-`equivalence` compares masked counts, per view, on four surfaces that are not equally comparable:
-`zoom0_equal`, the whole extent under each principal, frame-independent; `boxes_equal`, a box at
+`equivalence` compares masked counts, per view, on five surfaces that are not equally comparable:
+`zoom0_equal`, the whole extent under each principal, frame-independent; `filters_equal`, below;
+`boxes_equal`, a box at
 each census zoom, frame-dependent (`extent = "auto"` fits a base built from the complement onto a
 slightly different grid, so a box's margins can disagree by a handful of rows — `frames` carries
 both quantisations, `frames_equal` whether they match); `layers_equal`, the served-artifact frame
@@ -264,14 +265,24 @@ deployments and every principal: a box with no artifacts in it compares nothing.
 parents difference found inside a box names the box and counts under `layers` or `parents` all the
 same.
 
-`equivalence.views` holds each view's own comparison, keyed by name, with the four flags above,
+Each view's census also asks, under the broadest and the narrowest principal, a filter or two per
+filter operand `/v1/meta` offers on that view, a group-scoped family on the views of its keys
+included: a numeric column's presence and upper half, a category or keyword column's three
+commonest values, a text column's two commonest words, each drawn from the head of the file the
+view's batches take the column from, and `/v1/categories` for each category column. A matched
+count or value list that differs counts under `filters`.
+
+`equivalence.views` holds each view's own comparison, keyed by name, with the five flags above,
 `frames`, `frames_equal`, `census_coverage`, `differences` and `differences_by_surface`.
 `census_coverage` is what the folded deployment's census reached, read from the principal that
 sees the most: `zooms`, the artifacts and parent edges compared at each census zoom, and `layers`,
 each layer's `declared_levels` against the levels an artifact was served at, with
 `levels_compared`, `levels_declared`, `levels_missing` and the layer's own parent edges. A level in
 `levels_missing` is a failure sentence, since a census that compares no artifact at a level proves
-nothing there. The top-level `equal` is every view's `equal`, `incomplete` is a sentence per census
+nothing there. `census_coverage.visible` is the broadest principal's zoom-0 count and
+`census_coverage.filters` counts the probes compared, those matching something, and the category
+lists. `equivalence.views_compared_nowhere` names every view the all-in build serves that the
+census did not reach or saw nothing in, each a failure sentence. The top-level `equal` is every view's `equal`, `incomplete` is a sentence per census
 request that did not arrive whole, and the other top-level fields are the views' own summed or
 concatenated.
 

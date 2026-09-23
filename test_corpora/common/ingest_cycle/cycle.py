@@ -27,6 +27,7 @@ from .census import (
     census_zooms,
     compare_census,
     coverage_failures,
+    filter_probes,
     incomplete_sentences,
 )
 from .control import Control, wait_for
@@ -141,6 +142,9 @@ class Cycle:
         #: `/v1/meta` publishes, which carries each one's declared levels and their zoom ranges.
         self.census_boxes: dict[str, list[tuple[int, list[float]]]] = {}
         self.meta_layers: list[dict] = []
+        #: The filters and category lists each view's census asks, and the all-in census.
+        self.probes: dict[str, list[dict]] = {}
+        self.reference: dict = {}
         #: The served deployment, its session credential and the 100% principal's terms.
         self.served: Deployment | None = None
         self.session_cred = ""
@@ -760,15 +764,15 @@ class Cycle:
     # -- flush, fold, equivalence, write cycle ---------------------------------------------
 
     def do_flush(self, control) -> dict:
-        before = control.status()["write_executor"]["flush"]["flushes"]
         expected = (self.result["base_visible"] or 0) + self.result["ingest"]["accepted"]
         t0 = time.perf_counter()
         code = control.flush().status_code
         request_s = time.perf_counter() - t0
-        # Or nothing left to flush: the buffer can already be empty under the row trigger.
+
+        # Every view flushes on its own, and a flush the server discards stays buffered until it
+        # is planned again, so the flush has landed when the buffer holds nothing.
         def flush_landed() -> bool:
-            flush = control.status()["write_executor"]["flush"]
-            return flush["flushes"] > before or flush["buffered_items"] == 0
+            return control.status()["write_executor"]["flush"]["buffered_items"] == 0
 
         published, publish_s = wait_for(flush_landed, timeout=self.args.flush_timeout)
         reached, visibility_s = wait_for(
@@ -877,6 +881,7 @@ class Cycle:
                 self.frames[name],
                 ladder,
                 self.census_boxes.get(name) or [],
+                self.probes.get(name) or [],
             )
             for name in self.view_names
         }
@@ -924,7 +929,12 @@ class Cycle:
             all_in_frames = {v["id"]: v["quantisation"] for v in all_in_meta["views"]}
             self.meta_layers = all_in_meta.get("layers") or []
             self.choose_boxes(allin.viewer, reference_token)
+            self.probes = {
+                view["name"]: filter_probes(self.rung, self.views, view, all_in_meta)
+                for view in self.views
+            }
             reference = self.census_views(allin, allin.credential("session"), ladder)
+            self.reference = reference
         finally:
             allin.stop()
         folded = self.census_views(self.served, self.session_cred, ladder)
@@ -953,10 +963,19 @@ class Cycle:
         # The views together, so a reader asking whether the two deployments agree has one answer.
         out["differences_by_surface"] = by_surface
         out["differences"] = differences
-        for surface in ("zoom0", "boxes", "layers", "parents"):
+        for surface in ("zoom0", "boxes", "layers", "parents", "filters"):
             out[f"{surface}_equal"] = by_surface.get(surface, 0) == 0
         out["equal"] = all(v["equal"] for v in out["views"].values())
         out["frames_equal"] = all(v["frames_equal"] for v in out["views"].values())
+        # A view the all-in build serves and this census did not reach, or reached and saw nothing
+        # in under the broadest principal, proves nothing.
+        reached = {
+            name
+            for name, compared in out["views"].items()
+            if compared["census_coverage"].get("visible")
+        }
+        served = {view["id"] for view in all_in_meta["views"]}
+        out["views_compared_nowhere"] = sorted((served | set(self.view_names)) - reached)
         out["incomplete"] = incomplete_sentences(folded) + incomplete_sentences(reference)
         return out
 
@@ -1134,6 +1153,10 @@ class Cycle:
                 f"the census on {name} proved nothing about a declared level: {sentence}"
                 for sentence in coverage_failures(compared.get("census_coverage") or {})
             ]
+        out += [
+            f"the census compared nothing on view {name}"
+            for name in equivalence.get("views_compared_nowhere") or []
+        ]
         for name in ("equivalence", "restart"):
             phase = result.get(name)
             if isinstance(phase, dict):
