@@ -1378,6 +1378,7 @@ async fn a_recreated_view_serves_none_of_its_predecessors_artifacts() {
     let token = token_for(&server, &["0"]).await;
     assert_eq!(served(&server, "quarter:q2", SCOPED).await, vec![]);
     assert_eq!(browsed(&server, &token, "quarter:q2", SCOPED).await, vec![]);
+    assert_eq!(drilled(&server, &token, "quarter:q2", &old_c1).await.0, 404);
     assert_eq!(served(&server, "quarter:q1", SCOPED).await, q1);
 
     // The predecessor's key publishes a new artifact over the recreated view's own items.
@@ -1453,6 +1454,50 @@ async fn a_label_of_another_group_goes_with_the_artifact_of_a_dropped_view() {
     .await;
     assert_eq!(status, 201, "{body}");
     let (status, body) = put(&server, LABELS, label).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["created"], 1, "{body}");
+}
+
+/// A hierarchy and the labels attached to it, published into a view that is then dropped and
+/// created again, leave nothing in the recreated view, and each key publishes again there.
+#[tokio::test]
+async fn a_recreated_view_takes_no_node_or_label_of_its_predecessor() {
+    const TREE: &str = "clusters/tree";
+    const NAMES: &str = "labels/tree";
+    let tmp = TempDir::new().unwrap();
+    let server = serve_group(&tmp).await;
+    register(&server, declaration(TREE, Some("quarter"), "nested")).await;
+    let mut names = declaration(NAMES, Some("quarter"), "flat");
+    names["depends_on"] = json!([TREE]);
+    register(&server, names).await;
+    let tree = json!([
+        { "key": "root", "view": "q2", "members": members(0..40) },
+        { "key": "leaf", "view": "q2", "members": members(0..10), "parent": ["root"] },
+    ]);
+    let name = json!([{ "key": "n-leaf", "view": "q2", "members": members(0..10),
+                        "attached_to": { "layer": TREE, "key": "leaf" } }]);
+    let (status, body) = put(&server, TREE, tree.clone()).await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = put(&server, NAMES, name.clone()).await;
+    assert_eq!(status, 201, "{body}");
+    assert!(!served(&server, "quarter:q2", TREE).await.is_empty());
+    assert_eq!(
+        served(&server, "quarter:q2", NAMES).await,
+        vec![("n-leaf".to_string(), 10)]
+    );
+
+    recreate(&server, "q2").await;
+    assert_eq!(served(&server, "quarter:q2", TREE).await, vec![]);
+    assert_eq!(served(&server, "quarter:q2", NAMES).await, vec![]);
+    let server = restart(server, &tmp).await;
+    assert_eq!(served(&server, "quarter:q2", TREE).await, vec![]);
+    assert_eq!(served(&server, "quarter:q2", NAMES).await, vec![]);
+
+    // The old members are in no view now, so the republished tree counts none of them.
+    let (status, body) = put(&server, TREE, tree).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["created"], 2, "{body}");
+    let (status, body) = put(&server, NAMES, name).await;
     assert_eq!(status, 201, "{body}");
     assert_eq!(body["created"], 1, "{body}");
 }
