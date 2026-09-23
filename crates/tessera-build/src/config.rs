@@ -2129,7 +2129,7 @@ pub struct Attribute {
 ///
 /// On a **vocabulary** open means an unknown key is minted a fresh code, drawn at random from the
 /// declared width's unused space by [`tessera_store::vocabulary::VocabularyMinter`] — the same
-/// routine ingest uses, so exhaustion is one predicate. Declared values still pin or assign codes
+/// routine ingest uses, so exhaustion is one predicate. Declared values still pin or draw codes
 /// exactly as a closed vocabulary's do; the build mints only for keys the declaration does not
 /// carry, and an open vocabulary given no values at all is legal and starts empty. On a **layer**
 /// it means an unknown member key mints an artifact (`artifacts-from-points.md` §3).
@@ -2161,7 +2161,7 @@ pub struct Vocabulary {
 /// converge, so no spelling can acquire a rule the others lack.
 #[derive(Debug, Clone, Default)]
 pub struct DeclaredValues {
-    /// Value key → code, where the caller pinned one. A key with no entry here is assigned.
+    /// Value key → code, where the caller pinned one. A key with no entry here is drawn a code.
     pub codes: BTreeMap<String, u32>,
     /// Declaration order, in which the keys that pinned nothing are drawn codes.
     pub order: Vec<String>,
@@ -2460,7 +2460,7 @@ impl Schema {
     }
 
     /// One live [`VocabularyMinter`] per **open** vocabulary, seeded from whatever it already
-    /// carries — the declaration's codes, pinned or assigned, plus `reserved`. A closed vocabulary
+    /// carries — the declaration's codes, pinned or drawn, plus `reserved`. A closed vocabulary
     /// mints nothing and has no entry here at all, so `input::scan_attributes`'s batch-level mint
     /// pre-pass can never reach one.
     ///
@@ -4206,7 +4206,7 @@ fn compile_vocabularies(
             Some(declared) => Some(sources.path(&object, declared)?),
             None => None,
         };
-        // A `code` field pins the codes; without one the build assigns them.
+        // A `code` field pins the codes; without one the build draws them.
         let fields = check_fields(
             &object,
             source.as_ref(),

@@ -4,7 +4,7 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 
 ## Missing on one path
 
-- Declaring a column with `render: true` at a running service is refused (`PUT /control/attributes` answers 422), though a build accepts it, so not everything declarable at a build is declarable live. Deferred by Joe until he has design time for how existing row-space segments answer for a column they were written without; it stays refused until then.
+- Declaring a column with `render: true` at a running service is refused (`PUT /control/attributes` answers 422), though a build accepts it; how existing row-space segments answer for a column they were written without is still to be designed.
 - Category-typed view metadata works at a build and is refused at a running service: the create route resolves no vocabulary key.
 
 - A generating set that holds an ingested member is answered by the exact masked-count route until a fold, because the containment partition is composed from the build's postings and does not read the flushed term tiers. Correct, and slower for those sets. Composing over the tiers means recomposing at every flush; the cost is unmeasured.

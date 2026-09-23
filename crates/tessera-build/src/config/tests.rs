@@ -472,7 +472,7 @@ fn a_bare_key_list_draws_codes_at_random() {
     let codes: BTreeSet<u32> = keys.iter().map(|k| vocab.code_of(k).unwrap()).collect();
     assert_eq!(codes.len(), keys.len(), "one code per value");
     assert!(!codes.contains(&ABSENT_CODE));
-    // Twenty draws over 255 codes all landing in 1..=20 has a chance near 1e-22; numbering the
+    // Twenty draws over 255 codes all landing in 1..=20 is negligibly likely; numbering the
     // values in order lands there every time.
     assert!(codes.iter().any(|&c| c > 20), "{codes:?}");
 }
