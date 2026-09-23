@@ -35,6 +35,7 @@ pub mod membership_column;
 mod merge;
 pub mod occupancy;
 pub mod projection;
+pub mod records;
 mod refresh;
 pub mod region;
 pub mod row_column;
@@ -69,6 +70,7 @@ pub use categories::{
 pub use compact::{CompactionSchedule, PassCost};
 pub use compose::{buffered_rows_of, compose, denied_rows_of, visible_to, EffectiveMask};
 pub use projection::{ProjectionInputs, ProjectionRoute, RowProjection};
+pub use records::RecordsOrder;
 // The publication guard's refusal, which a publisher outside this crate must handle.
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's
 // judgement, and a caller that could ask separately could also act on a stale answer.
