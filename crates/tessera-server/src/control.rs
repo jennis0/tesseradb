@@ -232,8 +232,7 @@ const CHANGES_MAX_ITEMS: usize = 10_000;
 const DECLARATION_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 /// What an over-cap `/control/ingest` or `/control/values` caller does next.
-const INGEST_BODY_REMEDY: &str =
-    "The limit is ingest.ingest_max_batch_bytes. Send fewer rows per batch";
+const INGEST_BODY_REMEDY: &str = " (ingest.ingest_max_batch_bytes); send fewer rows per batch";
 
 /// The content type that selects Arrow IPC on a record-bearing route.
 const ARROW_CONTENT_TYPE: &str = "application/vnd.apache.arrow.stream";
@@ -258,10 +257,8 @@ fn body_encoding(headers: &HeaderMap) -> Result<BodyEncoding, ApiError> {
         "" | "application/json" | "application/x-ndjson" => Ok(BodyEncoding::Json),
         ARROW_CONTENT_TYPE => Ok(BodyEncoding::Arrow),
         other => Err(ApiError::Contract(format!(
-            "content-type '{other}' names no encoding this route takes: JSON is \
-             `application/json` (an array of objects, or one object per line, which \
-             `application/x-ndjson` also names) and Arrow IPC is `{ARROW_CONTENT_TYPE}` \
-             (ingest §1.2)"
+            "content-type '{other}' names no encoding this route takes; send \
+             `application/json`, `application/x-ndjson` or `{ARROW_CONTENT_TYPE}`"
         ))),
     }
 }
@@ -271,14 +268,12 @@ fn body_encoding(headers: &HeaderMap) -> Result<BodyEncoding, ApiError> {
 fn body_refusal(status: StatusCode, body: &str, cap: usize, remedy: &str) -> ApiError {
     if status == StatusCode::PAYLOAD_TOO_LARGE {
         ApiError::Contract(format!(
-            "the {body} body exceeds the {cap}-byte per-request limit and was refused before \
-             decoding, so nothing was allocated or appended. {remedy}"
+            "the {body} body is over the {cap}-byte per-request limit{remedy}"
         ))
     } else {
         ApiError::Contract(format!(
             "the {body} body could not be read: the connection failed mid-upload, the transfer \
-             encoding is malformed, or it is not the body this route takes. This is not the size \
-             limit; nothing was allocated or appended"
+             encoding is malformed, or it is not the body this route takes"
         ))
     }
 }
@@ -427,10 +422,8 @@ fn run_values(
     // The row cap can only be checked after the whole body is decoded.
     if rows.len() > state.limits.ingest_max_batch_rows {
         return Err(ApiError::Contract(format!(
-            "values batch has {} rows, exceeding the {}-row per-batch cap \
-             (ingest.ingest_max_batch_rows); refused before the WAL append, so it cost no queue \
-             slot and no record. The body was hashed and decoded in full before this fired — the \
-             row count is not knowable earlier",
+            "values batch has {} rows, over the {}-row limit (ingest.ingest_max_batch_rows); \
+             send at most that many per batch",
             rows.len(),
             state.limits.ingest_max_batch_rows
         )));
@@ -446,9 +439,8 @@ fn run_values(
         // in the batch, never by the id the caller sent, whichever address form the row used.
         let Some(entity) = held else {
             return Err(ApiError::Contract(format!(
-                "row {index} names an identifier this deployment does not hold. A values batch \
-                 fills entities that exist and creates none, so the point is ingested first \
-                 (`ingest.md` §1.6)"
+                "row {index} names an identifier this deployment does not hold; ingest the \
+                 point before writing its values"
             )));
         };
         request_rows.push(tessera_engine::IncomingValues {
@@ -501,8 +493,7 @@ fn resolve_view<'a>(
     let views = &meta.views;
     match view {
         None if views.len() > 1 => Err(ApiError::Contract(format!(
-            "this bundle has {} views ({}), so x-tessera-view is required — which one a batch \
-             belongs to is not inferable (contracts §3.4)",
+            "this bundle has {} views, so name one of them in x-tessera-view: {}",
             views.len(),
             views
                 .iter()
@@ -599,11 +590,8 @@ fn run_ingest(
     // interns nothing; a batch refused after this point still does.
     if items.len() > state.limits.ingest_max_batch_rows {
         return Err(ApiError::Contract(format!(
-            "ingest batch has {} rows, exceeding the {}-row per-batch cap \
-             (ingest.ingest_max_batch_rows); refused before ENTITY-ID allocation, so it cost no \
-             entity id, no queue slot and no WAL append. The body was hashed and decoded in full \
-             before this fired — the row count is not knowable earlier — so it is not free; the \
-             byte cap on the route is the refusal that costs nothing",
+            "ingest batch has {} rows, over the {}-row limit (ingest.ingest_max_batch_rows); \
+             send at most that many per batch",
             items.len(),
             state.limits.ingest_max_batch_rows
         )));
@@ -614,8 +602,7 @@ fn run_ingest(
     if unlabelled > 0 && point_default.is_none() {
         return Err(ApiError::Contract(format!(
             "view '{view}': {unlabelled} row(s) carry an empty access label and the view \
-             declares no `point_visibility.default` to fill them with. Declare the label such a \
-             row should carry, or label the rows (decision 0133)"
+             declares no `point_visibility.default`; label the rows, or declare the default"
         )));
     }
     let default_labels: Option<Vec<Vec<u8>>> = point_default
@@ -735,10 +722,8 @@ fn run_ingest(
     if !duplicate_ids.is_empty() {
         duplicate_ids.sort_unstable();
         return Err(ApiError::Conflict(format!(
-            "these external ids already have a row in view '{view}': {}. Positions are not \
-             updated in place — a re-placed point is a new view, or for a group a new one \
-             (views §2) — and the permutation is single-valued, so it cannot hold two rows for \
-             one entity in one view",
+            "these external ids already have a row in view '{view}', and a position is not \
+             updated in place: {}",
             duplicate_ids.join(", ")
         )));
     }
@@ -913,9 +898,8 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
             // Kept so the refusal names the edit flow instead of answering "unknown op".
             "predicate" => {
                 return Err(ApiError::Contract(
-                    "the predicate op is withdrawn: edit is delete + re-ingest (decision 0047) — \
-                     delete the item, then re-ingest it under the same external_id with its new \
-                     access labels; a deleted holder does not block re-ingest"
+                    "there is no predicate op; to change an item's access labels, delete it and \
+                     re-ingest it under the same external_id with the new labels"
                         .to_string(),
                 ));
             }
@@ -931,9 +915,7 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
             (Some(external_id), None) => {
                 if item.idset.is_some() {
                     return Err(ApiError::Contract(
-                        "idset accompanies tessera_id, never external_id: an external id means \
-                         the same entity under every identity key, so there is nothing for it to \
-                         guard"
+                        "idset accompanies tessera_id, never external_id; remove the idset"
                             .to_string(),
                     ));
                 }
@@ -948,16 +930,15 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
             (None, Some(tessera_id)) => {
                 let id: u64 = tessera_id.parse().map_err(|_| {
                     ApiError::Contract(
-                        "tessera_id must be a base-10 string: it is a u64, and a bare JSON number \
-                         loses precision past 2^53 in most clients"
+                        "tessera_id must be a base-10 string, such as \"12345\", not a JSON \
+                         number"
                             .to_string(),
                     )
                 })?;
                 let idset = item.idset.ok_or_else(|| {
                     ApiError::Contract(
-                        "a tessera_id-addressed change must carry the idset it was minted under \
-                         (GET /v1/meta): identifiers are keyed, so one gathered before a rotation \
-                         names a different item after it"
+                        "a tessera_id-addressed change must carry the idset it was minted under, \
+                         as `GET /v1/meta` gives it"
                             .to_string(),
                     )
                 })?;
@@ -1025,8 +1006,8 @@ fn resolve_addresses<'a>(
         Some(idset) => {
             if idsets.any(|other| other != idset) {
                 return Err(ApiError::Contract(
-                    "one request carries two different idsets; there is one per deployment, so \
-                     this list was assembled from a state that never existed"
+                    "one request carries two different idsets; send every tessera_id under the \
+                     same idset"
                         .to_string(),
                 ));
             }
@@ -1145,17 +1126,15 @@ async fn changes(
             rejection.status(),
             "change request",
             CHANGES_MAX_BODY_BYTES,
-            "Split it into smaller requests. This caps one request and never a deny: \
-             /control/changes is never load-shed",
+            "; split it into smaller requests",
         )
     })?;
 
     // The item cap, checked before anything is resolved.
     if items.len() > CHANGES_MAX_ITEMS {
         return Err(ApiError::Contract(format!(
-            "the change request carries {} items, exceeding the {CHANGES_MAX_ITEMS}-item \
-             per-request limit (limits.changes.max_changes_per_request on /control/status); \
-             split it into smaller requests. Nothing in this request was applied",
+            "the change request carries {} items, over the {CHANGES_MAX_ITEMS}-item limit \
+             (limits.changes.max_changes_per_request); split it into smaller requests",
             items.len()
         )));
     }
@@ -1762,13 +1741,12 @@ fn metadata_value(name: &str, value: &serde_json::Value) -> Result<ViewMetadataV
             }
         }
         serde_json::Value::Null => Err(ApiError::Contract(format!(
-            "metadata '{name}' is null. Every name a view group declares is required and a roster \
-             record is immutable, so an absent value is one that can never be supplied \
-             (views §3.2)"
+            "metadata '{name}' is null; give it a value, since every name a view group declares \
+             is required"
         ))),
         _ => Err(ApiError::Contract(format!(
-            "metadata '{name}' is an array or an object, and view metadata is one typed scalar \
-             per name (views §3.1). A per-(entity, view) value is an attribute, not metadata"
+            "metadata '{name}' is an array or an object; give one string, number or boolean, or \
+             declare a per-point value as an attribute"
         ))),
     }
 }
@@ -1841,8 +1819,7 @@ fn position_in_batch(widths: &[usize], flat: usize) -> (usize, usize) {
 fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Result<T, ApiError> {
     serde_json::from_slice(body).map_err(|e| {
         ApiError::Contract(format!(
-            "the {noun} body is not the JSON this route takes: {e}. Nothing was decoded, \
-             allocated or appended"
+            "the {noun} body is not the JSON this route takes: {e}"
         ))
     })
 }
@@ -2043,8 +2020,8 @@ fn resolve_member_addresses(
         Addressing::Tessera => {
             let idset = idset.ok_or_else(|| {
                 ApiError::Contract(
-                    "tessera-addressed members carry the idset they were minted under, so a list \
-                     gathered before a key rotation is refused rather than reinterpreted"
+                    "tessera-addressed members must carry the idset they were minted under; add \
+                     `idset`"
                         .to_string(),
                 )
             })?;
@@ -2065,8 +2042,7 @@ fn resolve_member_addresses(
         Addressing::External => {
             if idset.is_some() {
                 return Err(ApiError::Contract(
-                    "idset accompanies tessera_id, never external_id: an external id means \
-                     nothing to a key, so there is nothing for an idset to check"
+                    "idset accompanies tessera_id, never external_id; remove the idset"
                         .to_string(),
                 ));
             }
@@ -2095,10 +2071,8 @@ fn resolve_member_addresses(
         && !state.engine.bundle_carries_external_ids()
     {
         return Err(ApiError::Contract(
-            "this deployment carries no external ids: its bundle was built without \
-             `--mint-external-ids` and none of the ids named here has been ingested since, so no \
-             member can be addressed by external id. Rebuild with the flag, or address members by \
-             `tessera_id`. Nothing was allocated or appended"
+            "this deployment carries no external ids, so no member can be addressed by one; \
+             rebuild with `--mint-external-ids`, or address members by `tessera_id`"
                 .to_string(),
         ));
     }
@@ -2107,10 +2081,8 @@ fn resolve_member_addresses(
         // Named by its position in the batch, never by the id the caller sent.
         let (artifact, member) = position_in_batch(widths, position);
         return Err(ApiError::Unknown(format!(
-            "id {member} of artifact {artifact} names nothing this deployment holds — {layout}. \
-             The batch was refused rather than accepted without it: a dropped member moves both \
-             the count a viewer is shown and the size its existence criterion divides by, and a \
-             dropped generating-set entry widens who may read the content"
+            "id {member} of artifact {artifact} names nothing this deployment holds, counting \
+             {layout}"
         )));
     }
 
@@ -2338,9 +2310,7 @@ fn canonical_row_shape(
     let Some(kind) = declaration.shape.map(|s| s.kind) else {
         if !carried.is_empty() {
             return Err(refuse(
-                "carries a shape, and this layer declares no `shape`. Its members come from the \
-                 stored set its membership names, so a shape beside them is a region nothing \
-                 evaluates"
+                "carries a shape, and this layer declares no `shape`; remove the shape"
                     .to_string(),
             ));
         }
@@ -2353,16 +2323,15 @@ fn canonical_row_shape(
     let input = match carried.len() {
         0 => {
             return Err(refuse(format!(
-                "carries no shape, and this layer's `shape` declares a {}. The shape is the \
-                 whole of such an artifact's membership, so one published without it would count \
-                 zero for every viewer",
+                "carries no shape, and this layer's `shape` declares a {}; give the artifact \
+                 one",
                 kind.as_str()
             )))
         }
         1 => carried.pop().expect("one").1,
         _ => {
             return Err(refuse(format!(
-                "carries {} — one row has one shape, in its layer's kind's field",
+                "carries {}; give one shape, in the field of its layer's kind",
                 carried
                     .iter()
                     .map(|(f, _)| format!("`{f}`"))
@@ -2534,17 +2503,14 @@ async fn publish_artifacts(
             rejection.status(),
             "publish",
             state.limits.publish_max_body_bytes,
-            "The limit is ingest.publish_max_body_bytes (limits.publish.max_body_bytes on \
-             /control/status). Send fewer artifacts per request; a membership that does not fit \
-             beside its record is published with a first page and grown with `PATCH` in pages",
+            " (ingest.publish_max_body_bytes); send fewer artifacts per request, or publish a \
+             large membership's first page and grow it with `PATCH`",
         )
     })?;
     // An artifact record is object-shaped, so publication has no Arrow form.
     if body_encoding(&headers)? == BodyEncoding::Arrow {
         return Err(ApiError::Contract(format!(
-            "a publication takes JSON: an artifact record is object-shaped and has no Arrow \
-             spelling. `{ARROW_CONTENT_TYPE}` is accepted on /control/ingest and on PATCH \
-             /control/layers/{{name}}/artifacts (ingest §1.2)"
+            "a publication takes JSON, not `{ARROW_CONTENT_TYPE}`; send `application/json`"
         )));
     }
     let PublishBody {
@@ -2563,10 +2529,8 @@ async fn publish_artifacts(
     // The artifact cap, before any shape is canonicalised or address resolved.
     if artifacts.len() > state.limits.max_artifacts_per_request {
         return Err(ApiError::Contract(format!(
-            "the publication carries {} artifacts, exceeding the {}-artifact per-request limit \
-             (ingest.max_artifacts_per_request; limits.publish.max_artifacts_per_request on \
-             /control/status); refused before anything was resolved or allocated. Send fewer \
-             artifacts per request",
+            "the publication carries {} artifacts, over the {}-artifact limit \
+             (ingest.max_artifacts_per_request); send fewer artifacts per request",
             artifacts.len(),
             state.limits.max_artifacts_per_request
         )));
@@ -2581,10 +2545,8 @@ async fn publish_artifacts(
         {
             return Err(ApiError::Contract(format!(
                 "artifact {index} of this publication carries neither `members` nor `excluding`, \
-                 and attaches to nothing. A record names the members its membership holds, or the \
-                 entities it leaves out (ingest.md §2.3); an artifact whose membership holds \
-                 nobody is published with an empty `members` list, and only an attached artifact \
-                 may omit both and be served over its target's membership (decision 0145)"
+                 and attaches to nothing; give one of them, or `\"members\": []` for an empty \
+                 membership"
             )));
         }
     }
@@ -2597,20 +2559,14 @@ async fn publish_artifacts(
         };
         if artifact.members.is_some() {
             return Err(ApiError::Contract(format!(
-                "artifact {index} of this publication carries both `members` and `excluding`. A \
-                 membership has one spelling: name the members it holds, or the entities it \
-                 leaves out (ingest.md §2.3)"
+                "artifact {index} of this publication carries both `members` and `excluding`; \
+                 give one of them"
             )));
         }
         if excluding.len() > state.limits.max_excluded_per_request {
             return Err(ApiError::Contract(format!(
-                "artifact {index} of this publication excludes {} entities, exceeding the {} the \
-                 exclusion spelling admits (ingest.max_excluded_per_request; \
-                 limits.publish.max_excluded_per_request on /control/status); refused before \
-                 anything was resolved or allocated. What must fit one request is the list, the \
-                 complement being taken against the view's entities on the executor — so a list \
-                 this long is spelled as an inclusion instead, naming the members the artifact \
-                 holds, which pages over as many requests as it takes (ingest.md §2.3)",
+                "artifact {index} of this publication excludes {} entities, over the {}-entity \
+                 limit (ingest.max_excluded_per_request); name its `members` instead",
                 excluding.len(),
                 state.limits.max_excluded_per_request
             )));
@@ -2630,17 +2586,13 @@ async fn publish_artifacts(
                 (Some(group), None) => {
                     return Err(ApiError::Contract(format!(
                         "artifact {index} of this publication names no `view`, and layer '{name}' \
-                         is scoped to the group '{group}' — its artifacts are a different set per \
-                         view and each belongs to one. Name the view's key: it is part of the \
-                         identity, keys being unique per (layer, view), and no later record can \
-                         fill it (views §3.5)"
+                         is scoped to the group '{group}'; name the key of the view it belongs to"
                     )))
                 }
                 (None, Some(view)) => {
                     return Err(ApiError::Contract(format!(
                         "artifact {index} of this publication names the view '{view}', and layer \
-                         '{name}' is entity-scoped — one artifact set, drawn on every view it \
-                         names — so there is no per-view set for it to belong to (views §3.5)"
+                         '{name}' is entity-scoped; remove `view`"
                     )))
                 }
             }
@@ -2858,9 +2810,7 @@ async fn grow_memberships(
             rejection.status(),
             "grow",
             state.limits.publish_max_body_bytes,
-            "The limit is ingest.publish_max_body_bytes (limits.grow.max_body_bytes on \
-             /control/status). Send fewer members per request: a growth is a delta, so a \
-             membership may be grown in as many requests as it needs",
+            " (ingest.publish_max_body_bytes); send fewer members per request",
         )
     })?;
     let GrowBody {
@@ -2887,11 +2837,8 @@ async fn grow_memberships(
         .sum();
     if members > state.limits.max_members_per_request {
         return Err(ApiError::Contract(format!(
-            "the growth names {} members, exceeding the {}-member per-request limit \
-             (ingest.max_members_per_request; limits.grow.max_members_per_request on \
-             /control/status); refused before any address was resolved. Send fewer members per \
-             request: a growth is a delta, so a membership may be grown in as many requests as it \
-             needs",
+            "the growth names {} members, over the {}-member limit \
+             (ingest.max_members_per_request); send fewer members per request",
             members,
             state.limits.max_members_per_request
         )));
