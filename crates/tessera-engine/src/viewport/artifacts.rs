@@ -1263,10 +1263,34 @@ impl Engine {
             ))
         };
 
-        for (ordinal, entity, masked_count, rank) in passing {
-            if cut.binary_search(&ordinal).is_err() {
-                continue;
-            }
+        // A level is served in key order, then its keyless artifacts in ordinal order, so a level
+        // a build published and one published at a running service are served alike. The keys
+        // are read from the level's slots, looked up once, and copied only where the row carries
+        // one.
+        let survivors: Vec<Passing> = passing
+            .into_iter()
+            .filter(|&(ordinal, ..)| cut.binary_search(&ordinal).is_ok())
+            .collect();
+        let full = req.artifact_rows == ArtifactRows::Full;
+        let keyed: Vec<(Option<String>, Passing)> = self.write.live().with_artifacts(|store| {
+            let slots = store.slots(name, number);
+            let key_of = |ordinal: u32| {
+                slots
+                    .get(ordinal as usize)
+                    .and_then(Option::as_ref)
+                    .and_then(|record| record.key.as_deref())
+            };
+            let mut order: Vec<(Option<&str>, Passing)> =
+                survivors.into_iter().map(|at| (key_of(at.0), at)).collect();
+            order.sort_unstable_by(|(a, at), (b, bt)| {
+                (a.is_none(), a, at.0).cmp(&(b.is_none(), b, bt.0))
+            });
+            order
+                .into_iter()
+                .map(|(key, at)| (key.filter(|_| full).map(str::to_string), at))
+                .collect()
+        });
+        for (key, (ordinal, entity, masked_count, rank)) in keyed {
             // Checked once per artifact served: without this a client that has gone is
             // discovered only once the whole frame is ready, after minutes deriving geometry
             // nobody reads.
@@ -1347,20 +1371,11 @@ impl Engine {
             } else {
                 false
             };
-            // Parents come from the level's records, the key from the store — copying millions
-            // of caller-supplied keys into a cache buys nothing the store's lookup does not.
             let parents: Vec<(String, u32, u32)> = rows
                 .parents(ordinal)
                 .iter()
                 .map(|p| (name.clone(), p.level, p.ordinal))
                 .collect();
-            let key = match req.artifact_rows {
-                ArtifactRows::Identity => None,
-                ArtifactRows::Full => self
-                    .write
-                    .live()
-                    .with_artifacts(|store| store.get(name, number, ordinal)?.key.clone()),
-            };
             // Recorded, not resolved: a parent or attachment target may sit in a level this
             // loop has not reached yet.
             walked

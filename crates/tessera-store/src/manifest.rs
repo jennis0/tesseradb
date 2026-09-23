@@ -1074,6 +1074,11 @@ impl Manifest {
             .map(|v| v.incarnation)
     }
 
+    /// [`Self::incarnation_of`] for the view `key` of `group`.
+    pub fn incarnation_of_key(&self, group: &str, key: &str) -> Option<ViewIncarnation> {
+        self.incarnation_of(&format!("{group}{}{key}", crate::GROUP_SEPARATOR))
+    }
+
     /// Is this artifact's `(view, incarnation)` stamp the live one?
     ///
     /// The predicate every carry-forward and every open filters on. A stamp naming a view this

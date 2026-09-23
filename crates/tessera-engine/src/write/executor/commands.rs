@@ -417,8 +417,10 @@ impl Executor {
             reply.fail(e);
             return;
         }
+        let served = self.generation.load_full();
+        let views = crate::write::ServedViews(&served.bundle.manifest);
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
-            registry.prepare_put(&layer, level, &incoming, store, alloc)
+            registry.prepare_put(&layer, level, &incoming, store, alloc, &views)
         });
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -1545,16 +1547,29 @@ impl Executor {
         }
         self.live.with_roster(|roster| roster.apply(&record));
         let fills_dropped = self.publish_roster(&generation, started, &ids);
+        let served = self.generation.load_full();
+        let retired = self.live.with_publication_state(|registry, store, _| {
+            crate::write::retire_dead_view_artifacts(registry, store, &served.bundle.manifest)
+        });
+        for (layer, _) in &retired.levels {
+            self.pending_forms.retain(|(held, _), _| held != layer);
+            self.deps.artifact_projections.forget(layer);
+            self.deps.lineages.forget(layer);
+            self.deps.level_contents.forget(layer);
+        }
         self.side_manifests.behind_live = true;
         // Ordinary deletions, through the ordinary lane. They are appended, fsynced and applied by
         // the same path a `/control/changes` delete takes, so they retire at the fold and nowhere
         // else. A failure here is reported the way that lane reports one, in force and possibly
         // not durable, and does not un-drop the view, which is already acknowledged as far as the
         // log is concerned.
+        // An artifact of another view attached to a retired one is deleted with its own
+        // dependents, as a deletion of its target would delete it.
         let deleted = dangling.len() as u64;
-        if !dangling.is_empty() {
+        if !dangling.is_empty() || !retired.dependents.is_empty() {
             let mut entries: Vec<DenyEntry> = dangling
                 .into_iter()
+                .chain(retired.dependents)
                 .map(|entity| DenyEntry {
                     record: WalRecord::ChangeByEntity {
                         entity_id: entity,

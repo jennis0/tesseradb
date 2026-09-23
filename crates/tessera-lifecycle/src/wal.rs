@@ -844,6 +844,9 @@ pub struct PublishedArtifact {
     /// artifact in the view its publication was acked in, which is what makes the identity
     /// survive a restart.
     pub view: Option<String>,
+    /// The incarnation of `view` the artifact was published under, and `DECLARED_INCARNATION`
+    /// where there is no view. A drop of the view retires the artifact.
+    pub incarnation: tessera_types::view::ViewIncarnation,
     /// Entity-space membership, CRoaring portable. **Entity space and not row space** — a row-space
     /// membership is a frozen projection, correct until the first fold and then naming other
     /// people's documents (`membership.rs`).
@@ -1064,7 +1067,9 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // gained `Access`. A log at 21 is refused.
 // **23**: `LayerCreate` and `LayerDrop` carry the registry version each was given. A log at 22 is
 // refused.
-const WAL_VERSION: u16 = 23;
+// **24**: `PublishedArtifact` gained `incarnation`, the incarnation of its view it was published
+// under. A log at 23 is refused.
+const WAL_VERSION: u16 = 24;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2513,6 +2518,7 @@ mod tests {
                     entity: EntityId::new(4_294_836_223),
                     key: Some("c-0017".into()),
                     view: None,
+                    incarnation: 0,
                     members: serialise_members(&first),
                     contents: Vec::new(),
                     attached_to: None,
@@ -2531,6 +2537,7 @@ mod tests {
                     // here so a record naming one round-trips and a reader that lost it would
                     // read the members' length as the view's.
                     view: Some("s0".into()),
+                    incarnation: 3,
                     members: serialise_members(&second),
                     contents: vec![PublishedContent {
                         values: vec!["a label".into()],
