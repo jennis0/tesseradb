@@ -135,21 +135,21 @@ def _(mo):
       the frame. `skip` leaves out the columns that the view and the clustering use in their
       own way. `index=["title"]` makes titles searchable and filterable. A column that is not
       indexed is stored with each point and shown when you open it.
-    - `declare_layer("clusters", kind="flat")` declares a **layer**: a set of groups of points
+    - `declare_layer("kmeans", kind="flat")` declares a **layer**: a set of groups of points
       drawn over the map, here a clustering. `kind="flat"` means one level of clusters with no
       hierarchy. Section 2 has layers of the other kinds, whose clusters sit inside larger ones.
-    - `declare_labels("topics", of="clusters")` declares a line of text for each cluster of the
-      `clusters` layer.
+    - `declare_labels("names", of="kmeans")` declares a line of text for each cluster of the
+      `kmeans` layer.
 
     The inserts then give it the data, and each names the frame's columns it uses:
 
     - `insert("map", frame, id="entity_id", x="x", y="y")` makes each row a point. `id` names
       the column that identifies each paper, and `x` and `y` the columns holding its position.
       The view also takes `title`, because a column of that name was declared.
-    - `insert("clusters", frame, id="entity_id", key="cluster")` puts each paper in a cluster.
+    - `insert("kmeans", frame, id="entity_id", key="cluster")` puts each paper in a cluster.
       `key` names the column that says which cluster, and each distinct key becomes one
       cluster.
-    - `insert("topics", topic_names)` takes a dictionary from cluster key to text.
+    - `insert("names", topic_names)` takes a dictionary from cluster key to text.
 
     Each insert prints the columns it read and the columns it ignored.
 
@@ -165,12 +165,12 @@ def _(frame, td, topic_names):
     simple = td.create()
     simple.declare_view("map")
     simple.declare_columns(frame, skip=["entity_id", "x", "y", "cluster"], index=["title"])
-    simple.declare_layer("clusters", kind="flat")
-    simple.declare_labels("topics", of="clusters")
+    simple.declare_layer("kmeans", kind="flat")
+    simple.declare_labels("names", of="kmeans")
 
     simple.insert("map", frame, id="entity_id", x="x", y="y")
-    simple.insert("clusters", frame, id="entity_id", key="cluster")
-    simple.insert("topics", topic_names)
+    simple.insert("kmeans", frame, id="entity_id", key="cluster")
+    simple.insert("names", topic_names)
     print(simple.commit())
     return (simple,)
 
@@ -179,7 +179,9 @@ def _(frame, td, topic_names):
 def _(mo):
     mo.md("""
     `map()` draws the database's map in the notebook, served by that local server.
-    `colour_by="cluster:clusters"` colours each point by its cluster in the `clusters` layer.
+    `colour_by` names what the points are coloured by: a column, such as `"title"`, or
+    `cluster:` followed by a layer's name. `colour_by="cluster:kmeans"` colours each point by
+    its cluster in the `kmeans` layer.
     Hover over a point to see its title, and zoom in to see more points.
     """)
     return
@@ -187,7 +189,7 @@ def _(mo):
 
 @app.cell
 def _(mo, simple):
-    mo.ui.anywidget(simple.map(colour_by="cluster:clusters", height=520))
+    mo.ui.anywidget(simple.map(colour_by="cluster:kmeans", height=520))
     return
 
 
@@ -257,6 +259,11 @@ def _(DATA, datetime, pa, pc, pq):
     _written = members["topics-toponymy"].filter(pc.is_valid(members["topics-toponymy"]["rank"]))
     named_topics = pq.read_table(DATA / "topics-toponymy.parquet")
     named_topics = named_topics.filter(pc.is_in(named_topics["key"], _written["key"]))
+    # The corpus's files call the clustering `clusters/toponymy`, and this database `topics`.
+    named_topics = named_topics.set_column(
+        named_topics.schema.get_field_index("attached_layer"), "attached_layer",
+        pa.array(["topics"] * named_topics.num_rows),
+    )
     members["topics-toponymy"] = members["topics-toponymy"].filter(
         pc.is_in(members["topics-toponymy"]["key"], named_topics["key"])
     )
@@ -288,7 +295,7 @@ def _(mo):
     Each clustering is a layer. `views` says which views it is drawn on. `kind="tiered"` means
     fixed levels, from coarse to fine, which `levels` names. `computed` is what the server works
     out for each cluster for each reader, such as its centre and its bounding box. `scope` puts
-    `clusters/yearly` on every view of the `years` group, with separate clusters in each.
+    `yearly` on every view of the `years` group, with separate clusters in each.
 
     Two settings decide what a reader is shown. `require_member_visibility` shows a cluster to
     a reader only when they can see enough of its papers. `content_requires="all"` shows a
@@ -317,19 +324,19 @@ def _(SCALE, td):
 
     # How many of a topic's papers a reader must see before the topic is shown to them.
     _floor = {"whole": 50, "sample": 5}[SCALE]
-    db.declare_layer("clusters/toponymy", kind="tiered", views=["papers", "years"],
+    db.declare_layer("topics", kind="tiered", views=["papers", "years"],
                      levels=[(0, "coarsest"), (1, "coarse"), (2, "fine"), (3, "finest")],
                      require_member_visibility={"count": _floor}, title="Topics")
-    db.declare_labels("topics/toponymy", of="clusters/toponymy", content_requires="all",
+    db.declare_labels("topic_names", of="topics", content_requires="all",
                       title="Topic names")
-    db.declare_layer("taxonomy/arxiv", kind="tiered", views=["papers", "years"],
+    db.declare_layer("arxiv", kind="tiered", views=["papers", "years"],
                      levels=[(0, "archive"), (1, "subject class")],
                      require_member_visibility={"count": 1}, computed=("centroid", "box"),
                      title="arXiv classification")
-    db.declare_layer("clusters/kmeans", kind="flat", views=["papers"], value_set="open",
+    db.declare_layer("kmeans", kind="flat", views=["papers"], value_set="open",
                      require_member_visibility={"count": 50}, title="k-means clusters")
     # Filled in section 4, with a clustering of each year computed while the database serves.
-    db.declare_layer("clusters/yearly", kind="flat", scope={"group": "years"},
+    db.declare_layer("yearly", kind="flat", scope={"group": "years"},
                      require_member_visibility={"count": 1}, title="Clusters of each year")
     return (db,)
 
@@ -367,14 +374,14 @@ def _(DATA, db, members, pa, points, named_topics, years):
     _columns = dict(key="key", level="level", parent="parent", contents="contents",
                     attached_layer="attached_layer", attached_level="attached_level",
                     attached_key="attached_key")
-    for _layer, _name in [("clusters/toponymy", "clusters-toponymy"),
-                          ("taxonomy/arxiv", "taxonomy-arxiv"),
-                          ("clusters/kmeans", "clusters-kmeans")]:
+    for _layer, _name in [("topics", "clusters-toponymy"),
+                          ("arxiv", "taxonomy-arxiv"),
+                          ("kmeans", "clusters-kmeans")]:
         db.insert(_layer, artifacts=str(DATA / f"{_name}.parquet"), **_columns)
         db.insert(_layer, members=members[_name], id="entity", key="key", level="level",
                   rank="rank")
-    db.insert("topics/toponymy", named_topics, **_columns)
-    db.insert("topics/toponymy", members=members["topics-toponymy"], id="entity", key="key",
+    db.insert("topic_names", named_topics, **_columns)
+    db.insert("topic_names", members=members["topics-toponymy"], id="entity", key="key",
               level="level", rank="rank")
     return
 
@@ -405,7 +412,7 @@ def _(mo):
 
 @app.cell
 def _(db, mo):
-    mo.ui.anywidget(db.map(view="papers", colour_by="cluster:clusters/toponymy", height=520))
+    mo.ui.anywidget(db.map(view="papers", colour_by="cluster:topics", height=520))
     return
 
 
@@ -434,13 +441,13 @@ def _(db):
 
 @app.cell
 def _(astro, mo):
-    mo.ui.anywidget(astro.map(view="papers", colour_by="cluster:clusters/toponymy", height=380))
+    mo.ui.anywidget(astro.map(view="papers", colour_by="cluster:topics", height=380))
     return
 
 
 @app.cell
 def _(learning, mo):
-    mo.ui.anywidget(learning.map(view="papers", colour_by="cluster:clusters/toponymy", height=380))
+    mo.ui.anywidget(learning.map(view="papers", colour_by="cluster:topics", height=380))
     return
 
 
@@ -514,7 +521,7 @@ def _(mo):
 @app.cell
 def _(db, mo, recent_cs):
     mo.ui.anywidget(db.map(view="papers", filters=recent_cs,
-                           colour_by="cluster:clusters/toponymy", height=440))
+                           colour_by="cluster:topics", height=440))
     return
 
 
@@ -559,7 +566,7 @@ def _(DATA, astro, learning, pd, pq, since):
     _since_2020 = {"submitted_at": {"range": {"gte": since("2020-01-01")}}}
 
     def per_topic(reader):
-        page = reader.browse_artifacts("papers", "clusters/toponymy", level=0,
+        page = reader.browse_artifacts("papers", "topics", level=0,
                                        filters=_since_2020)
         return pd.DataFrame(page["artifacts"]).set_index("key")[["masked_count", "matched_count"]]
 
@@ -591,7 +598,7 @@ def _(mo, years):
 
 @app.cell
 def _(db, mo, years):
-    year_map = db.map(view=f"years:{years[-1]}", colour_by="cluster:clusters/toponymy",
+    year_map = db.map(view=f"years:{years[-1]}", colour_by="cluster:topics",
                       height=440)
     mo.ui.anywidget(year_map)
     return (year_map,)
@@ -608,7 +615,7 @@ def _(mo):
     mo.md("""
     A view of its own lets each year have its own clusters. The cell below runs scikit-learn's
     k-means on each year's positions, with about one cluster per 250 papers and at most 20,
-    and adds the result to the running database as `clusters/yearly`. That clustering is
+    and adds the result to the running database as `yearly`. That clustering is
     scoped to the `years` group, so each year's view gets its own clusters and the `papers`
     view gets none.
 
@@ -629,9 +636,9 @@ def _(KMeans, db, pd, points):
     yearly = points.select(["entity_id", "x", "y", "year"]).to_pandas()
     yearly["cluster"] = yearly.groupby("year", group_keys=False)[["x", "y"]].apply(_clusters)
 
-    db.insert("clusters/yearly", artifacts=yearly[["year", "cluster"]].drop_duplicates(),
+    db.insert("yearly", artifacts=yearly[["year", "cluster"]].drop_duplicates(),
               key="cluster", view="year")
-    db.insert("clusters/yearly", members=yearly, id="entity_id", key="cluster", view="year")
+    db.insert("yearly", members=yearly, id="entity_id", key="cluster", view="year")
     yearly_report = db.commit()
     print(yearly_report)
     return (yearly_report,)
@@ -640,7 +647,7 @@ def _(KMeans, db, pd, points):
 @app.cell
 def _(db, mo, yearly_report):
     _ = yearly_report
-    mo.ui.anywidget(db.map(view="years:2010", colour_by="cluster:clusters/yearly", height=440))
+    mo.ui.anywidget(db.map(view="years:2010", colour_by="cluster:yearly", height=440))
     return
 
 
@@ -675,7 +682,7 @@ def _(before_week, db, pd, visible, week, week_members):
     db.insert("papers", week, id="entity_id", x="x", y="y", access="categories")
     db.insert("years", week.select(["entity_id", "x", "y", "categories", "year"]),
               id="entity_id", x="x", y="y", access="categories", view="year")
-    db.insert("clusters/kmeans", members=week_members["clusters-kmeans"], id="entity", key="key",
+    db.insert("kmeans", members=week_members["clusters-kmeans"], id="entity", key="key",
               level="level", rank="rank")
     print(db.commit())
     pd.DataFrame({"before": before_week, "after": visible(db)})
@@ -745,7 +752,7 @@ def _(mo):
 
     ```python
     v = td.connect("https://tessera.example/viewer", token=my_token)
-    v.map(colour_by="cluster:clusters/toponymy")
+    v.map(colour_by="cluster:topics")
     ```
     """)
     return
