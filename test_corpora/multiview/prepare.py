@@ -364,6 +364,10 @@ def main() -> None:
     # Six curated collections, membership drawn irrespective of bucket — some members will be
     # absent from a given view (a C-bucket entity under "quarter", a D-bucket one under "world"),
     # which is the ordinary case a layer over a group has to tolerate.
+    # Each collection carries an access label of its own, which a principal must hold to be served
+    # it: `public`, one country, two countries, or none, which the layer's `inherited` default
+    # answers with the layer's own label. The countries are those most common among the
+    # collection's members, so the principal ladder separates them.
     collection_names = ["frontier", "core", "outliers", "review", "watchlist", "archive"]
     coll_rows = {"key": [], "contents": [], "members": [], "access": []}
     for i, name in enumerate(collection_names):
@@ -372,13 +376,18 @@ def main() -> None:
         coll_rows["key"].append(name)
         coll_rows["contents"].append([[f"{name}-tag"]])
         coll_rows["members"].append(members)
-        coll_rows["access"].append(None if i % 3 else "public")
+        held = [access[j] for j in np.flatnonzero(pick) if access[j]]
+        common = [c for c, _ in sorted(
+            ((c, held.count(c)) for c in set(held)), key=lambda one: (-one[1], one[0])
+        )]
+        labels = {0: ["public"], 1: common[:1], 3: common[1:3], 4: common[:1]}.get(i)
+        coll_rows["access"].append(labels)
     coll_table = pa.table(
         {
             "key": pa.array(coll_rows["key"], type=pa.string()),
             "contents": pa.array(coll_rows["contents"], type=pa.list_(pa.list_(pa.string()))),
             "members": pa.array(coll_rows["members"], type=pa.list_(pa.uint64())),
-            "access": pa.array(coll_rows["access"], type=pa.string()),
+            "access": pa.array(coll_rows["access"], type=pa.list_(pa.string())),
         }
     )
     pq.write_table(coll_table, out / "collections.parquet")
