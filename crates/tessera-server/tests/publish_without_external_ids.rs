@@ -1,11 +1,5 @@
-//! A publication under external addressing into a bundle that holds no external-id run is one
-//! refusal naming the deployment, not one `404` per member.
-//!
-//! Found reconciling the ingest campaign's driver (2026-09-04): every base built before the
-//! driver passed `--mint-external-ids` answered "id 0 of artifact 0 names nothing this deployment
-//! holds" for every publication, which reads as a list of typos when the truth is that nothing in
-//! the deployment can be named by an external id. The per-member refusal stays for a bundle that
-//! does carry ids, where a member that resolves to nothing is the caller's data being wrong.
+//! A publication under external addressing into a bundle that holds no external ids is one
+//! refusal for the deployment, not one `404` per member.
 
 mod common;
 
@@ -16,30 +10,24 @@ use serde_json::json;
 use tempfile::TempDir;
 use tessera_build::{build, BuildArgs};
 
-/// The shared fixture, with the external-id run minted or not.
-fn build_fixture_minting(out: &Path, dir: &Path, mint_external_ids: bool) {
+/// 64 items placed and labelled as the standard fixture's are, built into `dir/bundle` with no
+/// external ids.
+fn build_without_external_ids(dir: &Path) {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points_n(&points, 64);
     write_pairs_n(&pairs, 64);
     let args = BuildArgs {
-        mint_external_ids,
+        mint_external_ids: false,
         ..build_args(
-            out,
+            &dir.join("bundle"),
             vec![view_args("s0", &points, AccessInput::relation(pairs))],
         )
     };
     build(&args).expect("the fixture build succeeds");
 }
 
-async fn serve_fixture(mint_external_ids: bool) -> (TempDir, TestServer) {
-    let tmp = TempDir::new().unwrap();
-    build_fixture_minting(&tmp.path().join("bundle"), tmp.path(), mint_external_ids);
-    let server = open(&tmp).await;
-    (tmp, server)
-}
-
-/// Publish one artifact whose members are the given external ids; return status and body text.
+/// Publish one artifact whose members are the given external ids; return the status and the body.
 async fn publish(server: &TestServer, layer: &str, members: &[u64]) -> (u16, serde_json::Value) {
     let members: Vec<String> = members.iter().map(|e| member(*e)).collect();
     let encoded = layer.replace('/', "%2F");
@@ -60,9 +48,18 @@ async fn publish(server: &TestServer, layer: &str, members: &[u64]) -> (u16, ser
 
 #[tokio::test]
 async fn a_bundle_with_no_external_ids_refuses_the_publication_once() {
-    let (_tmp, server) = serve_fixture(false).await;
+    let tmp = TempDir::new().unwrap();
+    build_without_external_ids(tmp.path());
+    let server = open(&tmp).await;
     register(&server, flat_layer("flat/x")).await;
     let (status, body) = publish(&server, "flat/x", &[1, 2, 3]).await;
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["error"], "contract", "{body}");
+
+    // The same body lands on a bundle that holds external ids, so the refusal is the bundle's.
+    let tmp = TempDir::new().unwrap();
+    let server = serve_standard(&tmp).await;
+    register(&server, flat_layer("flat/x")).await;
+    let (status, body) = publish(&server, "flat/x", &[1, 2, 3]).await;
+    assert_eq!(status, 201, "{body}");
 }
