@@ -69,7 +69,8 @@ pub struct ItemsLimits {
     /// Arrow bytes a response carries. No page starts that could take it past this.
     pub response_bytes: usize,
     /// Time a response runs, read between pages and between chunks of a page's scan. A page
-    /// holding rows when it runs out is sent short.
+    /// holding rows when it runs out is sent short. The walk honours it only once stopping moves
+    /// the cursor on, so every response advances the read.
     pub response_time: Duration,
 }
 
@@ -101,7 +102,10 @@ pub struct ItemsRequest<'a> {
     pub idset: Option<u32>,
     pub limits: ItemsLimits,
     /// Cancellation ends the response with a trailer whose `ended_by` is `deadline`, after a
-    /// page holding whatever rows the page under way had reached.
+    /// page holding whatever rows the page under way had reached. The walk honours it only once
+    /// stopping moves the cursor on, so it may scan past it until then. A token cancelled before
+    /// the response walks its first page ends the response with no rows and the cursor it was
+    /// given, since the client has gone.
     pub cancel: Option<CancelToken>,
 }
 

@@ -1950,39 +1950,8 @@ fn a_merge_and_a_flush_between_two_pages_of_one_filtered_response_keep_it_exact(
 /// unfiltered and with every row marked: every row once, and as many as the viewport counts.
 #[test]
 fn every_row_is_read_once_across_stretch_boundaries() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
     let n = 30_000u64;
-    build_fixture_n(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        n,
-    );
-    let engine = engine_at(tmp.path(), &root, 3600);
-    engine.set_background_refresh_for_test(false);
-    for batch in 0..3u64 {
-        let rows: Vec<UnallocatedRow> = (0..700u64)
-            .map(|i| {
-                let s = n + batch * 700 + i;
-                UnallocatedRow {
-                    external_id: Some(s.to_le_bytes().to_vec()),
-                    view: "s0".to_string(),
-                    join: None,
-                    x: ((s * 37) % 1000) as f64 + 0.5,
-                    y: ((s * 53) % 1000) as f64 + 0.5,
-                    scalars: Vec::new(),
-                    terms: engine.resolve_terms(&[b"0".to_vec()]),
-                    descriptors: vec![b"0".to_vec()],
-                    scoped: Vec::new(),
-                }
-            })
-            .collect();
-        engine
-            .accept_ingest(rows, format!("batch-{batch}"), [0u8; 32])
-            .expect("the ingest is accepted");
-        flush(&engine);
-    }
+    let (_tmp, engine) = thirty_thousand(3);
     let segments = engine.generation().bundle.partitions["default"].views["s0"]
         .segments
         .len();
@@ -2132,18 +2101,42 @@ fn the_stored_walk_serves_what_the_mask_admits_where_the_candidate_is_wider() {
 // Time and cancellation inside a page
 // ---------------------------------------------------------------------------------------------
 
-/// The 30,000-item fixture of `common`, opened with its executor.
-fn thirty_thousand() -> (tempfile::TempDir, Engine) {
+/// The 30,000-item fixture of `common`, opened with its executor, and `batches` more segments of
+/// 700 items each ingested and flushed into its view, placed as the fixture places its own.
+fn thirty_thousand(batches: u64) -> (tempfile::TempDir, Engine) {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
+    let n = 30_000u64;
     build_fixture_n(
         &root,
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
-        30_000,
+        n,
     );
     let engine = engine_at(tmp.path(), &root, 3600);
     engine.set_background_refresh_for_test(false);
+    for batch in 0..batches {
+        let rows: Vec<UnallocatedRow> = (0..700u64)
+            .map(|i| {
+                let s = n + batch * 700 + i;
+                UnallocatedRow {
+                    external_id: Some(s.to_le_bytes().to_vec()),
+                    view: "s0".to_string(),
+                    join: None,
+                    x: ((s * 37) % 1000) as f64 + 0.5,
+                    y: ((s * 53) % 1000) as f64 + 0.5,
+                    scalars: Vec::new(),
+                    terms: engine.resolve_terms(&[b"0".to_vec()]),
+                    descriptors: vec![b"0".to_vec()],
+                    scoped: Vec::new(),
+                }
+            })
+            .collect();
+        engine
+            .accept_ingest(rows, format!("batch-{batch}"), [0u8; 32])
+            .expect("the ingest is accepted");
+        flush(&engine);
+    }
     (tmp, engine)
 }
 
@@ -2156,10 +2149,17 @@ fn region_of(shape: ShapeF64) -> FilterExpr {
 /// **A time budget reached while a page holds rows ends that page short, by time, and the
 /// response after it**, whose cursor the next response resumes from with no row lost or
 /// repeated. A narrower viewer and a filter make the rows a page wants sparser than the rows it
-/// scans, so a page reaches the budget before it fills.
+/// scans, so a page reaches the budget before it fills. The view is read as one segment and as
+/// four, where the budget can run out while the segments' first chunks are still being gathered.
 #[test]
 fn a_page_cut_by_time_is_sent_short_and_the_read_resumes_after_it() {
-    let (_tmp, engine) = thirty_thousand();
+    for batches in [0, 3] {
+        page_cut_by_time(batches);
+    }
+}
+
+fn page_cut_by_time(batches: u64) {
+    let (_tmp, engine) = thirty_thousand(batches);
     let session = engine.authorise(&subset_credential()).unwrap();
     let fields: Vec<String> = Vec::new();
     let west = region_of(ShapeF64::Bbox {
@@ -2177,7 +2177,7 @@ fn a_page_cut_by_time_is_sent_short_and_the_read_resumes_after_it() {
 
         req.limits.response_time = Duration::ZERO;
         let (sink, trailer) = respond(&engine, &session, req.clone()).unwrap();
-        assert_eq!(sink.pages.len(), 1, "{order:?}: one page before the budget ends it");
+        assert_eq!(sink.pages.len(), 1, "{order:?} {batches}: one page before the budget ends it");
         let (batch, end) = &sink.pages[0];
         assert_eq!(end.ended_by, PageEndedBy::Time, "{order:?}");
         assert!(batch.num_rows() > 0 && batch.num_rows() < 3000, "{order:?}: a short page");
@@ -2193,10 +2193,16 @@ fn a_page_cut_by_time_is_sent_short_and_the_read_resumes_after_it() {
 /// filter**: each sends the rows its page held when it was cancelled, and the next resumes past
 /// everything it scanned. The filter is a thin band across the map, so its rows are spread
 /// through the scan in both orders, and a page is larger than the band, so it holds rows at
-/// every cancellation after its first.
+/// every cancellation after its first. The view is read as one segment and as four.
 #[test]
 fn chained_responses_cancelled_mid_scan_complete_a_sparse_read() {
-    let (_tmp, engine) = thirty_thousand();
+    for batches in [0, 3] {
+        cancelled_mid_scan(batches);
+    }
+}
+
+fn cancelled_mid_scan(batches: u64) {
+    let (_tmp, engine) = thirty_thousand(batches);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let fields: Vec<String> = Vec::new();
     let band = region_of(ShapeF64::Bbox {
@@ -2223,7 +2229,7 @@ fn chained_responses_cancelled_mid_scan_complete_a_sparse_read() {
         let mut responses = 0;
         loop {
             responses += 1;
-            assert!(responses <= 200, "{order:?}: the read made no progress");
+            assert!(responses <= 200, "{order:?} {batches}: the read made no progress");
             let token = tessera_engine::CancelToken::new();
             let deadline = {
                 let token = token.clone();

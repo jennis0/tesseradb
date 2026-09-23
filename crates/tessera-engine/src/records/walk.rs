@@ -96,14 +96,13 @@ pub(super) struct Collected {
 }
 
 /// A response's time budget and cancellation, read between chunks of a walk's scan and never per
-/// row.
+/// row. A walk honours either only where stopping moves the position past the one the response
+/// started from, so every response the walk begins moves the scan on, at the cost of scanning
+/// on past a deadline until it does.
 pub(super) struct Clock {
     started: Instant,
     budget: Duration,
     pub(super) cancel: Option<CancelToken>,
-    /// Chunks this response has scanned. A walk stops for time or cancellation only after one, so
-    /// every response moves the scan position on, at the cost of one chunk past a deadline.
-    scanned: u32,
 }
 
 impl Clock {
@@ -112,7 +111,6 @@ impl Clock {
             started,
             budget,
             cancel,
-            scanned: 0,
         }
     }
 
@@ -124,11 +122,8 @@ impl Clock {
         self.started.elapsed() >= self.budget
     }
 
-    /// Why the scan must stop here, if it must.
+    /// Why the scan would stop here.
     fn stop(&self) -> Option<ResponseEndedBy> {
-        if self.scanned == 0 {
-            return None;
-        }
         if self.cancelled() {
             return Some(ResponseEndedBy::Deadline);
         }
@@ -146,6 +141,8 @@ pub(super) struct Walk {
     ceiling: u32,
     stretch: Option<Stretch>,
     pub(super) position: Position,
+    /// The scan position the response started from: a stop is honoured only past it.
+    origin: Option<Key>,
     /// The coarsest verdict the walk's evaluations have reached, for the response's header.
     pub(super) region: Option<RegionVerdict>,
 }
@@ -263,6 +260,7 @@ impl Walk {
             target: stretch.clamp(STRETCH_MIN, ceiling),
             ceiling,
             stretch: None,
+            origin: position.scan,
             position,
             region: None,
         }
@@ -293,7 +291,9 @@ impl Walk {
             }
             if self.stretch.is_none() {
                 if let Some(reason) = clock.stop() {
-                    break Walked::Stopped(reason);
+                    if !rows.is_empty() || scan > self.origin {
+                        break Walked::Stopped(reason);
+                    }
                 }
                 let opened = match order {
                     RecordsOrder::Map => self.open_map_stretch(cx, scan, &clock.cancel)?,
@@ -304,20 +304,22 @@ impl Walk {
                     None => break Walked::End,
                 }
             }
-            let stretch = self.stretch.as_ref().expect("a stretch is open");
-            let stopped = match order {
-                RecordsOrder::Map => {
-                    take_map(cx, stretch, self.keep_unmatched, scan, need, clock, &mut rows)
-                }
-                RecordsOrder::Stored => {
-                    take_stored(cx, stretch, self.keep_unmatched, scan, need, clock, &mut rows)
-                }
+            let take = Take {
+                cx,
+                stretch: self.stretch.as_ref().expect("a stretch is open"),
+                keep_unmatched: self.keep_unmatched,
+                moved: scan > self.origin,
             };
-            if let Some((reason, frontier)) = stopped {
+            let stopped = match order {
+                RecordsOrder::Map => take.map(scan, need, clock, &mut rows),
+                RecordsOrder::Stored => take.stored(scan, need, clock, &mut rows),
+            };
+            let stretch = take.stretch;
+            if let Some((reason, first_unreached)) = stopped {
                 // Every row before the first one the scan did not reach has been taken or passed
                 // over, so the scan position moves to just before it. The stretch outlasted the
                 // response, so the next response evaluates a shorter one.
-                scan = scan.max(before(frontier));
+                scan = scan.max(before(first_unreached));
                 self.target = (self.target / STRETCH_GROWTH).max(STRETCH_MIN);
                 break Walked::Stopped(reason);
             }
@@ -326,7 +328,6 @@ impl Walk {
                 scan = Some(key_of(order, cx.segments(), row));
                 break Walked::Filled;
             }
-            clock.scanned += 1;
             let until = stretch.until;
             self.stretch = None;
             self.target = self.target.saturating_mul(STRETCH_GROWTH).min(self.ceiling);
@@ -504,81 +505,9 @@ impl Walk {
     }
 }
 
-/// Take map-order rows past `scan` and in the stretch until `rows` holds `need`: each segment's
-/// rows that the page's mask admits, and the filter where rows must match, merged across segments
-/// by `(cell, tessera_id)`. `Some` where the clock stopped the scan, with the first key it did not
-/// reach.
-fn take_map(
-    cx: &PageCx<'_>,
-    stretch: &Stretch,
-    keep_unmatched: bool,
-    scan: Option<Key>,
-    need: usize,
-    clock: &mut Clock,
-    rows: &mut Vec<Taken>,
-) -> Option<(ResponseEndedBy, Key)> {
-    let mut runs: Vec<SegmentRun<'_>> = cx
-        .segments()
-        .iter()
-        .enumerate()
-        .map(|(seg, &(segment, base))| SegmentRun {
-            seg,
-            segment,
-            base,
-            next: first_after(segment, scan),
-            end: first_at_cell(segment, stretch.until),
-            chunk: u32::try_from(need - rows.len()).unwrap_or(u32::MAX).max(1),
-            buffered: Vec::new(),
-            at: 0,
-        })
-        .collect();
-    let stopped = |runs: &[SegmentRun<'_>], reason| {
-        let frontier = runs.iter().filter_map(SegmentRun::frontier).min()?;
-        Some((reason, frontier))
-    };
-    let mut heads: BinaryHeap<Reverse<(Key, usize)>> = BinaryHeap::with_capacity(runs.len());
-    for i in 0..runs.len() {
-        match runs[i].head(cx, stretch, keep_unmatched, clock) {
-            Head::Row(key) => heads.push(Reverse((key, i))),
-            Head::Drained => {}
-            Head::Stopped(reason) => return stopped(&runs, reason),
-        }
-    }
-    while rows.len() < need {
-        let Reverse((_, i)) = heads.pop()?;
-        let run = &mut runs[i];
-        let (local, matched) = run.buffered[run.at];
-        let tessera_id = run.segment.columns.tessera_id()[local as usize];
-        rows.push(Taken {
-            seg: run.seg,
-            local,
-            tessera_id,
-            entity: cx.entity_of(tessera_id),
-            matched,
-        });
-        run.at += 1;
-        if rows.len() == need {
-            return None;
-        }
-        match run.head(cx, stretch, keep_unmatched, clock) {
-            Head::Row(key) => heads.push(Reverse((key, i))),
-            Head::Drained => {}
-            Head::Stopped(reason) => return stopped(&runs, reason),
-        }
-    }
-    None
-}
-
-/// What a segment serves next in a map stretch.
-enum Head {
-    Row(Key),
-    Drained,
-    /// The clock stopped the scan before the segment's next chunk was gathered.
-    Stopped(ResponseEndedBy),
-}
-
 /// One segment's rows in a map stretch, gathered through the page's mask a chunk at a time: the
-/// first chunk is as long as the page still needs, and each after it twice the one before.
+/// first chunk is as long as the page still needs, and at least [`CHUNK_MIN`] rows, and each after
+/// it twice the one before.
 struct SegmentRun<'a> {
     seg: usize,
     segment: &'a SegmentData,
@@ -593,53 +522,42 @@ struct SegmentRun<'a> {
 }
 
 impl SegmentRun<'_> {
-    /// The key of the next row this segment serves, gathering another chunk where the last is
-    /// spent, and reading the clock before each one.
-    fn head(
-        &mut self,
-        cx: &PageCx<'_>,
-        stretch: &Stretch,
-        keep_unmatched: bool,
-        clock: &mut Clock,
-    ) -> Head {
-        while self.at == self.buffered.len() {
-            if self.next >= self.end {
-                return Head::Drained;
-            }
-            if let Some(reason) = clock.stop() {
-                return Head::Stopped(reason);
-            }
-            let hi = self.end.min(self.next.saturating_add(self.chunk));
-            let visible = cx
-                .open
-                .mask
-                .rows_in_range(self.base + self.next..self.base + hi);
-            self.buffered.clear();
-            self.at = 0;
-            match &stretch.filter {
-                None => self
-                    .buffered
-                    .extend(visible.iter().map(|row| (row - self.base, true))),
-                Some(filter) if keep_unmatched => {
-                    let matched = visible.and(filter.rows());
-                    self.buffered.extend(
-                        visible
-                            .iter()
-                            .map(|row| (row - self.base, matched.contains(row))),
-                    );
-                }
-                Some(filter) => self.buffered.extend(
+    /// The key of the next gathered row not yet taken.
+    fn head(&self) -> Option<Key> {
+        let &(local, _) = self.buffered.get(self.at)?;
+        Some(self.key(local))
+    }
+
+    /// The next chunk of this segment's part of the stretch, through the page's mask.
+    fn gather(&mut self, cx: &PageCx<'_>, stretch: &Stretch, keep_unmatched: bool) {
+        let hi = self.end.min(self.next.saturating_add(self.chunk));
+        let visible = cx
+            .open
+            .mask
+            .rows_in_range(self.base + self.next..self.base + hi);
+        self.buffered.clear();
+        self.at = 0;
+        match &stretch.filter {
+            None => self
+                .buffered
+                .extend(visible.iter().map(|row| (row - self.base, true))),
+            Some(filter) if keep_unmatched => {
+                let matched = visible.and(filter.rows());
+                self.buffered.extend(
                     visible
-                        .and(filter.rows())
                         .iter()
-                        .map(|row| (row - self.base, true)),
-                ),
+                        .map(|row| (row - self.base, matched.contains(row))),
+                );
             }
-            self.next = hi;
-            self.chunk = self.chunk.saturating_mul(2);
-            clock.scanned += 1;
+            Some(filter) => self.buffered.extend(
+                visible
+                    .and(filter.rows())
+                    .iter()
+                    .map(|row| (row - self.base, true)),
+            ),
         }
-        Head::Row(self.key(self.buffered[self.at].0))
+        self.next = hi;
+        self.chunk = self.chunk.saturating_mul(2);
     }
 
     fn key(&self, local: u32) -> Key {
@@ -653,7 +571,7 @@ impl SegmentRun<'_> {
     /// The first key in this segment the scan has not passed: the next gathered row not yet
     /// taken, or the first row not yet gathered. `None` where the segment's part of the stretch
     /// is spent.
-    fn frontier(&self) -> Option<Key> {
+    fn first_unreached(&self) -> Option<Key> {
         if self.at < self.buffered.len() {
             return Some(self.key(self.buffered[self.at].0));
         }
@@ -663,57 +581,175 @@ impl SegmentRun<'_> {
 
 /// How many of a stored stretch's items are tested between two readings of the clock.
 const STORED_CHUNK: usize = 4096;
+/// The fewest rows a map segment's first chunk spans, whatever the page still needs, so a
+/// response the clock stops still moves the scan by that much.
+const CHUNK_MIN: u32 = 1024;
 
-/// Take stored-order rows past `scan` from a stretch's items until `rows` holds `need`: each item
-/// whose row the page's mask admits, and that matches where rows must match. `Some` where the
-/// clock stopped the scan, with the first key it did not reach.
-fn take_stored(
-    cx: &PageCx<'_>,
-    stretch: &Stretch,
+/// One stretch's rows being taken into a page.
+struct Take<'a> {
+    cx: &'a PageCx<'a>,
+    stretch: &'a Stretch,
     keep_unmatched: bool,
-    scan: Option<Key>,
-    need: usize,
-    clock: &mut Clock,
-    rows: &mut Vec<Taken>,
-) -> Option<(ResponseEndedBy, Key)> {
-    let start = match scan {
-        None => 0,
-        Some(scan) => stretch
-            .items
-            .partition_point(|&(entity, _)| (entity, 0) <= scan),
-    };
-    let segments = cx.segments();
-    for (i, &(entity, row)) in stretch.items[start..].iter().enumerate() {
-        if rows.len() == need {
-            return None;
-        }
-        if i % STORED_CHUNK == 0 {
-            if i > 0 {
-                clock.scanned += 1;
-            }
-            if let Some(reason) = clock.stop() {
-                return Some((reason, (entity, 0)));
-            }
-        }
-        if !cx.open.mask.contains_row(row) {
-            continue;
-        }
-        let matched = stretch
-            .filter
-            .as_ref()
-            .is_none_or(|filter| filter.rows().contains(row));
-        if !matched && !keep_unmatched {
-            continue;
-        }
-        let (seg, local) =
-            segment_holding(segments, row).expect("the first segment's rows begin at 0");
-        rows.push(Taken {
-            seg,
-            local,
-            tessera_id: segments[seg].0.columns.tessera_id()[local as usize],
-            entity,
-            matched,
-        });
+    /// Whether the scan has already passed the position the response started from.
+    moved: bool,
+}
+
+impl Take<'_> {
+    /// The stop the clock asks for, where honouring it moves the position: a row is held, the
+    /// scan had passed the response's start before this take, or the first key the scan has not
+    /// reached lies past the first row the take began at.
+    fn stop(
+        &self,
+        clock: &Clock,
+        rows: &[Taken],
+        first_unreached: Key,
+        began_at: Key,
+    ) -> Option<(ResponseEndedBy, Key)> {
+        let reason = clock.stop()?;
+        (!rows.is_empty() || self.moved || first_unreached > began_at)
+            .then_some((reason, first_unreached))
     }
-    None
+
+    /// Take map-order rows past `scan` and in the stretch until `rows` holds `need`: each
+    /// segment's rows that the page's mask admits, and the filter where rows must match, merged
+    /// across segments by `(cell, tessera_id)`. `Some` where the clock stopped the scan, with the
+    /// first key it did not reach.
+    fn map(
+        &self,
+        scan: Option<Key>,
+        need: usize,
+        clock: &Clock,
+        rows: &mut Vec<Taken>,
+    ) -> Option<(ResponseEndedBy, Key)> {
+        let cx = self.cx;
+        let mut runs: Vec<SegmentRun<'_>> = cx
+            .segments()
+            .iter()
+            .enumerate()
+            .map(|(seg, &(segment, base))| SegmentRun {
+                seg,
+                segment,
+                base,
+                next: first_after(segment, scan),
+                end: first_at_cell(segment, self.stretch.until),
+                chunk: u32::try_from(need - rows.len())
+                    .unwrap_or(u32::MAX)
+                    .max(CHUNK_MIN),
+                buffered: Vec::new(),
+                at: 0,
+            })
+            .collect();
+        let began_at = runs.iter().filter_map(SegmentRun::first_unreached).min()?;
+        let mut heads: BinaryHeap<Reverse<(Key, usize)>> = BinaryHeap::with_capacity(runs.len());
+        for i in 0..runs.len() {
+            match self.head(&mut runs, i, clock, rows, began_at) {
+                Ok(Some(key)) => heads.push(Reverse((key, i))),
+                Ok(None) => {}
+                Err(stop) => return Some(stop),
+            }
+        }
+        while rows.len() < need {
+            let Reverse((_, i)) = heads.pop()?;
+            let run = &mut runs[i];
+            let (local, matched) = run.buffered[run.at];
+            let tessera_id = run.segment.columns.tessera_id()[local as usize];
+            rows.push(Taken {
+                seg: run.seg,
+                local,
+                tessera_id,
+                entity: cx.entity_of(tessera_id),
+                matched,
+            });
+            run.at += 1;
+            if rows.len() == need {
+                return None;
+            }
+            match self.head(&mut runs, i, clock, rows, began_at) {
+                Ok(Some(key)) => heads.push(Reverse((key, i))),
+                Ok(None) => {}
+                Err(stop) => return Some(stop),
+            }
+        }
+        None
+    }
+
+    /// Segment `i`'s next row, gathering chunks until it has one or its part of the stretch is
+    /// spent, and reading the clock before each chunk. `Err` where the clock stops the scan.
+    fn head(
+        &self,
+        runs: &mut [SegmentRun<'_>],
+        i: usize,
+        clock: &Clock,
+        rows: &[Taken],
+        began_at: Key,
+    ) -> std::result::Result<Option<Key>, (ResponseEndedBy, Key)> {
+        loop {
+            if let Some(key) = runs[i].head() {
+                return Ok(Some(key));
+            }
+            if runs[i].next >= runs[i].end {
+                return Ok(None);
+            }
+            let first_unreached = runs
+                .iter()
+                .filter_map(SegmentRun::first_unreached)
+                .min()
+                .expect("this segment holds rows not yet gathered");
+            if let Some(stop) = self.stop(clock, rows, first_unreached, began_at) {
+                return Err(stop);
+            }
+            runs[i].gather(self.cx, self.stretch, self.keep_unmatched);
+        }
+    }
+
+    /// Take stored-order rows past `scan` from the stretch's items until `rows` holds `need`:
+    /// each item whose row the page's mask admits, and that matches where rows must match.
+    /// `Some` where the clock stopped the scan, with the first key it did not reach.
+    fn stored(
+        &self,
+        scan: Option<Key>,
+        need: usize,
+        clock: &Clock,
+        rows: &mut Vec<Taken>,
+    ) -> Option<(ResponseEndedBy, Key)> {
+        let stretch = self.stretch;
+        let start = match scan {
+            None => 0,
+            Some(scan) => stretch
+                .items
+                .partition_point(|&(entity, _)| (entity, 0) <= scan),
+        };
+        let segments = self.cx.segments();
+        let &(began_at, _) = stretch.items.get(start)?;
+        for (i, &(entity, row)) in stretch.items[start..].iter().enumerate() {
+            if rows.len() == need {
+                return None;
+            }
+            if i % STORED_CHUNK == 0 {
+                if let Some(stop) = self.stop(clock, rows, (entity, 0), (began_at, 0)) {
+                    return Some(stop);
+                }
+            }
+            if !self.cx.open.mask.contains_row(row) {
+                continue;
+            }
+            let matched = stretch
+                .filter
+                .as_ref()
+                .is_none_or(|filter| filter.rows().contains(row));
+            if !matched && !self.keep_unmatched {
+                continue;
+            }
+            let (seg, local) =
+                segment_holding(segments, row).expect("the first segment's rows begin at 0");
+            rows.push(Taken {
+                seg,
+                local,
+                tessera_id: segments[seg].0.columns.tessera_id()[local as usize],
+                entity,
+                matched,
+            });
+        }
+        None
+    }
 }
