@@ -1,3 +1,4 @@
+import {makeData, makeVector, Uint64} from 'apache-arrow';
 import {expect} from 'vitest';
 import type {ArtifactChannelClock} from '../src/artifactChannel.js';
 import type {Band} from '../src/bands.js';
@@ -351,4 +352,81 @@ export function headersOf(init?: RequestInit): Record<string, string> {
   const out: Record<string, string> = {};
   new Headers(init?.headers).forEach((value, name) => (out[name] = value));
   return out;
+}
+
+/** A framed body: `u8 kind, u32 LE length, payload` for each frame, in order. */
+export function framed(frames: readonly {kind: number; payload: Uint8Array}[]): Uint8Array {
+  const out = new Uint8Array(frames.reduce((n, f) => n + 5 + f.payload.byteLength, 0));
+  const view = new DataView(out.buffer);
+  let at = 0;
+  for (const {kind, payload} of frames) {
+    out[at] = kind;
+    view.setUint32(at + 1, payload.byteLength, true);
+    out.set(payload, at + 5);
+    at += 5 + payload.byteLength;
+  }
+  return out;
+}
+
+/** A `uint64` Arrow vector. */
+export function u64(values: bigint[]) {
+  return makeVector(makeData({type: new Uint64(), data: BigUint64Array.from(values)}));
+}
+
+/**
+ * A response whose body arrives in chunks of `size` bytes as it is read. `onCancel` is called when
+ * the reader cancels the body. With `cut`, the body ends by failing with it, as `fetch` reports a
+ * connection closed part-way through a chunked body, in place of ending cleanly.
+ */
+export function chunked(
+  body: Uint8Array,
+  size = body.byteLength,
+  init: {headers?: Record<string, string>; onCancel?: () => void; cut?: Error} = {}
+): Response {
+  let at = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (at >= body.byteLength) return init.cut ? controller.error(init.cut) : controller.close();
+      controller.enqueue(body.slice(at, at + size));
+      at += size;
+    },
+    cancel() {
+      init.onCancel?.();
+    }
+  });
+  return new Response(stream, {status: 200, headers: init.headers ?? {}});
+}
+
+/**
+ * A response whose body the test feeds by hand, so "not yet arrived" is a state it can hold. An
+ * abort of `signal` errors the body, as a real `fetch` does to the body of an aborted request.
+ */
+export function manual(
+  signal?: AbortSignal,
+  headers: Record<string, string> = {}
+): {response: Response; push: (bytes: Uint8Array) => void; close: () => void} {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+    }
+  });
+  signal?.addEventListener('abort', () => {
+    try {
+      controller.error(new DOMException('The operation was aborted.', 'AbortError'));
+    } catch {
+      // Already closed: the abort came after the whole body.
+    }
+  });
+  return {
+    response: new Response(stream, {status: 200, headers}),
+    push: (bytes) => {
+      try {
+        controller.enqueue(bytes);
+      } catch {
+        // Errored by an abort, which is the state an abort test asserts about.
+      }
+    },
+    close: () => controller.close()
+  };
 }

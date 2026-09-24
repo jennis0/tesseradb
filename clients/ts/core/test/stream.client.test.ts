@@ -1,10 +1,10 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {makeData, makeVector, tableToIPC, Table, Uint64} from 'apache-arrow';
+import {tableToIPC, Table} from 'apache-arrow';
 import {TesseraClient} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {inlineDecoder} from '../src/decoder.js';
 import type {ViewportPart} from '../src/types.js';
-import {rejectsAsRefused, settle} from './support.js';
+import {chunked, framed, manual, rejectsAsRefused, settle, u64} from './support.js';
 
 /**
  * The streamed viewport: a response read frame by frame as it arrives. The server flushes whole
@@ -13,25 +13,6 @@ import {rejectsAsRefused, settle} from './support.js';
  * the whole-body reading, that it is early, and that an abort and a body without its trailer both
  * fail.
  */
-
-/** A framed body: `u8 kind, u32 LE length, payload`, repeated. */
-function frame(parts: {kind: number; payload: Uint8Array}[]): Uint8Array {
-  const total = parts.reduce((n, p) => n + 5 + p.payload.length, 0);
-  const out = new Uint8Array(total);
-  const view = new DataView(out.buffer);
-  let at = 0;
-  for (const {kind, payload} of parts) {
-    out[at] = kind;
-    view.setUint32(at + 1, payload.length, true);
-    out.set(payload, at + 5);
-    at += 5 + payload.length;
-  }
-  return out;
-}
-
-function u64(values: bigint[]) {
-  return makeVector(makeData({type: new Uint64(), data: BigUint64Array.from(values)}));
-}
 
 /**
  * Seven tiles over three points frames, two points a tile, and a tile that serves nothing, which a
@@ -67,7 +48,7 @@ function bodyBytes(): Uint8Array {
   const trailer = new TextEncoder().encode(
     JSON.stringify({arrow_serialise_ns: 0, flushes: points.length, points: total, stream_us: 0})
   );
-  return frame([
+  return framed([
     {kind: 1, payload: tiles},
     ...points.map((payload) => ({kind: 3, payload})),
     {kind: 4, payload: trailer}
@@ -75,52 +56,6 @@ function bodyBytes(): Uint8Array {
 }
 
 const HEADERS = {etag: '"c1"', 'x-tessera-identity-key': 'i1'};
-
-/** A response whose body arrives in fixed-size chunks. */
-function chunked(body: Uint8Array, size: number): Response {
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (let at = 0; at < body.byteLength; at += size) {
-        controller.enqueue(body.subarray(at, Math.min(body.byteLength, at + size)));
-      }
-      controller.close();
-    }
-  });
-  return new Response(stream, {status: 200, headers: HEADERS});
-}
-
-/** A response whose body the test feeds by hand, so "not yet arrived" is a state it can hold. */
-function manual(signal?: AbortSignal): {
-  response: Response;
-  push: (bytes: Uint8Array) => void;
-  close: () => void;
-} {
-  let controller!: ReadableStreamDefaultController<Uint8Array>;
-  const stream = new ReadableStream<Uint8Array>({
-    start(c) {
-      controller = c;
-    }
-  });
-  // As a real `fetch` does on abort, the reader's next read rejects rather than the stream ending.
-  signal?.addEventListener('abort', () => {
-    try {
-      controller.error(new DOMException('The operation was aborted.', 'AbortError'));
-    } catch {
-      // Already closed: the abort came after the trailer, and the response stands.
-    }
-  });
-  return {
-    response: new Response(stream, {status: 200, headers: HEADERS}),
-    push: (bytes) => {
-      try {
-        controller.enqueue(bytes);
-      } catch {
-        // Errored by the abort, which is the state under test.
-      }
-    },
-    close: () => controller.close()
-  };
-}
 
 const client = () =>
   new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()});
@@ -138,7 +73,7 @@ describe('a streamed viewport response', () => {
     // 1 splits every header across three chunks and every payload across hundreds; 7 lands mid
     // header and mid payload at every frame; a size past the body is the single-chunk case.
     for (const size of [1, 7, 64, 1_000, body.byteLength * 2]) {
-      vi.stubGlobal('fetch', async () => chunked(body, size));
+      vi.stubGlobal('fetch', async () => chunked(body, size, {headers: HEADERS}));
       const parts: ViewportPart[] = [];
       const response = await ask(client(), (p) => parts.push(p));
 
@@ -171,7 +106,7 @@ describe('a streamed viewport response', () => {
     for (let at = 0; at < body.byteLength; at += 5 + view.getUint32(at + 1, true)) starts.push(at);
     const lastPoints = starts[starts.length - 2]!;
 
-    const feed = manual();
+    const feed = manual(undefined, HEADERS);
     vi.stubGlobal('fetch', async () => feed.response);
     const parts: ViewportPart[] = [];
     const asking = ask(client(), (p) => parts.push(p));
@@ -199,7 +134,7 @@ describe('a streamed viewport response', () => {
     const secondPoints = starts[2]!;
 
     const controller = new AbortController();
-    const feed = manual(controller.signal);
+    const feed = manual(controller.signal, HEADERS);
     vi.stubGlobal('fetch', async () => feed.response);
     const parts: ViewportPart[] = [];
     const asking = ask(client(), (p) => parts.push(p), controller.signal);
@@ -226,7 +161,7 @@ describe('a streamed viewport response', () => {
     for (let at = 0; at < body.byteLength; at += 5 + view.getUint32(at + 1, true)) {
       if (view.getUint8(at) === 4) trailerAt = at;
     }
-    const feed = manual();
+    const feed = manual(undefined, HEADERS);
     vi.stubGlobal('fetch', async () => feed.response);
     const parts: ViewportPart[] = [];
     const asking = ask(client(), (p) => parts.push(p));
@@ -241,7 +176,7 @@ describe('a streamed viewport response', () => {
 
   it('refuses a body cut inside a frame rather than serving the short answer', async () => {
     const body = bodyBytes();
-    vi.stubGlobal('fetch', async () => chunked(body.subarray(0, body.byteLength - 12), 64));
+    vi.stubGlobal('fetch', async () => chunked(body.subarray(0, body.byteLength - 12), 64, {headers: HEADERS}));
     await expect(ask(client(), () => {})).rejects.toThrow();
   });
 
@@ -265,7 +200,7 @@ describe('a streamed viewport response', () => {
   it('reads the whole body when no sink is given, as every other caller does', async () => {
     const body = bodyBytes();
     const whole = decodeViewport(body);
-    vi.stubGlobal('fetch', async () => chunked(body, 100));
+    vi.stubGlobal('fetch', async () => chunked(body, 100, {headers: HEADERS}));
     const response = await client().viewport('tok', {view: 's0', zoom: 4, k: 100});
     expect([...response.result.ids]).toEqual([...whole.ids]);
     expect(response.bytes).toBe(body.byteLength);

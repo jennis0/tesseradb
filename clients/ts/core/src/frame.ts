@@ -1,29 +1,29 @@
 /**
- * Split a `/v1/viewport` response into its frames.
+ * Split a framed response into its frames.
  *
- * The wire frame (contracts §3.2 r26; `tessera-wire`'s `payload` module doc) is a sequence of
- * tagged, length-prefixed frames — every frame prefixed, which is client-interaction §8.6(2)'s
- * owner-annotated item and what retired this file's previous Arrow-message boundary walk and the
- * padding-arithmetic desynchronisation bug it documented:
+ * A body is a sequence of `u8 kind, u32 LE payload length, <payload>`. A `/v1/viewport` body:
  *
- *     u8 kind, u32 LE payload length, <payload>     -- repeated
  *       kind 1  tiles      Arrow IPC stream: tile, visible, matched, served (all uint64)
- *       kind 2  sub-cells  Arrow IPC stream: cell uint64, count uint64 — present iff the
- *                          underlay was requested (schema-only when requested-but-empty)
- *       kind 3  points     Arrow IPC stream: tessera_id uint64, code uint64, ...scalars —
+ *       kind 2  sub-cells  Arrow IPC stream: cell uint64, count uint64; present when the
+ *                          underlay was requested, schema-only when it is empty
+ *       kind 3  points     Arrow IPC stream: tessera_id uint64, code uint64, ...scalars;
  *                          zero or more frames, concatenating to the full points stream
- *       kind 4  trailer    JSON; exactly one, last — its presence marks the response complete
- *       kind 5  artifacts  Arrow IPC stream: the fourteen fixed columns `layer` (dictionary
- *                          u16/utf8) through `matched`, hull columns trailing when a served
- *                          layer declares one — or the identity projection's four (contracts
- *                          §3.2 r44) — at most one, after tiles and before any points frame;
- *                          ABSENT when the response served none
+ *       kind 4  trailer    JSON; exactly one, last
+ *       kind 5  artifacts  Arrow IPC stream: the fixed columns `layer` (dictionary u16/utf8)
+ *                          through `matched`, then hull columns when a served layer declares
+ *                          one, or the identity projection's columns; at most one, after tiles
+ *                          and before any points frame, absent when the response served none
  *
- * Every failure here throws, and strictly: a truncated body, an unknown kind, a missing trailer
- * or a misplaced tiles frame must never decode to a plausible shorter response — a sample
- * silently standing in for the set is the one failure mode this client exists to make
- * impossible. A response missing its trailer is incomplete BY CONTRACT, whatever the transport
- * said (the server aborts mid-body streams without one).
+ * A `/v1/items` or `/v1/artifacts` body:
+ *
+ *       kind 6  head       JSON; exactly one, first
+ *       kind 7  records    Arrow IPC stream of one page; zero or more, each followed by a page end
+ *       kind 8  page end   JSON: the cursor to resume after the page before it
+ *       kind 4  trailer    JSON; exactly one, last
+ *
+ * Every failure throws: a truncated body, an unknown kind or a frame out of place never decodes
+ * to a shorter response. A body without its trailer is incomplete, since the server ends a body
+ * that fails part-way without one.
  */
 export type FramedStreams = {
   tiles: Uint8Array;
@@ -47,6 +47,12 @@ export const FRAME_SUB_CELLS = 2;
 export const FRAME_POINTS = 3;
 export const FRAME_TRAILER = 4;
 export const FRAME_ARTIFACTS = 5;
+export const FRAME_RECORDS_HEAD = 6;
+export const FRAME_RECORDS = 7;
+export const FRAME_PAGE_END = 8;
+
+/** Which body a reader expects: a viewport's, or a bulk read's from `/v1/items` or `/v1/artifacts`. */
+export type FrameGrammar = 'viewport' | 'records';
 
 const FRAME_HEADER_BYTES = 5;
 
@@ -54,18 +60,14 @@ const FRAME_HEADER_BYTES = 5;
 export type Frame = {kind: number; payload: Uint8Array};
 
 /**
- * The frame grammar, enforced once, over a body that may arrive in any number of pieces.
- *
- * **This is the only statement of the grammar in this client.** {@link splitFramedStreams} is this
- * reader pushed a whole body; the streaming path in `client.ts` is this reader pushed each network
- * chunk. Two readers would be two chances to disagree about what a legal response is, and the
- * disagreement would be silent in exactly the direction that matters — a body one accepts and the
- * other refuses is a body whose points were drawn by one code path and not the other.
+ * The frame grammar, over a body that may arrive in any number of pieces. It is the only reader
+ * of frames in this client: {@link splitFramedStreams} pushes it a whole body, and the streaming
+ * paths push it each network chunk.
  *
  * Chunk boundaries carry no meaning: a frame's five-byte header may be split across three chunks
  * and its payload across a hundred, and the reader emits the frame only when it is whole. A frame
  * that lies inside a single chunk is handed over as a view onto it; one that spans chunks is
- * assembled into a buffer of its own, so no frame is ever copied more than once.
+ * assembled into a buffer of its own, so no frame is copied more than once.
  */
 export class FrameReader {
   /** Chunks pushed and not yet consumed, oldest first. */
@@ -79,6 +81,10 @@ export class FrameReader {
   private sawArtifacts = false;
   private sawPoints = false;
   private sawTrailer = false;
+  /** A records frame has arrived and its page end has not. */
+  private openPage = false;
+
+  constructor(private readonly grammar: FrameGrammar = 'viewport') {}
 
   /** Every complete frame the pushed bytes finish, in wire order. */
   push(chunk: Uint8Array): Frame[] {
@@ -110,11 +116,8 @@ export class FrameReader {
    * No more bytes are coming: what is left must be nothing, and what arrived must be a whole
    * response.
    *
-   * **A response missing its trailer is incomplete BY CONTRACT** (`streamed-serving.md` §6),
-   * whatever the transport said — the server aborts a mid-stream failure without one, and a reader
-   * that accepted the prefix as an answer would present a sample as the set. The delivered prefix
-   * is still sound and a caller may keep what it has already landed; what it must not do is call
-   * the response complete, which is what this throw denies it.
+   * A response missing its trailer is incomplete whatever the transport said. What a caller has
+   * already taken from it stays sound; this throw denies it only a complete response.
    */
   end(): void {
     if (this.queued > 0) {
@@ -122,6 +125,11 @@ export class FrameReader {
         throw new Error(`truncated frame header at byte ${this.consumed}`);
       }
       throw new Error(`frame at byte ${this.consumed} claims a payload past the end of the body`);
+    }
+    if (this.grammar === 'records') {
+      if (this.frames === 0) throw new Error('records payload has no head frame');
+      if (!this.sawTrailer) throw new Error('records payload has no trailer: the response is incomplete; resume the read from its cursor');
+      return;
     }
     if (!this.sawTiles) throw new Error('viewport payload has no tiles frame');
     if (!this.sawTrailer) {
@@ -135,6 +143,10 @@ export class FrameReader {
   }
 
   private check(kind: number): void {
+    if (this.grammar === 'records') {
+      this.checkRecords(kind);
+      return;
+    }
     switch (kind) {
       case FRAME_TILES:
         if (this.sawTiles) throw new Error('more than one tiles frame');
@@ -168,6 +180,35 @@ export class FrameReader {
         // Refused, never skipped: skipping would let a future frame kind carry data an old
         // reader silently drops.
         throw new Error(`unknown frame kind ${kind} at byte ${this.consumed}`);
+    }
+  }
+
+  /**
+   * A bulk read's grammar. A records frame stays open until its page end arrives, so a body cut
+   * between the two ends with a page open, and the caller discards that page.
+   */
+  private checkRecords(kind: number): void {
+    const at = this.consumed;
+    if (this.sawTrailer) throw new Error(`a frame after the trailer at byte ${at}`);
+    if (this.frames === 0 && kind !== FRAME_RECORDS_HEAD) throw new Error('the head frame must be first');
+    switch (kind) {
+      case FRAME_RECORDS_HEAD:
+        if (this.frames !== 0) throw new Error(`a second head frame at byte ${at}`);
+        break;
+      case FRAME_RECORDS:
+        if (this.openPage) throw new Error(`a records frame at byte ${at} before the page end of the one before it`);
+        this.openPage = true;
+        break;
+      case FRAME_PAGE_END:
+        if (!this.openPage) throw new Error(`a page end at byte ${at} with no records frame before it`);
+        this.openPage = false;
+        break;
+      case FRAME_TRAILER:
+        if (this.openPage) throw new Error(`the trailer at byte ${at} follows a records frame with no page end`);
+        this.sawTrailer = true;
+        break;
+      default:
+        throw new Error(`unknown frame kind ${kind} at byte ${at}`);
     }
   }
 
