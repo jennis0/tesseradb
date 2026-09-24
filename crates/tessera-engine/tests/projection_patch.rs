@@ -175,12 +175,11 @@ fn a_flush_refreshes_a_sessions_geometry_and_the_refresh_equals_a_rebuild() {
     );
 }
 
-/// A second flush refreshes from the first flush's entry, not from the build's — so the depth-1
-/// retention is sufficient for a *sequence* of flushes and not only for one.
+/// A second flush refreshes from the first flush's entry, not from the build's — so the retention
+/// is sufficient for a *sequence* of flushes and not only for one.
 ///
-/// The mutation this kills is a retention floor computed from the build generation rather than
-/// from the live one: that keeps generation 0 alive for ever and drops generation 1, so the second
-/// refresh has nothing to extend and rebuilds. Nothing else in the suite notices.
+/// **Mutation:** a prune that drops the entry the first refresh produced before the second refresh
+/// derives from it. The second refresh then has nothing to extend, and the request rebuilds.
 #[test]
 fn consecutive_flushes_each_refresh_from_the_one_before() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -283,12 +282,12 @@ fn the_window_before_a_refresh_serves_stale_geometry_rather_than_rebuilding() {
     assert_eq!(
         after.tiles.iter().map(|t| t.visible).sum::<u64>(),
         visible_before + 2,
-        "both flushed items are drawn: the stale entry aged out and the session rebuilt"
+        "both flushed items are drawn: rung 2 no longer serves the entry and the session rebuilt"
     );
     assert_eq!(
         engine.full_projection_builds(),
         2,
-        "and it did so by a build — the one the retention depth forces when a refresh is missed"
+        "and it did so by a build — the one rung 2's depth forces when a refresh is missed"
     );
 }
 
@@ -297,8 +296,9 @@ fn the_window_before_a_refresh_serves_stale_geometry_rather_than_rebuilding() {
 /// session's only entry is then two generations back, and the refresh must derive from it rather
 /// than find nothing and leave the session to rebuild.
 ///
-/// **Mutation:** prune by generation depth alone and the refresh finds no entry, produces nothing,
-/// and the request rebuilds.
+/// **Mutations:** prune by generation depth alone and the refresh finds no entry, produces nothing,
+/// and the request rebuilds; let the drill-down read below the retention floor and it answers from
+/// the kept entry and misses the first flush's item.
 #[test]
 fn a_refresh_two_publications_late_still_patches_the_session() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -322,6 +322,20 @@ fn a_refresh_two_publications_late_still_patches_the_session() {
     wait_until("the second flush", || {
         engine.write_executor_stats().flushes >= 2
     });
+
+    // The session's only entry is now two generations back and kept as the refresh's base. The
+    // drill-down must not answer from it: that would call the first flush's item absent while the
+    // viewport, finding neither rung, rebuilds and draws it.
+    let first = engine
+        .resolve_external_id(b"ext-1")
+        .unwrap()
+        .expect("the first flush's item resolves");
+    let id = engine.tessera_id_of(first).unwrap();
+    assert!(
+        engine.item(&session, id, None).unwrap().is_some(),
+        "the drill-down answers from no entry staler than the viewport's rung 2"
+    );
+
     engine.set_refresh_paused_for_test(false);
     wait_until("the refreshes to finish", || engine.maintenance_idle_for_test());
 
@@ -332,9 +346,10 @@ fn a_refresh_two_publications_late_still_patches_the_session() {
         "both flushed items are drawn"
     );
     assert_eq!(
-        engine.full_projection_builds(),
+        engine.projection_builds_by_route().iter().sum::<u64>(),
         1,
-        "and by the refresh's patch: the only build is the session's establishment"
+        "and by the refresh's patch: the only projection built whole, by a request or by the \
+         refresh, is the session's establishment"
     );
 }
 
@@ -470,4 +485,3 @@ fn wait_for_viewport(
         }
     }
 }
-

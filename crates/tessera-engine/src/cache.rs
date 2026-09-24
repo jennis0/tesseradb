@@ -64,7 +64,7 @@ use tessera_cache::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 ///    something worth carrying a disclosure hazard to avoid. The hazard did not shrink with the
 ///    cost, so the trade moved decisively one way.
 /// 2. **`segments_version` is globally unique within a process**, which is why
-///    [`RowProjectionCache::prune_generation`] may prune on it alone and ignore `Reclaimed::prefix`.
+///    [`RowProjectionCache::prune_generations_below`]'s depth test reads it alone.
 ///    `crate::pins::check_publishable` refuses any publication that does not strictly increase it,
 ///    and design §10.2 makes the prefix name *be* the segment-set version. Relax that guard and
 ///    this pruner starts removing the wrong generation's entries.
@@ -83,8 +83,8 @@ pub(crate) struct RowProjectionKey {
     pub view: String,
     /// The geometry generation the row space belongs to. A bundle swap changes it, and entries
     /// more than [`KEEP_SUPERSEDED_GENERATIONS`] behind become
-    /// [`RowProjectionCache::prune_generations_below`]'s work at the next publication; an *overlay*
-    /// swap must not (I11).
+    /// [`RowProjectionCache::prune_generations_below`]'s work at the next publication, which keeps
+    /// only a session's newest in the live prefix; an *overlay* swap must not (I11).
     pub segments_version: u64,
     /// The prefix that geometry belongs to — see fact 3 above for why this is here when
     /// `segments_version` already discriminates within a process.
@@ -328,8 +328,8 @@ impl RowProjectionCache {
     /// ~200 ms per credential — `probes/2026-08-04-refresh-ladder/`).
     ///
     /// **The fragment is not view-scoped**, so any of this token's entries answers: the fragment
-    /// cache keys on the satisfied terms and the watermark, and neither is a view. The freshest is taken because a later watermark is a strictly better answer to an
-    /// entity-space question.
+    /// cache keys on the satisfied terms and the watermark, and neither is a view. The freshest is
+    /// taken because a later watermark is a strictly better answer to an entity-space question.
     ///
     /// **Per token, never per entity** — the scan cost cannot depend on which identifier was
     /// asked for, which is Critical C-5's constant-time property.
@@ -341,15 +341,23 @@ impl RowProjectionCache {
     /// Both prunes miss those entries in the window that matters — `prune_generations_below` keeps
     /// the generation immediately under the live one, which after a fold is a pre-fold entry — so
     /// the scoping is here, at the read, rather than arranged for by eviction.
+    ///
+    /// **And bounded below by `floor`**, the publication's retention floor, so the drill-down is
+    /// never staler than rung 2 of the viewport beside it. The prune keeps a session's newest
+    /// entry below the floor as the refresh's base; answering from it would call an item absent
+    /// that the viewport, finding neither rung, rebuilds and draws.
     pub(crate) fn freshest_fragment(
         &self,
         token_id: u64,
         prefix: &str,
+        floor: u64,
     ) -> Option<Arc<FrozenFragment>> {
         self.inner
             .ready_entries()
             .into_iter()
-            .filter(|(key, _)| key.token_id == token_id && key.prefix == prefix)
+            .filter(|(key, _)| {
+                key.token_id == token_id && key.prefix == prefix && key.segments_version >= floor
+            })
             .max_by_key(|(key, _)| key.segments_version)
             .map(|(_, geometry)| Arc::clone(&geometry.fragment))
     }
@@ -423,8 +431,9 @@ impl RowProjectionCache {
     }
 
     /// Drop every projection built against a generation older than `floor`, keeping `floor` and
-    /// everything above it, **and keeping each session's newest projection of each view whatever
-    /// its generation**. Called by the publication, with `live - `[`KEEP_SUPERSEDED_GENERATIONS`].
+    /// everything above it, **and keeping each session's newest projection of each view in the
+    /// live prefix whatever its generation**. Called by the publication, with
+    /// `live - `[`KEEP_SUPERSEDED_GENERATIONS`] and the live generation's prefix.
     ///
     /// # Why a retention depth rather than a reclaim hook
     ///
@@ -441,27 +450,33 @@ impl RowProjectionCache {
     /// instant of the swap deletes both, and every session pays the full rebuild at every tick.
     ///
     /// **The newest entry is kept because it is the refresh's only base.** Two publications can
-    /// land before the refresh for the first has produced anything, a flush and then a merge under
-    /// load. The depth alone would then drop the entry both refreshes derive from, both would find
-    /// nothing, and every resident session would pay the full rebuild at its next request. Keeping
-    /// it lets a refresh derive across the gap; the rungs of `crate::refresh` are exact at any
-    /// distance within a prefix and rebuild across one. It costs nothing in the steady state,
-    /// where the refresh keeps every session's newest entry at the live generation anyway, and at
-    /// most one entry per session and view until the next publication otherwise.
+    /// land before the refresh for the first has taken its snapshot, a flush and then a merge
+    /// under load. The depth alone would then drop the entry both refreshes derive from, both
+    /// would find nothing, and every resident session would pay the full rebuild at its next
+    /// request. Keeping it lets a refresh derive across the gap: the rungs of `crate::refresh` are
+    /// exact at any distance within a prefix. A kept entry survives until a newer `Ready` entry
+    /// for its session and view, an eviction, its token's prune or a fold's publication removes
+    /// it. Nothing reads it but the refresh — rung 2 and [`Self::freshest_fragment`] look no
+    /// further back than the floor — so it is the first thing the byte bound evicts.
     ///
-    /// **Stale-serve stays bounded at two publications**, because rung 2 serves only the
-    /// generation immediately below the live one. A session whose refresh never runs keeps its
-    /// entry, rung 2 stops finding it at the next publication, and its next request builds.
+    /// **Only the live prefix.** Across a fold a kept entry is only a rebuild's input, and a merge
+    /// landing while the fold's pass is still rebuilding would rebuild every session that pass has
+    /// not reached a second time, holding them at 429 behind a pass longer than the rebuild it
+    /// saves. So across a fold the depth alone applies, as it did before.
     ///
-    /// Pruning on `segments_version` alone, ignoring the prefix, rests on [`RowProjectionKey`]'s
-    /// fact 2 — and a merge is why it must: row ids inside a merged span name different entities
-    /// afterwards, so the prefix is *not* a safe discriminator and `segments_version` is
-    /// (`geometry-pinning.md` §4). Only `Ready` entries count as newer: a build in flight may yet
-    /// fail, and the entry it derives from is then still the base.
+    /// The depth test reads `segments_version` alone, ignoring the prefix, and rests on
+    /// [`RowProjectionKey`]'s fact 2 — and a merge is why it must: row ids inside a merged span
+    /// name different entities afterwards, so the prefix is *not* a safe discriminator and
+    /// `segments_version` is (`geometry-pinning.md` §4). Only `Ready` entries count as newer: a
+    /// build in flight may yet fail, and the entry it derives from is then still the base.
     ///
-    /// Same cost note as [`Self::prune_token`], with one difference in its favour: this runs on the
-    /// publication path, not on a request handler.
-    pub(crate) fn prune_generations_below(&self, floor: u64) -> usize {
+    /// # Cost
+    ///
+    /// Two passes under the request path's lock: [`SingleFlightCache::ready_entries`] clones every
+    /// ready key and its `Arc`, then the removal walks every key. At the designed configuration n
+    /// is small, as [`Self::prune_token`] states; at its adversarial n the clone costs more than
+    /// the removal, and both run on the publication path, not on a request handler.
+    pub(crate) fn prune_generations_below(&self, floor: u64, live_prefix: &str) -> usize {
         let ready = self.inner.ready_entries();
         let mut newest: FxHashMap<(u64, &str), u64> = FxHashMap::default();
         for (key, _) in &ready {
@@ -470,7 +485,9 @@ impl RowProjectionCache {
         }
         self.inner.retain_keys(|key| {
             key.segments_version >= floor
-                || newest.get(&(key.token_id, key.view.as_str())) == Some(&key.segments_version)
+                || (key.prefix == live_prefix
+                    && newest.get(&(key.token_id, key.view.as_str()))
+                        == Some(&key.segments_version))
         })
     }
 }
@@ -480,7 +497,7 @@ impl RowProjectionCache {
 /// **One, and the number is the patch's input rather than a margin.** A flush appends, so the
 /// generation immediately below the live one holds exactly the projection the next request's patch
 /// derives from; a second one back is derivable from the first and is kept only while it is its
-/// session's newest ([`RowProjectionCache::prune_generations_below`]). Raising this buys nothing
-/// and costs a *measured* 125.12 MB per entry per session at 10⁹; lowering it to zero forfeits the
-/// patch and reinstates the full rebuild at every tick.
+/// session's newest in the live prefix ([`RowProjectionCache::prune_generations_below`]). Raising
+/// this buys nothing and costs a *measured* 125.12 MB per entry per session at 10⁹; lowering it to
+/// zero forfeits the patch and reinstates the full rebuild at every tick.
 pub(crate) const KEEP_SUPERSEDED_GENERATIONS: u64 = 1;

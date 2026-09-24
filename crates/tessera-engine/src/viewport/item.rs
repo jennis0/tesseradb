@@ -191,11 +191,18 @@ impl Engine {
         // the cost depend on which entity was asked for. The served fragment, not the live one:
         // rebuilding at the live watermark measures ~200 ms per credential per publication, and
         // would answer from a different watermark than the viewport beside it serves from. Falls
-        // back to a build only when this session has no resident entry, scoped to this
-        // generation's prefix so a fold's flip cannot answer from a replaced term index.
+        // back to a build only when this session has no entry at or above the retention floor,
+        // scoped to this generation's prefix so a fold's flip cannot answer from a replaced term
+        // index.
         let fragment = match self
             .row_projection_cache
-            .freshest_fragment(session.token_id(), &generation.prefix)
+            .freshest_fragment(
+                session.token_id(),
+                &generation.prefix,
+                generation
+                    .segments_version
+                    .saturating_sub(crate::cache::KEEP_SUPERSEDED_GENERATIONS),
+            )
         {
             Some(fragment) => fragment,
             None => self.fragment_for(session, &generation)?,
