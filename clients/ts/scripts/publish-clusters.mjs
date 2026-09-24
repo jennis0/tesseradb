@@ -221,9 +221,6 @@ for (let c = 0; c < CLUSTERS; c++) {
   if (members[c].length === 0) continue;
   clusters.push({
     key: `c-${String(c).padStart(4, '0')}`,
-    // The centroid in cell space, `[0, 65536)` per axis. Not published.
-    x: cx[c],
-    y: cy[c],
     members: members[c]
   });
 }

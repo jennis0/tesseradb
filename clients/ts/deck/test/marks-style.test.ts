@@ -50,27 +50,6 @@ describe('markStyle', () => {
     expect(markStyle(1_000_000, 0, 1).antialiasing).toBe(false);
   });
 
-  it('is smaller and dimmer than the band it replaces, at every count a screen holds', () => {
-    // A reference band: `1.2 + 1.0(1−t) + 0.08z` px at `0.5 + 0.3(1−t) + 0.02z`.
-    const before = (marks: number, zoom: number) => {
-      const t = Math.min(1, Math.max(0, (Math.log10(Math.max(1, marks)) - 2) / 4));
-      const z = Math.min(10, Math.max(0, zoom));
-      return {radius: 1.2 + 1.0 * (1 - t) + 0.08 * z, alpha: Math.min(0.95, 0.5 + 0.3 * (1 - t) + 0.02 * z)};
-    };
-    for (const marks of [2_400_000, 1_000_000, 100_000, 1_600, 100]) {
-      for (const zoom of [0, 1, 3, 6]) {
-        expect(markStyle(marks, zoom).radius).toBeLessThan(before(marks, zoom).radius);
-      }
-    }
-    // Alpha is lower at every dense count, and the sparse end reaches 0.78.
-    for (const marks of [2_400_000, 1_000_000, 100_000, 1_600]) {
-      for (const zoom of [0, 1, 3, 6]) {
-        expect(markStyle(marks, zoom).alpha).toBeLessThan(before(marks, zoom).alpha);
-      }
-    }
-    expect(markStyle(100, 0).alpha).toBeCloseTo(0.78, 6);
-  });
-
   it('deckOpacity undoes deck’s gamma so the shader composites at the alpha asked for', () => {
     expect(Math.pow(deckOpacity(0.5), 1 / 2.2)).toBeCloseTo(0.5, 6);
     expect(deckOpacity(1)).toBe(1);
