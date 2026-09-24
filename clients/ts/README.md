@@ -545,6 +545,9 @@ lives here instead.
 - **A legend lists the values on screen**, not the whole vocabulary, and a numeric ramp spans the
   marks served, not the corpus. A refused column draws every mark unmapped; every served mark is
   still on the map.
+- **A mark with no value draws unmapped**, grey, and takes no part in a numeric ramp, whether the
+  column is a category (code 0) or a number, bool, timestamp or string the server sent as null.
+  The decoder keeps a null in the column's `present` bytes and never reads it as zero.
 - **A typed category value is submitted, never validated**: values a principal cannot list may
   still be filtered by, and an unresolvable one is an empty answer — the control never says *no
   such value*.
