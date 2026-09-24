@@ -2,7 +2,10 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
 import {SessionArtifactTable, mortonOfTile, servedLineage, type ArtifactsProjection, type ComposedTile, type MarksProjection, type TilesProjection} from '@tesseradb/client';
 import {band} from '../../core/test/support.js';
-import {LookupTexture, MarkSlab, TesseraLayer, binDensity, filterDensity, type TesseraLayerProps} from '../src/index.js';
+import {binDensity, filterDensity} from '../src/density.js';
+import {TesseraLayer, type TesseraLayerProps} from '../src/layer.js';
+import {LookupTexture} from '../src/lut.js';
+import {MarkSlab} from '../src/slab.js';
 import {fakeDevice, type FakeResource} from './fake-device.js';
 
 const marks = (n: number): MarksProjection => ({bands: [band(2, 1n, n)], standIn: [], count: {shown: n, total: n, exact: true}});

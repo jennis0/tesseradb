@@ -2,7 +2,7 @@ import {useEffect, useRef, useState, useSyncExternalStore} from 'react';
 import {createStore, type ProjectionName, type Projections, type Store, type StoreOptions, type TokenSupplier} from '@tesseradb/client';
 
 /**
- * `@tesseradb/react` — the headless store in React (design client-components §4, adapters).
+ * `@tesseradb/react`: the headless store in React.
  *
  * Two hooks. `useTesseraStore` owns a store for the component's lifetime and `useProjection`
  * reads one projection through `useSyncExternalStore`, which the store's projections were shaped
@@ -13,7 +13,7 @@ import {createStore, type ProjectionName, type Projections, type Store, type Sto
  * **The store is built in an effect, not during render.** StrictMode mounts, unmounts and
  * remounts every component in development, running each effect's cleanup between; a store made
  * during render would be disposed by the first cleanup and never rebuilt, while one made with no
- * cleanup at all would leak a driver — its timers and its decode worker — on every remount. With
+ * cleanup at all would leak a driver, with its timers and its decode worker, on every remount. With
  * the build and the `dispose` paired inside one effect, the double mount costs one store built
  * and thrown away, and the one left alive is the one the second effect made. The first render
  * therefore sees `null`, which is the honest state: there is no store until the effect runs.
@@ -70,5 +70,4 @@ export function useProjection<K extends ProjectionName>(store: Store | null, nam
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-export type {Count, Masked, ProjectionName, Projections, Store, StoreOptions, TokenSupplier} from '@tesseradb/client';
-export {formatCount, formatMasked, NO_COUNT, NO_MASKED} from '@tesseradb/client';
+export type {ProjectionName, Projections, Store, StoreOptions, TokenSupplier} from '@tesseradb/client';
