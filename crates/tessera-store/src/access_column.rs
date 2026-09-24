@@ -1,17 +1,12 @@
 //! The one reader of an access column, for a points file at the build and an ingest batch on a
-//! running service.
-//!
-//! A column is a string, a list or large list of strings, or an `Int32` dictionary of strings, at
-//! either string width. Each value is one whole label, trimmed by
-//! [`tessera_types::label::label_value`]: a null, a value empty after trimming and an empty list
-//! are all no label. Any other type is refused rather than coerced, since guessing what its rows
-//! meant would mint labels nobody wrote.
+//! running service. Each value is one whole label, read through
+//! [`tessera_types::label::label_value`].
 
 use std::collections::HashMap;
 
-use arrow::array::{Array, ArrayRef, DictionaryArray, GenericListArray, LargeListArray, ListArray};
+use arrow::array::{Array, ArrayRef, AsArray, GenericListArray, LargeListArray, ListArray};
 use arrow::array::OffsetSizeTrait;
-use arrow::datatypes::{DataType, Int32Type};
+use arrow::datatypes::DataType;
 use tessera_types::label::label_value;
 
 use crate::utf8::{is_utf8, Utf8Column};
@@ -20,7 +15,7 @@ use crate::utf8::{is_utf8, Utf8Column};
 pub fn is_access_type(found: &DataType) -> bool {
     match found {
         DataType::List(inner) | DataType::LargeList(inner) => is_utf8(inner.data_type()),
-        DataType::Dictionary(keys, values) => **keys == DataType::Int32 && is_utf8(values),
+        DataType::Dictionary(_, values) => is_utf8(values),
         other => is_utf8(other),
     }
 }
@@ -81,7 +76,9 @@ impl<'a> AccessBatch<'a> {
     }
 }
 
-/// Decode one batch of an access column named `name`. The refusal names the column and its type.
+/// Decode one batch of an access column named `name`: a string, a list or large list of strings,
+/// or a dictionary of strings under any integer key, at either string width. A null, a value empty
+/// after trimming and an empty list are no label. Any other type is refused, naming it.
 pub fn read_access_column<'a>(column: &'a ArrayRef, name: &str) -> Result<AccessBatch<'a>, String> {
     let rows = column.len();
     let mut batch = AccessBatch::with_rows(rows);
@@ -89,7 +86,7 @@ pub fn read_access_column<'a>(column: &'a ArrayRef, name: &str) -> Result<Access
 
     // A dictionary's keys are the indices already: each distinct value is trimmed once and
     // renumbered, since a page may carry values no row uses and a trim may make two of them one.
-    if let Some(dictionary) = column.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
+    if let Some(dictionary) = column.as_any_dictionary_opt() {
         let values = Utf8Column::new(dictionary.values().as_ref()).ok_or_else(|| {
             format!(
                 "the access column '{name}' is a dictionary of {:?}; send a dictionary of strings",
@@ -100,9 +97,14 @@ pub fn read_access_column<'a>(column: &'a ArrayRef, name: &str) -> Result<Access
             .map(|key| values.at(key).and_then(|value| batch.intern(&mut seen, value)))
             .collect();
         let keys = dictionary.keys();
+        let positions = if values.is_empty() {
+            Vec::new()
+        } else {
+            dictionary.normalized_keys()
+        };
         for row in 0..rows {
             if !keys.is_null(row) {
-                if let Some(at) = mapped[keys.value(row) as usize] {
+                if let Some(&Some(at)) = positions.get(row).map(|&key| &mapped[key]) {
                     batch.indices.push(at);
                 }
             }
@@ -164,7 +166,8 @@ pub fn read_access_column<'a>(column: &'a ArrayRef, name: &str) -> Result<Access
 mod tests {
     use super::*;
     use arrow::array::{LargeStringArray, ListBuilder, StringArray, StringBuilder};
-    use arrow::array::{GenericListBuilder, LargeStringBuilder};
+    use arrow::array::{DictionaryArray, GenericListBuilder, LargeStringBuilder};
+    use arrow::datatypes::{Int32Type, Int8Type};
     use std::sync::Arc;
 
     fn rows(batch: &AccessBatch<'_>, n: usize) -> Vec<Vec<String>> {
@@ -189,7 +192,12 @@ mod tests {
                 .into_iter()
                 .collect::<DictionaryArray<Int32Type>>(),
         );
-        for column in [scalar, large, dictionary] {
+        let narrow: ArrayRef = Arc::new(
+            vec![Some(" red "), Some("  "), None]
+                .into_iter()
+                .collect::<DictionaryArray<Int8Type>>(),
+        );
+        for column in [scalar, large, dictionary, narrow] {
             let batch = read_access_column(&column, "access").unwrap();
             assert_eq!(rows(&batch, 3), want(&[&["red"], &[], &[]]), "{:?}", column.data_type());
         }
