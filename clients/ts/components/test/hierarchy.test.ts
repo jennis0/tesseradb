@@ -1,7 +1,8 @@
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {BrowseRow, Layer, Meta} from '@tesseradb/client';
 import '../src/hierarchy.js';
 import type {TesseraHierarchy} from '../src/hierarchy.js';
+import {UNNAMED} from '../src/base.js';
 import {deep, deepAll, deepText, fakeStore, mount, settle, status} from './fake-store.js';
 
 /**
@@ -12,6 +13,7 @@ import {deep, deepAll, deepText, fakeStore, mount, settle, status} from './fake-
 
 afterEach(() => {
   document.body.innerHTML = '';
+  vi.useRealTimers();
 });
 
 const layer = (name: string, kind: Layer['hierarchy']['kind'], computedContent: string[]): Layer =>
@@ -40,7 +42,7 @@ const META = {
   filterOperands: []
 } as unknown as Meta;
 
-const row = (id: bigint, name: string, masked: bigint, extra: Partial<BrowseRow> = {}): BrowseRow => ({
+const row = (id: bigint, name: string | null, masked: bigint, extra: Partial<BrowseRow> = {}): BrowseRow => ({
   tesseraId: id,
   key: `d-${id}`,
   name,
@@ -75,6 +77,19 @@ describe('<tessera-hierarchy>', () => {
     expect(asked[0]).toEqual({layer: 'mesh/descriptors', limit: 50});
   });
 
+  it('marks a row with no name as unnamed and never draws its key in the name’s place', async () => {
+    const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
+    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const store = fakeStore({meta: META, status: status({})});
+    store.setBrowse('roots', {artifacts: [row(3n, null, 10n)], parents: [], next: null});
+    el.store = store;
+    await settle(host);
+    await settle(host);
+    const name = deep(host, '[part="row"] [part="name"]')!;
+    expect(name.hasAttribute('data-unnamed')).toBe(true);
+    expect(name.textContent).not.toContain('d-3');
+  });
+
   it('fetches a node’s children on expansion, and pages them under More', async () => {
     const {host, el, store} = await panel();
     store.setBrowse('p:1', {artifacts: [row(11n, 'Cysts', 900n)], parents: [], next: 'c2'});
@@ -98,7 +113,18 @@ describe('<tessera-hierarchy>', () => {
     await settle(host);
     // The parent it is drawn under is not repeated, and the other is named rather than numbered:
     // the walk is the only place a name for one of these artifacts exists on this client.
-    expect(deepText(deep(host, '[part="also"]'))).toContain('also under Anatomy');
+    expect(deepText(deep(host, '[part="also"]'))).toContain('Anatomy');
+  });
+
+  it('marks a parent the walk has no name for as unnamed in *also under*, never by its id', async () => {
+    const {host, store} = await panel();
+    store.setBrowse('p:1', {artifacts: [row(11n, 'Cysts', 900n, {parentIds: [1n, 77n]})], parents: [], next: null});
+    (deep(host, '[part="expander"]') as HTMLButtonElement).click();
+    await settle(host);
+    await settle(host);
+    const also = deepText(deep(host, '[part="also"]'));
+    expect(also).toContain(UNNAMED);
+    expect(also).not.toContain('77');
   });
 
   it('a click is a highlight, and the actions carry the filter beside it', async () => {
@@ -158,8 +184,10 @@ describe('<tessera-hierarchy>', () => {
     store.setBrowse('q:lymph', {artifacts: [row(7n, 'Lymphocytes', 400_000n)], parents: [], next: null});
     const box = deep(host, '[part="search"] input') as HTMLInputElement;
     box.value = 'lymph';
+    vi.useFakeTimers();
     box.dispatchEvent(new Event('input'));
-    await new Promise((r) => setTimeout(r, 400));
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
     await settle(host);
     await settle(host);
     expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Lymphocytes']);

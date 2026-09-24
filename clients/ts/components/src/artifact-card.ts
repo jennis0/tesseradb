@@ -9,25 +9,13 @@ import {renderState} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
-/**
- * `<tessera-artifact-card>` — the selected artifact (design §5.3 tier 2, §6), as the boards draw
- * it: the name, its `Masked` count as *members visible to you*, its supplied description, layer
- * and key, the kind of shape its layer draws, its **parents** and *Children in this view* from the
- * served set, *Fit to cluster*, and the two verbs on each of *this artifact* and *outside this
- * artifact* — **`member_of` clauses** (`highlight-and-hierarchy.md` §3, §5.5), which replace the
- * `region`-by-published-artifact spelling this card used to send. The drawn-region spelling stays
- * for a region drawn by hand; `region` asks about a shape and `member_of` about a membership, and
- * for an artifact whose members are spread across the map the two are not the same question — the
- * shape is the map's own outline. *Fit* is absent on a layer that draws nothing (§5.4). **Steady during a
- * pan by construction**: the count is the drill-down's, over the whole membership as this
- * principal sees it, and moves with the mask and never with the viewport. The children are a live
- * read of the served set — whatever the channel has answered for the view now.
- *
- * A cluster with no name — no supplied text and no topic attached — shows {@link UNNAMED} in the
- * headline and never its key, which is an id: the key has a field of its own that says so.
- *
- * One refusal covers every withheld case and nothing here tells them apart.
- */
+/** A `role="button"` row's keys: Enter and Space press it. */
+const onKeys = (press: () => void) => (e: KeyboardEvent) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  press();
+};
+
 /** What each kind of drawn shape says on the card. */
 const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
   derived: 'derived — the hull of the members you can see',
@@ -35,6 +23,21 @@ const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
   authored: 'authored — the same for every viewer'
 };
 
+/**
+ * `<tessera-artifact-card>`: the selected artifact. Its name, its masked count as members visible
+ * to you, its supplied description, layer and key, the kind of shape its layer draws, its parents
+ * and its children in this view from the served set, Fit to cluster, and the `member_of` clause
+ * buttons for this artifact and for outside it. A `member_of` clause asks about membership, where a
+ * drawn `region` asks about a shape; for an artifact whose members are spread across the map the
+ * two differ. Fit is absent on a layer that draws nothing.
+ *
+ * The count is the drill-down's, over the whole membership this principal sees, so it moves with
+ * the mask and never with the viewport. The children are a live read of the served set.
+ *
+ * A cluster with no name (no supplied text and no topic attached) shows {@link UNNAMED} in the
+ * headline and never its key, which has a field of its own. One refusal covers every withheld case
+ * and nothing here tells them apart.
+ */
 export class TesseraArtifactCard extends TesseraElement {
   static override styles = [
     tokens,
@@ -55,7 +58,7 @@ export class TesseraArtifactCard extends TesseraElement {
       [part='count'] tessera-count::part(count) {
         font-size: 20px;
         font-weight: 500;
-        font-family: var(--tessera-font-mono);
+        font-family: var(--_tessera-font-mono);
       }
       [part='count'] tessera-count::part(label) {
         font-size: 13px;
@@ -64,10 +67,10 @@ export class TesseraArtifactCard extends TesseraElement {
       [part='content'] {
         margin: 0 0 10px;
         font-size: 12px;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       .field .v {
-        font-family: var(--tessera-font-mono);
+        font-family: var(--_tessera-font-mono);
         font-size: 12px;
       }
       .children-label {
@@ -80,7 +83,7 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='child'] tessera-count::part(count) {
         margin-left: auto;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         font-size: 12px;
         font-weight: 400;
       }
@@ -97,8 +100,8 @@ export class TesseraArtifactCard extends TesseraElement {
         border-color: currentColor;
       }
       [part='verbs'] [data-verb='highlight'][aria-pressed='true'] {
-        background: var(--tessera-highlight-soft);
-        color: var(--tessera-highlight);
+        background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
       }
       .parents-label {
         margin: 12px 0 4px;
@@ -110,13 +113,13 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='parent'] tessera-count::part(count) {
         margin-left: auto;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         font-size: 12px;
         font-weight: 400;
       }
       [part='close'] {
         display: inline-flex;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
     `
   ];
@@ -213,9 +216,9 @@ export class TesseraArtifactCard extends TesseraElement {
     // whether the outline they see moves with the principal. `decl` is the served row's layer;
     // an artifact opened with no served row (a host feeding the card directly) shows none.
     const shape = decl?.shape ? {kind: decl.shape, text: SHAPE_TEXT[decl.shape]} : null;
-    // What a clause made from this card calls the artifact: its drawn name, else its key. Carried
-    // on the clause because nothing downstream can resolve it — see `MemberClause.label`.
-    const clauseName = (here ? displayName(here, topics) : null) ?? artifact.detail.key;
+    // What a clause made from this card calls the artifact: its drawn name, carried on the clause
+    // because nothing downstream can resolve it (`MemberClause.label`). No name, no label.
+    const clauseName = here ? displayName(here, topics) : null;
     return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
       <div part="headline" class="card-title">${(here ? displayName(here, topics) : null) ?? UNNAMED}</div>
@@ -230,7 +233,7 @@ export class TesseraArtifactCard extends TesseraElement {
         ? html`<div part="label" class="xs muted parents-label">Parents</div>
             <ul part="parents" class="list">
               ${parents.map(
-                (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.tesseraId)} @click=${() => void s?.openArtifact(pnt.tesseraId)}>
+                (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.tesseraId)} @click=${() => void s?.openArtifact(pnt.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(pnt.tesseraId))}>
                   <span part="name" class="name">${displayName(pnt, topics) ?? UNNAMED}</span>
                   <tessera-count .masked=${{value: Number(pnt.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
                 </li>`
@@ -241,7 +244,7 @@ export class TesseraArtifactCard extends TesseraElement {
         ? html`<div part="label" class="xs muted children-label">Children in this view</div>
             <ul part="children" class="list">
               ${children.map(
-                (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)}>
+                (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(c.tesseraId))}>
                   <span part="name" class="name">${displayName(c, topics) ?? UNNAMED}</span>
                   <tessera-count .masked=${{value: Number(c.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
                 </li>`

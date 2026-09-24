@@ -1,4 +1,4 @@
-import {NO_COUNT, NO_MASKED, servedLineage, SessionArtifactTable, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection} from '@tesseradb/client';
+import {NO_COUNT, NO_MASKED, regionOperand, servedLineage, SessionArtifactTable, withMembers, withRegion, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection} from '@tesseradb/client';
 
 /**
  * A store with no network and no driver: projections a test sets directly, and the subscription
@@ -87,20 +87,12 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     setBrowse(key: string, page: BrowsePage) {
       browsePages.set(key, page);
     },
-    // The composed request, as the store composes it: the filter-position leaves, the clauses in
-    // that position, and the drawn region's leaf. A test sets `region` and this follows, which is
-    // the drift the panel's question was hashing around.
+    // The composed request, from the projections a test sets, through the client's own
+    // composition: the filter-position expression, the clauses in that position, the region.
     requestFilters: () => {
       const {expr, members} = projections.filters;
-      const leaves: unknown[] = [];
-      if (expr) leaves.push(expr);
-      for (const c of members) {
-        if (c.verb !== 'filter') continue;
-        const leaf = {member_of: {layer: c.layer, artifact: c.artifact.toString()}};
-        leaves.push(c.outside ? {none_of: [leaf]} : leaf);
-      }
-      if (projections.region) leaves.push({region: {bbox: [0, 0, 1, 1]}});
-      return (leaves.length === 0 ? null : leaves.length === 1 ? leaves[0] : {all_of: leaves}) as never;
+      const region = projections.region;
+      return withRegion(withMembers(expr, members, 'filter'), region ? regionOperand(region.shape) : null, region?.shape.outside ?? false);
     },
     pick: async (...args: unknown[]) => {
       calls.push({name: 'pick', args});
@@ -121,7 +113,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     clear: spy('clear'),
     refresh: spy('refresh'),
     dispose: spy('dispose')
-  } as FakeStore;
+  };
   return store;
 }
 

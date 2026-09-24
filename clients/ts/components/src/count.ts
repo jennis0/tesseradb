@@ -27,13 +27,13 @@ export class TesseraCount extends LitElement {
         display: inline;
       }
       [part='count'] {
-        color: var(--tessera-ink);
-        font-family: var(--tessera-font-mono);
+        color: var(--_tessera-ink);
+        font-family: var(--_tessera-font-mono);
         font-variant-numeric: tabular-nums;
         font-weight: 500;
       }
       [part='label'] {
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         margin-left: 0.4em;
       }
     `

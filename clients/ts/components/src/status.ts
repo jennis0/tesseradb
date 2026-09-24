@@ -34,10 +34,10 @@ export class TesseraStatus extends TesseraElement {
       [part='strip'] {
         display: inline-flex;
         align-items: stretch;
-        background: var(--tessera-surface);
-        border: 1px solid var(--tessera-line);
-        border-radius: var(--tessera-radius);
-        box-shadow: var(--tessera-shadow);
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius);
+        box-shadow: var(--_tessera-shadow);
         height: 36px;
         font-size: 12px;
         white-space: nowrap;
@@ -49,32 +49,32 @@ export class TesseraStatus extends TesseraElement {
         padding: 0 12px;
       }
       [part='strip'] > * + * {
-        border-left: 1px solid var(--tessera-line-2);
+        border-left: 1px solid var(--_tessera-line-2);
       }
       [part='state'] {
         font-weight: 600;
-        color: var(--tessera-ink);
+        color: var(--_tessera-ink);
         font-size: 12px;
       }
       [part='state'][data-state='loading'],
       [part='state'][data-state='retrying'] {
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       [part='state'][data-state='loading'] .dot,
       [part='state'][data-state='retrying'] .dot {
-        background: var(--tessera-ink-3);
+        background: var(--_tessera-ink-3);
       }
       [part='state'][data-state='retrying'] .dot {
-        background: var(--tessera-warn);
+        background: var(--_tessera-warn);
       }
       [part='state'][data-state='refused'],
       [part='state'][data-state='expired'] {
-        background: var(--tessera-refuse-soft);
-        color: var(--tessera-refuse);
+        background: var(--_tessera-refuse-soft);
+        color: var(--_tessera-refuse);
       }
       [part='state'][data-state='stale'] {
-        background: var(--tessera-warn-soft);
-        color: var(--tessera-warn);
+        background: var(--_tessera-warn-soft);
+        color: var(--_tessera-warn);
       }
       [part='state'] .skel {
         display: none;
@@ -93,10 +93,10 @@ export class TesseraStatus extends TesseraElement {
       }
       [part='refusal'] {
         font-weight: 400;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         padding-left: 12px;
         margin-left: 12px;
-        border-left: 1px solid var(--tessera-line-2);
+        border-left: 1px solid var(--_tessera-line-2);
         height: 100%;
         display: flex;
         align-items: center;
@@ -105,7 +105,7 @@ export class TesseraStatus extends TesseraElement {
         gap: 5px;
       }
       .cell .l {
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       .cell.dim {
         opacity: 0.45;
@@ -119,10 +119,10 @@ export class TesseraStatus extends TesseraElement {
       [part='card'] {
         margin-top: 8px;
         padding: 10px 12px;
-        background: var(--tessera-surface);
-        border: 1px solid var(--tessera-line);
-        border-radius: var(--tessera-radius);
-        box-shadow: var(--tessera-shadow);
+        background: var(--_tessera-surface);
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius);
+        box-shadow: var(--_tessera-shadow);
         font-size: 12px;
       }
     `

@@ -259,6 +259,8 @@ async function publishProbe(): Promise<void> {
   await explorer.updateComplete;
   const map = explorer.map;
   if (!map) return;
+  // The frame gaps and the cluster sample the harness reads are filled only while measuring.
+  map.measure = true;
   const probe = map.probe as MapProbe & {lanes: Lanes};
   probe.lanes ??= {decode: [], absorb: {split: [], store: [], remap: [], remapPoints: [], sliceMaxMs: 0}, region: null, coverage: null, longTasks: []};
   window.__tesseraProbe = probe;
@@ -628,6 +630,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
           : (rendered.find((c) => c.category)?.name ?? rendered[0]?.name ?? null);
       s.switching = false;
     });
+    explorer.titleField = dataset.titleField ?? '';
     writeViewToUrl(opening.id);
     followCameraWithBasemap(opening);
     void installBasemap(opening);
