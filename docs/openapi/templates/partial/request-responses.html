@@ -1,4 +1,5 @@
-{# essentials-openapi's partial, which also writes an inline response's description. #}
+{# Copied from essentials-openapi 1.4.0's partial of the same name. Changed: an inline
+   response's description is written. #}
 <p class="responses-title"><strong>{{texts.responses}}</strong></p>
 
 {% for code, definition in operation.responses.items() %}
