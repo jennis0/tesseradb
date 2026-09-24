@@ -1,7 +1,8 @@
+import {readFileSync} from 'node:fs';
+import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
 import {makeData, makeVector, tableToIPC, Table, Uint64, vectorFromArray} from 'apache-arrow';
 import {decodeViewport} from '../src/decode.js';
-import {liftGolden} from './old-shape-columns.js';
 import {bandsOfResult, BandCache, distinctOrdinals} from '../src/bands.js';
 import {NO_ORDINAL, SessionArtifactTable} from '../src/artifactTable.js';
 import {GRID32_CENTRE, artifactColours} from '../src/palette.js';
@@ -209,16 +210,11 @@ describe('the cache releases what a band held', () => {
   });
 });
 
-describe('the membership golden (captured against the notebook layer, the layer named with points)', () => {
-  // An r44 capture (2026-08-28; `artifacts.client.test.ts` says how). Everything above covers the
-  // column against bodies this test file builds; this is the one check that the column and the
-  // artifacts frame agree in a body the server actually sent.
+describe('the membership golden (the notebook corpus’s k-means layer, named with points)', () => {
+  // Everything above covers the column against bodies this test file builds; this is the one check
+  // that the column and the artifacts frame agree in a body the server actually sent.
   it('names members in the same response’s artifacts frame, and several artifacts with different geometry', () => {
-    const {readFileSync} = require('node:fs') as typeof import('node:fs');
-    const {join} = require('node:path') as typeof import('node:path');
-    // The capture carries the shape under its r44 names, which the decoder refuses outright; the
-    // column and the frame agreeing is what this checks, and that is read with those stripped.
-    const r = decodeViewport(liftGolden(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin')))));
+    const r = decodeViewport(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin'))));
     expect(r.artifacts.length).toBeGreaterThanOrEqual(3);
     const centroids = new Set(r.artifacts.map((a) => a.centroid?.join(',')));
     expect(centroids.size).toBe(r.artifacts.length);

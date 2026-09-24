@@ -1,14 +1,12 @@
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
+import {tableFromIPC} from 'apache-arrow';
 import {describe, expect, it} from 'vitest';
 import {decodeViewport} from '../src/decode.js';
 import {CELL_GRID} from '../src/coords.js';
-import {liftTilesHighlighted} from './old-shape-columns.js';
+import {splitFramedStreams} from '../src/frame.js';
 
-// The goldens predate the tiles frame's `highlighted` column and are lifted rather than
-// recaptured — see `liftTilesHighlighted`, and the fixture note in `clients/ts/README.md`.
-const fixture = (name: string) =>
-  liftTilesHighlighted(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name))));
+const fixture = (name: string) => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
 const meta = JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures', 'meta.json'), 'utf8'));
 
 describe('decodeViewport', () => {
@@ -150,6 +148,36 @@ describe('decodeViewport', () => {
       expect(Number.isInteger(code)).toBe(true);
       expect(code).toBeGreaterThanOrEqual(0);
     }
+  });
+
+  it('reads every rendered value as Arrow reads it, and a null into present', () => {
+    // Held to Arrow's own reading of the same frames, row by row and column by column.
+    const body = fixture('viewport-plain.bin');
+    const r = decodeViewport(body);
+    const points = splitFramedStreams(body).points.map((payload) => tableFromIPC(payload));
+    const rendered = (meta.declared_scalars as {name: string; render: boolean}[]).filter((c) => c.render);
+    expect(Object.keys(r.scalars).sort()).toEqual(rendered.map((c) => c.name).sort());
+    let withNulls = 0;
+    for (const [name, column] of Object.entries(r.scalars)) {
+      // Arrow reads a timestamp as a millisecond number; its stored microseconds are the values.
+      const cells = points.flatMap((t) => {
+        const vector = t.getChild(name)!;
+        const micros = column.arrowType === 'timestamp_us' ? vector.data.flatMap((d) => Array.from(d.values as BigInt64Array)) : null;
+        return Array.from({length: vector.length}, (_, i) => ({valid: vector.isValid(i), value: micros ? micros[i] : vector.get(i)}));
+      });
+      expect(column.values.length, `column ${name}`).toBe(cells.length);
+      cells.forEach(({valid, value}, i) => {
+        if (valid) expect(column.values[i], `column ${name}, row ${i}`).toBe(value);
+      });
+      const valid = cells.map((c) => (c.valid ? 1 : 0));
+      if (valid.every((v) => v === 1)) {
+        expect(column.present ?? null, `column ${name}`).toBeNull();
+        continue;
+      }
+      withNulls++;
+      expect([...column.present!], `column ${name}`).toEqual(valid);
+    }
+    expect(withNulls).toBeGreaterThan(0);
   });
 
   it('sums the underlay’s sub-cell counts to the visible total', () => {

@@ -198,56 +198,38 @@ measured against `2m4` are meaningless against `1e8`. Each preset's `visible` is
 TESSERA_SESSION_CRED=… node scripts/measure-principals.mjs --terms 0..200
 ```
 
-**`core/test/fixtures/*` — per wire change.** A decoder test passing against a stale golden is
+**`core/test/fixtures/*`, per wire change.** A decoder test passing against a stale golden is
 worse than no test.
 
 ```bash
-TESSERA_SESSION_CRED=… node scripts/capture-golden.mjs --terms 0
+node scripts/capture-golden.mjs
 ```
 
-Capture against the **wide** fixture (`data/scaled/attrs/schema-wide.toml`, nineteen columns and
-twelve Arrow types), not against a demo bundle: `decode.test.ts` walks the captured `meta.json` and
-checks every declared column decodes at its declared type, so a six-column capture keeps the test
-passing while quietly dropping two thirds of the types it covers. The other two are captured with
-`layers: []` so they keep pinning the no-artifacts-frame case whatever the server holds.
+It builds and serves two corpora with the live tests' harness (`core/test/served.ts`, which finds
+the `tessera` binary and `data/notebook/`), captures from each, and writes every fixture and
+`wire-example/test/expected.json`:
 
-**`viewport-artifacts.bin` and `viewport-membership.bin` are the exception, and may be captured
-against any corpus that carries a layer** — `--artifacts-only` recaptures the pair alone, leaving
-the wide goldens as they are. The first is the annotation channel's own shape, `k = 0` and no
-points frame; the worked decodes in `reference/examples` and `wire-example` pin its bytes, so it
-is captured as `--terms 0` every time. **Both are r44 captures and are due a recapture** — they
-carry `hull_x`/`hull_y`, the names the shape columns had before `polygon-membership.md` §7.1 made
-them `shape_x`/`shape_y` three lists deep (contracts §3.2 r45), and the decoder refuses those names
-outright rather than reading a hull body as shapeless. Until they are recaptured the tests strip
-the old columns (`core/test/old-shape-columns.ts`) to keep the row-set and membership claims
-against real bytes, and `viewport-artifacts-pre-r40.bin` beside them is a real body from before
-the rings change, kept deliberately and never recaptured: both are what the refusal is tested
-against. The second names the layer with points, so the body carries
-the artifacts frame **and** a points frame with the per-point membership column (D12); the wide
-fixture's breadth, a property of the declared columns, has nothing to contribute to either. What
-it must carry is several artifacts with genuinely different geometry — a layer declaring
-`centroid`, `box` and `hull` over clusters that occupy different parts of the map — and at least
-one point the column names a member, so it is captured as a principal broad enough to be served
-several (the demo's *medium* preset). Clusters cut from runs of consecutive ids do **not** qualify on a
-synthetic corpus whose positions are a modular sequence — every such run samples the whole extent,
-so every centroid lands in the middle and a decoder reading row 0 for every row would pass.
+- **A wide corpus it generates**: a thousand rows with a rendered column of every type a column
+  can have, each column null or absent on some rows. `python3` with pyarrow writes its Parquet
+  file. It gives `meta.json`, `viewport-plain.bin` and `viewport-underlay.bin` (zoom 2, `k = 20`,
+  `layers: []`, the second with `underlay_offset: 2`).
+- **The notebook corpus**, as a principal seeing about half of it. `viewport-artifacts.bin` and
+  `viewport-membership.bin` are its k-means layer at `k = 0` and `k = 50`. The three highlight
+  bodies are one request over the taxonomy layer with `filters` on `archive in [cs, math]`: with
+  `highlight` on `archive in [cs]`, the same under `point_rows: "highlight"`, and without the
+  highlight. The `browse-*.json` pages are the k-means roots, a filtered page of the HDBSCAN root's
+  children, and a search.
 
-**`viewport-highlight.bin`, `viewport-point-rows-highlight.bin`, `viewport-no-highlight.bin` and
-the three `browse-*.json` pages are recorded, not lifted** — one `tessera serve` over
-`data/ladder/arxiv/` on 2026-09-02, the day the highlight columns and the browse verb landed. The
-three viewport bodies are one request in three shapes: with `filters` and `highlight` together (so
-`highlighted < matched < visible`, all non-zero, which is the only arrangement in which reading the
-wrong column is caught), the same under `point_rows = "highlight"`, and the same with no highlight
-at all. Recapture them with a server serving contracts §3.2 r74–r75 and the same request; there is
-no script, because the request is three curls and the point is the shape rather than the corpus.
+Each capture checks what its tests rely on: a null in every rendered column that is not a
+category, a first point id past 2^53, distinct cluster centroids and a named member, a shape on
+every cluster with one of several parts and a ring of several vertices, `highlighted < matched <
+visible` above zero, children at rung 1, and a next page where one is expected. Where one fails
+the script writes nothing.
 
-**Every golden also predates the tiles frame's `highlighted` column** (`highlight-and-hierarchy.md`
-§2, fifth after `served` and always present), so `liftTilesHighlighted` in the same module gives
-each one that column with each tile's `matched` in it — which is exactly what the server serves for
-a request carrying no `highlight`, and these captures carried none. `liftGolden` is both lifts
-together. Both are rewrites of stale recordings, **in test code only**: the decoder keeps no shim
-(decision 0048) and refuses a body without the column. They go when the goldens are recaptured
-against a server serving the highlight columns.
+Both servers are built with one fixed identity key and the wide declaration pins every category
+code, so a recapture where nothing changed rewrites every file byte for byte except each viewport
+body's trailer, which carries timings. `viewport-artifacts-pre-r40.bin` is never recaptured: it is a body
+from before the shape columns, kept for the test that refuses it.
 
 ## Annotation layers, and the number beside a cluster
 

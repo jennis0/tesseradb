@@ -1,9 +1,10 @@
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
+import {tableFromIPC} from 'apache-arrow';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
-import {decodeViewport} from '../src/decode.js';
-import {liftGolden, liftTilesHighlighted} from './old-shape-columns.js';
+import {decodeArtifactsFrame, decodeViewport} from '../src/decode.js';
+import {splitFramedStreams} from '../src/frame.js';
 import type {Decoder} from '../src/decoder.js';
 import {refused, rejectsAsRefused, result} from './support.js';
 
@@ -225,39 +226,25 @@ describe('/v1/meta', () => {
 });
 
 /**
- * **The two artifact goldens are r44 captures** (2026-08-28) — taken against a `tessera serve`
- * built from this tree over the notebook corpus's `clusters/hdbscan` (`./run_demo.sh --scale
- * notebook --no-viewer`, then `scripts/capture-golden.mjs --artifacts-only` as the corpus's
- * *medium* preset principal, whose terms are arXiv categories; `--terms 0` sees nothing there), so
- * `layer` is dictionary-encoded, `rung` stands where `level` did, and `hull_x`/`hull_y` trail the
- * fixed prefix as the nested list of rings contracts §3.2 r44 specified.
- *
- * **Both goldens are now bodies from before the shape columns** (contracts §3.2 r45 renamed the
- * pair `shape_x`/`shape_y` and deepened it to parts of rings), and the decoder refuses them by
- * name rather than reading them as shapeless: read as *no drawn geometry*, an r44 body draws
- * every cluster as its box and looks like a layer that declares none. So the two fixture tests
- * below are the refusal, and the geometry and row-set claims are made against a hand-assembled
- * r45 body in `artifacts-frame.test.ts` and `shape.test.ts`. ⊘ The goldens are due a recapture
- * against a served corpus (`scripts/capture-golden.mjs --artifacts-only`), which restores the
- * captured-body claims here; `clients/ts/README.md`'s fixture rule applies.
+ * The artifacts frame as a server sent it: the k-means layer of the notebook corpus, which declares
+ * centroid, box and hull over clusters in different parts of the map, captured at `k = 0` by
+ * `scripts/capture-golden.mjs`.
  */
 describe('the artifacts frame, decoded from a captured response', () => {
   const fixture = (name: string) =>
     new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
 
-  it('refuses a body captured before the shape columns, whichever nesting its hull carried', () => {
-    // Two real bodies, not hand-assembled ones: the pre-r40 flat hull and the r44 list of rings.
-    // Neither is read as shapeless — the old column names are the refusal.
-    // Lifted for the tiles frame's `highlighted` column first, so what is being refused is the
-    // shape columns' old names and not the newer column these captures also predate.
-    refused(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts-pre-r40.bin'))));
-    refused(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts.bin'))));
+  it('refuses an artifacts frame captured before the shape columns', () => {
+    // A real body from a server that sent the hull as `hull_x`/`hull_y` and had no `rung` column.
+    // Its tiles frame predates other columns too, so the artifacts frame is decoded alone. The
+    // refusal of the old names by themselves is tested in `artifacts-frame.test.ts`.
+    refused(() => decodeArtifactsFrame(splitFramedStreams(fixture('viewport-artifacts-pre-r40.bin')).artifacts!));
   });
 
   it('carries one row per served artifact, and no points beside them', () => {
-    const result = decodeViewport(liftGolden(fixture('viewport-artifacts.bin')));
+    const result = decodeViewport(fixture('viewport-artifacts.bin'));
     expect(result.artifacts.length).toBeGreaterThan(0);
-    // Captured at `k = 0` — the annotation channel's own request shape. A body with an artifacts
+    // Captured at `k = 0`, the annotation channel's own request shape. A body with an artifacts
     // frame and no points frame at all is the case a decoder is most likely to get wrong.
     expect(result.ids.length).toBe(0);
     expect(result.membership).toEqual({});
@@ -278,20 +265,17 @@ describe('the artifacts frame, decoded from a captured response', () => {
   });
 
   it('reads a response with no artifacts frame as no artifacts, not as a failure', () => {
-    expect(decodeViewport(liftTilesHighlighted(fixture('viewport-plain.bin'))).artifacts).toEqual([]);
+    expect(decodeViewport(fixture('viewport-plain.bin')).artifacts).toEqual([]);
   });
 
   it('carries the derived geometry in the same grid units as the points', () => {
-    const result = decodeViewport(liftGolden(fixture('viewport-artifacts.bin')));
-    // The captured layer declares all three; the centroid and the box are read here, and the
-    // shape — under its r44 name in this capture — is what `liftGolden` took out. A null
-    // centroid or box would be *the layer declares none* and never *withheld* — content is never
-    // withheld from a served artifact — so a null on a layer that declares the property is a
-    // decoder or a server bug.
+    const result = decodeViewport(fixture('viewport-artifacts.bin'));
+    // The layer declares all three and the request narrowed none. A null would mean *the layer
+    // declares none*, never *withheld*, so a null here is a decoder or a server bug.
     for (const a of result.artifacts) {
       expect(a.centroid).not.toBeNull();
       expect(a.box).not.toBeNull();
-      expect(a.shape).toBeNull();
+      expect(a.shape).not.toBeNull();
 
       const [cx, cy] = a.centroid!;
       const [minX, minY, maxX, maxY] = a.box!;
@@ -304,11 +288,43 @@ describe('the artifacts frame, decoded from a captured response', () => {
 
       // Grid units, not data coordinates: the axes span 2^32, exactly as `codes` does.
       expect(maxX).toBeLessThanOrEqual(2 ** 32);
+      // Parts, then rings, then vertices, each vertex a member's position and so inside the box.
+      // A group of one or two members is served as that point or that segment.
+      expect(a.shape!.length).toBeGreaterThan(0);
+      for (const part of a.shape!) {
+        for (const ring of part) {
+          expect(ring.length).toBeGreaterThan(0);
+          for (const [x, y] of ring) {
+            expect(x).toBeGreaterThanOrEqual(minX);
+            expect(x).toBeLessThanOrEqual(maxX);
+            expect(y).toBeGreaterThanOrEqual(minY);
+            expect(y).toBeLessThanOrEqual(maxY);
+          }
+        }
+      }
     }
-    // Different clusters, different shapes — one geometry repeated across rows would mean the
+    // Different clusters, different shapes: one geometry repeated across rows would mean the
     // decoder read row 0 for everybody.
     const centroids = new Set(result.artifacts.map((a) => a.centroid!.join(',')));
     expect(centroids.size).toBe(result.artifacts.length);
+  });
+
+  it('reads every shape part, ring and vertex as Arrow reads the nested lists', () => {
+    const body = fixture('viewport-artifacts.bin');
+    const result = decodeViewport(body);
+    const table = tableFromIPC(splitFramedStreams(body).artifacts!);
+    const nested = (name: string, i: number) =>
+      Array.from(table.getChild(name)!.get(i) as Iterable<Iterable<Iterable<number>>>, (rings) => Array.from(rings, (ring) => Array.from(ring)));
+    expect(result.artifacts.length).toBe(table.numRows);
+    result.artifacts.forEach((a, i) => {
+      const xs = nested('shape_x', i);
+      const ys = nested('shape_y', i);
+      expect(a.shape, `artifact ${i}`).toEqual(xs.map((rings, p) => rings.map((ring, r) => ring.map((x, v) => [x, ys[p]![r]![v]]))));
+    });
+    // The capture holds a shape of several parts and a ring of several vertices, so reading only
+    // the first of either is caught.
+    expect(result.artifacts.some((a) => a.shape!.length > 1)).toBe(true);
+    expect(result.artifacts.some((a) => a.shape!.some((part) => part.some((ring) => ring.length > 1)))).toBe(true);
   });
 });
 
