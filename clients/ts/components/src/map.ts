@@ -6,6 +6,7 @@ import {
   WORLD_SIZE,
   assertCompositionMatchesServed,
   dataToWorldXY,
+  hasValue,
   worldBbox,
   type ArtifactsProjection,
   type FiltersProjection,
@@ -842,17 +843,20 @@ export class TesseraMap extends TesseraElement {
       if (this.hover) this.hover = null;
       return;
     }
-    const carried = (name: string): string | null => {
+    // An absent value reads as such beside the others; an absent title falls back as a missing one.
+    const carried = (name: string, absent: string | null): string | null => {
       const column = at?.band.scalars[name];
-      const raw = at && column ? (column.values as ArrayLike<unknown>)[at.i] : null;
-      return raw === null || raw === undefined ? null : hoverText(raw, column!.arrowType);
+      if (!at || !column) return null;
+      if (!hasValue(column, at.i)) return absent;
+      const raw = (column.values as ArrayLike<unknown>)[at.i];
+      return raw === null || raw === undefined ? null : hoverText(raw, column.arrowType);
     };
     const lines = this.tooltipFields
       .split(/[\s,]+/)
       .filter(Boolean)
-      .map(carried)
+      .map((name) => carried(name, 'absent'))
       .filter((v): v is string => v !== null);
-    const title = this.titleField ? carried(this.titleField) : null;
+    const title = this.titleField ? carried(this.titleField, null) : null;
     this.hover = {x: info.x, y: info.y, title: title ?? `#${idString(picked.id)}`, lines};
     if (this.titleField && title === null) this.describeHovered(picked.id, info.x, info.y);
     emit(this, 'tessera-hover', {id: idString(picked.id), x: info.x, y: info.y});

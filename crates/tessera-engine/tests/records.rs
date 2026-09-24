@@ -33,7 +33,7 @@ use tessera_build::{
 use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, MemberOfLeaf, RegionLeaf, Scalar};
 use tessera_engine::shapes::ShapeF64;
 use tessera_engine::{
-    Engine, EngineError, RecordsHead, RecordsLimits, PageEnd, ItemsRequest, RecordsSink,
+    ColumnBuf, Engine, EngineError, RecordsHead, RecordsLimits, PageEnd, ItemsRequest, RecordsSink,
     RecordsTrailer, LayerSelection, PageEndedBy, RecordsOrder, RecordsRefused, RegionVerdict,
     ResponseEndedBy, Session, SinkResult, ViewportRequest,
 };
@@ -1355,6 +1355,96 @@ fn absent_values_are_nulls_in_every_home() {
         }
     }
     assert_eq!(seen, N);
+}
+
+/// **The viewport's points carry a null where an item has no rendered value**, from the build and
+/// from an ingest alike, and a value where it has one, a genuine zero included. A category's
+/// absence stays its code 0. A column whose served points all hold a value has no validity.
+#[test]
+fn a_viewport_point_is_null_where_its_item_has_no_rendered_value() {
+    let mut fx = Fx::new();
+    fx.engine.set_merge_for_test(false);
+    let ingested: Vec<u64> = (N..N + 60).collect();
+    fx.ingest("later", &ingested);
+    // One item whose every rendered number is a genuine zero.
+    const ZERO: u64 = N + 100;
+    let (x, y) = position(ZERO);
+    let zero = UnallocatedRow {
+        external_id: Some(ZERO.to_le_bytes().to_vec()),
+        view: "s0".to_string(),
+        join: None,
+        x,
+        y,
+        scalars: vec![
+            WalScalar::Utf8("low".to_string()),
+            WalScalar::U16(0),
+            WalScalar::I32(0),
+            WalScalar::F32(0.0),
+            WalScalar::Null,
+            WalScalar::Null,
+            WalScalar::Utf8(prose_of(ZERO)),
+            WalScalar::Null,
+            WalScalar::Bool(false),
+        ],
+        terms: fx.engine.resolve_terms(&[b"0".to_vec()]),
+        descriptors: vec![b"0".to_vec()],
+        scoped: Vec::new(),
+    };
+    let entity = fx
+        .engine
+        .accept_ingest(vec![zero], "zero".to_string(), [0u8; 32])
+        .expect("the ingest is accepted")[0];
+    fx.entity.insert(ZERO, entity.raw());
+    flush(&fx.engine);
+
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let by_tid = sources_by_tid(&fx);
+    let out = fx
+        .engine
+        .viewport(&session, ViewportRequest::new("s0", 2, WHOLE_MAP, 200))
+        .expect("a viewport");
+    let at = |name: &str| {
+        let i = out.scalar_names.iter().position(|n| n == name).unwrap();
+        &out.points.scalars[i]
+    };
+    let (band, score, heat, flag) = (at("band"), at("score"), at("heat"), at("flag"));
+    let (ColumnBuf::U8(bands), ColumnBuf::I32(scores), ColumnBuf::F32(heats), ColumnBuf::Bool(flags)) =
+        (&band.values, &score.values, &heat.values, &flag.values)
+    else {
+        panic!("the render columns came back at the wrong types");
+    };
+    assert_eq!(band.present, None, "a category's absence is its code, not a null");
+    let mut served = BTreeSet::new();
+    for (i, (tid, _)) in out.points.iter().enumerate() {
+        let s = by_tid[&tid.raw()];
+        served.insert(s);
+        let expected_band = if s == ZERO { Some("low") } else { band_of(s) };
+        assert_eq!(bands[i] == 0, expected_band.is_none(), "band of {s}");
+        let (want_score, want_heat, want_flag) = if s == ZERO {
+            (Some(0), Some(0.0), Some(false))
+        } else {
+            (score_of(s), heat_of(s), flag_of(s))
+        };
+        assert_eq!(score.is_present(i).then_some(scores[i]), want_score, "score of {s}");
+        assert_eq!(heat.is_present(i).then_some(heats[i]), want_heat, "heat of {s}");
+        assert_eq!(flag.is_present(i).then_some(flags[i]), want_flag, "flag of {s}");
+    }
+    let mut expected: BTreeSet<u64> = (0..N).chain(ingested.iter().copied()).collect();
+    expected.insert(ZERO);
+    assert_eq!(served, expected, "every item is served");
+    assert!(ingested.iter().any(|&s| score_of(s).is_none()), "an ingested item has no score");
+
+    // Filtered to items with a score, every served point holds one.
+    let scored = fx
+        .engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 2, WHOLE_MAP, 200).filter(leaf("score", range(1, 1 << 30))),
+        )
+        .expect("a filtered viewport");
+    assert!(!scored.points.is_empty());
+    let i = scored.scalar_names.iter().position(|n| n == "score").unwrap();
+    assert_eq!(scored.points.scalars[i].present, None, "no score is absent");
 }
 
 /// **A page's category dictionary holds the keys its rows carry and no other.**

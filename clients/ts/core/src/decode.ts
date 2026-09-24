@@ -1,7 +1,7 @@
 import {tableFromIPC, Type, type DataType, type Table, type Vector} from 'apache-arrow';
 import {CELLS_PER_WORLD_UNIT} from './coords.js';
 import {splitFramedStreams} from './frame.js';
-import type {Artifact, ArtifactIdentity, MembershipColumn, ScalarColumn, Shape, SubCell, TileCounts, ViewportResult} from './types.js';
+import type {Artifact, ArtifactIdentity, MembershipColumn, ScalarColumn, ScalarValues, Shape, SubCell, TileCounts, ViewportResult} from './types.js';
 
 function u64Column(table: Table, name: string): BigUint64Array {
   const col = table.getChild(name);
@@ -62,14 +62,28 @@ function partsColumn(table: Table, name: string): {get(i: number): Parts | null}
  * it would shift nothing (the map is keyed by name) but would make the column vanish from the
  * legend with no error, so it throws instead. The thirteen arms mirror
  * `tessera_wire::payload::ScalarColumn`; the two must be changed together.
+ *
+ * **A null is read into `present`, never into a value.** Arrow's `toArray()` hands back a null
+ * number's slot as `0`, so where the vector holds a null, `present` marks it and the value beside
+ * it means nothing.
  */
 function scalarColumn(name: string, vector: Vector<DataType>): ScalarColumn {
+  const column: ScalarColumn = scalarValues(name, vector);
+  if (vector.nullCount > 0) {
+    const present = new Uint8Array(vector.length);
+    for (let i = 0; i < vector.length; i++) present[i] = vector.isValid(i) ? 1 : 0;
+    column.present = present;
+  }
+  return column;
+}
+
+function scalarValues(name: string, vector: Vector<DataType>): ScalarValues {
   const type = vector.type;
   switch (type.typeId) {
     case Type.Bool:
-      return {arrowType: 'bool', values: [...vector] as boolean[]};
+      return {arrowType: 'bool', values: Array.from(vector, (v: boolean | null) => v === true)};
     case Type.Utf8:
-      return {arrowType: 'utf8', values: [...vector] as string[]};
+      return {arrowType: 'utf8', values: Array.from(vector, (v: string | null) => v ?? '')};
     case Type.Timestamp:
       return {arrowType: 'timestamp_us', values: vector.toArray() as BigInt64Array};
     case Type.Int: {
@@ -125,11 +139,26 @@ function concatScalarColumns(pieces: ScalarColumn[], total: number): ScalarColum
       );
     }
   }
+  const column: ScalarColumn = concatScalarValues(pieces, total);
+  if (pieces.some((p) => p.present)) {
+    const present = new Uint8Array(total).fill(1);
+    let offset = 0;
+    for (const piece of pieces) {
+      if (piece.present) present.set(piece.present, offset);
+      offset += piece.values.length;
+    }
+    column.present = present;
+  }
+  return column;
+}
+
+function concatScalarValues(pieces: ScalarColumn[], total: number): ScalarValues {
+  const first = pieces[0]!;
   if (first.arrowType === 'bool' || first.arrowType === 'utf8') {
     return {
       arrowType: first.arrowType,
       values: pieces.flatMap((p) => p.values as (boolean | string)[])
-    } as ScalarColumn;
+    } as ScalarValues;
   }
   // The typed families share the `set`-into-a-preallocated-buffer shape; the switch is what
   // names each concrete constructor for the type checker. Mirrors `scalarColumn`'s arms — the
@@ -137,7 +166,7 @@ function concatScalarColumns(pieces: ScalarColumn[], total: number): ScalarColum
   const fill = <A extends {set(a: A, o: number): void; length: number}>(out: A): A => {
     let offset = 0;
     for (const piece of pieces) {
-      // Same `arrowType` (asserted above) means same concrete typed-array class; the checker
+      // Same `arrowType` (asserted by the caller) means same concrete typed-array class; the checker
       // cannot see through the union, hence the `unknown` step.
       const values = piece.values as unknown as A;
       out.set(values, offset);

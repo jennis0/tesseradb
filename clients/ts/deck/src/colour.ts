@@ -14,7 +14,7 @@
  * `extendRanks` and `numericValues` are re-exported from core so the viewer has one source.
  */
 import type {CategoryValue, ScalarColumn} from '@tesseradb/client';
-import {numericValues, rankedValues, type Ranks} from '@tesseradb/client';
+import {hasValue, numericValues, rankedValues, type Ranks} from '@tesseradb/client';
 
 export {
   countCodes,
@@ -35,8 +35,8 @@ const ALPHA = 200;
 export const UNIFORM: Rgba = [120, 190, 255, ALPHA];
 
 /**
- * Everything unmappable: the *absent* sentinel (code 0), a code no key explains, and any value
- * past the palette's end.
+ * Everything unmappable: the *absent* sentinel (code 0), a number with no value, a code no key
+ * explains, and any value past the palette's end.
  *
  * **Deliberately legible rather than invisible.** These marks are served and must be drawn (I7),
  * so the colour has to read as "no value" without reading as "no mark" — a low-saturation grey
@@ -203,6 +203,7 @@ export function formatScalar(
 ): string {
   const raw = column.values[index];
   if (raw === undefined) return '—';
+  if (!hasValue(column, index)) return 'absent';
   if (keyOfCode) {
     const code = Number(raw);
     if (code === 0) return 'absent';

@@ -7,6 +7,7 @@ import {
   type Composition,
   type ReplicaFrame,
   type ScalarColumn,
+  type ScalarValues,
   type StandInPiece,
   type TileRect
 } from '@tesseradb/client';
@@ -83,6 +84,29 @@ function pieceLength(piece: StandInPiece): number {
 function assembleScalar(name: string, pieces: readonly StandInPiece[], total: number): ScalarColumn | null {
   const first = pieces.find((p) => p.band.scalars[name])?.band.scalars[name];
   if (!first) return null;
+  const column: ScalarColumn = assembleValues(name, pieces, total, first);
+  // A piece whose band lacks the column has no value there, as a null does.
+  if (pieces.some((p) => p.band.scalars[name]?.present || !p.band.scalars[name])) {
+    const present = new Uint8Array(total);
+    let o = 0;
+    for (const piece of pieces) {
+      const source = piece.band.scalars[name];
+      const len = pieceLength(piece);
+      const at = (i: number) => (!source ? 0 : !source.present ? 1 : source.present[i]!);
+      if (piece.indices) for (const i of piece.indices) present[o++] = at(i);
+      else for (let i = 0; i < len; i++) present[o++] = at(i);
+    }
+    column.present = present;
+  }
+  return column;
+}
+
+function assembleValues(
+  name: string,
+  pieces: readonly StandInPiece[],
+  total: number,
+  first: ScalarColumn
+): ScalarValues {
 
   if (first.arrowType === 'bool' || first.arrowType === 'utf8') {
     const values: unknown[] = [];
@@ -97,7 +121,7 @@ function assembleScalar(name: string, pieces: readonly StandInPiece[], total: nu
       if (piece.indices) for (const i of piece.indices) values.push(source[i]);
       else for (let i = 0; i < len; i++) values.push(source[i]);
     }
-    return {arrowType: first.arrowType, values} as ScalarColumn;
+    return {arrowType: first.arrowType, values} as ScalarValues;
   }
 
   const Ctor = (first.values as unknown as {constructor: new (n: number) => ArrayLike<unknown>})
@@ -122,7 +146,7 @@ function assembleScalar(name: string, pieces: readonly StandInPiece[], total: nu
       o += len;
     }
   }
-  return {arrowType: first.arrowType, values: out} as unknown as ScalarColumn;
+  return {arrowType: first.arrowType, values: out} as unknown as ScalarValues;
 }
 
 /** The stand-in buffers a `ScatterplotLayer` draws, and how many marks they hold. */

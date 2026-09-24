@@ -27,8 +27,14 @@ export type Domain = {min: number; max: number};
 /** Palette rank per code, as a plain object so it lives comfortably in a projection. */
 export type Ranks = Record<number, number>;
 
+/** Whether point `i` of `column` has a value: false where the server sent a null. */
+export function hasValue(column: ScalarColumn, i: number): boolean {
+  return !column.present || column.present[i] === 1;
+}
+
 /**
- * A column's values as plain numbers, or `null` if it has no ramp.
+ * A column's values as plain numbers, or `null` if it has no ramp. A point with no value is `NaN`,
+ * so it takes no part in a domain and colours as unmapped, as a category's code 0 does.
  *
  * `i64` and `timestamp_us` arrive as `BigInt64Array`. Narrowing to a double loses precision past
  * 2⁵³ — but a colour ramp has ~256 distinguishable steps, so the loss is invisible *here* and
@@ -36,20 +42,13 @@ export type Ranks = Record<number, number>;
  * the decoder still hands back the `BigInt64Array`.
  */
 export function numericValues(column: ScalarColumn): ArrayLike<number> | null {
-  switch (column.arrowType) {
-    case 'bool':
-    case 'utf8':
-      return null;
-    case 'u64':
-    case 'i64':
-    case 'timestamp_us': {
-      const out = new Float64Array(column.values.length);
-      for (let i = 0; i < column.values.length; i++) out[i] = Number(column.values[i]!);
-      return out;
-    }
-    default:
-      return column.values;
-  }
+  if (column.arrowType === 'bool' || column.arrowType === 'utf8') return null;
+  const values = column.values as ArrayLike<number | bigint>;
+  const wide = column.arrowType === 'u64' || column.arrowType === 'i64' || column.arrowType === 'timestamp_us';
+  if (!wide && !column.present) return column.values as ArrayLike<number>;
+  const out = new Float64Array(values.length);
+  for (let i = 0; i < values.length; i++) out[i] = hasValue(column, i) ? Number(values[i]!) : NaN;
+  return out;
 }
 
 /**
