@@ -120,12 +120,7 @@ impl ScalarColumn {
                 Some(a) => Values::F32(a.values().to_vec()),
                 None => Values::F64AsF32(any.downcast_ref::<Float64Array>()?.values().to_vec()),
             },
-            ScalarType::F64 => Values::F64(if let Some(a) = any.downcast_ref::<Float64Array>() {
-                a.values().to_vec()
-            } else {
-                let a = any.downcast_ref::<Float32Array>()?;
-                a.values().iter().map(|v| f64::from(*v)).collect()
-            }),
+            ScalarType::F64 => Values::F64(f64_values(column.as_ref())?),
             ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
                 Values::Text(Utf8Values::new(column)?)
             }
@@ -171,24 +166,10 @@ impl ScalarColumn {
 
     /// An integer at the declared type, or [`OutOfRange`] where the type cannot hold it.
     fn integer(&self, value: i128) -> Result<ScalarValue, OutOfRange> {
-        let (min, max) = match self.ty {
-            ScalarType::U8 => (0, u8::MAX.into()),
-            ScalarType::U16 => (0, u16::MAX.into()),
-            ScalarType::U32 => (0, u32::MAX.into()),
-            ScalarType::U64 => (0, u64::MAX.into()),
-            ScalarType::I8 => (i8::MIN.into(), i8::MAX.into()),
-            ScalarType::I16 => (i16::MIN.into(), i16::MAX.into()),
-            ScalarType::I32 => (i32::MIN.into(), i32::MAX.into()),
-            ScalarType::I64 | ScalarType::TimestampUs => (i64::MIN.into(), i64::MAX.into()),
-            ScalarType::Bool
-            | ScalarType::F32
-            | ScalarType::F64
-            | ScalarType::Utf8
-            | ScalarType::Keyword
-            | ScalarType::Text => {
-                unreachable!("`new` reads only an integer declaration as integers")
-            }
-        };
+        let (min, max) = self
+            .ty
+            .integer_range()
+            .expect("`new` reads only an integer declaration as integers");
         if !(min..=max).contains(&value) {
             return Err(OutOfRange::Integer { value, min, max });
         }
@@ -205,6 +186,17 @@ impl ScalarColumn {
             _ => ScalarValue::TimestampUs(value as i64),
         })
     }
+}
+
+/// A float column at either width as `f64`, the narrower widened; `None` for any other type. The
+/// slots of null rows hold arbitrary numbers.
+pub fn f64_values(column: &dyn Array) -> Option<Vec<f64>> {
+    let any = column.as_any();
+    if let Some(a) = any.downcast_ref::<Float64Array>() {
+        return Some(a.values().to_vec());
+    }
+    let a = any.downcast_ref::<Float32Array>()?;
+    Some(a.values().iter().map(|v| f64::from(*v)).collect())
 }
 
 /// Any integer column but a `u64` one, or a microsecond timestamp, as `i64`: one conversion per

@@ -236,17 +236,6 @@ pub(in crate::write) fn scalar_code(scalar: &WalScalar) -> Option<u32> {
     }
 }
 
-/// A vocabulary code, at its column's declared width.
-///
-/// `is_category_width` admits `u8`/`u16`/`u32` only, so the fallthrough is `u32`, the widest,
-/// which cannot truncate a code the other two could hold.
-pub(in crate::write) fn code_at_declared_width(width: ScalarType, code: u32) -> WalScalar {
-    match width {
-        ScalarType::U8 => WalScalar::U8(code as u8),
-        ScalarType::U16 => WalScalar::U16(code as u16),
-        _ => WalScalar::U32(code),
-    }
-}
 
 #[cfg(test)]
 mod segment_schema_tests {

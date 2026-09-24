@@ -117,8 +117,21 @@ def test_the_first_commit_reports_what_it_built_and_prints_nothing(tmp_path, cor
 def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served, corpus, capsys):
     db = served(small)
     capsys.readouterr()
-    # A row outside the view's frame is a finding, and the check and the commit both carry it.
+    # A row outside the view's frame commits on the frame's edge, and the summary counts it.
     db.insert("map", papers(["far"], x=[9_000.0]), id="id", x="x", y="y", access="labels")
+    report = db.commit()
+    assert report.ok and report.clamped == 1
+    assert "clamped" in str(report)
+
+    # A value row with no id is a finding, and the check and the commit both carry it.
+    db = served(small)
+    capsys.readouterr()
+    db.insert(
+        "score",
+        pa.table({"id": pa.array([None], pa.string()), "score": pa.array([7.0], pa.float64())}),
+        id="id",
+        value="score",
+    )
     plan = db.check()
     assert plan.findings and all(str(finding) in str(plan) for finding in plan.findings)
     assert str(len(plan.plan)) in str(plan)

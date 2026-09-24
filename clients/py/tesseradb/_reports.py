@@ -181,6 +181,7 @@ class PagedReport(Summarised):
     - `already_present`: parts the database already held, which changed nothing.
     - `without_content`: annotations added without the content they declare.
     - `clipped`: rows moved onto the edge of a view's extent by its projection.
+    - `clamped`: rows outside a view's extent, moved onto its edge.
     - `refusals`: each refused request, with its status and the server's answer.
     - `tessera_ids`: the id given to each added row.
     - `artifact_ids`: the id given to each added annotation, by layer and then by
@@ -206,6 +207,7 @@ class PagedReport(Summarised):
     already_present: int = 0
     without_content: int = 0
     clipped: int = 0
+    clamped: int = 0
     refusals: list = field(default_factory=list)
     tessera_ids: list = field(default_factory=list)
     replayed: list = field(default_factory=list)
@@ -255,6 +257,8 @@ class PagedReport(Summarised):
             )
         if self.clipped:
             out.append(f"  rows clipped onto the frame's edge by the projection: {self.clipped:,}")
+        if self.clamped:
+            out.append(f"  rows outside the extent, clamped onto its edge: {self.clamped:,}")
         if self.replayed:
             out.append(f"  requests replayed, adding nothing: {len(self.replayed):,}")
         out += [str(finding) for finding in self.findings]

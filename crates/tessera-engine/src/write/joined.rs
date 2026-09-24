@@ -213,11 +213,10 @@ fn stored_as_wal(
             RV::U32(c) => c,
             _ => return None,
         };
-        return Some(match declared.arrow_type {
-            ScalarType::U8 => WS::U8(code as u8),
-            ScalarType::U16 => WS::U16(code as u16),
-            _ => WS::U32(code),
-        });
+        return Some(tessera_store::vocabulary::code_value(
+            declared.arrow_type,
+            code,
+        ));
     }
     Some(match (declared.arrow_type, value) {
         (ScalarType::Bool, RV::U8(x)) => WS::Bool(x != 0),

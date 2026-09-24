@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::scalar::ScalarType;
+
 /// What joins a group's name to one of its keys in a view id — `<group>:<key>` (`views.md` §3.2).
 ///
 /// Here rather than beside the manifest's copy because the WAL's roster records travel through
@@ -115,20 +117,24 @@ impl ViewMetadataType {
         }
     }
 
-    /// The values an integer type holds, or `None` for a type that is not an integer. A value is
-    /// carried as an `i64`, so `u64` stops at `i64::MAX`.
+    /// The values an integer type holds, or `None` for a type that is not an integer. A roster
+    /// value is stored as an `i64`, so the range is the declared type's cut to an `i64`'s, which
+    /// stops a `u64` at `i64::MAX`.
     pub fn integer_range(self) -> Option<(i64, i64)> {
-        Some(match self {
-            ViewMetadataType::U8 => (0, i64::from(u8::MAX)),
-            ViewMetadataType::U16 => (0, i64::from(u16::MAX)),
-            ViewMetadataType::U32 => (0, i64::from(u32::MAX)),
-            ViewMetadataType::U64 => (0, i64::MAX),
-            ViewMetadataType::I8 => (i64::from(i8::MIN), i64::from(i8::MAX)),
-            ViewMetadataType::I16 => (i64::from(i16::MIN), i64::from(i16::MAX)),
-            ViewMetadataType::I32 => (i64::from(i32::MIN), i64::from(i32::MAX)),
-            ViewMetadataType::I64 => (i64::MIN, i64::MAX),
+        let declared = match self {
+            ViewMetadataType::U8 => ScalarType::U8,
+            ViewMetadataType::U16 => ScalarType::U16,
+            ViewMetadataType::U32 => ScalarType::U32,
+            ViewMetadataType::U64 => ScalarType::U64,
+            ViewMetadataType::I8 => ScalarType::I8,
+            ViewMetadataType::I16 => ScalarType::I16,
+            ViewMetadataType::I32 => ScalarType::I32,
+            ViewMetadataType::I64 => ScalarType::I64,
             _ => return None,
-        })
+        };
+        let (min, max) = declared.integer_range()?;
+        let stored = |v: i128| v.clamp(i64::MIN.into(), i64::MAX.into()) as i64;
+        Some((stored(min), stored(max)))
     }
 
     /// Does `value` belong under this declaration? An integer must fit the declared width. An
@@ -315,6 +321,17 @@ mod tests {
         assert!(ViewMetadataType::I8.admits(&ViewMetadataValue::Int(-128)));
         assert!(!ViewMetadataType::Float.admits(&ViewMetadataValue::Int(1)));
         assert!(!ViewMetadataType::I32.admits(&ViewMetadataValue::Text("1".to_string())));
+    }
+
+    #[test]
+    fn a_u64_is_held_up_to_the_largest_value_its_i64_storage_holds() {
+        assert_eq!(ViewMetadataType::U64.integer_range(), Some((0, i64::MAX)));
+        assert!(ViewMetadataType::U64.admits(&ViewMetadataValue::Int(i64::MAX)));
+        assert!(!ViewMetadataType::U64.admits(&ViewMetadataValue::Int(-1)));
+        assert_eq!(
+            ViewMetadataType::I64.integer_range(),
+            Some((i64::MIN, i64::MAX))
+        );
     }
 
     #[test]

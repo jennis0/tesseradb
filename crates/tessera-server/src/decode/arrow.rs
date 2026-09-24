@@ -1,11 +1,12 @@
-use arrow::array::Array;
+use arrow::array::{Array, UInt32Array};
 use arrow::record_batch::RecordBatch;
+use tessera_engine::coordinates;
+use tessera_engine::member_key;
+use tessera_engine::shapes::Bounds;
 use tessera_engine::scalar_column::{self, ScalarColumn};
 use tessera_engine::utf8::Utf8Column;
-use tessera_engine::{
-    DeclaredScalar, Projection, ScalarType, ScalarValue, ScopedScalar, Vocabularies,
-    VocabularyKind, ABSENT_CODE,
-};
+use tessera_engine::vocabulary::{code_value, Resolved};
+use tessera_engine::{DeclaredScalar, Projection, ScopedScalar, Vocabularies};
 use tessera_lifecycle::{BatchArtifacts, WalScalar};
 use tessera_types::layer::LayerDeclaration;
 use tessera_types::TesseraId;
@@ -35,16 +36,6 @@ pub(crate) struct RawIngestItem {
     pub(crate) scoped: Vec<WalScalar>,
 }
 
-/// A projected view's coordinate columns are `lon` and `lat`, an unprojected view's `x` and `y`,
-/// as at the build. Naming the axes for what they hold catches a corpus written with the two
-/// exchanged, which would otherwise be silently mirrored.
-fn coordinate_columns(projection: Projection) -> (&'static str, &'static str) {
-    match projection {
-        Projection::None => ("x", "y"),
-        _ => ("lon", "lat"),
-    }
-}
-
 /// One ingest batch, decoded, with what its membership columns said.
 pub(crate) struct ParsedBatch {
     pub(crate) items: Vec<RawIngestItem>,
@@ -55,6 +46,8 @@ pub(crate) struct ParsedBatch {
     /// Rows whose latitude lay outside the projection's domain and were moved onto the frame's
     /// edge; always `0` for an unprojected view.
     pub(crate) clipped: u64,
+    /// Rows outside the view's extent, moved onto its edge.
+    pub(crate) clamped: u64,
 }
 
 /// One category cell: its key resolved to the bound code, at the column's declared width. Codes
@@ -68,16 +61,6 @@ fn category_code(
     vocabulary: &str,
     vocabularies: &Vocabularies,
 ) -> Result<WalScalar, DecodeError> {
-    let Some(key) = keys.at(row) else {
-        return Ok(code_at(declared.arrow_type, ABSENT_CODE));
-    };
-    if key.is_empty() {
-        return Err(DecodeError(format!(
-            "{body_name}: column '{}' carries the empty string, which is not a value key; send \
-             null for an item with no value",
-            declared.name
-        )));
-    }
     let minter = vocabularies.get(vocabulary).ok_or_else(|| {
         DecodeError(format!(
             "{body_name}: column '{}' names vocabulary '{vocabulary}', which this bundle does \
@@ -85,30 +68,15 @@ fn category_code(
             declared.name
         ))
     })?;
-    if let Some(code) = minter.code_of(key) {
-        return Ok(code_at(declared.arrow_type, code));
-    }
-    match minter.kind() {
-        // A declared vocabulary is closed, so an unbound key is refused here, where the whole
-        // batch can still be rejected without effect.
-        VocabularyKind::Declared => Err(DecodeError(format!(
-            "{body_name}: column '{}' carries value '{key}', which declared vocabulary \
-             '{vocabulary}' does not list; send a key it lists",
+    match minter.resolve(keys.at(row)) {
+        Ok(Resolved::Code(code)) => Ok(code_value(declared.arrow_type, code)),
+        // The executor mints a novel key's code at a commit window's close or in a values batch's
+        // pass, before the WAL append.
+        Ok(Resolved::Novel(key)) => Ok(WalScalar::Utf8(key.to_string())),
+        Err(e) => Err(DecodeError(format!(
+            "{body_name}: column '{}' {e}",
             declared.name
         ))),
-        // A novel key travels as a key; the executor mints its code at a commit window's close
-        // or in a values batch's pass, before the WAL append.
-        VocabularyKind::Discovered => Ok(WalScalar::Utf8(key.to_string())),
-    }
-}
-
-/// A code at its column's declared width. A category is `u8`, `u16` or `u32` wide, so the
-/// fallthrough is `u32`.
-pub(super) fn code_at(width: ScalarType, code: u32) -> WalScalar {
-    match width {
-        ScalarType::U8 => WalScalar::U8(code as u8),
-        ScalarType::U16 => WalScalar::U16(code as u16),
-        _ => WalScalar::U32(code),
     }
 }
 
@@ -136,9 +104,16 @@ fn record_batches<'a>(
     })
 }
 
+/// A batch's layer columns, and the `level` column that places their scalar keys.
+struct Memberships<'b> {
+    columns: Vec<MembershipColumn<'b>>,
+    levels: Option<&'b UInt32Array>,
+}
+
 /// Checks a batch's columns before any row is read and returns its layer columns. A name is the
 /// route's own, a declared scalar, a family in `scoped` or a registered layer's, matched in that
 /// order, so a layer cannot redefine `x`; a declared or scoped column at the wrong type is refused.
+/// A `level` column is read as a member table's is wherever the batch carries a layer column.
 fn check_columns<'b>(
     body_name: &str,
     batch: &'b RecordBatch,
@@ -147,8 +122,15 @@ fn check_columns<'b>(
     scoped: &[ScopedScalar],
     layer_of: &dyn Fn(&str) -> Option<LayerDeclaration>,
     view_in: &dyn Fn(&str) -> Option<String>,
-) -> Result<Vec<MembershipColumn<'b>>, DecodeError> {
+) -> Result<Memberships<'b>, DecodeError> {
+    let undeclared = |name: &str| {
+        DecodeError(format!(
+            "{body_name}: column '{name}' is not a declared scalar, a registered layer or a \
+             group-scoped attribute of this batch's view; declare it or leave it out"
+        ))
+    };
     let mut declarations = Vec::new();
+    let mut level_unclaimed = false;
     for field in batch.schema_ref().fields() {
         let name = field.name().as_str();
         if fixed.iter().any(|f| f.name() == name)
@@ -159,20 +141,34 @@ fn check_columns<'b>(
         {
             continue;
         }
-        let Some(declaration) = layer_of(name) else {
-            return Err(DecodeError(format!(
-                "{body_name}: column '{name}' is not a declared scalar, a registered layer or a \
-                 group-scoped attribute of this batch's view; declare it or leave it out"
-            )));
-        };
-        declarations.push((name, declaration));
+        match layer_of(name) {
+            Some(declaration) => declarations.push((name, declaration)),
+            None if name == member_key::LEVEL => level_unclaimed = true,
+            None => return Err(undeclared(name)),
+        }
     }
-    let mut memberships = Vec::with_capacity(declarations.len());
+    if level_unclaimed && declarations.is_empty() {
+        return Err(undeclared(member_key::LEVEL));
+    }
+    let levels = match batch.column_by_name(member_key::LEVEL) {
+        Some(column) if !declarations.is_empty() && layer_of(member_key::LEVEL).is_none() => {
+            Some(member_key::read_levels(column.as_ref()).ok_or_else(|| {
+                DecodeError(format!(
+                    "{body_name}: column '{}' places the batch's member keys at a level and is \
+                     {:?}; send it as uint32",
+                    member_key::LEVEL,
+                    column.data_type()
+                ))
+            })?)
+        }
+        _ => None,
+    };
+    let mut columns = Vec::with_capacity(declarations.len());
     for (name, declaration) in &declarations {
         let column = batch
             .column_by_name(name)
             .expect("the column was found in this batch's own schema");
-        memberships.push(membership_column(
+        columns.push(membership_column(
             body_name,
             name,
             column,
@@ -208,7 +204,7 @@ fn check_columns<'b>(
             )));
         }
     }
-    Ok(memberships)
+    Ok(Memberships { columns, levels })
 }
 
 /// A column `check_columns` has passed, read once for all of one record batch's rows.
@@ -250,7 +246,7 @@ fn cell(
                 .expect("a column of keys is a category's");
             category_code(body_name, *col, row, declared, vocabulary, vocabularies)
         }
-        Cells::Scalars(column) => column.value(row).map(wal_scalar).map_err(|e| {
+        Cells::Scalars(column) => column.value(row).map_err(|e| {
             DecodeError(format!(
                 "{body_name}: row {request_row}, column '{}' (declared {}) carries {e}; send a \
                  value that fits or declare a wider type",
@@ -259,19 +255,6 @@ fn cell(
             ))
         }),
     }
-}
-
-/// The build's value type as the write-ahead log's, variant for variant.
-fn wal_scalar(value: ScalarValue) -> WalScalar {
-    macro_rules! same {
-        ($($v:ident),* $(,)?) => {
-            match value {
-                $(ScalarValue::$v(x) => WalScalar::$v(x),)*
-                ScalarValue::Null => WalScalar::Null,
-            }
-        };
-    }
-    same!(Bool, U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, TimestampUs, Utf8)
 }
 
 fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
@@ -285,14 +268,15 @@ fn check_external_id(external_id: &[u8]) -> Result<(), DecodeError> {
     Ok(())
 }
 
-/// Decodes a `/control/ingest` body against the view's projection, its declared scalars, its
-/// group's scoped families and the layer registry. `node_id` is accepted and not stored. Any
-/// refusal refuses the whole batch.
+/// Decodes a `/control/ingest` body against the view's projection and extent, its declared
+/// scalars, its group's scoped families and the layer registry. `node_id` is accepted and not
+/// stored. Any refusal refuses the whole batch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_ingest_batch(
     encoding: BodyEncoding,
     body: &[u8],
     projection: Projection,
+    extent: &Bounds,
     declared: &[DeclaredScalar],
     // The families of the group that owns the view, in manifest order; empty outside a group.
     scoped: &[ScopedScalar],
@@ -302,7 +286,7 @@ pub(crate) fn parse_ingest_batch(
     view_in: &dyn Fn(&str) -> Option<String>,
 ) -> Result<ParsedBatch, DecodeError> {
     let body_name = "ingest body";
-    let (x_name, y_name) = coordinate_columns(projection);
+    let (x_name, y_name) = coordinates::axis_names(projection);
     let fixed = [
         Fixed::ExternalId,
         Fixed::Coordinate(x_name),
@@ -325,7 +309,7 @@ pub(crate) fn parse_ingest_batch(
     let scoped_declared: Vec<DeclaredScalar> = scoped.iter().map(scoped_as_declared).collect();
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
-    let mut clipped = 0u64;
+    let (mut clipped, mut clamped) = (0u64, 0u64);
     let mut padded: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for batch in batches {
         let batch = batch?;
@@ -340,26 +324,20 @@ pub(crate) fn parse_ingest_batch(
         let offset = items.len();
 
         let ext = optional_binary_col(body_name, &batch, "external_id")?;
-        // Only where the right column is absent, so an unprojected view with a declared scalar
-        // called `lon` is unaffected.
-        for (wrong, right) in wrong_spellings(projection) {
-            if batch.column_by_name(wrong).is_some() && batch.column_by_name(right).is_none() {
-                return Err(DecodeError(format!(
-                    "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}'; \
-                     rename '{wrong}' to '{right}'",
-                    match projection {
-                        Projection::None =>
-                            "this view declares no projection, so it has no longitude".to_string(),
-                        _ => format!("this view is projected `{}`", projection.name()),
-                    }
-                )));
-            }
+        let has_column = |name: &str| batch.column_by_name(name).is_some();
+        if let Some((wrong, right)) = coordinates::misnamed_axis(projection, has_column) {
+            return Err(DecodeError(format!(
+                "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}'; \
+                 rename '{wrong}' to '{right}'",
+                match projection {
+                    Projection::None =>
+                        "this view declares no projection, so it has no longitude".to_string(),
+                    _ => format!("this view is projected `{}`", projection.name()),
+                }
+            )));
         }
-        let mut x = coordinate_col(&batch, x_name, offset)?;
-        let mut y = coordinate_col(&batch, y_name, offset)?;
-        // The projection runs here, before anything else reads the coordinates, as the build
-        // runs it on a points file.
-        clipped += project_columns(projection, &mut x, &mut y)?;
+        let x = coordinate_col(&batch, x_name, offset)?;
+        let y = coordinate_col(&batch, y_name, offset)?;
         let access = labels_col(body_name, &batch, "access")?.ok_or_else(|| {
             DecodeError(
                 "ingest body: column 'access' is missing; send each row's labels as a list of \
@@ -380,8 +358,12 @@ pub(crate) fn parse_ingest_batch(
             .collect();
 
         for i in 0..batch.num_rows() {
-            for column in &memberships {
-                tally.read(body_name, column, i, offset)?;
+            let placed = coordinates::place(projection, Some(extent), x[i], y[i])
+                .map_err(|e| DecodeError(format!("ingest body: row {} {e}", offset + i)))?;
+            clipped += u64::from(placed.clipped);
+            clamped += u64::from(placed.clamped());
+            for column in &memberships.columns {
+                tally.read(body_name, column, memberships.levels, i, offset)?;
             }
             // In declared order, not schema order: the vector is read back by position. A
             // declared column the batch omits keeps its slot, absent, so an older client's batch
@@ -419,8 +401,8 @@ pub(crate) fn parse_ingest_batch(
             }
             items.push(RawIngestItem {
                 external_id,
-                x: x[i],
-                y: y[i],
+                x: placed.x,
+                y: placed.y,
                 labels: access.labels(i).map(|label| label.as_bytes().to_vec()).collect(),
                 scalars,
                 scoped: scoped_values,
@@ -432,6 +414,7 @@ pub(crate) fn parse_ingest_batch(
         artifacts: tally.into_artifacts(),
         padded_columns: padded.len() as u64,
         clipped,
+        clamped,
     })
 }
 
@@ -546,8 +529,8 @@ pub(crate) fn parse_values_batch(
             .collect();
 
         for i in 0..batch.num_rows() {
-            for column in &memberships {
-                tally.read(body_name, column, i, offset)?;
+            for column in &memberships.columns {
+                tally.read(body_name, column, memberships.levels, i, offset)?;
             }
             let external = match &ext {
                 Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
@@ -573,6 +556,13 @@ pub(crate) fn parse_values_batch(
                     )))
                 }
                 (Some(external), None) => {
+                    if idset.as_ref().is_some_and(|arr| !arr.is_null(i)) {
+                        return Err(DecodeError(format!(
+                            "values body: row {} names an external_id with an idset, which \
+                             accompanies a tessera_id only; remove the idset",
+                            rows.len()
+                        )));
+                    }
                     check_external_id(&external)?;
                     Address::External(external)
                 }
@@ -613,44 +603,6 @@ pub(crate) fn parse_values_batch(
     })
 }
 
-/// The coordinate columns a batch for this view must not carry, each paired with its right name.
-fn wrong_spellings(projection: Projection) -> [(&'static str, &'static str); 2] {
-    match projection {
-        Projection::None => [("lon", "x"), ("lat", "y")],
-        _ => [("x", "lon"), ("y", "lat")],
-    }
-}
-
-/// Projects the coordinate columns in place, returning how many rows were clipped. A point
-/// outside WGS84's range is refused, as at the build; one outside only the projection's domain
-/// is moved onto the frame's edge and counted, never refused.
-fn project_columns(
-    projection: Projection,
-    x: &mut [f64],
-    y: &mut [f64],
-) -> Result<u64, DecodeError> {
-    if projection == Projection::None {
-        return Ok(0);
-    }
-    let mut clipped = 0u64;
-    for (row, (lon, lat)) in x.iter_mut().zip(y.iter_mut()).enumerate() {
-        if !lon.is_finite() || !lat.is_finite() || lon.abs() > 180.0 || lat.abs() > 90.0 {
-            return Err(DecodeError(format!(
-                "ingest body: row {row} is at lon {lon}, lat {lat}, which is not a place; this \
-                 view is projected ({}), so send WGS84 degrees with longitude within ±180 and \
-                 latitude within ±90",
-                projection.name()
-            )));
-        }
-        // Counted here because the engine's out-of-frame check reads the frame's edge as inside,
-        // so at the whole-world frame it never sees a clipped row.
-        clipped += u64::from(projection.is_clipped(*lat));
-        let (px, py) = projection.forward(*lon, *lat);
-        (*lon, *lat) = (px, py);
-    }
-    Ok(clipped)
-}
-
 /// An optional binary column: `None` when absent, refused when present at another type.
 fn optional_binary_col<'a>(
     body_name: &str,
@@ -671,9 +623,8 @@ fn optional_binary_col<'a>(
     }
 }
 
-/// A coordinate column as `f64`: `float32` is widened, as the build reads a points file, and
-/// `float64` is never narrowed, since at deep zoom narrowing would move a point to another cell.
-/// `offset` is where this record batch's rows start in the request, so a null names its row.
+/// A coordinate column, read by the rule a build reads a points file's. `offset` is where this
+/// record batch's rows start in the request, so a null names its row.
 fn coordinate_col(
     batch: &arrow::record_batch::RecordBatch,
     name: &str,
@@ -681,26 +632,18 @@ fn coordinate_col(
 ) -> Result<Vec<f64>, DecodeError> {
     let column = batch.column_by_name(name).ok_or_else(|| {
         DecodeError(format!(
-            "ingest body: column '{name}' missing or not float32/float64"
+            "ingest body: column '{name}' is missing; send it as float32 or float64"
         ))
     })?;
-    if let Some(row) = (0..column.len()).find(|&row| column.is_null(row)) {
-        return Err(DecodeError(format!(
-            "ingest body: row {}, column '{name}' is null; write a number, since every row needs \
-             both coordinates",
+    coordinates::read_coordinates(column.as_ref()).map_err(|e| match e {
+        coordinates::ColumnError::Null { row } => DecodeError(format!(
+            "ingest body: row {}, column '{name}' {e}",
             offset + row
-        )));
-    }
-    let any = column.as_any();
-    if let Some(a) = any.downcast_ref::<arrow::array::Float64Array>() {
-        Ok(a.values().to_vec())
-    } else if let Some(a) = any.downcast_ref::<arrow::array::Float32Array>() {
-        Ok(a.values().iter().map(|v| f64::from(*v)).collect())
-    } else {
-        Err(DecodeError(format!(
-            "ingest body: column '{name}' missing or not float32/float64"
-        )))
-    }
+        )),
+        coordinates::ColumnError::Type(_) => {
+            DecodeError(format!("ingest body: column '{name}' {e}"))
+        }
+    })
 }
 
 /// The batch's labels column `name`, read by the rule the build reads a points file's access
@@ -725,9 +668,15 @@ mod category_wire {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
-    use tessera_engine::{DeclaredScalar, Vocabularies};
+    use tessera_engine::{DeclaredScalar, ScalarType, Vocabularies, VocabularyKind, ABSENT_CODE};
 
     const CODE_OPS: u32 = 4711;
+    const EXTENT: Bounds = Bounds {
+        x_min: 0.0,
+        x_max: 1.0,
+        y_min: 0.0,
+        y_max: 1.0,
+    };
 
     fn declared() -> Vec<DeclaredScalar> {
         vec![
@@ -815,6 +764,7 @@ mod category_wire {
             BodyEncoding::Arrow,
             &body(column, nullable),
             Projection::None,
+            &EXTENT,
             &declared(),
             &[],
             &vocabularies(),
@@ -885,6 +835,7 @@ mod category_wire {
             BodyEncoding::Arrow,
             &body(Arc::new(StringArray::from(vec!["k9-unit"])), false),
             Projection::None,
+            &EXTENT,
             &declared(),
             &[],
             &vocabularies_of(VocabularyKind::Discovered),
@@ -907,6 +858,7 @@ mod category_wire {
             BodyEncoding::Arrow,
             &body(Arc::new(StringArray::from(vec!["ops"])), false),
             Projection::None,
+            &EXTENT,
             &declared(),
             &[],
             &vocabularies_of(VocabularyKind::Discovered),

@@ -29,9 +29,10 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::mpsc;
 
-use arrow::array::{Array, Float32Array, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, TimeUnit};
 use tessera_store::access_column::AccessBatch;
+use tessera_store::coordinates::{place, read_coordinates, ColumnError};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
@@ -39,7 +40,7 @@ use parquet::file::statistics::Statistics;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_spatial::{fixed32, Bounds, Projection};
 use tessera_store::scalar_column::ScalarColumn;
-use tessera_store::vocabulary::VocabularyMinter;
+use tessera_store::vocabulary::{code_value, Resolved, Unresolved, VocabularyMinter};
 
 use crate::config::{Fields, ViewSelector, ENTITY_ID};
 use crate::error::{BuildError, Result};
@@ -485,11 +486,14 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             _ => None,
                         };
                         let geometry = match geometry {
-                            Geometry::Xy(xi, yi) => PointGeom::Xy(
-                                source_ids,
-                                read_f64_column(path, &batch, xi, x_name)?,
-                                read_f64_column(path, &batch, yi, y_name)?,
-                            ),
+                            Geometry::Xy(xi, yi) => {
+                                let at = |row| row_name(&batch, id_idx, id_name, row);
+                                PointGeom::Xy(
+                                    source_ids,
+                                    read_coordinate_column(path, &batch, xi, x_name, &at)?,
+                                    read_coordinate_column(path, &batch, yi, y_name, &at)?,
+                                )
+                            }
                             Geometry::Morton(mi) => PointGeom::Morton(
                                 source_ids,
                                 read_u64_column(path, &batch, mi, morton_name)?,
@@ -545,21 +549,17 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             if limit.is_some_and(|l| ids[i] >= l) || !selected(i) {
                                 continue;
                             }
-                            // The one place a coordinate is placed, reached in the width the file
-                            // was read at: the column arrives as `f64` whatever width it was
-                            // stored at, so nothing narrows between the Parquet page and the
-                            // fixed-point grid. The transform runs here, at the boundary, in the
-                            // same place a write does it (`projections.md` §3);
-                            // `Projection::None` is the exact identity, so an unprojected view's
-                            // stored positions are the bits they always were. A coordinate outside
-                            // the projection's input domain is refused, and one outside its
-                            // *output* domain clipped and counted, by the survey pass that every
-                            // build runs before this one (`survey_points`).
-                            let (x, y) = projection.forward(xs[i], ys[i]);
+                            // Counted by the survey every build runs before this pass.
+                            let placed = place(projection, Some(extent), xs[i], ys[i]).map_err(
+                                |e| BuildError::Schema {
+                                    path: path.to_path_buf(),
+                                    detail: format!("{} {} {e}", fields.of(ENTITY_ID), ids[i]),
+                                },
+                            )?;
                             if visit(PointRow {
                                 source_id: ids[i],
-                                qx: fixed32(x, extent.x_min, extent.x_max),
-                                qy: fixed32(y, extent.y_min, extent.y_max),
+                                qx: fixed32(placed.x, extent.x_min, extent.x_max),
+                                qy: fixed32(placed.y, extent.y_min, extent.y_max),
                             })
                             .is_break()
                             {
@@ -1415,12 +1415,9 @@ pub fn survey_points(
                 })
             }
         };
-        let name_of = |i: usize| match id_idx {
-            Some(idx) => crate::ids::display_at(batch.column(idx).as_ref(), i),
-            None => format!("row {i}"),
-        };
-        let xs = read_f64_column(path, &batch, x_idx, x_name)?;
-        let ys = read_f64_column(path, &batch, y_idx, y_name)?;
+        let name_of = |i: usize| row_name(&batch, id_idx, fields.of(ENTITY_ID), i);
+        let xs = read_coordinate_column(path, &batch, x_idx, x_name, &name_of)?;
+        let ys = read_coordinate_column(path, &batch, y_idx, y_name, &name_of)?;
         let keep = match (select, select_idx) {
             (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
             _ => None,
@@ -1431,65 +1428,21 @@ pub fn survey_points(
             {
                 continue;
             }
-            // A non-finite coordinate would poison every comparison below and produce a box the
-            // extent validator then refuses with no mention of the row that caused it. Named
-            // here, where the file and the value are both in hand.
-            let (x, y) = (xs[i], ys[i]);
-            if !x.is_finite() || !y.is_finite() {
-                return Err(BuildError::Schema {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "{} {} has a non-finite position ({x}, {y}), so no box fits the \
-                         data. `extent = \"auto\"` reads every row it would place",
-                        fields.of(ENTITY_ID),
-                        name_of(i)
-                    ),
-                });
-            }
-            // **The transform runs here, and the two things it can find are different.** A
-            // coordinate outside WGS84's own range is not a coordinate and is refused
-            // (`projections.md` §2); a latitude inside that range but outside the *projection's*
-            // domain is clipped onto the frame's edge, counted, and never refused (§7) — the
-            // clamp counter below structurally cannot see one, because the edge is exactly where
-            // it says nothing is clamped. Every build takes this pass before any work, so it is
-            // the one place the check has to be.
-            let (x, y) = if projection == Projection::None {
-                (x, y)
-            } else {
-                if x.abs() > 180.0 || y.abs() > 90.0 {
-                    return Err(BuildError::Schema {
-                        path: path.to_path_buf(),
-                        detail: format!(
-                            "{} {} is at lon {x}, lat {y}, which is not a place: this view is \
-                             projected ({}), and the accepted input coordinate system is WGS84 \
-                             degrees — longitude within ±180, latitude within ±90 \
-                             (projections.md §2). Convert the source to WGS84 before building, or \
-                             declare `projection = \"none\"` if this view's space is not the Earth",
-                            fields.of(ENTITY_ID),
-                            name_of(i),
-                            projection.name()
-                        ),
-                    });
-                }
-                survey.clipped += u64::from(projection.is_clipped(y));
-                projection.forward(x, y)
-            };
+            let placed = place(projection, against, xs[i], ys[i]).map_err(|e| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!("{} {e}", name_of(i)),
+            })?;
+            let (x, y) = placed.projected;
+            survey.clipped += u64::from(placed.clipped);
+            survey.clamped_x += u64::from(placed.clamped_x);
+            survey.clamped_y += u64::from(placed.clamped_y);
+            survey.clamped += u64::from(placed.clamped());
             found = true;
             survey.rows += 1;
             x_min = x_min.min(x);
             x_max = x_max.max(x);
             y_min = y_min.min(y);
             y_max = y_max.max(y);
-            if let Some(frame) = against {
-                // `v == max` is **not** a clamp: cells are half-open and the maximum lands in the
-                // top cell by construction, so a tightly-fitted corpus must not report its own
-                // boundary rows as misplaced.
-                let out_x = x < frame.x_min || x > frame.x_max;
-                let out_y = y < frame.y_min || y > frame.y_max;
-                survey.clamped_x += u64::from(out_x);
-                survey.clamped_y += u64::from(out_y);
-                survey.clamped += u64::from(out_x || out_y);
-            }
         }
     }
     survey.bounds = found.then_some(Bounds {
@@ -1941,47 +1894,36 @@ fn read_u64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
     Ok(values)
 }
 
-/// Read a coordinate column as `f64`, **accepting both float widths and widening the narrower**.
-///
-/// This is the rule an attribute column declared `f64` is already read by — `f64` accepts `f32`
-/// and widens — and a coordinate takes only that half of it. The other half, `f32` accepting `f64`
-/// and rounding, has no counterpart here: an attribute's width is *declared*, so narrowing is what
-/// the declaration asked for, whereas a coordinate's width is a property of the corpus and nothing
-/// asks for it to be reduced.
-///
-/// **Widening rather than narrowing is what makes a deep frame honest.** A frame at zoom offset
-/// *k* resolves `2^(8−k)` `f32` steps per cell, so past roughly offset 8 a narrowing decides which
-/// **cell** a point occupies rather than merely its position within one — and no report downstream
-/// can see that it did, the quantiser having been handed a value the file did not hold
-/// (`projections.md` §6). A whole-world frame is served perfectly well by `f32` input, which is
-/// why the narrower width is accepted rather than refused.
-fn read_f64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> Result<Vec<f64>> {
-    let column = batch.column(idx);
-    if column.null_count() > 0 {
-        return Err(BuildError::Schema {
+/// A coordinate column, read by [`read_coordinates`]. `row_name` says how a refusal names a row of
+/// `batch`.
+fn read_coordinate_column(
+    path: &Path,
+    batch: &RecordBatch,
+    idx: usize,
+    name: &str,
+    row_name: &dyn Fn(usize) -> String,
+) -> Result<Vec<f64>> {
+    read_coordinates(batch.column(idx).as_ref()).map_err(|e| {
+        let at = match e {
+            ColumnError::Null { row } => format!("{}: ", row_name(row)),
+            ColumnError::Type(_) => String::new(),
+        };
+        BuildError::Schema {
             path: path.to_path_buf(),
-            detail: format!("column '{name}' contains nulls"),
-        });
-    }
-    match column.data_type() {
-        DataType::Float32 => Ok(column
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .expect("checked data type")
-            .values()
-            .iter()
-            .map(|v| f64::from(*v))
-            .collect()),
-        DataType::Float64 => Ok(column
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .expect("checked data type")
-            .values()
-            .to_vec()),
-        other => Err(BuildError::Schema {
-            path: path.to_path_buf(),
-            detail: format!("column '{name}' has unsupported type {other:?}"),
-        }),
+            detail: format!("{at}column '{name}' {e}"),
+        }
+    })
+}
+
+/// How a refusal names row `row` of `batch`: by its identity where the file carries a column
+/// `id_name` at `id_idx`, and by its position in the batch otherwise.
+fn row_name(batch: &RecordBatch, id_idx: Option<usize>, id_name: &str, row: usize) -> String {
+    match id_idx {
+        Some(idx) => format!(
+            "{id_name} {}",
+            crate::ids::display_at(batch.column(idx).as_ref(), row)
+        ),
+        None => format!("row {row}"),
     }
 }
 
@@ -2315,12 +2257,13 @@ impl BatchColumn {
             })?;
             return match attribute.value_set {
                 Some(crate::config::ValueSet::Open) => {
-                    let minter = minters.get_mut(vocabulary).unwrap_or_else(|| {
-                        panic!(
-                            "'{vocabulary}' is discovered, so `Schema::open_minters` must \
-                             have seeded it before this scan began"
-                        )
-                    });
+                    let minter = minters.get_mut(vocabulary).ok_or_else(|| {
+                        BuildError::Invalid(format!(
+                            "attribute '{}' draws codes from open vocabulary '{vocabulary}', and \
+                             the scan was given no minter for it; pass `Schema::open_minters`",
+                            attribute.name
+                        ))
+                    })?;
                     Ok(BatchValues::Discovered(mint_batch(
                         keys.column(),
                         minter,
@@ -2361,32 +2304,22 @@ impl BatchColumn {
     ) -> Result<ScalarValue> {
         Ok(match &self.values {
             BatchValues::Keys(keys) => {
-                let code = if keys.is_null(row) {
-                    crate::config::ABSENT_CODE
-                } else {
-                    let key = keys.value(row);
-                    let vocabulary = attribute
-                        .vocabulary
-                        .as_ref()
-                        .expect("a Keys column belongs to a category");
-                    schema_decl.vocabularies[vocabulary]
-                        .code_of(key)
-                        .ok_or_else(|| {
-                            crate::config::declaration_error(format!(
-                                "attribute '{}': the points file carries value '{key}', which the \
-                                 declared vocabulary does not list. Under \
-                                 `vocabulary = \"declared\"` there is no auto-mint: a category \
-                                 carries properties and a visibility consequence, so a typo must \
-                                 not create one (per-point-attributes §5)",
-                                attribute.name
-                            ))
-                        })?
-                };
-                code_as(attribute.ty, code)
+                let vocabulary = attribute
+                    .vocabulary
+                    .as_ref()
+                    .expect("a Keys column belongs to a category");
+                let resolved = schema_decl.vocabularies[vocabulary]
+                    .values
+                    .resolve(keys.column().at(row))
+                    .map_err(|e| unresolved(attribute, e))?;
+                match resolved {
+                    Resolved::Code(code) => code_value(attribute.ty, code),
+                    Resolved::Novel(_) => unreachable!("a closed vocabulary lists every key"),
+                }
             }
             // Already resolved by `decode`'s mint pre-pass — a pure index, like every other
             // variant here, and no lookup against `schema_decl` at all.
-            BatchValues::Discovered(codes) => code_as(attribute.ty, codes[row]),
+            BatchValues::Discovered(codes) => code_value(attribute.ty, codes[row]),
             BatchValues::Scalar(column) => column.value(row).map_err(|e| {
                 crate::config::declaration_error(format!(
                     "attribute '{}' (declared '{}'): the points file carries {e}; declare a wider \
@@ -2399,19 +2332,9 @@ impl BatchColumn {
     }
 }
 
-/// A vocabulary code at the column's declared width. A declared vocabulary's codes were checked
-/// against [`ScalarType::max_code`] at parse; a discovered one's are drawn by
-/// [`VocabularyMinter::mint`] from that same width's usable space (`vocabulary::usable_max` in
-/// `tessera-store`) and so are in range by construction. Either way the narrowing here cannot
-/// lose a value.
-fn code_as(ty: ScalarType, code: u32) -> ScalarValue {
-    match ty {
-        ScalarType::U8 => ScalarValue::U8(code as u8),
-        ScalarType::U16 => ScalarValue::U16(code as u16),
-        // `is_category_width` admits only these three, so the fallthrough is `u32` rather than a
-        // silent home for a width that should never have reached here.
-        _ => ScalarValue::U32(code),
-    }
+/// A category cell's refusal, naming the attribute.
+fn unresolved(attribute: &crate::config::Attribute, e: Unresolved) -> BuildError {
+    crate::config::declaration_error(format!("attribute '{}' {e}", attribute.name))
 }
 
 /// The batch-level mint pre-pass for a discovered vocabulary (§3.4): collect the distinct,
@@ -2425,8 +2348,8 @@ fn code_as(ty: ScalarType, code: u32) -> ScalarValue {
 /// one place every other variant's resolution is a pure index. Collecting first and minting the
 /// distinct set keeps the mutation entirely inside `decode`, before any row is read back.
 ///
-/// An empty key is refused, never minted as [`crate::config::ABSENT_CODE`] — the same typo trap
-/// [`VocabularyMinter::mint`] itself enforces for a declared vocabulary's row-time lookup.
+/// Each cell is resolved by [`VocabularyMinter::resolve`], so an empty key is refused here as it is
+/// at a running service.
 fn mint_batch(
     keys: crate::utf8::Utf8Column<'_>,
     minter: &mut VocabularyMinter,
@@ -2436,11 +2359,10 @@ fn mint_batch(
 
     let mut novel: BTreeSet<&str> = BTreeSet::new();
     for i in 0..keys.len() {
-        if keys.is_null(i) {
-            continue;
-        }
-        let key = keys.value(i);
-        if minter.code_of(key).is_none() {
+        let resolved = minter
+            .resolve(keys.at(i))
+            .map_err(|e| unresolved(attribute, e))?;
+        if let Resolved::Novel(key) = resolved {
             novel.insert(key);
         }
     }
@@ -2451,14 +2373,9 @@ fn mint_batch(
     }
 
     Ok((0..keys.len())
-        .map(|i| {
-            if keys.is_null(i) {
-                crate::config::ABSENT_CODE
-            } else {
-                minter
-                    .code_of(keys.value(i))
-                    .expect("every key in this batch was just minted or was already bound")
-            }
+        .map(|i| match minter.resolve(keys.at(i)) {
+            Ok(Resolved::Code(code)) => code,
+            _ => unreachable!("every key in this batch was just minted or was already bound"),
         })
         .collect())
 }
@@ -2861,16 +2778,25 @@ pub fn read_roster_table(
                             })
                             .collect::<Result<_>>()?
                     }
+                    // Read at `f64` whatever the declared width, since a roster float is held
+                    // as one.
                     ScalarType::F32 | ScalarType::F64 => {
-                        let nulls = column.nulls().cloned();
-                        read_f64_column(path, &batch, idx, name)?
-                            .into_iter()
-                            .enumerate()
-                            .map(|(row, value)| {
-                                match nulls.as_ref().is_some_and(|n| n.is_null(row)) {
-                                    true => Err(missing(row)),
-                                    false => Ok(MetadataValue::Float(value)),
-                                }
+                        let read = ScalarColumn::new(column, ScalarType::F64).ok_or_else(|| {
+                            BuildError::Schema {
+                                path: path.to_path_buf(),
+                                detail: format!(
+                                    "the roster column '{name}' has type {:?}, and this group \
+                                     declares it '{}'; send float32 or float64",
+                                    column.data_type(),
+                                    declared.ty.arrow_type_name()
+                                ),
+                            }
+                        })?;
+                        (0..column.len())
+                            .map(|row| match read.value(row) {
+                                Ok(ScalarValue::F64(value)) => Ok(MetadataValue::Float(value)),
+                                Ok(_) => Err(missing(row)),
+                                Err(e) => unreachable!("an f64 read refuses nothing: {e}"),
                             })
                             .collect::<Result<_>>()?
                     }
