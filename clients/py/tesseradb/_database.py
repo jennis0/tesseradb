@@ -1264,7 +1264,7 @@ class Database:
         return self.viewer().items(view, fields, **options)
 
     def artifacts(self, view: str, layer: str, fields: Sequence[str], **options):
-        """Every annotation of `layer`, with the properties named, as one pyarrow table.
+        """Every artifact of `layer`, with the properties named, as one pyarrow table.
 
         This is `Viewer.artifacts` as this database's own reader; `options` are its keywords.
 

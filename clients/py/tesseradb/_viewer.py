@@ -9,6 +9,7 @@ the same data.
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
 import struct
@@ -35,28 +36,60 @@ FRAME_TRAILER = 4
 FRAME_ARTIFACTS = 5
 _KINDS = {FRAME_TILES, FRAME_SUB_CELLS, FRAME_POINTS, FRAME_TRAILER, FRAME_ARTIFACTS}
 
+#: The frame kinds of a `POST /v1/items` or `POST /v1/artifacts` body: a head, records frames
+#: each followed by a page end, and the trailer, whose kind is the viewport's.
+FRAME_RECORDS_HEAD = 6
+FRAME_RECORDS = 7
+FRAME_PAGE_END = 8
 
-def split_frames(body: bytes) -> list[tuple[int, bytes]]:
+
+def _read_exactly(stream, size: int) -> Optional[bytearray]:
+    """`size` bytes of `stream`, or `None` where the stream ends or its connection fails first.
+
+    A server that stops a streamed body part of the way closes the connection before the body
+    ends, which the HTTP client reports as an error rather than as a short read.
+    """
+    buffer = bytearray(size)
+    view = memoryview(buffer)
+    got = 0
+    try:
+        while got < size:
+            read = stream.readinto(view[got:])
+            if not read:
+                return None
+            got += read
+    except (http.client.HTTPException, OSError):
+        return None
+    finally:
+        view.release()
+    return buffer
+
+
+def _frames(stream):
+    """The frames of a body as `(kind, payload)`, read from `stream` as they arrive. They stop
+    where the body ends, whole or cut."""
+    while True:
+        header = _read_exactly(stream, 5)
+        if header is None:
+            return
+        (length,) = struct.unpack_from("<I", header, 1)
+        payload = _read_exactly(stream, length)
+        if payload is None:
+            return
+        yield header[0], payload
+
+
+def split_frames(body: bytes) -> list[tuple[int, bytearray]]:
     """A `/v1/viewport` body as `(kind, payload)` pairs, or a refusal if it is not a whole one.
 
     Each frame is a one-byte kind, a four-byte little-endian length and the payload. The trailer
     comes last and marks the body complete, so a body cut short is refused rather than read as a
     smaller answer.
     """
-    frames: list[tuple[int, bytes]] = []
-    at = 0
-    while at < len(body):
-        if len(body) - at < 5:
-            raise Refusal(f"viewport: truncated frame header at byte {at}")
-        kind = body[at]
+    frames = list(_frames(io.BytesIO(body)))
+    for kind, _ in frames:
         if kind not in _KINDS:
-            raise Refusal(f"viewport: unknown frame kind {kind} at byte {at}")
-        (length,) = struct.unpack_from("<I", body, at + 1)
-        end = at + 5 + length
-        if end > len(body):
-            raise Refusal(f"viewport: the frame at byte {at} claims a payload past the body's end")
-        frames.append((kind, body[at + 5 : end]))
-        at = end
+            raise Refusal(f"viewport: unknown frame kind {kind}")
     if not frames or frames[0][0] != FRAME_TILES:
         raise Refusal("viewport: the tiles frame must be first")
     if frames[-1][0] != FRAME_TRAILER:
@@ -64,61 +97,58 @@ def split_frames(body: bytes) -> list[tuple[int, bytes]]:
     return frames
 
 
-#: The frame kinds of a `POST /v1/items` or `POST /v1/artifacts` body: a head, records frames
-#: each followed by a page end, and the trailer, whose kind is the viewport's.
-FRAME_RECORDS_HEAD = 6
-FRAME_RECORDS = 7
-FRAME_PAGE_END = 8
-_RECORDS_KINDS = {FRAME_RECORDS_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER}
+class PartialRead(Refusal):
+    """A read from `items` or `artifacts` that stopped part of the way: a response cut short, or
+    a later request refused. Every page given before the stop is whole.
 
+    - `rows`: on a read into one table, the rows read before the stop, as a pyarrow table. `None`
+      from `batches=True`, whose pages were given as they came.
+    - `cursor`: the cursor to pass as `cursor` to read the rows after them, or `None` to read
+      from the start.
+    - `done`: `True` where every row had arrived before the stop, so none is left to read.
+    """
 
-def _read_up_to(stream, size: int) -> bytes:
-    """`size` bytes of `stream`, or fewer where it ends first."""
-    parts = []
-    while size:
-        # In pieces, so that a length the body states is not allocated before the bytes arrive.
-        part = stream.read(min(size, 1 << 20))
-        if not part:
-            break
-        parts.append(part)
-        size -= len(part)
-    return b"".join(parts)
+    def __init__(self, why: str, cursor: Optional[str], done: bool) -> None:
+        super().__init__(why)
+        self.why = why
+        self.cursor = cursor
+        self.done = done
+        self.rows = None
 
-
-def _records_frames(route: str, stream):
-    """The frames of a `POST /v1/items` or `POST /v1/artifacts` body as `(kind, payload)`, read
-    from `stream` as they arrive. They stop at a frame cut short."""
-    while True:
-        header = _read_up_to(stream, 5)
-        if len(header) < 5:
-            return
-        kind = header[0]
-        if kind not in _RECORDS_KINDS:
-            raise Refusal(f"{route}: unknown frame kind {kind}")
-        (length,) = struct.unpack_from("<I", header, 1)
-        payload = _read_up_to(stream, length)
-        if len(payload) < length:
-            return
-        yield kind, payload
+    def __str__(self) -> str:
+        if self.rows is None:
+            kept = "The pages given before it are whole."
+        else:
+            kept = f"The {self.rows.num_rows} rows read before it are this error's `rows`."
+        if self.done:
+            rest = "Every row had arrived."
+        elif self.cursor is None:
+            rest = "Read again from the start for the rest."
+        else:
+            rest = f"Pass cursor={self.cursor!r} to read the rest."
+        return f"{self.why}. {kept} {rest}"
 
 
 class Batches:
     """The pages of a read from `items` or `artifacts`, each a `pyarrow.RecordBatch`, requested
     from the server as they are iterated.
 
-    The first response is requested when this is made, so a refusal is raised there. Each later
-    response is requested when the pages of the one before have all been taken, and a loop that
-    stops early requests no more.
+    The first response is requested when this is made, so a refusal of the read is raised there.
+    Each later response is requested when the pages of the one before have all been taken, and
+    frames are read from the connection as they arrive, so a loop that stops early reads no
+    further.
 
     - `head`: the first response's head, as a dictionary: `page_rows`, the page size used; on an
       items read `order`, the order used; and, where `count` was asked for, the counts.
-    - `next`: the cursor to pass as `cursor` to read on after the last page taken, or `None` once
-      no row remains.
+    - `next`: the cursor to pass as `cursor` to read on after the last page taken. Before any
+      page it is the read's own `cursor`, `None` for a read from the start.
+    - `done`: `True` once the server has said that no row remains.
 
-    A category column's dictionary holds the keys of its own page only. `read_all()` joins the
-    pages left into one table with one dictionary per column, and `to_pandas()` does the same and
-    returns a DataFrame. `close()` ends the response being read, which frees its place on the
-    server; dropping the last reference does the same.
+    A response cut short, or a later request refused, raises a `PartialRead` after the pages
+    before it. A category column's dictionary holds the keys of its own page only. `read_all()`
+    joins the pages left into one table with one dictionary per column, and `to_pandas()` does the
+    same and returns a DataFrame. `close()` ends the response being read, which frees its place
+    on the server; dropping the last reference does the same.
 
         for batch in db.items("papers", ["title"], page_rows=10_000, batches=True):
             frame = batch.to_pandas()
@@ -127,12 +157,13 @@ class Batches:
     def __init__(self, reader: "Viewer", route: str, request: dict) -> None:
         self._route = route
         self.next: Optional[str] = request.get("cursor")
+        self.done = False
         self._response = reader._open("POST", f"/v1/{route}", request)
-        frames = _records_frames(route, self._response)
+        frames = _frames(self._response)
         first = next(frames, None)
         if first is None or first[0] != FRAME_RECORDS_HEAD:
             self._response.close()
-            raise Refusal(f"{route}: the response did not begin with its head")
+            raise Refusal(f"POST /v1/{route}: the response did not begin with its head")
         self.head: dict = json.loads(first[1])
         # The server takes `count` on a read's first request only.
         rest = {key: value for key, value in request.items() if key != "count"}
@@ -141,30 +172,42 @@ class Batches:
     def _read(self, reader: "Viewer", rest: dict, frames):
         import pyarrow.ipc as ipc
 
+        what = f"POST /v1/{self._route}"
         while True:
-            pending, trailer = None, None
+            pending, ended = None, False
             with self._response:
                 for kind, payload in frames:
                     if kind == FRAME_RECORDS:
-                        pending = ipc.open_stream(io.BytesIO(payload)).read_next_batch()
+                        pending = ipc.open_stream(payload).read_next_batch()
                     elif kind == FRAME_PAGE_END:
-                        self.next = json.loads(payload)["next"]
-                        yield pending
+                        if pending is None:
+                            raise self._stopped(f"{what}: a page end has no page before it")
+                        self._reached(json.loads(payload))
+                        page, pending = pending, None
+                        yield page
                     elif kind == FRAME_TRAILER:
-                        trailer = json.loads(payload)
-            if trailer is None:
-                where = (
-                    "Read again from the start"
-                    if self.next is None
-                    else f"Pass cursor={self.next!r} to read on from the last whole page"
-                )
-                raise Refusal(f"{self._route}: the response ended before its trailer. {where}")
-            self.next = trailer["next"]
-            if self.next is None:
+                        self._reached(json.loads(payload))
+                        ended = True
+                    elif kind != FRAME_RECORDS_HEAD:
+                        raise self._stopped(f"{what}: a frame has the unknown kind {kind}")
+            if not ended:
+                raise self._stopped(f"{what}: the response ended before its trailer")
+            if self.done:
                 return
-            request = {**rest, "cursor": self.next}
-            self._response = reader._open("POST", f"/v1/{self._route}", request)
-            frames = _records_frames(self._route, self._response)
+            try:
+                request = {**rest, "cursor": self.next}
+                self._response = reader._open("POST", f"/v1/{self._route}", request)
+            except (Refusal, OSError, http.client.HTTPException) as refused:
+                raise self._stopped(str(refused)) from None
+            frames = _frames(self._response)
+
+    def _reached(self, frame: dict) -> None:
+        """Take the cursor of a page end or a trailer."""
+        self.next = frame["next"]
+        self.done = self.next is None
+
+    def _stopped(self, why: str) -> PartialRead:
+        return PartialRead(why, self.next, self.done)
 
     def __iter__(self) -> "Batches":
         return self
@@ -176,11 +219,21 @@ class Batches:
         """The pages not yet taken, as one `pyarrow.Table`.
 
         Its schema metadata `tessera.head` is `head` as JSON. A read that returns no row is a
-        table of `tessera_id` alone, since no page carried the other columns.
+        table of `tessera_id` alone, since no page carried the other columns. A `PartialRead`
+        carries the rows read before it as its `rows`.
         """
+        batches = []
+        try:
+            for batch in self:
+                batches.append(batch)
+        except PartialRead as stopped:
+            stopped.rows = self._table(batches)
+            raise
+        return self._table(batches)
+
+    def _table(self, batches: list):
         import pyarrow as pa
 
-        batches = list(self)
         if batches:
             table = pa.Table.from_batches(batches).unify_dictionaries()
         else:
@@ -203,7 +256,7 @@ def _tables(payloads: Sequence[bytes]):
     import pyarrow as pa
     import pyarrow.ipc as ipc
 
-    tables = [ipc.open_stream(io.BytesIO(payload)).read_all() for payload in payloads]
+    tables = [ipc.open_stream(payload).read_all() for payload in payloads]
     return pa.concat_tables(tables) if tables else None
 
 
@@ -766,6 +819,9 @@ class Viewer:
         `page_rows`, the page size used, `order`, the order used, and the counts under `count`.
         A read that returns no row is a table of `tessera_id` alone.
 
+        A response cut short, or a later request refused, raises a `PartialRead` whose `rows` are
+        the rows read before it and whose `cursor` reads the rest.
+
             papers = db.items("papers", ["title", "year"], system_fields=["external_id"])
             papers.to_pandas()
             recent = db.items("papers", ["title"], filters={"year": {"range": {"gte": 2020}}})
@@ -804,28 +860,27 @@ class Viewer:
         idset: Optional[int] = None,
         batches: bool = False,
     ):
-        """Every annotation of `layer` this reader is served, with the properties named, as a
+        """Every artifact of `layer` this reader is served, with the properties named, as a
         pyarrow table.
 
-        An annotation, or artifact, is one member of a layer: a cluster, a region, a node in a
-        taxonomy. The read is carried across responses as `items` carries one, and
-        `batches=True` returns a `Batches` in the same way.
+        An artifact is one member of a layer: a cluster, a region, a node in a taxonomy. The read
+        is carried across responses as `items` carries one, and `batches=True` returns a
+        `Batches` in the same way.
 
         - `view`: the view whose items the counts and the geometry are computed over.
         - `layer`: the layer to read, as `meta()` lists it.
-        - `fields`: any of `"key"`, `"level"`, `"parents"`, `"target"` (the annotation this one
-          is attached to), `"masked_count"` (how many of its items this reader may see),
+        - `fields`: any of `"key"`, `"level"`, `"parents"`, `"target"` (the artifact this one is
+          attached to), `"masked_count"` (how many of its items this reader may see),
           `"content"`, `"centroid"`, `"box"` and `"shape"`, in the order wanted.
-        - `level`: only the annotations at this level of a layered hierarchy.
-        - `parent`: only the children of this annotation, by its `tessera_id`.
-        - `q`: only the annotations whose key or first text contains this, ignoring case. It
-          cannot be combined with `parent`.
-        - `filters`: only the annotations with an item this reader may see that matches. Each
-          row then has `matched_count`, how many do.
-        - `keep_unmatched`: with `filters`, every annotation, those with no matching item
-          included.
-        - `count`: also count the annotations served, `served`, and those that match,
-          `matched`. The counts are in the head.
+        - `level`: only the artifacts at this level of a levelled layer.
+        - `parent`: only the children of this artifact, by its `tessera_id`.
+        - `q`: only the artifacts whose key or first text contains this, ignoring case. It cannot
+          be combined with `parent`.
+        - `filters`: only the artifacts with an item this reader may see that matches. Each row
+          then has `matched_count`, how many do.
+        - `keep_unmatched`: with `filters`, every artifact, those with no matching item included.
+        - `count`: also count the artifacts served, `served`, and those that match, `matched`.
+          The counts are in the head.
         - `page_rows`, `pages`, `cursor`, `compression`, `idset`: as for `items`.
 
         The rows are in order of level, and in the order they were published within a level.

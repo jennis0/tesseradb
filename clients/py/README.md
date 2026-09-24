@@ -368,9 +368,9 @@ for batch in db.items("s0", ["title"], page_rows=10_000, batches=True):
 named, as one pyarrow table. The server answers a page at a time, several pages to a response,
 and ends each response with a cursor for the next. `items` asks for responses until no row
 remains and joins their pages. The columns are `tessera_id`, the fields in the order named, then
-the `system_fields` asked for: `position` as `tessera:x` and `tessera:y`, `external_id` as
-`tessera:external_id` (bytes, from a `Database` as from `connect()`) and `labels` as
-`tessera:labels`. A category column holds each value's key as a dictionary column, and a missing
+the `system_fields` asked for: `position` as `tessera:x` and `tessera:y`, in the view's
+coordinates; `external_id` as `tessera:external_id`, the id each item was inserted with, as bytes;
+and `labels` as `tessera:labels`. A category column holds each value's key as a dictionary column, and a missing
 value is null. `filters` narrows the rows as `Selection.filter` does, and `keep_unmatched=True`
 keeps every row and adds a `tessera:matched` column. The table's schema metadata `tessera.head`
 holds the page size and order the server used, and with `count=True` the numbers of items
@@ -384,20 +384,29 @@ otherwise.
 
 With `batches=True` the call returns a `Batches`: an iterator of `pyarrow.RecordBatch`, one per
 page. It asks for the first response at once and for each later one when the pages before it are
-used up, so a loop that stops early reads no further. A batch's category dictionary holds only
-that page's keys; `read_all()` joins the pages left into one table with one dictionary per column,
-and `to_pandas()` into one DataFrame. `head` is the first response's head, `next` the cursor to
-pass as `cursor` to read on after the last batch taken, and `close()` ends the read. A response
-cut short raises a `Refusal` after its whole pages, naming the cursor to read on from.
+used up, and reads each response as it arrives, so a loop that stops early reads no further. A
+batch's category dictionary holds only that page's keys; `read_all()` joins the pages left into
+one table with one dictionary per column, and `to_pandas()` into one DataFrame. `head` is the
+first response's head. `next` is the cursor to pass as `cursor` to read on after the last batch
+taken, and before the first batch it is the `cursor` the read began from. `done` is `True` once
+the server has said no row remains, and `close()` ends the read.
 
-`artifacts(view, layer, fields, ...)` reads every annotation of a layer the reader is served in
-the same way. `fields` are drawn from `key`, `level`, `parents`, `target`, `masked_count`,
-`content`, `centroid`, `box` and `shape`; `level`, `parent` and `q` choose which annotations, and
-`filters` keeps those with a matching item and adds `matched_count`. The rows are in order of
+A response cut short, or a later request refused, as when the server's bulk reads are all busy,
+raises a `PartialRead`, a kind of `Refusal`, after the whole pages before it. Its `cursor` is the
+cursor to pass to read the rest, and `done` says whether every row had arrived. From a read into
+one table, its `rows` are the rows read before it, as a table; from `batches=True`, those pages
+have already been given.
+
+`artifacts(view, layer, fields, ...)` reads every artifact of a layer the reader is served in the
+same way. An artifact is one member of a layer, such as a cluster. `fields` are drawn from `key`,
+`level`, `parents`, `target`, `masked_count`, `content`, `centroid`, `box` and `shape`; `level`,
+`parent` and `q` choose which artifacts, and `filters` keeps those with a matching item and adds
+`matched_count`. The rows are in order of
 level, then in the order they were published.
 
 `tessera items` and `tessera artifacts` make the same reads from a shell and write Arrow IPC or
-Parquet; `tessera items --help` lists their arguments.
+Parquet; `tessera items --help` lists their arguments. When a read stops part of the way, they
+keep the whole pages before the stop in the output and print the cursor to read the rest with.
 
 Not built yet: `items()` on a selection. `db.items(view, fields, filters=...)` takes the same
 filter expression.
