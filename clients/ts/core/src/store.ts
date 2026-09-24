@@ -4,7 +4,6 @@ import type {Composition} from './compose.js';
 import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
 import {dataToWorldXY, gridToWorld, MAX_DEPTH, WORLD_SIZE} from './coords.js';
 import {tileRectOfBbox} from './budget.js';
-import {rectContainsTile} from './rects.js';
 import {worldBbox} from './prefetch.js';
 import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.js';
 import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks} from './encoding.js';
@@ -15,14 +14,14 @@ import {regionOperand, withRegion} from './region.js';
 import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
 import {requestLevels} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
-import {artifactColours, positionalEntry, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
-import type {Band, BandKey} from './bands.js';
-import {BandBudget, bandKey} from './bands.js';
+import type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
+import {BandBudget} from './bands.js';
 import {DEFAULT_CACHE_BYTES, Replica, type ReplicaOptions} from './replica.js';
 import {TesseraClient, type TesseraClientOptions} from './client.js';
 import {HeldRecords, HeldShapes} from './held.js';
 import {SelectedRegion, type RegionProjection, type SelectionShape} from './selectedRegion.js';
 import {Suggestions} from './suggestions.js';
+import {ArtifactColours, ColourCoverage} from './colours.js';
 import {TokenSupply, type TokenSupplier} from './token.js';
 import type {DepthChoice} from './budget.js';
 import type {Presented} from './presented.js';
@@ -474,6 +473,11 @@ export function createStore(options: StoreOptions): Store {
 
   const table = new SessionArtifactTable();
 
+  const colours = new ArtifactColours(table, options.palette ?? 'positional', (map, palette) =>
+    replaceProjection('artifacts', {...projections.artifacts, colours: map, palette})
+  );
+  const coverage = new ColourCoverage();
+
   const suggestions = new Suggestions(
     clock,
     async (column, q) => {
@@ -520,8 +524,6 @@ export function createStore(options: StoreOptions): Store {
   let viewId = options.view ?? '';
   let budget = options.budget ?? 500_000;
   let colourBy: string | null = null;
-  let palette: PaletteKind = options.palette ?? 'positional';
-  let scheme: PaletteScheme = 'dark';
   let contentKeyAtFrame = '';
 
   /**
@@ -567,7 +569,7 @@ export function createStore(options: StoreOptions): Store {
     view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: colours.palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
@@ -965,7 +967,7 @@ export function createStore(options: StoreOptions): Store {
       narrowed: filtersBesideRegion() !== null
     });
     accumulateEncoding(frame);
-    refreshColours();
+    colours.refresh();
     checkColourCoverage();
 
     if (replica) {
@@ -1041,140 +1043,39 @@ export function createStore(options: StoreOptions): Store {
       table,
       servedOrdinals,
       shapes: shapes.shapes,
-      // **Rebuilt only when the table moved.** A response that names artifacts already held names
-      // no new ordinal, so the colours and the lookup texture built from them are the same ones —
-      // which is what the channel's payload store buys, and it buys nothing if this rebuilds a map
-      // of the same size every settle (`artifact-cache-handover.md` §6 step 2).
-      colours: table.version === colouredAt ? projections.artifacts.colours : colourTable(),
-      palette
+      colours: colours.current(),
+      palette: colours.palette
     });
     checkColourCoverage();
   }
 
-  /** The table's version the held `colours` map was built at — a rebuild only when it moved. */
-  let colouredAt = -1;
-  /** The palette and ground the held map was built under; either moving is a whole rebuild. */
-  let colouredUnder: {palette: PaletteKind; scheme: PaletteScheme} | null = null;
   /**
-   * The map the `artifacts` projection publishes. It is a `ReadonlyMap` to every reader and this
-   * is the one writer: an extension for newly named ordinals is applied here, in place, so the
-   * map's identity is what tells a reader an extension from a recolour.
-   */
-  let colourMap = new Map<number, Rgba>();
-
-  /**
-   * A colour per live ordinal (§5.10), **extended for what the table gained rather than rebuilt
-   * over what it holds**, and only when the table has moved at all — a response naming artifacts
-   * already known computes nothing.
-   *
-   * The distinction the incremental route rests on is the palette's, not an optimisation's.
-   * `positional` is a pure function of one artifact's centroid, so an ordinal's colour is
-   * unaffected by every other ordinal and the table's change list is exactly the work to do; the
-   * map is then **mutated in place and keeps its identity**, which is what lets the lookup
-   * texture tell an extension from a recolour (`lut.ts`). `spread` assigns hues by rank around
-   * the whole set's angle circle, so one arrival moves every colour: it rebuilds whole, at the
-   * table's live count, on any settle that names an artifact.
-   */
-  function colourTable(): Map<number, Rgba> {
-    const changes = palette === 'positional' && colouredUnder?.palette === 'positional' && colouredUnder.scheme === scheme ? table.changesSince(colouredAt) : null;
-    colouredAt = table.version;
-    colouredUnder = {palette, scheme};
-    if (changes) {
-      for (const {ordinal, kind} of changes) {
-        if (kind === 'freed') colourMap.delete(ordinal);
-        else colourMap.set(ordinal, positionalEntry(table.entry(ordinal)?.centroid ?? null, scheme));
-      }
-      return colourMap;
-    }
-    colourMap = artifactColours(
-      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
-      palette,
-      scheme
-    );
-    return colourMap;
-  }
-
-  /**
-   * Rebuild the colours if a response has named artifacts the table had not seen — the point
-   * path's own artifacts frames, which arrive ahead of the debounced channel's.
-   */
-  function refreshColours(): void {
-    if (table.version === colouredAt) return;
-    replaceProjection('artifacts', {...projections.artifacts, colours: colourTable(), palette});
-  }
-
-  /** Bands already asked for again under this served-set version — a refetch is asked once. */
-  const colourAsked = new Map<BandKey, number>();
-
-  /**
-   * Colour coverage (§5.10): per band in view, over its distinct list — never its points — does
-   * every ordinal resolve to something colourable, for every layer asked for? A band that has one
-   * that does not, or that lacks the column for a layer asked for (fetched before it was), is
-   * colour-stale: it keeps drawing what resolves, and its tile is asked for again after novel
-   * ground, once per served set, through the replica's coverage retraction and the driver's
-   * ordinary plan.
-   *
-   * **Against the colours, not against the channel's latest served set** — a deviation from
-   * §5.10's wording, reported with the change. Resolving against the served set alone made every
-   * band in view stale the moment a zoom moved the cut finer, because a walk cannot go down: on
-   * the 2.4M corpus one notch retracted 2,267 of 15,006 bands, refetching tiles that had just
-   * arrived, and drew them neutral meanwhile. A band whose ordinals resolve to an artifact the
-   * table holds is coloured, exactly, by an artifact the wire said its points belong to; it needs
-   * no refetch to be correct. What remains stale is what colour-staleness is for: a band with no
-   * column for a layer just switched on, and one whose parent chain was never seen.
+   * Publish the colour coverage of the bands in view, and fetch the colour-stale ones again. In
+   * view is the visible box: the point path also fetches a margin, whose bands name artifacts the
+   * channel did not serve for this view.
    */
   function checkColourCoverage(): void {
     const a = projections.artifacts;
-    const asked = layersAsked();
-    if (!replica || !presenter || a.status !== 'shown' || asked.length === 0) {
+    const layers = layersAsked();
+    if (!replica || !presenter || a.status !== 'shown' || layers.length === 0) {
       if (a.coverage.stale !== 0 || a.coverage.current !== 0) replaceProjection('artifacts', {...a, coverage: {current: 0, stale: 0}});
       return;
     }
     const started = clock.now();
-    const stale: Band[] = [];
-    let current = 0;
-    // **In view means the visible box, not the render rect.** The channel answers for what the
-    // viewer is looking at; the point path fetches a wider ring, and a band in the margin names
-    // artifacts the channel never served for this view. Those resolve to neutral, correctly, and
-    // are not a reason to refetch — they colour when a pan brings their artifacts into the box.
     const v = presenter.view;
     const depth = projections.view.depth;
     const visible = v ? tileRectOfBbox(worldBbox({target: [v.view.target[0], v.view.target[1]], zoom: v.view.zoom, width: v.width, height: v.height}, 1), depth) : null;
-    for (const band of projections.marks.bands) {
-      if (visible && (band.depth !== depth || !rectContainsTile(visible, band.x, band.y))) continue;
-      let ok = true;
-      for (const layer of asked) {
-        const m = band.membership[layer];
-        if (!m) {
-          ok = false;
-          break;
-        }
-        for (let i = 0; i < m.distinct.length; i++) {
-          if (table.resolve(m.distinct[i]!, a.colours) === 0) {
-            ok = false;
-            break;
-          }
-        }
-        if (!ok) break;
-      }
-      if (ok) current++;
-      else stale.push(band);
-    }
-    // **Nothing is asked for while a switch is settling.** `reschedule` re-enters the driver,
-    // which fires its leading edge for a view arriving from stillness — so a view the slider is
-    // passing through would ask here, outside the settle that exists to stop exactly that
-    // (`view-switching.md` §4). Not merely deferred but *not decided*: recording these bands as
-    // asked and then not asking would leave them stale until the served set moved. The frame the
-    // settled request draws runs this check again, with nothing pending.
-    const toAsk = switchTimer === null ? stale.filter((b) => colourAsked.get(bandKey(b.depth, b.prefix)) !== a.version) : [];
-    for (const b of toAsk) colourAsked.set(bandKey(b.depth, b.prefix), a.version);
+    const bands = projections.marks.bands;
+    // While a switch settles nothing is asked for: asking reschedules the driver, which would
+    // request a view the slider is passing through.
+    const {current, stale, toAsk} = coverage.check({bands, layers, table, colours: a.colours, version: a.version, visible, depth, mayAsk: switchTimer === null});
     if (toAsk.length > 0) {
       replica.retract(toAsk);
       presenter.reschedule();
     }
-    options.instruments?.onTrace?.('coverage', {ms: clock.now() - started, bands: projections.marks.bands.length, stale: stale.length, asked: toAsk.length});
-    if (a.coverage.current !== current || a.coverage.stale !== stale.length) {
-      replaceProjection('artifacts', {...projections.artifacts, coverage: {current, stale: stale.length}});
+    options.instruments?.onTrace?.('coverage', {ms: clock.now() - started, bands: bands.length, stale, asked: toAsk.length});
+    if (a.coverage.current !== current || a.coverage.stale !== stale) {
+      replaceProjection('artifacts', {...projections.artifacts, coverage: {current, stale}});
     }
   }
 
@@ -1334,7 +1235,7 @@ export function createStore(options: StoreOptions): Store {
     // The content key was the frame of another view's replica, and the colour refetch's record is
     // per band key with no view axis — both are about what was drawn, and what was drawn is gone.
     contentKeyAtFrame = '';
-    colourAsked.clear();
+    coverage.forget();
     // A shape is generalised against the frame it was fetched under and names an artifact of one
     // view's row space (§8: the client does not match artifact identity across views).
     shapes.forget('all');
@@ -1541,23 +1442,6 @@ export function createStore(options: StoreOptions): Store {
     askLayers();
   }
 
-  function recolour(): void {
-    // O(live): the colours move, the ordinals do not, and the vis side rewrites its texture.
-    replaceProjection('artifacts', {...projections.artifacts, colours: colourTable(), palette});
-  }
-
-  function setPalette(kind: PaletteKind): void {
-    if (kind === palette) return;
-    palette = kind;
-    recolour();
-  }
-
-  function setScheme(next: PaletteScheme): void {
-    if (next === scheme) return;
-    scheme = next;
-    recolour();
-  }
-
   function clearSelection(): void {
     replaceProjection('selection', {item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
   }
@@ -1729,7 +1613,7 @@ export function createStore(options: StoreOptions): Store {
     suggest: (column, q) => suggestions.suggest(column, q),
     setLayers,
     setColourBy,
-    setPalette,
+    setPalette: (kind) => colours.setPalette(kind),
     setBudget,
     setCurrentView,
     frame: frameOrNull,
@@ -1738,7 +1622,7 @@ export function createStore(options: StoreOptions): Store {
     openArtifact,
     needShape: (id) => shapes.need(id),
     clearSelection,
-    setScheme,
+    setScheme: (scheme) => colours.setScheme(scheme),
     select(shape) {
       if (region.select(shape, projections.marks)) requery();
     },
