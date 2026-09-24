@@ -31,7 +31,10 @@ export const MAX_ATTEMPTS = 600;
 /** The status of an answer to a request that reached no server. It is not an HTTP status. */
 export const UNANSWERED = 0;
 
-/** One request's answer: the status, the body decoded where it was a JSON object, and the text. */
+/**
+ * One request's answer: the status, the body decoded where it was a JSON object, and the text.
+ * `JSON.parse` rounds an integer past 2^53 in `body`; `detail` holds the text as it arrived.
+ */
 export type Answer = {
   status: number;
   ok: boolean;

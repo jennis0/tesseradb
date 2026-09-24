@@ -21,6 +21,8 @@ export type Served = {
   viewerUrl: string;
   sessionUrl: string;
   sessionCredential: string;
+  controlUrl: string;
+  operatorCredential: string;
   stop(): void;
 };
 
@@ -101,7 +103,7 @@ operator_credential_file = ".tessera/operator.cred"
 `;
 
 /** Resolves with the three bound addresses from the child's `listening` line, or rejects. */
-function listening(child: ChildProcess, errors: () => string, timeoutMs: number): Promise<{viewer: string; session: string}> {
+function listening(child: ChildProcess, errors: () => string, timeoutMs: number): Promise<{viewer: string; session: string; control: string}> {
   return new Promise((resolveListening, reject) => {
     const timer = setTimeout(() => reject(new Error(`tessera serve announced no listening line within ${timeoutMs} ms:\n${errors()}`)), timeoutMs);
     child.once('exit', (code) => {
@@ -111,10 +113,10 @@ function listening(child: ChildProcess, errors: () => string, timeoutMs: number)
     createInterface({input: child.stdout!}).on('line', (line) => {
       if (!line.startsWith('{')) return;
       try {
-        const event = JSON.parse(line) as {event?: string; viewer?: string; session?: string};
-        if (event.event !== 'listening' || !event.viewer || !event.session) return;
+        const event = JSON.parse(line) as {event?: string; viewer?: string; session?: string; control?: string};
+        if (event.event !== 'listening' || !event.viewer || !event.session || !event.control) return;
         clearTimeout(timer);
-        resolveListening({viewer: event.viewer, session: event.session});
+        resolveListening({viewer: event.viewer, session: event.session, control: event.control});
       } catch {
         // A line of the child's own logging that happens to start with a brace.
       }
@@ -146,7 +148,8 @@ export async function start(): Promise<Served | string> {
     chmodSync(secrets, 0o700);
     const sessionCredential = randomBytes(24).toString('hex');
     writeFileSync(join(secrets, 'session.cred'), `${sessionCredential}\n`, {mode: 0o600});
-    writeFileSync(join(secrets, 'operator.cred'), `${randomBytes(24).toString('hex')}\n`, {mode: 0o600});
+    const operatorCredential = randomBytes(24).toString('hex');
+    writeFileSync(join(secrets, 'operator.cred'), `${operatorCredential}\n`, {mode: 0o600});
     const env = {...process.env, TESSERA_IDENTITY_KEY: randomBytes(16).toString('hex')};
     const deployment = join(directory, 'tessera.toml');
 
@@ -170,7 +173,14 @@ export async function start(): Promise<Served | string> {
     };
     try {
       const at = await listening(child, () => stderr, 30_000);
-      return {viewerUrl: `http://${at.viewer}`, sessionUrl: `http://${at.session}`, sessionCredential, stop};
+      return {
+        viewerUrl: `http://${at.viewer}`,
+        sessionUrl: `http://${at.session}`,
+        sessionCredential,
+        controlUrl: `http://${at.control}`,
+        operatorCredential,
+        stop
+      };
     } catch (error) {
       stop();
       throw error;
