@@ -112,10 +112,7 @@ async fn ingest_point_with(
     let status = resp.status().as_u16();
     let answer: Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "the point is ingested: {answer}");
-    answer["tessera_ids"][0]
-        .as_u64()
-        .or_else(|| answer["tessera_ids"][0].as_str().and_then(|s| s.parse().ok()))
-        .unwrap()
+    ingested_ids(&answer)[0]
 }
 
 fn base64_of(text: &str) -> String {

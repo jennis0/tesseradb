@@ -5,7 +5,7 @@ import '../src/filter.js';
 import '../src/filter-panel.js';
 import type {TesseraItemCard} from '../src/item-card.js';
 import type {TesseraFilter} from '../src/filter.js';
-import {deep, deepAll, fakeStore, mount, settle, status} from './fake-store.js';
+import {deep, deepAll, fakeStore, mount, settle, status, meta, scalar} from './fake-store.js';
 import {UNNAMED} from '../src/base.js';
 
 afterEach(() => {
@@ -13,25 +13,18 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const META: Meta = {
-  apiVersion: 1,
-  idset: 0,
-  views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
-  groups: [],
+const META = meta({
   declaredScalars: [
-    {name: 'archive', arrowType: 'u16', category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, index: true},
-    {name: 'submitted_at', arrowType: 'timestamp_us', category: null, render: true, index: true},
-    {name: 'title', arrowType: 'utf8', category: null, render: false, index: true}
+    scalar('archive', 'u16', {category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, homes: ['rendered']}),
+    scalar('submitted_at', 'timestamp_us', {render: true, homes: ['rendered']}),
+    scalar('title', 'utf8')
   ],
-  layers: [],
-  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144, maxBrowseRows: 200},
-  maxTilesPerRequest: 4096,
   filterOperands: [
     {column: 'archive', family: 'category', operands: ['eq', 'in']},
     {column: 'title', family: 'text', operands: ['match', 'phrase']},
     {column: 'submitted_at', family: 'numeric', operands: ['range']}
   ]
-};
+});
 
 describe('<tessera-item-card>', () => {
   it('renders fields by name in declaration order, presented by type, with a slot per field', async () => {

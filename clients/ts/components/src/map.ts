@@ -7,7 +7,6 @@ import {
   assertCompositionMatchesServed,
   dataToWorldXY,
   hasValue,
-  worldBbox,
   type ArtifactsProjection,
   type FiltersProjection,
   type MarksProjection,
@@ -16,7 +15,7 @@ import {
   type SelectionShape,
   type ViewProjection
 } from '@tesseradb/client';
-import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, resolvePick, type ContourShape, type Picked} from '@tesseradb/deck';
+import {MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, resolvePick, viewInputOf, type ContourShape, type Picked} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -27,27 +26,27 @@ import {sameFrame} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-map>` — the canvas (design client-components §5.3 tier 1, §5.9): points, the density
- * wash, the artifact markers, hover, pick, the selection highlight, and the display states drawn
- * over the canvas itself, so a refused or expired view never reads as an empty corpus.
+ * `<tessera-map>` is the canvas: points, the density wash, the artifact markers, hover, pick, the
+ * selection highlight, and the display states drawn over the canvas itself, so a refused or
+ * expired view never reads as an empty corpus.
  *
  * **Per instance, not per module.** Each map owns its `Deck`, its `MarkSlab` and its probe. The
- * `Deck` is finalised **a settle after** disconnection, cancelled if the element reconnects first
- * — JupyterLab's windowed notebooks and a framework's reorder disconnect and reconnect elements
- * routinely, and a synchronous finalize would rebuild the GPU slab on every scroll-past. The
- * store is never disposed on disconnect (`TesseraElement`).
+ * `Deck` is finalised a settle after disconnection, and not at all if the element reconnects
+ * first: JupyterLab's windowed notebooks and a framework's reorder disconnect and reconnect
+ * elements routinely, and a synchronous finalize would rebuild the GPU slab on every scroll past.
+ * The store is not disposed on disconnect (`TesseraElement`).
  *
- * **The map owns the camera; the store is told** (§4). deck's `{target, zoom}` in world space is
- * converted to the view's data bbox and handed to `setView` on every change; the driver debounces.
- * The element holds the view state itself so `fit()`, `fitTo()` and the keyboard can move it.
+ * **The map owns the camera and tells the store.** deck's `{target, zoom}` in world space goes to
+ * `setView` through `viewInputOf` on every change; the driver debounces. The element holds the
+ * view state itself so `fit()`, `fitTo()` and the keyboard can move it.
  *
- * **Selection** (§5.11): `mode="box"`, or shift-drag in `pan`, draws a box; `mode="lasso"` draws
- * a freehand polygon. The highlight while dragging is the shape and nothing else (decision 0097),
- * and the settled shape goes to `store.select`, which puts it on every request as the `region`
- * leaf — the map narrows to it and its count is exact for the shape (`selection-operand.md`).
+ * **Selection.** `mode="box"`, or shift-drag in `pan`, draws a box; `mode="lasso"` draws a
+ * freehand polygon. While dragging, only the shape is drawn. The settled shape goes to
+ * `store.select`, which puts it on every request as the `region` leaf, so the map narrows to it
+ * and its count is exact for the shape.
  *
- * **Colour by cluster** is `colour-by="cluster:<layer>"` (§5.10): the map owns the lookup texture
- * beside the slab, and the `palette` property chooses positional or spread (decision 0099).
+ * **Colour by cluster** is `colour-by="cluster:<layer>"`, and the `palette` property chooses
+ * positional or spread. The layer owns the lookup texture.
  *
  * `display: block` with its height from `--tessera-map-height`, because a custom element is
  * inline and heightless and deck sizes its canvas from its parent.
@@ -84,7 +83,7 @@ export type MapProbe = {
     outlinesMs: number;
     labelsMs: number;
     layersMs: number;
-    /** Lookup-texture writes since the map was made — what a colouring interaction costs. */
+    /** Writes to the layer's lookup texture since the layer made it. */
     lutWrites: number;
     /**
      * What the last paint drew of the artifacts: the **rings** the outline layer carries, the
@@ -363,8 +362,8 @@ export class TesseraMap extends TesseraElement {
     cluster: {layer: null, layersOn: [], coverage: {current: 0, stale: 0}, servedIds: [], sample: [], coloured: 0}
   };
 
+  /** Handed to the layer rather than left to it: a hover reads a mark's band back out of it. */
   readonly slab = new MarkSlab();
-  readonly lut = new LookupTexture();
   private deck: Deck<OrthographicView> | null = null;
   private finalizeTimer: ReturnType<typeof setTimeout> | null = null;
   /** The pending hover-record request's dwell, cancelled by the next hover and by disconnection. */
@@ -655,7 +654,6 @@ export class TesseraMap extends TesseraElement {
     this.deck?.finalize();
     this.deck = null;
     this.slab.clear();
-    this.lut.destroy();
   }
 
   // ---- deck ---------------------------------------------------------------------------------
@@ -671,10 +669,7 @@ export class TesseraMap extends TesseraElement {
       controller: true,
       pickingRadius: 8,
       layers: [],
-      onDeviceInitialized: (device) => {
-        this.slab.attach(device);
-        this.lut.attach(device);
-      },
+      onDeviceInitialized: (device) => this.slab.attach(device),
       onViewStateChange: ({viewState}) => {
         const v = viewState as {target: number[]; zoom: number};
         this.viewState = {...this.viewState, target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
@@ -699,12 +694,10 @@ export class TesseraMap extends TesseraElement {
     this.cameraFrame = s.frame();
     this.cameraView = s.get('view').id;
     const {width, height} = this.size;
-    const v = this.viewState;
-    const wb = worldBbox({target: [v.target[0], v.target[1]], zoom: v.zoom, width, height}, 1);
-    const [x0, y0] = s.dataXY(wb[0], wb[1]);
-    const [x1, y1] = s.dataXY(wb[2], wb[3]);
-    s.setView({bbox: [x0, y0, x1, y1], width, height});
-    emit(this, 'tessera-viewchange', {bbox: [x0, y0, x1, y1], zoom: v.zoom, width, height});
+    const input = viewInputOf(s, this.viewState, width, height);
+    if (!input) return;
+    s.setView(input);
+    emit(this, 'tessera-viewchange', {bbox: input.bbox, zoom: this.viewState.zoom, width, height});
   }
 
   private paint(): void {
@@ -718,7 +711,6 @@ export class TesseraMap extends TesseraElement {
           id: 'tessera',
           store: s,
           slab: this.slab,
-          lut: this.lut,
           clusterLevel: this.clusterLevel ?? undefined,
           selectedWorldXY: this.selectedWorldXY,
           openedArtifact: s.get('selection').artifact?.id ?? null,

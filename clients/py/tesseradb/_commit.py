@@ -1230,7 +1230,7 @@ def _fold(report, page: Page, answer: Answer) -> None:
             body.get("accepted", 0)
         )
         report.artifacts_minted += int(body.get("minted", 0))
-        report.tessera_ids += [str(i) for i in body.get("tessera_ids", [])]
+        report.tessera_ids += body.get("tessera_ids", [])
         report.clipped += int(body.get("clipped", 0))
         report.clamped += int(body.get("clamped", 0))
     elif page.kind == "values":
@@ -1247,7 +1247,7 @@ def _fold(report, page: Page, answer: Answer) -> None:
         report.without_content += int(body.get("without_content", 0))
         minted = report.artifact_ids.setdefault(page.name, {})
         for identity, one in zip(page.artifacts, body.get("artifacts", [])):
-            minted[identity] = str(one["tessera_id"])
+            minted[identity] = one["tessera_id"]
     elif page.kind in ("attribute", "vocabulary"):
         # `existing: true` is the held-part arm of the fill rule: the name is there under this
         # identity and the request applied nothing but its values.

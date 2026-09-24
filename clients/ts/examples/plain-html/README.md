@@ -45,7 +45,8 @@ only, the session plane never browser-facing — would let the page present its 
 viewer plane directly and replace the proxy. Until it is granted, the proxy is the only
 production shape, and this example is that shape.
 
-## The other two examples
+## The other examples
 
-`../react-explorer` and `../canvas-store` use this server for their tokens: their Vite dev servers
-proxy `/token` and `/users` here and `/v1/*` to the viewer plane, so start this one first.
+`../react-explorer`, `../canvas-store` and `../deck-host` use this server for their tokens: their
+Vite dev servers proxy `/token` and `/users` here and `/v1/*` to the viewer plane, so start this
+one first.

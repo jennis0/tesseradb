@@ -40,7 +40,7 @@ export const UNANSWERED = 0;
 
 /**
  * One request's answer: the status, the body decoded where it was a JSON object, and the whole
- * response text. `JSON.parse` rounds an integer past 2^53 in `body`; `text` holds it as it arrived.
+ * response text.
  */
 export type Answer = {
   status: number;
@@ -63,6 +63,10 @@ export type ChangeItem = {op: 'delete' | 'suppress' | 'unsuppress'} & (
 export type ControlOptions = {
   controlUrl: string;
   operatorCredential: string;
+  /** Used for every request in place of the global `fetch`. */
+  fetch?: typeof fetch;
+  /** Sent on every request. A route's own `authorization` and `content-type` are set after these. */
+  headers?: Record<string, string>;
 };
 
 /** What every call takes: a signal that ends it. */
@@ -163,10 +167,14 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
 export class Control {
   private readonly base: string;
   private readonly credential: string;
+  private readonly fetch: typeof fetch | undefined;
+  private readonly headers: Record<string, string> | undefined;
 
   constructor(options: ControlOptions) {
     this.base = options.controlUrl.replace(/\/+$/, '');
     this.credential = options.operatorCredential;
+    this.fetch = options.fetch;
+    this.headers = options.headers;
   }
 
   private async send(
@@ -177,7 +185,11 @@ export class Control {
     headers: Record<string, string> = {}
   ): Promise<Answer> {
     const url = this.base + path;
-    const init: RequestInit = {method, headers: {authorization: `Bearer ${this.credential}`, ...headers}};
+    // The route's own headers replace a host header of the same name in any case.
+    const all = new Headers(this.headers);
+    all.set('authorization', `Bearer ${this.credential}`);
+    for (const [name, value] of Object.entries(headers)) all.set(name, value);
+    const init: RequestInit = {method, headers: all};
     if (body !== undefined) init.body = body as BodyInit;
     if (options.signal) init.signal = options.signal;
     const started = performance.now();
@@ -188,7 +200,7 @@ export class Control {
       let response: Response;
       let text: string;
       try {
-        response = await fetch(url, init);
+        response = await (this.fetch ?? fetch)(url, init);
         text = await response.text();
       } catch (error) {
         if (options.signal?.aborted) throw options.signal.reason;

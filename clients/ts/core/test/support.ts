@@ -4,7 +4,7 @@ import type {Band} from '../src/bands.js';
 import {tileXY} from '../src/coords.js';
 import type {Clock} from '../src/driver.js';
 import type {FrameScheduler} from '../src/presented.js';
-import type {Artifact, Layer, Meta, TileCounts, ViewInfo, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {Artifact, DeclaredScalar, Layer, Meta, TileCounts, ViewInfo, ViewportResponse, ViewportResult} from '../src/types.js';
 
 /** The fixtures the core tests share, the fake clocks, and `settle`. */
 
@@ -304,6 +304,11 @@ export function view(id: string, over: Partial<ViewInfo> = {}): ViewInfo {
   };
 }
 
+/** A declared column that is indexed, not rendered and read from the record, unless `over` says. */
+export function scalar(name: string, arrowType: DeclaredScalar['arrowType'], over: Partial<DeclaredScalar> = {}): DeclaredScalar {
+  return {name, arrowType, category: null, render: false, index: true, analyser: null, homes: ['record'], ...over};
+}
+
 /** `/v1/meta`'s `selection` block with the server's defaults for the ceilings. */
 export const SELECTION: Meta['selection'] = {
   kMin: 1,
@@ -314,21 +319,36 @@ export const SELECTION: Meta['selection'] = {
   maxCategoryValues: 1000,
   maxRegionVertices: 10_000,
   maxRegionCells: 262_144,
-  maxBrowseRows: 200
+  maxBrowseRows: 200,
+  maxShapeVertices: 50_000,
+  maxSuggestions: 20,
+  maxSuggestionWalk: 100_000,
+  maxSuggestSetEntities: 10_000_000,
+  maxPageRows: 65_536,
+  maxPageBytes: 16_777_216
 };
 
 /** A deployment of one view `s0` with nothing declared, and whichever fields `over` names. */
 export function meta(over: Partial<Meta> = {}): Meta {
   return {
     apiVersion: 1,
+    bundleFormat: 1,
     idset: 0,
     views: [view('s0')],
     groups: [],
     declaredScalars: [],
+    scopedScalars: [],
     layers: [],
     selection: SELECTION,
     maxTilesPerRequest: 4096,
     filterOperands: [],
     ...over
   };
+}
+
+/** A request's headers as a record under lower-case names, whatever form `init` gave them in. */
+export function headersOf(init?: RequestInit): Record<string, string> {
+  const out: Record<string, string> = {};
+  new Headers(init?.headers).forEach((value, name) => (out[name] = value));
+  return out;
 }

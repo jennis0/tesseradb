@@ -55,7 +55,6 @@ export class TesseraFilterPanel extends TesseraElement {
     switch (draft.family) {
       case 'text':
         return `${column}: ${draft.mode === 'phrase' ? '“' + draft.query + '”' : draft.query}`;
-      case 'string':
       case 'keyword':
         return `${column} ${draft.op} ${draft.needle}`;
       case 'category':

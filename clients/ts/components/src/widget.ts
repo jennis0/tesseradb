@@ -192,7 +192,6 @@ function controlOf(column: string, control: ColumnDraft, op: Record<string, unkn
       }
       throw bad();
     }
-    case 'string':
     case 'keyword': {
       if ((name === 'eq' || name === 'prefix' || name === 'contains') && typeof value === 'string') {
         return {family: control.family, needle: value, op: name, verb};

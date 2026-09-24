@@ -1,6 +1,6 @@
 import {css, html, nothing, type PropertyValues} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {browsableLayers, isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
+import {browsableLayers, isFilterLayer, refusalOf, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -480,11 +480,6 @@ export class TesseraHierarchy extends TesseraElement {
         : nothing}
     </li>`;
   }
-}
-
-function refusalOf(error: unknown): Refusal {
-  const e = error as {code?: string; detail?: string; message?: string};
-  return {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)};
 }
 
 attachContextRoot();
