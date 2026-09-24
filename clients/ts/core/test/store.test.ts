@@ -684,13 +684,7 @@ describe('select — the selection is the region leaf on every request (§5.11)'
 });
 
 
-describe('needShape fetches the drawn shape by identifier', () => {
-  /**
-   * The viewport is asked for centroids and boxes (`artifactChannel.ts`), so the shape a map draws
-   * comes from `/v1/artifacts/{id}`. What matters here is the *asking*: on a pointer move this is
-   * called every frame, so a second request for a shape already held — or already in flight — is
-   * the defect the two maps behind it exist to prevent.
-   */
+describe('the store holds the drawn shape by identifier', () => {
   function shapeClient(shape: [number, number][][][] | null) {
     const artifact = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 7n, centroid: null, box: null, shape}));
     const client = {
@@ -720,36 +714,7 @@ describe('needShape fetches the drawn shape by identifier', () => {
     return {store, artifact, clock};
   }
 
-  it('asks once per artifact and publishes the parts it gets back', async () => {
-    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
-    const {store, artifact, clock} = await storeWith(parts);
-    store.needShape(5n);
-    store.needShape(5n);
-    await clock.advance(1);
-    expect(artifact).toHaveBeenCalledTimes(1);
-    expect(store.get('artifacts').shapes.get(5n)).toEqual(parts);
-    // Held, so a later ask is free.
-    store.needShape(5n);
-    await clock.advance(1);
-    expect(artifact).toHaveBeenCalledTimes(1);
-  });
-
-  it('holds nothing for an artifact whose layer draws no shape, and does not ask again', async () => {
-    const {store, artifact, clock} = await storeWith(null);
-    store.needShape(9n);
-    await clock.advance(1);
-    expect(store.get('artifacts').shapes.has(9n)).toBe(false);
-    store.needShape(9n);
-    await clock.advance(1);
-    expect(artifact).toHaveBeenCalledTimes(1);
-  });
-
-  /**
-   * The rung 3 defect (`client-delivery.md`): the drill-down answers the shape beside the box, and
-   * opening an artifact read the box and dropped the shape on the floor. The map draws from
-   * `artifacts.shapes`, so a cluster opened from the list drew nothing at all on a layer that
-   * declares a hull — 253 served, 0 rings.
-   */
+  /** The drill-down answers the shape beside the box, and the map draws from `artifacts.shapes`. */
   it('opening an artifact holds the shape its own answer carried, and asks for nothing more', async () => {
     const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
     const {store, artifact, clock} = await storeWith(parts);
@@ -1296,34 +1261,23 @@ describe('the item a click opens and the record a hover names', () => {
     expect(store.get('selection')).toEqual({item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
   });
 
-  it('asks for a hovered record once, holds a refusal as none, and asks again after a clear', async () => {
+  it('writes no projection for a hovered record, and asks again after a clear', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {client} = fakeClient(() => response('ck'));
-    const item = vi.fn(async (_token: string, id: bigint) => {
-      if (id === 404n) throw new TesseraError(404, 'not-found', 'no such item');
-      return {fields: {title: `paper ${id}`}, externalId: null, views: [], scoped: {}, labels: []};
-    });
+    const item = vi.fn(async (_token: string, id: bigint) => ({fields: {title: `paper ${id}`}, externalId: null, views: [], scoped: {}, labels: []}));
     (client as unknown as {item: typeof item}).item = item;
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
     await clock.advance(1);
 
-    // Two hovers in flight at once share one request, and a later one is answered from what is held.
-    const [first, second] = await Promise.all([store.describe(7n), store.describe(7n)]);
-    expect(first).toEqual({title: 'paper 7'});
-    expect(second).toEqual({title: 'paper 7'});
+    expect(await store.describe(7n)).toEqual({title: 'paper 7'});
     expect(await store.describe(7n)).toEqual({title: 'paper 7'});
     expect(item).toHaveBeenCalledTimes(1);
-
-    expect(await store.describe(404n)).toBeNull();
-    expect(await store.describe(404n)).toBeNull();
-    expect(item).toHaveBeenCalledTimes(2);
-    // A hover writes no projection.
     expect(store.get('selection').item).toBeNull();
 
     store.clear();
     await clock.advance(1);
     await store.describe(7n);
-    expect(item).toHaveBeenCalledTimes(3);
+    expect(item).toHaveBeenCalledTimes(2);
   });
 });

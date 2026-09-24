@@ -20,6 +20,7 @@ import type {Band, BandKey} from './bands.js';
 import {BandBudget, bandKey} from './bands.js';
 import {DEFAULT_CACHE_BYTES, Replica, type ReplicaOptions} from './replica.js';
 import {TesseraClient, type TesseraClientOptions} from './client.js';
+import {HeldRecords, HeldShapes} from './held.js';
 import {Suggestions} from './suggestions.js';
 import {TokenSupply, type TokenSupplier} from './token.js';
 import type {DepthChoice} from './budget.js';
@@ -524,11 +525,25 @@ export function createStore(options: StoreOptions): Store {
     (state) => replaceProjection('filters', {...projections.filters, ...state})
   );
 
+  const shapes = new HeldShapes(
+    async (id) => {
+      const asked = await viewed();
+      // Generalised to the pixel of the view's own zoom.
+      const zoom = presenter?.view?.view.zoom;
+      const detail = await client.artifact(asked.token, id, {view: asked.view, ...(zoom === undefined ? {} : {zoom})});
+      return detail.shape;
+    },
+    shapeKindOf,
+    (held) => replaceProjection('artifacts', {...projections.artifacts, shapes: held})
+  );
+
+  const records = new HeldRecords((id) => tokens.get().then((t) => client.item(t, id)).then((detail) => detail.fields));
+
   const tokens = new TokenSupply(options.authorise, options.token, clock, (changed) => {
     // A derived shape and a hovered record answer one principal; a new token may be another.
     if (changed) {
-      forgetShapes('derived');
-      forgetDescribed();
+      shapes.forget('derived');
+      records.forget();
     }
     // A warm-up that failed for want of a token runs again now there is one.
     if (meta === null) void ready().catch(() => {});
@@ -1057,7 +1072,7 @@ export function createStore(options: StoreOptions): Store {
       held: state.held,
       table,
       servedOrdinals,
-      shapes: heldShapes,
+      shapes: shapes.shapes,
       // **Rebuilt only when the table moved.** A response that names artifacts already held names
       // no new ordinal, so the colours and the lookup texture built from them are the same ones —
       // which is what the channel's payload store buys, and it buys nothing if this rebuilds a map
@@ -1354,7 +1369,7 @@ export function createStore(options: StoreOptions): Store {
     colourAsked.clear();
     // A shape is generalised against the frame it was fetched under and names an artifact of one
     // view's row space (§8: the client does not match artifact identity across views).
-    forgetShapes('all');
+    shapes.forget('all');
 
     if (!kept) {
       // No camera to carry, so no question to re-ask: `lastView` is the outgoing frame's bbox and
@@ -1612,141 +1627,11 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  /**
-   * {@link Store.describe} — the hover's record, asked for once per id and held.
-   *
-   * A refusal is held as `null` for the same reason the shape cache holds one: the pointer will
-   * cross this mark again within the second, and an id that answered 404 once will answer 404
-   * every time until the principal changes.
-   */
-  const described = new Map<string, Record<string, unknown> | null>();
-  const describing = new Map<string, Promise<Record<string, unknown> | null>>();
-  /** Moved when the principal changes, so an answer asked for under the previous one is not held. */
-  let describedEpoch = 0;
-
-  function forgetDescribed(): void {
-    described.clear();
-    describing.clear();
-    describedEpoch += 1;
-  }
-
-  async function describe(id: bigint): Promise<Record<string, unknown> | null> {
-    const key = id.toString();
-    const held = described.get(key);
-    if (held !== undefined) return held;
-    const inFlight = describing.get(key);
-    if (inFlight) return inFlight;
-    const epoch = describedEpoch;
-    const request = tokens.get()
-      .then((t) => client.item(t, id))
-      .then((detail) => detail.fields)
-      .catch(() => null)
-      .then((fields) => {
-        if (disposed || epoch !== describedEpoch) return fields;
-        describing.delete(key);
-        described.set(key, fields);
-        return fields;
-      });
-    describing.set(key, request);
-    return request;
-  }
-
-  // ---- the drawn shape, fetched by identifier (`artifact-shapes.md` §9) -----------------------
-
-  /**
-   * The shapes held, with the kind each was served as, and the identifiers already asked for.
-   *
-   * **Two maps, because an absence has two meanings.** A shape not in `heldShapes` is either not
-   * asked for or asked for and not answered, and the second must not be asked again on every
-   * pointer move; `askedShapes` is what separates them. A refusal stays in `askedShapes` and out
-   * of `heldShapes`, so a `404` is asked once and drawn as a box — which is what the map does for
-   * an artifact whose layer draws no shape, and the two are indistinguishable on purpose.
-   *
-   * **The kind decides what survives a change of principal** (`polygon-membership.md` §7.1): a
-   * `derived` shape is this principal's and goes with them; a `predicate` or an `authored` one is
-   * identical for every principal served the artifact and is kept. An artifact the new
-   * principal is not served is simply never looked up.
-   */
-  let heldShapes = new Map<bigint, Shape>();
-  let heldKinds = new Map<bigint, ShapeKind>();
-  let askedShapes = new Set<bigint>();
-
-  /** Drop what the principal's change invalidates — every derived shape, or everything. */
-  function forgetShapes(which: 'derived' | 'all'): void {
-    if (heldShapes.size === 0 && askedShapes.size === 0) return;
-    if (which === 'all') {
-      heldShapes = new Map();
-      heldKinds = new Map();
-      askedShapes = new Set();
-    } else {
-      const keep = new Map<bigint, Shape>();
-      const kinds = new Map<bigint, ShapeKind>();
-      for (const [id, shape] of heldShapes) {
-        const kind = heldKinds.get(id);
-        if (kind !== undefined && kind !== 'derived') {
-          keep.set(id, shape);
-          kinds.set(id, kind);
-        }
-      }
-      heldShapes = keep;
-      heldKinds = kinds;
-      askedShapes = new Set(keep.keys());
-    }
-    replaceProjection('artifacts', {...projections.artifacts, shapes: heldShapes});
-  }
-
   /** The kind a served artifact's layer draws, from the meta; null where it draws none. */
   function shapeKindOf(id: bigint): ShapeKind | null {
     const layer = projections.artifacts.served.find((a) => a.tesseraId === id)?.layer;
     if (layer === undefined) return null;
     return projections.meta?.layers.find((l) => l.name === layer)?.shape ?? null;
-  }
-
-  function needShape(id: bigint): void {
-    if (askedShapes.has(id)) return;
-    askedShapes.add(id);
-    void (async () => {
-      try {
-        const asked = await viewed();
-        // The view's own zoom, so the shape is generalised to this screen's pixel.
-        const zoom = presenter?.view?.view.zoom;
-        const detail = await client.artifact(asked.token, id, {view: asked.view, ...(zoom === undefined ? {} : {zoom})});
-        // The principal may have changed under the request, by a renewal or a clear, and then
-        // this answer describes a mask no longer drawn.
-        if (disposed || !askedShapes.has(id)) return;
-        if (!detail.shape) return;
-        heldShapes = new Map(heldShapes).set(id, detail.shape);
-        heldKinds = new Map(heldKinds).set(id, shapeKindOf(id) ?? 'derived');
-        replaceProjection('artifacts', {...projections.artifacts, shapes: heldShapes});
-      } catch {
-        // A refused shape is a shape not drawn, and the `box` already in hand answers instead.
-        // There is nothing here to report: `404` covers an unknown identifier, one this principal
-        // may not reach and one below its layer's criterion identically, so a message would be
-        // inventing a distinction the wire does not carry.
-      }
-    })();
-  }
-
-  /**
-   * Take the shape an answer already carried into the held shapes, so the map draws it.
-   *
-   * The drill-down route answers `centroid`, `box` **and** the shape in one body, and
-   * {@link openArtifact} was reading the first two and discarding the third: the shape landed in
-   * `selection.artifact.detail` — where the card reads it and draws nothing with it — and never
-   * in `artifacts.shapes`, which is what `focusOutlines` looks in. So an artifact opened from
-   * `<tessera-artifact-list>` drew no outline at all on a layer that declares a hull, because the
-   * box the served row carries is refused for a layer whose declared shape is a hull; a layer
-   * declaring none drew its box and hid the fault. The map's own click and hover call
-   * {@link needShape} beside this, which is why a pick drew and a list row did not.
-   *
-   * Recorded as asked, so `needShape` never issues a second request for a shape already in hand.
-   */
-  function holdShape(id: bigint, shape: Shape | null): void {
-    if (!shape) return;
-    askedShapes.add(id);
-    heldShapes = new Map(heldShapes).set(id, shape);
-    heldKinds = new Map(heldKinds).set(id, shapeKindOf(id) ?? 'derived');
-    replaceProjection('artifacts', {...projections.artifacts, shapes: heldShapes});
   }
 
   async function openArtifact(id: bigint): Promise<void> {
@@ -1756,7 +1641,7 @@ export function createStore(options: StoreOptions): Store {
       const detail = await client.artifact(asked.token, id, {view: asked.view});
       if (disposed || epoch !== clears) return;
       // A renewal may have changed the principal under the request, and a shape can be theirs.
-      if (tokens.current === asked.token) holdShape(id, detail.shape);
+      if (tokens.current === asked.token) shapes.hold(id, detail.shape);
       replaceProjection('selection', {...projections.selection, artifact: {id, detail}, artifactRefusal: null, item: null, itemRefusal: null});
     } catch (error) {
       if (disposed || epoch !== clears) return;
@@ -1974,8 +1859,8 @@ export function createStore(options: StoreOptions): Store {
       switchTimer = null;
     }
     table.clear();
-    forgetShapes('all');
-    forgetDescribed();
+    shapes.forget('all');
+    records.forget();
     clearSelection();
     contentKeyAtFrame = '';
     replaceProjection('view', {id: viewId, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0});
@@ -2001,13 +1886,15 @@ export function createStore(options: StoreOptions): Store {
   function dispose(): void {
     disposed = true;
     tokens.dispose();
+    suggestions.dispose();
+    shapes.dispose();
+    records.dispose();
     for (const held of perView.values()) {
       held.presenter.cancel();
       held.channel.cancel();
     }
     if (switchTimer !== null) clock.cancel(switchTimer);
     switchTimer = null;
-    suggestions.dispose();
     client.close();
   }
 
@@ -2043,9 +1930,9 @@ export function createStore(options: StoreOptions): Store {
     setCurrentView,
     frame: frameOrNull,
     pick,
-    describe,
+    describe: (id) => records.describe(id),
     openArtifact,
-    needShape,
+    needShape: (id) => shapes.need(id),
     clearSelection,
     setScheme,
     select,
