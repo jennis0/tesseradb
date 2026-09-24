@@ -13,7 +13,8 @@ an overall limit on how many requests may be outstanding at once: a request that
 every slot is taken is refused immediately, with no wait. A request that clears that stage still
 needs a compute permit, a share of running capacity, and waits up to a configured timeout,
 `serve.admission_timeout_ms`, for one to open. A request that gets no compute permit within that
-time is refused as well.
+time is refused as well. A bulk read of items or artifacts is admitted under a limit of its own,
+described under [bulk reads](#bulk-reads).
 
 Both refusals answer with the same 429 status, carrying a fixed one-second interval to wait before
 retrying. Two further cases carry the same status and the same interval, for reasons closer to a
@@ -107,6 +108,67 @@ flowchart TD
 *A streamed request's lifetime. The compute permit releases once counts are sent; the slot permit
 stays held until delivery ends, whichever of the four exits reaches it first.*
 
+## Bulk reads
+
+`POST /v1/items` and `POST /v1/artifacts` read items and artifacts page by page, each response
+continuing from the cursor the one before it returned
+([queries](queries.md#reading-items-and-artifacts-in-bulk)). They run under an admission limit of
+their own, `serve.bulk_admission`, so a long read takes no slot from the viewport, item and
+session routes, and those routes take none from it. The limit counts reads running at once. A
+read past it is refused at once with the 429 and one-second interval described above. No bulk
+read waits for a slot, and a limit of 0 refuses every bulk read. A bulk read holds its permit for
+its whole response, since it builds each page while the one before it is being sent, so it has no
+separate compute permit to release early. It shares the engine's compute threads and the
+process's memory with every other request. `/control/status` reports the limit under `bulk`, with
+the reads in flight and how many have been refused.
+
+| Key | Default | What it bounds |
+|---|---|---|
+| `serve.bulk_admission` | 2 | bulk reads running at once |
+| `serve.max_page_rows` | 100,000 | rows in a page; published in `/v1/meta` as `selection.max_page_rows` |
+| `serve.max_page_bytes` | 64 MiB | a page's Arrow bytes before compression; published as `selection.max_page_bytes`; at most 2 GiB |
+| `serve.bulk_response_bytes` | 256 MiB | the Arrow bytes one response may carry: no page starts that could take the response past it; at least `serve.max_page_bytes` |
+| `serve.bulk_response_ms` | 30,000 | how long one response runs before it ends at the next point where stopping moves the cursor on |
+
+The server refuses a configuration that sets `serve.max_page_rows` or `serve.max_page_bytes` to 0,
+`serve.max_page_bytes` above 2 GiB, or `serve.bulk_response_bytes` below `serve.max_page_bytes`.
+
+A bulk read holds about seven pages of `serve.max_page_bytes` at its peak: about four while it
+builds a page, and three encoded pages, two queued for the connection and one being written to
+it. The first figure is measured: 4.05 times the page ceiling, with rows of very uneven size.
+All bulk reads together can therefore hold `serve.bulk_admission` × 7 × `serve.max_page_bytes`,
+which is 896 MiB at the defaults. The server has no memory cap of its own to hold that figure
+against, so it logs it at startup, as `bulk_read_memory_bytes`, for the operator to compare with
+the memory cap the process runs under.
+
+A response the server ends closes with a trailer, and the trailer carries a cursor unless no
+row remains. The server ends a response when it has sent the pages asked for, reached its byte
+or time budget, or run out of rows. The stream deadline, `serve.stream_deadline_ms`, is measured
+from admission for a bulk read. When it passes, the engine sends the page under way short and ends
+the response with a trailer marked `deadline`, carrying a cursor to continue from. At the defaults
+the time budget of 30 seconds ends a response well before the deadline of 60 seconds, so the
+deadline is a backstop.
+
+A client that stops reading gets no trailer. When a frame cannot be queued for
+`serve.stream_write_stall_ms` because the client has not taken the frames before it, the server
+stops the read and cuts the connection. The body ends without its trailer, which the client reads
+as incomplete, and the client resumes from the last page end it received. A client that
+disconnects stops the read too. However a response ends, its permit is released when the read
+stops.
+
+```mermaid
+flowchart TD
+  A[admission:<br/>a bulk-read permit, or 429 at once] --> P[build a page;<br/>send it and its page end]
+  P -- "rows remain, within the pages<br/>asked for and both budgets" --> P
+  P -- "no row remains, a limit is reached,<br/>or the stream deadline passes" --> T[trailer;<br/>permit released]
+  P -. "client stops reading for<br/>stream_write_stall_ms" .-> X1[connection cut, no trailer;<br/>permit released]
+  P -. "client disconnects or a fault occurs" .-> X2[read stops, no trailer;<br/>permit released]
+```
+
+*A bulk-read response. Every end the server chooses carries a trailer. A client that stops
+reading or goes away, or a fault, leaves a body without one, and the client resumes from the last
+page end it received.*
+
 ## What a client may already hold
 
 A response carries two keys and a generation name a client can compare against what it already holds.
@@ -190,9 +252,11 @@ The framed response, and the split between computing counts and streaming points
 `tessera-engine`'s `viewport` module; the frame encoding itself is in `tessera-wire`. A session's
 kept authorised set and row arrangement, the background pass that keeps them current, and the
 wait-rather-than-refuse behaviour for a request racing a build already in progress live in
-`tessera-engine`, in its `cache`, `refresh` and `single_flight` modules. Admission, the streaming
-transport and its deadlines, and the health and readiness routes live in `tessera-server`, in its
-`state`, `viewer` and `health` modules.
+`tessera-engine`'s `cache` and `refresh` modules and in the `tessera-cache` crate. Admission, the
+streaming transport and its deadlines, and the health and readiness routes live in
+`tessera-server`, in its `state`, `stream`, `viewer` and `health` modules. A bulk read's pages,
+stretches and cursors live in `tessera-engine`'s `records` module, and its admission and streaming
+in `tessera-server`'s `records` module.
 
 Coverage of the properties this chapter describes is stated in `conformance.md`'s coverage matrix.
 
