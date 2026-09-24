@@ -33,7 +33,7 @@ widget = ["anywidget>=0.9"]
 # Jupyter copy.
 # `tomli` reads TOML on Pythons below 3.11, which have no `tomllib`.
 dev = [
-  "anywidget>=0.9", "marimo", "nbformat", "pandas", "pytest", "ruff", "scikit-learn",
+  "anywidget>=0.9", "marimo", "nbformat", "pandas", "pytest", "pytest-cov", "ruff", "scikit-learn",
   "tomli>=2; python_version < '3.11'",
 ]
 
