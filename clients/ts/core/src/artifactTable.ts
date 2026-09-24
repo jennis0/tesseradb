@@ -1,88 +1,68 @@
 /**
- * The session artifact table (design client-components §5.10): ordinal → artifact, per session.
+ * The session artifact table: ordinal to artifact, one table per session.
  *
- * Ids are stable across responses (a replacement mints new identities, an edit keeps them —
- * decision 0081), so one table per session names every artifact the session has held, and the
- * ordinal — a `u32`, `0` reserved for *none* — is what every point will carry once the wire's
- * membership column exists. Naming happens here and nowhere else: the decode worker cannot share
- * a table across its lanes, so it emits a response-local index and the main thread remaps.
+ * An artifact's id is stable across responses, so one table names every artifact the session has
+ * held. The ordinal is a `u32` with `0` reserved for none, and it is what each point's membership
+ * carries. Naming happens only here: the decode worker cannot share the table, so it emits a
+ * response-local index that the main thread remaps.
  *
- * **Bounded by what is held, not by the layer.** A layer may hold 10⁶–10⁷ artifacts, so ordinals
- * are refcounted and recycled: each holder's distinct-ordinal list is a reference, taken when the
- * holder is built and released when it is dropped, and an ordinal whose count reaches zero goes
- * back on a free list. Live ordinals are therefore bounded by resident holders, and a lookup
- * texture sized to the live range stays small.
- *
- * Two holders: the artifact channel's served set, which takes a reference on each response and
- * releases the previous one, and every band, which takes one per distinct ordinal it carries
- * (`bands.ts`) and releases them when it is evicted or truncated.
+ * A layer may hold millions of artifacts, so ordinals are reference-counted and reused. Each
+ * holder takes a reference per distinct ordinal when built and releases it when dropped; an ordinal
+ * at zero returns to a free list. Live ordinals are bounded by what is held, and a lookup texture
+ * sized to them stays small. The holders are the artifact channel's store and every band.
  */
 
 export type ArtifactEntry = {
   tesseraId: bigint;
   layer: string;
   /**
-   * The ordinals of the parents this table holds, in the wire's order — ascending by `tesseraId`
-   * (contracts §3.2 r71) — and empty where none resolved. A parent is on the wire only where both
-   * ends are in one response, deliberately (decision 0087): a walk that meets an empty list
-   * resolves to neutral, never to a guessed ancestor. A tree holds at most one; a `dag` layer may
-   * hold several, and the walk takes the first (decision 0117; `dag-hierarchies.md` §7).
+   * The ordinals of the parents this table holds, in the wire's order (ascending by `tesseraId`),
+   * and empty where none resolved. A parent is on the wire only where both ends are in one
+   * response, so a walk that meets an empty list resolves to none rather than a guessed ancestor. A
+   * tree holds at most one parent; a `dag` layer may hold several, and the walk takes the first.
    */
   parentOrdinals: readonly number[];
   /**
-   * **The rung the wire gave for this artifact** (contracts §3.2 r43): the declared level on a
-   * levelled layer, the response-local parent-chain depth on a treed one, `0` on a flat one — the
-   * one number a client draws and coarsens by, whatever the layer's kind.
-   *
-   * This table used to hold two numbers — the declared `level` off the wire and a `depth` counted
-   * from the response's parent links — with `rungOf` picking between them per layer kind, because
-   * only one was right for each kind and the pick was a documented per-client trap (shipped wrong
-   * once). The server now computes the right one per kind and serves it as `rung`, so the pick,
-   * the client-side count and the second field are gone.
+   * The rung the wire gave: the declared level on a levelled layer, the parent-chain depth in the
+   * response on a treed one, `0` on a flat one. The number a client draws and coarsens by.
    */
   rung: number;
   /**
-   * The centroid the frame that named this artifact declared, in the wire's grid units, or null
-   * where it declared none. A positional colour is a pure function of it (`palette.ts`), so an
-   * entry is colourable whether or not the current view's channel response served it.
+   * The centroid the naming frame declared, in wire grid units, or null. A positional colour
+   * depends only on it (`palette.ts`), so an entry can be coloured whether or not the current view
+   * served it.
    */
   centroid: readonly [number, number] | null;
 };
 
 /**
- * What a holder hands over: the wire's identity, its layer, its in-response parents and centroid,
- * and the rung the response gave it.
- *
- * `rung` is optional only so a caller building a reference by hand need not invent one; a holder
- * fed from a response passes the artifact's own, and omitting it means *rung 0*, which is what a
- * flat layer's artifacts — and a treed layer's roots — are.
+ * What a holder hands over: the artifact's id, layer, parents in the same response, centroid and
+ * rung. An omitted `rung` means 0, the rung of a flat layer's artifacts and a tree's roots.
  */
 export type ArtifactRef = {tesseraId: bigint; layer: string; parentIds: readonly bigint[]; centroid?: readonly [number, number] | null; rung?: number};
 
-/** Ordinal `0` is reserved: *no artifact*. */
+/** Ordinal `0` is reserved for no artifact. */
 export const NO_ORDINAL = 0;
 
 /**
- * What moved for one ordinal, as {@link SessionArtifactTable.changesSince} reports it. The four
- * kinds are distinguished because what a reader must recompute for each differs:
+ * What changed for one ordinal, as {@link SessionArtifactTable.changesSince} reports it. Each kind
+ * asks a reader to recompute something different:
  *
- * - `named` — the ordinal was assigned to an artifact. It is on no other ordinal's parent chain
- *   yet, so **only its own** derived value can have moved; a link that would put it on one is
- *   reported as the child's `linked`.
- * - `placed` — a centroid arrived for an ordinal already named, so its colour moved, and with it
- *   every value derived by resolving *through* it.
- * - `linked` — a parent link was set on an entry that existed before the batch that set it, so
- *   what that entry's descendants resolve to has moved.
- * - `freed` — the last reference went and the slot returned to the free list.
+ * - `named`: the ordinal was assigned. It is on no other ordinal's parent chain yet, so only its
+ *   own derived value moved; a link that puts it on one is reported as the child's `linked`.
+ * - `placed`: a centroid arrived for an ordinal already named, so its colour moved, and every value
+ *   resolved through it.
+ * - `linked`: a parent link was set on an entry that existed before the batch, so its descendants
+ *   resolve differently.
+ * - `freed`: the last reference went and the slot returned to the free list.
  */
 export type ArtifactTableChange = {ordinal: number; kind: 'named' | 'placed' | 'linked' | 'freed'};
 
 const KINDS = ['named', 'placed', 'linked', 'freed'] as const;
 
 /**
- * How many changes the journal keeps. A reader further behind than this is told so and rebuilds
- * whole — the work it would have done anyway — so the cap bounds the journal's memory and never
- * the answer's correctness.
+ * How many changes the journal keeps. A reader further behind is told so and rebuilds whole, so
+ * the limit bounds memory and not correctness.
  */
 const JOURNAL_LIMIT = 1 << 16;
 
@@ -91,32 +71,31 @@ function keyOf(layer: string, tesseraId: bigint): string {
 }
 
 export class SessionArtifactTable {
-  /** Index is the ordinal; slot 0 is the reserved none. A freed slot holds null until reused. */
+  /** Indexed by ordinal; slot 0 is reserved. A freed slot holds null until reused. */
   private entries: (ArtifactEntry | null)[] = [null];
   private refs: number[] = [0];
   private ordinals = new Map<string, number>();
   private free: number[] = [];
   /**
-   * Bumped whenever an ordinal is named or freed, an entry's geometry arrives, or a link is set
-   * on an entry that already existed — the key a caller derives its colours under, so a rebuild
-   * happens when the table moved and not per response.
+   * Incremented whenever an ordinal is named or freed, a centroid arrives, or a link is set on an
+   * entry that already existed. Callers derive their colours under it.
    */
   private stamp = 0;
   /**
-   * One packed change per version, oldest first: the version of `journal[i]` is
-   * `journalFrom + i + 1`, since every recorded change bumps the stamp by exactly one. That is
-   * what lets {@link changesSince} answer by index rather than by search.
+   * One packed change per version, oldest first. The version of `journal[i]` is
+   * `journalFrom + i + 1`, since each change increments the stamp by one, so
+   * {@link changesSince} answers by index.
    */
   private journal: number[] = [];
   /** The version `journal[0]` follows: the oldest version {@link changesSince} can answer from. */
   private journalFrom = 0;
 
-  /** How many times the table's contents have changed — see {@link stamp}. */
+  /** How many times the table's contents have changed; see {@link stamp}. */
   get version(): number {
     return this.stamp;
   }
 
-  /** Record one change against a fresh version. */
+  /** Records one change against a new version. */
   private record(ordinal: number, kind: ArtifactTableChange['kind']): void {
     this.stamp += 1;
     this.journal.push(ordinal * KINDS.length + KINDS.indexOf(kind));
@@ -128,15 +107,12 @@ export class SessionArtifactTable {
   }
 
   /**
-   * Every change since `version`, oldest first, or `null` where the journal cannot answer — a
-   * reader further behind than {@link JOURNAL_LIMIT} changes, or one asking about a table that
-   * has been cleared under it.
+   * Every change since `version`, oldest first, or `null` where the journal cannot answer: a reader
+   * more than {@link JOURNAL_LIMIT} changes behind, or one from before a clear.
    *
-   * **What this is for.** A colour map and a lookup texture are derived from the whole table, and
-   * the table holds whole levels once the channel has promoted them — hundreds of thousands of
-   * entries — while a settled view names a few hundred it had not seen. Rebuilding either from
-   * `liveEntries` per settle costs the hold; applying the changes costs what changed. A reader
-   * that cannot use a change list asks for none and is no worse off.
+   * A colour map and a lookup texture are derived from the whole table, which can hold hundreds of
+   * thousands of entries while a settled view names a few hundred new ones. Applying the changes
+   * costs what changed; rebuilding costs the whole table.
    */
   changesSince(version: number): ArtifactTableChange[] | null {
     if (version === this.stamp) return [];
@@ -149,7 +125,7 @@ export class SessionArtifactTable {
     return out;
   }
 
-  /** Ordinals in use — the bound on a lookup texture. */
+  /** Ordinals in use. */
   get live(): number {
     return this.ordinals.size;
   }
@@ -167,10 +143,7 @@ export class SessionArtifactTable {
     return this.entries[ordinal] ?? null;
   }
 
-  /**
-   * Every ordinal in use, with its entry — O(live), which is bounded by resident marks through
-   * the refcounts. What a caller builds a colour per ordinal from.
-   */
+  /** Every ordinal in use, with its entry, for building a colour per ordinal. */
   liveEntries(): {ordinal: number; entry: ArtifactEntry}[] {
     const out: {ordinal: number; entry: ArtifactEntry}[] = [];
     for (const ordinal of this.ordinals.values()) {
@@ -181,16 +154,14 @@ export class SessionArtifactTable {
   }
 
   /**
-   * Take one reference on each of `refs`, naming any that are new, and return their ordinals in
-   * order. Parent links are set where both ends are in this batch, every parent the reference
-   * names that the table holds, in the reference's order; links already known survive a batch
-   * that carries the child alone, names no parent it can resolve, or resolves only some of the
-   * parents it names.
+   * Takes one reference on each of `refs`, naming any that are new, and returns their ordinals in
+   * order. A parent link is set for every parent the table holds, in the reference's order. Links
+   * already known survive a batch that carries the child alone or resolves only some of its
+   * parents.
    */
   take(refs: readonly ArtifactRef[]): Uint32Array {
     const ordinals = new Uint32Array(refs.length);
-    // Which ordinals this batch named: a link set on one of them is part of naming it, and a
-    // reader told so would rebuild what it has not yet built (see {@link ArtifactTableChange}).
+    // A link set on an ordinal this batch named is part of naming it, and is not reported as `linked`.
     const namedHere = new Set<number>();
     for (let i = 0; i < refs.length; i++) {
       const ref = refs[i]!;
@@ -204,8 +175,7 @@ export class SessionArtifactTable {
         namedHere.add(ordinal);
         this.record(ordinal, 'named');
       } else if (ref.centroid && !this.entries[ordinal]!.centroid) {
-        // A frame that declared a centroid for an artifact first named without one: geometry
-        // arriving late is a colour arriving late, not a second identity.
+        // A centroid arriving late is a colour arriving late, on the same identity.
         this.entries[ordinal] = {...this.entries[ordinal]!, centroid: ref.centroid};
         this.record(ordinal, 'placed');
       }
@@ -223,31 +193,23 @@ export class SessionArtifactTable {
       }
       if (parents.length === 0) continue;
       const entry = this.entries[ordinals[i]!]!;
-      // **A partial resolution never shrinks a list already held.** The point path's batch is
-      // built from the membership column (`bands.ts`) and lands before the debounced channel's,
-      // so a child's parents are usually not all in it; the scalar kept its link on a batch that
-      // did not resolve, and the list keeps its entries on one that resolves only some.
+      // A partial resolution does not shrink a list already held. The point path's batch comes from
+      // the membership column and lands before the channel's, so it often lacks some parents.
       if (parents.length < ref.parentIds.length && entry.parentOrdinals.length > 0) continue;
       if (parents.length === entry.parentOrdinals.length && parents.every((p, j) => p === entry.parentOrdinals[j])) continue;
-      // **The link sets nothing but itself.** The rung came off the wire when the entry was named
-      // (contracts §3.2 r43: the server computes it per layer kind, chain depth included), so
-      // there is no client-side count to update — the defect that count carried is why it is gone.
       const moved = parents[0] !== entry.parentOrdinals[0];
       this.entries[ordinals[i]!] = {...entry, parentOrdinals: parents};
-      // A link on an entry this batch named is part of naming it; on one that was already here it
-      // moves what the entry's descendants resolve to, so a reader is told — **only when the first
-      // entry moved**, since {@link resolve} is the list's one reader and walks the first alone. A
-      // channel batch completing the point path's partial list (a second parent arriving behind
-      // the first) moves no colour, and a reader told otherwise would rebuild the whole texture
-      // on most settles that reach new ground of a `dag` layer.
+      // A link on an entry that was already here changes what its descendants resolve to. It is
+      // reported only when the first parent changed, since {@link resolve} walks the first alone; a
+      // second parent arriving behind the first changes no colour.
       if (moved && !namedHere.has(ordinals[i]!)) this.record(ordinals[i]!, 'linked');
     }
     return ordinals;
   }
 
   /**
-   * Take one more reference on each of `ordinals` — a band recording the distinct ordinals it
-   * carries, already named by {@link take}. Ordinal `0` and a freed slot are skipped.
+   * Takes one more reference on each of `ordinals`, as a band does for the distinct ordinals it
+   * carries. Ordinal `0` and a freed slot are skipped.
    */
   retain(ordinals: ArrayLike<number>): void {
     for (let i = 0; i < ordinals.length; i++) {
@@ -257,7 +219,7 @@ export class SessionArtifactTable {
     }
   }
 
-  /** Release one reference per ordinal; an ordinal at zero returns to the free list. */
+  /** Releases one reference per ordinal; an ordinal at zero returns to the free list. */
   release(ordinals: ArrayLike<number>): void {
     for (let i = 0; i < ordinals.length; i++) {
       const ordinal = ordinals[i]!;
@@ -278,28 +240,19 @@ export class SessionArtifactTable {
   }
 
   /**
-   * Walk `ordinal`'s parent links up to the nearest ordinal `served` admits, or `0` where the
-   * walk fails — an edge never seen, or the cut moved finer than anything held. Hierarchy
-   * resolves in the table, never on the points (§5.10).
+   * Walks `ordinal`'s parent links to the nearest ordinal `served` admits, or `0` where the walk
+   * fails: an edge never seen, or a cut finer than anything held. `served` is anything with `has`,
+   * such as a set of ordinals or the colour map.
    *
-   * `served` is anything that answers `has` — a set of ordinals, or the colour map, whose keys
-   * are every ordinal a colour is known for.
-   *
-   * `maxLevel` is the level chosen to colour at: the walk passes a served ancestor whose rung
-   * is deeper than it and stops at the first served one at or above it, so choosing a coarser
-   * level is a lookup-texture rewrite and never a refetch. Undefined colours at the deepest
-   * served. **The comparison is the wire's `rung`** (contracts §3.2 r43) — the declared level on
-   * a levelled layer and the response-local chain depth on a treed one, computed server-side per
-   * layer kind so this walk never has to pick between derivations.
-   *
-   * **On a `dag` layer the walk takes the first parent at each step** (decision 0117;
-   * `dag-hierarchies.md` §7): the wire orders a row's parents ascending by `tessera_id`, so the
-   * chain — and the colour at its end — is the same on every rebuild. Exact-only colouring
-   * (decision 0099) is untouched: every artifact on the chain holds the point.
+   * `maxLevel` is the level to colour at: the walk passes a served ancestor whose rung is deeper and
+   * stops at the first at or above it, so a coarser level is a lookup-texture rewrite, not a
+   * refetch. Undefined colours at the deepest served. On a `dag` layer the walk takes the first
+   * parent at each step; parents are ordered by `tessera_id`, so the chain is the same on every
+   * rebuild, and every artifact on it holds the point.
    */
   resolve(ordinal: number, served: {has(ordinal: number): boolean}, maxLevel?: number): number {
     let at = ordinal;
-    // Bounded by the table's size: a malformed link cycle must not hang the caller.
+    // Bounded by the table's size, so a link cycle cannot hang the caller.
     for (let steps = 0; at !== NO_ORDINAL && steps <= this.entries.length; steps++) {
       const here = this.entries[at];
       if (served.has(at) && (maxLevel === undefined || (here?.rung ?? 0) <= maxLevel)) return at;
@@ -308,15 +261,14 @@ export class SessionArtifactTable {
     return NO_ORDINAL;
   }
 
-  /** Drop everything — the identity key changed, so nothing held may be named again. */
+  /** Drops everything, because the identity key changed. */
   clear(): void {
     this.entries = [null];
     this.refs = [0];
     this.ordinals.clear();
     this.free = [];
     this.stamp += 1;
-    // Nothing held may be named again, so no reader may patch across this: the journal starts
-    // empty at the new version and answers nothing below it.
+    // The journal restarts at the new version, so no reader patches across a clear.
     this.journal = [];
     this.journalFrom = this.stamp;
   }
