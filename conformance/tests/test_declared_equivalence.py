@@ -286,7 +286,7 @@ class PlainView(Case):
         d.control("PUT", f"/control/views/{ATLAS}", json=body, expect=(201,))
         d.rows(
             "/control/ingest",
-            fx.point_rows(ATLAS_MEMBERS, [fx.fx_column()], seed=7, extent=ATLAS_EXTENT),
+            fx.point_rows(ATLAS_MEMBERS, [], seed=7, extent=ATLAS_EXTENT),
             "atlas",
             view=ATLAS,
         )
@@ -401,9 +401,7 @@ class GroupScoped(Case):
 
     @staticmethod
     def _ingest(d: Deployment, key: str, batch: str) -> None:
-        rows = fx.point_rows(
-            KEY_MEMBERS[key], [fx.fx_column(), *_scoped(key)], seed=KEYS[key], extent=GROUP_EXTENT
-        )
+        rows = fx.point_rows(KEY_MEMBERS[key], _scoped(key), seed=KEYS[key], extent=GROUP_EXTENT)
         d.rows("/control/ingest", rows, f"{key}-{batch}", view=_group_view(key))
 
 
