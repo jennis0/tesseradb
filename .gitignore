@@ -34,3 +34,10 @@ clients/ts/.vite.out
 
 # A local notebook and its virtualenv: a scratchpad, never the repository.
 notebooks/
+
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md
+
+#Ignore codacy configuration files
+.codacy/
