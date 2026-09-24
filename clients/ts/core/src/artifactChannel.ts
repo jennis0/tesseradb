@@ -7,6 +7,7 @@ import type {ViewState} from './driver.js';
 import type {Artifact, ArtifactIdentity, FilterExpr, Layer, Quantisation, ViewportResponse} from './types.js';
 import {SessionArtifactTable, type ArtifactRef} from './artifactTable.js';
 import {artifactBudgetFor} from './artifactBudget.js';
+import {refusalOf} from './presented.js';
 
 /**
  * The annotation channel: which artifacts the current view is served, and what each one's masked
@@ -836,7 +837,6 @@ export class ArtifactChannel {
     } catch (error) {
       if (signal.signal.aborted || this.inFlight !== signal) return;
       this.inFlight = null;
-      const e = error as {code?: string; detail?: string; message?: string};
       // A refusal is not an empty view. The **served set** is dropped: it answered a request that
       // has been superseded, and drawing it beside a failure would present the last view's clusters
       // as this one's. The store is untouched — a request that failed said nothing about whether
@@ -845,7 +845,7 @@ export class ArtifactChannel {
         ...this.state,
         artifacts: [],
         status: 'refused',
-        refusal: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)},
+        refusal: refusalOf(error),
         version: this.state.version + 1
       };
       this.emit();

@@ -10,7 +10,7 @@ import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.
 import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks} from './encoding.js';
 import {composeFilters, emptyDraft, type ClauseVerb, type FilterDraft} from './filters.js';
 import {withMember, withMembers, withoutMember, type MemberClause} from './members.js';
-import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
+import {Presenter, defaultFrameScheduler, refusalOf, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
 import {insideBox, insidePolygon, regionOperand, withRegion, type WorldPolygon} from './region.js';
 import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
 import {requestLevels} from './artifactChannel.js';
@@ -1282,10 +1282,9 @@ export function createStore(options: StoreOptions): Store {
         categories: {...projections.legend.categories, [column]: [...byCode.values()]}
       });
     } catch (error) {
-      const e = error as {code?: string; detail?: string; message?: string};
       replaceProjection('legend', {
         ...projections.legend,
-        categoryErrors: {...projections.legend.categoryErrors, [column]: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)}}
+        categoryErrors: {...projections.legend.categoryErrors, [column]: refusalOf(error)}
       });
     }
   }
@@ -1711,13 +1710,12 @@ export function createStore(options: StoreOptions): Store {
       });
     } catch (error) {
       if (disposed || suggestWant.get(column) !== q || suggestEpoch !== epoch) return;
-      const e = error as {code?: string; detail?: string; message?: string};
       replaceProjection('filters', {
         ...projections.filters,
         // A refusal answers the question a prior page was about too — a stale page must not
         // render as though it still does.
         suggestions: without(projections.filters.suggestions, column),
-        suggestErrors: {...projections.filters.suggestErrors, [column]: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)}}
+        suggestErrors: {...projections.filters.suggestErrors, [column]: refusalOf(error)}
       });
     }
   }
@@ -1775,11 +1773,10 @@ export function createStore(options: StoreOptions): Store {
       const detail = await client.item(token, id);
       replaceProjection('selection', {...projections.selection, item: {id, detail}, itemRefusal: null});
     } catch (error) {
-      const e = error as {code?: string; detail?: string; message?: string};
       replaceProjection('selection', {
         ...projections.selection,
         item: null,
-        itemRefusal: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)}
+        itemRefusal: refusalOf(error)
       });
     }
   }
@@ -1933,11 +1930,10 @@ export function createStore(options: StoreOptions): Store {
       if (token === asked) holdShape(id, detail.shape);
       replaceProjection('selection', {...projections.selection, artifact: {id, detail}, artifactRefusal: null, item: null, itemRefusal: null});
     } catch (error) {
-      const e = error as {code?: string; detail?: string; message?: string};
       replaceProjection('selection', {
         ...projections.selection,
         artifact: null,
-        artifactRefusal: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)}
+        artifactRefusal: refusalOf(error)
       });
     }
   }
@@ -2227,8 +2223,7 @@ export function createStore(options: StoreOptions): Store {
   };
 
   void warm().catch((error) => {
-    const e = error as {code?: string; detail?: string; message?: string; status?: number};
-    const refusal = {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)};
+    const refusal = refusalOf(error);
     replaceProjection('status', {...projections.status, status: 'refused', refusal, expired: isExpiry(refusal)});
   });
 

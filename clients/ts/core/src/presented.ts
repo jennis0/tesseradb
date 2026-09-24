@@ -52,6 +52,15 @@ export type PresentedStatus = 'idle' | 'loading' | 'retrying' | 'shown' | 'empty
 
 export type Refusal = {code: string; detail: string};
 
+/**
+ * The refusal a thrown error stands for: the `code` and `detail` a `TesseraError` carries, or
+ * `fetch-failed` and the message for an error that reached no server.
+ */
+export function refusalOf(error: unknown): Refusal {
+  const e = (error ?? {}) as {code?: string; detail?: string; message?: string};
+  return {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)};
+}
+
 /** The driver's tier verdict — see `Driver`'s `onFrame` doc for what each costs. */
 type Verdict = {tier: 'fold'; plan: Plan} | {tier: 'derive'; plan: Plan; frame: ReplicaFrame};
 
@@ -269,10 +278,6 @@ export class Presenter {
     // answer to the last view that succeeded, and discarding them would make recovery pay for a
     // full rewrite.
     this.held = null;
-    const e = detail as {code?: string; detail?: string; message?: string} | undefined;
-    this.events.onStatus('refused', {
-      code: e?.code ?? 'fetch-failed',
-      detail: e?.detail ?? e?.message ?? String(detail)
-    });
+    this.events.onStatus('refused', refusalOf(detail));
   }
 }

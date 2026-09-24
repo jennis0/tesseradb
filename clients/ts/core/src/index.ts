@@ -56,6 +56,7 @@ export {
   Presenter,
   assertCompositionMatchesServed,
   defaultFrameScheduler,
+  refusalOf,
   type FrameScheduler,
   type Presented,
   type PresentedStatus,
