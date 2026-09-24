@@ -1,10 +1,9 @@
 import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
-import type {Clock} from '../src/driver.js';
-import type {FrameScheduler} from '../src/presented.js';
 import {createStore, type Store} from '../src/store.js';
 import {withVerb, type FilterDraft} from '../src/filters.js';
-import type {Artifact, Layer, MembershipColumn, Meta, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {Artifact, Layer, MembershipColumn, Meta, ViewportResponse} from '../src/types.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
@@ -14,16 +13,11 @@ import {tileRectOfBbox} from '../src/budget.js';
  * rule keyed on the content key, and the drops.
  */
 
-const META: Meta = {
-  apiVersion: 1,
-  idset: 0,
-  views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200}}],
+const META = meta({
+  views: [view('s0', {displayName: 'default', quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200}})],
   declaredScalars: [{name: 'archive', arrowType: 'u16', category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, index: true}],
-  layers: [],
-  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},
-  maxTilesPerRequest: 4096,
   filterOperands: [{column: 'archive', family: 'category', operands: ['in']}]
-};
+});
 
 /** What the fake sees of a request: enough to answer for every tile it asked about. */
 type FakeRequest = {zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[] | 'all'};
@@ -36,7 +30,7 @@ type FakeRequest = {zoom: number; bbox?: [number, number, number, number]; tiles
  */
 function responseCovering(req: FakeRequest, contentKey: string, served = 3): ViewportResponse {
   const base = response(contentKey, 'ik', served);
-  const q = META.views[0].quantisation;
+  const q = META.views[0]!.quantisation;
   let prefixes: bigint[];
   if (req.tiles) prefixes = req.tiles;
   else {
@@ -46,92 +40,13 @@ function responseCovering(req: FakeRequest, contentKey: string, served = 3): Vie
     prefixes = [];
     for (let y = rect.y0; y <= rect.y1; y++) for (let x = rect.x0; x <= rect.x1; x++) prefixes.push(mortonOfTile(x, y, req.zoom));
   }
-  const tiles = prefixes.map((tile, i) => ({tile, visible: 1000n, matched: 1000n, highlighted: 1000n, served: i === 0 ? BigInt(served) : 0n}));
+  const tiles = prefixes.map((prefix, i) => tile(prefix, 1000n, {served: i === 0 ? BigInt(served) : 0n}));
   return {...base, result: {...base.result, tiles}};
 }
 
 function response(contentKey: string, identityKey = 'ik', served = 3): ViewportResponse {
-  const result: ViewportResult = {
-    tiles: [{tile: 0n, visible: 10_000_000n, matched: 10_000_000n, highlighted: 10_000_000n, served: BigInt(served)}],
-    ids: BigUint64Array.from({length: served}, (_, i) => BigInt(i + 1)),
-    codes: BigUint64Array.from({length: served}, () => 0n),
-    positions: Float64Array.from({length: served * 2}, () => 1),
-    world: Float32Array.from({length: served * 2}, () => 0.1),
-    scalars: {archive: {arrowType: 'u16', values: Uint16Array.from({length: served}, () => 5)}},
-    subCells: null,
-    membership: {},
-    artifacts: []
-  };
-  return {
-    result,
-    timings: {serverUs: 0, admissionUs: 0, stageNs: null},
-    identityKey,
-    contentKey,
-    pin: contentKey,
-    stale: false,
-    region: null,
-    bytes: 0
-  };
-}
-
-function fakeClock(): Clock & {advance(ms: number): Promise<void>} {
-  let now = 0;
-  let seq = 0;
-  const timers = new Map<number, {at: number; fire: () => void}>();
-  const drain = async () => {
-    for (let i = 0; i < 12; i++) await Promise.resolve();
-  };
-  return {
-    now: () => now,
-    after(ms, fire) {
-      const id = ++seq;
-      timers.set(id, {at: now + ms, fire});
-      return id;
-    },
-    cancel(handle) {
-      timers.delete(handle as number);
-    },
-    async advance(ms) {
-      // Drain first, so an async bring-up (`warm`) resolves and schedules its timers before the
-      // loop that fires them — the store's machinery is built inside a promise chain, not synchronously.
-      await drain();
-      const target = now + ms;
-      for (;;) {
-        let nextId = -1;
-        for (const [id, t] of timers) {
-          if (t.at <= target && (nextId < 0 || t.at < timers.get(nextId)!.at)) nextId = id;
-        }
-        if (nextId < 0) break;
-        const t = timers.get(nextId)!;
-        timers.delete(nextId);
-        now = t.at;
-        t.fire();
-        await drain();
-      }
-      now = target;
-      await drain();
-    }
-  };
-}
-
-function fakeScheduler(): FrameScheduler & {flush(): void} {
-  const queue = new Map<number, () => void>();
-  let seq = 0;
-  return {
-    request(fire) {
-      const id = ++seq;
-      queue.set(id, fire);
-      return id;
-    },
-    cancel(handle) {
-      queue.delete(handle as number);
-    },
-    flush() {
-      const fires = [...queue.values()];
-      queue.clear();
-      for (const fire of fires) fire();
-    }
-  };
+  const scalars = {archive: {arrowType: 'u16' as const, values: Uint16Array.from({length: served}, () => 5)}};
+  return responseOf(servedResult(served, [tile(0n, 10_000_000n)], {scalars}), {contentKey, identityKey});
 }
 
 /** The `region` leaf anywhere in a filter expression, or null — what the fake answers a verdict for. */
@@ -377,10 +292,10 @@ describe('the drops', () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const layers = [
-      {name: 'clusters/kmeans', title: 'k-means', views: ['s0'], hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid', 'box', 'hull'], shape: 'derived', suppliedContent: ['topic'], depsOn: [], version: 1},
-      {name: 'mesh/descriptors', title: 'MeSH', views: ['s0'], hierarchy: {kind: 'dag', pruneChildren: false}, levels: [], computedContent: [], shape: null, suppliedContent: ['name'], depsOn: [], version: 1}
+      layer('clusters/kmeans', {computedContent: ['centroid', 'box', 'hull'], shape: 'derived', suppliedContent: ['topic']}),
+      layer('mesh/descriptors', {hierarchy: {kind: 'dag', pruneChildren: false}, suppliedContent: ['name']})
     ];
-    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler, meta: {...META, layers} as Meta});
+    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler, meta: {...META, layers}});
     // Asked for by name, which is what a host driving `setLayers` directly would do.
     store.setLayers(['clusters/kmeans', 'mesh/descriptors']);
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
@@ -736,8 +651,8 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     // Two artifacts, served identically on every request — the shape of a layer whose artifacts
     // are scattered through row space and so are served in full whatever the viewport.
     const served = [
-      {layer: 'clusters/a', tesseraId: 1n, key: 'c1', maskedCount: 5n, centroid: [1, 2] as [number, number], box: null, shape: null, content: [], parentIds: [], rung: 0, matched: null},
-      {layer: 'clusters/a', tesseraId: 2n, key: 'c2', maskedCount: 7n, centroid: [3, 4] as [number, number], box: null, shape: null, content: [], parentIds: [], rung: 0, matched: null}
+      artifact(1n, {layer: 'clusters/a', key: 'c1', maskedCount: 5n, centroid: [1, 2]}),
+      artifact(2n, {layer: 'clusters/a', key: 'c2', maskedCount: 7n, centroid: [3, 4]})
     ];
     const {client} = fakeClient(() => {
       const r = response('ck');
@@ -774,20 +689,9 @@ describe('the colours are rebuilt when the table moves and not per response', ()
   it('extends the map for what a settle named and recomputes nothing already in it', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
-    const artifact = (id: bigint, centroid: [number, number]) => ({
-      layer: 'clusters/a',
-      tesseraId: id,
-      key: `c${id}`,
-      maskedCount: 5n,
-      centroid,
-      box: null,
-      shape: null,
-      content: [],
-      parentIds: [],
-      rung: 0,
-      matched: null
-    });
-    let served = [artifact(1n, [1, 2]), artifact(2n, [3, 4])];
+    const cluster = (id: bigint, centroid: [number, number]) =>
+      artifact(id, {layer: 'clusters/a', key: `c${id}`, maskedCount: 5n, centroid});
+    let served = [cluster(1n, [1, 2]), cluster(2n, [3, 4])];
     const {client} = fakeClient(() => {
       const r = response('ck');
       return {...r, result: {...r.result, artifacts: served, artifactsIdentity: null}};
@@ -807,7 +711,7 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     // A settle that names a third artifact. Under the positional palette a colour is a pure
     // function of one centroid, so the map is extended where the table moved: the same object,
     // and the colours already in it are the same objects — not recomputed to the same values.
-    served = [...served, artifact(3n, [5, 6])];
+    served = [...served, cluster(3n, [5, 6])];
     store.setView({bbox: [50, 100, 100, 200], width: 800, height: 800});
     await clock.advance(600);
     scheduler.flush();
@@ -1094,45 +998,26 @@ describe('the subscriber fan-out', () => {
 });
 
 describe('the layers drawn and the layer coloured by are two settings', () => {
-  const layer = (name: string, extra: Partial<Layer> = {}): Layer => ({
-    name,
-    title: name,
-    views: ['s0'],
-    membership: 'enumerated',
-    hierarchy: {kind: 'flat', pruneChildren: false},
-    levels: [],
-    computedContent: ['centroid', 'box'],
-    shape: null,
-    suppliedContent: [],
-    depsOn: [],
-    version: 1,
-    ...extra
-  });
+  const drawn = (name: string, extra: Partial<Layer> = {}): Layer => layer(name, {computedContent: ['centroid', 'box'], ...extra});
   const levels = [0, 1, 2, 3].map((level) => ({level, title: `level ${level}`, zoom: null}));
   const LAYERED: Meta = {
     ...META,
     layers: [
-      layer('topics', {hierarchy: {kind: 'tiered', pruneChildren: false}, levels}),
-      layer('topic_names', {computedContent: [], suppliedContent: ['label'], depsOn: ['topics']}),
-      layer('kmeans'),
-      layer('mesh', {computedContent: []})
+      drawn('topics', {hierarchy: {kind: 'tiered', pruneChildren: false}, levels}),
+      drawn('topic_names', {computedContent: [], suppliedContent: ['label'], depsOn: ['topics']}),
+      drawn('kmeans'),
+      layer('mesh')
     ]
   };
-  const row = (layerName: string, id: bigint, target: bigint | null = null): Artifact => ({
-    layer: layerName,
-    tesseraId: id,
-    key: `${layerName}-${id}`,
-    maskedCount: 3n,
-    centroid: target === null ? [2 ** 30, 2 ** 30] : null,
-    box: null,
-    shape: null,
-    content: target === null ? [] : ['a name'],
-    parentIds: [],
-    rung: 0,
-    matched: null,
-    highlighted: null,
-    target
-  });
+  const row = (layerName: string, id: bigint, target: bigint | null = null): Artifact =>
+    artifact(id, {
+      layer: layerName,
+      key: `${layerName}-${id}`,
+      maskedCount: 3n,
+      centroid: target === null ? [2 ** 30, 2 ** 30] : null,
+      content: target === null ? [] : ['a name'],
+      target
+    });
   const ROWS: Record<string, Artifact[]> = {topics: [row('topics', 11n)], topic_names: [row('topic_names', 21n, 11n)], kmeans: [row('kmeans', 31n)]};
 
   /**
@@ -1247,5 +1132,168 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     expect(asked().every((r) => !Array.isArray(r.layers) || r.layers.length === 0)).toBe(true);
     expect(traces.filter((t) => t.kind === 'colour-by').map((t) => t.fields.layer)).toEqual(['nope', 'topic_names']);
     expect(store.get('legend').colourBy).toBe('cluster:topic_names');
+  });
+});
+
+describe('the token', () => {
+  it('asks the supplier for a new token before the one it holds expires, and asks with it', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewport} = fakeClient(() => response('ck'));
+    let issued = 0;
+    const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+    expect(authorise).toHaveBeenCalledTimes(1);
+
+    // A minute's token is renewed within its minute, with no request in between to prompt it.
+    await clock.advance(59_000);
+    expect(authorise).toHaveBeenCalledTimes(2);
+
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(viewport.mock.calls.at(-1)![0]).toBe('t2');
+  });
+
+  it('stops renewing once disposed, even with a renewal in flight', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    let answer: (() => void) | null = null;
+    const authorise = vi.fn(async () => {
+      // The second ask is held open until the store has been disposed.
+      if (authorise.mock.calls.length === 2) await new Promise<void>((resolve) => (answer = resolve));
+      return {token: `t${authorise.mock.calls.length}`, expiresAt: (Date.now() + 60_000) / 1000};
+    });
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+    await clock.advance(59_000);
+    expect(authorise).toHaveBeenCalledTimes(2);
+
+    store.dispose();
+    answer!();
+    await clock.advance(600_000);
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect(clock.pending).toBe(0);
+  });
+
+  it('forgets derived shapes and hovered records when the token changes, and keeps predicate shapes', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const served = [artifact(1n, {layer: 'hulls'}), artifact(2n, {layer: 'regions'})];
+    const {client} = fakeClient((req) => {
+      const r = response('ck');
+      return (req.layers ?? []).length === 0 ? r : {...r, result: {...r.result, artifacts: served}};
+    }, meta({
+      ...META,
+      layers: [
+        layer('hulls', {computedContent: ['centroid', 'box', 'hull'], shape: 'derived'}),
+        layer('regions', {membership: 'spatial', computedContent: ['centroid', 'box'], shape: 'predicate'})
+      ]
+    }));
+    const shapeOf = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}));
+    const item = vi.fn(async (token: string) => ({fields: {asked: token}, externalId: null, views: [], scoped: {}, labels: []}));
+    Object.assign(client, {artifact: shapeOf, item});
+    let issued = 0;
+    const authorise = vi.fn(async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000}));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    store.setLayers(['hulls', 'regions']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([1n, 2n]);
+    store.needShape(1n);
+    store.needShape(2n);
+    await clock.advance(1);
+    expect([...store.get('artifacts').shapes.keys()]).toEqual([1n, 2n]);
+    expect(await store.describe(7n)).toEqual({asked: 't1'});
+
+    // The renewal hands over another token, so another principal as far as the store knows.
+    await clock.advance(30_000);
+    expect(authorise).toHaveBeenCalledTimes(2);
+    expect([...store.get('artifacts').shapes.keys()]).toEqual([2n]);
+    expect(await store.describe(7n)).toEqual({asked: 't2'});
+  });
+
+  it('reports the session expired when the server refuses the token it holds as expired', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    let refuse = false;
+    const {store, viewport} = await warm(
+      () => {
+        if (refuse) throw new TesseraError(401, 'expired-token', 'the token has expired');
+        return response('ck');
+      },
+      {clock, scheduler}
+    );
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('status').expired).toBe(false);
+    const asked = viewport.mock.calls.length;
+
+    // Zoomed far in, so the held frame cannot answer and a request goes out.
+    refuse = true;
+    store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+    await clock.advance(5_000);
+    scheduler.flush();
+    expect(viewport.mock.calls.length).toBeGreaterThan(asked);
+    expect(store.get('status')).toMatchObject({status: 'refused', expired: true, refusal: {code: 'expired-token'}});
+  });
+});
+
+describe('the item a click opens and the record a hover names', () => {
+  it('puts a picked item in the selection, and a refusal in its place', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const detail = {fields: {archive: 'cs'}, externalId: null, views: [], scoped: {}, labels: []};
+    const item = vi.fn(async (_token: string, id: bigint) => {
+      if (id === 404n) throw new TesseraError(404, 'not-found', 'no such item');
+      return detail;
+    });
+    (client as unknown as {item: typeof item}).item = item;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    await store.pick(7n);
+    expect(store.get('selection')).toMatchObject({item: {id: 7n, detail}, itemRefusal: null});
+
+    await store.pick(404n);
+    expect(store.get('selection')).toMatchObject({item: null, itemRefusal: {code: 'not-found'}});
+  });
+
+  it('asks for a hovered record once, holds a refusal as none, and asks again after a clear', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const item = vi.fn(async (_token: string, id: bigint) => {
+      if (id === 404n) throw new TesseraError(404, 'not-found', 'no such item');
+      return {fields: {title: `paper ${id}`}, externalId: null, views: [], scoped: {}, labels: []};
+    });
+    (client as unknown as {item: typeof item}).item = item;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    // Two hovers in flight at once share one request, and a later one is answered from what is held.
+    const [first, second] = await Promise.all([store.describe(7n), store.describe(7n)]);
+    expect(first).toEqual({title: 'paper 7'});
+    expect(second).toEqual({title: 'paper 7'});
+    expect(await store.describe(7n)).toEqual({title: 'paper 7'});
+    expect(item).toHaveBeenCalledTimes(1);
+
+    expect(await store.describe(404n)).toBeNull();
+    expect(await store.describe(404n)).toBeNull();
+    expect(item).toHaveBeenCalledTimes(2);
+    // A hover writes no projection.
+    expect(store.get('selection').item).toBeNull();
+
+    store.clear();
+    await clock.advance(1);
+    await store.describe(7n);
+    expect(item).toHaveBeenCalledTimes(3);
   });
 });

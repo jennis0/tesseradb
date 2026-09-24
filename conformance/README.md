@@ -104,13 +104,15 @@ deliberately *not* selected and why.
 
 ## Fixtures
 
-The catalogue is cached at a fixed `/tmp` path and rebuilt whenever the **stamped recipe** beside
-the bundle is not the input set the builder wants now (`<bundle>.FIXTURE.json`; see
-`oracle/harness.py`'s "Fixture reuse" section). Reuse used to be decided by a predicate over the
-bundle — an allowlist that had to be extended in step with every new build input, and twice was
-not, which is how the suite came to be green as a function of `(checkout, /tmp state)` rather than
-of the checkout. Delete the stamp to force a rebuild; no manual cache wipe is needed for a changed
-seed, layout, extent or identity key.
+The catalogue and the multi-view corpus are cached in `/tmp`, one directory per `tessera` binary
+(`/tmp/tessera-<name>-<digest>`, `harness.fixture_dir`), and rebuilt whenever the **stamped recipe**
+beside the bundle is not the input set, or the binary, the builder has now (`<bundle>.FIXTURE.json`;
+see `oracle/harness.py`'s "Fixture reuse" section). A directory for another binary is deleted once
+it has gone unused for 7 days. Reuse used to be decided by a predicate over the bundle — an
+allowlist that had to be extended in step with every new build input, and twice was not, which is
+how the suite came to be green as a function of `(checkout, /tmp state)` rather than of the
+checkout. Delete the stamp to force a rebuild; no manual cache wipe is needed for a changed seed,
+layout, extent or identity key.
 
 **Every fixture is synthesised from a seed. Nothing here reads the Phase 0 corpus**, which is what
 lets the suite run from a clean checkout and therefore in CI. The byte-scan and restart-replay
@@ -119,7 +121,7 @@ cost. `reference/tests` still uses that corpus and is a separate question.
 
 | Fixture | Path | What it is for |
 |---|---|---|
-| `catalogue_bundle_root` | `/tmp/tessera-catalogue` | 150,000 synthetic items designed **backwards from the adversarial mask catalogue** (`oracle.catalogue`), so each mask shape is reachable as a grant set. Three Roaring containers, a block placed astride 65,536, a pair straddling §7.2's ~5% crossover, a block confined to one depth-6 tile, and a `high_tail` block placed entirely above the byte-scan's floor. Since 2026-08-12 the schema also plants a render-only category (`shelf`) and two blob-resident columns (`note`, `pages`) whose generation functions carry the blob's adversarial shapes: an empty-string value, a present zero, an oversize row, and entities absent from has-row entirely. Since 2026-08-13 it plants the keyword column `submitter`: two anchor values carried by one entity each and sorting first and last, ~7,800 near-unique `node-<region>-<id>` keys sharing a stem so a prefix range spans hundreds of front-coded blocks, and 36 `hub-<region>-<letter>` values carried by thousands of entities each. |
+| `catalogue_bundle_root` | `/tmp/tessera-catalogue-<digest>` | 150,000 synthetic items designed **backwards from the adversarial mask catalogue** (`oracle.catalogue`), so each mask shape is reachable as a grant set. Three Roaring containers, a block placed astride 65,536, a pair straddling §7.2's ~5% crossover, a block confined to one depth-6 tile, and a `high_tail` block placed entirely above the byte-scan's floor. Since 2026-08-12 the schema also plants a render-only category (`shelf`) and two blob-resident columns (`note`, `pages`) whose generation functions carry the blob's adversarial shapes: an empty-string value, a present zero, an oversize row, and entities absent from has-row entirely. Since 2026-08-13 it plants the keyword column `submitter`: two anchor values carried by one entity each and sorting first and last, ~7,800 near-unique `node-<region>-<id>` keys sharing a stem so a prefix range spans hundreds of front-coded blocks, and 36 `hub-<region>-<letter>` values carried by thousands of entities each. |
 | canary states | per-test tmp dir | Three tiny corpora from `oracle.canary_fixture`, built under one identity key: the base corpus, the same plus an item carrying a term nobody holds, and the same plus an item carrying a term principals do hold. The third is the comparator's positive control. |
 
 ## Known limitations / explicitly out of scope

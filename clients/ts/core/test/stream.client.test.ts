@@ -4,6 +4,7 @@ import {TesseraClient} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {inlineDecoder} from '../src/decoder.js';
 import type {ViewportPart} from '../src/types.js';
+import {rejectsAsRefused, settle} from './support.js';
 
 /**
  * The streamed viewport: a response landed frame by frame instead of body by body.
@@ -132,11 +133,6 @@ const client = () =>
 const ask = (c: TesseraClient, onPart: (p: ViewportPart) => void, signal?: AbortSignal) =>
   c.viewport('tok', {view: 's0', zoom: 4, k: 100}, signal, false, onPart);
 
-/** Let the read loop, the decode chain and the sink run to a standstill. */
-async function settle(times = 8): Promise<void> {
-  for (let i = 0; i < times; i++) await new Promise((r) => setTimeout(r, 0));
-}
-
 afterEach(() => vi.unstubAllGlobals());
 
 describe('a streamed viewport response', () => {
@@ -244,7 +240,7 @@ describe('a streamed viewport response', () => {
 
     feed.push(body.subarray(0, trailerAt));
     feed.close();
-    await expect(asking).rejects.toThrow(/trailer/);
+    await rejectsAsRefused(asking);
     // Well-framed and incomplete: every points frame was delivered and is drawable, and the
     // response is still refused, because the trailer's presence is the completeness signal.
     expect(parts.length).toBe(3);

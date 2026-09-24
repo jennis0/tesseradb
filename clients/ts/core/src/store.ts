@@ -632,10 +632,19 @@ export function createStore(options: StoreOptions): Store {
       if (!token) throw new TesseraError(401, 'bad-credential', 'no token');
       return token;
     }
-    const got = await options.authorise();
+    return renew(options.authorise);
+  }
+
+  async function renew(authorise: TokenSupplier): Promise<string> {
+    const got = await authorise();
+    if (disposed) return got.token;
     // A derived shape is a function of the principal's own visible members, so one held across a
     // change of token would draw the previous principal's shape against the new one's identifiers.
-    if (token !== got.token) forgetShapes('derived');
+    // A hover's record is an answer to the principal too.
+    if (token !== got.token) {
+      forgetShapes('derived');
+      forgetDescribed();
+    }
     token = got.token;
     expiresAt = got.expiresAt * (got.expiresAt < 1e12 ? 1000 : 1); // seconds or ms, tolerant
     armRenewal();
@@ -644,11 +653,15 @@ export function createStore(options: StoreOptions): Store {
 
   function armRenewal(): void {
     if (renewTimer) clock.cancel(renewTimer);
-    if (!options.authorise || !Number.isFinite(expiresAt)) return;
-    // Renew a beat before expiry, so a warm client never presents a token the server will refuse.
-    const wait = Math.max(0, expiresAt - Date.now() - 30_000);
+    const authorise = options.authorise;
+    if (!authorise || !Number.isFinite(expiresAt)) return;
+    // Renew 30 s before expiry, so a warm client never presents a token the server will refuse, or
+    // halfway through a lifetime shorter than a minute. The token is still fresh by `ensureToken`'s
+    // margin when this fires, so it renews directly.
+    const left = expiresAt - Date.now();
+    const wait = Math.max(0, left / 2, left - 30_000);
     renewTimer = clock.after(wait, () => {
-      void ensureToken().catch(() => {});
+      void renew(authorise).catch(() => {});
     });
   }
 
@@ -1777,6 +1790,14 @@ export function createStore(options: StoreOptions): Store {
    */
   const described = new Map<string, Record<string, unknown> | null>();
   const describing = new Map<string, Promise<Record<string, unknown> | null>>();
+  /** Moved when the principal changes, so an answer asked for under the previous one is not held. */
+  let describedEpoch = 0;
+
+  function forgetDescribed(): void {
+    described.clear();
+    describing.clear();
+    describedEpoch += 1;
+  }
 
   async function describe(id: bigint): Promise<Record<string, unknown> | null> {
     const key = id.toString();
@@ -1785,13 +1806,15 @@ export function createStore(options: StoreOptions): Store {
     const inFlight = describing.get(key);
     if (inFlight) return inFlight;
     if (!token) return null;
+    const epoch = describedEpoch;
     const request = client
       .item(token, id)
       .then((detail) => detail.fields)
       .catch(() => null)
       .then((fields) => {
+        if (disposed || epoch !== describedEpoch) return fields;
         describing.delete(key);
-        if (!disposed) described.set(key, fields);
+        described.set(key, fields);
         return fields;
       });
     describing.set(key, request);
@@ -2119,7 +2142,7 @@ export function createStore(options: StoreOptions): Store {
     }
     table.clear();
     forgetShapes('all');
-    described.clear();
+    forgetDescribed();
     contentKeyAtFrame = '';
     replaceProjection('view', {id: viewId, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0});
     replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});

@@ -1,9 +1,8 @@
 import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient} from '../src/client.js';
-import type {Clock} from '../src/driver.js';
-import type {FrameScheduler} from '../src/presented.js';
 import {createStore} from '../src/store.js';
-import type {Meta, ViewInfo, ViewportPart, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {ViewportPart, ViewportResponse} from '../src/types.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, tile, view} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
@@ -21,33 +20,18 @@ import {tileRectOfBbox} from '../src/budget.js';
 const FRAME = {xMin: 0, xMax: 100, yMin: 0, yMax: 200};
 const OTHER_FRAME = {xMin: -1000, xMax: 1000, yMin: -500, yMax: 500};
 
-function view(id: string, quantisation: typeof FRAME, group: string | null): ViewInfo {
-  return {
-    id,
-    displayName: id,
-    quantisation,
-    projection: 'none',
-    worldAspect: null,
-    tileScheme: null,
-    tile: null,
-    roster: group ? {group, key: id, metadata: {}} : null
-  };
-}
+const inGroup = (id: string, quantisation: typeof FRAME, group: string | null) =>
+  view(id, {quantisation, roster: group ? {group, key: id, metadata: {}} : null});
 
-const META: Meta = {
-  apiVersion: 1,
-  idset: 0,
-  views: [view('far', OTHER_FRAME, null), view('v0', FRAME, 'g'), view('v1', FRAME, 'g'), view('v2', FRAME, 'g')],
+const everyView = {views: ['v0', 'v1', 'v2', 'far'], computedContent: ['centroid', 'box']};
+
+const META = meta({
+  views: [inGroup('far', OTHER_FRAME, null), inGroup('v0', FRAME, 'g'), inGroup('v1', FRAME, 'g'), inGroup('v2', FRAME, 'g')],
   groups: [{name: 'g', title: 'quarters', membersOf: null, views: ['v0', 'v1', 'v2']}],
   declaredScalars: [{name: 'archive', arrowType: 'u16', category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, index: true}],
-  layers: [
-    {name: 'l', title: 'l', views: ['v0', 'v1', 'v2', 'far'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid', 'box'], suppliedContent: [], shape: null, depsOn: [], version: 1},
-    {name: 'm', title: 'm', views: ['v0', 'v1', 'v2', 'far'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid', 'box'], suppliedContent: [], shape: null, depsOn: [], version: 1}
-  ],
-  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},
-  maxTilesPerRequest: 4096,
+  layers: [layer('l', everyView), layer('m', everyView)],
   filterOperands: [{column: 'archive', family: 'category', operands: ['in']}]
-};
+});
 
 type FakeRequest = {view: string; zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[]};
 
@@ -56,34 +40,12 @@ function responseCovering(req: FakeRequest, served = 3): ViewportResponse {
   // One artifact per view, identified by the view that served it — the client does not match
   // artifact identity across views (§8), and a projection carrying the wrong one is visible here.
   // Served only where the request named a layer, as the wire serves them.
-  const artifacts = (req.layers ?? []).length === 0 ? [] : [
-    {
-      layer: 'l',
-      tesseraId: BigInt(META.views.findIndex((v) => v.id === req.view) + 1),
-      key: req.view,
-      maskedCount: 5n,
-      centroid: null,
-      box: null,
-      shape: null,
-      content: [],
-      parentIds: [],
-      rung: 0,
-      matched: null
-    }
-  ];
-  const result: ViewportResult = {
-    tiles: [],
-    ids: BigUint64Array.from({length: served}, (_, i) => BigInt(i + 1)),
-    codes: BigUint64Array.from({length: served}, () => 0n),
-    positions: Float64Array.from({length: served * 2}, () => 1),
-    world: Float32Array.from({length: served * 2}, () => 0.1),
-    scalars: {archive: {arrowType: 'u16', values: Uint16Array.from({length: served}, () => 5)}},
-    subCells: null,
-    // The membership column each named layer's pass puts on the band — its absence is what makes
-    // a band colour-stale when a layer goes on while a view is held.
-    membership: {},
-    artifacts
-  };
+  const artifacts = (req.layers ?? []).length === 0
+    ? []
+    : [artifact(BigInt(META.views.findIndex((v) => v.id === req.view) + 1), {key: req.view, maskedCount: 5n})];
+  // No membership column: its absence is what makes a band colour-stale when a layer goes on
+  // while a view is held.
+  const scalars = {archive: {arrowType: 'u16' as const, values: Uint16Array.from({length: served}, () => 5)}};
   const q = META.views.find((v) => v.id === req.view)!.quantisation;
   let prefixes: bigint[];
   if (req.tiles) prefixes = req.tiles;
@@ -94,81 +56,8 @@ function responseCovering(req: FakeRequest, served = 3): ViewportResponse {
     prefixes = [];
     for (let y = rect.y0; y <= rect.y1; y++) for (let x = rect.x0; x <= rect.x1; x++) prefixes.push(mortonOfTile(x, y, req.zoom));
   }
-  return {
-    result: {...result, tiles: prefixes.map((tile, i) => ({tile, visible: 1000n, matched: 1000n, highlighted: 1000n, served: i === 0 ? BigInt(served) : 0n}))},
-    timings: {serverUs: 0, admissionUs: 0, stageNs: null},
-    identityKey: 'ik',
-    contentKey: 'ck',
-    pin: 'ck',
-    stale: false,
-    region: null,
-    bytes: 0
-  };
-}
-
-function fakeClock(): Clock & {advance(ms: number): Promise<void>} {
-  let now = 0;
-  let seq = 0;
-  const timers = new Map<number, {at: number; fire: () => void}>();
-  // **Twelve microtask ticks is a budget, and a chain that needs a macrotask turn outruns it.**
-  // The ticks settle a promise chain; anything that resolves on a real turn of the event loop —
-  // and the driver's request path has one — lands after the drain has finished and is attributed
-  // to whichever `advance` runs next, so a held view appears to ask for tiles it never asked for.
-  // That made `does not ask for a stepped-to view whose bands are colour-stale` fail on 2 runs in
-  // 3 under load, and only under load. Yielding once to the macrotask queue closes the window.
-  const drain = async () => {
-    for (let i = 0; i < 12; i++) await Promise.resolve();
-    await new Promise((resolve) => setImmediate(resolve));
-  };
-  return {
-    now: () => now,
-    after(ms, fire) {
-      const id = ++seq;
-      timers.set(id, {at: now + ms, fire});
-      return id;
-    },
-    cancel(handle) {
-      timers.delete(handle as number);
-    },
-    async advance(ms) {
-      await drain();
-      const target = now + ms;
-      for (;;) {
-        let nextId = -1;
-        for (const [id, t] of timers) {
-          if (t.at <= target && (nextId < 0 || t.at < timers.get(nextId)!.at)) nextId = id;
-        }
-        if (nextId < 0) break;
-        const t = timers.get(nextId)!;
-        timers.delete(nextId);
-        now = t.at;
-        t.fire();
-        await drain();
-      }
-      now = target;
-      await drain();
-    }
-  };
-}
-
-function fakeScheduler(): FrameScheduler & {flush(): void} {
-  const queue = new Map<number, () => void>();
-  let seq = 0;
-  return {
-    request(fire) {
-      const id = ++seq;
-      queue.set(id, fire);
-      return id;
-    },
-    cancel(handle) {
-      queue.delete(handle as number);
-    },
-    flush() {
-      const fires = [...queue.values()];
-      queue.clear();
-      for (const fire of fires) fire();
-    }
-  };
+  const tiles = prefixes.map((prefix) => tile(prefix, 1000n));
+  return response(servedResult(served, tiles, {scalars, artifacts}));
 }
 
 /** The ground a view was asked about, over every piece its requests were split into. */
@@ -393,8 +282,7 @@ describe('a switch across frames publishes no camera and drops the selection (§
     // `frame()`, which moves with the switch, so its `setView` lands *during* this call — and if
     // the store's handles are not already pointed at the incoming view by then, that camera is
     // scheduled on the view being left: the request goes out for a view nobody is looking at, the
-    // incoming one is never asked for, and the switch sits at `loading` for ever. Found by the V2
-    // smoke on the multiview fixture, where the first switch into a group never drew.
+    // incoming one is never asked for, and the switch sits at `loading` for ever.
     let refitted = false;
     const stop = store.subscribe(() => {
       if (refitted || store.frame() !== OTHER_FRAME) return;
@@ -409,7 +297,7 @@ describe('a switch across frames publishes no camera and drops the selection (§
     expect(refitted).toBe(true);
     expect(asked('far').length).toBeGreaterThan(0);
     // Nothing was asked for the view left behind after the switch began.
-    expect(asked('v0').filter((r) => r.bbox?.[0] === -1000)).toHaveLength(0);
+    expect(asked('v0').filter((c) => c[1].bbox?.[0] === -1000)).toHaveLength(0);
     expect(store.get('view').composition).not.toBeNull();
   });
 });
