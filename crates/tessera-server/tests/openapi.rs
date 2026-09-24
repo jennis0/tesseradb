@@ -1886,8 +1886,8 @@ async fn ingest_and_values_match_the_description() {
         .unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
 
-    // Arrow, waiting for the rows to be visible; the batch leaves both declared columns out.
-    let resp = control(&f.server, &post, "/control/ingest?wait=visible")
+    // Arrow leaving both declared columns out: a row that creates an item carries every one.
+    let resp = control(&f.server, &post, "/control/ingest")
         .header("x-tessera-batch-id", "openapi-arrow")
         .header("content-type", ARROW)
         .body(build_ingest_batch_optional(&[(
@@ -1899,8 +1899,17 @@ async fn ingest_and_values_match_the_description() {
         .send()
         .await
         .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
+
+    // Waiting for the rows to be visible.
+    let resp = control(&f.server, &post, "/control/ingest?wait=visible")
+        .header("x-tessera-batch-id", "openapi-visible")
+        .json(&json!([{ "external_id": b64(b"openapi-2"), "x": 50.0, "y": 60.0,
+                         "access": "0", "archive": "astro", "score": null }]))
+        .send()
+        .await
+        .unwrap();
     let answer = assert_answer(&doc, &post, resp, 200).await;
-    assert_eq!(answer["padded_columns"], 2);
     assert!(answer["visible"].is_boolean());
 
     // Refusals: no batch id, an unknown view, an undeclared column, an encoding the route does

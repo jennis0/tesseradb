@@ -1069,9 +1069,10 @@ paths:
         attribute, a group-scoped attribute of the view's group, or an enumerated layer; any other
         name is `422`.
 
-        **Attributes.** A declared attribute the batch leaves out is absent on every row, and is
-        counted in `padded_columns`. In JSON, an attribute one row names is named on every row,
-        `null` where the row has no value. A category takes its vocabulary's key: under a `closed`
+        **Attributes.** A row that creates an item carries every declared attribute, and every
+        group-scoped attribute of the view's group, as a column: `null`, or a column of Arrow's
+        null type, where the row has no value. A batch that leaves one out is `422`. A row joining
+        an item that already exists need not carry them. A category takes its vocabulary's key: under a `closed`
         vocabulary an unknown key is `422`, and under an `open` one it is added. An integer is
         read exactly, from a JSON number or a string of digits; `timestamp_us` is microseconds
         since the Unix epoch.
@@ -3685,7 +3686,7 @@ components:
     IngestResponse:
       type: object
       additionalProperties: false
-      required: [accepted, over_bound, over_bound_ids, clipped, clamped, padded_columns, tessera_ids, minted, publication]
+      required: [accepted, over_bound, over_bound_ids, clipped, clamped, tessera_ids, minted, publication]
       properties:
         accepted:
           type: integer
@@ -3710,10 +3711,6 @@ components:
           type: integer
           minimum: 0
           description: Rows whose coordinates lay outside the view's extent and were stored on its edge.
-        padded_columns:
-          type: integer
-          minimum: 0
-          description: Declared attributes the batch left out, each absent on every row.
         tessera_ids:
           type: array
           description: One `tessera_id` per row in the order sent, as a string of decimal digits, whether or not the row carries an external id. A replay answers the original ids.
