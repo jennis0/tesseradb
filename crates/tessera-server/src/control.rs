@@ -26,14 +26,14 @@ use tessera_types::view::ViewMetadataValue;
 use tessera_types::{EntityId, TermId, TesseraId};
 
 use crate::decode::{
-    parse_ingest_batch, parse_values_batch, Address, BodyEncoding, DecodeError, ParsedBatch,
-    ParsedValues,
+    labels_col, parse_ingest_batch, parse_values_batch, Address, BodyEncoding, DecodeError,
+    ParsedBatch, ParsedValues,
 };
 use crate::error::{
     map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
 };
 use crate::health::is_ready;
-use crate::state::{ApiJson, ApiJsonRejection, AppState};
+use crate::state::{ApiJson, ApiJsonRejection, ApiQuery, AppState};
 
 /// The deny lane's runtime, whose blocking pool runs every `/control/changes` body. The deny lane
 /// never shares tokio's blocking pool with ingest: an ingest closure holds its thread until its
@@ -333,7 +333,7 @@ struct ValuesResp {
 /// need `x-tessera-view` naming a view whose key their group owns.
 async fn values(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<ValuesResp>, ApiError> {
@@ -797,7 +797,7 @@ fn run_ingest(
 /// cap), 429 (queue). Connections are not bounded in-process; the deployment bounds them.
 async fn ingest(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
@@ -1119,7 +1119,7 @@ fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
 /// fails, because an accepted deny left unapplied would fail open. The 200 follows the fsync.
 async fn changes(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: Result<ApiJson<Vec<ChangeItem>>, ApiJsonRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let ApiJson(items) = body.map_err(|rejection| match rejection {
@@ -1157,9 +1157,10 @@ async fn changes(
 /// publication and the answer.
 const VISIBLE_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
-/// The `wait` query parameter every write route takes. Its one value is `visible`; any other is a
-/// 422, so `wait=true` is not mistaken for a completed wait.
+/// The `wait` query parameter every write route takes. Its one value is `visible`; any other value,
+/// or any other parameter, is a 422, so `wait=true` or `wiat=visible` is not mistaken for a wait.
 #[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WaitQuery {
     #[serde(default)]
     wait: Option<String>,
@@ -1257,7 +1258,7 @@ async fn await_publication(state: &AppState, publication: u64) -> PublicationAck
 /// buffered before the request; `?wait=visible` holds the 202 until it is reached.
 async fn flush(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     // Read before the flush is armed, so an unknown value arms nothing.
     let asked = wait.asked()?;
@@ -1289,7 +1290,7 @@ async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
 /// append fails. A declaration that breaks the deployment's rules is a 422 saying why.
 async fn register_layer(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<tessera_types::layer::LayerDeclaration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let mut declaration = body.0;
@@ -1366,7 +1367,7 @@ async fn register_layer(
 async fn drop_layer(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     state
         .write(move |state| state.engine.drop_layer(name))
@@ -1404,7 +1405,7 @@ struct AttributeBody {
 /// has another, 422 for a rule broken. The engine refuses `render = true` on this route.
 async fn declare_attribute(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<AttributeBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1486,7 +1487,7 @@ struct VocabularyValuesBody {
 async fn declare_vocabulary(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<VocabularyBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1524,7 +1525,7 @@ async fn declare_vocabulary(
 async fn mint_vocabulary_values(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<VocabularyValuesBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let values: Vec<tessera_engine::DeclaredValue> = body
@@ -1600,7 +1601,7 @@ struct ViewGroupBody {
     #[serde(default = "projection_none")]
     projection: String,
     extent: ExtentBody,
-    /// One label or a list, each element one term taken verbatim. Absent is `public`.
+    /// One label or a list, each element one term. Absent is `public`.
     #[serde(default)]
     visibility: Option<tessera_types::view::DeclaredGate>,
     #[serde(default)]
@@ -1638,7 +1639,7 @@ fn projection_none() -> String {
 async fn create_view_group(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<ViewGroupBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1674,7 +1675,7 @@ async fn create_view_group(
 async fn create_plain_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<PlainViewBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1701,7 +1702,7 @@ async fn create_plain_view(
 #[serde(deny_unknown_fields)]
 struct ViewRecord {
     /// This view's own gate; absent takes the group's. One label or a list, each element one
-    /// term taken verbatim.
+    /// term.
     #[serde(default)]
     visibility: Option<tessera_types::view::DeclaredGate>,
     /// One entry per name the group declared. A `timestamp_us` is microseconds since the epoch,
@@ -1759,7 +1760,7 @@ fn metadata_value(name: &str, value: &serde_json::Value) -> Result<ViewMetadataV
 async fn create_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<ViewRecord>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let record = body.0;
@@ -1792,7 +1793,7 @@ async fn create_view(
 async fn drop_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
-    axum::extract::Query(query): axum::extract::Query<DropViewQuery>,
+    ApiQuery(query): ApiQuery<DropViewQuery>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let wait = WaitQuery { wait: query.wait };
     let dropped = state
@@ -1805,18 +1806,13 @@ async fn drop_view(
     acknowledge(&state, &wait, StatusCode::OK, body).await
 }
 
-/// An artifact record's `access` labels as the plugin's descriptors: the call `/control/ingest`
-/// makes of its `access` column. Absent and empty are no label.
+/// An artifact record's `access` labels as the plugin's descriptors, by the rule the build reads
+/// an artifact's labels with. Absent and empty are no label.
 fn access_descriptors(
     state: &AppState,
     labels: Option<Vec<String>>,
 ) -> Result<Vec<Vec<u8>>, ApiError> {
-    let labels: Vec<Vec<u8>> = labels
-        .unwrap_or_default()
-        .into_iter()
-        .map(String::into_bytes)
-        .collect();
-    tessera_plugin::artifact_access(state.engine.plugin().as_ref(), &labels)
+    tessera_plugin::artifact_access(state.engine.plugin().as_ref(), &labels.unwrap_or_default())
         .map_err(ApiError::Contract)
 }
 
@@ -1842,8 +1838,9 @@ fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Res
 }
 
 /// `PATCH /control/layers/{name}/artifacts`'s Arrow form: one row per artifact, `key: utf8` and
-/// `members: list<utf8>` or `large_list<utf8>`, with `addressing`, `level` and `idset` in the
-/// schema metadata. Decoded into the JSON form's body, so the handler has one path.
+/// `members: list<utf8>` or `large_list<utf8>`, with `view` and `access` optional, and
+/// `addressing`, `level` and `idset` in the schema metadata. Decoded into the JSON form's body, so
+/// the handler has one path.
 fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     use arrow::array::{LargeListArray, ListArray, StringArray};
     use arrow::datatypes::DataType;
@@ -1855,10 +1852,10 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
     let metadata = reader.schema().metadata().clone();
     // Any other column or metadata key is refused, as the JSON form refuses unknown fields.
     for field in reader.schema().fields() {
-        if !matches!(field.name().as_str(), "key" | "members" | "view") {
+        if !matches!(field.name().as_str(), "key" | "members" | "view" | "access") {
             return Err(ApiError::Contract(format!(
                 "growth body: column '{}' is not one this route takes; a growth carries `key`, \
-                 `members` and, on a layer scoped to a group, `view`, and nothing else",
+                 `members`, `access` and, on a layer scoped to a group, `view`, and nothing else",
                 field.name()
             )));
         }
@@ -1926,6 +1923,8 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                 )
             })?),
         };
+        let access = labels_col("growth body", &batch, "access")
+            .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
         let members = batch.column_by_name("members").ok_or_else(|| {
             ApiError::Contract(
                 "growth body: column 'members' is missing; it is list<utf8> or large_list<utf8>, \
@@ -2005,8 +2004,11 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                      it grows"
                 )));
             }
-            // The Arrow form carries joining members only; content, shapes and ranked pages
-            // travel on the JSON form.
+            let labels = access
+                .as_ref()
+                .map(|access| access.labels(row).map(str::to_string).collect());
+            // The Arrow form carries joining members and labels only; content, shapes and ranked
+            // pages travel on the JSON form.
             artifacts.push(GrowingArtifactBody {
                 key: keys.value(row).to_string(),
                 view: views
@@ -2023,7 +2025,7 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                 ellipse: None,
                 wkt: None,
                 space: None,
-                access: None,
+                access: labels,
             });
         }
     }
@@ -2191,11 +2193,21 @@ struct IncomingArtifactBody {
     /// This row's space, overriding `default_space` for its shape and authored content alike.
     #[serde(default)]
     space: Option<String>,
-    /// The artifact's own access labels, one per element, taken whole. Absent, `null` and `[]`
-    /// are no label, which the layer's `artifact_visibility.default` answers. Refused on a layer
+    /// The artifact's own access labels, one per element, taken whole. `null` and `[]` are no
+    /// label, which the layer's `artifact_visibility.default` answers; absent states none, which a
+    /// layer whose `artifact_visibility` names a field refuses. Labels are refused on a layer
     /// whose `artifact_visibility` names no field.
-    #[serde(default)]
-    access: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "present")]
+    access: Option<Option<Vec<String>>>,
+}
+
+/// A field whose absence differs from `null`: absent is `None`, and `null` is `Some(None)`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// The shape fields of a publication's or a growth's row.
@@ -2530,7 +2542,7 @@ struct IncomingContentBody {
 async fn publish_artifacts(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -2635,9 +2647,15 @@ async fn publish_artifacts(
         }
     }
 
-    let accesses: Vec<Vec<Vec<u8>>> = artifacts
+    let accesses: Vec<Option<Vec<Vec<u8>>>> = artifacts
         .iter_mut()
-        .map(|artifact| access_descriptors(&state, artifact.access.take()))
+        .map(|artifact| {
+            artifact
+                .access
+                .take()
+                .map(|labels| access_descriptors(&state, labels))
+                .transpose()
+        })
         .collect::<Result<_, _>>()?;
 
     // Shapes and addresses read the bundle, so they run on the blocking pool with the write.
@@ -2852,7 +2870,7 @@ struct ContentFillBody {
 async fn grow_memberships(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -3020,7 +3038,7 @@ async fn faults_arm(
 #[cfg(feature = "fault-injection")]
 async fn faults_arrivals(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(req): axum::extract::Query<FaultSiteRequest>,
+    ApiQuery(req): ApiQuery<FaultSiteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let site = parse_pause_site(&req.site)?;
     Ok(Json(serde_json::json!({

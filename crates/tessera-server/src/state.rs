@@ -659,6 +659,27 @@ impl<T: serde::de::DeserializeOwned> axum::extract::FromRequest<Arc<AppState>> f
     }
 }
 
+/// A query string. One that does not deserialise is a `contract` refusal with serde's reason, as
+/// [`ApiJson`] answers a wrongly shaped body.
+pub struct ApiQuery<T>(pub T);
+
+impl<T: serde::de::DeserializeOwned> axum::extract::FromRequestParts<Arc<AppState>> for ApiQuery<T> {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, ApiError> {
+        match axum::extract::Query::<T>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Query(value)) => Ok(ApiQuery(value)),
+            Err(e) => Err(ApiError::Contract(format!(
+                "{}; send only the parameters this route defines, with the values its schema allows",
+                e.body_text()
+            ))),
+        }
+    }
+}
+
 impl AppState {
     /// Run `f` on the blocking pool behind the compute gate. The permits move into the closure, so
     /// they release when the work finishes, not when the caller stops waiting.

@@ -189,25 +189,100 @@ hierarchy = { kind = "flat", prune_children = false }
   source = "clusters_members"
 "#;
 
+/// A second group over the same points, and a label layer attached into `clusters`, scoped to
+/// the group named where `{group}` stands.
+const LABELS: &str = r#"
+[[view_group]]
+name             = "tallies"
+projection       = "none"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+point_visibility = { default = "public" }
+
+[[view_group.view]]
+key    = "a"
+source = "points_a"
+
+[[view_group.view]]
+key    = "b"
+source = "points_b"
+
+[[layer]]
+name = "names"
+title = "Names"
+views = ["{group}"]
+scope = { group = "{group}" }
+source = "names"
+fields = { view = "slice" }
+membership = "enumerated"
+visibility = "public"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = "none"
+hierarchy = { kind = "flat", prune_children = false }
+depends_on = ["clusters"]
+
+  [layer.members]
+  source = "clusters_members"
+"#;
+
+/// The label layer's artifacts: `c0` on each view, attached to that view's `c0` of `clusters`.
+fn write_names(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("slice", DataType::Utf8, false),
+        Field::new("attached_layer", DataType::Utf8, false),
+        Field::new("attached_key", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["c0", "c0"])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(StringArray::from(vec!["clusters", "clusters"])),
+            Arc::new(StringArray::from(vec!["c0", "c0"])),
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
 /// The fixture, built. `artifacts` is the artifacts table's rows, so a case can hand it a
 /// duplicate.
 fn build_fixture(
     dir: &Path,
     artifacts: &[(&str, &str)],
 ) -> Result<tessera_build::BuildReport, tessera_build::BuildError> {
+    build_with_labels(dir, artifacts, None)
+}
+
+/// The fixture, and where `labels` names a group, the `tallies` group and a label layer scoped
+/// to that group attached into `clusters`.
+fn build_with_labels(
+    dir: &Path,
+    artifacts: &[(&str, &str)],
+    labels: Option<&str>,
+) -> Result<tessera_build::BuildReport, tessera_build::BuildError> {
     write_points(&dir.join("a.parquet"), 100.0);
     write_points(&dir.join("b.parquet"), 90.0);
     write_pairs(&dir.join("pairs.parquet"));
     write_artifacts(&dir.join("clusters.parquet"), artifacts);
     write_members(&dir.join("clusters_members.parquet"));
+    let mut toml = CONFIG.to_string();
+    if let Some(group) = labels {
+        write_names(&dir.join("names.parquet"));
+        toml = toml.replace(
+            "clusters_members   = \"clusters_members.parquet\"",
+            "clusters_members   = \"clusters_members.parquet\"\nnames              = \"names.parquet\"",
+        );
+        toml.push_str(&LABELS.replace("{group}", group));
+    }
     let config_path = dir.join("config.toml");
-    std::fs::write(&config_path, CONFIG).unwrap();
+    std::fs::write(&config_path, toml).unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .expect("the fixture declaration parses");
 
-    let view = |key: &str, points: &str| ViewArgs {
+    let view = |group: &str, key: &str, points: &str| ViewArgs {
         visibility: None,
-        view_id: format!("slices:{key}"),
+        view_id: format!("{group}:{key}"),
         projection: tessera_spatial::Projection::None,
         extent: extent(),
         points: dir.join(points),
@@ -217,30 +292,52 @@ fn build_fixture(
     };
     let mut layers = config.layers.clone();
     for layer in &mut layers {
-        layer.views = vec!["slices:a".to_string(), "slices:b".to_string()];
+        let group = layer.scope.group().unwrap_or("slices").to_string();
+        layer.views = vec![format!("{group}:a"), format!("{group}:b")];
+    }
+    let group = |name: &str| tessera_store::manifest::GroupDescriptor {
+        title: None,
+        name: name.to_string(),
+        members_of: None,
+        point_default: Some("public".to_string()),
+        visibility: None,
+        scoped_scalars: Vec::new(),
+        quantisation: group_frame(),
+        projection: tessera_spatial::Projection::None,
+        metadata: Vec::new(),
+        views: ["a", "b"]
+            .into_iter()
+            .map(|key| tessera_store::manifest::GroupViewDescriptor {
+                key: key.to_string(),
+                visibility: None,
+                metadata: Default::default(),
+            })
+            .collect(),
+    };
+    let mut views = vec![
+        view("slices", "a", "a.parquet"),
+        view("slices", "b", "b.parquet"),
+    ];
+    let mut groups = vec![group("slices")];
+    let scoped = |group: &str| ScopedLayer {
+        group: group.to_string(),
+        column: "slice".to_string(),
+        keys: vec!["a".to_string(), "b".to_string()],
+    };
+    let mut scoped_layers: std::collections::BTreeMap<String, ScopedLayer> =
+        [("clusters".to_string(), scoped("slices"))]
+            .into_iter()
+            .collect();
+    if let Some(label_group) = labels {
+        views.push(view("tallies", "a", "a.parquet"));
+        views.push(view("tallies", "b", "b.parquet"));
+        groups.push(group("tallies"));
+        scoped_layers.insert("names".to_string(), scoped(label_group));
     }
     build(&BuildArgs {
-        views: vec![view("a", "a.parquet"), view("b", "b.parquet")],
+        views,
         anchor: 0,
-        groups: vec![tessera_store::manifest::GroupDescriptor {
-            title: None,
-            name: "slices".to_string(),
-            members_of: None,
-            point_default: Some("public".to_string()),
-            visibility: None,
-            scoped_scalars: Vec::new(),
-            quantisation: group_frame(),
-            projection: tessera_spatial::Projection::None,
-            metadata: Vec::new(),
-            views: ["a", "b"]
-                .into_iter()
-                .map(|key| tessera_store::manifest::GroupViewDescriptor {
-                    key: key.to_string(),
-                    visibility: None,
-                    metadata: Default::default(),
-                })
-                .collect(),
-        }],
+        groups,
         scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: dir.join("bundle"),
@@ -251,16 +348,7 @@ fn build_fixture(
         shard_id: 0,
         layers,
         layer_inputs: config.layer_sources.clone(),
-        scoped_layers: [(
-            "clusters".to_string(),
-            ScopedLayer {
-                group: "slices".to_string(),
-                column: "slice".to_string(),
-                keys: vec!["a".to_string(), "b".to_string()],
-            },
-        )]
-        .into_iter()
-        .collect(),
+        scoped_layers: scoped_layers.into_iter().collect(),
         mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -430,4 +518,23 @@ fn an_artifact_naming_a_view_the_group_lacks_is_refused() {
     let error = build_fixture(tmp.path(), &[("c0", "a"), ("c1", "z")])
         .expect_err("the group has no view 'z', so no artifact can belong to it");
     assert!(matches!(error, tessera_build::BuildError::Invalid(_)), "{error:?}");
+}
+
+#[test]
+fn a_label_layer_attached_across_groups_is_refused_and_one_in_the_targets_group_builds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let error = build_with_labels(tmp.path(), &[("c0", "a"), ("c0", "b")], Some("tallies"))
+        .expect_err("a label on tallies' views attached to a slices artifact is never served");
+    assert!(
+        matches!(error, tessera_build::BuildError::Invalid(_)),
+        "{error:?}"
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let report = build_with_labels(tmp.path(), &[("c0", "a"), ("c0", "b")], Some("slices"))
+        .expect("a label layer scoped to its target's group builds");
+    assert!(report
+        .artifact_levels
+        .iter()
+        .any(|level| level.layer == "names"));
 }

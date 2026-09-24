@@ -1,16 +1,12 @@
-//! `/control/ingest`'s `access` column is a **list of labels**, one element per label, taken
-//! verbatim (contracts §3.4, decision 0129).
+//! `/control/ingest`'s `access` column, read by the rule the build reads a points file's access
+//! column by.
 //!
-//! What this proves, against a running server: a list column ingests and every element lands as
-//! one term whatever it contains — a label with a comma is one label, not two; a scalar `utf8`
-//! column is refused at the schema naming the column and the shape it takes; an empty list is a
-//! row with no label, which the view's declared `point_visibility.default` fills and which a view
-//! declaring none refuses naming the count (decision 0133); a null list and a null element are
-//! refused naming the row.
-//!
-//! The comma case is the one that found the defect: a corpus whose compartment keys are free text
-//! (`Natural History Museum, Vienna`) split on a wire that carried one string per row, and the
-//! fragments were minted as terms — some of them the names of other compartments.
+//! What this proves, against a running server: every element is one label whatever it contains,
+//! so a label with a comma is one label, not two; a scalar string column and a dictionary are one
+//! label per row; each label is trimmed, and a credential holding the trimmed label sees the row;
+//! an empty list, a null, an empty element and a null element are all no label, which the view's
+//! declared `point_visibility.default` fills and which a view declaring none refuses naming the
+//! count.
 
 mod common;
 
@@ -18,10 +14,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryArray, Float32Array, ListArray, ListBuilder, StringArray, StringBuilder,
+    ArrayRef, BinaryArray, DictionaryArray, Float32Array, GenericListBuilder, LargeStringBuilder,
+    ListArray, ListBuilder, StringArray, StringBuilder,
 };
 use arrow::buffer::OffsetBuffer;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Int32Type, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use tempfile::TempDir;
@@ -34,6 +31,11 @@ const LONDON: &str = "Natural History Museum";
 /// One ingest body with an `access` column of the caller's making, so the refusal cases can spell
 /// it wrong.
 fn body_with_access(rows: usize, access: arrow::array::ArrayRef) -> Vec<u8> {
+    body_with_access_from(100, rows, access)
+}
+
+/// [`body_with_access`] with its external ids starting `first` past the fixture's own.
+fn body_with_access_from(first: u64, rows: usize, access: arrow::array::ArrayRef) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
@@ -41,7 +43,7 @@ fn body_with_access(rows: usize, access: arrow::array::ArrayRef) -> Vec<u8> {
         Field::new("access", access.data_type().clone(), true),
     ]));
     let ids: Vec<Vec<u8>> = (0..rows as u64)
-        .map(|i| external_id_of(N_ITEMS + 100 + i))
+        .map(|i| external_id_of(N_ITEMS + first + i))
         .collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -205,25 +207,59 @@ async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
     assert_eq!(visible_to(&server, &["0"]).await, fixture_zero + 1);
 }
 
-/// A scalar `utf8` column is the shape a separator grammar lived in, and it is refused at the
-/// schema, whole batch and no effect, naming the column.
+/// A scalar string column and a dictionary of strings are one whole label per row, as at the
+/// build: a label with a comma in it is never split.
 #[tokio::test]
-async fn a_scalar_utf8_access_column_is_refused_naming_the_column() {
+async fn a_scalar_and_a_dictionary_column_are_one_label_per_row() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
     let body = body_with_access(1, Arc::new(StringArray::from(vec![VIENNA])));
     let resp = ingest(&server, "scalar-1", body).await;
-    assert_eq!(resp.status(), 422);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "contract", "{body}");
-    assert!(body["detail"].as_str().unwrap().contains("'access'"), "{body}");
-    assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_before,
-        "a refused batch has no effect"
-    );
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let dictionary: DictionaryArray<Int32Type> = vec![VIENNA].into_iter().collect();
+    let body = body_with_access_from(200, 1, Arc::new(dictionary));
+    let resp = ingest(&server, "dictionary-1", body).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    drain(&server).await;
+
+    assert_eq!(visible_to(&server, &[VIENNA]).await, 2);
+    assert_eq!(visible_to(&server, &[LONDON]).await, 0);
+}
+
+/// A padded label is stored trimmed: a credential holding the trimmed label sees the row,
+/// whichever encoding carried it, and so does one holding the padded spelling, which the
+/// credential side trims alike.
+#[tokio::test]
+async fn a_padded_label_is_stored_trimmed_on_every_encoding() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let public_before = visible_to(&server, &[]).await;
+    let mut large = GenericListBuilder::<i32, _>::new(LargeStringBuilder::new());
+    large.values().append_value(" red ");
+    large.append(true);
+    let bodies: Vec<(&str, ArrayRef)> = vec![
+        ("list", Arc::new(access_lists(&[&[" red "]]))),
+        ("large", Arc::new(large.finish())),
+        ("scalar", Arc::new(StringArray::from(vec![" red "]))),
+        (
+            "dictionary",
+            Arc::new(vec![" red "].into_iter().collect::<DictionaryArray<Int32Type>>()),
+        ),
+    ];
+    for (first, (batch_id, access)) in (100..).step_by(100).zip(bodies) {
+        let resp = ingest(&server, batch_id, body_with_access_from(first, 1, access)).await;
+        assert_eq!(resp.status(), 200, "{batch_id}: {}", resp.text().await.unwrap());
+    }
+    drain(&server).await;
+
+    assert_eq!(visible_to(&server, &["red"]).await, 4);
+    assert_eq!(visible_to(&server, &[" red "]).await, 4);
+    assert_eq!(visible_to(&server, &[]).await, public_before, "a label is never everyone");
+
+    let server = restart(server, &tmp).await;
+    assert_eq!(visible_to(&server, &["red"]).await, 4, "the trimmed label survives a restart");
+    assert_eq!(visible_to(&server, &[]).await, public_before);
 }
 
 /// An empty list is a row with no label, and the view's declared default fills it (decision
@@ -236,17 +272,17 @@ async fn an_empty_list_takes_the_views_declared_default() {
     let sealed_before = visible_to(&server, &["ir:sealed"]).await;
     let zero_before = visible_to(&server, &["0"]).await;
 
-    let body = body_with_access(2, Arc::new(access_lists(&[&[], &["0"]])));
+    let body = body_with_access(4, Arc::new(access_lists(&[&[], &["0"], &[""], &["  ", ""]])));
     let resp = ingest(&server, "empty-1", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 2);
+    assert_eq!(json["accepted"], 4);
     drain(&server).await;
 
     assert_eq!(
         visible_to(&server, &["ir:sealed"]).await,
-        sealed_before + 1,
-        "the unlabelled row landed under the declared default"
+        sealed_before + 3,
+        "the empty list and the lists of empty labels landed under the declared default"
     );
     assert_eq!(
         visible_to(&server, &["0"]).await,
@@ -278,7 +314,7 @@ async fn an_empty_list_under_a_public_default_is_public() {
 
 /// A view declaring no default refuses the batch (decision 0133), naming the count of unlabelled
 /// rows and the view, in the terms the build refuses the same corpus; the batch has no effect.
-/// An empty *element* stays refused as it was, whatever the view declares.
+/// A list of one empty label is no label, and is refused alike.
 #[tokio::test]
 async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared() {
     let (_tmp, server) = serve_with_default(None).await;
@@ -297,7 +333,7 @@ async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared(
     let resp = ingest(&server, "labelled", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
-    // An empty element is not a label, on either declaration.
+    // An empty element is no label.
     let body = body_with_access(1, Arc::new(access_lists(&[&[""]])));
     let resp = ingest(&server, "empty-element", body).await;
     assert_eq!(resp.status(), 422);
@@ -312,10 +348,10 @@ async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared(
     );
 }
 
-/// **The four cases at the Arrow door** (decision 0133): a null list cell and an empty list are
-/// one case, a row with no label, filled by a declared default and refused with the count where
-/// none is declared; an empty element is refused as no label at all; the column absent from the
-/// batch is refused at the schema. The JSON door's four are in `ingest_wire.rs`.
+/// **The four cases at the Arrow door** (decision 0133): a null list cell, an empty list and an
+/// empty element are one case, a row with no label, filled by a declared default and refused with
+/// the count where none is declared; the column absent from the batch is refused at the schema.
+/// The JSON door's four are in `ingest_wire.rs`.
 #[tokio::test]
 async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     fn null_and_empty() -> Vec<u8> {
@@ -356,7 +392,7 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
         body_with_access(1, Arc::new(empty_element.finish())),
     )
     .await;
-    assert_eq!(resp.status(), 422, "an empty element is no label at all");
+    assert_eq!(resp.status(), 422, "an empty element is no label, and no default is declared");
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
@@ -388,13 +424,12 @@ async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
     );
 }
 
-/// A null element has no bytes to be a label; it is refused naming the row, and the batch has no
-/// effect.
+/// A null element is no label and is dropped, as at the build; the row keeps its other labels.
 #[tokio::test]
-async fn a_null_element_is_refused_naming_the_row() {
+async fn a_null_element_is_dropped() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
+    let zero_before = visible_to(&server, &["0"]).await;
 
     let mut null_element = ListBuilder::new(StringBuilder::new());
     null_element.values().append_value("0");
@@ -406,14 +441,8 @@ async fn a_null_element_is_refused_naming_the_row() {
         body_with_access(1, Arc::new(null_element.finish())),
     )
     .await;
-    assert_eq!(resp.status(), 422);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "contract", "{body}");
-    assert!(mentions(body["detail"].as_str().unwrap(), "row 0"), "{body}");
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    drain(&server).await;
 
-    assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_before,
-        "the refused batch had no effect"
-    );
+    assert_eq!(visible_to(&server, &["0"]).await, zero_before + 1);
 }

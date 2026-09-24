@@ -126,7 +126,7 @@ pub(crate) fn resolve_group(
         quantisation,
         projection,
         metadata: declaration.metadata.clone(),
-        visibility: gate_of(declaration.visibility.clone()),
+        visibility: declaration.visibility.clone(),
         point_default: declaration.point_default.clone(),
         // **Empty, and the roster fills it.** A group's keys are `ViewRoster`'s, applied by
         // `Manifest::with_roster` after this list is merged in, so a descriptor written with a
@@ -175,7 +175,7 @@ pub(crate) fn resolve_plain(
         incarnation: DECLARED_INCARNATION,
         quantisation,
         projection,
-        visibility: gate_of(declaration.visibility.clone()),
+        visibility: declaration.visibility.clone(),
         point_default: declaration.point_default.clone(),
     };
     if let Some(held) = manifest.views.iter().find(|v| v.id == name) {
@@ -225,12 +225,6 @@ fn compile_common(
         y_max: frame.y_max,
     };
     Ok((projection, quantisation))
-}
-
-/// The gate as the manifest stores it: a public view has none. The labels were checked against
-/// the plugin before the declaration reached the executor.
-fn gate_of(visibility: Option<Vec<String>>) -> Option<Vec<String>> {
-    visibility.filter(|labels| labels.as_slice() != ["public"])
 }
 
 fn check_metadata(name: &str, metadata: &[GroupMetadataField]) -> Result<(), String> {

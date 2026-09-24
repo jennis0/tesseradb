@@ -71,8 +71,10 @@ fn tiler_and_segment_writers_round_trip() {
     let morton_bytes = fs::read(dir.path().join("morton.u32")).expect("read morton.u32");
     assert_eq!(morton_bytes.len(), items.len() * 4);
     let file_codes: Vec<u32> = morton_bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect();
     assert_eq!(file_codes, codes);
     assert!(file_codes.windows(2).all(|w| w[0] <= w[1]));
@@ -216,8 +218,10 @@ fn morton_file_is_u32_four_bytes_per_row_and_the_u64_file_is_gone() {
     assert_eq!(bytes.len(), items.len() * 4, "4 bytes per row, no header");
 
     let read_back: Vec<u32> = bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect();
     assert_eq!(read_back, codes, "bytes must round-trip sort_batch's codes");
     assert!(read_back.windows(2).all(|w| w[0] <= w[1]));

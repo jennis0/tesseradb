@@ -151,7 +151,7 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 #[test]
 fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
-    for (index, version) in [15u16, 16, 17, 18, 19, 20, 21, 22, 23].into_iter().enumerate() {
+    for (index, version) in [15u16, 16, 17, 18, 19, 20, 21, 22, 23, 24].into_iter().enumerate() {
         let at = dir.path().join(format!("v{index}"));
         std::fs::create_dir(&at).unwrap();
         std::fs::write(at.join("wal-000001.log"), header_at_version(version, 1, 0)).unwrap();
@@ -165,7 +165,7 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     // a statement about the version rather than about the rest of the header.
     let other = dir.path().join("current");
     std::fs::create_dir(&other).unwrap();
-    std::fs::write(other.join("wal-000001.log"), header_at_version(24, 1, 0)).unwrap();
+    std::fs::write(other.join("wal-000001.log"), header_at_version(25, 1, 0)).unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
 }
 

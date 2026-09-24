@@ -394,10 +394,10 @@ impl Engine {
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn create_view_group(
         &self,
-        declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
+        mut declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
-        self.check_visibility(declaration.visibility.as_deref())?;
-        self.check_point_default(declaration.point_default.as_deref())?;
+        declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
+        declaration.point_default = self.check_point_default(declaration.point_default.as_deref())?;
         self.write.create_view_group(declaration)
     }
 
@@ -405,35 +405,36 @@ impl Engine {
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn create_plain_view(
         &self,
-        declaration: tessera_lifecycle::wal::PlainViewDeclaration,
+        mut declaration: tessera_lifecycle::wal::PlainViewDeclaration,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
-        self.check_visibility(declaration.visibility.as_deref())?;
-        self.check_point_default(declaration.point_default.as_deref())?;
+        declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
+        declaration.point_default = self.check_point_default(declaration.point_default.as_deref())?;
         self.write.create_plain_view(declaration)
     }
 
+    /// [`tessera_plugin::check_point_default`] with this engine's plugin: the default as stored,
+    /// or a view refusal.
     fn check_point_default(
         &self,
         default: Option<&str>,
-    ) -> std::result::Result<(), crate::write::AcceptError> {
-        let Some(default) = default else {
-            return Ok(());
-        };
-        tessera_plugin::check_point_default(self.plugin.as_ref(), default).map_err(|detail| {
-            crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
-        })
-    }
-
-    /// [`tessera_plugin::check_visibility`] with this engine's plugin, as a view refusal.
-    fn check_visibility(
-        &self,
-        visibility: Option<&[String]>,
-    ) -> std::result::Result<(), crate::write::AcceptError> {
-        tessera_plugin::check_visibility(self.plugin.as_ref(), visibility)
-            .map(|_| ())
+    ) -> std::result::Result<Option<String>, crate::write::AcceptError> {
+        default
+            .map(|default| tessera_plugin::check_point_default(self.plugin.as_ref(), default))
+            .transpose()
             .map_err(|detail| {
                 crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
             })
+    }
+
+    /// [`tessera_plugin::check_visibility`] with this engine's plugin: the gate as stored, or a
+    /// view refusal.
+    fn check_visibility(
+        &self,
+        visibility: Option<&[String]>,
+    ) -> std::result::Result<Option<Vec<String>>, crate::write::AcceptError> {
+        tessera_plugin::check_visibility(self.plugin.as_ref(), visibility).map_err(|detail| {
+            crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
+        })
     }
 
     /// Create a view of a view group. Almost nothing is validated here; the gate's labels are the
@@ -445,7 +446,7 @@ impl Engine {
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.check_visibility(visibility.as_deref())?;
+        let visibility = self.check_visibility(visibility.as_deref())?;
         self.write.create_view(group, key, visibility, metadata)
     }
 

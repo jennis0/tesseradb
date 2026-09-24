@@ -1,22 +1,12 @@
 import {describe, expect, it} from 'vitest';
 import {colourLayers, drawableLayers, isFilterLayer, layerClosure, layerEntries} from '../src/layers.js';
 import type {Layer} from '../src/types.js';
+import {layer as declared} from './support.js';
 
-const layer = (name: string, depsOn: string[] = []): Layer => ({
-  name,
-  title: name,
-  views: ['s0'],
-  membership: 'enumerated',
-  hierarchy: {kind: 'flat', pruneChildren: false},
-  levels: [],
-  computedContent: [],
-  suppliedContent: [],
-  depsOn,
-  version: 1
-});
+const layer = (name: string, depsOn: string[] = []): Layer => declared(name, {depsOn});
 
 /**
- * A clustering's labels are a second layer that `depends_on` it (decision 0096): the picker
+ * A clustering's labels are a second layer that `depends_on` it: the picker
  * offers the clustering with its labels as one entry, and the request names both.
  */
 describe('the layer closure', () => {

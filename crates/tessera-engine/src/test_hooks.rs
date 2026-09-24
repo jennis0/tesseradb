@@ -321,7 +321,7 @@ impl Engine {
             .find_map(|partition| partition.views.get(view))
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let mut probe = crate::timing::Probe::new();
-        let geometry =
+        let (geometry, _) =
             self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
         Ok(geometry.projection.bitmap().clone())
     }

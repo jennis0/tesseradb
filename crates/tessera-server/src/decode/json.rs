@@ -4,6 +4,7 @@
 //!
 //! An integer is parsed exactly from its digits (a JSON number or a string), never through a
 //! double. A null or absent `access` is a row with no label, which the view's default decides.
+//! `access` is read by the Arrow decode's access-column reader, as the Arrow form's is.
 
 use std::sync::Arc;
 
@@ -176,15 +177,21 @@ fn fixed_column(
             Arc::new(builder.finish())
         }
         Fixed::Access => {
+            // Built as the Arrow form's list column, so the Arrow decode's one reader applies the
+            // label rule to both.
             let mut builder = ListBuilder::new(StringBuilder::new());
             for (row, record) in rows.iter().enumerate() {
                 match record.get("access") {
-                    // A row with no label; the view's declaration decides.
                     None | Some(Value::Null) => builder.append(true),
+                    Some(Value::String(text)) => {
+                        builder.values().append_value(text);
+                        builder.append(true);
+                    }
                     Some(Value::Array(labels)) => {
                         for label in labels {
                             match label {
                                 Value::String(text) => builder.values().append_value(text),
+                                Value::Null => builder.values().append_null(),
                                 _ => {
                                     return Err(refusal(
                                         body_name,
@@ -203,7 +210,8 @@ fn fixed_column(
                             body_name,
                             row,
                             "access",
-                            "is not a list of labels; send a list with one label per element",
+                            "is not a label or a list of labels; send a string or a list of \
+                             strings",
                         ))
                     }
                 }

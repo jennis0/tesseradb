@@ -227,8 +227,8 @@ impl Disclosure {
                 field: attribute.column().to_string(),
                 ty: attribute.ty.arrow_type_name(),
                 placement: match (attribute.render, attribute.index) {
-                    (true, true) => "hot+index",
-                    (true, false) => "hot",
+                    (true, true) => "render+index",
+                    (true, false) => "render",
                     (false, true) => "index",
                     (false, false) => "blob",
                 },

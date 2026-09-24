@@ -37,6 +37,13 @@ the unit of access the corpus indexes: the term index maps each term to the item
 A credential resolves to the terms it satisfies, and an item is visible to a token when the two
 sets intersect.
 
+A label is trimmed wherever it is read, at a build and at a running service, before the plugin
+sees it. A label that is empty after trimming is no label, so a list holding only such labels is
+an item with no label, which takes its view's default. A label written in a declaration, such as a
+view's or a layer's `visibility` or a default, is stored trimmed, and one that is empty after
+trimming is refused. The shipped plugin trims a credential's terms the same way, so a credential
+matches the label it names however either was padded.
+
 At authorise, the service resolves a credential to its satisfied terms and looks each one up in
 the term index. The union of the items those terms carry, one bitmap over item identity, is the
 authorised set: the whole of what that credential grants, independent of any later request.

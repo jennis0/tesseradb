@@ -9,7 +9,7 @@ use tessera_types::TermId;
 /// Every build interns this descriptor first, so term `0` is `public` in every bundle and is
 /// minted for no other descriptor. Every session resolved by the engine gains it by construction.
 /// It is neither a grant nor a plugin behaviour.
-pub const PUBLIC_LABEL: &[u8] = b"public";
+pub const PUBLIC_LABEL: &[u8] = tessera_types::label::PUBLIC.as_bytes();
 
 /// [`PUBLIC_LABEL`]'s term id. `0` is the first ordinal a dictionary assigns, not an absent
 /// sentinel; reserving it makes the label's identity a property of the format rather than of the

@@ -2,6 +2,7 @@
 //! the bundle read protocol and zero-copy loader, and `Permutation` — the
 //! only legal EntityId→RowId path in the codebase (invariant I4).
 
+pub mod access_column;
 pub mod coalesce;
 pub mod columns;
 pub mod declaration;

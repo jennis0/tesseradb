@@ -8,6 +8,7 @@ import {
   FRAME_TRAILER,
   splitFramedStreams
 } from '../src/frame.js';
+import {refused} from './support.js';
 
 const fixture = (name: string) =>
   new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
@@ -76,7 +77,7 @@ describe('splitFramedStreams', () => {
 
     // A second frame would silently concatenate into the artifact surface — the same laxity the
     // tiles rule refuses, and it would show a cluster twice on the map.
-    expect(() =>
+    refused(() =>
       splitFramedStreams(
         cat(
           frame(FRAME_TILES, body),
@@ -85,10 +86,10 @@ describe('splitFramedStreams', () => {
           frame(FRAME_TRAILER, body)
         )
       )
-    ).toThrow(/more than one artifacts frame/);
+    );
 
     // After the points it would arrive too late for a reader that draws as it decodes.
-    expect(() =>
+    refused(() =>
       splitFramedStreams(
         cat(
           frame(FRAME_TILES, body),
@@ -97,7 +98,7 @@ describe('splitFramedStreams', () => {
           frame(FRAME_TRAILER, body)
         )
       )
-    ).toThrow(/must precede every points frame/);
+    );
   });
 
   it('consumes the whole payload exactly — every frame is length-prefixed', () => {
@@ -119,7 +120,7 @@ describe('splitFramedStreams', () => {
     // A silently short points stream would decode to fewer points than `served` promised, which
     // is a P2 failure wearing a plausible face: a sample presented as the set.
     const raw = fixture('viewport-plain.bin');
-    expect(() => splitFramedStreams(raw.subarray(0, raw.byteLength - 16))).toThrow();
+    refused(() => splitFramedStreams(raw.subarray(0, raw.byteLength - 16)));
   });
 
   it('refuses a body whose trailer is missing — incomplete by contract', () => {
@@ -134,7 +135,7 @@ describe('splitFramedStreams', () => {
       at += 5 + view.getUint32(at + 1, true);
     }
     expect(trailerStart).toBeGreaterThan(0);
-    expect(() => splitFramedStreams(raw.subarray(0, trailerStart))).toThrow(/trailer/);
+    refused(() => splitFramedStreams(raw.subarray(0, trailerStart)));
   });
 
   it('refuses an unknown frame kind rather than skipping it', () => {
@@ -142,6 +143,6 @@ describe('splitFramedStreams', () => {
     const extended = new Uint8Array(raw.byteLength + 5);
     extended.set(raw);
     extended[raw.byteLength] = 9; // no such kind
-    expect(() => splitFramedStreams(extended)).toThrow(/unknown frame kind/);
+    refused(() => splitFramedStreams(extended));
   });
 });

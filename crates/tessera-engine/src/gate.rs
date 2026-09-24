@@ -157,8 +157,8 @@ pub(crate) fn resolve(
 /// Does one of `labels` name a term this principal holds? `None` is `public` — satisfied by
 /// construction, inside the trust boundary, and never through the plugin (decision 0088).
 ///
-/// Each label is one element of the plugin's list call, taken verbatim (decision 0132): a gate
-/// declared as `"finance,legal"` is one term with a comma in it, and a gate wanting both is the
+/// Each label is one element of the plugin's list call, never split: a gate declared as
+/// `"finance,legal"` is one term with a comma in it, and a gate wanting both is the
 /// two-element list. The descriptors are compared with the credential's own, as a layer's and an
 /// artifact's are, so a label no item carries is still one a credential can hold.
 fn passes<'a>(

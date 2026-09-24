@@ -1,0 +1,35 @@
+# Tessera from the image built by the repository's Dockerfile. docker/README.md walks through it.
+#
+#   docker compose run --rm tessera build    # once, to create the database
+#   docker compose up -d                     # serve it
+
+services:
+  tessera:
+    image: tessera
+    build:
+      context: ..
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      TESSERA_IDENTITY_KEY: ${TESSERA_IDENTITY_KEY:-}
+    volumes:
+      - ./config:/etc/tessera:ro
+      - tessera-data:/var/lib/tessera
+    secrets:
+      - tessera_session
+      - tessera_operator
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+      - "127.0.0.1:8082:8082"
+    restart: unless-stopped
+
+volumes:
+  tessera-data:
+
+secrets:
+  tessera_session:
+    file: ./secrets/tessera_session
+  tessera_operator:
+    file: ./secrets/tessera_operator

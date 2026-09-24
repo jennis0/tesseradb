@@ -128,9 +128,9 @@ async fn deployment(red: bool) -> Deployment {
             &server,
             LAYER,
             json!([
-                { "key": "open", "members": members(0..40) },
-                { "key": "p-open", "members": members(40..120) },
-                { "key": "c-open", "members": members(0..20) },
+                { "key": "open", "members": members(0..40), "access": null },
+                { "key": "p-open", "members": members(40..120), "access": null },
+                { "key": "c-open", "members": members(0..20), "access": null },
                 { "key": "shared", "members": members(120..160), "access": ["blue"] },
             ]),
         )
@@ -487,6 +487,142 @@ async fn a_label_fills_once_and_a_layer_naming_no_field_refuses_one() {
     }
 }
 
+/// The Arrow form of a growth whose `access` column carries `labels` on one row keyed `key`, or a
+/// null list where `labels` is `None`.
+fn arrow_growth(key: &str, labels: Option<&[&str]>) -> Vec<u8> {
+    use arrow::array::{Array, ListBuilder, StringArray, StringBuilder};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    let mut members = ListBuilder::new(StringBuilder::new());
+    members.append(true);
+    let members = members.finish();
+    let mut access = ListBuilder::new(StringBuilder::new());
+    match labels {
+        Some(labels) => {
+            for label in labels {
+                access.values().append_value(label);
+            }
+            access.append(true);
+        }
+        None => access.append(false),
+    }
+    let access = access.finish();
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("members", members.data_type().clone(), false),
+            Field::new("access", access.data_type().clone(), true),
+        ],
+        [("addressing".to_string(), "external".to_string())].into(),
+    ));
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from(vec![key])),
+            Arc::new(members),
+            Arc::new(access),
+        ],
+    )
+    .unwrap();
+    let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// The Arrow form of a growth carries labels in an `access` column, read as the ingest body reads
+/// one: a null list fills nothing, a label fills an artifact that has none, the same label again
+/// is accepted, a different one is a `409`, and the label is held across a restart.
+#[tokio::test]
+async fn an_arrow_growth_fills_a_label_as_the_json_form_does() {
+    let d = deployment(false).await;
+    let patch = |server: &TestServer, body: Vec<u8>| {
+        server
+            .client
+            .patch(artifacts_url(server, LAYER))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .header("content-type", "application/vnd.apache.arrow.stream")
+            .body(body)
+            .send()
+    };
+    async fn open_served(server: &TestServer) -> bool {
+        let blue = token_for(server, &["0", "blue"]).await;
+        keys_served(&viewport_raw(server, &blue, viewport(0, json!({}))).await)
+            .contains(&"open".to_string())
+    }
+
+    let server = &d.server;
+    let resp = patch(server, arrow_growth("open", None)).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    tick(server).await;
+    assert!(open_served(server).await);
+
+    let resp = patch(server, arrow_growth("open", Some(&["red"])))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    tick(server).await;
+    assert!(!open_served(server).await);
+    let resp = patch(server, arrow_growth("open", Some(&["red"])))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let resp = patch(server, arrow_growth("open", Some(&["blue"])))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 409);
+
+    let d = d.restart().await;
+    assert!(!open_served(&d.server).await);
+    let resp = patch(&d.server, arrow_growth("open", Some(&["blue"])))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 409);
+}
+
+/// On a layer that reads labels, a publication record without `access` is refused with nothing
+/// created, alone or beside one that states its labels, and one stating `null`, `[]` or only a
+/// blank label publishes an artifact with no label of its own. A record that only adds members to
+/// a held artifact needs none.
+#[tokio::test]
+async fn a_record_without_access_on_a_layer_reading_labels_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, teams_declaration("inherited")).await;
+    let put = |artifacts: serde_json::Value| {
+        server
+            .client
+            .put(artifacts_url(&server, LAYER))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+            .send()
+    };
+    for refused in [
+        json!([{ "key": "bare", "members": members(0..10) }]),
+        json!([{ "key": "bare", "members": members(0..10) },
+               { "key": "red", "members": members(10..20), "access": ["red"] }]),
+    ] {
+        let resp = put(refused).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 422);
+    }
+    let resp = put(json!([
+        { "key": "nulled", "members": members(0..10), "access": null },
+        { "key": "emptied", "members": members(10..20), "access": [] },
+        { "key": "blank", "members": members(30..40), "access": ["  "] },
+    ]))
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 201);
+    let resp = put(json!([{ "key": "nulled", "members": members(20..30) }])).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    tick(&server).await;
+    let token = token_for(&server, &["0"]).await;
+    assert_eq!(
+        keys_served(&viewport_raw(&server, &token, viewport(0, json!({}))).await),
+        vec!["blank".to_string(), "emptied".to_string(), "nulled".to_string()]
+    );
+}
+
 /// An artifact with no label takes the layer's default: a named default admits only a viewer
 /// holding it.
 #[tokio::test]
@@ -498,7 +634,7 @@ async fn an_unlabelled_artifact_takes_a_named_default() {
         &server,
         LAYER,
         json!([
-            { "key": "bare", "members": members(0..40) },
+            { "key": "bare", "members": members(0..40), "access": null },
             { "key": "blue", "members": members(0..40), "access": ["blue"] },
         ]),
     )
@@ -545,8 +681,9 @@ enum Spelling {
     Numbers,
 }
 
-/// Write the artifact source, its label column spelled as `spelling` says.
-fn write_teams(path: &std::path::Path, spelling: Spelling) {
+/// Write the artifact source, its label column spelled as `spelling` says. `padded` writes every
+/// label with spaces around it, and a list with an empty and a blank label beside its own.
+fn write_teams(path: &std::path::Path, spelling: Spelling, padded: bool) {
     use arrow::array::{
         ArrayRef, DictionaryArray, Int64Array, ListBuilder, StringArray, StringBuilder,
         UInt64Builder,
@@ -560,7 +697,9 @@ fn write_teams(path: &std::path::Path, spelling: Spelling) {
         }
         members.append(true);
     }
-    let first: Vec<Option<&str>> = BUILT.iter().map(|(_, _, labels)| labels.map(|l| l[0])).collect();
+    let pad = |label: &str| if padded { format!(" {label} ") } else { label.to_string() };
+    let first: Vec<Option<String>> =
+        BUILT.iter().map(|(_, _, labels)| labels.map(|l| pad(l[0]))).collect();
     let team: ArrayRef = match spelling {
         Spelling::List => {
             let mut team = ListBuilder::new(StringBuilder::new());
@@ -569,7 +708,11 @@ fn write_teams(path: &std::path::Path, spelling: Spelling) {
                     None => team.append(false),
                     Some(labels) => {
                         for label in *labels {
-                            team.values().append_value(label);
+                            team.values().append_value(pad(label));
+                        }
+                        if padded {
+                            team.values().append_value("");
+                            team.values().append_value("  ");
                         }
                         team.append(true);
                     }
@@ -579,7 +722,12 @@ fn write_teams(path: &std::path::Path, spelling: Spelling) {
         }
         Spelling::Plain => std::sync::Arc::new(StringArray::from(first)),
         Spelling::Dictionary => {
-            std::sync::Arc::new(first.into_iter().collect::<DictionaryArray<Int32Type>>())
+            std::sync::Arc::new(
+                first
+                    .iter()
+                    .map(Option::as_deref)
+                    .collect::<DictionaryArray<Int32Type>>(),
+            )
         }
         Spelling::Numbers => {
             std::sync::Arc::new(Int64Array::from(vec![Some(1i64); BUILT.len()]))
@@ -603,7 +751,15 @@ fn write_teams(path: &std::path::Path, spelling: Spelling) {
     w.close().unwrap();
 }
 
-fn built_config(field: &str) -> String {
+/// The declaration both layers are built from. `padded` spells every declared word and inline
+/// label with spaces around it, gates the inline layer on ` team `, gives `teams` the named
+/// default ` red `, and gives the inline layer's unlabelled artifact a blank label.
+fn built_config(field: &str, padded: bool) -> String {
+    let (visibility, inline_visibility, teams_default, inline_default, red, open) = if padded {
+        (" public ", " team ", " red ", " inherited ", " red ", r#", access = "  ""#)
+    } else {
+        ("public", "public", "inherited", "inherited", "red", ", access = []")
+    };
     format!(
         r#"
 [sources]
@@ -621,8 +777,8 @@ title                     = "{LAYER}"
 views                     = ["s0"]
 source                    = "teams"
 membership                = "enumerated"
-visibility                = "public"
-artifact_visibility       = {{ field = "{field}", default = "inherited" }}
+visibility                = "{visibility}"
+artifact_visibility       = {{ field = "{field}", default = "{teams_default}" }}
 require_member_visibility = "none"
 hierarchy                 = {{ kind = "nested", prune_children = false }}
 content                   = {{ computed = ["centroid"] }}
@@ -632,13 +788,13 @@ name                      = "inline"
 title                     = "inline"
 views                     = ["s0"]
 membership                = "enumerated"
-visibility                = "public"
-artifact_visibility       = {{ field = "team", default = "inherited" }}
+visibility                = "{inline_visibility}"
+artifact_visibility       = {{ field = "team", default = "{inline_default}" }}
 require_member_visibility = "none"
 hierarchy                 = {{ kind = "flat", prune_children = false }}
 artifacts = [
-  {{ key = "inline-red", members = [0, 1, 2], access = "red" }},
-  {{ key = "inline-open", members = [3, 4, 5] }},
+  {{ key = "inline-red", members = [0, 1, 2], access = "{red}" }},
+  {{ key = "inline-open", members = [3, 4, 5]{open} }},
 ]
 "#
     )
@@ -646,13 +802,33 @@ artifacts = [
 
 /// Build the fixture's points with the two layers above; the build's own answer.
 fn build_labelled(dir: &std::path::Path, spelling: Spelling, field: &str) -> Result<(), String> {
+    build_labelled_padded(dir, spelling, field, false)
+}
+
+/// [`build_labelled`], with every label and declared word padded where `padded` says so.
+fn build_labelled_padded(
+    dir: &std::path::Path,
+    spelling: Spelling,
+    field: &str,
+    padded: bool,
+) -> Result<(), String> {
+    build_config(dir, spelling, padded, &built_config(field, padded))
+}
+
+/// The fixture's points and teams source, padded where `padded` says so, built under `toml`.
+fn build_config(
+    dir: &std::path::Path,
+    spelling: Spelling,
+    padded: bool,
+    toml: &str,
+) -> Result<(), String> {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points_n(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
-    write_teams(&dir.join("teams.parquet"), spelling);
+    write_teams(&dir.join("teams.parquet"), spelling, padded);
     let config_path = dir.join("config.toml");
-    std::fs::write(&config_path, built_config(field)).unwrap();
+    std::fs::write(&config_path, toml).unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .map_err(|e| e.to_string())?;
     let args = tessera_build::BuildArgs {
@@ -723,7 +899,7 @@ async fn labels_built_and_labels_published_serve_alike() {
             "inline",
             json!([
                 { "key": "inline-red", "members": members(0..3), "access": ["red"] },
-                { "key": "inline-open", "members": members(3..6) },
+                { "key": "inline-open", "members": members(3..6), "access": null },
             ]),
         )
         .await;
@@ -743,6 +919,149 @@ async fn labels_built_and_labels_published_serve_alike() {
     }
 }
 
+/// **Padded labels and declared words, built and published, serve as their trimmed selves** on
+/// both paths: an artifact source's labels in every spelling, an inline label, a layer's
+/// `visibility` of ` public ` and of ` team `, and a named and an `inherited` artifact default. A
+/// viewer holding `red` sees the red artifacts and one holding only `blue` does not; only a viewer
+/// holding `team` reaches the inline layer.
+#[tokio::test]
+async fn padded_labels_built_and_published_serve_as_their_trimmed_selves() {
+    for spelling in [Spelling::List, Spelling::Plain, Spelling::Dictionary] {
+        let list = spelling == Spelling::List;
+        let built = TempDir::new().unwrap();
+        build_labelled_padded(built.path(), spelling, "team", true)
+            .expect("the padded build succeeds");
+        let built_server = open(&built).await;
+
+        let live = TempDir::new().unwrap();
+        let live_server = serve(&live).await;
+        let mut teams = teams_declaration(" red ");
+        teams["visibility"] = json!(" public ");
+        register(&live_server, teams).await;
+        let mut inline = teams_declaration("inherited");
+        inline["name"] = json!("inline");
+        inline["title"] = json!("inline");
+        inline["visibility"] = json!(" team ");
+        inline["hierarchy"]["kind"] = json!("flat");
+        inline["content"]["computed"] = json!([]);
+        register(&live_server, inline).await;
+        publish(
+            &live_server,
+            LAYER,
+            json!(BUILT
+                .iter()
+                .map(|(key, range, labels)| {
+                    let labels: Option<Vec<String>> = labels.map(|l| {
+                        let own = if list { l.to_vec() } else { vec![l[0]] };
+                        own.iter().map(|label| format!(" {label} ")).chain(["".into()]).collect()
+                    });
+                    json!({ "key": key, "members": members(range.clone()), "access": labels })
+                })
+                .collect::<Vec<_>>()),
+        )
+        .await;
+        publish(
+            &live_server,
+            "inline",
+            json!([
+                { "key": "inline-red", "members": members(0..3), "access": [" red "] },
+                { "key": "inline-open", "members": members(3..6), "access": ["  "] },
+            ]),
+        )
+        .await;
+        tick(&live_server).await;
+
+        let principals: [&[&str]; 6] = [
+            &["0"],
+            &["0", "red"],
+            &["0", "blue"],
+            &["0", "red", "team"],
+            &["0", "blue", "team"],
+            &["1", "red", "blue", "team"],
+        ];
+        for terms in principals {
+            let from_build = served_counts(&built_server, terms).await;
+            assert_eq!(
+                from_build,
+                served_counts(&live_server, terms).await,
+                "{terms:?}, {spelling:?}"
+            );
+        }
+        for server in [&built_server, &live_server] {
+            let keys = |rows: Vec<(String, String, u64)>| -> Vec<String> {
+                rows.into_iter().map(|(_, key, _)| key).collect()
+            };
+            let red = keys(served_counts(server, &["0", "red", "team"]).await);
+            let blue = keys(served_counts(server, &["0", "blue", "team"]).await);
+            for key in ["red", "open", "inline-red"] {
+                assert!(red.contains(&key.to_string()), "{key} to red: {red:?}, {spelling:?}");
+                assert!(!blue.contains(&key.to_string()), "{key} to blue: {blue:?}, {spelling:?}");
+            }
+            assert!(blue.contains(&"inline-open".to_string()), "{blue:?}, {spelling:?}");
+            let outside = keys(served_counts(server, &["0", "red", "blue"]).await);
+            assert!(outside.contains(&"red".to_string()), "{outside:?}, {spelling:?}");
+            assert!(
+                !outside.iter().any(|key| key.starts_with("inline")),
+                "the ` team ` layer is reached only through `team`: {outside:?}, {spelling:?}"
+            );
+        }
+        built_server.shutdown().await;
+        live_server.shutdown().await;
+    }
+}
+
+/// A padded label fills as its trimmed self, on the JSON and the Arrow form of a growth: the
+/// trimmed spelling is then the same label, accepted again, and a blank label fills nothing.
+#[tokio::test]
+async fn a_padded_label_fills_as_its_trimmed_self() {
+    let d = deployment(false).await;
+    let server = &d.server;
+    let served_to = async |terms: &[&str], key: &str| {
+        let token = token_for(server, terms).await;
+        keys_served(&viewport_raw(server, &token, viewport(0, json!({}))).await)
+            .contains(&key.to_string())
+    };
+
+    let (status, body) =
+        patch(server, LAYER, json!([{ "key": "open", "access": [" red ", ""] }])).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = patch(server, LAYER, json!([{ "key": "open", "access": ["red"] }])).await;
+    assert_eq!(status, 200, "the trimmed spelling is the label held: {body}");
+    let resp = server
+        .client
+        .patch(artifacts_url(server, LAYER))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(arrow_growth("p-open", Some(&["  red"])))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let (status, body) = patch(server, LAYER, json!([{ "key": "c-open", "access": ["  "] }])).await;
+    assert_eq!(status, 200, "{body}");
+    tick(server).await;
+
+    for key in ["open", "p-open"] {
+        assert!(served_to(&["0", "red"], key).await, "{key}");
+        assert!(!served_to(&["0", "blue"], key).await, "{key}");
+    }
+    assert!(served_to(&["0", "blue"], "c-open").await, "a blank label is no label");
+
+    let d = d.restart().await;
+    let server = &d.server;
+    let served_to = async |terms: &[&str], key: &str| {
+        let token = token_for(server, terms).await;
+        keys_served(&viewport_raw(server, &token, viewport(0, json!({}))).await)
+            .contains(&key.to_string())
+    };
+    for key in ["open", "p-open"] {
+        assert!(served_to(&["0", "red"], key).await, "{key} after a restart");
+        assert!(!served_to(&["0", "blue"], key).await, "{key} after a restart");
+    }
+    let (status, body) = patch(server, LAYER, json!([{ "key": "open", "access": ["red"] }])).await;
+    assert_eq!(status, 200, "the held label is still `red` after a restart: {body}");
+}
+
 /// A declared label field its source does not carry is refused by the build.
 #[test]
 fn a_label_field_the_source_does_not_carry_is_refused() {
@@ -755,6 +1074,97 @@ fn a_label_field_the_source_does_not_carry_is_refused() {
     );
 }
 
+/// At a build, an inline row without `access` on a layer that reads labels is refused, where the
+/// same row with `access = []` builds.
+#[test]
+fn an_inline_row_stating_no_labels_is_refused_at_a_build() {
+    let unstated =
+        built_config("team", false).replace("members = [3, 4, 5], access = []", "members = [3, 4, 5]");
+    let dir = TempDir::new().unwrap();
+    assert!(build_config(dir.path(), Spelling::List, false, &unstated).is_err());
+    let dir = TempDir::new().unwrap();
+    assert!(build_config(dir.path(), Spelling::List, false, &built_config("team", false)).is_ok());
+}
+
+/// At a build, a key a member file names on an open layer that reads labels, with no row in the
+/// artifact source, would be minted with no labels and is refused; a member file naming only
+/// declared keys builds.
+#[test]
+fn a_key_a_member_file_would_mint_on_a_labelled_layer_is_refused_at_a_build() {
+    use arrow::array::{ArrayRef, StringArray, UInt64Array};
+    use arrow::datatypes::{Field, Schema};
+    use std::sync::Arc;
+
+    fn write(path: &std::path::Path, columns: Vec<(&str, ArrayRef)>) {
+        let schema = Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|(name, array)| Field::new(*name, array.data_type().clone(), false))
+                .collect::<Vec<_>>(),
+        ));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema.clone(),
+            columns.into_iter().map(|(_, array)| array).collect(),
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut w = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+    }
+    fn with_members(dir: &std::path::Path, keys: &[&str]) -> Result<(), String> {
+        write(
+            &dir.join("minted.parquet"),
+            vec![
+                ("key", Arc::new(StringArray::from(vec!["declared"])) as ArrayRef),
+                ("team", Arc::new(StringArray::from(vec!["red"])) as ArrayRef),
+            ],
+        );
+        write(
+            &dir.join("minted_members.parquet"),
+            vec![
+                ("key", Arc::new(StringArray::from(keys.to_vec())) as ArrayRef),
+                (
+                    "entity",
+                    Arc::new(UInt64Array::from((0..keys.len() as u64).collect::<Vec<_>>()))
+                        as ArrayRef,
+                ),
+            ],
+        );
+        let toml = r#"
+[sources]
+points         = "points.parquet"
+minted         = "minted.parquet"
+minted_members = "minted_members.parquet"
+
+[[view]]
+name             = "s0"
+extent           = { min = 0.0, max = 1000.0 }
+point_visibility = { default = "public" }
+
+[[layer]]
+name                      = "minted"
+title                     = "minted"
+views                     = ["s0"]
+source                    = "minted"
+membership                = "enumerated"
+value_set                 = "open"
+visibility                = "public"
+artifact_visibility       = { field = "team", default = "inherited" }
+require_member_visibility = "none"
+hierarchy                 = { kind = "flat", prune_children = false }
+
+  [layer.members]
+  source = "minted_members"
+"#;
+        build_config(dir, Spelling::List, false, toml)
+    }
+    let dir = TempDir::new().unwrap();
+    assert!(with_members(dir.path(), &["declared", "stray"]).is_err());
+    let dir = TempDir::new().unwrap();
+    with_members(dir.path(), &["declared", "declared"]).expect("declared keys only");
+}
+
 /// `tessera check` refuses a label column its source does not carry, and one that holds no
 /// strings, and passes each spelling the build reads.
 #[test]
@@ -762,9 +1172,9 @@ fn check_refuses_an_absent_or_non_text_label_column() {
     let checked = |spelling: Spelling, field: &str| {
         let dir = TempDir::new().unwrap();
         write_points_n(&dir.path().join("points.parquet"), N_ITEMS);
-        write_teams(&dir.path().join("teams.parquet"), spelling);
+        write_teams(&dir.path().join("teams.parquet"), spelling, false);
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, built_config(field)).unwrap();
+        std::fs::write(&path, built_config(field, false)).unwrap();
         let config = tessera_build::config::Config::parse(&path, &Default::default()).unwrap();
         tessera_build::check::check(&config).is_clean()
     };
@@ -845,7 +1255,12 @@ async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_non
         .unwrap();
     assert_eq!(resp.status().as_u16(), 422);
 
-    publish(&server, LAYER, json!([{ "key": "bare", "members": members(0..40) }])).await;
+    publish(
+        &server,
+        LAYER,
+        json!([{ "key": "bare", "members": members(0..40), "access": null }]),
+    )
+    .await;
     let (status, _) = patch(&server, LAYER, json!([{ "key": "bare", "access": ["nothing"] }])).await;
     assert_eq!(status, 422);
     tick(&server).await;

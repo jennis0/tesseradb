@@ -50,7 +50,7 @@ clap = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
 toml = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing-subscriber = "0.3"
 
 [dev-dependencies]

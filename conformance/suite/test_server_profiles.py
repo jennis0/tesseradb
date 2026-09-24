@@ -31,17 +31,17 @@ battery on the catalogue bundle (2026-08-15, this host), with headroom for the w
 rotation phases the read-only measurement does not exercise. At deployment scale the floor is
 rounding noise and the rule reads as written.
 
-Two behaviours below the completion zone were measured while pinning the out-of-memory control's
-limit, and the gap between them matters:
+Below the completion zone the outcome depends on how much of the charge the kernel cannot
+reclaim. With swap off, only anonymous memory forces a kill. The server's anonymous memory after
+boot grows with the CPU count (measured 2026-09-24: about 4.9 MB on one CPU, 6.2 MB on four,
+9.5 MB on twelve), so a limit above the smallest of those kills on some hosts and not others: at
+8 MiB a twelve-CPU host kills the server during boot, and a four-CPU CI runner completes the run
+with no `oom_kill`. At 16 MiB (measured 2026-08-15) the server neither booted nor died: enough
+charge was reclaimable that the kernel thrashed text pages indefinitely, and the run surfaced as
+a health-wait timeout with `oom_kill 0`, a resource outcome the cgroup never names.
 
-- at 8 MiB the kernel kills the server during boot, reliably — the binary's own text cannot
-  fault in (`memory.events` records `oom_kill 1`);
-- at 16 MiB the server neither boots nor dies: enough charge is reclaimable that the kernel
-  thrashes text pages indefinitely, and the run surfaces as a health-wait timeout with
-  `oom_kill 0` — a resource outcome the cgroup never names.
-
-So the control below pins the discrimination at 8 MiB, where the kill is certain, and the
-constrained walk's limit sits far from both bands. The thrash band is why the floor carries
+So the control below pins the discrimination at 2 MiB, under the anonymous floor on any CPU count,
+and the constrained walk's limit sits far from the thrash band, which is why the floor carries
 headroom rather than hugging the measurement.
 
 **At this corpus size the limit is real but does not yet bite — measured, and stated so nobody
@@ -106,9 +106,10 @@ from .test_stage_invariance import (
 #: measured 16 MiB thrash band).
 PROCESS_FLOOR_BYTES = 48 * 1024 * 1024
 
-#: The out-of-memory control's limit — inside the certain-kill band the module doc records.
+#: The out-of-memory control's limit — under the server's anonymous memory at any CPU count, so
+#: the kill does not depend on the host (module doc).
 #: Contrived on purpose: the control exists to observe the discrimination, not the regime.
-OOM_CONTROL_LIMIT_BYTES = 8 * 1024 * 1024
+OOM_CONTROL_LIMIT_BYTES = 2 * 1024 * 1024
 
 PROFILE_NAMES = ("default", "constrained", "cold", "single-thread")
 
@@ -245,7 +246,7 @@ def test_a_completed_constrained_walk_is_accounted_for_by_its_cgroup(profile_wal
 def test_a_memory_killed_run_reports_a_resource_outcome_not_a_correctness_failure(
     tmp_path_factory, private_catalogue_bundle
 ):
-    """Contrive the kill — a limit inside the measured certain-kill band — and observe the
+    """Contrive the kill — a limit under the server's anonymous memory — and observe the
     discrimination: the walk raises `OutOfMemory` carrying the cgroup's own `oom_kill` count,
     and that type is not the correctness failure's type, so the first real out-of-memory a
     constrained run meets is reported as a measurement rather than triaged as data corruption."""

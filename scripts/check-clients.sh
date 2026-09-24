@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
-# The TypeScript half of the gate.
+# The TypeScript half of the gate: typecheck every package and the operator scripts, run the unit
+# suites, then run core's live test against a real `tessera serve`.
 #
-# **Why this exists.** One rename — `ead7e90`, "a slice is a view, everywhere" — touched 21 files
-# under `clients/` and shipped three defects: two distinct app-state fields collapsed onto one
-# name, a `.slice()` call on a typed array renamed to `.view()`, and a `const view` shadowing a
-# module-level one so every request threw before its initialiser ran. None was caught, because the
-# gate was Rust and Python only, and each cost a separate investigation to find. A client that does
-# not compile is not a smaller failure than a crate that does not compile.
+# The operator scripts are plain `.mjs` and are checked with `checkJs`, so a block-scoped variable
+# used before its declaration (TS2448) fails here rather than at run time.
 #
-# The operator scripts are plain `.mjs` and are checked with `checkJs`, not merely parsed: the third
-# defect above is TS2448, "block-scoped variable used before its declaration", which a syntax check
-# passes and a typecheck catches.
+# The live test builds `data/notebook/` with the `tessera` binary. Where either is missing it skips
+# each test and prints the reason, as the Python suite's server tests do.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 if ! command -v npm >/dev/null 2>&1; then
-  echo "check-clients: npm is not on PATH. The TypeScript client is part of the gate; install" >&2
-  echo "  Node (>=20) and re-run, or run the other three gate commands and say in your report" >&2
-  echo "  that this one did not run — a skipped check reported as a pass is how the three" >&2
-  echo "  defects above reached main." >&2
+  echo "check-clients: npm is not on PATH. Install Node (>=20) and re-run, or say in your report" >&2
+  echo "  that this check did not run." >&2
   exit 1
 fi
 
@@ -29,10 +23,13 @@ if [ ! -d clients/ts/node_modules ]; then
   exit 1
 fi
 
-echo "check-clients: typechecking core, viewer, spike and the operator scripts"
+echo "check-clients: typechecking every package and the operator scripts"
 npm --prefix clients/ts run typecheck --silent
 
 echo "check-clients: running the client test suites"
 npm --prefix clients/ts test --silent
+
+echo "check-clients: running core's live test"
+npm --prefix clients/ts/core run test:live --silent
 
 echo "check-clients: ok"

@@ -79,6 +79,10 @@ pub enum RegistryError {
     /// An artifact carries an access label on a layer whose `artifact_visibility` names no field,
     /// so nothing would read it.
     Access { layer: String, key: Option<String> },
+    /// An artifact created on a layer whose `artifact_visibility` names a field does not state its
+    /// labels, as a build's artifact source without that column does not. A record states no
+    /// label with an explicit empty or null `access`.
+    LabelsUnstated { layer: String, key: Option<String> },
     /// An artifact's access labels are more, or longer, than a stored record can hold.
     AccessTooLong { layer: String, key: Option<String> },
     /// A layer named in `depends_on` is not registered. Refused at create rather than discovered at
@@ -91,6 +95,9 @@ pub enum RegistryError {
     /// replacement is refused where it would dangle a *declared* dependent, so an edge into a layer
     /// nobody declared is an edge nothing protects.
     UndeclaredAttachment { layer: String, target: String },
+    /// An artifact attaches into a layer drawn on none of the views its own layer is drawn on. It
+    /// is served only on a view where its target is, so it could never be served.
+    NoSharedView { layer: String, target: String },
     /// An artifact declares no dependency in a layer that declares one.
     ///
     /// **Fail-closed, because a dependency edge is a visibility term**
@@ -138,8 +145,8 @@ pub enum RegistryError {
     /// minted artifact could not be served: a minted artifact carries nothing but its name, and
     /// this layer requires more of every artifact it publishes.
     ///
-    /// **The same two refusals a publication already makes**, hoisted to admission so they refuse
-    /// the one batch rather than the window it would have joined — and the same two a build makes
+    /// **The same refusals a publication already makes**, hoisted to admission so they refuse
+    /// the one batch rather than the window it would have joined — and the same ones a build makes
     /// over a member table, which is what keeps one declaration from meaning two things at the two
     /// entry points ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
     Unmintable {
@@ -467,6 +474,18 @@ impl std::fmt::Display for RegistryError {
             RegistryError::Content { layer, detail } => {
                 write!(f, "{layer}: {detail}")
             }
+            RegistryError::LabelsUnstated { layer, key } => write!(
+                f,
+                "{layer} reads each artifact's own labels, and the artifact{} states none. State \
+                 labels for every artifact created: `access` on a publication record, null or \
+                 empty for no label of its own; at a build, the layer's label column in the \
+                 artifact source, `access = []` on an inline row, or a row in the artifact source \
+                 for a key a member file names",
+                match key {
+                    Some(key) => format!(" keyed {key}"),
+                    None => String::new(),
+                },
+            ),
             RegistryError::AccessTooLong { layer, key } => write!(
                 f,
                 "{layer}: the artifact{} carries more than {} access labels, or one longer than {} \
@@ -498,6 +517,12 @@ impl std::fmt::Display for RegistryError {
                 "{layer} publishes an artifact attached into {target}, which it does not declare in \
                  depends_on — an attached artifact is withheld with its target, and a dependency \
                  nobody declared is one no replacement checks"
+            ),
+            RegistryError::NoSharedView { layer, target } => write!(
+                f,
+                "{layer} attaches an artifact into {target}, which is drawn on none of the views \
+                 {layer} is drawn on, so the artifact could never be served; declare {layer} on a \
+                 view {target} is drawn on"
             ),
             RegistryError::MissingAttachment { layer, key } => write!(
                 f,
@@ -910,7 +935,7 @@ impl LayerRegistry {
     /// On any error nothing has moved: the checks all run before the first allocation.
     pub fn prepare_create(
         &mut self,
-        declaration: LayerDeclaration,
+        mut declaration: LayerDeclaration,
         alloc: &mut Allocator,
     ) -> Result<WalRecord, RegistryError> {
         declaration.validate()?;
@@ -1187,7 +1212,7 @@ impl LayerRegistry {
                     .map(|(rank, content)| (rank as u16, content.values.clone()))
                     .collect(),
                 shape: artifact.shape.clone(),
-                access: artifact.access.clone(),
+                access: artifact.access.clone().unwrap_or_default(),
             };
             let prepared = self.prepare_fills(
                 layer_name,
@@ -1677,7 +1702,7 @@ impl LayerRegistry {
                 attached_to: None,
                 parent_keys: Vec::new(),
                 shape: None,
-                access: Vec::new(),
+                access: None,
             })
             .collect();
         self.prepare_artifacts(
@@ -1800,12 +1825,16 @@ impl LayerRegistry {
             .filter(|artifact| !declared.is_empty() && artifact.contents.is_empty())
             .count() as u64;
         for artifact in incoming {
-            check_access(
-                layer_name,
-                &layer.declaration,
-                artifact.key.as_deref(),
-                &artifact.access,
-            )?;
+            let Some(access) = &artifact.access else {
+                if layer.declaration.artifact_visibility.carries_own_labels() {
+                    return Err(RegistryError::LabelsUnstated {
+                        layer: layer_name.to_string(),
+                        key: artifact.key.clone(),
+                    });
+                }
+                continue;
+            };
+            check_access(layer_name, &layer.declaration, artifact.key.as_deref(), access)?;
         }
         for (i, artifact) in incoming.iter().enumerate() {
             let refuse = |detail: String| {
@@ -1923,59 +1952,20 @@ impl LayerRegistry {
                     }
                     return Ok(None);
                 };
-                if !layer.declaration.depends_on.contains(&wanted.layer) {
-                    return Err(RegistryError::UndeclaredAttachment {
-                        layer: layer_name.to_string(),
-                        target: wanted.layer.clone(),
-                    });
+                // A new attachment is stored only here: every artifact of a layer that declares
+                // a dependency is published with its attachment, so a later fill of one can only
+                // repeat it.
+                if let Some(target) = self.layers.get(&wanted.layer) {
+                    if !layer.declaration.shares_a_view_with(&target.declaration) {
+                        return Err(RegistryError::NoSharedView {
+                            layer: layer_name.to_string(),
+                            target: wanted.layer.clone(),
+                        });
+                    }
                 }
-                let missing = || RegistryError::NoSuchAttachmentTarget {
-                    layer: layer_name.to_string(),
-                    target: wanted.layer.clone(),
-                    level: wanted.level,
-                    key: wanted.key.clone(),
-                };
-                let target = self.layers.get(&wanted.layer).ok_or_else(missing)?;
-                // The target's own view, on `resolve_attachment`'s rule: inside this artifact's
-                // view where the target layer is group-scoped, and a key held only in another
-                // view is the crossing rather than a missing target (`views.md` §3.5).
-                let in_view = target.declaration.scope.group().and(*view);
-                let ordinal =
-                    match store.ordinal_of_key(&wanted.layer, wanted.level, in_view, &wanted.key) {
-                        Some(ordinal) => ordinal,
-                        None => {
-                            let held_in = store.views_holding_key(
-                                &wanted.layer,
-                                wanted.level,
-                                in_view,
-                                &wanted.key,
-                            );
-                            if !held_in.is_empty() {
-                                return Err(RegistryError::CrossViewEdge {
-                                    layer: layer_name.to_string(),
-                                    level: wanted.level,
-                                    child: artifact
-                                        .key
-                                        .clone()
-                                        .unwrap_or_else(|| "<no key>".to_string()),
-                                    parent: wanted.key.clone(),
-                                    held_in,
-                                });
-                            }
-                            return Err(missing());
-                        }
-                    };
-                let entity = target
-                    .runs
-                    .get(wanted.level as usize)
-                    .and_then(|runs| runs.entity_of(ordinal as u64))
-                    .ok_or_else(missing)?;
-                Ok(Some(crate::membership::Attachment {
-                    layer: wanted.layer.clone(),
-                    level: wanted.level,
-                    ordinal,
-                    entity: EntityId::new(entity),
-                }))
+                let key = artifact.key.as_deref().unwrap_or("<no key>");
+                self.resolve_attachment(layer_name, *view, key, wanted, store)
+                    .map(Some)
             })
             .collect::<Result<_, _>>()?;
 
@@ -2148,7 +2138,9 @@ impl LayerRegistry {
                         }),
                     parents: parents[i].clone(),
                     shape: artifact.shape.clone(),
-                    access: crate::membership::canonical_access(&artifact.access),
+                    access: crate::membership::canonical_access(
+                        artifact.access.as_deref().unwrap_or_default(),
+                    ),
                 }
             })
             .collect();
@@ -2339,9 +2331,10 @@ impl LayerRegistry {
     /// The ordinal a member key names, or **`None` where the layer is open and nothing holds it**
     /// — the resolution the ingest route makes at admission (`artifacts-from-points.md` §6.3).
     ///
-    /// `None` is *this key will be minted at the close*, and it is returned only after the two
+    /// `None` is *this key will be minted at the close*, and it is returned only after the
     /// checks a minted artifact could not pass are made: a layer declaring supplied content kinds,
-    /// and a layer declaring a dependency, each refuse here rather than at the close, so one
+    /// a layer declaring a dependency and a layer reading labels each refuse here rather than at
+    /// the close, so one
     /// caller's key refuses one batch instead of the window it would have joined.
     ///
     /// **Suppression is invisible to this by construction, which is §5's third ruling.** The lookup
@@ -2378,7 +2371,7 @@ impl LayerRegistry {
                         why: why.to_string(),
                     })
                 };
-                // The two refusals `prepare_publish` would make of an artifact carrying only a key,
+                // The refusals `prepare_publish` would make of an artifact carrying only a key,
                 // made here where the batch can still be rejected without effect. Both are
                 // declarations about *every* artifact of the layer, so neither depends on which key
                 // arrived — a layer is mintable or it is not.
@@ -2394,6 +2387,12 @@ impl LayerRegistry {
                     return unmintable(
                         "the layer declares depends_on, so every artifact it publishes attaches to \
                          one, and an artifact with no dependency would be gated on nothing",
+                    );
+                }
+                if declaration.artifact_visibility.carries_own_labels() {
+                    return unmintable(
+                        "the layer reads each artifact's own labels from a field, and a minted \
+                         artifact states none",
                     );
                 }
                 Ok(None)
@@ -2877,10 +2876,8 @@ impl LayerRegistry {
 
     /// Resolves which layers this principal may know exist, once per session.
     ///
-    /// `resolve_label` maps a gate label to its term, returning `None` for a label the dictionary
-    /// does not hold — which makes the layer reachable by nobody. **Fail-closed, and the right
-    /// answer**: a gate naming a term no document carries grants nothing, and treating an
-    /// unresolvable label as "no gate" would publish every such layer to everyone.
+    /// `admits` answers whether the principal holds a layer's gate label. A label it cannot
+    /// resolve admits nobody: treating one as no gate would publish every such layer to everyone.
     ///
     /// Satisfaction is **intersection** with the principal's satisfied set, never a conservative
     /// label join: a join yields an empty required set for a disjunctive gate and would admit every
@@ -3215,7 +3212,7 @@ mod tests {
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
-            access: Vec::new(),
+            access: None,
         }
     }
 
@@ -4526,6 +4523,60 @@ mod tests {
         assert_eq!(artifacts[0].incarnation, 4);
     }
 
+    /// A label on a layer drawn on none of its target layer's views is refused at publication with
+    /// nothing allocated; one on a layer sharing a view with its target publishes.
+    #[test]
+    fn an_attachment_into_a_layer_on_none_of_its_views_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let on = |name: &str, group: &str, views: &[&str]| {
+            let mut d = scoped(name, group);
+            d.views = views.iter().map(|view| view.to_string()).collect();
+            d
+        };
+        register(
+            &mut reg,
+            &mut alloc,
+            on("clusters/q", "quarter", &["quarter:q1", "halves:q1"]),
+        )
+        .unwrap();
+        let put = reg
+            .prepare_put("clusters/q", 0, &[in_view("c1", "q1", &[1])], &store, &mut alloc, &AnyView)
+            .unwrap();
+        apply_put(&mut reg, &mut store, &put);
+        let label = || {
+            let mut label = in_view("n1", "q1", &[1]);
+            label.attached_to = Some(crate::membership::IncomingAttachment {
+                layer: "clusters/q".into(),
+                level: 0,
+                key: "c1".into(),
+            });
+            label
+        };
+        for (name, group, view) in [
+            ("labels/t", "tally", "tally:q1"),
+            ("labels/w", "wholes", "wholes:q1"),
+            ("labels/h", "halves", "halves:q1"),
+        ] {
+            let mut d = on(name, group, &[view]);
+            d.depends_on = vec!["clusters/q".into()];
+            register(&mut reg, &mut alloc, d).unwrap();
+        }
+
+        for refused_layer in ["labels/t", "labels/w"] {
+            let refused = reg
+                .prepare_put(refused_layer, 0, &[label()], &store, &mut alloc, &AnyView)
+                .unwrap_err();
+            assert!(matches!(refused, RegistryError::NoSharedView { .. }), "{refused:?}");
+            assert_eq!(store.next_ordinal(refused_layer, 0), 0);
+        }
+        let put = reg
+            .prepare_put("labels/h", 0, &[label()], &store, &mut alloc, &AnyView)
+            .unwrap();
+        assert_eq!(put.created, 1);
+    }
+
     /// **`view` is part of the identity** (`ingest.md` §1.5, `views.md` §3.5): required on a
     /// group-scoped layer, refused on an entity-scoped one, and the same key in two views is two
     /// artifacts with two ordinals and two entities.
@@ -4780,7 +4831,7 @@ mod tests {
         let mut store = ArtifactStore::default();
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
         let mut labelled = incoming("c1", &[1]);
-        labelled.access = vec![b"team-a".to_vec()];
+        labelled.access = Some(vec![b"team-a".to_vec()]);
         let refused = reg
             .prepare_put(
                 "clusters/a",
@@ -4800,6 +4851,39 @@ mod tests {
         assert!(matches!(refused, RegistryError::Access { .. }), "{refused:?}");
     }
 
+    /// An artifact stating no label of its own, on [`IncomingArtifact::access`]'s terms.
+    fn unlabelled(key: &str, members: &[u32]) -> IncomingArtifact {
+        let mut artifact = incoming(key, members);
+        artifact.access = Some(Vec::new());
+        artifact
+    }
+
+    /// On a layer naming a field, an artifact that states no labels is refused with nothing
+    /// allocated, whether alone or beside one that states them, and one stating an empty list
+    /// publishes with no label.
+    #[test]
+    fn an_artifact_stating_no_labels_on_a_layer_reading_them_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let store = ArtifactStore::default();
+        let mut d = declaration("clusters/a");
+        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        register(&mut reg, &mut alloc, d).unwrap();
+        let mark = alloc.low_water();
+        for batch in [vec![incoming("c1", &[1])], vec![unlabelled("c0", &[2]), incoming("c1", &[1])]]
+        {
+            let refused = reg
+                .prepare_put("clusters/a", 0, &batch, &store, &mut alloc, &AnyView)
+                .unwrap_err();
+            assert!(matches!(refused, RegistryError::LabelsUnstated { .. }), "{refused:?}");
+            assert_eq!(alloc.low_water(), mark, "nothing is allocated for a refused batch");
+        }
+        let prepared = reg
+            .prepare_put("clusters/a", 0, &[unlabelled("c1", &[1])], &store, &mut alloc, &AnyView)
+            .unwrap();
+        assert_eq!(prepared.created, 1);
+    }
+
     /// On a layer naming a field, a label is published in canonical order, filled once on a held
     /// artifact that has none, accepted again unchanged, and a different one is a part conflict.
     #[test]
@@ -4812,12 +4896,12 @@ mod tests {
         register(&mut reg, &mut alloc, d).unwrap();
 
         let mut first = incoming("c1", &[1]);
-        first.access = vec![b"b".to_vec(), b"a".to_vec(), b"b".to_vec()];
+        first.access = Some(vec![b"b".to_vec(), b"a".to_vec(), b"b".to_vec()]);
         let prepared = reg
             .prepare_put(
                 "clusters/a",
                 0,
-                &[first, incoming("c2", &[2])],
+                &[first, unlabelled("c2", &[2])],
                 &store,
                 &mut alloc,
                 &AnyView,
@@ -4831,7 +4915,7 @@ mod tests {
         assert!(store.get("clusters/a", 0, 1).unwrap().access.is_empty());
 
         let mut fill = incoming("c2", &[]);
-        fill.access = vec![b"c".to_vec()];
+        fill.access = Some(vec![b"c".to_vec()]);
         let prepared = reg
             .prepare_put(
                 "clusters/a",
@@ -4862,7 +4946,7 @@ mod tests {
         assert!(again.fills.is_empty());
 
         let mut other = incoming("c2", &[]);
-        other.access = vec![b"d".to_vec()];
+        other.access = Some(vec![b"d".to_vec()]);
         let refused = reg
             .prepare_put("clusters/a", 0, &[other], &store, &mut alloc, &AnyView)
             .unwrap_err();
@@ -4879,24 +4963,24 @@ mod tests {
         let mut d = declaration("clusters/a");
         d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
         register(&mut reg, &mut alloc, d).unwrap();
-        publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[incoming("held", &[1])]).unwrap();
+        publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[unlabelled("held", &[1])]).unwrap();
 
         let long = vec![b'x'; u16::MAX as usize];
         let many: Vec<Vec<u8>> = (0..u16::MAX as u32).map(|i| i.to_le_bytes().to_vec()).collect();
         for access in [vec![long.clone()], many.clone()] {
             let mut fresh = incoming("c1", &[1]);
-            fresh.access = access.clone();
+            fresh.access = Some(access.clone());
             assert!(reg
                 .prepare_put("clusters/a", 0, &[fresh], &store, &mut alloc, &AnyView)
                 .is_err());
             let mut fill = incoming("held", &[]);
-            fill.access = access;
+            fill.access = Some(access);
             assert!(reg
                 .prepare_put("clusters/a", 0, &[fill], &store, &mut alloc, &AnyView)
                 .is_err());
         }
         let mut fits = incoming("c2", &[1]);
-        fits.access = vec![vec![b'x'; u16::MAX as usize - 1]];
+        fits.access = Some(vec![vec![b'x'; u16::MAX as usize - 1]]);
         assert!(reg.prepare_put(
             "clusters/a",
             0,

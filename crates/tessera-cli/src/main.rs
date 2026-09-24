@@ -250,6 +250,19 @@ enum Command {
         #[command(subcommand)]
         command: CorpusCommand,
     },
+    /// Ask the server this deployment describes whether it is ready: exit 0 when its viewer
+    /// plane answers `/readyz` with 200, and 1 otherwise.
+    ///
+    /// For a container's health check, run beside the server. An unspecified bind address
+    /// (`0.0.0.0` or `[::]`) is reached on loopback.
+    Health {
+        /// This deployment's `tessera.toml`, instead of the one found by walking up.
+        #[arg(long, value_name = "PATH")]
+        deployment: Option<PathBuf>,
+        /// Seconds to wait for the connection and for the answer.
+        #[arg(long, default_value_t = 3)]
+        timeout: u64,
+    },
     /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
     ///
     /// Takes no required flag: the same `tessera.toml` `tessera build` wrote into names the
@@ -382,6 +395,105 @@ enum ArtifactCensusLayer {
     Partition,
     Boundary,
     Treed,
+}
+
+/// `GET /readyz` on the viewer plane, over one plain HTTP/1.1 connection, within `timeout` in all.
+fn readyz(mut addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<(), String> {
+    use std::io::{ErrorKind, Read, Write};
+    if addr.ip().is_unspecified() {
+        addr.set_ip(match addr {
+            std::net::SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+        });
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let failed = |e: std::io::Error| match e.kind() {
+        ErrorKind::WouldBlock | ErrorKind::TimedOut => format!(
+            "{addr} did not answer /readyz within {} s",
+            timeout.as_secs()
+        ),
+        _ => format!("{addr}: {e}"),
+    };
+    // A zero duration is refused as a socket timeout, so the last moment before the deadline
+    // waits a millisecond.
+    let remaining = || {
+        deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .max(std::time::Duration::from_millis(1))
+    };
+    let mut stream =
+        std::net::TcpStream::connect_timeout(&addr, remaining()).map_err(|e| match e.kind() {
+            ErrorKind::WouldBlock | ErrorKind::TimedOut => failed(e),
+            _ => format!("no server answering at {addr}: {e}"),
+        })?;
+    stream
+        .set_write_timeout(Some(remaining()))
+        .and_then(|()| {
+            stream.write_all(
+                format!("GET /readyz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+        })
+        .map_err(failed)?;
+    let mut head = [0u8; 16];
+    let mut read = 0;
+    while read < head.len() {
+        stream.set_read_timeout(Some(remaining())).map_err(failed)?;
+        match stream.read(&mut head[read..]) {
+            Ok(0) => break,
+            Ok(n) => read += n,
+            Err(e) => return Err(failed(e)),
+        }
+    }
+    let status_line = String::from_utf8_lossy(&head[..read]);
+    let code = status_line
+        .strip_prefix("HTTP/")
+        .and_then(|rest| rest.split(' ').nth(1));
+    match code {
+        Some("200") => Ok(()),
+        Some(code) => Err(format!("{addr} answered /readyz with {code}: not ready")),
+        None => Err(format!("{addr} did not answer /readyz with HTTP")),
+    }
+}
+
+/// Exit with success on the first SIGTERM or SIGINT, from a thread of its own so the handler is
+/// in place before the bundle opens. Inside a container the server is PID 1, which the kernel
+/// sends no signal it has no handler for.
+fn exit_on_termination() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("tessera serve: SIGTERM and SIGINT will not stop the server: {e}");
+            return;
+        }
+    };
+    let (term, int) = runtime.block_on(async {
+        (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        )
+    });
+    let (mut term, mut int) = match (term, int) {
+        (Ok(term), Ok(int)) => (term, int),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("tessera serve: SIGTERM and SIGINT will not stop the server: {e}");
+            return;
+        }
+    };
+    std::thread::spawn(move || {
+        let name = runtime.block_on(async {
+            tokio::select! {
+                _ = term.recv() => "SIGTERM",
+                _ = int.recv() => "SIGINT",
+            }
+        });
+        eprintln!("tessera serve: stopped on {name}");
+        std::process::exit(0);
+    });
 }
 
 fn parse_extent(raw: &str) -> Result<Bounds, String> {
@@ -1911,13 +2023,46 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Command::Health {
+            deployment,
+            timeout,
+        } => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let config = match tessera_config::open(deployment.as_deref(), &cwd) {
+                Ok((_, config)) => config,
+                Err(e) => {
+                    eprintln!("tessera health: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(viewer) = config.viewer_addr else {
+                eprintln!(
+                    "tessera health: this deployment declares no viewer address; add one under \
+                     `[serve]`, such as `viewer = \"127.0.0.1:8080\"`"
+                );
+                return ExitCode::FAILURE;
+            };
+            match readyz(viewer, std::time::Duration::from_secs(timeout)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("tessera health: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Command::Serve { deployment } => {
             // Diagnostics on stderr, because stdout carries one thing: the JSON line naming the
             // three bound addresses, which a supervisor reads as the process's first stdout line
             // (`tessera_server::serve_announcing`).
+            // Colour only for a terminal, so a container's or a supervisor's log is plain text.
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
+                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
                 .init();
+            // SIGTERM or SIGINT ends the process at once, including while the bundle opens. A
+            // write is fsynced before it is acknowledged, so stopping loses only what no client
+            // was told had landed, and the next start replays the log.
+            exit_on_termination();
             let deployment = match tessera_config::discover(
                 deployment.as_deref(),
                 &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),

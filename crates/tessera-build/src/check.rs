@@ -113,7 +113,7 @@ pub struct SourceChecked {
 #[derive(Debug, Clone)]
 pub struct FramePreview {
     pub view: String,
-    pub projection: &'static str,
+    pub projection: tessera_spatial::Projection,
     /// The box declared, and the square it snaps to. `None` under `auto`.
     pub snapped: Option<(crate::config::LonLatBox, tessera_spatial::frame::Snap)>,
 }
@@ -126,15 +126,19 @@ impl std::fmt::Display for FramePreview {
                 f_,
                 "  {:<20} {}, `extent = \"auto\"` — the frame is fitted to the data, so it is not \
                  known until the build reads the points",
-                self.view, self.projection
+                self.view,
+                self.projection.name()
             ),
             Some((asked, snap)) => {
-                let f = snap.square.bounds();
+                // y runs south, so the square's minimum y is its maximum latitude.
+                let square = snap.square.bounds();
+                let (lon_min, lat_max) = self.projection.inverse(square.x_min, square.y_min);
+                let (lon_max, lat_min) = self.projection.inverse(square.x_max, square.y_max);
                 writeln!(
                     f_,
                     "  {:<20} {}, asked for lon [{}, {}], lat [{}, {}]",
                     self.view,
-                    self.projection,
+                    self.projection.name(),
                     asked.lon_min,
                     asked.lon_max,
                     asked.lat_min,
@@ -142,7 +146,8 @@ impl std::fmt::Display for FramePreview {
                 )?;
                 write!(
                     f_,
-                    "  {:<20} {} to the square at z{} ({}, {}) — x [{}, {}], y [{}, {}]",
+                    "  {:<20} {} to the square at z{} ({}, {}) — lon [{lon_min}, {lon_max}], lat \
+                     [{lat_min}, {lat_max}]",
                     "",
                     if snap.floored {
                         "FLOORED at the offset cap rather than fitted"
@@ -152,10 +157,6 @@ impl std::fmt::Display for FramePreview {
                     snap.square.z,
                     snap.square.x,
                     snap.square.y,
-                    f.x_min,
-                    f.x_max,
-                    f.y_min,
-                    f.y_max
                 )
             }
         }
@@ -556,7 +557,7 @@ fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckRep
     if view.projection != tessera_spatial::Projection::None {
         report.frames.push(FramePreview {
             view: view.name.clone(),
-            projection: view.projection.name(),
+            projection: view.projection,
             snapped: match &view.extent {
                 Extent::LonLat(asked) => {
                     Some((*asked, crate::config::snap_lon_lat(view.projection, asked)))
@@ -617,7 +618,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
     if group.projection != tessera_spatial::Projection::None {
         report.frames.push(FramePreview {
             view: group.name.clone(),
-            projection: group.projection.name(),
+            projection: group.projection,
             snapped: match &group.extent {
                 Extent::LonLat(asked) => {
                     Some((*asked, crate::config::snap_lon_lat(group.projection, asked)))
@@ -764,8 +765,9 @@ fn check_access_column(object: &Object, field: &str, schema: &ArrowSchema, repor
 }
 
 /// What is wrong with the column named as where access labels are read from, or `None`: it must be
-/// present, and a string, a list of strings or a dictionary of strings. The check and the build's
-/// reader of an artifact source both ask this.
+/// present, and a string, a list of strings or a dictionary of strings. The check asks both; the
+/// build's reader asks only of a column the source carries, and a source without it states no
+/// labels, which the publication refuses.
 pub(crate) fn access_column_problem(field: &str, schema: &ArrowSchema) -> Option<String> {
     let Some((_, found)) = schema.column_with_name(field) else {
         return Some(format!(
@@ -774,12 +776,7 @@ pub(crate) fn access_column_problem(field: &str, schema: &ArrowSchema) -> Option
             columns(schema)
         ));
     };
-    let ok = match found.data_type() {
-        DataType::List(inner) | DataType::LargeList(inner) => crate::utf8::is_utf8(inner.data_type()),
-        DataType::Dictionary(_, values) => crate::utf8::is_utf8(values),
-        other => crate::utf8::is_utf8(other),
-    };
-    (!ok).then(|| {
+    (!tessera_store::access_column::is_access_type(found.data_type())).then(|| {
         format!(
             "the access column '{field}' holds {:?}. Access labels are strings, one or a list of \
              them",
@@ -1056,10 +1053,7 @@ fn write_disclosure(out: &mut String, disclosure: &crate::disclosure::Disclosure
         }
     }
     if !disclosure.attributes.is_empty() {
-        let _ = writeln!(
-            out,
-            "\nattributes (in declaration order, which is the stored column order)"
-        );
+        let _ = writeln!(out, "\nattributes");
         for attribute in &disclosure.attributes {
             let _ = writeln!(
                 out,

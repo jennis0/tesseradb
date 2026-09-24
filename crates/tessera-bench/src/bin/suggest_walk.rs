@@ -183,8 +183,10 @@ fn container_count(posting: &PostingRef<'_>) -> usize {
     match posting {
         PostingRef::Roaring(view) => view.iter().for_each(&mut note),
         PostingRef::Array(bytes) => bytes
-            .chunks_exact(4)
-            .for_each(|c| note(u32::from_le_bytes(c.try_into().unwrap()))),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .for_each(|c| note(u32::from_le_bytes(*c))),
     }
     n
 }

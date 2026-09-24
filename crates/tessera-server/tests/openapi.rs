@@ -709,8 +709,8 @@ async fn categories_match_the_description_in_both_forms_and_both_refusals() {
 }
 
 /// The typeahead's own shape: `SuggestResponse` on a real page, `count` present iff asked, and
-/// the refusals `/v1/categories/{column}` does not have — `q` over 256 bytes and an unknown query
-/// parameter, both `422`.
+/// its refusals, among them the one `/v1/categories/{column}` does not have: `q` over 256 bytes is
+/// `422`.
 #[tokio::test]
 async fn suggest_matches_the_description_and_its_own_refusals() {
     let doc = description();
@@ -1290,8 +1290,9 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
 /// probes are asserted below to be the only ones.
 ///
 /// **Each route is probed twice over.** Once with a request the route accepts, and once with each
-/// way it can be malformed: a query string that does not parse, a body that is not JSON, a body
-/// with the wrong content type, JSON of the wrong shape, an identifier that is not a number.
+/// way it can be malformed: a query string that does not parse or names a parameter the route does
+/// not define, a body that is not JSON, a body with the wrong content type, JSON of the wrong
+/// shape, an identifier that is not a number.
 /// Without a valid token every one of them answers 401: the token is checked before the query
 /// string, the path or the body is read, so an unauthenticated caller learns nothing about what
 /// the route would have accepted and no body is buffered for them. With a valid token the same
@@ -1299,8 +1300,8 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
 /// refusing everything.
 ///
 /// **Mutations this kills:** dropping the `ViewerSession` argument from any viewer handler;
-/// moving it after a `Query`, `Path` or `Json` argument; mounting a new viewer route with no
-/// credential check; answering a bare `StatusCode::UNAUTHORIZED` instead of
+/// moving it after an `ApiQuery`, `Path` or `ApiJson` argument; mounting a new viewer route with
+/// no credential check; answering a bare `StatusCode::UNAUTHORIZED` instead of
 /// `ApiError::BadCredential`'s envelope; and, on the probe half, putting `/healthz` or `/readyz`
 /// behind the credential.
 #[tokio::test]
@@ -1365,10 +1366,7 @@ async fn every_viewer_route_requires_a_session_token() {
                 if kind != Malformed::No {
                     let resp =
                         send_viewer_probe(&f.server, &method, path, kind, Some(token)).await;
-                    if matches!(
-                        kind,
-                        Malformed::Shape | Malformed::UnknownField | Malformed::UnknownPinField
-                    ) {
+                    if with_token == 422 {
                         assert_refusal(&doc, resp, with_token, "contract").await;
                     } else {
                         assert_eq!(
@@ -1407,6 +1405,8 @@ enum Malformed {
     No,
     /// A query string whose `limit` is not a number.
     Query,
+    /// A query string naming a parameter the route does not define.
+    UnknownQuery,
     /// A body that is not JSON.
     Syntax,
     /// A JSON body sent as `text/plain`.
@@ -1422,17 +1422,13 @@ enum Malformed {
 }
 
 /// The ways `method path` can be malformed, each with the status a caller holding a valid token
-/// gets for it. `/v1/meta` reads no query string, so its malformed query is served; `suggest`
-/// refuses its own query string with 422.
+/// gets for it. `/v1/meta` reads no query string, so its malformed query is served.
 fn malformed_viewer_requests(method: &reqwest::Method, path: &str) -> Vec<(Malformed, u16)> {
     let mut kinds = Vec::new();
     if *method == reqwest::Method::GET {
-        let status = match path {
-            "/v1/meta" => 200,
-            "/v1/categories/{column}/suggest" => 422,
-            _ => 400,
-        };
+        let status = if path == "/v1/meta" { 200 } else { 422 };
         kinds.push((Malformed::Query, status));
+        kinds.push((Malformed::UnknownQuery, status));
     } else {
         kinds.extend([
             (Malformed::Syntax, 400),
@@ -1471,6 +1467,7 @@ async fn send_viewer_probe(
         .join("/");
     let url = match kind {
         Malformed::Query => server.viewer_url(&format!("{concrete}?limit=not-a-number")),
+        Malformed::UnknownQuery => server.viewer_url(&format!("{concrete}?unknown_param=1")),
         _ => server.viewer_url(&concrete),
     };
     let mut req = server.client.request(method.clone(), url);

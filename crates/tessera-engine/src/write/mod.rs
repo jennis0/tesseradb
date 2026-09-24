@@ -267,13 +267,13 @@ impl tessera_lifecycle::GroupViews for ServedViews<'_> {
 }
 
 /// Remove every artifact of a group-scoped layer whose view is not at the incarnation it was
-/// published under. A view drop calls this, and so does an open, over records packed before a
-/// drop or replayed from before it.
+/// published under, returning the levels it changed. A view drop calls this, and so does an open,
+/// over records packed before a drop or replayed from before it.
 pub(crate) fn retire_dead_view_artifacts(
     registry: &LayerRegistry,
     store: &mut ArtifactStore,
     manifest: &tessera_store::manifest::Manifest,
-) -> tessera_lifecycle::RetiredViews {
+) -> Vec<(String, u32)> {
     store.retire_dead_views(|layer, key, incarnation| {
         match registry.get(layer).and_then(|held| held.declaration.scope.group()) {
             Some(group) => manifest.incarnation_of_key(group, key) == Some(incarnation),
