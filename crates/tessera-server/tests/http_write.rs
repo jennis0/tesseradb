@@ -1914,12 +1914,7 @@ async fn an_out_of_extent_coordinate_is_clamped_onto_the_edge_and_counted() {
     assert_eq!(body["clamped"], 2, "{body}");
     tick(&server).await;
 
-    let ids: Vec<u64> = body["tessera_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|id| id.as_u64().unwrap())
-        .collect();
+    let ids = ingested_ids(&body);
     let corner = served_cells(&server.state.engine, [995.0, 995.0, 1000.0, 1000.0]);
     assert_eq!(corner[&ids[0]], (65_535, 65_535));
     assert_eq!(corner[&ids[2]], (65_535, 65_535));
