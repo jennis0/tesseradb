@@ -86,10 +86,12 @@ prefix of that tile's full answer, in that same order. Nothing is skipped or reo
 off. What did arrive was computed against one version of the corpus and can be trusted for what it
 is. Only the trailer's absence marks the response as incomplete.
 
-Two deadlines bound how long delivery may take. A send that stalls longer than
-`serve.stream_write_stall_ms` aborts the stream. The whole delivery, from the first flush to the
-trailer, may not outlive `serve.stream_deadline_ms`, however the client is reading. A reader that
-accepts just enough bytes to dodge the stall limit still cannot hold a slot forever.
+Two deadlines bound how long a viewport's delivery may take. A send that stalls longer than
+`serve.stream_write_stall_ms` aborts the stream. The whole delivery of a viewport response, from
+the first flush to the trailer, may not outlive `serve.stream_deadline_ms`, however the client is
+reading. A reader that accepts just enough bytes to dodge the stall limit still cannot hold a slot
+forever. A bulk read uses the same two settings differently, as described under
+[bulk reads](#bulk-reads).
 
 If a client disconnects before a response finishes, the server notices at points it checks between
 steps of the work still to do, and stops rather than continuing to compute or send.
@@ -110,17 +112,15 @@ stays held until delivery ends, whichever of the four exits reaches it first.*
 
 ## Bulk reads
 
-`POST /v1/items` and `POST /v1/artifacts` read items and artifacts page by page, each response
-continuing from the cursor the one before it returned
-([queries](queries.md#reading-items-and-artifacts-in-bulk)). They run under an admission limit of
-their own, `serve.bulk_admission`, so a long read takes no slot from the viewport, item and
-session routes, and those routes take none from it. The limit counts reads running at once. A
-read past it is refused at once with the 429 and one-second interval described above. No bulk
-read waits for a slot, and a limit of 0 refuses every bulk read. A bulk read holds its permit for
-its whole response, since it builds each page while the one before it is being sent, so it has no
-separate compute permit to release early. It shares the engine's compute threads and the
-process's memory with every other request. `/control/status` reports the limit under `bulk`, with
-the reads in flight and how many have been refused.
+The bulk reads, `POST /v1/items` and `POST /v1/artifacts`
+([queries](queries.md#reading-items-and-artifacts-in-bulk)), run under an admission limit of their
+own, `serve.bulk_admission`, so a long read takes no slot from the viewport, item and session
+routes, and those routes take none from it. A read past the limit is refused at once with the 429
+and one-second interval above, and a limit of 0 refuses every bulk read. An admitted read holds its
+permit until its response ends, on a blocking thread of its own: the server allows one such thread
+for each read the limit admits. Bulk reads share the machine's CPU and the process's memory with
+every other request. `/control/status` reports the limit under `bulk`, with the reads in flight and
+how many have been refused.
 
 | Key | Default | What it bounds |
 |---|---|---|
@@ -128,33 +128,31 @@ the reads in flight and how many have been refused.
 | `serve.max_page_rows` | 100,000 | rows in a page; published in `/v1/meta` as `selection.max_page_rows` |
 | `serve.max_page_bytes` | 64 MiB | a page's Arrow bytes before compression; published as `selection.max_page_bytes`; at most 2 GiB |
 | `serve.bulk_response_bytes` | 256 MiB | the Arrow bytes one response may carry: no page starts that could take the response past it; at least `serve.max_page_bytes` |
-| `serve.bulk_response_ms` | 30,000 | how long one response runs before it ends at the next point where stopping moves the cursor on |
+| `serve.bulk_response_ms` | 30,000 | how long one response runs |
 
 The server refuses a configuration that sets `serve.max_page_rows` or `serve.max_page_bytes` to 0,
 `serve.max_page_bytes` above 2 GiB, or `serve.bulk_response_bytes` below `serve.max_page_bytes`.
 
-A bulk read holds about seven pages of `serve.max_page_bytes` at its peak: about four while it
-builds a page, and three encoded pages, two queued for the connection and one being written to
-it. The first figure is measured: 4.05 times the page ceiling, with rows of very uneven size.
-All bulk reads together can therefore hold `serve.bulk_admission` × 7 × `serve.max_page_bytes`,
-which is 896 MiB at the defaults. The server has no memory cap of its own to hold that figure
-against, so it logs it at startup, as `bulk_read_memory_bytes`, for the operator to compare with
-the memory cap the process runs under.
+The server allows seven pages of `serve.max_page_bytes` for each bulk read. Building a page takes
+about four: the engine's memory test, reading notes of 8 bytes and then of 100 KB under a 256 KiB
+ceiling, measured 4.05 in the engine alone and holds it below eight. Encoded pages on their way to
+the socket take at most two more, one in the body channel and one being written. All bulk reads
+together can hold `serve.bulk_admission` × 7 × `serve.max_page_bytes`, 896 MiB at the defaults. The
+server has no memory cap of its own to hold that against, so it logs the figure at startup as
+`bulk_read_memory_bytes`, for the operator to compare with the cap the process runs under.
 
-A response the server ends closes with a trailer, and the trailer carries a cursor unless no
-row remains. The server ends a response when it has sent the pages asked for, reached its byte
-or time budget, or run out of rows. The stream deadline, `serve.stream_deadline_ms`, is measured
-from admission for a bulk read. When it passes, the engine sends the page under way short and ends
-the response with a trailer marked `deadline`, carrying a cursor to continue from. At the defaults
-the time budget of 30 seconds ends a response well before the deadline of 60 seconds, so the
-deadline is a backstop.
+Every end the server chooses closes with a trailer that says why and carries the cursor to continue
+from, null once no row remains. A response stops for its time budget only where stopping moves the
+cursor on, so it can overrun by one filter evaluation and one chunk of its scan. The stream
+deadline, `serve.stream_deadline_ms`, is measured from admission for a bulk read, and it cancels
+the engine's work: the page under way is sent short and a trailer marked `deadline` follows. Those
+last frames go at the client's pace, bounded by the stall limit, since a bulk read's body has no
+send deadline of its own. At the defaults the 30-second time budget ends a response well before the
+60-second deadline.
 
-A client that stops reading gets no trailer. When a frame cannot be queued for
-`serve.stream_write_stall_ms` because the client has not taken the frames before it, the server
-stops the read and cuts the connection. The body ends without its trailer, which the client reads
-as incomplete, and the client resumes from the last page end it received. A client that
-disconnects stops the read too. However a response ends, its permit is released when the read
-stops.
+A client that stops reading for `serve.stream_write_stall_ms` is cut off without a trailer. It
+resumes from the last page end it received and discards any records frame that no page end
+follows.
 
 ```mermaid
 flowchart TD
@@ -165,9 +163,7 @@ flowchart TD
   P -. "client disconnects or a fault occurs" .-> X2[read stops, no trailer;<br/>permit released]
 ```
 
-*A bulk-read response. Every end the server chooses carries a trailer. A client that stops
-reading or goes away, or a fault, leaves a body without one, and the client resumes from the last
-page end it received.*
+*How a bulk-read response ends. The permit is released on every path.*
 
 ## What a client may already hold
 
