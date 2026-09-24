@@ -123,19 +123,18 @@ This separation means TesseraDB can sit underneath an application with its own u
 
 | | |
 |---|---|
-| [`docs/design/`](docs/design/) | **The specification.** Start at its [README](docs/design/README.md) |
-| [`docs/decisions/`](docs/decisions/) | Settled decisions, one per file, immutable |
-| [`docs/agents/`](docs/agents/) | How work is done here — process, parallelism, house style |
-| [`docs/evidence/`](docs/evidence/) | Measurements, investigations, prior art. Never normative |
+| [`docs/`](docs/README.md) | The documentation site's source. Its home page is [`docs/index.md`](docs/index.md); `mkdocs build --strict` builds it |
+| [`docs/system/`](docs/system/) | How Tessera works. Start at the [overview](docs/system/overview.md) |
 | [`crates/`](crates/) | The Rust workspace — one binary, `tessera build` and `tessera serve` |
 | [`clients/ts/`](clients/ts/) | The TypeScript client and a deck.gl viewer |
+| [`clients/py/`](clients/py/) | The Python client, `tesseradb`, with a notebook widget |
 | [`conformance/`](conformance/), [`reference/`](reference/) | The conformance suite and its independent Python oracle |
 
 ## Who this is for
 
-- **Evaluating the approach, or assuring it** → [`docs/design/README.md`](docs/design/README.md)
+- **Evaluating the approach, or assuring it** → [`docs/system/overview.md`](docs/system/overview.md)
   is the guided tour: the guarantees, how they are enforced, and what is accepted.
-- **Contributing, human or agent** → [`docs/agents/README.md`](docs/agents/README.md).
+- **Contributing, human or agent** → [`CLAUDE.md`](CLAUDE.md).
 - **Deploying it** → not yet. There is no packaging story and no operations guide, because there is
   nothing worth deploying until the conformance suite is complete.
 

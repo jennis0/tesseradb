@@ -1,0 +1,106 @@
+site_name: Tessera
+site_description: A per-viewer, access-controlled map over billions of records, served from one machine.
+repo_url: https://github.com/jennis0/tesseradb
+edit_uri: ""
+docs_dir: docs
+strict: true
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+
+# Working notes and the style guide live under docs/ but are not pages of the site.
+exclude_docs: |
+  /README.md
+  /writing.md
+  /outstanding.md
+  /roadmap.md
+  /ingest-campaign.md
+  /guides/views.md
+  /pytest.ini
+  /tests/
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search:
+      lang: en
+  - neoteroi.mkdocsoad:
+      use_pymdownx: true
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [clients/py]
+          options:
+            docstring_style: google
+            show_root_heading: true
+            show_root_full_path: false
+            show_source: false
+            members_order: source
+            filters: ["!^_"]
+
+nav:
+  - Home: index.md
+  - Start:
+      - start/index.md
+  - Guides:
+      - guides/index.md
+  - Reference:
+      - reference/index.md
+      - HTTP API: reference/http.md
+      - Wire framing: openapi/README.md
+      - Capabilities: reference/capabilities.md
+      - CLI: reference/cli.md
+      - Configuration schema: reference/schema.md
+      - Python client: reference/python.md
+      - TypeScript client: reference/typescript.md
+      - Components: reference/components.md
+  - How it works:
+      - Overview: system/overview.md
+      - Data model: system/data-model.md
+      - Access control: system/access-control.md
+      - Security: system/security.md
+      - Queries: system/queries.md
+      - Annotations: system/annotations.md
+      - Write path: system/write-path.md
+      - Serving: system/serving.md
+      - Clients: system/clients.md
+  - Developer:
+      - developer/index.md
