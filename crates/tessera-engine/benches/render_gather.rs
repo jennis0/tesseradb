@@ -1,11 +1,12 @@
 //! The viewport's render-column gather, over a column every item holds and one half the items
 //! lack.
 //!
-//! Two bundles of 10⁶ items, each with four rendered `f64` columns: in `whole` every item carries
-//! a value, in `sparse` every second item carries none. A request at zoom 6 over 63 × 63 tiles
+//! Three bundles of 10⁶ items, each with four rendered `f64` columns: in `whole` every item
+//! carries a value, in `rare` one item in a thousand carries none, and in `sparse` every second
+//! item carries none. A request at zoom 6 over 63 × 63 tiles
 //! serves about 6.3 × 10⁴ points under the production density settings, so the four columns'
 //! gather is a large share of the request. The tile count is below the parallel sweep's threshold,
-//! so the whole request runs on the calling thread. Both bundles are built in a temporary
+//! so the whole request runs on the calling thread. The bundles are built in a temporary
 //! directory, so the bench needs no fixture on disk.
 //!
 //! Before criterion times the whole request, each case prints the gather stage's time and the
@@ -57,8 +58,9 @@ fn write(path: &Path, columns: Vec<(Field, ArrayRef)>) {
     writer.close().unwrap();
 }
 
-/// A bundle whose four render columns hold a value for every item, or for every second one.
-fn bundle(dir: &Path, sparse: bool) -> Engine {
+/// A bundle whose four render columns hold no value for one item in `absent_every`, or for none
+/// where it is `None`.
+fn bundle(dir: &Path, absent_every: Option<u64>) -> Engine {
     let ids: Vec<u64> = (0..N).collect();
     let spread = |e: u64, salt: u64| {
         (e.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(salt as u32) % 65_536) as f64 + 0.5
@@ -80,7 +82,10 @@ fn bundle(dir: &Path, sparse: bool) -> Engine {
     for (n, name) in COLUMNS.iter().enumerate() {
         let values: Float64Array = ids
             .iter()
-            .map(|&e| (!sparse || e % 2 == 0).then_some((e + n as u64) as f64))
+            .map(|&e| {
+                let absent = absent_every.is_some_and(|every| e % every == 0);
+                (!absent).then_some((e + n as u64) as f64)
+            })
             .collect();
         columns.push((Field::new(*name, DataType::Float64, true), Arc::new(values)));
     }
@@ -180,9 +185,9 @@ fn thread_cpu_ns() -> u64 {
 
 fn bench_render_gather(c: &mut Criterion) {
     let mut group = c.benchmark_group("render_gather");
-    for (name, sparse) in [("whole", false), ("sparse", true)] {
+    for (name, absent_every) in [("whole", None), ("rare", Some(1000)), ("sparse", Some(2))] {
         let tmp = TempDir::new().unwrap();
-        let engine = bundle(tmp.path(), sparse);
+        let engine = bundle(tmp.path(), absent_every);
         let session = engine.authorise(br#"{"terms": ["0"]}"#).unwrap();
         let request = || ViewportRequest::new("s0", 6, [0.0, 0.0, 64512.0, 64512.0], 500);
         let mut gather = Vec::new();

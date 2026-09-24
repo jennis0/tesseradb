@@ -325,7 +325,7 @@ fn record_fields(
         };
         let d = &manifest.declared_scalars[declared_index];
         let row = u32::try_from(local).expect("a segment holds fewer than 2^32 rows");
-        if !RenderPresence::of(segment, &d.name, d.vocabulary.is_some()).contains(row) {
+        if !RowPresence::of(segment, &d.name, d.vocabulary.is_some()).contains(row) {
             continue;
         }
         values[declared_index] = row_field_out(view, local, d, &generation.vocabularies);
@@ -464,7 +464,7 @@ pub(crate) fn flushed_row_scalar(
             let Ok(local_row) = u32::try_from(local) else {
                 continue;
             };
-            if !RenderPresence::of(segment, &d.name, d.vocabulary.is_some()).contains(local_row) {
+            if !RowPresence::of(segment, &d.name, d.vocabulary.is_some()).contains(local_row) {
                 continue;
             }
             let resolved = resolve_scalars(segment, &render_scalars);

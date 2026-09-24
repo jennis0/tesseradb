@@ -29,7 +29,7 @@ use super::plan::{FieldPlan, Home, Named, SystemField};
 use super::walk::{PageCx, Taken};
 use crate::error::{EngineError, Result};
 use crate::viewport::{
-    category_code, category_key, slice_value, stored_field_out, OpenView, RenderPresence,
+    category_code, category_key, slice_value, stored_field_out, OpenView, RowPresence,
     ScalarOut,
 };
 use crate::Generation;
@@ -241,7 +241,7 @@ fn value_bytes(value: &RV) -> usize {
 }
 
 /// A rendered field's values: the slot in the row tail, where the segment holds the column and
-/// the row carries a value, read as [`RenderPresence`] says. A category's absence is its code 0,
+/// the row carries a value, read as [`RowPresence`] says. A category's absence is its code 0,
 /// which `slice_value` answers.
 fn rendered_values(
     segments: &[(&tessera_store::read::SegmentData, u32)],
@@ -255,7 +255,7 @@ fn rendered_values(
     let presences: Vec<_> = segments
         .iter()
         .map(|(segment, _)| {
-            RenderPresence::of(segment, &field.name, field.vocabulary.is_some())
+            RowPresence::of(segment, &field.name, field.vocabulary.is_some())
         })
         .collect();
     rows.iter()

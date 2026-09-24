@@ -129,13 +129,13 @@ impl PointColumns {
     }
 }
 
-/// One render column's gathered values, and which of them are a value.
+/// One render column's gathered values, and which points carry one.
 ///
 /// `present` is `None` where every point carries a value, the common case, which then costs no
 /// buffer. Otherwise `present[i]` is false where point *i* has no value: a number, bool,
 /// timestamp or string whose segment's presence record says so, or whose segment has no such
-/// column. `values[i]` is then the type's zero and means nothing. A category is never absent here:
-/// its absence is code 0 in `values`.
+/// column. `values[i]` is then the type's zero and means nothing. A category has no `present`;
+/// code 0 in `values` is its absence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PointScalar {
     pub values: ColumnBuf,
@@ -183,7 +183,8 @@ impl PointScalar {
     }
 
     fn wire_bytes_estimate(&self) -> usize {
-        self.values.wire_bytes_estimate() + self.values.len().div_ceil(8)
+        let validity = self.present.as_ref().map_or(0, |present| present.len().div_ceil(8));
+        self.values.wire_bytes_estimate() + validity
     }
 }
 

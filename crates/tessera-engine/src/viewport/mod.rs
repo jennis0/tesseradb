@@ -90,7 +90,7 @@ pub(crate) use row_filter::{
 };
 pub(crate) use served::ServedView;
 pub(crate) use sweep::{
-    scoped_render_families, segment_holding, segment_row_of, RenderPresence,
+    scoped_render_families, segment_holding, segment_row_of, RowPresence,
 };
 
 pub(crate) use geometry::OpenView;
@@ -140,7 +140,7 @@ impl Engine {
         identity_key.copy_from_slice(&identity_digest[..16]);
 
         let mut hasher = Sha256::new();
-        hasher.update(b"tessera-content-key-v2");
+        hasher.update(b"tessera-content-key-v1");
         hasher.update(identity_key);
         hasher.update(geometry.fragment.watermark.to_le_bytes());
         hasher.update(generation.overlay_version.to_le_bytes());

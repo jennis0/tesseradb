@@ -714,13 +714,14 @@ pub(super) fn resolve_scalars<'a>(
 /// A category's absence is its code 0 in the column, so a category is `Every` here. A number,
 /// bool, timestamp or string is absent where the segment's presence record says so, and on every
 /// row of a segment that has no such column.
-pub(crate) enum RenderPresence<'a> {
+#[derive(Clone, Copy)]
+pub(crate) enum RowPresence<'a> {
     Every,
     NoRow,
     Rows(&'a croaring::Bitmap),
 }
 
-impl<'a> RenderPresence<'a> {
+impl<'a> RowPresence<'a> {
     pub(crate) fn of(segment: &'a SegmentData, name: &str, category: bool) -> Self {
         Self::read(segment, name, category, segment.columns.scalar(name).is_some())
     }
@@ -728,50 +729,56 @@ impl<'a> RenderPresence<'a> {
     /// [`Self::of`] where the caller has already looked up whether the segment holds the column.
     fn read(segment: &'a SegmentData, name: &str, category: bool, held: bool) -> Self {
         if category {
-            return RenderPresence::Every;
+            return RowPresence::Every;
         }
         if !held {
-            return RenderPresence::NoRow;
+            return RowPresence::NoRow;
         }
         match segment.columns.presence(name).bitmap() {
-            None => RenderPresence::Every,
-            Some(rows) => RenderPresence::Rows(rows),
+            None => RowPresence::Every,
+            Some(rows) => RowPresence::Rows(rows),
+        }
+    }
+
+    /// This presence over `rows` alone: `Every` where each of them carries a value.
+    fn within(self, rows: Range<u32>) -> Self {
+        match self {
+            RowPresence::Rows(held) if held.contains_range(rows) => RowPresence::Every,
+            other => other,
         }
     }
 
     #[inline]
     pub(crate) fn contains(&self, row: u32) -> bool {
         match self {
-            RenderPresence::Every => true,
-            RenderPresence::NoRow => false,
-            RenderPresence::Rows(rows) => rows.contains(row),
+            RowPresence::Every => true,
+            RowPresence::NoRow => false,
+            RowPresence::Rows(rows) => rows.contains(row),
         }
     }
 }
 
-/// Which of `placed` carry a value for `d`, or `None` where all of them do. The per-row test runs
-/// only where some part has an absence.
-fn gather_presence(
-    parts: &SelectionParts<'_>,
-    resolved: &[ResolvedScalars<'_>],
-    ci: usize,
+/// One column's values at `placed`, each read by `value(part, local)`, and which of them carry a
+/// value: `None` where every part's rows all do, and then no row is tested.
+#[inline]
+fn gather_column<T>(
     placed: &[(u32, u32)],
-    d: &DeclaredScalar,
-) -> Option<Vec<bool>> {
-    let parts = parts.as_slice();
-    let presence_of = |at: usize| {
-        let held = resolved[at][ci].is_some();
-        RenderPresence::read(parts[at].segment, &d.name, d.vocabulary.is_some(), held)
-    };
-    if (0..parts.len()).all(|at| matches!(presence_of(at), RenderPresence::Every)) {
-        return None;
+    presence: &[RowPresence<'_>],
+    value: impl Fn(usize, usize) -> T,
+) -> (Vec<T>, Option<Vec<bool>>) {
+    let mut out = Vec::with_capacity(placed.len());
+    for &(part, local) in placed {
+        out.push(value(part as usize, local as usize));
     }
-    let per_part: Vec<RenderPresence<'_>> = (0..parts.len()).map(presence_of).collect();
+    if presence.iter().all(|p| matches!(p, RowPresence::Every)) {
+        return (out, None);
+    }
     let present: Vec<bool> = placed
         .iter()
-        .map(|&(part, local)| per_part[part as usize].contains(local))
+        .map(|&(part, local)| presence[part as usize].contains(local))
         .collect();
-    (!present.iter().all(|&p| p)).then_some(present)
+    let every = present.iter().all(|&held| held);
+    (out, (!every).then_some(present))
 }
 
 /// Gather one tile's selected rows column-major. `tessera_id` and position are one load each from
@@ -827,9 +834,16 @@ pub(super) fn gather_tile_columns(
     };
 
     let mut scalars = Vec::with_capacity(declared.len());
+    // One buffer for every column: each part's presence over the rows the tile spans in it.
+    let mut presence: Vec<RowPresence<'_>> = Vec::with_capacity(resolved.len());
     for (ci, d) in declared.iter().enumerate() {
+        presence.clear();
+        presence.extend(parts.as_slice().iter().zip(&resolved).map(|(part, r)| {
+            RowPresence::read(part.segment, &d.name, d.vocabulary.is_some(), r[ci].is_some())
+                .within(part.range.clone())
+        }));
         // The typed slice per part is resolved before the row loop, so the loop below carries no
-        // `match` at all.
+        // type dispatch.
         macro_rules! build {
             ($(($v:ident, $t:ty)),* $(,)?) => {
                 match d.arrow_type {
@@ -842,14 +856,14 @@ pub(super) fn gather_tile_columns(
                                 _ => return Err(malformed(d)),
                             }
                         }
-                        let mut out = Vec::with_capacity(rows.len());
-                        for &(part, local) in &placed {
-                            out.push(match per_part[part as usize] {
-                                Some(s) => s[local as usize],
-                                None => <$t>::default(),
+                        let (out, present) =
+                            gather_column(&placed, &presence, |part, local| {
+                                match per_part[part] {
+                                    Some(s) => s[local],
+                                    None => <$t>::default(),
+                                }
                             });
-                        }
-                        ColumnBuf::$v(out)
+                        (ColumnBuf::$v(out), present)
                     })*
                     ScalarType::Bool => {
                         let mut per_part = Vec::with_capacity(resolved.len());
@@ -860,14 +874,14 @@ pub(super) fn gather_tile_columns(
                                 _ => return Err(malformed(d)),
                             }
                         }
-                        let mut out = Vec::with_capacity(rows.len());
-                        for &(part, local) in &placed {
-                            out.push(match per_part[part as usize] {
-                                Some(a) => a.value(local as usize),
-                                None => false,
+                        let (out, present) =
+                            gather_column(&placed, &presence, |part, local| {
+                                match per_part[part] {
+                                    Some(a) => a.value(local),
+                                    None => false,
+                                }
                             });
-                        }
-                        ColumnBuf::Bool(out)
+                        (ColumnBuf::Bool(out), present)
                     }
                     // A keyword shares this arm: rendered, it is its bytes. A segment carrying
                     // anything else under the name refuses here rather than being served.
@@ -880,23 +894,20 @@ pub(super) fn gather_tile_columns(
                                 _ => return Err(malformed(d)),
                             }
                         }
-                        let mut out = Vec::with_capacity(rows.len());
-                        for &(part, local) in &placed {
-                            out.push(match per_part[part as usize] {
-                                Some(a) => a.value(local as usize).to_string(),
-                                None => String::new(),
+                        let (out, present) =
+                            gather_column(&placed, &presence, |part, local| {
+                                match per_part[part] {
+                                    Some(a) => a.value(local).to_string(),
+                                    None => String::new(),
+                                }
                             });
-                        }
-                        ColumnBuf::Utf8(out)
+                        (ColumnBuf::Utf8(out), present)
                     }
                 }
             };
         }
-        let values = flat_families!(build);
-        scalars.push(PointScalar {
-            values,
-            present: gather_presence(parts, &resolved, ci, &placed, d),
-        });
+        let (values, present) = flat_families!(build);
+        scalars.push(PointScalar { values, present });
     }
 
     Ok(PointColumns {
