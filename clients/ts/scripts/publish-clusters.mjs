@@ -37,6 +37,8 @@
 // rather than promote it.
 import {readFile} from 'node:fs/promises';
 import {tableFromIPC} from 'apache-arrow';
+// Loading a `.ts` module needs Node 22.18 or later, which strips its types.
+import {Control} from '../core/src/control.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -45,11 +47,11 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const control = args.control ?? 'http://127.0.0.1:45721';
 const sessionCred = process.env.TESSERA_SESSION_CRED;
 const operatorCred = process.env.TESSERA_OPERATOR_CRED;
 if (!sessionCred) throw new Error('set TESSERA_SESSION_CRED');
 if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
+const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', operatorCredential: operatorCred});
 
 const CLUSTERS = Number(args.clusters ?? 24);
 const SAMPLE_DEPTH = Number(args['sample-depth'] ?? 7);
@@ -87,6 +89,12 @@ if (labelLayer && !labelTerm) {
 }
 
 // --------------------------------------------------------------------------------- the plumbing
+
+/** A control answer's body, or a throw naming the refusal. */
+function accepted(what, answer) {
+  if (!answer.ok) throw new Error(`${what}: ${answer.status} ${answer.detail}`);
+  return answer.body;
+}
 
 async function authorise(terms) {
   const r = await fetch(`${session}/session/authorise`, {
@@ -296,40 +304,26 @@ const declaration = {
   levels: []
 };
 
-const registered = await fetch(`${control}/control/layers`, {
-  method: 'PUT',
-  headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
-  body: JSON.stringify(declaration)
-});
-if (!registered.ok) throw new Error(`register: ${registered.status} ${await registered.text()}`);
-const layer = await registered.json();
-console.log(`registered ${layer.name} (tessera_id ${layer.tessera_id}) — the address to suppress it by`);
+const layer = accepted('register', await control.declareLayer(declaration));
+console.log(`registered ${layer.name} (tessera_id ${layer.tessera_id}), the address to suppress it by`);
 
-// The layer name is path-shaped, so its slash is percent-encoded into the one path segment the
-// route captures.
-const artifactsUrl = `${control}/control/layers/${encodeURIComponent(layerName)}/artifacts`;
 let batch = [];
 let batchMembers = 0;
 let published = 0;
 const publish = async () => {
   if (batch.length === 0) return;
-  const r = await fetch(artifactsUrl, {
-    method: 'PUT',
-    headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
-    body: JSON.stringify({
-      level: 0,
-      // Per request, not per member: a clustering names its whole corpus, and a per-member tag
-      // would be most of the body.
-      addressing: 'tessera',
-      idset: meta.idset,
-      artifacts: batch.map((c) => ({
-        key: c.key,
-        members: c.members.map((id) => id.toString())
-      }))
-    })
+  const answer = await control.publish(layerName, {
+    level: 0,
+    // Per request: a clustering names its whole corpus, and a per-member tag would be most of the
+    // body.
+    addressing: 'tessera',
+    idset: meta.idset,
+    artifacts: batch.map((c) => ({
+      key: c.key,
+      members: c.members.map((id) => id.toString())
+    }))
   });
-  if (!r.ok) throw new Error(`publish: ${r.status} ${await r.text()}`);
-  published += (await r.json()).artifacts.length;
+  published += accepted('publish', answer).artifacts.length;
   batch = [];
   batchMembers = 0;
 };
@@ -384,13 +378,8 @@ if (labelLayer) {
     // refused at publication — a dependency nobody declared is one no replacement checks.
     depends_on: [layerName]
   };
-  const labelResp = await fetch(`${control}/control/layers`, {
-    method: 'PUT',
-    headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
-    body: JSON.stringify(labelDeclaration)
-  });
-  if (!labelResp.ok) throw new Error(`register labels: ${labelResp.status} ${await labelResp.text()}`);
-  console.log(`registered ${labelLayer} (tessera_id ${(await labelResp.json()).tessera_id})`);
+  const labelsRegistered = accepted('register labels', await control.declareLayer(labelDeclaration));
+  console.log(`registered ${labelLayer} (tessera_id ${labelsRegistered.tessera_id})`);
 
   const labels = [];
   for (const cluster of clusters) {
@@ -412,32 +401,26 @@ if (labelLayer) {
   }
   console.log(`${labels.length} labels of ${clusters.length} clusters carry a per-term variation`);
 
-  const labelsUrl = `${control}/control/layers/${encodeURIComponent(labelLayer)}/artifacts`;
   let pending = [];
   let pendingIds = 0;
   const publishLabels = async () => {
     if (pending.length === 0) return;
-    const r = await fetch(labelsUrl, {
-      method: 'PUT',
-      headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
-      body: JSON.stringify({
-        level: 0,
-        addressing: 'tessera',
-        idset: meta.idset,
-        artifacts: pending.map((l) => ({
-          key: l.key,
-          members: l.members.map((id) => id.toString()),
-          content: l.variations.map((v) => ({
-            values: v.values,
-            generated_from: v.generated_from.map((id) => id.toString())
-          })),
-          // The target is named by its own stable key: an ordinal never crosses the boundary, so a
-          // key is the only address a caller holds for it.
-          attached_to: {layer: layerName, level: 0, key: l.cluster}
-        }))
-      })
+    const answer = await control.publish(labelLayer, {
+      level: 0,
+      addressing: 'tessera',
+      idset: meta.idset,
+      artifacts: pending.map((l) => ({
+        key: l.key,
+        members: l.members.map((id) => id.toString()),
+        content: l.variations.map((v) => ({
+          values: v.values,
+          generated_from: v.generated_from.map((id) => id.toString())
+        })),
+        // The target is named by its stable key, the only address a caller holds for it.
+        attached_to: {layer: layerName, level: 0, key: l.cluster}
+      }))
     });
-    if (!r.ok) throw new Error(`publish labels: ${r.status} ${await r.text()}`);
+    accepted('publish labels', answer);
     pending = [];
     pendingIds = 0;
   };
