@@ -3,8 +3,7 @@ import {LayerManager, type Layer} from '@deck.gl/core';
 import {SessionArtifactTable, mortonOfTile, servedLineage, type ArtifactsProjection, type ComposedTile, type MarksProjection, type TilesProjection} from '@tesseradb/client';
 import {band} from '../../core/test/support.js';
 import {binDensity, filterDensity} from '../src/density.js';
-import {TesseraLayer, type TesseraLayerProps} from '../src/layer.js';
-import {LookupTexture} from '../src/lut.js';
+import {TesseraLayer, type TesseraLayerInternalProps} from '../src/layer.js';
 import {MarkSlab} from '../src/slab.js';
 import {fakeDevice, type FakeResource} from './fake-device.js';
 
@@ -51,8 +50,8 @@ function host() {
   return {
     device,
     errors,
-    draw: (props: Partial<TesseraLayerProps>) =>
-      manager.setLayers([new TesseraLayer({id: 'tessera', depth: 2, status: 'shown', artifacts: artifacts(), ...props} as TesseraLayerProps)]),
+    draw: (props: Partial<TesseraLayerInternalProps>) =>
+      manager.setLayers([new TesseraLayer({id: 'tessera', depth: 2, status: 'shown', artifacts: artifacts(), ...props} as TesseraLayerInternalProps)]),
     remove: () => manager.setLayers([]),
     buffer: () => {
       const data = marksLayer()?.props.data as {attributes: Record<string, {buffer?: FakeResource}>} | undefined;
@@ -102,21 +101,17 @@ describe('TesseraLayer GPU resources', () => {
     expect(texture!.destroyed).toBe(true);
   });
 
-  it('draws through the slab and lookup texture the host passes and never releases them', () => {
+  it('draws through the slab the host passes and never releases it', () => {
     const h = host();
     const slab = new MarkSlab();
-    const lut = new LookupTexture();
     slab.attach(h.device);
-    lut.attach(h.device);
-    h.draw({marks: marks(3), slab, lut});
-    h.draw({marks: marks(3), slab, lut, scheme: 'light'});
+    h.draw({marks: marks(3), slab});
+    h.draw({marks: marks(3), slab, scheme: 'light'});
     expect(h.errors).toEqual([]);
     const buffer = slab.layers()[0]!.draw.gpu!.positions as unknown as FakeResource;
     expect(h.buffer()).toBe(buffer);
-    expect(h.texture()).toBe(lut.gpu);
     h.remove();
     expect(buffer.destroyed).toBe(false);
-    expect((lut.gpu as unknown as FakeResource).destroyed).toBe(false);
     expect(slab.drawn).toBe(3);
   });
 
@@ -132,18 +127,6 @@ describe('TesseraLayer GPU resources', () => {
     expect(h.buffer()).toBe(slab.layers()[0]!.draw.gpu!.positions);
   });
 
-  it('releases its own lookup texture when the host starts passing one', () => {
-    const h = host();
-    h.draw({marks: marks(3)});
-    const own = h.texture();
-    const lut = new LookupTexture();
-    lut.attach(h.device);
-    h.draw({marks: marks(3), lut});
-    expect(h.errors).toEqual([]);
-    expect(own!.destroyed).toBe(true);
-    expect(h.texture()).toBe(lut.gpu);
-  });
-
   it('leaves a slab the host never attached on the CPU path', () => {
     const h = host();
     const slab = new MarkSlab();
@@ -155,14 +138,6 @@ describe('TesseraLayer GPU resources', () => {
     expect(h.cpuPositions()).toBe(draw.positions);
   });
 
-  it('leaves a lookup texture the host never attached off the GPU', () => {
-    const h = host();
-    const lut = new LookupTexture();
-    h.draw({marks: marks(3), lut});
-    expect(h.errors).toEqual([]);
-    expect(lut.gpu).toBeNull();
-    expect(h.texture()).toBeNull();
-  });
 });
 
 describe('TesseraLayer density wash', () => {

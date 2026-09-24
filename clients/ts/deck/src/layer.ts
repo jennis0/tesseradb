@@ -73,10 +73,6 @@ export type TesseraLayerProps = CompositeLayerProps & {
   meta?: Meta | null;
   legend?: LegendProjection | null;
   status?: PresentedStatus;
-  /** The marks' GPU buffers. Unset, the layer makes and releases its own; a host's is attached and released by the host. */
-  slab?: MarkSlab | null;
-  /** The cluster colour lookup texture, on the same terms as `slab`. */
-  lut?: LookupTexture | null;
   /** The level to colour at for a nested layer; undefined colours at the deepest served. */
   clusterLevel?: number;
   /** Whether names and counts are drawn at the centroids. */
@@ -642,7 +638,13 @@ export function displayName(artifact: Artifact, topics: ReadonlyMap<bigint, stri
   return artifactName(artifact) ?? topics.get(artifact.tesseraId) ?? null;
 }
 
-export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
+/** The props `<tessera-map>` also passes, through `@tesseradb/deck/internal`. */
+export type TesseraLayerInternalProps = TesseraLayerProps & {
+  /** The marks' GPU buffers. Unset, the layer makes and releases its own; a host's is attached and released by the host. */
+  slab?: MarkSlab | null;
+};
+
+export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
   static override layerName = 'TesseraLayer';
   static override defaultProps = {
     store: null,
@@ -654,7 +656,6 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     legend: null,
     status: 'idle',
     slab: null,
-    lut: null,
     clusterLevel: undefined,
     labels: true,
     scheme: 'dark',
@@ -705,7 +706,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     if (params.changeFlags.propsChanged && (this.props.store ?? null) !== this.state.subscribed) {
       this.follow(this.props.store ?? null);
     }
-    this.release({slab: !!this.props.slab, lut: !!this.props.lut});
+    if (this.props.slab) this.release({slab: true, lut: false});
   }
 
   override finalizeState(context: Parameters<CompositeLayer['finalizeState']>[0]): void {
@@ -765,9 +766,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return this.state.ownSlab;
   }
 
-  /** The host's lookup texture, else the layer's own, made on the layer's device at first use. */
+  /** The layer's lookup texture, made on the layer's device at first use. */
   private lut(): LookupTexture {
-    if (this.props.lut) return this.props.lut;
     if (!this.state.ownLut) {
       this.state.ownLut = new LookupTexture();
       if (this.context.device) this.state.ownLut.attach(this.context.device);
@@ -775,7 +775,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return this.state.ownLut;
   }
 
-  /** Free the GPU resources the layer made; the host's own are left alone. */
+  /** Free the GPU resources the layer made; a host's slab is left alone. */
   private release(which: {slab: boolean; lut: boolean}): void {
     if (which.slab) {
       this.state.ownSlab?.clear();
