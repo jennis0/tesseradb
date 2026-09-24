@@ -4,17 +4,12 @@ import {decodeViewport} from '../src/decode.js';
 import {refused} from './support.js';
 
 /**
- * The shape on the wire (contracts §3.2 item 4, `polygon-membership.md` §7.1).
- *
- * `shape_x` and `shape_y` are `list<list<list<uint32>>>` — parts, then rings, then vertices —
- * because a hole and a second part are different things to a renderer: a membership that is two
- * separated clouds is two parts and never one polygon over the gap between them, and a boundary's
- * enclave is a hole of its part and never a second shape drawn over it. The decoder descends three
- * levels and **checks** that the two axes agree at every one of them: they agree by construction,
- * and a decoder that assumes it misdraws silently on the day something else does not.
+ * The shape on the wire. `shape_x` and `shape_y` are `list<list<list<uint32>>>` (parts, rings,
+ * vertices) because a hole and a second part draw differently: two separated clouds are two parts,
+ * and an enclave is a hole of its part. The decoder checks that the two axes agree at every level.
  */
 
-/** A framed `/v1/viewport` body: `u8 kind, u32 LE length, payload`, repeated (frame.ts). */
+/** A framed `/v1/viewport` body: `u8 kind, u32 LE length, payload`, repeated. */
 function frame(parts: {kind: number; payload: Uint8Array}[]): Uint8Array {
   const total = parts.reduce((n, p) => n + 5 + p.payload.length, 0);
   const out = new Uint8Array(total);
@@ -34,17 +29,15 @@ const RINGS = new List(new Field('item', new List(new Field('item', new Uint32()
 const PARTS = new List(new Field('item', RINGS, true));
 const FLAT = new List(new Field('item', new Uint32(), false));
 const TEXTS = new List(new Field('item', new Utf8(), true));
-/** `parent_ids: list<uint64>` (contracts §3.2 r71): the served parents in this response, ascending. */
+/** `parent_ids: list<uint64>`: the served parents in this response, ascending. */
 const PARENTS = new List(new Field('item', new Uint64(), false));
 
 type Parts = number[][][] | null;
 
 /**
- * An artifacts-frame body over one row per pair of shape axes — the annotation channel's own
- * shape, `k = 0` and no points frame: the fixed columns `layer` (dictionary u16/utf8) through
- * `target`, the two shape columns trailing. The axes are given
- * separately so a test can make them disagree, which the server never does and which is exactly
- * why the decoder must not assume it.
+ * An artifacts-frame body with one row per pair of shape axes, as the annotation channel's `k = 0`
+ * request gets: no points frame, the fixed columns, then the two shape columns. The axes are given
+ * separately so a test can make them disagree.
  */
 function body(rows: {x: Parts; y: Parts}[], type: {x: unknown; y: unknown} = {x: PARTS, y: PARTS}): Uint8Array {
   const tiles = tableToIPC(new Table({tile: u64([0n]), visible: u64([1n]), matched: u64([1n]), served: u64([0n]), highlighted: u64([1n])}), 'stream');
@@ -62,11 +55,10 @@ function body(rows: {x: Parts; y: Parts}[], type: {x: unknown; y: unknown} = {x:
       box_max_y: vectorFromArray(rows.map(() => 9), new Uint32()),
       content: vectorFromArray(rows.map(() => [] as string[]), TEXTS),
       parent_ids: vectorFromArray(rows.map(() => [] as bigint[]), PARENTS),
-      // Required: the decoder refuses a body without it, since reading a missing rung as 0 would
-      // draw a whole hierarchy at its coarsest.
+      // Required: the decoder refuses a body without it.
       rung: vectorFromArray(rows.map(() => 0), new Uint32()),
       matched: vectorFromArray(rows.map(() => null), new Bool()),
-      // Required too, and all-null here: these rows are a clustering, attached to nothing.
+      // Required, and all null: these rows are a clustering, attached to nothing.
       target: vectorFromArray(rows.map(() => null as bigint | null), new Uint64()),
       shape_x: vectorFromArray(rows.map((r) => r.x), type.x as never),
       shape_y: vectorFromArray(rows.map((r) => r.y), type.y as never)
@@ -89,8 +81,8 @@ describe('a shape is parts of rings', () => {
         {x: [[[1, 2, 1]]], y: [[[1, 1, 2]]]}
       ])
     );
-    // Two separated clouds are two parts, and nothing joins them: a flat decode would have read
-    // one eight-vertex ring whose fifth edge crosses the ground between the clouds.
+    // Two separated clouds are two parts; a flat decode would read one ring whose fifth edge crosses
+    // the gap.
     expect(r.artifacts[0]!.shape).toEqual([
       [
         [
@@ -133,9 +125,8 @@ describe('a shape is parts of rings', () => {
   });
 
   it('keeps a degenerate group as the ring the wire sent — one vertex, or two', () => {
-    // A one-member group is a ring of one vertex and a two-member group a ring of two
-    // (`artifact-shapes.md` §1). Rounding either up to a triangle here would invent an area no
-    // member occupies, so the decoder carries what it was sent and the drawing decides.
+    // A one-member group is a ring of one vertex and a two-member group a ring of two. The decoder
+    // carries what it was sent and does not invent an area.
     const r = decodeViewport(body([{x: [[[4]], [[1, 2]], [[0, 3, 3]]], y: [[[4]], [[1, 1]], [[0, 0, 3]]]}]));
     expect(r.artifacts[0]!.shape!.map((part) => part[0]!.length)).toEqual([1, 2, 3]);
     expect(r.artifacts[0]!.shape![0]).toEqual([[[4, 4]]]);
@@ -144,8 +135,8 @@ describe('a shape is parts of rings', () => {
   it('reads a null shape as the layer drawing none, not as an empty shape', () => {
     const r = decodeViewport(body([{x: null, y: null}]));
     expect(r.artifacts[0]!.shape).toBeNull();
-    // The box is still there: a null geometry column is a fact about the layer, never about the
-    // viewer, and this layer declares a box.
+    // The box is still there: a null geometry column is about the layer, and this layer declares a
+    // box.
     expect(r.artifacts[0]!.box).toEqual([0, 0, 9, 9]);
   });
 
@@ -155,9 +146,7 @@ describe('a shape is parts of rings', () => {
   });
 
   it('refuses a two-level shape column — the rings of vertices a server older than the shape columns sends', () => {
-    // The nesting is what makes a rings-of-vertices reader fail its downcast rather than read a
-    // part as a ring. The same downcast in reverse is checked here, at the schema, so the skew is
-    // a named refusal and not a shape read one level too shallow.
+    // A column one level too shallow is refused at the schema rather than read as parts.
     refused(() => decodeViewport(body([{x: [[0, 3, 3]] as never, y: [[0, 0, 3]] as never}], {x: RINGS, y: RINGS})));
     refused(() => decodeViewport(body([{x: [0, 3, 3] as never, y: [0, 0, 3] as never}], {x: FLAT, y: FLAT})));
   });

@@ -53,7 +53,7 @@ describe('the artifact channel', () => {
     ch.schedule(view, 400, 300);
     ch.schedule(view, 400, 300);
     expect(viewport).not.toHaveBeenCalled(); // still settling
-    expect(clock.pending).toBe(1); // one timer, the latest — the earlier ones were cancelled
+    expect(clock.pending).toBe(1); // the earlier timers were cancelled
     clock.fire();
     await settle();
     expect(viewport).toHaveBeenCalledTimes(1);
@@ -104,16 +104,15 @@ describe('the artifact channel', () => {
     expect(table.live).toBe(2);
     const ordinalOfOne = table.ordinalOf('clusters/x', 1n);
 
-    // Panned onto disjoint ground. **The served set is only what is in view** — merging it would
-    // draw clusters for ground the user has left — and the payloads of what was left are held.
+    // Panned onto disjoint ground: the served set is only what is in view, and the payloads of what
+    // was left are held.
     served = [clusterX(3n)];
     ch.refresh(view, 400, 300);
     await settle();
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([3n]);
     expect(ch.current.held).toBe(3);
     expect(table.live).toBe(3);
-    // And the ordinal an artifact was named under survives the pan, which is what stops the
-    // colours and the lookup texture being rebuilt for ground already seen.
+    // The ordinal an artifact was named under survives the pan, so its colour is not rebuilt.
     expect(table.ordinalOf('clusters/x', 1n)).toBe(ordinalOfOne);
   });
 
@@ -133,13 +132,13 @@ describe('the artifact channel', () => {
     await settle();
     const settled = table.version;
 
-    // Back over the original ground: the table does not move, so nothing downstream of its version
-    // — the colour map, the lookup texture — is rebuilt.
+    // Back over the original ground: the table does not move, so nothing derived from its version
+    // is rebuilt.
     served = [clusterX(1n), clusterX(2n)];
     ch.refresh(view, 400, 300);
     await settle();
     expect(table.version).toBe(settled);
-    // The payload is the *same object*, so a consumer memoising on identity does no work either.
+    // The payload is the same object, so a consumer memoising on identity does no work.
     expect(ch.current.artifacts[0]).toBe(first);
   });
 
@@ -178,8 +177,7 @@ describe('the artifact channel', () => {
     await settle();
     expect(ch.current.artifacts.map((a) => a.matched)).toEqual([true, false]);
 
-    // The filter changed; the payloads did not, and the bit is the one thing that
-    // must not be answered from the store.
+    // The filter changed and the payloads did not; `matched` is not answered from the store.
     served = [clusterX(1n, null, false), clusterX(2n, null, true)];
     ch.refresh(view, 400, 300);
     await settle();
@@ -205,7 +203,7 @@ describe('the artifact channel', () => {
     expect(ch.current.artifacts).toHaveLength(0);
     expect(ch.current.held).toBe(2);
 
-    // A reset is the other half of rule 7: a new principal, and nothing held may be named again.
+    // A reset drops the store: a new principal.
     ch.reset();
     expect(ch.current.held).toBe(0);
     expect(table.live).toBe(0);
@@ -223,14 +221,14 @@ describe('the artifact channel', () => {
   });
 });
 
-// ---------------------------------------------------------------- the fetch model (design §6)
+// ---------------------------------------------------------------- the fetch model
 
 /** One depth-5 tile in wire grid units: the world is 2^32 per axis, 32 tiles across at depth 5. */
 const S = 2 ** 27;
 
-/** The partial view: bbox [37.5, 40.625, 62.5, 59.375] world units → tiles 2..3 × 2..3 at depth 5. */
+/** The partial view: bbox [37.5, 40.625, 62.5, 59.375] world units, tiles 2..3 x 2..3 at depth 5. */
 const partialView = {target: [50, 50, 0] as [number, number, number], zoom: 4};
-/** The whole-extent view: bbox [0, 0, 512, 512] — every tile at any depth. */
+/** The whole-extent view: bbox [0, 0, 512, 512], every tile at any depth. */
 const wholeView = {target: [256, 256, 0] as [number, number, number], zoom: 0};
 
 const geo = (
@@ -258,9 +256,9 @@ const geo = (
 const inside = () => geo(1n, {box: [3 * S, 3 * S, 3.5 * S, 3.5 * S], centroid: [3.2 * S, 3.2 * S]});
 /** Wholly outside it. */
 const outside = () => geo(2n, {box: [6 * S, 6 * S, 7 * S, 7 * S], centroid: [6.5 * S, 6.5 * S]});
-/** Its edge crosses the viewport while its centroid sits outside — it is drawn, by its box. */
+/** Its edge crosses the viewport while its centroid is outside; drawn, by its box. */
 const edge = () => geo(3n, {box: [0.5 * S, 0.5 * S, 2.5 * S, 2.5 * S], centroid: [S, S]});
-/** No geometry at all — always in view. */
+/** No geometry at all; always in view. */
 const bare = () => geo(4n);
 
 const decl = (over: Partial<Layer> = {}): Layer =>
@@ -309,8 +307,8 @@ describe('held-whole tracking and the local serve', () => {
 
     ch.refresh(partialView, 400, 300);
     await settle();
-    // No request: the pick is local, and it is the set the server would have named — the artifact
-    // whose edge crosses the viewport with its centroid outside is drawn, the bare one always is.
+    // No request: the pick is local and matches what the server would name, including the artifact
+    // whose edge crosses the viewport and the one with no geometry.
     expect(viewport).toHaveBeenCalledTimes(1);
     expect(ch.current.status).toBe('shown');
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([1n, 3n, 4n]);
@@ -377,7 +375,7 @@ describe('held-whole tracking and the local serve', () => {
     ch.refresh(wholeView, 512, 512);
     await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(false);
-    expect(clock.pending).toBe(0); // and it is never a promotion candidate either
+    expect(clock.pending).toBe(0); // not a promotion candidate either
 
     ch.refresh(partialView, 400, 300);
     await settle();
@@ -429,8 +427,7 @@ describe('held-whole tracking and the local serve', () => {
     await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
 
-    // A filtered ask reaches the network and comes back under a new generation: rule 7 drops the
-    // store, and a mark must never outlive it.
+    // A filtered ask comes back under a new generation, which drops the store and its marks.
     filter = {archive: {eq: 'x'}};
     keys = {contentKey: 'ck2'};
     ch.refresh(partialView, 400, 300);
@@ -440,7 +437,7 @@ describe('held-whole tracking and the local serve', () => {
     filter = null;
     ch.refresh(partialView, 400, 300);
     await settle();
-    expect(viewport).toHaveBeenCalledTimes(3); // back to the network — nothing is held whole
+    expect(viewport).toHaveBeenCalledTimes(3); // back to the network: nothing is held whole
   });
 
   it('drops the marks when another channel observes a rotation, and re-asks for the noted view', async () => {
@@ -493,7 +490,7 @@ describe('the idle promotion ratchet', () => {
     await settle();
     expect(viewport).toHaveBeenCalledTimes(2);
     const req = viewport.mock.calls.at(-1)![1] as Record<string, unknown>;
-    // The whole-extent bbox, the level named, no budget and no filter — the promotion's shape.
+    // The promotion's shape: whole-extent bbox, the level named, no budget and no filter.
     expect(req.bbox).toEqual(rectToRequestBbox({x0: 0, y0: 0, x1: 0, y1: 0}, 0, Q));
     expect(req.zoom).toBe(0);
     expect(req.k).toBe(0);
@@ -502,7 +499,7 @@ describe('the idle promotion ratchet', () => {
     expect(req.artifactBudget).toBeUndefined();
     expect(req.filters).toBeUndefined();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
-    // The served set never moves on a promotion — it fed the store and the marks alone.
+    // A promotion leaves the served set alone.
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([1n]);
 
     ch.refresh(partialView, 400, 300);
@@ -539,7 +536,7 @@ describe('the idle promotion ratchet', () => {
     expect(clock.pending).toBe(1); // the promotion, armed
 
     ch.schedule(partialView, 400, 300); // the user moves
-    expect(clock.pending).toBe(1); // the settle timer alone — the promotion was disarmed
+    expect(clock.pending).toBe(1); // the settle timer alone; the promotion was disarmed
     clock.fire();
     await settle();
     // One per-view request and no promotion: had both timers been live, this would be 3.
@@ -548,7 +545,7 @@ describe('the idle promotion ratchet', () => {
     expect(req.artifactBudget).toBeDefined(); // the per-view shape, not the promotion's
 
     await settle();
-    expect(clock.pending).toBe(1); // and the ratchet re-arms once the view is served
+    expect(clock.pending).toBe(1); // the promotion re-arms once the view is served
   });
 });
 
@@ -583,13 +580,13 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
     const req = viewport.mock.calls.at(-1)![1] as ViewportRequest;
     expect(req.artifactRows).toBe('identity');
     expect(req.filters).toEqual({archive: {eq: 'x'}});
-    // The served set is the response's rows, wholesale — not the local pick, not the whole hold.
+    // The served set is the response's rows, not the local pick or the whole store.
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([1n, 3n, 4n]);
     // The bit is the response's; the payload is the store's.
     expect(ch.current.artifacts.map((a) => a.matched)).toEqual([true, false, true]);
     expect(ch.current.artifacts[0]!.key).toBe(heldOne.key);
     expect(ch.current.artifacts[0]!.box).toEqual(heldOne.box);
-    // Nothing entered the store — an identity row carries no payload to hold.
+    // Nothing entered the store: an identity row carries no payload.
     expect(ch.current.held).toBe(4);
   });
 
@@ -606,8 +603,8 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
     filter = {archive: {eq: 'x'}};
     ch.refresh(partialView, 400, 300);
     await settle();
-    // A row whose bit and rung agree with the held payload IS the held object — a consumer
-    // memoising on identity does no work for it; a row whose bit moved is a copy wearing it.
+    // A row whose bit and rung agree with the held payload is the held object; a row whose bit moved
+    // is a copy.
     expect(ch.current.artifacts[1]).toBe(held[1]);
     expect(ch.current.artifacts[0]).not.toBe(held[0]);
     expect(ch.current.artifacts[0]!.matched).toBe(true);
@@ -620,7 +617,7 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
     let full = [inside(), bare()];
     const {client, viewport} = server(
       () => full,
-      // The server names an artifact the store never held: a payload the hold did not cover.
+      // The server names an artifact the store never held.
       () => identity([{id: 1n, matched: true}, {id: 9n, matched: true}])
     );
     const {ch} = holdingChannel(client, clock, {declarations: [decl()], filters: () => filter});
@@ -659,8 +656,8 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
     keys = {contentKey: 'ck2'};
     ch.refresh(partialView, 400, 300);
     await settle();
-    // A held payload under a rotated key is another generation's answer: the identity rows are
-    // not dressed in it, the full ask follows, and rule 7 rotates the store on its answer.
+    // A held payload under another content key is another generation's answer, so the full ask
+    // follows and its answer replaces the store.
     expect(rotating.viewport).toHaveBeenCalledTimes(3);
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([1n, 4n]);
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(false);
@@ -672,8 +669,8 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
     const {client, viewport} = server(() => [inside(), outside(), edge(), bare()], () => identity([]));
     const {ch} = holdingChannel(client, clock, {declarations: [decl()], filters: () => filter});
     ch.setLayer('clusters/x');
-    // A whole-extent view, filtered from the start: full rows are asked for, and the answer —
-    // whole extent or not — marks nothing, its row set having answered a narrower question.
+    // A whole-extent view, filtered from the start, asks for full rows, and the answer marks
+    // nothing held whole.
     ch.refresh(wholeView, 512, 512);
     await settle();
     expect((viewport.mock.calls[0]![1] as ViewportRequest).artifactRows).toBeUndefined();
@@ -750,8 +747,8 @@ describe('the depth clamp', () => {
       view: 's0',
       quantisation: Q,
       token: async () => 'tok',
-      // A frame drawn at depth 10 while the camera sits at the full extent — the pairing the
-      // harness produced on a principal switch, which asked for 2^20 tiles and was refused (422).
+      // A frame drawn at depth 10 while the camera sits at the full extent would ask for 2^20 tiles,
+      // which the server refuses.
       depth: () => 10,
       maxTiles: 4096,
       clock,
