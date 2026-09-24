@@ -4,21 +4,21 @@ This tutorial is for someone who has never used Tessera. We'll take the 29,935 p
 for Ireland and put them on a map in your browser, where you can search them by name and filter them
 by kind of place and by population.
 
-This tutorial should take about 30 minutes to complete. You'll need Rust (installed with rustup), `git`, `curl`, `unzip`, `openssl`,
-Python 3, Node.js with npm, and a web browser.
+This tutorial should take about 30 minutes to complete. You'll need Rust (installed with rustup),
+`git`, `curl`, `unzip`, `openssl`, Python 3, Node.js with npm, and a web browser.
 
 ## What we'll do
 
 1. Build `tessera` from its source code.
 2. Download the GeoNames file for Ireland and convert it to Parquet.
 3. Write a declaration that describes the data, and validate it with `tessera check`.
-4. Build the data into a deployment with `tessera build`
+4. Build the data into a deployment with `tessera build`.
 5. Start the server with `tessera serve`.
 6. Open the map in a browser and filter it.
 
 ## Build Tessera
 
-Build and install the tessera binary using cargo
+Clone the repository, then build and install the `tessera` binary with cargo.
 
 ```bash
 git clone https://github.com/jennis0/tesseradb ~/tesseradb
@@ -32,8 +32,8 @@ cargo install --path crates/tessera-cli
 ...
 ```
 
-Cargo puts the program in `~/.cargo/bin`, which rustup
-has already added to your `PATH`, so you can check straight away that it runs.
+Cargo puts the program in `~/.cargo/bin`, which rustup has already added to your `PATH`, so you can
+check straight away that it runs.
 
 ```bash
 tessera --version
@@ -147,7 +147,7 @@ for quotes. It reads the id and the population as whole numbers, then writes six
 Run it.
 
 ```bash
-.venv/bin/python convert.py
+python convert.py
 ```
 
 ```
@@ -158,9 +158,9 @@ Every line of `IE.txt` is now a row in `points.parquet`.
 
 ## Describe the data
 
-Next we tell Tessera what the data means, in a file called a declaration. It's written in TOML. A declaration
-names the files to read and says how to place each row on a map. It lists the columns to keep and
-the kind of value each holds, and it says who may see each row. Save this as `corpus.toml` beside
+Next we tell Tessera what the data means, in a file called a declaration. It's written in TOML. A
+declaration names the files to read and says how to place each row on a map. It lists the columns to
+keep and the kind of value each holds, and it says who may see each row. Save this as `corpus.toml` beside
 `points.parquet`.
 
 ```toml
@@ -201,7 +201,8 @@ render = true
 ```
 
 **The sources.** `[sources]` gives each file a short name, with its path relative to `corpus.toml`.
-`[defaults]` makes `points` the source for every block below it, so we don't have to repeat it. This is only necessary when building from prepared data.
+`[defaults]` makes `points` the source for every block below it, so we don't have to repeat it.
+This is only necessary when building from prepared data.
 
 **The view.** A [view](../system/data-model.md#views-and-view-groups) is one way of laying the
 places out on a flat map. It has a projection, which turns longitude and latitude into a position on
@@ -213,7 +214,8 @@ instance, and a viewer can switch between them. We only need one, which we'll ca
 areas more and more the further they are from the equator.
 
 The `extent` gives a range of longitude and a range of latitude, in degrees. Ours is a rectangle
-around Ireland. There's no default, so every view has to state one. [joe comment: I don't think this is true, I believe by default the extent will be set based on the data provided]
+around Ireland. A declaration has to give an extent, but it can be `"auto"`, which fits it to the
+data. We give a rectangle so that a place with a bad coordinate can't stretch the map.
 
 `point_visibility` decides who may see each place. Tessera gives each place an access label, and
 each viewer holds a set of labels. A viewer sees only the places whose label they hold. Labels
@@ -221,7 +223,9 @@ usually come from a column in your data, but we don't have one, so every place g
 label, `public`. Every viewer holds `public`, so everyone will see every place. The tutorial on
 access control gives places different labels and shows two people two different maps.
 
-**The vocabulary.** Vocabularies are categorical value sets stored as attributes (see below). In this case, the feature class is a single letter from a list GeoNames defines. The [GeoNames feature codes
+**The vocabulary.** A [vocabulary](../system/data-model.md#vocabularies) is the fixed list of values
+a category attribute can take (more on attributes below). Here it's the feature class, a single
+letter from a list GeoNames defines. The [GeoNames feature codes
 page](http://www.geonames.org/export/codes.html) has more detail. The Ireland data has:
 
 | Class | What GeoNames files under it | Places |
@@ -236,33 +240,40 @@ page](http://www.geonames.org/export/codes.html) has more detail. The Ireland da
 | U | undersea features | 0 |
 | V | forests and heaths | 118 |
 
-A column whose values come from a fixed list like this is a category. Tessera keeps the list itself
-as a [vocabulary](../system/data-model.md#vocabularies).
-
-`width = "u8"` stores each place's class as a one-byte code, which leaves room for 255 values. u16 and u32 width sets are also supported
+`width = "u8"` stores each place's class as a one-byte code, which leaves room for 255 values. For
+longer lists there are `u16` and `u32`.
 
 `value_set = "closed"` says the list is complete. The build will refuse any place whose class isn't
-on it. An open vocabulary is derived from the data and will gain a new entry any time a new value is seen.
+on it. An open vocabulary is derived from the data instead, and gains a new entry whenever a new
+value turns up.
 
 `visibility = "public"` lets every viewer see the whole list, including `U`, which no Irish place
 carries. The alternative, `derived`, would show each viewer only the values found on places they can
-see. This `public` is a setting on the vocabularly itself, and has nothing to do with the access label on each
-place.
+see. This `public` is a setting on the vocabulary itself, and has nothing to do with the access
+label on each place.
 
-**The attributes.** An attribute is a property Tessera keeps for every place that can be used for filtering or highlighting the data. We declare three. The
-name is `text`, the feature class is a `category` drawn from the vocabulary above, and the
-population is an `i64`, which is a whole number.
+**The attributes.** An attribute is a property Tessera keeps for every place, which you can use to
+draw, filter or highlight the data. We declare three. The name is `text`, the feature class is a
+`category` drawn from the vocabulary above, and the population is an `i64`, which is a whole number.
 
-Unlike a traditional database, Tessera is designed to serve large numbers of points on an interactive map, so is designed to stream millions of points to the users browser. Most attributes aren't necessary for simply drawing the map, so when building a database you need to tell the system what to do with each attribute. We provide two key settings:
+Unlike a traditional database, Tessera is built to stream millions of points to the user's browser
+for an interactive map. Most attributes aren't needed to draw the map, so when you build a database
+you tell Tessera what each attribute is for. There are two settings.
+
 - `render = true` stores the value beside each place's position on the map, so it travels with
-  every point that's drawn. This is necessary for any value that is to be used as part of rendering the map (e.g. setting the colour of each point). We set
-  it on `feature_class` and `population`.
-- `index = true` builds a search index available for filtering the data. On `name`, that lets you filter places based on a text search.
-- Attributes with neither of the above can be retrieved for each point but cannot be drawn or used for filtering. Data stored this way uses less memory and less disk space than the above.
+  every point that's drawn. Any value the map uses when drawing, such as the colour of each point,
+  needs it. We set it on `feature_class` and `population`.
+- `index = true` builds a search index for filtering the data. On `name`, it lets you filter places
+  with a text search.
+
+An attribute with neither setting can still be read for each place, but it can't be drawn or used
+for filtering. It takes less memory and less disk space than one with either.
 
 ## Describe the deployment
 
-The declaration describes the data. A second file, `tessera.toml`, configures the database itself. It says where the bundle goes, which declaration to build, and provides other configuration settings for the system. `tessera check`, `tessera build` and `tessera serve` all look for it in the directory you
+The declaration describes the data. A second file, `tessera.toml`, configures the database itself.
+It says where the bundle goes and which declaration to build, and holds the rest of the system's
+settings. `tessera check`, `tessera build` and `tessera serve` all look for it in the directory you
 run them from, and then in the directories above. Save this beside `corpus.toml`.
 
 ```toml
@@ -448,8 +459,8 @@ chmod 600 session.secret operator.secret
 
 The server listens on three addresses, each with its own job.
 
-- The viewer address, port 9141, serves the data. Each caller gets only the places
-  it's allowed to see.
+- The viewer address, port 9141, serves the data. Each caller gets only the places it's allowed to
+  see.
 - The session address, port 9142, gives a caller permission to read the map. It only answers
   callers holding the session secret.
 - The control address, port 9143, takes changes to the data, such as new places and deletions.
@@ -496,25 +507,17 @@ dist/tessera-components.js             1,857.60 kB │ gzip: 444.08 kB
 ...
 ```
 
-`examples/plain-html` holds a web page with the map on it, and a small Node server to go with it.
+`examples/plain-html` holds a web page with the map on it, and a small Node server that signs you
+in. The server holds the session secret so that the browser never sees it; the tutorial on access
+control explains why that matters.
 
-The page needs its own server because of the session secret. Anyone with that secret can get
-permission to see any place, so it must never reach a browser. The page's server keeps it instead.
-When you open the page, the server uses the secret to get you permission to read the map, and passes
-the browser only that permission, which lasts an hour. It also forwards the browser's map requests
-to the viewer address, so the page and the map come from the same place.
-
-The page's server offers a choice of the people listed in `users.json`. Each has a display name and
-a list of the labels they hold, under `terms`. A real application would get these from its own
-sign-in. The list that comes with the example belongs to a different dataset, so replace it with a
-single person, Everyone, who holds no labels of their own.
+The server signs you in as one of the people listed in `users.json`. The list that comes with the
+example belongs to a different dataset, so replace it with a single person, Everyone.
 
 ```bash
 cd examples/plain-html
 echo '{"everyone": {"label": "Everyone", "terms": []}}' > users.json
 ```
-
-Everyone will still see every place, because every viewer holds `public`.
 
 Tell the page's server where Tessera is listening and where to find the session secret, then start
 it.
@@ -542,8 +545,8 @@ pass your filters, which with no filters set is all of them. Shown is how many p
 actually drawn. It can be lower than matched, because where an area holds more matches than the page
 draws at once, the server sends a sample.
 
-If you leave the page open for more than an hour, the strip will say Session expired, because the
-permission has run out. Reloading the page gets a fresh one.
+If you leave the page open for more than an hour, the strip will say Session expired. Reload the
+page to sign in again.
 
 ## Filter the map
 
