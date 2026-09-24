@@ -202,7 +202,8 @@ render = true
 
 **The sources.** `[sources]` gives each file a short name, with its path relative to `corpus.toml`.
 `[defaults]` makes `points` the source for every block below it, so we don't have to repeat it.
-This is only necessary when building from prepared data.
+You only write these when building from files on disc. The Python client writes them for you from
+the data you insert.
 
 **The view.** A [view](../system/data-model.md#views-and-view-groups) is one way of laying the
 places out on a flat map. It has a projection, which turns longitude and latitude into a position on
