@@ -1,9 +1,10 @@
 # Run Tessera under systemd
 
-This guide turns the map you served from a terminal in the first tutorial into a service on a Linux
-server, which starts at boot and comes back by itself if it crashes. You'll need sudo on the server
-and the `tessera` binary you built with cargo. From the tutorial's `~/ireland` directory you need
-`corpus.toml`, `points.parquet` and `.env`, which holds the identity key.
+This guide turns the map you served from a terminal in [the first tutorial](../start/index.md)
+into a service on a Linux server, which starts at boot and comes back by itself if it crashes.
+You'll need sudo on the server and the `tessera` binary you built with cargo. From the tutorial's
+`~/ireland` directory you need `corpus.toml`, `points.parquet` and `.env`, which holds the identity
+key.
 
 Once the service is running, [Operate a deployment](operating.md) covers what you do with it, from
 who may reach each address to compaction. [Run Tessera with Docker](docker.md) does the same job as
@@ -25,10 +26,10 @@ sudo install -m 0755 ~/.cargo/bin/tessera /usr/local/bin/tessera
 
 ## Lay out /srv/tessera
 
-Everything the service reads or writes lives under `/srv/tessera`. The declaration and its Parquet
-file go in `corpus`. The write-ahead log and the cache go in `state`, apart from the bundle, so the
-service can be allowed to write to `bundle` and `state` and nothing else. The credentials go in
-`secrets`, which only the `tessera` user can open.
+The service needs to write to two places only, the bundle and a `state` directory holding the
+write-ahead log and the cache. Keeping them apart from the declaration in `corpus` and the
+credentials in `secrets` lets systemd make everything else read-only to it. Only the `tessera`
+user can open `secrets`.
 
 ```bash
 sudo install -d -o tessera -g tessera -m 0750 /srv/tessera /srv/tessera/corpus /srv/tessera/state /srv/tessera/state/wal
@@ -38,7 +39,8 @@ sudo install -o tessera -g tessera -m 0600 ~/ireland/.env /srv/tessera/.env
 ```
 
 The server creates its cache directory when it first starts. It does not create the directory the
-log goes in, which is why `state/wal` is made here. Without it the server stops at once:
+log goes in, which is why `state/wal` is made here. Without it the server stops at once, with an
+error that doesn't say which directory it wanted:
 
 ```text
 tessera serve: refused to start: wal error: wal io error: No such file or directory (os error 2)
@@ -76,43 +78,42 @@ token_max_lifetime = 3600
 viewer  = "127.0.0.1:9151"
 session = "127.0.0.1:9152"
 control = "unix:/run/tessera/control.sock"
-session_credential_file  = "secrets/session.cred"
-operator_credential_file = "secrets/operator.cred"
+session_credential_file  = "secrets/session.secret"
+operator_credential_file = "secrets/operator.secret"
 ```
 
 The paths under `[bundle]`, `schema` and both credential files are read relative to the directory
 `tessera.toml` is in, wherever the server is started from.
 
-Besides giving the log, the cache and the declaration directories of their own, this file differs
-from the tutorial's in one place. The control address, which takes writes to the corpus, was a TCP
-port on `127.0.0.1` in the tutorial. Any program on the machine can connect to that, and only the
-operator credential keeps it out. Here it is a unix socket, a file that only the `tessera` user can
-open, so the operating system turns every other account away before the credential is even read. A
-socket path is not read relative to `tessera.toml`, so write it in full.
+In the tutorial the control address, which takes writes to the corpus, was a TCP port on
+`127.0.0.1`. Any program on the machine can connect to that, and only the operator credential keeps
+it out. Here it is a unix socket, a file only the `tessera` user can open, so the operating system
+turns every other account away before the credential is even read. Write a socket's path in full,
+since it is not read relative to `tessera.toml`.
 
-The viewer and session addresses stay on `127.0.0.1`. [Who reaches each
-address](operating.md#who-reaches-each-address) says who should reach each one, and how.
+The viewer and session addresses stay on `127.0.0.1`. [Addresses and
+credentials](operating.md#addresses-and-credentials) says who should reach each one, and what
+`token_max_lifetime` is for.
 
-`token_max_lifetime` has no default. It is how long, in seconds, a browser's token lasts before it
-has to ask for a new one. A token keeps the access it was issued with, so this is also how long a
-viewer whose access you narrow goes on seeing what they saw before.
+Every section of `tessera.toml` refuses a key it does not know and names the ones it takes. The keys
+this guide leaves out keep their defaults.
 
-Every section of `tessera.toml` refuses a key it does not know, and names the ones it takes. The
-keys this guide leaves out keep their defaults; each is a field of `RawServe` or `RawIngest` in
-[`crates/tessera-config/src/lib.rs`](https://github.com/jennis0/tesseradb/blob/main/crates/tessera-config/src/lib.rs),
-with its default in
-[`defaults.rs`](https://github.com/jennis0/tesseradb/blob/main/crates/tessera-config/src/defaults.rs).
+!!! note ""
+    Not built yet: a reference page for `tessera.toml`. Until there is one, each key is a field of
+    `RawServe` or `RawIngest` in
+    [`crates/tessera-config/src/lib.rs`](https://github.com/jennis0/tesseradb/blob/main/crates/tessera-config/src/lib.rs),
+    with its default in
+    [`defaults.rs`](https://github.com/jennis0/tesseradb/blob/main/crates/tessera-config/src/defaults.rs).
 
 ## Create the credentials
 
-The server will not start without both secrets `tessera.toml` names. The session credential lets
-your application's backend ask for viewer tokens, and the operator credential lets whoever holds it
-change the corpus.
+The server will not start without the session and operator credentials `tessera.toml` names. They
+use the tutorial's file names:
 
 ```console
 tessera$ umask 077
-tessera$ openssl rand -hex 32 > secrets/session.cred
-tessera$ openssl rand -hex 32 > secrets/operator.cred
+tessera$ openssl rand -hex 32 > secrets/session.secret
+tessera$ openssl rand -hex 32 > secrets/operator.secret
 ```
 
 ## Build the bundle
@@ -128,8 +129,8 @@ built /srv/tessera/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2181446 b
   view ireland: 29935 row(s)
 ```
 
-A later rebuild needs more care than this one, because the running service changes the bundle. [The
-identity key and rebuilds](rebuild.md) explains why.
+A later build is different, because the running server changes the bundle and a browser may hold a
+`tessera_id` from it. [Rebuild and replace the bundle](rebuild.md) covers it.
 
 ## Start it by hand
 
@@ -143,9 +144,9 @@ $ sudo install -d -o tessera -g tessera -m 0700 /run/tessera
 
 ```console
 tessera$ tessera serve
-2026-09-24T08:48:15.182888Z  INFO tessera_server::memory: the allocator's arena count is capped arenas=12
-2026-09-24T08:48:15.231744Z  INFO tessera_engine::engine: the engine adopted the prefix's derived artifact structures named=0 containment_adopted=0 prefix=v00000
-2026-09-24T08:48:15.232055Z  INFO tessera_server: bulk reads may hold this much memory at once, within the process's memory cap bulk_admission=2 max_page_bytes=67108864 bulk_read_memory_bytes=939524096
+2026-09-24T09:26:04.709794Z  INFO tessera_server::memory: the allocator's arena count is capped arenas=12
+2026-09-24T09:26:04.727664Z  INFO tessera_engine::engine: the engine adopted the prefix's derived artifact structures named=0 containment_adopted=0 prefix=v00000
+2026-09-24T09:26:04.727934Z  INFO tessera_server: bulk reads may hold this much memory at once, within the process's memory cap bulk_admission=2 max_page_bytes=67108864 bulk_read_memory_bytes=939524096
 {"event":"listening","viewer":"127.0.0.1:9151","session":"127.0.0.1:9152","control":"unix:/run/tessera/control.sock"}
 ```
 
@@ -163,13 +164,13 @@ of a JSON object whose `terms` list the access labels to grant.
 tessera$ curl -sSi http://127.0.0.1:9151/readyz
 HTTP/1.1 200 OK
 content-length: 0
-date: Thu, 24 Sep 2026 08:48:15 GMT
+date: Thu, 24 Sep 2026 09:26:04 GMT
 
 tessera$ curl -sS http://127.0.0.1:9152/session/authorise \
-  -H "authorization: Bearer $(cat secrets/session.cred)" \
+  -H "authorization: Bearer $(cat secrets/session.secret)" \
   -H 'content-type: application/json' \
   -d "{\"auth_data\": \"$(printf '{"terms": ["public"]}' | base64 -w0)\"}"
-{"token":"fc49d81f40689d1ab665306d5f82f461b8ff36203ee0bb6ab4c82d8336267ef2","token_id":0,"expires_at":1790243295}
+{"token":"2546b15027f3b33d8639941a5406597e1ee2bf60715d46dbfb5e4268ac0547d1","token_id":0,"expires_at":1790245564}
 ```
 
 Press Ctrl-C in the first shell. The server prints `tessera serve: stopped on SIGINT` and exits.
@@ -210,23 +211,21 @@ WantedBy=multi-user.target
 `UMask=0077` means the socket, and every file the server writes, can be opened by the `tessera` user
 alone.
 
-`MemoryMax` caps the service's memory, and 24G is a placeholder. Much of what the server holds is
-the bundle's pages, which the kernel drops at the cap and reads back from disc when they are needed
-again, so a cap that is too low makes the server slower before it makes it fail. The kernel kills
-the process only when it cannot free enough. [Memory](operating.md#memory) explains how to choose
-the figure. `MemorySwapMax=0` keeps the service out of swap, so it meets the cap rather than being
-paged out.
+`MemoryMax` caps the service's memory, and 24G is a placeholder; [Memory](operating.md#memory)
+explains how to choose the figure. `MemorySwapMax=0` keeps the service out of swap, so it meets the
+cap rather than being paged out.
 
 `Restart=on-failure` restarts the server when it exits with an error or is killed, and at no other
-time. That is deliberate. A server that has lost the ability to write its log stays up and reports
-itself not ready, and restarting it then can bring back an item someone suppressed. [When a write to
-the log fails](operating.md#when-a-write-to-the-log-fails) explains. Leave any automatic restart on
-readiness out.
+time, because a server that has lost the ability to write its log stays up and reports itself not
+ready. Restarting it then can bring back an item someone suppressed, as [When a write to the log
+fails](operating.md#when-a-write-to-the-log-fails) explains. Don't add an automatic restart on
+readiness.
 
-The last five settings confine the service. `ProtectSystem=strict` makes the whole filesystem
-read-only to the service apart from `/srv/tessera/bundle`, `/srv/tessera/state`, the runtime
-directory and a private `/tmp`. If you move the bundle or the log elsewhere, change `ReadWritePaths`
-to match.
+The last five settings confine the service. `NoNewPrivileges` stops the server and anything it
+runs from gaining privileges. `PrivateTmp` gives it a `/tmp` of its own, and `ProtectHome` hides
+every home directory from it. `ProtectSystem=strict` makes the rest of the filesystem read-only to
+it, apart from the runtime directory and the paths in `ReadWritePaths`. If you move the bundle or
+the log elsewhere, change `ReadWritePaths` to match.
 
 Start the service, and have it start at boot:
 
@@ -237,10 +236,6 @@ journalctl -u tessera -f
 ```
 
 The journal shows the same lines you saw when you started it by hand. The server logs at `INFO` and
-above, and `RUST_LOG` does not change that.
-
-`systemctl stop tessera` sends SIGTERM. The server writes `tessera serve: stopped on SIGTERM` and
-exits straight away, without waiting for requests in progress. It loses nothing it had acknowledged,
-because every change is written to the log and flushed to disc before the caller is told it
-succeeded. A browser partway through a response gets it cut short, without the final frame that
-marks a response complete.
+above, and `RUST_LOG` does not change that. `systemctl stop tessera` sends SIGTERM, which stops the
+server at once; [Stopping and restarting](operating.md#stopping-and-restarting) says what that
+means for requests in progress.

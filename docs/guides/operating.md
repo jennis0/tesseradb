@@ -1,26 +1,28 @@
 # Operate a deployment
 
-Once Tessera is running, [under systemd](systemd.md) or [with Docker](docker.md), some decisions are
-still yours. Settle who may reach each address, how much memory the server gets and how browsers
-reach it over TLS before anyone else uses it. The later sections, on health, failed writes,
-compaction and rebuilds, are the ones you'll come back to.
+This guide covers running Tessera once it is installed, [under systemd](systemd.md) or [with
+Docker](docker.md). Before anyone else uses the server, decide who may reach each of its three
+addresses and how much memory it gets. After that you'll mostly need the sections on health, the
+write-ahead log and compaction. Putting the viewer address behind TLS has [a page of its
+own](tls.md), and so does [rebuilding the bundle](rebuild.md).
 
-The examples use the systemd guide's layout, with commands after `tessera$` run as the `tessera`
-user in `/srv/tessera` and the control address on a socket. With Docker, send the same requests to
-the ports you published, 9161 to 9163 in the Docker guide, and read the credentials from `secrets/`.
+The examples use the systemd install, run as the `tessera` user in `/srv/tessera`. Under Docker,
+run them from `~/tessera-docker`, use ports 9161 to 9163 in place of 9151 to 9153, and write
+`http://127.0.0.1:9163` where the examples reach the control socket with
+`--unix-socket /run/tessera/control.sock http://localhost`.
 
 ## What the server keeps on disc
 
-`[bundle]` in `tessera.toml` names three places, and they need different care.
+`[bundle]` in `tessera.toml` names three places.
 
 | Key | What it holds | What makes it grow | If it is lost |
 |---|---|---|---|
 | `path` | The bundle: every item, its position, its attributes, the search indexes and the identity key. The server writes to it as it runs, adding a segment each time it makes newly ingested items visible and rewriting it at each compaction | Ingest, until a compaction reclaims what deletions and merges left behind | The database. Restore it from a backup |
-| `wal` | The write-ahead log. Every change since the last flush into the bundle, in files named after this path: `wal-000001.log`, `wal-000001.sync` and so on | Writes, until the bundle holds them and the oldest files are deleted | Every change acknowledged since the last flush |
+| `wal` | The write-ahead log, which holds every change since the last flush into the bundle, in files named after this path: `wal-000001.log`, `wal-000001.sync` and so on | Writes, until the bundle holds them and the oldest files are deleted | Every change acknowledged since the last flush |
 | `cache` | Work the server can redo: each distinct grant's set of visible items, the name-search suggestions and scratch files | A pair of files for each distinct set of labels a viewer has been granted. A compaction deletes them | Nothing but time. The server rebuilds what it needs |
 
-Back up the bundle and the log together, with the server stopped. A copy of one without the other is
-a database as it stood at some other moment.
+Back up the bundle and the log together, with the server stopped. A copy of one without the other
+is a database as it stood at some other moment.
 
 !!! warning
     Keep the bundle and the log on a local disc. The server locks the bundle's directory so that a
@@ -30,9 +32,7 @@ a database as it stood at some other moment.
 Anyone who can read the bundle can read every item in it, whatever its access label, and the
 identity key too. Access control applies to what the server sends, not to the files.
 
-## Who reaches each address
-
-The server listens on three addresses, and each is meant for a different caller.
+## Addresses and credentials
 
 | Address | Routes | Who should reach it |
 |---|---|---|
@@ -40,15 +40,19 @@ The server listens on three addresses, and each is meant for a different caller.
 | Session | `/session/authorise`, `/session/revoke`, `/healthz`, `/readyz` | Your application's backend, which signs people in and asks Tessera for their tokens |
 | Control | `/control/*` | You, and whatever loads data into the corpus |
 
-The session address hands out tokens to anyone holding the session credential, and the control
-address accepts deletions and new data from anyone holding the operator credential. Neither should
-be reachable from the internet. The viewer address serves only what each token allows, and is the
-one browsers need.
+Anyone holding the session credential can mint a token with any labels they like. The operator
+credential is the only thing between the control address and a caller who wants to delete your
+data or add to it. Keep both addresses off the internet. The viewer address serves only what each
+token allows, and it is the one browsers need.
 
-The server reads each credential once, when it starts, and trims the whitespace around it. To change
-one, replace the file and restart the server. Instead of a file, `session_credential_env` and
-`operator_credential_env` can name an environment variable. A file is the better choice, since a
-process's environment can be read from `/proc` by anything else running as the same user. The server
+Both installs keep the credentials in files called `session.secret` and `operator.secret`. Under
+systemd they are in `/srv/tessera/secrets`, and under Docker in `~/tessera-docker/secrets`, which
+Compose mounts into the container as `/run/secrets`. The server reads each file once, when it starts, and trims the whitespace around it. To change a
+credential, replace the file and restart the server.
+
+Instead of a file, `session_credential_env` and `operator_credential_env` can name an environment
+variable. The server does not trim a variable, and anything else running as the same user can read
+a process's environment from `/proc`. A file is the better choice. Whichever you use, the server
 wants both credentials even if nothing ever calls the control address:
 
 ```text
@@ -64,9 +68,10 @@ tessera serve: refused to start: there is no operator credential; set `operator_
     [Deployment](../system/clients.md#deployment) in the clients chapter shows both ways this goes
     wrong.
 
-A browser's token lasts `token_max_lifetime` seconds and keeps the labels it was issued with. If you
-take a label away from someone, they keep seeing its items until their token expires, unless your
-backend revokes it with `/session/revoke`.
+A browser's token lasts `token_max_lifetime` seconds, set under `[disclosure]`, and keeps the
+labels it was issued with. If you take a label away from someone, they go on seeing its items until
+their token expires, unless your backend revokes it with `/session/revoke`. A shorter lifetime
+narrows that gap, at the cost of more calls to the session address.
 
 ## Memory
 
@@ -80,33 +85,33 @@ The server holds five caches, each with a limit you can set under `[serve]`:
 | `region_cache_bytes` | 256 MiB | Drawn filter regions broken into map tiles, shared between viewers |
 | `occupancy_cache_bytes` | 32 MiB | How many tiles at each zoom hold something a session can see |
 
-Paged reads of records, `POST /v1/items`, hold up to seven pages each while they run. Two may run at
-once (`bulk_admission`), and a page is up to 64 MiB (`max_page_bytes`). The server logs what that
-comes to when it starts, as `bulk_read_memory_bytes=939524096`. With the defaults, the caches and
-paged reads come to about 4.4 GiB.
+The paged reads, `POST /v1/items` and `POST /v1/artifacts`, share one limit. Two may run at once
+(`bulk_admission`), each holding up to seven pages of at most 64 MiB (`max_page_bytes`). The server
+logs what that comes to when it starts, as `bulk_read_memory_bytes=939524096`. With the defaults,
+the caches and paged reads come to about 4.4 GiB.
 
 The bundle itself is not loaded. The server maps its files, so their pages sit in the kernel's page
-cache and count towards the process's memory, but the kernel drops them when memory is short and
+cache and count towards the process's memory. When memory is short the kernel drops them, and
 reads them back from disc when a request needs them. Set the cap (`MemoryMax` under systemd, or a
-memory limit on the container) above the caches and paged reads together. Every gigabyte beyond that
-keeps more of the bundle in memory.
+memory limit on the container) above the caches and paged reads together. Every gigabyte beyond that keeps more of the bundle in memory. A cap that is too low makes the
+server slower before it makes it fail.
 
 `/control/status` shows what the process holds. `anon_bytes` is the caches and the allocator's own
 memory, and `file_bytes` is how much of the bundle is in memory:
 
 ```console
 tessera$ curl -sS --unix-socket /run/tessera/control.sock \
-  -H "authorization: Bearer $(cat secrets/operator.cred)" \
+  -H "authorization: Bearer $(cat secrets/operator.secret)" \
   http://localhost/control/status | jq '{posture: .write_executor.posture, heap}'
 {
   "posture": "running",
   "heap": {
-    "anon_bytes": 5169152,
-    "file_bytes": 20275200,
+    "anon_bytes": 6320128,
+    "file_bytes": 19673088,
     "last_trim_micros": 0,
     "last_trim_returned_bytes": 0,
-    "resident_bytes": 25444352,
-    "trim_baseline_bytes": 4808704,
+    "resident_bytes": 25993216,
+    "trim_baseline_bytes": 6139904,
     "trim_growth_bytes": 268435456,
     "trims": 0
   }
@@ -117,22 +122,21 @@ tessera$ curl -sS --unix-socket /run/tessera/control.sock \
 other work on the same machine.
 
 A build sizes itself separately. `tessera build --memory-budget 24g` keeps the build's own
-structures within 24 GiB; without it the build works out a budget from the memory the machine has
-free. If you rebuild on the server's machine while it runs, give a budget that leaves the server its
-share.
+structures within 24 GiB. Without it the build works out a budget from the memory the machine has
+free, which is too much if the server is running beside it.
 
 ## Health and readiness
 
 The viewer and session addresses both answer `/healthz` and `/readyz`, with no credential and no
-body. `/healthz` answers 200 whenever the process is answering at all. `/readyz` answers 200 while
-the part of the server that takes writes is running normally, and 503 otherwise. That is the one to
-send traffic by. The control address has neither, and turns away a request without the operator
-credential.
+body. `/healthz` answers 200 whenever the process is answering at all. `/readyz` is the one to send
+traffic by. It answers 200 while the part of the server that takes writes is running normally, and
+503 when it is not, or when the server has had to open an older state of the bundle because the
+newest one on disc failed its checks. The control address has neither.
 
-The nginx configuration above does not pass the probes through, so run your load balancer's or
-monitor's check on the server's machine, or against the session address from inside your network.
-`tessera health` does the same check from the command line. It reads `tessera.toml`, asks the viewer
-address for `/readyz`, and exits 0 on a 200. The Docker image uses it as its health check.
+The [TLS proxy](tls.md) does not pass the probes through. Run your load balancer's or monitor's
+check on the server's machine, or against the session address from inside your network.
+`tessera health` makes the same check from the command line. It reads `tessera.toml`, asks the
+viewer address for `/readyz`, and exits 0 on a 200. The Docker image uses it as its health check.
 
 ```console
 tessera$ tessera health && echo ready
@@ -152,45 +156,50 @@ A disc that hangs on a write, rather than failing it, leaves the posture at `run
 at 200 while nothing is written. [Health and readiness](../system/serving.md#health-and-readiness)
 covers what the probe can and cannot see.
 
-## When a write to the log fails
+## The write-ahead log
 
-Every change is written to the log and flushed to disc before the caller is told it succeeded. What
-happens when that fails depends on which step failed.
+The server writes every change to the log, and forces it to disc, before it tells the caller the
+change succeeded. A change it has acknowledged therefore survives the server being stopped or
+killed.
 
-If appending to the log fails, the posture becomes `wal-poisoned` and `/readyz` answers 503 until
+### When a write to the log fails
+
+If appending the record fails, the posture becomes `wal-poisoned` and `/readyz` answers 503 until
 the server restarts.
 
-If the record is written but forcing it to disc fails, the server tries again a few times. If it
-still fails, it throws away what did not reach the disc and goes back to `running`, and `/readyz`
-answers 200 again. The only sign in `/control/status` is `write_executor.wal_recoveries` going up by
-one. It is not back to normal, though. From then on it makes no newly ingested items visible, never
-trims the log, and refuses every compaction with the reason `overlay_diverged`. The log says so in a
-line beginning `ALARM` and ending "Restart this node."
+If the record was appended but forcing it to disc fails, a deletion or suppression is tried again,
+twice. Ingest is not. When the write still fails, the server throws away what did not reach the
+disc and goes back to `running`, and `/readyz` answers 200 again. The only sign in
+`/control/status` is `write_executor.wal_recoveries` going up by one. The server is not back to
+normal, though. It makes no newly ingested items visible and never trims the log. It starts no
+compaction, not even one you ask for, and records nothing about that under `compaction`. The log
+has a line beginning `ALARM` and ending "Restart this node."
 
-Either way, a deletion or suppression whose write failed is still applied, in memory, so the item
+Either way, a deletion or suppression whose write failed is still applied in memory, so the item
 stays hidden. The caller is answered 500, with a detail that includes "a change in it may be in
-force, so do not treat this as a no-op". An unsuppress whose write failed is not applied. The
-deletions and suppressions that were applied have no record on disc, so a restart forgets them.
+force, so do not treat this as a no-op". An unsuppress whose write failed is not applied. Nothing on
+disc records the deletions and suppressions that were applied, so a restart forgets them.
 
 !!! warning
-    A restart can bring a deleted or suppressed item back into view, if the change that hid it was
+    A restart can bring a deleted or suppressed item back into view if the change that hid it was
     answered 500. After a failed write:
 
-    1. Have whatever sends changes to `/control/changes` send every change that was answered 500
-       again.
+    1. Have whatever sends changes to `/control/changes` send again every change that was answered
+       500. If the log has recovered, this writes them to disc.
     2. Fix the disc.
     3. Restart the server.
-    4. Send every change that was answered 500 again.
+    4. Send every change that was answered 500 once more. This catches any that failed again in
+       step 1.
 
-    Restart the server on its process exiting, never on `/readyz` answering 503. The systemd unit
-    and the Compose file in these guides both do that.
+    Restart the server when its process exits, and never because `/readyz` answers 503. The
+    systemd unit and the Compose file in these guides both work that way.
 
 ## Compaction
 
 The server adds a segment to the bundle each time it makes newly ingested items visible, and merges
 small segments as they build up. Deleted items stay in the bundle, hidden from every viewer, until a
-compaction rewrites the bundle as one segment per view without them. Compaction is also what
-reclaims the disc space merges leave behind.
+compaction rewrites the bundle as one segment per view without them. Compaction also reclaims the
+disc space that merges leave behind.
 
 The server starts one when any of these conditions holds, each set under `[ingest]`:
 
@@ -203,9 +212,9 @@ The server starts one when any of these conditions holds, each set under `[inges
 | `compaction_dead_bytes_ratio` | 1.0 | Files the bundle no longer uses take at least as much space as the files it does |
 
 Set `compaction_window_start` to the start of your quietest hours, in UTC as `"HH:MM"`. Requests are
-answered as usual while a compaction runs, but when it finishes every session's cached view of the
-map is out of date at once. A background pass rebuilds them, and a session it has not reached yet
-rebuilds its own on its next request, which makes that request slower.
+answered as usual while a compaction runs. When it finishes, though, every session's cached view of
+the map is out of date at once. A background pass rebuilds them, and a session it hasn't reached
+yet pays for its own on its next request.
 
 After one compaction starts, none of these conditions starts another until
 `compaction_min_interval_secs` has passed, 86400 seconds by default, and never while one is still
@@ -223,7 +232,7 @@ To start one yourself, whatever the schedule says:
 
 ```console
 tessera$ curl -sS -X POST --unix-socket /run/tessera/control.sock \
-  -H "authorization: Bearer $(cat secrets/operator.cred)" \
+  -H "authorization: Bearer $(cat secrets/operator.secret)" \
   -w '%{http_code}\n' http://localhost/control/compact
 202
 ```
@@ -233,7 +242,7 @@ dropped, with a warning in the log. Read the outcome a few seconds later:
 
 ```console
 tessera$ curl -sS --unix-socket /run/tessera/control.sock \
-  -H "authorization: Bearer $(cat secrets/operator.cred)" \
+  -H "authorization: Bearer $(cat secrets/operator.secret)" \
   http://localhost/control/status | jq '.compaction | {folds, fold_refusals, last_refusal}'
 {
   "folds": 1,
@@ -244,11 +253,14 @@ tessera$ curl -sS --unix-socket /run/tessera/control.sock \
 
 [Compaction](../system/write-path.md#compaction) in the write-path chapter describes it in full.
 
-## Restarts
+## Stopping and restarting
 
-The server keeps sessions in memory, so a restart ends every one of them, and each browser has to
-ask your backend for a new token. When it starts, the server opens the newest state of the bundle
-recorded on disc that passes its checks, and replays the log over it, so every change it
-acknowledged before it stopped is back. [Restart and
-recovery](../system/write-path.md#restart-and-recovery) has the detail.
+SIGTERM or SIGINT stops the server at once, without waiting for requests in progress, and it
+writes `tessera serve: stopped on SIGTERM` as it goes. A browser partway through a response gets it
+cut short, missing the final frame that marks a response complete.
 
+Sessions are held only in memory. After a restart none of them exists, and each browser has to ask
+your backend for a new token. Changes are a different matter. On starting, the server opens the
+newest state of the bundle on disc that passes its checks and replays the log over it, which brings
+back every change it acknowledged before it stopped. [Restart
+and recovery](../system/write-path.md#restart-and-recovery) has the detail.
