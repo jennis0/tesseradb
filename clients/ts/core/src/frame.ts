@@ -128,7 +128,7 @@ export class FrameReader {
     }
     if (this.grammar === 'records') {
       if (this.frames === 0) throw new Error('records payload has no head frame');
-      if (!this.sawTrailer) throw new Error('records payload has no trailer: the response is incomplete');
+      if (!this.sawTrailer) throw new Error('records payload has no trailer: the response is incomplete; resume the read from its cursor');
       return;
     }
     if (!this.sawTiles) throw new Error('viewport payload has no tiles frame');

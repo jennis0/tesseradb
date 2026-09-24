@@ -375,17 +375,18 @@ export function u64(values: bigint[]) {
 
 /**
  * A response whose body arrives in chunks of `size` bytes as it is read. `onCancel` is called when
- * the reader cancels the body.
+ * the reader cancels the body. With `cut`, the body ends by failing with it, as `fetch` reports a
+ * connection closed part-way through a chunked body, in place of ending cleanly.
  */
 export function chunked(
   body: Uint8Array,
   size = body.byteLength,
-  init: {headers?: Record<string, string>; onCancel?: () => void} = {}
+  init: {headers?: Record<string, string>; onCancel?: () => void; cut?: Error} = {}
 ): Response {
   let at = 0;
   const stream = new ReadableStream<Uint8Array>({
     pull(controller) {
-      if (at >= body.byteLength) return controller.close();
+      if (at >= body.byteLength) return init.cut ? controller.error(init.cut) : controller.close();
       controller.enqueue(body.slice(at, at + size));
       at += size;
     },

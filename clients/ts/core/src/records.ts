@@ -9,8 +9,8 @@ import type {PageEnd, RecordsTrailer, RegionVerdict, Timings} from './types.js';
  * table as it arrives, then the trailer.
  *
  * A page is yielded once its page end has arrived, so a records frame cut off before its page end
- * is never yielded. A body that ends without its trailer throws after the last whole page, and
- * {@link cursor} is then the last page end's cursor, from which the read resumes without
+ * is never yielded. A body that ends or is cut without its trailer throws after the last whole
+ * page, and {@link cursor} is then the last page end's cursor, from which the read resumes without
  * repeating a row.
  *
  * The body is read only as the caller iterates. Iterating to the end, breaking out of the loop,
@@ -152,13 +152,20 @@ class Frames {
 
   /**
    * The next whole frame, or `null` at the end of a complete body or once the read is released.
-   * Throws on a body that is not complete, and once the signal has aborted, even where frames
-   * already read remain.
+   * Throws on a body that is not complete, whether it ended or was cut, and once the signal has
+   * aborted, even where frames already read remain.
    */
   async next(): Promise<Frame | null> {
     this.signal?.throwIfAborted();
     while (this.ready.length === 0) {
-      const chunk = this.reader ? await this.reader.read() : {done: true as const, value: undefined};
+      let chunk: ReadableStreamReadResult<Uint8Array> = {done: true, value: undefined};
+      try {
+        if (this.reader) chunk = await this.reader.read();
+      } catch (error) {
+        // The caller's abort stops the read. Any other failure is a connection cut, which is how
+        // the server ends a body that fails part-way, so it is judged as the end of the body.
+        if (this.signal?.aborted) throw error;
+      }
       if (chunk.done) {
         // A release while this read waited ends the body early, and that is not a fault.
         if (this.released) return null;

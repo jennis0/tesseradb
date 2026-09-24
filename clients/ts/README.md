@@ -439,9 +439,10 @@ for (;;) {
 The request is sent as given. The client chooses no fields, order, page size or compression, and
 holds nothing between calls.
 
-A page is yielded once its page end has arrived. A body that ends without its trailer yields its
-whole pages and then throws; `cursor` is then the last page end's cursor, and a read resumed from
-it repeats no row. Breaking out of the loop, calling `return()` or aborting the request's signal
+A page is yielded once its page end has arrived. A body that ends without its trailer, including
+one whose connection is cut, which is how the server ends a response that fails part-way, yields
+its whole pages and then throws; `cursor` is then the last page end's cursor, and a read resumed
+from it repeats no row. Breaking out of the loop, calling `return()` or aborting the request's signal
 closes the connection, and the server stops the response. A `return()` while a page is awaited
 ends that wait as the end of the read. After an abort no further page is yielded, including pages
 already received.

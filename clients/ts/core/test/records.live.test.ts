@@ -1,3 +1,5 @@
+import {createServer} from 'node:http';
+import type {AddressInfo} from 'node:net';
 import type {Table} from 'apache-arrow';
 import {afterAll, beforeAll, describe, expect, it, type TestContext} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
@@ -5,6 +7,7 @@ import {Control} from '../src/control.js';
 import {refusalOf} from '../src/presented.js';
 import type {RecordsRead} from '../src/records.js';
 import type {ArtifactsRequest, BrowseRow, ItemsRequest, Meta, Session, ViewportRequest} from '../src/types.js';
+import {rejectsAsRefused} from './support.js';
 import {start, type Served} from './served.js';
 
 /**
@@ -71,6 +74,48 @@ const items = (request: ItemsRequest) =>
 
 const artifacts = (request: ArtifactsRequest) =>
   readAll((cursor) => client.artifacts(session.token, {...request, cursor, ...(cursor === undefined ? {} : {count: undefined})}));
+
+/**
+ * A proxy in front of the viewer plane that forwards a response as a chunked body and closes the
+ * connection at the byte `cutAt` chooses, as the server does to a body that fails part-way.
+ */
+async function cuttingProxy(target: string, cutAt: (body: Uint8Array) => number) {
+  const server = createServer(async (req, res) => {
+    const sent: Buffer[] = [];
+    for await (const chunk of req) sent.push(chunk as Buffer);
+    const upstream = await fetch(`${target}${req.url}`, {
+      method: req.method,
+      headers: {authorization: req.headers.authorization!, 'content-type': 'application/json'},
+      body: Buffer.concat(sent)
+    });
+    const body = new Uint8Array(await upstream.arrayBuffer());
+    const headers: Record<string, string> = {};
+    upstream.headers.forEach((value, name) => {
+      if (name.startsWith('x-tessera-') || name === 'content-type') headers[name] = value;
+    });
+    // No length, so Node sends the body chunked, and the connection closes before its last chunk.
+    res.writeHead(upstream.status, headers);
+    res.write(body.subarray(0, cutAt(body)), () => res.socket?.destroy());
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    close: () => {
+      server.closeAllConnections();
+      server.close();
+    }
+  };
+}
+
+/** Where each frame of a body starts, and its kind. */
+function frameStarts(body: Uint8Array): {at: number; kind: number; length: number}[] {
+  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+  const out: {at: number; kind: number; length: number}[] = [];
+  for (let at = 0; at < body.byteLength; at += 5 + view.getUint32(at + 1, true)) {
+    out.push({at, kind: body[at]!, length: view.getUint32(at + 1, true)});
+  }
+  return out;
+}
 
 /** Every value of column `name` across `tables`, in order. */
 const column = (tables: Table[], name: string): unknown[] => tables.flatMap((t) => [...t.getChild(name)!]);
@@ -214,6 +259,43 @@ describe('bulk reads against a live server', () => {
       expect(thrown).toBeInstanceOf(TesseraError);
       expect(thrown).toMatchObject({status: 422});
       expect(refusalOf(thrown).code).toBe('contract');
+    }
+  });
+
+  it('treats a connection cut before the trailer as an incomplete body, and resumes from the last page end', async (ctx) => {
+    live(ctx);
+    const request: ItemsRequest = {view: 's0', fields: ['title'], pageRows: 50, pages: 5};
+    const whole = column((await items({...request, pages: undefined})).tables, 'tessera_id');
+    // After the second page end, and halfway through the third records frame.
+    const cuts: Record<string, (body: Uint8Array) => number> = {
+      'on a frame boundary': (body) => {
+        const ends = frameStarts(body).filter((f) => f.kind === 8);
+        return ends[1]!.at + 5 + ends[1]!.length;
+      },
+      'inside a frame': (body) => {
+        const records = frameStarts(body).filter((f) => f.kind === 7);
+        return records[2]!.at + 5 + Math.floor(records[2]!.length / 2);
+      }
+    };
+    for (const [name, cutAt] of Object.entries(cuts)) {
+      const proxy = await cuttingProxy((served as Served).viewerUrl, cutAt);
+      try {
+        const cutClient = new TesseraClient({viewerUrl: proxy.url, sessionUrl: (served as Served).sessionUrl});
+        const read = await cutClient.items(session.token, request);
+        const got: Table[] = [];
+        await rejectsAsRefused(
+          (async () => {
+            for await (const table of read) got.push(table);
+          })()
+        );
+        expect(got.map((t) => t.numRows), name).toEqual([50, 50]);
+        expect(read.trailer).toBeNull();
+        expect(typeof read.cursor, name).toBe('string');
+        const rest = await readAll((cursor) => client.items(session.token, {...request, cursor: cursor ?? read.cursor!}));
+        expect([...column(got, 'tessera_id'), ...column(rest.tables, 'tessera_id')], name).toEqual(whole);
+      } finally {
+        proxy.close();
+      }
     }
   });
 

@@ -245,19 +245,29 @@ describe('TesseraClient.items and artifacts', () => {
     expect(uncounted.head).toEqual<ArtifactsHead>({pageRows: 5, served: null, matched: null});
   });
 
-  it('yields the whole pages of a body cut before its trailer, then refuses it, resuming after the last page end', async () => {
+  it('yields the whole pages of a body that ends or is cut before its trailer, then refuses it, resuming after the last page end', async () => {
     const all = parts();
-    // Cut after the second records frame, whose page end never arrived; and after its page end.
-    for (const [cut, whole] of [[4, 1], [5, 2]] as const) {
-      const read = await clientFor(chunked(framed(all.slice(0, cut)))).client.items('tok', {...REQUEST, cursor: 'c0'});
-      const got: Table[] = [];
-      const reading = (async () => {
-        for await (const table of read) got.push(table);
-      })();
-      await rejectsAsRefused(reading);
-      expect(got.map(rowsOf)).toEqual(PAGES.slice(0, whole).map(rowsOf));
-      expect(read.trailer).toBeNull();
-      expect(read.cursor).toBe(CURSORS[whole - 1]);
+    const inside = framed(all.slice(0, 6));
+    const bodies: [name: string, body: Uint8Array, whole: number][] = [
+      ['after a records frame whose page end never came', framed(all.slice(0, 4)), 1],
+      ['after a page end', framed(all.slice(0, 5)), 2],
+      ['inside a records frame', inside.subarray(0, inside.byteLength - 20), 2]
+    ];
+    for (const [name, body, whole] of bodies) {
+      // A clean end, and the connection cut that `fetch` reports as a failed read.
+      for (const cut of [undefined, new TypeError('terminated')]) {
+        const read = await clientFor(chunked(body, 16, {cut})).client.items('tok', {...REQUEST, cursor: 'c0'});
+        const got: Table[] = [];
+        const reading = (async () => {
+          for await (const table of read) got.push(table);
+        })();
+        await rejectsAsRefused(reading).catch((error: unknown) => {
+          throw new Error(`${name}, ${cut ? 'cut' : 'ended'}: ${String(error)}`);
+        });
+        expect(got.map(rowsOf), name).toEqual(PAGES.slice(0, whole).map(rowsOf));
+        expect(read.trailer).toBeNull();
+        expect(read.cursor, name).toBe(CURSORS[whole - 1]);
+      }
     }
   });
 
