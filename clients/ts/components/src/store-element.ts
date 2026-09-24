@@ -24,13 +24,8 @@ export class TesseraStore extends TesseraElement {
   protected override canBuildOwn = true;
   private provider = new ContextProvider(this, {context: storeContext, initialValue: null});
 
-  protected override onStoreAdopted(store: Store): void {
+  protected override onStoreAdopted(store: Store | null): void {
     this.provider.setValue(store);
-  }
-
-  override dispose(): void {
-    super.dispose();
-    this.provider.setValue(null);
   }
 
   override render() {

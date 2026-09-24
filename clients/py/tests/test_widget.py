@@ -152,10 +152,15 @@ def test_the_synced_surface_is_exactly_the_design_s(make):
     synced = set(Map.class_traits(sync=True)) - set(anywidget.AnyWidget.class_traits(sync=True))
     synced = {k for k in synced if not k.startswith("_")}  # `_esm` and `_css` are anywidget's
     assert synced == {
-        "url", "view", "explorer_layout", "height",
+        "url", "view", "explorer_layout", "height", "title_field",
         "bbox", "layers", "colour_by", "filters",
         "selected", "selected_artifact", "region",
     }
+
+
+def test_title_field_is_synced_down_and_defaults_to_none(make):
+    assert make(token="t").get_state()["title_field"] is None
+    assert make(token="t", title_field="title").get_state()["title_field"] == "title"
 
 
 def test_map_without_a_bundle_says_how_to_get_one(monkeypatch):

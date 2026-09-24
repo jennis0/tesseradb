@@ -4,13 +4,9 @@ import '../src/map.js';
 import {fakeStore, mount, settle, status} from './fake-store.js';
 
 /**
- * What a hover says a point is.
- *
- * **A mark cannot carry its own name.** A text column lives in the record blob and is refused
- * `render` (records-and-search §3), so no viewport response holds one and the opaque id is the
- * whole of what the marks stream knows. The map therefore asks `/v1/items` — through the store's
- * `describe`, which writes no projection and so opens no card — once the pointer has rested, and
- * replaces the id with the name when the answer arrives.
+ * What a hover says a point is. The host names the field that titles a point (`title-field`);
+ * unset, the title is the point's id and nothing is fetched. A field the marks do not carry is
+ * asked of the record through the store's `describe`, which opens no card, once the pointer rests.
  */
 
 afterEach(() => {
@@ -18,24 +14,26 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-/** Meta declaring one text column and one that is not, so the choice is a choice. */
 const meta = (scalars: {name: string; arrowType: string}[]): Meta =>
   ({
     declaredScalars: scalars.map((s) => ({...s, category: null, render: false, index: true}))
   }) as unknown as Meta;
 
-async function map(scalars: {name: string; arrowType: string}[]) {
-  const host = await mount('<tessera-map></tessera-map>');
-  const el = host.querySelector('tessera-map') as unknown as {
-    store: unknown;
-    worldAt: unknown;
-    onHover(info: unknown): void;
-    hover: {title: string} | null;
-  };
+type HoverMap = {
+  store: unknown;
+  worldAt: unknown;
+  slab: {markAt: unknown};
+  onHover(info: unknown): void;
+  hover: {title: string; lines: string[]} | null;
+};
+
+async function map(scalars: {name: string; arrowType: string}[], attributes = '') {
+  const host = await mount(`<tessera-map ${attributes}></tessera-map>`);
+  const el = host.querySelector('tessera-map') as unknown as HoverMap;
   const store = fakeStore({status: status({}), meta: meta(scalars)});
   el.store = store;
-  // No deck in jsdom, so the map cannot unproject: the hovered artifact is resolved from a world
-  // point and this test is about the tooltip, not about the contours.
+  // No deck here, so the map cannot unproject: the hovered artifact is resolved from a world
+  // point and these tests are about the tooltip, not about the contours.
   el.worldAt = () => null;
   await settle(host);
   return {el, store};
@@ -44,26 +42,28 @@ async function map(scalars: {name: string; arrowType: string}[]) {
 /** Deck's answer for a mark: the slot layer, the row, and the ids that layer was given. */
 const markAt = (id: bigint) => ({index: 0, x: 10, y: 20, sourceLayer: {id: 'marks-p0', props: {tesseraIds: new BigUint64Array([id])}}});
 
+/** The marks under the pointer carrying `scalars`, one row each. */
+const carrying = (scalars: Record<string, {arrowType: string; value: unknown}>) => () => ({
+  band: {scalars: Object.fromEntries(Object.entries(scalars).map(([k, v]) => [k, {arrowType: v.arrowType, values: [v.value]}]))},
+  i: 0
+});
+
 describe('a hover over a mark', () => {
-  it('shows the id at once and the record’s name once the pointer has rested', async () => {
+  it('shows the id at once and the title field from the record once the pointer has rested', async () => {
     vi.useFakeTimers();
-    const {el, store} = await map([
-      {name: 'confidence', arrowType: 'f32'},
-      {name: 'name', arrowType: 'text'}
-    ]);
+    const {el, store} = await map([{name: 'name', arrowType: 'text'}], 'title-field="name"');
     store.describe = async () => ({name: 'Sheena McCurrach Art', country: 'GB'});
 
     el.onHover(markAt(31728047486770n));
-    // Before the dwell: the id, because that is all the marks stream carries.
     expect(el.hover?.title).toBe('#31728047486770');
 
     await vi.advanceTimersByTimeAsync(300);
     expect(el.hover?.title).toBe('Sheena McCurrach Art');
   });
 
-  it('asks for nothing where the corpus declares no string column', async () => {
+  it('with no title field, shows the id and asks for nothing, whatever the bundle declares', async () => {
     vi.useFakeTimers();
-    const {el, store} = await map([{name: 'confidence', arrowType: 'f32'}]);
+    const {el, store} = await map([{name: 'name', arrowType: 'text'}]);
     let asked = 0;
     store.describe = async () => {
       asked += 1;
@@ -78,7 +78,7 @@ describe('a hover over a mark', () => {
 
   it('asks once for the mark the pointer settled on, not for the ones it crossed', async () => {
     vi.useFakeTimers();
-    const {el, store} = await map([{name: 'name', arrowType: 'text'}]);
+    const {el, store} = await map([{name: 'name', arrowType: 'text'}], 'title-field="name"');
     const asked: string[] = [];
     store.describe = async (id: bigint) => {
       asked.push(id.toString());
@@ -91,5 +91,39 @@ describe('a hover over a mark', () => {
     }
     await vi.advanceTimersByTimeAsync(300);
     expect(asked).toEqual(['4']);
+  });
+
+  it('reads a title field the marks carry off the mark, and asks for nothing', async () => {
+    vi.useFakeTimers();
+    const {el, store} = await map([{name: 'code', arrowType: 'utf8'}], 'title-field="code"');
+    el.slab.markAt = carrying({code: {arrowType: 'utf8', value: 'GB-LND'}});
+    let asked = 0;
+    store.describe = async () => {
+      asked += 1;
+      return null;
+    };
+
+    el.onHover(markAt(5n));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(el.hover?.title).toBe('GB-LND');
+    expect(asked).toBe(0);
+  });
+
+  it('never takes the title from tooltip-fields: they are lines beneath the id', async () => {
+    const {el} = await map([{name: 'code', arrowType: 'utf8'}, {name: 'name', arrowType: 'utf8'}], 'tooltip-fields="code,name"');
+    el.slab.markAt = carrying({code: {arrowType: 'utf8', value: 'GB-LND'}, name: {arrowType: 'utf8', value: 'London'}});
+
+    el.onHover(markAt(5n));
+    expect(el.hover?.title).toBe('#5');
+    expect(el.hover?.lines).toEqual(['GB-LND', 'London']);
+  });
+
+  it('shows a timestamp in full', async () => {
+    const at = 1_700_000_000_123_000;
+    const {el} = await map([{name: 'published', arrowType: 'timestamp_us'}], 'tooltip-fields="published"');
+    el.slab.markAt = carrying({published: {arrowType: 'timestamp_us', value: at}});
+
+    el.onHover(markAt(5n));
+    expect(el.hover?.lines).toEqual([new Date(at / 1000).toISOString()]);
   });
 });

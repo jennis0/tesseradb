@@ -38,11 +38,11 @@ export class TesseraLayerPicker extends TesseraElement {
       }
       [part='entry'][data-filter-layer] {
         cursor: default;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         padding-left: 22px;
       }
       [part='name'] {
-        font-family: var(--tessera-font-mono);
+        font-family: var(--_tessera-font-mono);
         font-size: 12px;
         overflow: hidden;
         text-overflow: ellipsis;

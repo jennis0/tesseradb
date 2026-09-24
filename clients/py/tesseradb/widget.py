@@ -77,6 +77,9 @@ class Map(anywidget.AnyWidget):
     on expiry), or a callable returning either (called on expiry). ``view`` names one of the
     served views; ``None`` is the first.
 
+    ``title_field`` names the record field that titles a point in the hover and the item card;
+    ``None`` titles a point by its id.
+
     ``layers`` names the annotation layers to draw (their dependents come with them); ``None``
     leaves the explorer's default and ``[]`` draws none. ``colour_by`` is a column, or
     ``"cluster:<layer>"`` for the served clusters' exact membership.
@@ -107,6 +110,8 @@ class Map(anywidget.AnyWidget):
     # Not `layout`: ipywidgets' DOMWidget already has one, the CSS Layout model the frontend reads.
     explorer_layout = traitlets.Enum(["docked", "overlay"], default_value="docked").tag(sync=True)
     height = traitlets.Int(480).tag(sync=True)
+    # The record field that titles a point in the hover and the item card; `None` titles it by id.
+    title_field = traitlets.Unicode(None, allow_none=True).tag(sync=True)
     # Both ways, synced up at the settle.
     bbox = traitlets.List(traitlets.Float(), minlen=4, maxlen=4, allow_none=True, default_value=None).tag(sync=True)
     # `None` leaves the explorer's own default; `[]` is none; a list is exactly those (with their
@@ -134,6 +139,7 @@ class Map(anywidget.AnyWidget):
         bbox: Optional[Sequence[float]] = None,
         height: int = 480,
         explorer_layout: str = "docked",
+        title_field: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         if token is None:
@@ -160,6 +166,7 @@ class Map(anywidget.AnyWidget):
             bbox=None if bbox is None else [float(v) for v in bbox],
             height=height,
             explorer_layout=explorer_layout,
+            title_field=title_field,
             _esm=bundle.read_text(encoding="utf-8"),
             **kwargs,
         )

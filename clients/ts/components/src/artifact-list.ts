@@ -39,11 +39,11 @@ export class TesseraArtifactList extends TesseraElement {
         padding-left: calc(6px + var(--depth, 0) * 18px);
       }
       [part='name'][data-unnamed] {
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       [part='item'] tessera-count::part(count) {
         margin-left: auto;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         font-size: 12px;
         font-weight: 400;
       }
