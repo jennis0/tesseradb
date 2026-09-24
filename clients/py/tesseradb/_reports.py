@@ -19,6 +19,7 @@ class Summarised:
     """A report that shows as the lines `summary()` returns."""
 
     def summary(self) -> list[str]:
+        """The lines `print()` shows."""
         raise NotImplementedError
 
     def __str__(self) -> str:
@@ -40,8 +41,8 @@ def _count(n: int, one: str, many: str | None = None) -> str:
 class Declared(Summarised):
     """What `declare_columns` declared.
 
-    - `columns`: one row per column declared: its name, data type, what it was declared as, its
-      `render` and `index` flags, and why.
+    - `columns`: a `DeclaredColumn` for each column of the frame that was neither skipped nor
+      already declared, including those no type fits, which were not declared.
     - `vocabularies`: the vocabularies declared for category columns.
     """
 
@@ -49,6 +50,9 @@ class Declared(Summarised):
     vocabularies: list[str] = field(default_factory=list)
 
     def summary(self) -> list[str]:
+        """The lines `print()` shows: each column and what it was declared as, and the
+        vocabularies declared."""
+
         def flags(column: DeclaredColumn) -> str:
             named = [flag for flag in ("render", "index") if getattr(column, flag)]
             return column.declared_as + "".join(f", {flag}" for flag in named)
@@ -95,6 +99,8 @@ class Report(Summarised):
         return "; ".join(f"{target}: {_count(n, 'row')}" for target, n in self.rows.items())
 
     def summary(self) -> list[str]:
+        """The lines `print()` shows: the rows inserted, then every note, finding and warning,
+        or the whole log where the check failed."""
         out = [
             f"check: {'ok' if self.ok else 'FAILED'}, inserted "
             f"{self._rows_in_words() or 'no rows'}"
@@ -127,8 +133,8 @@ class CommitReport(Report):
       it built, the annotations it made from key columns, and the member rows in no annotation
       (a null key). Each is `None` where the log does not give it.
     - `seconds`: how long the check, the build and the server's start took.
-    - `viewer`, `session`, `control`: the addresses readers read from, tokens are made at, and
-      the operator writes to.
+    - `viewer`, `session`, `control`: the addresses of the viewer plane, where readers read, the
+      session plane, where tokens are made, and the control plane, where the operator writes.
     - `identity`: how the rows are named, by their id column or by `tessera_id`.
     """
 
@@ -144,6 +150,8 @@ class CommitReport(Report):
     identity: str = ""
 
     def summary(self) -> list[str]:
+        """The lines `print()` shows: the items built, the views and layers, the address served
+        at, then every note, finding and warning."""
         if not self.ok:
             return ["commit: FAILED"] + self._problems()
         views = [
@@ -180,7 +188,8 @@ class PagedReport(Summarised):
     - `values_bound`, `titles_set`: vocabulary values added and titles replaced.
     - `already_present`: parts the database already held, which changed nothing.
     - `without_content`: annotations added without the content they declare.
-    - `clipped`: rows moved onto the edge of a view's extent by its projection.
+    - `clipped`: rows outside the range the view's projection can place, stored on the view's
+      edge.
     - `clamped`: rows outside a view's extent, moved onto its edge.
     - `refusals`: each refused request, with its status and the server's answer.
     - `tessera_ids`: the id given to each added row.
@@ -218,13 +227,17 @@ class PagedReport(Summarised):
 
     @property
     def ok(self) -> bool:
+        """`True` when nothing was refused and nothing was found before sending."""
         return not self.refusals and not self.findings
 
     @property
     def rows(self) -> int:
+        """The rows added, over every view."""
         return sum(self.rows_accepted.values())
 
     def summary(self) -> list[str]:
+        """The lines `print()` shows: the requests planned, or what was added and when it became
+        visible, then every finding and refusal."""
         if not self.sent:
             out = [
                 f"check: {'ok' if self.ok else 'FAILED'}, "
@@ -285,9 +298,11 @@ class ChangeReport(Summarised):
 
     @property
     def ok(self) -> bool:
+        """`True` when no request was refused."""
         return not self.refusals
 
     def summary(self) -> list[str]:
+        """The lines `print()` shows: the ids sent, then every refusal."""
         out = [f"{self.op}: {_count(self.requested, 'id')}, {'ok' if self.ok else 'FAILED'}"]
         out += [f"refused {refusal['status']}: {refusal['detail']}" for refusal in self.refusals]
         return out

@@ -71,15 +71,25 @@ plugins:
       # Overrides of the plugin's table templates, which otherwise print descriptions as raw
       # Markdown. The path is relative to the directory mkdocs runs in.
       templates_path: docs/openapi/templates
+  # No tooltip on a link to a documented object: it would repeat the heading and its module path.
+  - autorefs:
+      link_titles: false
   - mkdocstrings:
       handlers:
         python:
           paths: [clients/py]
           options:
-            docstring_style: google
+            # The docstrings are Markdown, with parameters as bullets, so no section is parsed.
+            docstring_style: null
             show_root_heading: true
             show_root_full_path: false
             show_source: false
+            separate_signature: true
+            line_length: 80
+            show_signature_annotations: true
+            signature_crossrefs: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
             members_order: source
             filters: ["!^_"]
 
@@ -102,7 +112,14 @@ nav:
       - Capabilities: reference/capabilities.md
       - CLI: reference/cli.md
       - Configuration schema: reference/schema.md
-      - Python client: reference/python.md
+      - Python client:
+          - reference/python/index.md
+          - Connecting and creating: reference/python/connecting.md
+          - Declaring: reference/python/declaring.md
+          - Inserting and committing: reference/python/inserting.md
+          - Reading: reference/python/reading.md
+          - Operating: reference/python/operating.md
+          - The notebook map: reference/python/widget.md
       - TypeScript client: reference/typescript.md
       - Components: reference/components.md
   - How it works:

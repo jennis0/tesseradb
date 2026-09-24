@@ -18,7 +18,16 @@ VOCABULARY_WIDTH = "u16"
 
 @dataclass
 class DeclaredColumn:
-    """One row of the table the helper prints."""
+    """One column `declare_columns` looked at, and what it declared the column as.
+
+    - `name`: the column's name.
+    - `dtype`: its Arrow type, as text.
+    - `declared_as`: the attribute type it was declared with, or `"not declared"` where no type
+      fits.
+    - `render`, `index`: the flags it was declared with.
+    - `vocabulary`: for a category, the vocabulary its values come from, and `None` otherwise.
+    - `why`: why it was declared as it was, or why it was not.
+    """
 
     name: str
     dtype: str

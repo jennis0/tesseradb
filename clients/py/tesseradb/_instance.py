@@ -66,7 +66,12 @@ class ServeRefused(Refusal):
 
 @dataclass
 class Listening:
-    """The three planes' bound addresses, as the child announced them."""
+    """The addresses a database's server listens on, each as `host:port`.
+
+    - `viewer`: the viewer plane, where readers read.
+    - `session`: the session plane, where tokens are made and revoked.
+    - `control`: the control plane, where the operator writes.
+    """
 
     viewer: str
     session: str
