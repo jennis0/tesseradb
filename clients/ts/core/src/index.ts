@@ -6,6 +6,21 @@ export {decodeViewport} from './decode.js';
 export {chooseDepth, calibrate, countedMarks, tilesInBbox, tileRectOfBbox, MIN_DEPTH} from './budget.js';
 export type {BudgetInputs, CountCell, CountField, DepthChoice, Observation} from './budget.js';
 export {TesseraClient, TesseraError, type PartSink, type TesseraClientOptions} from './client.js';
+export {
+  Control,
+  addressed,
+  MAX_ATTEMPTS,
+  MAX_BACKOFF,
+  MIN_BACKOFF,
+  UNANSWERED,
+  type Answer,
+  type CallOptions,
+  type ChangeItem,
+  type ControlOptions,
+  type RowAnswer,
+  type RowOptions,
+  type WriteOptions
+} from './control.js';
 export {createDecoder, inlineDecoder, setWorkerFactory, workerDecoder, type Decoder} from './decoder.js';
 export {BandCache, bandKey, bandsOfResult, distinctOrdinals, isComplete} from './bands.js';
 export {

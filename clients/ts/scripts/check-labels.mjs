@@ -24,6 +24,9 @@
 //     answering with the description of the thing that was just hidden.
 import {readFile} from 'node:fs/promises';
 import {tableFromIPC} from 'apache-arrow';
+// Loading a `.ts` module needs Node 22.18 or later, which strips its types.
+import {Control} from '../core/src/control.ts';
+import {accepted} from './operator.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -32,11 +35,11 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const control = args.control ?? 'http://127.0.0.1:45721';
 const sessionCred = process.env.TESSERA_SESSION_CRED;
 const operatorCred = process.env.TESSERA_OPERATOR_CRED;
 if (!sessionCred) throw new Error('set TESSERA_SESSION_CRED');
 if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
+const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', operatorCredential: operatorCred});
 const clusterLayer = args.clusters ?? 'centroids/kmeans-2026-08';
 const labelLayer = args.labels ?? 'topics/ctfidf-2026-08';
 const labelTerm = args.term ?? '46';
@@ -207,14 +210,8 @@ if (!cluster) throw new Error(`no cluster ${label.key.replace(/^l-/, '')} served
 expect('the label answers on its identifier before the suppression', (await byIdentifier(witnessToken, label.id)) !== null);
 
 const change = async (op) => {
-  const r = await fetch(`${control}/control/changes`, {
-    method: 'POST',
-    headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
-    // A bare array of items, each carrying its own idset: a `tessera_id` is only meaningful under
-    // the identity lineage that minted it.
-    body: JSON.stringify([{tessera_id: cluster.id.toString(), idset: (await metaOf(witnessToken)).idset, op}])
-  });
-  if (!r.ok) throw new Error(`${op}: ${r.status} ${await r.text()}`);
+  // Each item carries the idset its `tessera_id` was issued under.
+  accepted(op, await control.changes([{tessera_id: cluster.id.toString(), idset: (await metaOf(witnessToken)).idset, op}]));
 };
 
 // **The unsuppress runs whatever happens in between.** This suppresses a cluster on a live
