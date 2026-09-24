@@ -19,7 +19,8 @@ import {artifactColours, positionalEntry, type PaletteKind, type PaletteScheme, 
 import type {Band, BandKey} from './bands.js';
 import {BandBudget, bandKey} from './bands.js';
 import {DEFAULT_CACHE_BYTES, Replica, type ReplicaOptions} from './replica.js';
-import {TesseraClient, TesseraError, type TesseraClientOptions} from './client.js';
+import {TesseraClient, type TesseraClientOptions} from './client.js';
+import {TokenSupply, type TokenSupplier} from './token.js';
 import type {DepthChoice} from './budget.js';
 import type {Presented} from './presented.js';
 import type {
@@ -83,11 +84,7 @@ export type SelectionShape = (
   | {kind: 'artifact'; id: bigint}
 ) & {outside?: boolean};
 
-/**
- * How the store gets a viewer token it renews before expiry. `expiresAt` is seconds since the Unix
- * epoch, as `/session/authorise` reports `expires_at`; `Infinity` is a token that does not expire.
- */
-export type TokenSupplier = () => Promise<{token: string; expiresAt: number}>;
+export type {TokenSupplier} from './token.js';
 
 export type StoreOptions = {
   viewerUrl: string;
@@ -538,12 +535,15 @@ export function createStore(options: StoreOptions): Store {
 
   const table = new SessionArtifactTable();
 
-  // The token the store holds, renewed before the first refusal, and whether this store has ever
-  // used one — a 401 on a token it *did* use is a swept session (design §5.4), not a bad option.
-  let token: string | null = options.token ?? null;
-  let expiresAtMs = Infinity;
-  let renewTimer: unknown = null;
-  let tokenEverUsed = false;
+  const tokens = new TokenSupply(options.authorise, options.token, clock, (changed) => {
+    // A derived shape and a hovered record answer one principal; a new token may be another.
+    if (changed) {
+      forgetShapes('derived');
+      forgetDescribed();
+    }
+    // A warm-up that failed for want of a token runs again now there is one.
+    if (meta === null) void ready().catch(() => {});
+  });
 
   let meta: Meta | null = null;
   let viewId = options.view ?? '';
@@ -631,69 +631,10 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  // ---- the token supplier -------------------------------------------------------------------
-
-  /**
-   * The token to ask with: the one held while it is fresh, else the supplier's next. Every verb
-   * asks through this, so a verb called before the first token lands waits for it.
-   */
-  async function ensureToken(): Promise<string> {
-    if (disposed) throw disposedError();
-    if (token && Date.now() < expiresAtMs - 5_000) return token;
-    if (!options.authorise) {
-      if (!token) throw new TesseraError(401, 'bad-credential', 'no token');
-      return token;
-    }
-    return renew(options.authorise);
-  }
-
-  /** The renewal in flight, which every caller shares, so one supplier call answers them all. */
-  let renewing: Promise<string> | null = null;
-
-  function renew(authorise: TokenSupplier): Promise<string> {
-    renewing ??= renewOnce(authorise).finally(() => {
-      renewing = null;
-    });
-    return renewing;
-  }
-
-  async function renewOnce(authorise: TokenSupplier): Promise<string> {
-    const got = await authorise();
-    if (disposed) throw disposedError();
-    // A derived shape is a function of the principal's own visible members, so one held across a
-    // change of token would draw the previous principal's shape against the new one's identifiers.
-    // A hover's record is an answer to the principal too. Before the first token nothing is held
-    // under another principal, and what was asked for is being answered under this one.
-    if (token !== null && token !== got.token) {
-      forgetShapes('derived');
-      forgetDescribed();
-    }
-    token = got.token;
-    expiresAtMs = got.expiresAt * 1000;
-    armRenewal();
-    // A warm-up that failed for want of a token runs again now there is one.
-    if (meta === null) void ready().catch(() => {});
-    return token;
-  }
-
-  function armRenewal(): void {
-    if (renewTimer) clock.cancel(renewTimer);
-    const authorise = options.authorise;
-    if (!authorise || !Number.isFinite(expiresAtMs)) return;
-    // Renew 30 s before expiry, so a warm client never presents a token the server will refuse, or
-    // halfway through a lifetime shorter than a minute. The token is still fresh by `ensureToken`'s
-    // margin when this fires, so it renews directly.
-    const left = expiresAtMs - Date.now();
-    const wait = Math.max(0, left / 2, left - 30_000);
-    renewTimer = clock.after(wait, () => {
-      void renew(authorise).catch(() => {});
-    });
-  }
-
   /** The token and the view a verb naming a view asks under, once the store has read its meta. */
   async function viewed(): Promise<{token: string; view: string}> {
     await ready();
-    return {token: await ensureToken(), view: viewId};
+    return {token: await tokens.get(), view: viewId};
   }
 
   /**
@@ -707,25 +648,11 @@ export function createStore(options: StoreOptions): Store {
       warming = null;
       if (!disposed) {
         const refusal = refusalOf(error);
-        replaceProjection('status', {...projections.status, status: 'refused', refusal, expired: isExpiry(refusal)});
+        replaceProjection('status', {...projections.status, status: 'refused', refusal, expired: tokens.isExpiry(refusal)});
       }
       throw error;
     });
     return warming;
-  }
-
-  function disposedError(): Error {
-    return new Error('the store is disposed; create another store to ask again');
-  }
-
-  /** Whether a refusal means the session ended (design §5.4's expired row). */
-  function isExpiry(refusal: Refusal | null): boolean {
-    if (!refusal) return false;
-    if (refusal.code === 'expired-token') return true;
-    // A 401 `bad-credential` on a token this store has used is a swept session, indistinguishable
-    // from one that never existed — expired either way. Before the store has used a token, it is a
-    // bad option, not an expiry.
-    return refusal.code === 'bad-credential' && tokenEverUsed;
   }
 
   /**
@@ -792,8 +719,7 @@ export function createStore(options: StoreOptions): Store {
 
     const built = new Replica(
       async (req, signal, background, onPart) => {
-        const tok = await ensureToken();
-        tokenEverUsed = true;
+        const tok = await tokens.use();
         // The point path names the layers asked for and pays their pass (§5.10): that is what puts
         // the membership column on each band. `[]` until a layer is drawn or coloured by — and
         // `[]` on the replica's counts-only revalidation, which absorbs no points and would pay the
@@ -868,7 +794,7 @@ export function createStore(options: StoreOptions): Store {
       clock,
       view: id,
       quantisation: q,
-      token: ensureToken,
+      token: () => tokens.get(),
       // The drawn depth, from the projection the frame handler has just replaced — the presenter's
       // own handle is assigned after it hands the frame over, so it is one frame behind here. A
       // view that is not current has no drawn depth in the projection and reads its own.
@@ -910,8 +836,7 @@ export function createStore(options: StoreOptions): Store {
   }
 
   async function warm(): Promise<void> {
-    const t = await ensureToken();
-    tokenEverUsed = true;
+    const t = await tokens.use();
     // The host may have read this document already (see {@link StoreOptions.meta}); a second
     // fetch of it is a round trip for something in hand.
     const read = options.meta ?? (await client.meta(t));
@@ -951,7 +876,7 @@ export function createStore(options: StoreOptions): Store {
   // ---- projection updates from the machinery ------------------------------------------------
 
   function onStatus(status: PresentedStatus, refusal: Refusal | null): void {
-    const expired = isExpiry(refusal);
+    const expired = tokens.isExpiry(refusal);
     replaceProjection('status', {
       status,
       sessionWarm: projections.status.sessionWarm || status === 'shown',
@@ -1326,7 +1251,7 @@ export function createStore(options: StoreOptions): Store {
     const wanted = [...counts.keys()].filter((code) => !held.has(code));
     if (wanted.length === 0) return;
     try {
-      const resolved = await client.categories(await ensureToken(), column, {codes: wanted, view: viewId});
+      const resolved = await client.categories(await tokens.get(), column, {codes: wanted, view: viewId});
       if (disposed) return;
       const byCode = new Map((projections.legend.categories[column] ?? []).map((v) => [v.code, v]));
       for (const v of resolved) byCode.set(v.code, v);
@@ -1825,7 +1750,7 @@ export function createStore(options: StoreOptions): Store {
   async function pick(id: bigint): Promise<void> {
     const epoch = clears;
     try {
-      const detail = await client.item(await ensureToken(), id);
+      const detail = await client.item(await tokens.get(), id);
       if (disposed || epoch !== clears) return;
       replaceProjection('selection', {...projections.selection, item: {id, detail}, itemRefusal: null});
     } catch (error) {
@@ -1863,7 +1788,7 @@ export function createStore(options: StoreOptions): Store {
     const inFlight = describing.get(key);
     if (inFlight) return inFlight;
     const epoch = describedEpoch;
-    const request = ensureToken()
+    const request = tokens.get()
       .then((t) => client.item(t, id))
       .then((detail) => detail.fields)
       .catch(() => null)
@@ -1982,7 +1907,7 @@ export function createStore(options: StoreOptions): Store {
       const detail = await client.artifact(asked.token, id, {view: asked.view});
       if (disposed || epoch !== clears) return;
       // A renewal may have changed the principal under the request, and a shape can be theirs.
-      if (token === asked.token) holdShape(id, detail.shape);
+      if (tokens.current === asked.token) holdShape(id, detail.shape);
       replaceProjection('selection', {...projections.selection, artifact: {id, detail}, artifactRefusal: null, item: null, itemRefusal: null});
     } catch (error) {
       if (disposed || epoch !== clears) return;
@@ -2226,13 +2151,13 @@ export function createStore(options: StoreOptions): Store {
 
   function dispose(): void {
     disposed = true;
+    tokens.dispose();
     for (const held of perView.values()) {
       held.presenter.cancel();
       held.channel.cancel();
     }
     if (switchTimer !== null) clock.cancel(switchTimer);
     switchTimer = null;
-    if (renewTimer) clock.cancel(renewTimer);
     for (const timer of suggestTimers.values()) clock.cancel(timer);
     suggestTimers.clear();
     client.close();
