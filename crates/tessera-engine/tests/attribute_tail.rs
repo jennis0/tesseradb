@@ -759,6 +759,53 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
     );
 }
 
+/// **A segment holding a render column at a type other than the declared one is refused.** The
+/// manifest is rewritten after the build to declare `score` as `f64` while the segment stores
+/// `f32`, and the digest in `CURRENT` follows it, so the bundle opens and the disagreement
+/// reaches the gather.
+#[test]
+fn a_segment_holding_a_render_column_at_another_type_is_refused() {
+    use sha2::{Digest, Sha256};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_attributes(&root, tmp.path(), N_ITEMS);
+
+    let current_path = root.join("CURRENT");
+    let mut current: tessera_store::manifest::CurrentPointer =
+        serde_json::from_slice(&std::fs::read(&current_path).unwrap()).unwrap();
+    let manifest_path = root.join(&current.prefix).join("MANIFEST.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let score = manifest["declared_scalars"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|d| d["name"] == "score")
+        .expect("the fixture declares score");
+    assert_eq!(score["arrow_type"], "f32");
+    score["arrow_type"] = "f64".into();
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    std::fs::write(&manifest_path, &bytes).unwrap();
+    current.manifest_digest = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    std::fs::write(&current_path, serde_json::to_vec(&current).unwrap()).unwrap();
+
+    let engine = engine_over(tmp.path(), &root, config_uncapped());
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let answer = engine.viewport(
+        &session,
+        ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], u32::MAX as usize),
+    );
+    assert!(
+        matches!(answer, Err(tessera_engine::EngineError::Malformed(_))),
+        "the f32 column is refused, not served as f64: {:?}",
+        answer.map(|out| out.points.len())
+    );
+}
+
 // =============================================================================================
 // A render set that is not a prefix of the declaration
 // =============================================================================================
