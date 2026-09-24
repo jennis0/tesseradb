@@ -1,17 +1,10 @@
 import {describe, expect, it} from 'vitest';
 import {enterGroup, hasOneLayout, stepView, viewLabel, viewPickerEntries, viewsOfGroup} from '../src/views.js';
-import type {Meta, ViewInfo, ViewMetadataValue} from '../src/types.js';
+import type {ViewInfo, ViewMetadataValue} from '../src/types.js';
+import {meta as deployment, view as plain} from './support.js';
 
-const view = (id: string, group?: string, key?: string): ViewInfo => ({
-  id,
-  displayName: id,
-  quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1},
-  projection: 'none',
-  worldAspect: null,
-  tileScheme: null,
-  tile: null,
-  roster: group === undefined ? null : {group, key: key!, metadata: {}}
-});
+const view = (id: string, group?: string, key?: string): ViewInfo =>
+  plain(id, {roster: group === undefined ? null : {group, key: key!, metadata: {}}});
 
 /**
  * A roster whose **keys sort in a different order than the server lists them** — `2026-Q10` sorts
@@ -19,15 +12,15 @@ const view = (id: string, group?: string, key?: string): ViewInfo => ({
  * group's list is the order, and a client that compared keys would walk this group backwards
  * through its middle.
  */
-const meta = {
+const meta = deployment({
   views: [
     view('world'),
     view('quarter:2026-Q2', 'quarter', '2026-Q2'),
     view('quarter:2026-Q10', 'quarter', '2026-Q10'),
     view('quarter:2026-Q11', 'quarter', '2026-Q11')
   ],
-  groups: [{name: 'quarter', membersOf: null, views: ['quarter:2026-Q2', 'quarter:2026-Q10', 'quarter:2026-Q11']}]
-} as unknown as Meta;
+  groups: [{name: 'quarter', title: null, membersOf: null, views: ['quarter:2026-Q2', 'quarter:2026-Q10', 'quarter:2026-Q11']}]
+});
 
 describe('the roster', () => {
   it('orders a group as the server lists it, not by key', () => {
@@ -80,13 +73,13 @@ const KEYED: {key: string; metadata: Record<string, ViewMetadataValue>}[] = [
 const owner = KEYED.map((q) => rostered(`quarter:${q.key}`, 'quarter', q.key, q.metadata));
 const members = KEYED.map((q) => rostered(`world:${q.key}`, 'world', q.key, {}));
 
-const rich = {
+const rich = deployment({
   views: [{...view('knn'), displayName: 'knn'}, {...view('pca64'), displayName: 'pca64'}, ...owner, ...members],
   groups: [
     {name: 'quarter', title: 'Quarterly embedding', membersOf: null, views: owner.map((v) => v.id)},
     {name: 'world', title: null, membersOf: 'quarter', views: members.map((v) => v.id)}
   ]
-} as unknown as Meta;
+});
 
 const labelOf = (id: string) => viewLabel(rich, rich.views.find((v) => v.id === id)!);
 
@@ -101,7 +94,7 @@ describe('a view\u2019s label', () => {
   it('draws a range by its months only where the endpoints are whole ones, and the year once', () => {
     const span = (from: number, to: number | null) => {
       const one = rostered('g:k', 'g', 'k', {starts: {type: 'timestamp_us', value: from}, ...(to === null ? {} : {ends: {type: 'timestamp_us', value: to} as ViewMetadataValue})});
-      return viewLabel({views: [one], groups: []} as unknown as Meta, one).label;
+      return viewLabel(deployment({views: [one]}), one).label;
     };
     expect(span(at(2026, 4, 1), at(2026, 6, 30))).toBe('Apr – Jun 2026');
     expect(span(at(2026, 4, 5), at(2026, 6, 20))).toBe('5 Apr – 20 Jun 2026');
@@ -137,7 +130,7 @@ describe('the layout entries', () => {
   });
 
   it('are one layout — and the layout picker draws nothing — for one plain view and no groups', () => {
-    expect(hasOneLayout({views: [view('s0')], groups: []} as unknown as Meta)).toBe(true);
+    expect(hasOneLayout(deployment({views: [view('s0')]}))).toBe(true);
     expect(hasOneLayout(rich)).toBe(false);
   });
 });

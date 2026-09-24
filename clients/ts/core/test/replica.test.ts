@@ -1,38 +1,24 @@
 import {describe, expect, it} from 'vitest';
 import {Replica} from '../src/replica.js';
 import {mortonOfTile, tileOfCode, tileToCellBox, tileXY} from '../src/coords.js';
-import type {Quantisation, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {Quantisation, ViewportResponse} from '../src/types.js';
+import {response, result, tile} from './support.js';
 
 const Q: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
 
 /** A response serving `n` points for each named tile, identities ascending across the whole batch. */
-function response(tiles: {tile: bigint; served: number; visible?: number}[], pin = 'p1'): ViewportResponse {
+function served(tiles: {tile: bigint; served: number; visible?: number}[], pin = 'p1'): ViewportResponse {
   const total = tiles.reduce((sum, t) => sum + t.served, 0);
-  const result: ViewportResult = {
-    tiles: tiles.map((t) => ({
-      tile: t.tile,
-      visible: BigInt(t.visible ?? t.served),
-      matched: BigInt(t.visible ?? t.served),
-      served: BigInt(t.served)
-    })),
-    ids: BigUint64Array.from({length: total}, (_, i) => BigInt(i + 1)),
-    codes: new BigUint64Array(total),
-    positions: new Float64Array(total * 2),
-    world: new Float32Array(total * 2),
-    scalars: {},
-    subCells: null,
-    membership: {},
-    artifacts: []
-  };
-  return {
-    result,
-    timings: {serverUs: 0, admissionUs: 0, stageNs: null},
-    identityKey: 'ik',
-    contentKey: pin,
-    pin,
-    stale: false,
-    bytes: 0
-  };
+  return response(
+    result({
+      tiles: tiles.map((t) => tile(t.tile, BigInt(t.visible ?? t.served), {served: BigInt(t.served)})),
+      ids: BigUint64Array.from({length: total}, (_, i) => BigInt(i + 1)),
+      codes: new BigUint64Array(total),
+      positions: new Float64Array(total * 2),
+      world: new Float32Array(total * 2)
+    }),
+    {contentKey: pin}
+  );
 }
 
 /**
@@ -95,7 +81,7 @@ describe('tileXY', () => {
 
   it('agrees with the tiling a point falls into', () => {
     // A point's tile, derived from its code, must be the tile whose cell box contains it.
-    for (const [cx, cy] of [[0, 0], [65535, 65535], [12345, 54321], [40000, 7]]) {
+    for (const [cx, cy] of [[0, 0], [65535, 65535], [12345, 54321], [40000, 7]] as const) {
       let cell = 0n;
       for (let bit = 0; bit < 16; bit++) {
         cell |= BigInt((cx >> bit) & 1) << BigInt(2 * bit);
@@ -116,7 +102,7 @@ describe('tileXY', () => {
 
 describe('Replica.fetchRegion', () => {
   it('issues one request and holds every band it returns', async () => {
-    const {r, calls} = replica(() => response([{tile: 0n, served: 2}, {tile: 1n, served: 3}]));
+    const {r, calls} = replica(() => served([{tile: 0n, served: 2}, {tile: 1n, served: 3}]));
 
     const frame = await r.fetchRegion(world(1), 1, 500);
 
@@ -127,7 +113,7 @@ describe('Replica.fetchRegion', () => {
   });
 
   it('makes a revisit free', async () => {
-    const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
+    const {r, calls} = replica(() => served([{tile: 0n, served: 2}]));
 
     await r.fetchRegion(world(1), 1, 500);
     const second = await r.fetchRegion(world(1), 1, 500);
@@ -141,7 +127,7 @@ describe('Replica.fetchRegion', () => {
   it('asks only for the strip a pan actually exposes', async () => {
     // The whole point: coverage is a rectangle, so a shifted viewport subtracts to one strip
     // rather than to a per-tile diff over the viewport.
-    const {r, calls} = replica(() => response([{tile: 0n, served: 1}]));
+    const {r, calls} = replica(() => served([{tile: 0n, served: 1}]));
 
     await r.fetchRegion(rect(0, 0, 3, 3), 3, 500);
     const second = await r.fetchRegion(rect(2, 0, 5, 3), 3, 500);
@@ -155,7 +141,7 @@ describe('Replica.fetchRegion', () => {
   it('treats a covered region as answered, so empty ground is never re-asked', async () => {
     // A response omits empty tiles entirely. Coverage is what records "we asked here", and without
     // it a mostly-empty viewport re-requests its empty tiles forever.
-    const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
+    const {r, calls} = replica(() => served([{tile: 0n, served: 2}]));
 
     await r.fetchRegion(world(3), 3, 500); // 64 tiles, one of which holds anything
     expect(calls).toHaveLength(1);
@@ -166,7 +152,7 @@ describe('Replica.fetchRegion', () => {
 
   it('re-asks once the content key rotates', async () => {
     let pin = 'p1';
-    const {r, calls} = replica(() => response([{tile: 0n, served: 2}], pin), {
+    const {r, calls} = replica(() => served([{tile: 0n, served: 2}], pin), {
       revalidateAfterMs: 0
     });
 
@@ -187,7 +173,7 @@ describe('Replica.fetchRegion', () => {
   });
 
   it('never touches the wire for an all-held ask inside the revalidation window', async () => {
-    const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
+    const {r, calls} = replica(() => served([{tile: 0n, served: 2}]));
 
     await r.fetchRegion(world(1), 1, 500);
     await r.fetchRegion(world(1), 1, 500);
@@ -196,7 +182,7 @@ describe('Replica.fetchRegion', () => {
   });
 
   it('will not reuse coverage bought at a smaller cap', async () => {
-    const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
+    const {r, calls} = replica(() => served([{tile: 0n, served: 2}]));
 
     await r.fetchRegion(world(1), 1, 100);
     await r.fetchRegion(world(1), 1, 500); // a larger k may yield more for the same tiles
@@ -207,7 +193,7 @@ describe('Replica.fetchRegion', () => {
   it('splits a large region so no single response can block a frame', async () => {
     // One rectangle of 200x200 tiles is 40,000 — above the per-request bound, so it arrives as
     // several responses rather than one that decodes for seconds on the main thread.
-    const {r, calls} = replica(() => response([{tile: 0n, served: 1}]));
+    const {r, calls} = replica(() => served([{tile: 0n, served: 1}]));
     await r.fetchRegion(rect(0, 0, 199, 199), 8, 500);
     expect(calls.length).toBeGreaterThan(1);
     // Every piece is a strip of the full width, so together they tile the region exactly.
@@ -215,7 +201,7 @@ describe('Replica.fetchRegion', () => {
   });
 
   it('serves bands but retains nothing when the cache is bypassed', async () => {
-    const {r, calls} = replica(() => response([{tile: 0n, served: 2}]), {cache: false});
+    const {r, calls} = replica(() => served([{tile: 0n, served: 2}]), {cache: false});
 
     const first = await r.fetchRegion(world(1), 1, 500);
     const second = await r.fetchRegion(world(1), 1, 500);
@@ -227,7 +213,7 @@ describe('Replica.fetchRegion', () => {
   });
 
   it('drops everything on an explicit reset', async () => {
-    const {r, calls} = replica(() => response([{tile: 0n, served: 2}]));
+    const {r, calls} = replica(() => served([{tile: 0n, served: 2}]));
 
     await r.fetchRegion(world(1), 1, 500);
     r.reset();
@@ -241,7 +227,7 @@ describe('Replica.fetchRegion', () => {
     // an all-held ask makes no request and would never learn of it.
     let identity = 'i1';
     const {r, calls} = replica(() => {
-      const res = response([{tile: 0n, served: 2}]);
+      const res = served([{tile: 0n, served: 2}]);
       return {...res, identityKey: identity};
     });
 

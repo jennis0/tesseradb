@@ -4,30 +4,8 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {liftGolden, liftTilesHighlighted} from './old-shape-columns.js';
-import type {ViewportResult} from '../src/types.js';
-
-/** `body` with its kind-5 payload replaced: `u8 kind, u32 LE length, payload`, frame by frame. */
-function reframe(body: Uint8Array, artifacts: Uint8Array): Uint8Array {
-  const frames: {kind: number; payload: Uint8Array}[] = [];
-  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-  let at = 0;
-  while (at < body.length) {
-    const kind = body[at]!;
-    const length = view.getUint32(at + 1, true);
-    frames.push({kind, payload: kind === FRAME_ARTIFACTS ? artifacts : body.subarray(at + 5, at + 5 + length)});
-    at += 5 + length;
-  }
-  const out = new Uint8Array(frames.reduce((n, f) => n + 5 + f.payload.length, 0));
-  const outView = new DataView(out.buffer);
-  at = 0;
-  for (const {kind, payload} of frames) {
-    out[at] = kind;
-    outView.setUint32(at + 1, payload.length, true);
-    out.set(payload, at + 5);
-    at += 5 + payload.length;
-  }
-  return out;
-}
+import type {Decoder} from '../src/decoder.js';
+import {result} from './support.js';
 
 /**
  * What the artifact channel puts on the wire, and what it makes of what comes back.
@@ -38,17 +16,13 @@ function reframe(body: Uint8Array, artifacts: Uint8Array): Uint8Array {
  * layer.
  */
 
-const empty: ViewportResult = {
-  tiles: [],
-  ids: new BigUint64Array(),
-  codes: new BigUint64Array(),
-  positions: new Float64Array(),
-  world: new Float32Array(),
-  scalars: {},
-  subCells: null,
-  membership: {},
-  artifacts: [],
-  artifactsIdentity: null
+/** Answers every whole response with an empty result; these tests read the request, not the body. */
+const empty: Decoder = {
+  decode: async () => result(),
+  decodeHead: () => Promise.reject(new Error('a response without a part sink decodes whole')),
+  decodePoints: () => Promise.reject(new Error('a response without a part sink decodes whole')),
+  lastWorkerMs: null,
+  close: () => {}
 };
 
 /** Capture every request the client makes, and answer each with the body given. */
@@ -65,7 +39,7 @@ const client = () =>
   new TesseraClient({
     viewerUrl: 'http://viewer',
     sessionUrl: 'http://session',
-    decoder: {decode: async () => empty, close: () => {}}
+    decoder: empty
   });
 
 afterEach(() => vi.unstubAllGlobals());

@@ -4,6 +4,7 @@ import {TesseraClient} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {inlineDecoder} from '../src/decoder.js';
 import type {ViewportPart} from '../src/types.js';
+import {settle} from './support.js';
 
 /**
  * The streamed viewport: a response landed frame by frame instead of body by body.
@@ -131,11 +132,6 @@ const client = () =>
 
 const ask = (c: TesseraClient, onPart: (p: ViewportPart) => void, signal?: AbortSignal) =>
   c.viewport('tok', {view: 's0', zoom: 4, k: 100}, signal, false, onPart);
-
-/** Let the read loop, the decode chain and the sink run to a standstill. */
-async function settle(times = 8): Promise<void> {
-  for (let i = 0; i < times; i++) await new Promise((r) => setTimeout(r, 0));
-}
 
 afterEach(() => vi.unstubAllGlobals());
 

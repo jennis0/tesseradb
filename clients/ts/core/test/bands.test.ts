@@ -1,38 +1,16 @@
 import {describe, expect, it} from 'vitest';
 import {BandBudget, BandCache, bandSplitter, bandsOfResult, isComplete, type Band} from '../src/bands.js';
 import {mortonOfTile, tileContains, tileOfCode, tileXY} from '../src/coords.js';
-import type {ScalarColumn, ViewportResult} from '../src/types.js';
+import type {ScalarColumn} from '../src/types.js';
+import {band as heldBand, result, tile} from './support.js';
 
 /**
- * A band whose identities are `base, base+1, …` — ascending, as the wire delivers them, which is
- * what every prefix operation here depends on.
+ * A band whose identities are `1, 2, …`, ascending as the wire delivers them, which is what every
+ * prefix operation here depends on.
  */
 function band(overrides: Partial<Band> & {depth: number; prefix: bigint; n: number}): Band {
-  const {n, ...rest} = overrides;
-  const ids = BigUint64Array.from({length: n}, (_, i) => BigInt(i + 1));
-  const codes = BigUint64Array.from({length: n}, () => overrides.prefix << BigInt(64 - 2 * overrides.depth));
-  // The tile index the store would have de-interleaved when the band was built.
-  const {x, y} = tileXY(overrides.prefix, overrides.depth);
-  return {
-    x,
-    y,
-    ids,
-    codes,
-    positions: new Float32Array(n * 2),
-    scalars: {},
-    served: n,
-    capUsed: 500,
-    visible: BigInt(n),
-    matched: BigInt(n),
-    membership: {},
-    heldBelow: n === 0 ? 0n : ids[n - 1]! + 1n,
-    identityKey: 'ik',
-    contentKey: 'ck',
-    // What the store itself would compute: 8 for the id, 8 for the code, 16 for the position pair.
-    bytes: n * 32,
-    touchedAt: 0,
-    ...rest
-  };
+  const {n, depth, prefix, ...rest} = overrides;
+  return heldBand(depth, prefix, n, {heldBelow: n === 0 ? 0n : BigInt(n + 1), ...rest});
 }
 
 describe('tile addressing', () => {
@@ -59,23 +37,16 @@ describe('bandsOfResult', () => {
     const scalars: Record<string, ScalarColumn> = {
       w: {arrowType: 'u32', values: Uint32Array.from([10, 11, 12, 13, 14])}
     };
-    const result: ViewportResult = {
-      tiles: [
-        {tile: 7n, visible: 90n, matched: 90n, served: 2n},
-        {tile: 8n, visible: 0n, matched: 0n, served: 0n},
-        {tile: 9n, visible: 40n, matched: 40n, served: 3n}
-      ],
+    const res = result({
+      tiles: [tile(7n, 90n, {served: 2n}), tile(8n, 0n), tile(9n, 40n, {served: 3n})],
       ids: BigUint64Array.from([1n, 2n, 5n, 6n, 7n]),
       codes: BigUint64Array.from([0n, 0n, 0n, 0n, 0n]),
       positions: Float64Array.from([0, 0, 128, 128, 256, 256, 384, 384, 512, 512]),
       world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
-      scalars,
-      subCells: null,
-      membership: {},
-      artifacts: []
-    };
+      scalars
+    });
 
-    const bands = bandsOfResult(result, 4, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
+    const bands = bandsOfResult(res, 4, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
 
     expect(bands.map((b) => b.prefix)).toEqual([7n, 9n]); // the empty tile yields no band
     expect([...bands[0]!.ids]).toEqual([1n, 2n]);
@@ -87,18 +58,14 @@ describe('bandsOfResult', () => {
   });
 
   it('copies rather than views, so evicting a band frees its bytes', () => {
-    const result: ViewportResult = {
-      tiles: [{tile: 1n, visible: 2n, matched: 2n, served: 2n}],
+    const res = result({
+      tiles: [tile(1n, 2n, {served: 2n})],
       ids: BigUint64Array.from([1n, 2n, 3n, 4n]),
       codes: BigUint64Array.from([0n, 0n, 0n, 0n]),
       positions: new Float64Array(8),
-      world: new Float32Array(8),
-      scalars: {},
-      subCells: null,
-      membership: {},
-      artifacts: []
-    };
-    const [only] = bandsOfResult(result, 1, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
+      world: new Float32Array(8)
+    });
+    const [only] = bandsOfResult(res, 1, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
     // A subarray would share the 4-element response buffer; a copy owns exactly its own two.
     expect(only!.ids.buffer.byteLength).toBe(2 * 8);
   });
@@ -474,31 +441,23 @@ describe('BandCache.bandsForRegion at scale', () => {
 
 describe('bandSplitter', () => {
   it('reassembles exactly what the one-call split produces, however it is sliced', () => {
-    const tiles = Array.from({length: 200}, (_, i) => ({
-      tile: BigInt(i),
-      visible: 3n,
-      matched: 3n,
-      served: 3n
-    }));
+    const tiles = Array.from({length: 200}, (_, i) => tile(BigInt(i), 3n, {served: 3n}));
     const n = 200 * 3;
-    const result: ViewportResult = {
+    const res = result({
       tiles,
       ids: BigUint64Array.from({length: n}, (_, i) => BigInt(i)),
       codes: new BigUint64Array(n),
       positions: new Float64Array(n * 2),
       world: Float32Array.from({length: n * 2}, (_, i) => i),
-      scalars: {w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}},
-      subCells: null,
-      membership: {},
-      artifacts: []
-    };
+      scalars: {w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}}
+    });
     const meta = {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0};
 
-    const whole = bandsOfResult(result, 4, meta);
+    const whole = bandsOfResult(res, 4, meta);
 
     // A deadline already in the past forces the smallest slices the splitter will make; every
     // slice must still make progress, or an arrival would spin forever without absorbing.
-    const splitter = bandSplitter(result, 4, meta);
+    const splitter = bandSplitter(res, 4, meta);
     const sliced: Band[] = [];
     let steps = 0;
     while (!splitter.done()) {

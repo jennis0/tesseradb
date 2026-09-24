@@ -9,6 +9,7 @@ import {
   worldBbox,
   type PlannerInputs
 } from '../src/prefetch.js';
+import type {DepthChoice} from '../src/budget.js';
 import {tileOfCode} from '../src/coords.js';
 import {rectArea, rectContains} from '../src/rects.js';
 
@@ -169,7 +170,7 @@ describe('deeperFetch', () => {
 
   it('stops at the grid floor', () => {
     const atFloor = {...BASE, viewport: {...BASE.viewport, zoom: 16}};
-    const choice = {depth: 16, tiles: 1, predictedMarks: 0, limitedBy: 'maxDepth' as const};
+    const choice: DepthChoice = {depth: 16, tiles: 1, predictedMarks: 0, source: 'bound', averageMarks: 0, limitedBy: 'maxDepth'};
     expect(deeperFetch(atFloor, choice)).toBeNull();
   });
 
