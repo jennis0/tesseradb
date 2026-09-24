@@ -276,7 +276,7 @@ pub(super) fn tile_ranges(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn tile_sweep<'a>(
     tile: &Tile,
-    tile_parts: &[(usize, Range<u32>)],
+    tile_parts: &'a [(usize, Range<u32>)],
     mask: &EffectiveMask,
     segments: &[(&'a SegmentData, u32)],
     params: &SelectParams,
@@ -407,6 +407,7 @@ pub(super) fn tile_sweep<'a>(
         count,
         rows: selected.rows,
         parts: part_list,
+        tile_parts,
         sub_cells,
         stats: stats.t,
     }))
@@ -422,6 +423,9 @@ pub(super) struct TileSweepOut<'a> {
     pub(super) count: TileCount,
     pub(super) rows: Vec<u32>,
     pub(super) parts: Vec<SelectionPart<'a>>,
+    /// The tiling's entry for this tile, positionally aligned with `parts`: which of the view's
+    /// segments each part is, the key [`Gather`] reads its per-segment columns by.
+    pub(super) tile_parts: &'a [(usize, Range<u32>)],
     pub(super) sub_cells: Vec<SubCellCount>,
     pub(super) stats: TileStats,
 }
@@ -440,7 +444,7 @@ impl Engine {
         &self,
         served: &ServedView<'a>,
         mask: &EffectiveMask,
-        tiling: &Tiling,
+        tiling: &'a Tiling,
         params: &SelectParams,
         req: &ViewportRequest<'_>,
         probe: &mut Probe,
@@ -459,7 +463,7 @@ impl Engine {
         // has at most one tile of wasted work in flight at cancellation, where the parallel
         // fan-out has at most `compute_threads` tiles, since every tile already past the
         // checkpoint runs to completion.
-        let run = |tile: &Tile, tile_parts: &[(usize, Range<u32>)]| {
+        let run = |tile: &Tile, tile_parts: &'a [(usize, Range<u32>)]| {
             tile_sweep(
                 tile,
                 tile_parts,
@@ -624,7 +628,7 @@ type ResolvedScalars<'a> = Vec<Option<ScalarSlice<'a>>>;
 /// is named in no response such a principal receives.
 ///
 /// A family with no column for this view — one created after the build — is not in the list;
-/// absence in a segment of a view that does have one is [`gather_tile_columns`]'s to resolve, and
+/// absence in a segment of a view that does have one is [`Gather`]'s to resolve, and
 /// comes out as an absent value.
 pub(super) fn scoped_render_scalars(
     manifest: &tessera_store::manifest::Manifest,
@@ -758,167 +762,260 @@ impl<'a> RowPresence<'a> {
     }
 }
 
-/// One column's values at `placed`, each read by `value(part, local)`, and which of them carry a
-/// value: `None` where every part's rows all do, and then no row is tested.
+/// One column's values at `placed`, each read by `value(segment, local)`, and which of them carry
+/// a value. `presence` is `None` where every row the tile spans carries one, and then no row is
+/// tested.
 #[inline]
 fn gather_column<T>(
     placed: &[(u32, u32)],
-    presence: &[RowPresence<'_>],
+    presence: Option<&[RowPresence<'_>]>,
     value: impl Fn(usize, usize) -> T,
 ) -> (Vec<T>, Option<Vec<bool>>) {
     let mut out = Vec::with_capacity(placed.len());
-    for &(part, local) in placed {
-        out.push(value(part as usize, local as usize));
+    for &(segment, local) in placed {
+        out.push(value(segment as usize, local as usize));
     }
-    if presence.iter().all(|p| matches!(p, RowPresence::Every)) {
+    let Some(presence) = presence else {
         return (out, None);
-    }
+    };
     let present: Vec<bool> = placed
         .iter()
-        .map(|&(part, local)| presence[part as usize].contains(local))
+        .map(|&(segment, local)| presence[segment as usize].contains(local))
         .collect();
     let every = present.iter().all(|&held| held);
     (out, (!every).then_some(present))
 }
 
-/// Gather one tile's selected rows column-major. `tessera_id` and position are one load each from
-/// `columns.arrow` and `morton.u32`. `rows` are view-space, ascending by `tessera_id` and not by
-/// segment, so consecutive rows can land in different parts; they are resolved to `(part, local)`
-/// once, and every column then walks that placement, leaving the inner loop a bounds-checked
-/// index into a typed slice with no name lookup, no downcast and no per-value type dispatch.
+/// One segment's identity and position columns.
+struct SegmentRows<'a> {
+    tessera_id: &'a [u64],
+    morton: &'a [u32],
+    residual: &'a [u32],
+}
+
+macro_rules! column_slices {
+    ($(($v:ident, $t:ty)),* $(,)?) => {
+        /// One render column's typed values in each segment of the view, `None` where the
+        /// segment's schema lacks the column or no tile of the request touches the segment.
+        enum ColumnSlices<'a> {
+            $($v(Vec<Option<&'a [$t]>>),)*
+            Bool(Vec<Option<&'a arrow::array::BooleanArray>>),
+            Utf8(Vec<Option<&'a arrow::array::StringArray>>),
+        }
+    };
+}
+flat_families!(column_slices);
+
+/// One declared render column across the view's segments.
+struct RenderColumn<'a> {
+    values: ColumnSlices<'a>,
+    /// Per segment. `NoRow` for a segment no tile touches, which no tile reads.
+    presence: Vec<RowPresence<'a>>,
+}
+
+fn malformed(d: &DeclaredScalar) -> EngineError {
+    EngineError::Malformed(format!(
+        "a segment of this view holds scalar column '{}' at a type other than the declared {}; \
+         serving it would put values under another column's name",
+        d.name,
+        d.arrow_type.arrow_type_name()
+    ))
+}
+
+/// Column `ci` of each resolved segment as `typed` reads it, refusing a segment that holds the
+/// column at another type.
+fn per_segment<'a, T>(
+    resolved: &[Option<ResolvedScalars<'a>>],
+    ci: usize,
+    d: &DeclaredScalar,
+    typed: impl Fn(&ScalarSlice<'a>) -> Option<T>,
+) -> Result<Vec<Option<T>>> {
+    resolved
+        .iter()
+        .map(|r| match r.as_ref().and_then(|r| r[ci].as_ref()) {
+            None => Ok(None),
+            Some(slice) => typed(slice).map(Some).ok_or_else(|| malformed(d)),
+        })
+        .collect()
+}
+
+/// The emit pass's reader. Every segment a swept tile touches has its identity and position
+/// columns and each declared render column's typed values and presence resolved once for the
+/// request, indexed by the segment's position in the view's segment list. A tile then does only
+/// its per-part presence narrowing and the row loops.
 ///
 /// The column set is always `declared`'s length, so a request cannot end up with a column set
 /// derived from whichever tile happened to be first. A declared column a segment holds at another
-/// type is a malformed bundle, refused rather than silently skipped. A column a segment's schema
-/// does not hold is absent for every row of that segment, answered from the schema and never a
-/// blob read — the state a group-scoped family's lane in a segment written before it existed
-/// produces. An absent value is the type's zero in the buffer and false in the column's
+/// type is a malformed bundle, refused here rather than silently skipped. A column a segment's
+/// schema does not hold is absent for every row of that segment, answered from the schema and
+/// never a blob read: the state a group-scoped family's lane in a segment written before it
+/// existed produces. An absent value is the type's zero in the buffer and false in the column's
 /// `present`, except a category's, which is code 0 in the buffer.
-pub(super) fn gather_tile_columns(
-    parts: &SelectionParts<'_>,
-    rows: &[u32],
-    declared: &[DeclaredScalar],
-) -> Result<PointColumns> {
-    let placed: Vec<(u32, u32)> = rows
-        .iter()
-        .map(|&row| {
-            let (part, _, local) = parts.resolve_indexed(row);
-            (part as u32, local)
-        })
-        .collect();
+pub(super) struct Gather<'a> {
+    segments: Vec<SegmentRows<'a>>,
+    /// One per declared render column, in declaration order.
+    columns: Vec<RenderColumn<'a>>,
+    /// The current tile's selected rows as `(segment, local)`.
+    placed: Vec<(u32, u32)>,
+    /// Each segment's presence over the rows the current tile spans in it, for the current column.
+    presence: Vec<RowPresence<'a>>,
+}
 
-    let mut tessera_ids = Vec::with_capacity(rows.len());
-    let mut codes = Vec::with_capacity(rows.len());
-    for &(part, local) in &placed {
-        let segment = parts.as_slice()[part as usize].segment;
-        let idx = local as usize;
-        tessera_ids.push(segment.columns.tessera_id()[idx]);
-        codes.push(
-            ((segment.morton.u32()[idx] as u64) << 32) | segment.columns.residual()[idx] as u64,
-        );
+impl<'a> Gather<'a> {
+    pub(super) fn new(
+        segments: &[(&'a SegmentData, u32)],
+        swept: &[TileSweepOut<'a>],
+        declared: &[DeclaredScalar],
+    ) -> Result<Self> {
+        let mut touched = vec![false; segments.len()];
+        for ts in swept {
+            for &(s, _) in ts.tile_parts {
+                touched[s] = true;
+            }
+        }
+        let resolved: Vec<Option<ResolvedScalars<'a>>> = segments
+            .iter()
+            .zip(&touched)
+            .map(|(&(segment, _), &touched)| touched.then(|| resolve_scalars(segment, declared)))
+            .collect();
+
+        let mut columns = Vec::with_capacity(declared.len());
+        for (ci, d) in declared.iter().enumerate() {
+            let presence = segments
+                .iter()
+                .zip(&resolved)
+                .map(|(&(segment, _), r)| match r {
+                    Some(r) => RowPresence::read(
+                        segment,
+                        &d.name,
+                        d.vocabulary.is_some(),
+                        r[ci].is_some(),
+                    ),
+                    None => RowPresence::NoRow,
+                })
+                .collect();
+            macro_rules! typed {
+                ($(($v:ident, $t:ty)),* $(,)?) => {
+                    match d.arrow_type {
+                        $(ScalarType::$v => ColumnSlices::$v(per_segment(&resolved, ci, d, |s| {
+                            match s {
+                                ScalarSlice::$v(x) => Some(*x),
+                                _ => None,
+                            }
+                        })?),)*
+                        ScalarType::Bool => ColumnSlices::Bool(per_segment(&resolved, ci, d, |s| {
+                            match s {
+                                ScalarSlice::Bool(a) => Some(*a),
+                                _ => None,
+                            }
+                        })?),
+                        // A keyword shares this arm: rendered, it is its bytes.
+                        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+                            ColumnSlices::Utf8(per_segment(&resolved, ci, d, |s| match s {
+                                ScalarSlice::Utf8(a) => Some(*a),
+                                _ => None,
+                            })?)
+                        }
+                    }
+                };
+            }
+            let values = flat_families!(typed);
+            columns.push(RenderColumn { values, presence });
+        }
+
+        Ok(Gather {
+            segments: segments
+                .iter()
+                .map(|&(segment, _)| SegmentRows {
+                    tessera_id: segment.columns.tessera_id(),
+                    morton: segment.morton.u32(),
+                    residual: segment.columns.residual(),
+                })
+                .collect(),
+            columns,
+            placed: Vec::new(),
+            presence: vec![RowPresence::NoRow; segments.len()],
+        })
     }
 
-    let resolved: Vec<ResolvedScalars<'_>> = parts
-        .as_slice()
-        .iter()
-        .map(|part| resolve_scalars(part.segment, declared))
-        .collect();
-
-    let malformed = |d: &DeclaredScalar| {
-        EngineError::Malformed(format!(
-            "a segment of this view holds scalar column '{}' at a type other than the declared \
-             {}; serving it would put values under another column's name",
-            d.name,
-            d.arrow_type.arrow_type_name()
-        ))
-    };
-
-    let mut scalars = Vec::with_capacity(declared.len());
-    // One buffer for every column: each part's presence over the rows the tile spans in it.
-    let mut presence: Vec<RowPresence<'_>> = Vec::with_capacity(resolved.len());
-    for (ci, d) in declared.iter().enumerate() {
-        presence.clear();
-        presence.extend(parts.as_slice().iter().zip(&resolved).map(|(part, r)| {
-            RowPresence::read(part.segment, &d.name, d.vocabulary.is_some(), r[ci].is_some())
-                .within(part.range.clone())
+    /// Gather one tile's selected rows column-major. `rows` are view-space, ascending by
+    /// `tessera_id` and not by segment, so consecutive rows can land in different parts; they are
+    /// resolved to `(segment, local)` once, and every column then walks that placement, leaving
+    /// the inner loop a bounds-checked index into a typed slice.
+    pub(super) fn tile(&mut self, ts: &TileSweepOut<'a>) -> PointColumns {
+        let parts = SelectionParts::new(&ts.parts);
+        self.placed.clear();
+        self.placed.extend(ts.rows.iter().map(|&row| {
+            let (part, _, local) = parts.resolve_indexed(row);
+            (ts.tile_parts[part].0 as u32, local)
         }));
-        // The typed slice per part is resolved before the row loop, so the loop below carries no
-        // type dispatch.
-        macro_rules! build {
-            ($(($v:ident, $t:ty)),* $(,)?) => {
-                match d.arrow_type {
-                    $(ScalarType::$v => {
-                        let mut per_part: Vec<Option<&[$t]>> = Vec::with_capacity(resolved.len());
-                        for r in &resolved {
-                            match r[ci] {
-                                Some(ScalarSlice::$v(s)) => per_part.push(Some(s)),
-                                None => per_part.push(None),
-                                _ => return Err(malformed(d)),
-                            }
-                        }
-                        let (out, present) =
-                            gather_column(&placed, &presence, |part, local| {
-                                match per_part[part] {
-                                    Some(s) => s[local],
+        let placed = &self.placed;
+
+        let mut tessera_ids = Vec::with_capacity(placed.len());
+        let mut codes = Vec::with_capacity(placed.len());
+        for &(segment, local) in placed {
+            let rows = &self.segments[segment as usize];
+            let idx = local as usize;
+            tessera_ids.push(rows.tessera_id[idx]);
+            codes.push(((rows.morton[idx] as u64) << 32) | rows.residual[idx] as u64);
+        }
+
+        let mut scalars = Vec::with_capacity(self.columns.len());
+        for column in &self.columns {
+            let mut every = true;
+            for (s, range) in ts.tile_parts {
+                let within = column.presence[*s].within(range.clone());
+                every &= matches!(within, RowPresence::Every);
+                self.presence[*s] = within;
+            }
+            let presence = (!every).then_some(self.presence.as_slice());
+            macro_rules! gather {
+                ($(($v:ident, $t:ty)),* $(,)?) => {
+                    match &column.values {
+                        $(ColumnSlices::$v(slices) => {
+                            let (out, present) = gather_column(placed, presence, |s, local| {
+                                match slices[s] {
+                                    Some(v) => v[local],
                                     None => <$t>::default(),
                                 }
                             });
-                        (ColumnBuf::$v(out), present)
-                    })*
-                    ScalarType::Bool => {
-                        let mut per_part = Vec::with_capacity(resolved.len());
-                        for r in &resolved {
-                            match r[ci] {
-                                Some(ScalarSlice::Bool(a)) => per_part.push(Some(a)),
-                                None => per_part.push(None),
-                                _ => return Err(malformed(d)),
-                            }
-                        }
-                        let (out, present) =
-                            gather_column(&placed, &presence, |part, local| {
-                                match per_part[part] {
+                            (ColumnBuf::$v(out), present)
+                        })*
+                        ColumnSlices::Bool(arrays) => {
+                            let (out, present) = gather_column(placed, presence, |s, local| {
+                                match arrays[s] {
                                     Some(a) => a.value(local),
                                     None => false,
                                 }
                             });
-                        (ColumnBuf::Bool(out), present)
-                    }
-                    // A keyword shares this arm: rendered, it is its bytes. A segment carrying
-                    // anything else under the name refuses here rather than being served.
-                    ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-                        let mut per_part = Vec::with_capacity(resolved.len());
-                        for r in &resolved {
-                            match r[ci] {
-                                Some(ScalarSlice::Utf8(a)) => per_part.push(Some(a)),
-                                None => per_part.push(None),
-                                _ => return Err(malformed(d)),
-                            }
+                            (ColumnBuf::Bool(out), present)
                         }
-                        let (out, present) =
-                            gather_column(&placed, &presence, |part, local| {
-                                match per_part[part] {
+                        ColumnSlices::Utf8(arrays) => {
+                            let (out, present) = gather_column(placed, presence, |s, local| {
+                                match arrays[s] {
                                     Some(a) => a.value(local).to_string(),
                                     None => String::new(),
                                 }
                             });
-                        (ColumnBuf::Utf8(out), present)
+                            (ColumnBuf::Utf8(out), present)
+                        }
                     }
-                }
-            };
+                };
+            }
+            let (values, present) = flat_families!(gather);
+            scalars.push(PointScalar { values, present });
         }
-        let (values, present) = flat_families!(build);
-        scalars.push(PointScalar { values, present });
-    }
 
-    Ok(PointColumns {
-        tessera_ids,
-        codes,
-        scalars,
-        membership: Vec::new(),
-        // The gather is mask-blind: it reads columns for rows selection already chose. The
-        // highlight's bits are attached by the emit pass instead.
-        highlighted: None,
-    })
+        PointColumns {
+            tessera_ids,
+            codes,
+            scalars,
+            membership: Vec::new(),
+            // The gather is mask-blind: it reads columns for rows selection already chose. The
+            // highlight's bits are attached by the emit pass instead.
+            highlighted: None,
+        }
+    }
 }
 
 #[cfg(test)]

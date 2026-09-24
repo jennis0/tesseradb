@@ -492,11 +492,9 @@ impl<'a> SelectionParts<'a> {
 
     /// [`Self::resolve`], plus **which** part answered.
     ///
-    /// The index is what lets a caller key per-segment work it has hoisted out of its row loop —
+    /// The index is what lets a caller key per-segment work it has hoisted out of its row loop:
     /// the gather resolves each declared column's [`tessera_store::read::ScalarSlice`] once per
-    /// part rather than once per row, and needs somewhere to look the resolved set up. Returning
-    /// the index rather than having the caller match on the segment pointer keeps that lookup an
-    /// array index, and keeps `resolve`'s own contract unchanged for everyone else.
+    /// segment for the request, and maps a row's part to its segment to look it up.
     pub fn resolve_indexed(&self, view_row: u32) -> (usize, &'a SegmentData, u32) {
         for (i, part) in self.parts.iter().enumerate().rev() {
             if view_row >= part.row_base {
