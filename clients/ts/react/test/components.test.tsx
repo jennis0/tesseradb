@@ -2,7 +2,7 @@ import {act, createElement, createRef} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {deep, fakeStore, settle, status} from '../../components/test/fake-store.js';
-import {TesseraCount, TesseraExplorer, TesseraItemCard, TesseraKeyPicker, TesseraStatus, TesseraStore, TesseraViewPicker, type CountElement, type ExplorerElement, type ItemCardElement, type ViewPickerElement} from '../src/components.js';
+import {TesseraCount, TesseraExplorer, TesseraHierarchy, TesseraItemCard, TesseraKeyPicker, TesseraStatus, TesseraStore, TesseraViewPicker, type CountElement, type ExplorerElement, type ItemCardElement, type ViewPickerElement} from '../src/components.js';
 
 /**
  * The wrappers: an object prop lands as a property (never an attribute), an `on*` prop receives
@@ -125,6 +125,28 @@ describe('@tesseradb/react/components', () => {
     await settle(host);
     expect(ref.current?.titleField).toBe('name');
     expect(ref.current?.map?.titleField).toBe('name');
+  });
+
+  it('TesseraHierarchy hands its clause event to an on* prop, the id a decimal string', async () => {
+    const meta = {
+      apiVersion: 1,
+      idset: 0,
+      views: [{id: 's0', displayName: 's0', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
+      groups: [],
+      declaredScalars: [],
+      layers: [{name: 'mesh', title: 'mesh', views: ['s0'], hierarchy: {kind: 'dag', pruneChildren: false}, levels: [], computedContent: [], shape: null, suppliedContent: ['name'], depsOn: [], version: 1}],
+      selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144, maxBrowseRows: 200},
+      maxTilesPerRequest: 4096,
+      filterOperands: []
+    } as never;
+    const store = fakeStore({meta, status: status({status: 'shown'})});
+    store.setBrowse('roots', {artifacts: [{tesseraId: 2n ** 63n, key: 'd-1', name: 'Neoplasms', maskedCount: 10n, matchedCount: null, rung: 0, parentIds: []}], parents: [], next: null});
+    const seen: {id: string; verb: string; on: boolean}[] = [];
+    await act(async () => root.render(createElement(TesseraHierarchy, {store, onClauseChange: (e) => seen.push({id: e.detail.id, verb: e.detail.verb, on: e.detail.on})})));
+    await settle(host);
+    await settle(host);
+    (deep(host, '[part="row"] [part="name"]') as HTMLButtonElement).click();
+    expect(seen).toEqual([{id: '9223372036854775808', verb: 'highlight', on: true}]);
   });
 
   it('a TesseraStore above provides by context to a wrapped panel below', async () => {

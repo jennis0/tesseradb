@@ -222,6 +222,36 @@ describe('events', () => {
   });
 });
 
+describe('event details', () => {
+  it('are typed on HTMLElementEventMap for a plain TypeScript listener', () => {
+    const el = document.createElement('div');
+    const seen: string[] = [];
+    el.addEventListener('tessera-clausechange', (e) => seen.push(`${e.detail.layer}:${e.detail.id}:${e.detail.verb}`));
+    el.addEventListener('tessera-levelchange', (e) => seen.push(String(e.detail.level)));
+    // @ts-expect-error: a close names what closed, and carries no id.
+    el.addEventListener('tessera-close', (e) => seen.push(e.detail.id));
+    emit(el, 'tessera-clausechange', {id: '7', layer: 'mesh', outside: false, verb: 'highlight', on: true});
+    emit(el, 'tessera-levelchange', {level: 2});
+    expect(seen).toEqual(['mesh:7:highlight', '2']);
+  });
+
+  it('carry an artifact selection’s id as a decimal string, so the detail is JSON', async () => {
+    const {TesseraMap} = await import('../src/map.js');
+    const host = await mount('<tessera-map></tessera-map>');
+    const map = host.querySelector('tessera-map') as InstanceType<typeof TesseraMap>;
+    const store = fakeStore({status: status({})});
+    map.store = store;
+    await settle(host);
+    const details: unknown[] = [];
+    host.addEventListener('tessera-selectchange', (e) => details.push(e.detail));
+    const shape = {kind: 'artifact', id: 2n ** 64n - 1n} as const;
+    map.select(shape);
+    store.set('region', {shape, status: 'shown', refusal: null, visible: null, matched: {value: 3, exact: true}, served: {shown: 3, total: 3, exact: true}, verdict: null, held: {ids: new BigUint64Array(), positions: new Float32Array(), count: 0}});
+    expect(details).toHaveLength(2);
+    for (const d of details) expect(JSON.parse(JSON.stringify(d)).shape).toEqual({kind: 'artifact', id: '18446744073709551615'});
+  });
+});
+
 describe('<tessera-map> defaults', () => {
   it('draws no density wash unless a host asks for one', async () => {
     // Owner direction, 2026-08-26: how density should be rendered is its own conversation, and

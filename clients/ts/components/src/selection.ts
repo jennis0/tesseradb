@@ -1,7 +1,7 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import {REGION_HELD_LIMIT, type RegionProjection} from '@tesseradb/client';
-import {TesseraElement, emit, idString} from './base.js';
+import {TesseraElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
@@ -113,7 +113,7 @@ export class TesseraSelection extends TesseraElement {
         <button part="action" class="btn" type="button" title=${r.shape.outside ? 'Filter to the inside of the shape' : 'Filter to the outside of the shape'} @click=${() => {
           const next = {...r.shape, outside: !r.shape.outside};
           this.resolvedStore?.select(next);
-          emit(this, 'tessera-selectchange', {shape: next, status: 'loading'});
+          emit(this, 'tessera-selectchange', {shape: shapeDetail(next), status: 'loading'});
         }}>${icon('filter', 13)}${r.shape.outside ? 'Inside' : 'Outside'}</button>
         ${waiting('Export', 'Needs the export verb (not yet served)')}
         ${waiting('Save as artifact', 'Needs the runtime-artifact path (not yet served)')}

@@ -481,7 +481,7 @@ export class TesseraExplorer extends TesseraElement {
 
   /** The tab list's keys: the arrows move between tabs, wrapping, and Home and End go to the ends. */
   private onTabKey = (e: KeyboardEvent): void => {
-    const buttons = [...this.renderRoot.querySelectorAll<HTMLButtonElement>('[part="tabs"] [role="tab"]')];
+    const buttons = Array.from(this.renderRoot.querySelectorAll<HTMLButtonElement>('[part="tabs"] [role="tab"]'));
     const at = buttons.indexOf(e.target as HTMLButtonElement);
     if (at < 0) return;
     const n = buttons.length;

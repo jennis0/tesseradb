@@ -1,7 +1,8 @@
 import {ContextConsumer} from '@lit/context';
 import {LitElement, type PropertyValues} from 'lit';
 import {property} from 'lit/decorators.js';
-import {createStore, type Store, type TokenSupplier} from '@tesseradb/client';
+import {createStore, type SelectionShape, type Store, type TokenSupplier} from '@tesseradb/client';
+import type {SelectionShapeDetail, TesseraEventDetails} from './events.js';
 import {storeContext} from './context.js';
 
 /**
@@ -173,12 +174,18 @@ export abstract class TesseraElement extends LitElement {
  */
 export const UNNAMED = '\u2014';
 
-/** A custom event that bubbles through shadow roots, so a host listens on any ancestor (§5.7). */
-export function emit(from: HTMLElement, name: string, detail: unknown): void {
+/** Emit one of the elements' events (`events.ts`), bubbling and composed so it crosses shadow roots. */
+export function emit<K extends keyof TesseraEventDetails>(from: HTMLElement, name: K, detail: TesseraEventDetails[K]): void {
   from.dispatchEvent(new CustomEvent(name, {detail, bubbles: true, composed: true}));
 }
 
-/** Ids cross the DOM boundary as decimal strings — the wire's own JSON form (§5.7). */
+/** Ids cross the DOM boundary as decimal strings, the wire's own JSON form. */
 export function idString(id: bigint): string {
   return id.toString(10);
+}
+
+/** A selection shape as an event carries it, an artifact's id as a decimal string. */
+export function shapeDetail(shape: SelectionShape | null): SelectionShapeDetail | null {
+  if (!shape || shape.kind !== 'artifact') return shape;
+  return {...shape, id: idString(shape.id)};
 }

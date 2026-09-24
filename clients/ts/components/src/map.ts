@@ -17,7 +17,7 @@ import {
 } from '@tesseradb/client';
 import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, resolvePick, type ContourShape, type Picked} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
-import {TesseraElement, emit, idString} from './base.js';
+import {TesseraElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import type {PickOutcome} from './item-card.js';
 import {renderState, stateOf, type PanelState} from './states.js';
@@ -572,7 +572,7 @@ export class TesseraMap extends TesseraElement {
       if (region.status !== 'loading' && region !== this.regionAnnounced) {
         this.regionAnnounced = region;
         emit(this, 'tessera-selectchange', {
-          shape: region.shape,
+          shape: shapeDetail(region.shape),
           status: region.status,
           visible: region.visible,
           matched: region.matched,
@@ -1025,7 +1025,7 @@ export class TesseraMap extends TesseraElement {
     this.regionAskedAt = performance.now();
     if (this.probe.region) this.probe.region = null;
     this.resolvedStore?.select(shape);
-    emit(this, 'tessera-selectchange', {shape, status: shape ? 'loading' : 'cleared'});
+    emit(this, 'tessera-selectchange', {shape: shapeDetail(shape), status: shape ? 'loading' : 'cleared'});
   }
 
   // ---- the camera -----------------------------------------------------------------------------
