@@ -98,6 +98,25 @@ describe('each route', () => {
     });
   }
 
+  it('sends every route through the host’s fetch, with its headers beside the route’s own', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('the global fetch was used');
+    });
+    const sent: Record<string, string>[] = [];
+    const hosted = async (_url: string | URL | Request, init?: RequestInit) => {
+      sent.push({...(init?.headers as Record<string, string>)});
+      return new Response('{}', {status: 200});
+    };
+    const c = new Control({controlUrl: 'http://control', operatorCredential: 'op-cred', fetch: hosted as typeof fetch, headers: {'x-host': 'script', authorization: 'Bearer host'}});
+    const calls = [...cases.map((k) => k.call), ...writes.map((w) => (c: Control) => w.call(c, {})), (c: Control) => c.grow('l', rows)];
+    for (const call of calls) {
+      sent.length = 0;
+      expect((await call(c)).ok).toBe(true);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({'x-host': 'script', authorization: 'Bearer op-cred'});
+    }
+  });
+
   it('grow sends bytes as an Arrow stream', async () => {
     const sent = recording({status: 200, body: {}});
     await control.grow('l', rows);

@@ -63,6 +63,10 @@ export type ChangeItem = {op: 'delete' | 'suppress' | 'unsuppress'} & (
 export type ControlOptions = {
   controlUrl: string;
   operatorCredential: string;
+  /** Used for every request in place of the global `fetch`. */
+  fetch?: typeof fetch;
+  /** Sent on every request. A route's own `authorization` and `content-type` are set after these. */
+  headers?: Record<string, string>;
 };
 
 /** What every call takes: a signal that ends it. */
@@ -163,10 +167,12 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
 export class Control {
   private readonly base: string;
   private readonly credential: string;
+  private readonly opts: ControlOptions;
 
   constructor(options: ControlOptions) {
     this.base = options.controlUrl.replace(/\/+$/, '');
     this.credential = options.operatorCredential;
+    this.opts = options;
   }
 
   private async send(
@@ -177,7 +183,7 @@ export class Control {
     headers: Record<string, string> = {}
   ): Promise<Answer> {
     const url = this.base + path;
-    const init: RequestInit = {method, headers: {authorization: `Bearer ${this.credential}`, ...headers}};
+    const init: RequestInit = {method, headers: {...this.opts.headers, authorization: `Bearer ${this.credential}`, ...headers}};
     if (body !== undefined) init.body = body as BodyInit;
     if (options.signal) init.signal = options.signal;
     const started = performance.now();
@@ -188,7 +194,7 @@ export class Control {
       let response: Response;
       let text: string;
       try {
-        response = await fetch(url, init);
+        response = await (this.opts.fetch ?? fetch)(url, init);
         text = await response.text();
       } catch (error) {
         if (options.signal?.aborted) throw options.signal.reason;

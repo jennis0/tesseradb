@@ -67,17 +67,20 @@ const REACHED_AS: Record<string, string> = {
 /** Operations the client does not reach. Adding a method for one of them fails this test until it is removed here. */
 const NOT_REACHED = new Set(['healthz', 'readyz', 'items', 'artifacts']);
 
-/** One call of each method that reaches an operation, with arguments enough to send its request. */
-const CALLS: Record<string, (c: TesseraClient) => Promise<unknown>> = {
-  authorise: (c) => c.authorise(['t']),
-  revoke: (c) => c.revoke(7),
-  meta: (c) => c.meta('tok'),
-  categories: (c) => c.categories('tok', 'archive'),
-  suggest: (c) => c.suggest('tok', 'archive', 'cs'),
-  viewport: (c) => c.viewport('tok', {view: 's0', zoom: 0}),
-  item: (c) => c.item('tok', 7n),
-  artifact: (c) => c.artifact('tok', 7n, {view: 's0'}),
-  browse: (c) => c.browse('tok', {view: 's0', layer: 'l'})
+/**
+ * One call of each method that reaches an operation, with arguments enough to send its request, and
+ * the signal where one is given.
+ */
+const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<unknown>> = {
+  authorise: (c, signal) => c.authorise(['t'], signal),
+  revoke: (c, signal) => c.revoke(7, signal),
+  meta: (c, signal) => c.meta('tok', signal),
+  categories: (c, signal) => c.categories('tok', 'archive', {signal}),
+  suggest: (c, signal) => c.suggest('tok', 'archive', 'cs', {signal}),
+  viewport: (c, signal) => c.viewport('tok', {view: 's0', zoom: 0}, signal),
+  item: (c, signal) => c.item('tok', 7n, signal),
+  artifact: (c, signal) => c.artifact('tok', 7n, {view: 's0', signal}),
+  browse: (c, signal) => c.browse('tok', {view: 's0', layer: 'l'}, signal)
 };
 
 const methodOf = (operation: string) => REACHED_AS[operation] ?? operation;
@@ -119,6 +122,38 @@ describe('the client against the HTTP contract', () => {
       await call!(client).catch(() => {});
       expect(sent.map((s) => operationOf(ops, s.method, s.path)), op.id).toEqual([op.id]);
       expect(sent[0]!.origin, op.id).toBe(origins[planeOf(op.path)!]);
+    }
+  });
+
+  it('sends every request through the host’s fetch, with its headers and the caller’s signal', async () => {
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('the global fetch was used');
+    });
+    const sent: {method: string; headers: Record<string, string>; signal: AbortSignal | null | undefined}[] = [];
+    const hosted = async (_url: string | URL | Request, init?: RequestInit) => {
+      sent.push({method: init?.method ?? 'GET', headers: {...(init?.headers as Record<string, string>)}, signal: init?.signal});
+      return new Response(JSON.stringify({error: 'contract', detail: 'recorded'}), {status: 422});
+    };
+    const client = new TesseraClient({
+      viewerUrl: 'http://viewer',
+      sessionUrl: 'http://session',
+      sessionCredential: 'cred',
+      fetch: hosted as typeof fetch,
+      headers: {'x-host': 'embed', authorization: 'Bearer host'}
+    });
+    for (const [method, call] of Object.entries(CALLS)) {
+      sent.length = 0;
+      const signal = new AbortController().signal;
+      const thrown = await call(client, signal).then(
+        () => null,
+        (error: unknown) => error
+      );
+      expect(thrown, method).toMatchObject({status: 422});
+      expect(sent, method).toHaveLength(1);
+      expect(sent[0]!.headers['x-host'], method).toBe('embed');
+      // The verb's own credential is sent, not the host's header of the same name.
+      expect(sent[0]!.headers.authorization, method).not.toBe('Bearer host');
+      expect(sent[0]!.signal, method).toBe(signal);
     }
   });
 });
