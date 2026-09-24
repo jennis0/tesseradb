@@ -83,7 +83,10 @@ export type SelectionShape = (
   | {kind: 'artifact'; id: bigint}
 ) & {outside?: boolean};
 
-/** How to get a viewer token: a fixed string, or a supplier the store renews before expiry. */
+/**
+ * How the store gets a viewer token it renews before expiry. `expiresAt` is seconds since the Unix
+ * epoch, as `/session/authorise` reports `expires_at`; `Infinity` is a token that does not expire.
+ */
 export type TokenSupplier = () => Promise<{token: string; expiresAt: number}>;
 
 export type StoreOptions = {
@@ -534,7 +537,7 @@ export function createStore(options: StoreOptions): Store {
   // The token the store holds, renewed before the first refusal, and whether this store has ever
   // used one — a 401 on a token it *did* use is a swept session (design §5.4), not a bad option.
   let token: string | null = options.token ?? null;
-  let expiresAt = Infinity;
+  let expiresAtMs = Infinity;
   let renewTimer: unknown = null;
   let tokenEverUsed = false;
 
@@ -627,7 +630,7 @@ export function createStore(options: StoreOptions): Store {
   // ---- the token supplier -------------------------------------------------------------------
 
   async function ensureToken(): Promise<string> {
-    if (token && Date.now() < expiresAt - 5_000) return token;
+    if (token && Date.now() < expiresAtMs - 5_000) return token;
     if (!options.authorise) {
       if (!token) throw new TesseraError(401, 'bad-credential', 'no token');
       return token;
@@ -646,7 +649,7 @@ export function createStore(options: StoreOptions): Store {
       forgetDescribed();
     }
     token = got.token;
-    expiresAt = got.expiresAt * (got.expiresAt < 1e12 ? 1000 : 1); // seconds or ms, tolerant
+    expiresAtMs = got.expiresAt * 1000;
     armRenewal();
     return token;
   }
@@ -654,11 +657,11 @@ export function createStore(options: StoreOptions): Store {
   function armRenewal(): void {
     if (renewTimer) clock.cancel(renewTimer);
     const authorise = options.authorise;
-    if (!authorise || !Number.isFinite(expiresAt)) return;
+    if (!authorise || !Number.isFinite(expiresAtMs)) return;
     // Renew 30 s before expiry, so a warm client never presents a token the server will refuse, or
     // halfway through a lifetime shorter than a minute. The token is still fresh by `ensureToken`'s
     // margin when this fires, so it renews directly.
-    const left = expiresAt - Date.now();
+    const left = expiresAtMs - Date.now();
     const wait = Math.max(0, left / 2, left - 30_000);
     renewTimer = clock.after(wait, () => {
       void renew(authorise).catch(() => {});
