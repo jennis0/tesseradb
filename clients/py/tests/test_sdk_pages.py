@@ -663,8 +663,8 @@ def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(se
 # ---------------------------------------------------------------------------- §6.3
 
 
-def test_a_row_outside_the_frame_refuses_the_commit_and_nothing_is_sent(served, corpus):
-    """§6.3: the pre-flight reports and sends nothing, and drops no row to send the rest."""
+def test_a_row_outside_the_frame_commits_on_the_frames_edge_and_is_reported(served, corpus):
+    """A row outside the view's frame is stored on its edge and counted as clamped."""
     db = served(small)
     before = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"]
     db.insert(
@@ -682,15 +682,11 @@ def test_a_row_outside_the_frame_refuses_the_commit_and_nothing_is_sent(served, 
         y="y",
         access="labels",
     )
-    plan = db.check()
-    assert not plan.ok
-    assert any("outside view 'map''s frame" in str(f) for f in plan.findings), plan
-    with pytest.raises(Refusal) as raised:
-        db.commit()
-    report = raised.value.report
-    assert report.findings and report.rows_accepted == {} and not report.refusals
-    # Neither row was sent: the one inside the frame is not a commit the user asked for on its own.
-    assert viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"] == before
+    assert db.check().ok
+    report = db.commit()
+    assert report.ok, report
+    assert report.rows_accepted == {"map": 2} and report.clamped == 1
+    assert viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"] == before + 2
 
 
 def test_a_row_with_no_id_where_the_insert_names_one_is_listed(served, corpus):
