@@ -136,6 +136,14 @@ pub(super) fn read_page(
     Ok((page.into_batch()?, kept, bytes))
 }
 
+/// A page of no rows: the columns `plan` names with their types, as every page of the read
+/// carries them, and the bytes its builders hold.
+pub(super) fn empty_page(plan: &FieldPlan, keep_unmatched: bool) -> Result<(RecordBatch, usize)> {
+    let page = PageValues::new(plan, keep_unmatched);
+    let bytes = page.bytes;
+    Ok((page.into_batch()?, bytes))
+}
+
 /// Every field `plan` names for `rows`, as the fields' homes hold them. The record store's values
 /// are kept for the earliest rows, in run order, that come to no more than `budget` bytes, and
 /// for the first row it holds whatever that comes to: a value read past them is dropped as it is

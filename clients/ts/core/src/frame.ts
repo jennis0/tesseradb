@@ -43,6 +43,20 @@ export const FRAME_SUB_CELLS = 2;
 export const FRAME_POINTS = 3;
 export const FRAME_TRAILER = 4;
 export const FRAME_ARTIFACTS = 5;
+export const FRAME_RECORDS_HEAD = 6;
+export const FRAME_RECORDS = 7;
+export const FRAME_PAGE_END = 8;
+
+/**
+ * Which body a reader expects. `'viewport'` is a `/v1/viewport` body, whose frames
+ * {@link FramedStreams} lists. `'records'` is a `/v1/items` or `/v1/artifacts` body:
+ *
+ * - Kind 6, head: JSON, exactly one, first.
+ * - Kind 7, records: an Arrow IPC stream of one page. Zero or more, each followed by a page end.
+ * - Kind 8, page end: JSON carrying the cursor to resume after the page before it.
+ * - Kind 4, trailer: JSON, exactly one, last. A body without it is incomplete.
+ */
+export type FrameGrammar = 'viewport' | 'records';
 
 const FRAME_HEADER_BYTES = 5;
 
@@ -50,16 +64,15 @@ const FRAME_HEADER_BYTES = 5;
 export type Frame = {kind: number; payload: Uint8Array};
 
 /**
- * The frame grammar, enforced once, over a body that may arrive in any number of pieces.
- *
- * It is the client's one statement of the grammar. {@link splitFramedStreams} pushes it a whole
- * body, and the streaming path in the client pushes it each network chunk, so the two paths accept
- * the same bodies and draw the same points.
+ * The frame grammar, over a body that may arrive in any number of pieces. It is the client's one
+ * reader of frames: {@link splitFramedStreams} pushes it a whole body, and the streaming paths push
+ * it each network chunk, so every path accepts the same bodies. Every failure throws, so a
+ * truncated body, an unknown kind or a frame out of place never decodes to a shorter response.
  *
  * Chunk boundaries carry no meaning: a frame's five-byte header may be split across three chunks
  * and its payload across a hundred, and the reader emits the frame only when it is whole. A frame
  * that lies inside a single chunk is handed over as a view onto it; one that spans chunks is
- * assembled into a buffer of its own, so no frame is ever copied more than once.
+ * assembled into a buffer of its own, so no frame is copied more than once.
  */
 export class FrameReader {
   /** Chunks pushed and not yet consumed, oldest first. */
@@ -73,6 +86,10 @@ export class FrameReader {
   private sawArtifacts = false;
   private sawPoints = false;
   private sawTrailer = false;
+  /** A records frame has arrived and its page end has not. */
+  private openPage = false;
+
+  constructor(private readonly grammar: FrameGrammar = 'viewport') {}
 
   /** Every complete frame the pushed bytes finish, in wire order. */
   push(chunk: Uint8Array): Frame[] {
@@ -116,6 +133,11 @@ export class FrameReader {
       }
       throw new Error(`frame at byte ${this.consumed} claims a payload past the end of the body`);
     }
+    if (this.grammar === 'records') {
+      if (this.frames === 0) throw new Error('records payload has no head frame');
+      if (!this.sawTrailer) throw new Error('records payload has no trailer: the response is incomplete; resume the read from its cursor');
+      return;
+    }
     if (!this.sawTiles) throw new Error('viewport payload has no tiles frame');
     if (!this.sawTrailer) {
       throw new Error('viewport payload has no trailer: the response is incomplete');
@@ -128,6 +150,10 @@ export class FrameReader {
   }
 
   private check(kind: number): void {
+    if (this.grammar === 'records') {
+      this.checkRecords(kind);
+      return;
+    }
     switch (kind) {
       case FRAME_TILES:
         if (this.sawTiles) throw new Error('more than one tiles frame');
@@ -161,6 +187,35 @@ export class FrameReader {
         // Refused, never skipped: skipping would let a future frame kind carry data an old
         // reader silently drops.
         throw new Error(`unknown frame kind ${kind} at byte ${this.consumed}`);
+    }
+  }
+
+  /**
+   * A bulk read's grammar. A records frame stays open until its page end arrives, so a body cut
+   * between the two ends with a page open, and the caller discards that page.
+   */
+  private checkRecords(kind: number): void {
+    const at = this.consumed;
+    if (this.sawTrailer) throw new Error(`a frame after the trailer at byte ${at}`);
+    if (this.frames === 0 && kind !== FRAME_RECORDS_HEAD) throw new Error('the head frame must be first');
+    switch (kind) {
+      case FRAME_RECORDS_HEAD:
+        if (this.frames !== 0) throw new Error(`a second head frame at byte ${at}`);
+        break;
+      case FRAME_RECORDS:
+        if (this.openPage) throw new Error(`a records frame at byte ${at} before the page end of the one before it`);
+        this.openPage = true;
+        break;
+      case FRAME_PAGE_END:
+        if (!this.openPage) throw new Error(`a page end at byte ${at} with no records frame before it`);
+        this.openPage = false;
+        break;
+      case FRAME_TRAILER:
+        if (this.openPage) throw new Error(`the trailer at byte ${at} follows a records frame with no page end`);
+        this.sawTrailer = true;
+        break;
+      default:
+        throw new Error(`unknown frame kind ${kind} at byte ${at}`);
     }
   }
 

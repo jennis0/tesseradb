@@ -88,9 +88,7 @@ const REACHED_AS: Record<string, string> = {
  */
 const NOT_REACHED = new Map([
   ['healthz', 'a probe for a supervisor, unauthenticated, on the viewer and session listeners'],
-  ['readyz', 'a probe for a supervisor, unauthenticated, on the viewer and session listeners'],
-  ['items', 'the TypeScript client has no bulk read of records'],
-  ['artifacts', 'the TypeScript client has no bulk read of records']
+  ['readyz', 'a probe for a supervisor, unauthenticated, on the viewer and session listeners']
 ]);
 
 /**
@@ -106,7 +104,9 @@ const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<
   viewport: (c, signal) => c.viewport('tok', {view: 's0', zoom: 0}, signal),
   item: (c, signal) => c.item('tok', 7n, signal),
   artifact: (c, signal) => c.artifact('tok', 7n, {view: 's0', signal}),
-  browse: (c, signal) => c.browse('tok', {view: 's0', layer: 'l'}, signal)
+  browse: (c, signal) => c.browse('tok', {view: 's0', layer: 'l'}, signal),
+  items: (c, signal) => c.items('tok', {view: 's0', fields: []}, signal),
+  artifacts: (c, signal) => c.artifacts('tok', {view: 's0', layer: 'l', fields: []}, signal)
 };
 
 /** One call of each `Control` method that reaches an operation, with arguments enough to send its request. */

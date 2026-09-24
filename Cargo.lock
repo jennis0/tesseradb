@@ -2893,9 +2893,11 @@ name = "tessera-cli"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "base64",
  "clap",
  "parquet",
  "rand 0.8.7",
+ "reqwest",
  "serde_json",
  "tempfile",
  "tessera-analyse",
@@ -2907,6 +2909,7 @@ dependencies = [
  "tessera-spatial",
  "tessera-store",
  "tessera-types",
+ "tessera-wire",
  "tokio",
  "toml 0.8.23",
  "tracing-subscriber",

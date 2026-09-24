@@ -39,7 +39,7 @@ use crate::Generation;
 pub use artifacts::ArtifactsRequest;
 pub(crate) use cursor::CursorKey;
 use cursor::{Binding, ItemsCursor, Position, Route};
-use columns::read_page;
+use columns::{empty_page, read_page};
 use plan::FieldPlan;
 use walk::{filter_rows, Clock, Collected, PageCx, Walk, Walked};
 
@@ -356,6 +356,8 @@ trait Pager {
         generation: &Arc<Generation>,
         clock: &mut Clock,
     ) -> Result<Paged>;
+    /// A page of no rows, with the read's columns and their types, and its bytes.
+    fn empty(&self) -> Result<(RecordBatch, usize)>;
     /// The position reached, sealed.
     fn cursor(&self, engine: &Engine) -> String;
     /// The coarsest verdict the pages' region leaves have reached.
@@ -482,7 +484,9 @@ impl Engine {
 
     /// The head, then pages until the response ends, then the trailer. The head follows the first
     /// page, so a failure there is a plain refusal and the head carries the first page's region
-    /// verdict.
+    /// verdict. A response whose pages found no row carries one page of no rows, so that every
+    /// response gives the read's columns; one cancelled before it walks a page carries none, since
+    /// the client has gone.
     fn serve_pages(
         &self,
         response: &Response<'_>,
@@ -516,6 +520,8 @@ impl Engine {
             Ok(())
         };
         let (mut pages, mut rows, mut bytes) = (0u64, 0u64, 0usize);
+        // The trailer's cursor, where the page of no rows has already sent it.
+        let mut sent_next: Option<Option<String>> = None;
         let ended_by = loop {
             if pages > 0 {
                 if response.pages.is_some_and(|limit| pages >= u64::from(limit)) {
@@ -578,15 +584,37 @@ impl Engine {
                         break reason;
                     }
                 }
-                Paged::End => break ResponseEndedBy::End,
-                Paged::Stopped(reason) => break reason,
+                Paged::End | Paged::Stopped(_) => {
+                    let reason = match page {
+                        Paged::Stopped(reason) => reason,
+                        _ => ResponseEndedBy::End,
+                    };
+                    if pages == 0 {
+                        let (batch, page_bytes) = pager.empty()?;
+                        let next = (reason != ResponseEndedBy::End).then(|| pager.cursor(self));
+                        let end = PageEnd {
+                            next: next.clone(),
+                            ended_by: match next {
+                                None => PageEndedBy::End,
+                                Some(_) => PageEndedBy::Time,
+                            },
+                            bytes: page_bytes,
+                        };
+                        sink.page(&batch, &end)
+                            .map_err(|SinkClosed| EngineError::Cancelled)?;
+                        pages = 1;
+                        sent_next = Some(next);
+                    }
+                    break reason;
+                }
             }
         };
         send_head(pager, counted, None, sink)?;
         Ok(RecordsTrailer {
             pages,
             rows,
-            next: (ended_by != ResponseEndedBy::End).then(|| pager.cursor(self)),
+            next: sent_next
+                .unwrap_or_else(|| (ended_by != ResponseEndedBy::End).then(|| pager.cursor(self))),
             ended_by,
         })
     }
@@ -684,6 +712,10 @@ impl Pager for ItemsPager<'_> {
             ended_by,
             then,
         })
+    }
+
+    fn empty(&self) -> Result<(RecordBatch, usize)> {
+        empty_page(&self.planned.plan, self.planned.req.keep_unmatched)
     }
 
     fn cursor(&self, engine: &Engine) -> String {
