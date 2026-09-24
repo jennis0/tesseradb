@@ -9,6 +9,7 @@ import {TesseraElement} from './base.js';
 import {storeContext} from './context.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon, type IconName} from './icons.js';
+import {exportparts, forwarded} from './parts.js';
 import {sameFrame} from './view-switch.js';
 import type {TesseraMap} from './map.js';
 import {chrome, tokens} from './tokens.js';
@@ -44,6 +45,22 @@ import './legend.js';
  * and the section it sits in is collapsed by default because the *In view* list is the viewport's
  * answer and this is the corpus's.
  */
+/** Every part of every element the explorer renders, forwarded (`parts.ts`). */
+const FORWARD = {
+  map: exportparts('map'),
+  status: exportparts('status'),
+  'view-picker': exportparts('view-picker'),
+  'key-picker': exportparts('key-picker'),
+  legend: exportparts('legend'),
+  'layer-picker': exportparts('layer-picker'),
+  'filter-panel': exportparts('filter-panel', forwarded('filter')),
+  hierarchy: exportparts('hierarchy'),
+  'artifact-list': exportparts('artifact-list'),
+  selection: exportparts('selection'),
+  'item-card': exportparts('item-card'),
+  'artifact-card': exportparts('artifact-card')
+};
+
 const ALL_PANELS = ['toolbar', 'legend', 'filters', 'hierarchy', 'artifacts', 'selection', 'detail'] as const;
 type Panel = (typeof ALL_PANELS)[number];
 type Sheet = 'filters' | 'layers' | 'artifacts' | 'detail';
@@ -353,20 +370,20 @@ export class TesseraExplorer extends TesseraElement {
     const hasDetail = Boolean(selection?.item || selection?.artifact || selection?.artifactRefusal || selection?.itemRefusal || this.map?.lastPick);
     // The detail region shows whichever changed last.
     const showArtifact = this.lastDetail === 'artifact' && (selection?.artifact || selection?.artifactRefusal);
-    const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card></tessera-artifact-card>` : html`<tessera-item-card .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
+    const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']}></tessera-artifact-card>` : html`<tessera-item-card exportparts=${FORWARD['item-card']} .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
     // The two pickers sit at the top of the toolbar slot, above *Colour by* and *Layers*
     // (`view-switching.md` §6.3) — in the docked sidebar, the overlay's left card and the narrow
     // layout's *Layers* sheet alike, all three of which render this slot. Both draw nothing for
     // the one-view corpus that every demo corpus is today.
-    const toolbar = html`<slot name="toolbar"><tessera-view-picker></tessera-view-picker><tessera-key-picker></tessera-key-picker><tessera-legend selectable .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
-    const layersPanel = html`<slot name="layers"><tessera-layer-picker></tessera-layer-picker></slot>`;
-    const filters = html`<slot name="filters"><tessera-filter-panel></tessera-filter-panel></slot>`;
-    const hierarchy = html`<slot name="hierarchy"><tessera-hierarchy></tessera-hierarchy></slot>`;
+    const toolbar = html`<slot name="toolbar"><tessera-view-picker exportparts=${FORWARD['view-picker']}></tessera-view-picker><tessera-key-picker exportparts=${FORWARD['key-picker']}></tessera-key-picker><tessera-legend exportparts=${FORWARD.legend} selectable .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
+    const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
+    const filters = html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']}></tessera-filter-panel></slot>`;
+    const hierarchy = html`<slot name="hierarchy"><tessera-hierarchy exportparts=${FORWARD.hierarchy}></tessera-hierarchy></slot>`;
     // Drawn only where there is a lineage to walk: a bundle of flat clusterings has none, and an
     // empty section reads as a panel that failed rather than one with nothing to say.
     const hasHierarchy = browsableLayers(meta?.layers ?? []).length > 0;
-    const list = html`<slot name="artifacts"><tessera-artifact-list></tessera-artifact-list></slot>`;
-    const selectionPanel = this.has('selection') && region ? html`<slot name="selection"><tessera-selection></tessera-selection></slot>` : nothing;
+    const list = html`<slot name="artifacts"><tessera-artifact-list exportparts=${FORWARD['artifact-list']}></tessera-artifact-list></slot>`;
+    const selectionPanel = this.has('selection') && region ? html`<slot name="selection"><tessera-selection exportparts=${FORWARD.selection}></tessera-selection></slot>` : nothing;
     const section = (name: IconName, title: string, summary: string, body: unknown, open = false) =>
       html`<details ?open=${open}><summary><span class="t"><span class="closed-chev">${icon('chevr', 14)}</span><span class="open-chev">${icon('chev', 14)}</span>${title}</span><span class="summary">${summary}</span></summary><div class="body" data-section=${name}>${body}</div></details>`;
 
@@ -424,6 +441,7 @@ export class TesseraExplorer extends TesseraElement {
     // pointer (the owner's review, 2026-08-28).
     return html`<div part="frame" @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))} @tessera-viewfollow=${(e: CustomEvent<{view: string; x: number; y: number}>) => this.followItem(e.detail)} @tessera-close=${() => this.closeDetail()}>
       <tessera-map
+        exportparts=${FORWARD.map}
         colour-by=${this.colourBy || nothing}
         layers=${this.layers || nothing}
         tooltip-fields=${this.tooltipFields}
@@ -435,12 +453,12 @@ export class TesseraExplorer extends TesseraElement {
         @tessera-hover=${() => nothing}
         @click=${() => this.requestUpdate()}
       >
-        <div slot="bottom-left" class="in-map-strip"><slot name="status"><tessera-status></tessera-status></slot></div>
+        <div slot="bottom-left" class="in-map-strip"><slot name="status"><tessera-status exportparts=${FORWARD.status}></tessera-status></slot></div>
         ${this.querySelector('[slot="tooltip"]') ? html`<slot name="tooltip" slot="tooltip"></slot>` : nothing}
       </tessera-map>
       ${this.layout === 'overlay' ? html`${overlayLeft}${overlayRight}` : docked}
       ${this.sheet && sheetBody !== nothing ? html`<div part="sheet" role="dialog">${sheetBody}</div>` : nothing}
-      <div part="strip-row"><tessera-status></tessera-status></div>
+      <div part="strip-row"><tessera-status exportparts=${FORWARD.status}></tessera-status></div>
       <div part="tabs" role="tablist">
         ${this.has('filters') ? tab('filters', 'filter', 'Filters') : nothing}
         ${this.has('legend') ? tab('layers', 'layers', 'Layers') : nothing}

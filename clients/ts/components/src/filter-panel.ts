@@ -4,9 +4,13 @@ import {activeCount, emptyDraft, isPopulated, memberKey, withVerb, withoutMember
 import {TesseraElement, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
+import {exportparts} from './parts.js';
 import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './filter.js';
+
+/** Each control's parts, forwarded as `filter-<part>` (`parts.ts`). */
+const FILTER_PARTS = exportparts('filter');
 
 /**
  * `<tessera-filter-panel>` — every operand `meta` offers, as `<tessera-filter>`s, with the
@@ -165,7 +169,7 @@ export class TesseraFilterPanel extends TesseraElement {
       ${repeat(
         operands,
         (o) => o.column,
-        (o) => html`<tessera-filter column=${o.column} .store=${s}></tessera-filter>`
+        (o) => html`<tessera-filter exportparts=${FILTER_PARTS} column=${o.column} .store=${s}></tessera-filter>`
       )}
     </div>`;
   }

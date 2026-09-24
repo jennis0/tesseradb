@@ -85,3 +85,14 @@ describe('theme tokens', () => {
     expect(await computed(p, ['tessera-explorer', 'tessera-map'], 'background-color')).toBe('rgb(9, 8, 7)');
   });
 });
+
+describe('forwarded parts', () => {
+  it('style the explorer’s inner map and status strip from the page', async () => {
+    const p = await page(
+      '<tessera-explorer></tessera-explorer>',
+      'tessera-explorer::part(map-controls) { border-top-color: rgb(4, 5, 6); } tessera-explorer::part(status-strip) { color: rgb(7, 8, 9); }'
+    );
+    expect(await computed(p, ['tessera-explorer', 'tessera-map', '[part="controls"]'], 'border-top-color')).toBe('rgb(4, 5, 6)');
+    expect(await computed(p, ['tessera-explorer', '[part="strip-row"] tessera-status', '[part="strip"]'], 'color')).toBe('rgb(7, 8, 9)');
+  });
+});
