@@ -176,8 +176,9 @@ export function patchLut(inputs: LutInputs, data: Uint8Array, ordinals: readonly
  * `writeData` of a row or two on a settle, of at most a few megabytes when everything moved,
  * against the twelve of a per-point pass.
  *
- * Owned by the host beside the slab, because it outlives every frame; attached to a device when
- * the map has one. Without a device it still builds the bytes, which is what a test reads.
+ * Owned by `TesseraLayer`, which makes it on its deck's device and releases it when finalised, or
+ * by a host that passes its own and attaches it. Without a device it still builds the bytes, which
+ * is what a test reads.
  */
 export class LookupTexture {
   private device: Device | null = null;

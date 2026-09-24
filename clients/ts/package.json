@@ -13,7 +13,8 @@
     "wire-example",
     "examples/plain-html",
     "examples/react-explorer",
-    "examples/canvas-store"
+    "examples/canvas-store",
+    "examples/deck-host"
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",

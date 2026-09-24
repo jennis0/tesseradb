@@ -25,11 +25,12 @@ harness, built to answer one question: **does a running Tessera actually work?**
   StrictMode's double mount leaks no driver. `@tesseradb/react/components` wraps every element
   through `@lit/react` with typed props and events, behind optional peers on
   `@tesseradb/components` and `@lit/react`, so a hooks-only install pulls neither Lit nor deck.gl.
-- `examples/` — the three pages design §9 step 4 asks for, each a workspace the gate typechecks:
-  `plain-html` (no build step; the bundle with its integrity hash, and the app server that holds
-  the session credential), `react-explorer` (React 19 through the wrappers, one slot replaced by
-  a host component) and `canvas-store` (the store under a hand-rolled camera on a 2D canvas, with
-  none of our rendering — the check that C2 works).
+- `examples/` — four pages, each a workspace the client check typechecks: `plain-html` (no build
+  step; the bundle with its integrity hash, and the app server that holds the session
+  credential), `react-explorer` (React 19 through the wrappers, one slot replaced by a host
+  component), `canvas-store` (the store under a hand-rolled camera on a 2D canvas, with none of
+  our rendering) and `deck-host` (`TesseraLayer` in a `Deck` the page builds, beside a layer of
+  its own).
 - `viewer/` — the demo, `@tesseradb/viewer`: `<tessera-explorer layout="overlay">` plus the
   instruments — dataset and principal pickers (where the session credential stays), the layer and
   colour controls, the depth and request readouts, the trace bar.

@@ -29,46 +29,37 @@ import {deckOpacity, markStyle} from './marks-style.js';
 import {MarkSlab, type GpuSlab} from './slab.js';
 
 /**
- * `TesseraLayer` — a deck.gl `CompositeLayer` over the store's `marks`, `tiles` and `artifacts`
- * (design client-components §4, §5.10). What the instrument's layer construction and GPU slab
- * were, given a class boundary: for the customer who owns a `Deck` already, and for
- * `<tessera-map>`.
+ * `TesseraLayer` is a deck.gl `CompositeLayer` over the store's marks, tiles and artifacts. It
+ * draws, bottom to top: the hovered and the opened artifact's outline, the density wash from the
+ * exact tiles' counts, the marks, names and counts at the artifacts' centroids, the picked mark
+ * and the selected region.
  *
- * **It never fetches.** Every projection arrives by property — or, with the `store` convenience,
- * is read off the store the host hands in, which the layer subscribes to and nothing more. Hover
- * and pick are the host's: the mark sublayers carry `tesseraIds` and the label sublayers
+ * **Props.** The host sets `store`, or sets `marks`, `tiles`, `artifacts`, `meta`, `legend`,
+ * `status` and `depth` itself; one of these given beside `store` is drawn in place of the store's.
+ * Every other prop is optional. `slab` holds the marks' GPU buffers and `lut` the cluster colour
+ * lookup texture. Left unset, the layer makes both on its deck's device and releases them when it
+ * is finalised. A host that passes its own attaches them to the device itself and releases them
+ * itself; a slab it never attaches draws through deck's CPU attribute path, which uploads every
+ * resident mark again whenever a band arrives.
+ *
+ * **Coordinates.** The layer draws in the 512-unit world square (`WORLD_SIZE`) for an
+ * `OrthographicView` with `flipY: true`. `viewInputOf` turns that view's camera into what
+ * `store.setView` takes. Not built yet: an adapter for a geographic `MapView` or a MapLibre host,
+ * which cannot draw this layer in its own projection.
+ *
+ * **It never fetches.** With `store`, it subscribes and reads projections, and does nothing else.
+ * Hover and pick are the host's: the mark sublayers carry `tesseraIds` and the label sublayers
  * `artifactIds`, and `resolvePick` turns deck's pick info into a mark, an artifact, a miss or a
- * broken pick. **A contour is not in that pass**: what the pointer is over is resolved in JS
- * against the frontier's shapes ({@link contourShapes}, then `hoverAt`), for a hover and for a
- * click alike.
+ * broken pick. A contour is not pickable; the artifact under the pointer is found against the
+ * frontier's shapes ({@link contourShapes}, then `hoverAt`).
  *
- * **Every served mark is drawn.** The length handed to deck is the resident count, unconditionally
- * — no budget, no cap, no filter applies here. Colour is presentation and never decides what is
- * drawn: an unresolvable value is grey, never absent.
+ * **Every served mark is drawn.** The length handed to deck is the resident count; no budget, cap
+ * or filter applies here. A value with no colour draws grey.
  *
- * **The slab is the host's**, because it outlives every frame and every response and is
- * GPU-facing storage rather than view state; the layer syncs it with the exact bands once per
- * `marks` object. The stand-in pieces are materialised once per `standIn` array, memoised on
- * its identity, since the pieces survive most frames by reference.
- *
- * The drawing, in order (§5.10): the hovered and the opened artifact's served `shape` — a hull,
- * a membership shape or an authored one, drawn through one path as parts with holes — or its
- * `box` where its layer draws no shape — **and nothing else**, since only those two draw
- * ({@link focusOutlines}); the single-hue
- * density wash from the exact tiles' counts,
- * filtered so the tile grid never shows (decision 0097); the marks — one `MarksLayer` per
- * retained slab partition, addressed by slot, plus the stand-ins — in their membership colour
- * through the lookup texture when colouring by cluster, else the column's colour; names and
- * counts at the frontier's centroids — sized by masked count — placed by priority into a spatial hash
- * with leader lines; the picked mark; and the selected region as the shape drawn — a box or a lasso, never
- * its cells.
- *
- * **Colour by cluster is exact only** (decision 0099): a point wears an artifact's colour only
- * because the wire named the point a member, through the ordinal it carries; the lookup texture
- * resolves the ordinal up the table to what is served now, and neutral where that fails. The
- * host owns the {@link LookupTexture} beside the slab; every colouring interaction — palette,
- * level, highlight, the cluster/column switch — is a rewrite of it or a uniform, never a pass
- * over the points (decision 0100).
+ * **Colour by cluster** reads each point's membership ordinal, as the wire named it, through the
+ * lookup texture, which resolves the ordinal to the artifact served now, or to neutral. A change of
+ * palette, level, highlight, or between cluster and column colour rewrites the texture or a
+ * uniform and makes no pass over the points.
  */
 
 export type TesseraLayerProps = CompositeLayerProps & {
@@ -82,9 +73,9 @@ export type TesseraLayerProps = CompositeLayerProps & {
   meta?: Meta | null;
   legend?: LegendProjection | null;
   status?: PresentedStatus;
-  /** The persistent mark buffers, owned by the host. */
-  slab: MarkSlab;
-  /** The lookup texture, owned by the host beside the slab; made here when the host has none. */
+  /** The marks' GPU buffers. Unset, the layer makes and releases its own; a host's is attached and released by the host. */
+  slab?: MarkSlab | null;
+  /** The cluster colour lookup texture, on the same terms as `slab`. */
   lut?: LookupTexture | null;
   /** The level to colour at for a nested layer; undefined colours at the deepest served. */
   clusterLevel?: number;
@@ -132,6 +123,7 @@ export type LayerTimings = {
   outlinesMs: number;
   labelsMs: number;
   layersMs: number;
+  /** Writes to the lookup texture since it was made. */
   lutWrites: number;
   /**
    * The **parts** the outline layer holds and the **artifacts** they belong to; two units on
@@ -206,6 +198,11 @@ const HALO_BUFFER = 14;
  * existed.
  */
 const HALO_OUTLINE_WIDTH = (HALO_EM * ATLAS_PX) / 0.75;
+/**
+ * The glyphs an empty text layer is given in place of `'auto'`, which over no rows builds a font
+ * atlas 0 px high that WebGL refuses to upload. The digits are what every count label draws.
+ */
+const WARM_GLYPHS = '0123456789';
 const CHROME: [number, number, number, number] = [234, 238, 243, 240];
 const PLATE: [number, number, number, number] = [13, 15, 18, 235];
 
@@ -302,14 +299,20 @@ const heldStandIn = new WeakMap<object, {key: string; buffers: StandInBuffers}>(
 const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array}>();
 /** Frames whose slab-residency check has run — once per `marks` object, not once per paint. */
 const checkedMarks = new WeakSet<object>();
-/** The wash image, once per `tiles` object; `pending` while it is being built off the paint path. */
-type HeldWash = {depth: number; channel: string; image: ImageData | null; bounds: [number, number, number, number]; pending: boolean};
-const heldWash = new WeakMap<object, HeldWash>();
-/** The last wash built, drawn while the next is being built. */
-let lastWash: HeldWash | null = null;
-/** The pending wash build, one at a time: a newer `tiles` object supersedes an unbuilt older one. */
-let washTimer: ReturnType<typeof setTimeout> | null = null;
-/** How long `tiles` must stand still before the wash is rebuilt — the settle, not the frame. */
+/** What a wash is built for: one `tiles` object, at one depth, reading one count. */
+type WashKey = {tiles: TilesProjection; depth: number; channel: 'visible' | 'matched' | 'highlighted'};
+/**
+ * One layer's wash: the last image built, which is drawn until the next is ready, and the build
+ * waiting to run. Held in the layer's state, so two maps on one page never cancel or draw each
+ * other's wash.
+ */
+type WashState = {
+  built: (WashKey & {image: ImageData | null; bounds: [number, number, number, number]}) | null;
+  pending: WashKey | null;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+const sameWash = (a: WashKey | null, b: WashKey) => a !== null && a.tiles === b.tiles && a.depth === b.depth && a.channel === b.channel;
+/** How long `tiles` must stand still before the wash is rebuilt: the settle, not the frame. */
 const WASH_SETTLE_MS = 200;
 /** What the empty sublayers are given, once, so their descriptors are stable across paints. */
 const EMPTY_F32 = new Float32Array(0);
@@ -323,8 +326,6 @@ const NO_SHAPES: {polygon: [number, number][]}[] = [];
 const NO_POINTS: [number, number][] = [];
 /** The column encoding the slab's colour attribute holds, kept while the map colours by cluster. */
 const heldColumnEncoding = new WeakMap<MarkSlab, {encoding: Encoding; colourBy: string | null}>();
-/** A lookup texture per slab, for a host that handed none in. */
-const ownLut = new WeakMap<MarkSlab, LookupTexture>();
 /** The drawn outlines, once per served set, fetched shapes, opened artifact and hovered artifact. */
 const heldOutlines = new WeakMap<object, {key: string; shapes: object; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
@@ -821,6 +822,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     meta: null,
     legend: null,
     status: 'idle',
+    slab: null,
     lut: null,
     clusterLevel: undefined,
     labels: true,
@@ -843,10 +845,18 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     onTimings: null
   };
 
-  declare state: {tick: number; unsubscribe: (() => void) | null; subscribed: Store | null; zoomBucket: number};
+  declare state: {
+    tick: number;
+    unsubscribe: (() => void) | null;
+    subscribed: Store | null;
+    zoomBucket: number;
+    ownSlab: MarkSlab | null;
+    ownLut: LookupTexture | null;
+    wash: WashState;
+  };
 
   override initializeState(): void {
-    this.state = {tick: 0, unsubscribe: null, subscribed: null, zoomBucket: NaN};
+    this.state = {tick: 0, unsubscribe: null, subscribed: null, zoomBucket: NaN, ownSlab: null, ownLut: null, wash: {built: null, pending: null, timer: null}};
     this.follow(this.props.store ?? null);
   }
 
@@ -867,6 +877,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     if (params.changeFlags.propsChanged && (this.props.store ?? null) !== this.state.subscribed) {
       this.follow(this.props.store ?? null);
     }
+    this.release({slab: !!this.props.slab, lut: !!this.props.lut});
   }
 
   override finalizeState(context: Parameters<CompositeLayer['finalizeState']>[0]): void {
@@ -874,6 +885,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     this.state.unsubscribe?.();
     this.state.unsubscribe = null;
     this.state.subscribed = null;
+    this.release({slab: true, lut: true});
+    if (this.state.wash.timer !== null) clearTimeout(this.state.wash.timer);
+    this.state.wash = {built: null, pending: null, timer: null};
   }
 
   /** The `store` convenience: subscribe, and mark the layer for update on every change. */
@@ -913,15 +927,36 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     };
   }
 
-  /** The lookup texture: the host's, or one kept per slab. */
+  /** The host's slab, else the layer's own, made on the layer's device at first use. */
+  private slab(): MarkSlab {
+    if (this.props.slab) return this.props.slab;
+    if (!this.state.ownSlab) {
+      this.state.ownSlab = new MarkSlab();
+      if (this.context.device) this.state.ownSlab.attach(this.context.device);
+    }
+    return this.state.ownSlab;
+  }
+
+  /** The host's lookup texture, else the layer's own, made on the layer's device at first use. */
   private lut(): LookupTexture {
     if (this.props.lut) return this.props.lut;
-    let held = ownLut.get(this.props.slab);
-    if (!held) {
-      held = new LookupTexture();
-      ownLut.set(this.props.slab, held);
+    if (!this.state.ownLut) {
+      this.state.ownLut = new LookupTexture();
+      if (this.context.device) this.state.ownLut.attach(this.context.device);
     }
-    return held;
+    return this.state.ownLut;
+  }
+
+  /** Free the GPU resources the layer made; the host's are never touched. */
+  private release(which: {slab: boolean; lut: boolean}): void {
+    if (which.slab) {
+      this.state.ownSlab?.clear();
+      this.state.ownSlab = null;
+    }
+    if (which.lut) {
+      this.state.ownLut?.destroy();
+      this.state.ownLut = null;
+    }
   }
 
   override renderLayers(): LayersList {
@@ -937,20 +972,16 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
 
   private buildLayers(timings: LayerTimings): LayersList {
     const r = this.resolved();
-    const {slab} = this.props;
+    const slab = this.slab();
     const layers: (Layer | null)[] = [];
 
-    // The lookup texture is rewritten whenever the table, the colours, the palette, the level or
-    // the highlight moved — never O(points), and by the rows that moved rather than whole where
-    // the table only gained ordinals (`lut.ts`) — and the device it lives on is deck's. **The
-    // table and the colour map are compared inside**, by version and by identity: a point response
-    // names artifacts the debounced channel has not served yet, and those ordinals would otherwise
-    // keep the texture's neutral until the channel's next answer. The served set's version is
-    // deliberately not in the key — no texel is a function of it, and having it there rebuilt the
-    // whole texture on every settle.
+    // The lookup texture is rewritten when the table, the colours, the palette, the level or the
+    // highlight moved, by the rows that moved where the table only gained ordinals (`lut.ts`). The
+    // table and the colour map are compared inside `update`, by version and by identity, because a
+    // point response names artifacts the artifact channel has not served yet. The served set's
+    // version is not in the key: no texel depends on it.
     const lut = this.lut();
     const lutStarted = performance.now();
-    if (this.context.device && !lut.gpu) lut.attach(this.context.device);
     const opened = this.props.openedArtifact ?? null;
     const highlight = r.artifacts && opened !== null ? r.artifacts.served.find((a) => a.tesseraId === opened) : undefined;
     const highlightOrdinal = highlight && r.artifacts ? r.artifacts.table.ordinalOf(highlight.layer, highlight.tesseraId) : NO_ORDINAL;
@@ -1191,12 +1222,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   }
 
   /**
-   * The density wash, rebuilt once per `tiles` object — and **off the paint path**. Binning and
-   * filtering the wash over a full viewport's tiles (65,536 at depth 8) is 60–70 ms, and it sat
-   * inside the first paint with marks. Now a new `tiles` object schedules the build on a
-   * macrotask, the paint draws the previous wash (or none) meanwhile, and the layer asks for an
-   * update when the image is ready — one frame later, never inside the frame that draws the
-   * marks. The image still comes from the exact tiles' counts and nothing else (§5.10).
+   * The density wash from the exact tiles' counts, built once per `tiles` object and off the
+   * paint path: binning and filtering a full viewport's tiles (65,536 at depth 8) takes 60 to 70
+   * ms. A new `tiles` object schedules the build on a timer, the paint draws this layer's previous
+   * wash (or none) meanwhile, and the layer asks for an update when the image is ready.
    *
    * `tiles` null draws the empty layer, so the bitmap program links with the rest at the first
    * paint of the session.
@@ -1206,46 +1235,39 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     let bounds: [number, number, number, number] = [0, 0, 1, 1];
     if (tiles) {
       // The channel is in the key beside the depth: a highlight change hands the layer the same
-      // `tiles` object with a different question to wash, and a memo on the object alone would
-      // draw the old answer.
-      const channel = this.props.washChannel ?? 'matched';
-      let held = heldWash.get(tiles);
-      if (!held || held.depth !== depth || held.channel !== channel) {
-        if (!held || !held.pending) {
-          // Keep the last wash drawn while this one is built: no flash to nothing at a settle.
-          held = {depth, channel, image: lastWash?.image ?? null, bounds: lastWash?.bounds ?? [0, 0, 1, 1], pending: true};
-          heldWash.set(tiles, held);
-          const build = () => {
-            washTimer = null;
-            const binned = binDensity(tiles.tiles, depth, channel);
-            const built = binned && binned.filled > 0 ? filterDensity(binned, depth) : null;
-            const entry = {
-              depth,
-              channel,
-              image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
-              bounds: built ? built.bounds : ([0, 0, 1, 1] as [number, number, number, number]),
-              pending: false
-            };
-            heldWash.set(tiles, entry);
-            lastWash = entry;
-            // The layer that is current for this id, which may no longer be this instance.
-            const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
-            // A discarded instance has no manager to ask; the next paint reads the memo anyway.
-            if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
-            current.setNeedsUpdate();
-            current.setNeedsRedraw();
+      // `tiles` object with a different question to wash.
+      const want: WashKey = {tiles, depth, channel: this.props.washChannel ?? 'matched'};
+      const wash = this.state.wash;
+      if (!sameWash(wash.built, want) && !sameWash(wash.pending, want)) {
+        wash.pending = want;
+        const build = () => {
+          wash.timer = null;
+          wash.pending = null;
+          const binned = binDensity(want.tiles.tiles, want.depth, want.channel);
+          const built = binned && binned.filled > 0 ? filterDensity(binned, want.depth) : null;
+          wash.built = {
+            ...want,
+            image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
+            bounds: built ? built.bounds : [0, 0, 1, 1]
           };
-          // Debounced to the settle: while a response streams in, every fold hands the layer a
-          // new `tiles` object a frame apart, and a wash per frame would cost more than the
-          // marks it sits under. The last one asked for is the one built.
-          if (typeof setTimeout !== 'undefined') {
-            if (washTimer !== null) clearTimeout(washTimer);
-            washTimer = setTimeout(build, WASH_SETTLE_MS);
-          } else build();
-        }
+          // The layer that is current for this id, which may no longer be this instance.
+          const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
+          // A discarded instance has no manager to ask; the next paint reads the state anyway.
+          if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
+          current.setNeedsUpdate();
+          current.setNeedsRedraw();
+        };
+        // Debounced to the settle: while a response streams in, every fold hands the layer a new
+        // `tiles` object a frame apart, and a wash per frame would cost more than the marks it
+        // sits under. The last one asked for is the one built.
+        if (typeof setTimeout !== 'undefined') {
+          if (wash.timer !== null) clearTimeout(wash.timer);
+          wash.timer = setTimeout(build, WASH_SETTLE_MS);
+        } else build();
       }
-      image = held.image;
-      bounds = held.bounds;
+      // The last wash built is drawn while the next is built: no flash to nothing at a settle.
+      image = wash.built?.image ?? null;
+      bounds = wash.built?.bounds ?? bounds;
     }
     const [x0, y0, x1, y1] = bounds;
     return new BitmapLayer(
@@ -1440,7 +1462,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           fontSettings: {sdf: true, buffer: HALO_BUFFER, radius: HALO_RADIUS, cutoff: 0.25},
           outlineWidth: HALO_OUTLINE_WIDTH,
           outlineColor: HALO[scheme],
-          characterSet: 'auto',
+          characterSet: rows.length > 0 ? 'auto' : WARM_GLYPHS,
           pickable: this.props.pickable && kind === 'name',
           artifactIds: rows.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
