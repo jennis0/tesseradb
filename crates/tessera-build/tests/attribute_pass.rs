@@ -55,7 +55,8 @@ const ROW_GROUP: usize = 700;
 /// Rows of the attribute file naming ids this build never loads — counted, never refused.
 const STRANGERS: u64 = 500;
 
-/// Whether the attribute source carries a row for this source id at all.
+/// Whether the attribute source's row for this source id carries values; every other row it holds
+/// for this build is nulls.
 fn carried(e: u64) -> bool {
     !e.is_multiple_of(3)
 }
@@ -89,8 +90,7 @@ fn when_of(e: u64) -> Option<i64> {
     (!e.is_multiple_of(23)).then_some(1_700_000_000_000_000 + e as i64)
 }
 
-/// Geometry only — the attributes live in their own file, which is what gives the join something
-/// to miss.
+/// Geometry only: the attributes live in their own file, joined on the entity id.
 fn write_points(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -120,8 +120,8 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
-/// Six declared columns over a subset of this build's ids, plus [`STRANGERS`] rows naming ids no
-/// build here assigns.
+/// Six declared columns, a row for each of this build's ids, valued where [`carried`] says and
+/// nulls elsewhere, plus [`STRANGERS`] rows naming ids no build here assigns.
 fn write_attributes(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -136,31 +136,42 @@ fn write_attributes(path: &Path) {
             true,
         ),
     ]));
-    let ids: Vec<u64> = (0..N)
-        .filter(|&e| carried(e))
-        .chain(1_000_000..1_000_000 + STRANGERS)
-        .collect();
+    let ids: Vec<u64> = (0..N).chain(1_000_000..1_000_000 + STRANGERS).collect();
+    // A stranger's row is valued; it is ignored either way.
+    let valued = |e: u64| e >= N || carried(e);
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(UInt64Array::from(ids.clone())),
             Arc::new(StringArray::from(
-                ids.iter().map(|&e| note_of(e)).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|&e| note_of(e).filter(|_| valued(e)))
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(Float64Array::from(
-                ids.iter().map(|&e| score_of(e)).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|&e| score_of(e).filter(|_| valued(e)))
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(Int64Array::from(
-                ids.iter().map(|&e| count_of(e)).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|&e| count_of(e).filter(|_| valued(e)))
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(UInt8Array::from(
-                ids.iter().map(|&e| small_of(e)).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|&e| small_of(e).filter(|_| valued(e)))
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(BooleanArray::from(
-                ids.iter().map(|&e| flag_of(e)).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|&e| flag_of(e).filter(|_| valued(e)))
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(TimestampMicrosecondArray::from(
-                ids.iter().map(|&e| when_of(e)).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|&e| when_of(e).filter(|_| valued(e)))
+                    .collect::<Vec<_>>(),
             )),
         ],
     )
@@ -354,8 +365,8 @@ fn assert_coverage(coverage: &[AttributeCoverage], which: &str) {
     assert_eq!(source.entities, N, "{which}: the denominator is this build");
     assert_eq!(
         source.matched_rows,
-        (0..N).filter(|&e| carried(e)).count() as u64,
-        "{which}: rows that resolved to an entity"
+        N,
+        "{which}: every entity has a row"
     );
     assert_eq!(
         source.unknown_rows, STRANGERS,

@@ -213,11 +213,11 @@ numeric zero, so a range query that happens to include zero does not wrongly mat
 have no value at all.
 
 Every declared field is required wherever an item arrives with its fields. A build refuses a
-source file that lacks the column, and an ingest refuses a row that creates an item without it; a
-null is how either says an item has no value. A row that adds an item already held to another
-view carries its fields already, so it may leave them out, and a values batch fills only the
-columns it names. A field may not take the name of a column the system reads itself, `level`
-among them.
+source file that lacks the column, or that has no row for an item the build creates, and an
+ingest refuses a row that creates an item without it; a null is how either says an item has no
+value. A row that adds an item already held to another view carries its fields already, so it may
+leave them out, and a values batch fills only the columns it names. A field may not take the name
+of a column the system reads itself, `level` among them.
 
 ## Vocabularies
 

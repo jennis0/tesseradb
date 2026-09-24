@@ -917,18 +917,6 @@ pub(crate) fn report_attribute_coverage(coverage: &[AttributeCoverage]) {
              build read (a --limit build prunes row groups before decoding them)",
             thousands(source.unknown_rows)
         );
-        // The join did not meet at all. Emphatic and not a refusal: the ids may simply be another
-        // corpus's, and only the operator knows which — but a build that says nothing here ships a
-        // bundle whose every declared column is empty.
-        if source.matched_rows == 0 && source.entities > 0 {
-            eprintln!(
-                "        source '{}' AND THIS BUILD'S ENTITY SPACE DO NOT MEET — not one of its \
-                 rows named an entity this build loaded. The join is on the entity id: check that \
-                 `entity_id_field` names the column carrying it, and that these are the same ids \
-                 the view's own source carries",
-                source.source
-            );
-        }
     }
 }
 
@@ -1396,9 +1384,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // pre-fill below is for: a row this pass never visits would otherwise keep an empty `scalars`
     // vector, and the segment writer refuses that by name rather than padding it — padding would
     // put every later row's value under the wrong identity in a column whose width says nothing is
-    // wrong. What it must **not** require is that every item be *matched*: an entity no source
-    // names is a column that is absent for it, which is what a join does and what the coverage
-    // report below states in numbers (`configuration.md` §1).
+    // wrong. Every item must be matched by a row of each source, which a row of nulls satisfies.
     //
     // `minters` seeds one live `VocabularyMinter` per discovered vocabulary from whatever the
     // schema already pins, and the scan mints into it for every novel key the corpus supplies.
@@ -1416,9 +1402,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             .map(|(position, item)| (item.source_id, position))
             .collect();
         // **Absent, then overwritten.** Every item starts with one absent value per declared
-        // column, so an entity no source names keeps a column of nothing rather than an empty
-        // `scalars` vector the segment writer would refuse. That is what makes coverage a report:
-        // an unmatched entity is a legitimate outcome of a join and is counted, not stopped.
+        // column, which a row carrying a null leaves in place.
         for item in tiler_items.iter_mut() {
             item.scalars = vec![ScalarValue::Null; args.schema.attributes.len()];
         }
@@ -1431,6 +1415,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 .collect();
             let mut matched_rows = 0u64;
             let mut unknown_rows = 0u64;
+            let mut met = vec![false; staged.len()];
             let mut present = vec![0u64; group.attributes.len()];
             // An attribute source is entity space and has no view to select (`views.md` §5).
             input::scan_attributes(
@@ -1450,6 +1435,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                             continue;
                         };
                         matched_rows += 1;
+                        met[position] = true;
                         for ((&column, decoded), count) in group
                             .attributes
                             .iter()
@@ -1470,6 +1456,14 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                     Ok(())
                 },
             )?;
+            if let Some(position) = met.iter().position(|met| !met) {
+                return Err(input::item_without_a_row(
+                    &group.path,
+                    &columns,
+                    &id_space,
+                    staged[position].source_id,
+                ));
+            }
             attribute_coverage.push(AttributeCoverage {
                 source: group.name.clone(),
                 entities: staged.len() as u64,

@@ -35,9 +35,16 @@ def small(db) -> None:
     db.declare_attribute("score", type="f64", index=True, render=False)
     db.insert("map", papers([f"p{i}" for i in range(20)]), id="id", x="x", y="y",
               access="labels")
+    # The build reads `score` from this table, which holds a row for every item: a value on `p0`
+    # and nulls on the rest.
     db.insert(
         "score",
-        pa.table({"id": pa.array(["p0"], pa.string()), "score": pa.array([0.5], pa.float64())}),
+        pa.table(
+            {
+                "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
+                "score": pa.array([0.5] + [None] * 19, pa.float64()),
+            }
+        ),
         id="id",
         value="score",
     )

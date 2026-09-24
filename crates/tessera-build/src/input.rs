@@ -2182,6 +2182,28 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     Ok(())
 }
 
+/// The refusal for an item this build creates that has no row in the attribute source at `path`,
+/// which carries `columns`: every such item has one, as a new item at a running service carries
+/// every declared column, and a row of nulls is how a source says it has no value.
+pub(crate) fn item_without_a_row(
+    path: &Path,
+    columns: &[&crate::config::Attribute],
+    id_space: &crate::ids::IdSpace,
+    source_id: u64,
+) -> BuildError {
+    let detail = tessera_store::declaration::check_declared_present(
+        columns
+            .iter()
+            .map(|attribute| (attribute.name.as_str(), attribute.column())),
+        |_| false,
+    )
+    .expect_err("an attribute source carries at least one column");
+    BuildError::Schema {
+        path: path.to_path_buf(),
+        detail: format!("item {} has no row: {detail}", id_space.display(source_id)),
+    }
+}
+
 /// How many rows one decoded batch of an attribute source carries — the Parquet reader's batch
 /// size, and the bound a caller's staging buffer must leave room for above its own budget.
 pub const ATTRIBUTE_BATCH_ROWS: usize = 65_536;
