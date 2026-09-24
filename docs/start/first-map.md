@@ -451,7 +451,7 @@ attribute 'population': 29,935 of 29,935 entities have a value
   view ireland: 29935 row(s)
 ```
 
-It takes about a second. Most of the report confirms what we expected: all 29,935 places took the
+It takes a few seconds. Most of the report confirms what we expected: all 29,935 places took the
 default label, every place has a value for each attribute, and the view holds 29,935 rows. Every
 feature class was one of our nine letters, or the build would have stopped and named the stranger.
 
