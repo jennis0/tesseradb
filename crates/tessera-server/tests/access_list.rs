@@ -7,10 +7,6 @@
 //! an empty list, a null, an empty element and a null element are all no label, which the view's
 //! declared `point_visibility.default` fills and which a view declaring none refuses naming the
 //! count.
-//!
-//! The comma case is the one that found the defect: a corpus whose compartment keys are free text
-//! (`Natural History Museum, Vienna`) split on a wire that carried one string per row, and the
-//! fragments were minted as terms, some of them the names of other compartments.
 
 mod common;
 
@@ -246,6 +242,10 @@ async fn a_padded_label_is_stored_trimmed_on_every_encoding() {
         ("list", Arc::new(access_lists(&[&[" red "]]))),
         ("large", Arc::new(large.finish())),
         ("scalar", Arc::new(StringArray::from(vec![" red "]))),
+        (
+            "dictionary",
+            Arc::new(vec![" red "].into_iter().collect::<DictionaryArray<Int32Type>>()),
+        ),
     ];
     for (first, (batch_id, access)) in (100..).step_by(100).zip(bodies) {
         let resp = ingest(&server, batch_id, body_with_access_from(first, 1, access)).await;
@@ -253,9 +253,13 @@ async fn a_padded_label_is_stored_trimmed_on_every_encoding() {
     }
     drain(&server).await;
 
-    assert_eq!(visible_to(&server, &["red"]).await, 3);
-    assert_eq!(visible_to(&server, &[" red "]).await, 3);
+    assert_eq!(visible_to(&server, &["red"]).await, 4);
+    assert_eq!(visible_to(&server, &[" red "]).await, 4);
     assert_eq!(visible_to(&server, &[]).await, public_before, "a label is never everyone");
+
+    let server = restart(server, &tmp).await;
+    assert_eq!(visible_to(&server, &["red"]).await, 4, "the trimmed label survives a restart");
+    assert_eq!(visible_to(&server, &[]).await, public_before);
 }
 
 /// An empty list is a row with no label, and the view's declared default fills it (decision

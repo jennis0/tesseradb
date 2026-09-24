@@ -709,13 +709,13 @@ fn write_teams(path: &std::path::Path, spelling: Spelling, padded: bool) {
 }
 
 /// The declaration both layers are built from. `padded` spells every declared word and inline
-/// label with spaces around it, gives `teams` the named default ` red `, and gives the inline
-/// layer's unlabelled artifact a blank label.
+/// label with spaces around it, gates the inline layer on ` team `, gives `teams` the named
+/// default ` red `, and gives the inline layer's unlabelled artifact a blank label.
 fn built_config(field: &str, padded: bool) -> String {
-    let (visibility, teams_default, inline_default, red, open) = if padded {
-        (" public ", " red ", " inherited ", " red ", r#", access = "  ""#)
+    let (visibility, inline_visibility, teams_default, inline_default, red, open) = if padded {
+        (" public ", " team ", " red ", " inherited ", " red ", r#", access = "  ""#)
     } else {
-        ("public", "inherited", "inherited", "red", "")
+        ("public", "public", "inherited", "inherited", "red", "")
     };
     format!(
         r#"
@@ -745,7 +745,7 @@ name                      = "inline"
 title                     = "inline"
 views                     = ["s0"]
 membership                = "enumerated"
-visibility                = "{visibility}"
+visibility                = "{inline_visibility}"
 artifact_visibility       = {{ field = "team", default = "{inline_default}" }}
 require_member_visibility = "none"
 hierarchy                 = {{ kind = "flat", prune_children = false }}
@@ -868,8 +868,9 @@ async fn labels_built_and_labels_published_serve_alike() {
 
 /// **Padded labels and declared words, built and published, serve as their trimmed selves** on
 /// both paths: an artifact source's labels in every spelling, an inline label, a layer's
-/// `visibility` of ` public `, and a named and an `inherited` artifact default. A viewer holding
-/// `red` sees the red artifacts and one holding only `blue` does not.
+/// `visibility` of ` public ` and of ` team `, and a named and an `inherited` artifact default. A
+/// viewer holding `red` sees the red artifacts and one holding only `blue` does not; only a viewer
+/// holding `team` reaches the inline layer.
 #[tokio::test]
 async fn padded_labels_built_and_published_serve_as_their_trimmed_selves() {
     for spelling in [Spelling::List, Spelling::Plain, Spelling::Dictionary] {
@@ -887,7 +888,7 @@ async fn padded_labels_built_and_published_serve_as_their_trimmed_selves() {
         let mut inline = teams_declaration("inherited");
         inline["name"] = json!("inline");
         inline["title"] = json!("inline");
-        inline["visibility"] = json!(" public ");
+        inline["visibility"] = json!(" team ");
         inline["hierarchy"]["kind"] = json!("flat");
         inline["content"]["computed"] = json!([]);
         register(&live_server, inline).await;
@@ -917,7 +918,15 @@ async fn padded_labels_built_and_published_serve_as_their_trimmed_selves() {
         .await;
         tick(&live_server).await;
 
-        for terms in [&["0"][..], &["0", "red"], &["0", "blue"], &["1", "red", "blue"]] {
+        let principals: [&[&str]; 6] = [
+            &["0"],
+            &["0", "red"],
+            &["0", "blue"],
+            &["0", "red", "team"],
+            &["0", "blue", "team"],
+            &["1", "red", "blue", "team"],
+        ];
+        for terms in principals {
             let from_build = served_counts(&built_server, terms).await;
             assert_eq!(
                 from_build,
@@ -929,13 +938,19 @@ async fn padded_labels_built_and_published_serve_as_their_trimmed_selves() {
             let keys = |rows: Vec<(String, String, u64)>| -> Vec<String> {
                 rows.into_iter().map(|(_, key, _)| key).collect()
             };
-            let red = keys(served_counts(server, &["0", "red"]).await);
-            let blue = keys(served_counts(server, &["0", "blue"]).await);
+            let red = keys(served_counts(server, &["0", "red", "team"]).await);
+            let blue = keys(served_counts(server, &["0", "blue", "team"]).await);
             for key in ["red", "open", "inline-red"] {
                 assert!(red.contains(&key.to_string()), "{key} to red: {red:?}, {spelling:?}");
                 assert!(!blue.contains(&key.to_string()), "{key} to blue: {blue:?}, {spelling:?}");
             }
             assert!(blue.contains(&"inline-open".to_string()), "{blue:?}, {spelling:?}");
+            let outside = keys(served_counts(server, &["0", "red", "blue"]).await);
+            assert!(outside.contains(&"red".to_string()), "{outside:?}, {spelling:?}");
+            assert!(
+                !outside.iter().any(|key| key.starts_with("inline")),
+                "the ` team ` layer is reached only through `team`: {outside:?}, {spelling:?}"
+            );
         }
         built_server.shutdown().await;
         live_server.shutdown().await;
@@ -978,6 +993,20 @@ async fn a_padded_label_fills_as_its_trimmed_self() {
         assert!(!served_to(&["0", "blue"], key).await, "{key}");
     }
     assert!(served_to(&["0", "blue"], "c-open").await, "a blank label is no label");
+
+    let d = d.restart().await;
+    let server = &d.server;
+    let served_to = async |terms: &[&str], key: &str| {
+        let token = token_for(server, terms).await;
+        keys_served(&viewport_raw(server, &token, viewport(0, json!({}))).await)
+            .contains(&key.to_string())
+    };
+    for key in ["open", "p-open"] {
+        assert!(served_to(&["0", "red"], key).await, "{key} after a restart");
+        assert!(!served_to(&["0", "blue"], key).await, "{key} after a restart");
+    }
+    let (status, body) = patch(server, LAYER, json!([{ "key": "open", "access": ["red"] }])).await;
+    assert_eq!(status, 200, "the held label is still `red` after a restart: {body}");
 }
 
 /// A declared label field its source does not carry is refused by the build.

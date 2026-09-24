@@ -539,7 +539,8 @@ async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
 
 /// **Declared words are stored trimmed**, on both routes: a padded gate is the same declaration
 /// as its trimmed spelling, a view gated ` 0 ` is reached by a credential holding `0`, a gate of
-/// ` public ` is no gate, and a padded point default is given to an unlabelled row as its label.
+/// ` public ` is no gate, and a padded point default is given to an unlabelled row as its label,
+/// before and after a restart.
 #[tokio::test]
 async fn padded_gates_and_point_defaults_are_stored_trimmed() {
     let served = Served::build(|dir| build_fixture(dir, N)).await;
@@ -589,7 +590,7 @@ async fn padded_gates_and_point_defaults_are_stored_trimmed() {
     assert_eq!(resp.status().as_u16(), 200);
     drain(&served.server).await;
 
-    let views_for = async |terms: &[&str]| -> Vec<String> {
+    async fn views_for(served: &Served, terms: &[&str]) -> Vec<String> {
         let token = token_for(&served.server, terms).await;
         let resp = served
             .server
@@ -606,16 +607,8 @@ async fn padded_gates_and_point_defaults_are_stored_trimmed() {
             .iter()
             .map(|v| v["id"].as_str().unwrap().to_string())
             .collect()
-    };
-    let zero = views_for(&["0"]).await;
-    assert!(zero.contains(&"gated".to_string()), "{zero:?}");
-    assert!(zero.contains(&"open".to_string()), "{zero:?}");
-    let one = views_for(&["1"]).await;
-    assert!(!one.contains(&"gated".to_string()), "{one:?}");
-    assert!(one.contains(&"open".to_string()), "{one:?}");
-    assert!(one.contains(&"gated_group:k".to_string()), "{one:?}");
-
-    let count_for = async |terms: &[&str]| -> usize {
+    }
+    async fn count_for(served: &Served, terms: &[&str]) -> usize {
         let token = token_for(&served.server, terms).await;
         let resp = served
             .server
@@ -630,9 +623,21 @@ async fn padded_gates_and_point_defaults_are_stored_trimmed() {
             .unwrap();
         assert_eq!(resp.status().as_u16(), 200);
         decode_viewport(&resp.bytes().await.unwrap()).1.len()
-    };
-    assert_eq!(count_for(&["5"]).await, 1, "the default is stored as `5`");
-    assert_eq!(count_for(&["0"]).await, 0);
+    }
+    async fn assert_trimmed(served: &Served) {
+        let zero = views_for(served, &["0"]).await;
+        assert!(zero.contains(&"gated".to_string()), "{zero:?}");
+        assert!(zero.contains(&"open".to_string()), "{zero:?}");
+        let one = views_for(served, &["1"]).await;
+        assert!(!one.contains(&"gated".to_string()), "{one:?}");
+        assert!(one.contains(&"open".to_string()), "{one:?}");
+        assert!(one.contains(&"gated_group:k".to_string()), "{one:?}");
+        assert_eq!(count_for(served, &["5"]).await, 1, "the default is stored as `5`");
+        assert_eq!(count_for(served, &["0"]).await, 0);
+    }
+    assert_trimmed(&served).await;
+    let served = served.restart().await;
+    assert_trimmed(&served).await;
 }
 
 /// **Both declarations survive a restart and a fold** (`ingest.md` §1.3): from the log alone
