@@ -418,17 +418,23 @@ pub fn accepted_keys(message: &str) -> Option<Vec<String>> {
 /// Text as one table cell: its lines joined, with `|`, `<` and `>` escaped outside code spans.
 pub fn cell(text: &str) -> String {
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    line.split('`')
+    outside_code(&line, |plain| escape_angles(plain).replace('|', "\\|"))
+}
+
+/// `text` with `escape` applied to the parts outside backtick code spans.
+pub fn outside_code(text: &str, escape: impl Fn(&str) -> String) -> String {
+    text.split('`')
         .enumerate()
         .map(|(i, part)| match i % 2 {
-            0 => part
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-                .replace('|', "\\|"),
+            0 => escape(part),
             _ => part.to_string(),
         })
         .collect::<Vec<_>>()
         .join("`")
+}
+
+pub fn escape_angles(text: &str) -> String {
+    text.replace('<', "&lt;").replace('>', "&gt;")
 }
 
 /// Compare `rendered` with the committed page at `path`, or write it there when the environment

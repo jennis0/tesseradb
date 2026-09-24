@@ -2902,6 +2902,7 @@ dependencies = [
  "tessera-build",
  "tessera-config",
  "tessera-corpus",
+ "tessera-docgen",
  "tessera-server",
  "tessera-spatial",
  "tessera-store",
