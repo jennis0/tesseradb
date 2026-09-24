@@ -247,7 +247,7 @@ impl crate::Engine {
             return Err(refuse_layer());
         }
         let layer = self.write.live().registered_layer(req.layer).ok_or_else(refuse_layer)?;
-        if !layer.declaration.views.iter().any(|s| s == view)
+        if !layer.declaration.draws_on(view)
             || generation.overlay.is_deleted(layer.entity)
             || generation.overlay.is_suppressed(layer.entity)
         {

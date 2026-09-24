@@ -91,15 +91,9 @@ pub enum RegistryError {
     /// replacement is refused where it would dangle a *declared* dependent, so an edge into a layer
     /// nobody declared is an edge nothing protects.
     UndeclaredAttachment { layer: String, target: String },
-    /// An artifact of a layer scoped to one group attaches to an artifact of a layer scoped to a
-    /// group whose views are not the same views. The target is drawn only on its own group's
-    /// views and the attached artifact only on its own, so it could never be served.
-    CrossGroupAttachment {
-        layer: String,
-        group: String,
-        target: String,
-        target_group: String,
-    },
+    /// An artifact attaches into a layer drawn on none of the views its own layer is drawn on. It
+    /// is served only on a view where its target is, so it could never be served.
+    NoSharedView { layer: String, target: String },
     /// An artifact declares no dependency in a layer that declares one.
     ///
     /// **Fail-closed, because a dependency edge is a visibility term**
@@ -261,8 +255,7 @@ pub fn no_pending(_: &str) -> Option<crate::wal::ParentRef> {
 
 /// The views of each group, as whoever publishes sees them: a build its declared roster, a running
 /// service its live one. A publication into a group-scoped layer stamps each artifact with its
-/// view's incarnation and refuses a view the group does not have, and one attaching across groups
-/// that share no views is refused.
+/// view's incarnation and refuses a view the group does not have.
 pub trait GroupViews {
     /// The live incarnation of `group`'s view `key`, or `None` where the group has no such view.
     fn incarnation_of(
@@ -272,8 +265,6 @@ pub trait GroupViews {
     ) -> Option<tessera_types::view::ViewIncarnation>;
     /// Every key of `group`, which a refusal names.
     fn keys_of(&self, group: &str) -> Vec<String>;
-    /// The group that owns `group`'s keys: itself, unless it declares `members` of another.
-    fn owner_of(&self, group: &str) -> String;
 }
 
 /// No group has a view: what a publication into an entity-scoped layer is prepared against.
@@ -285,9 +276,6 @@ impl GroupViews for NoGroupViews {
     }
     fn keys_of(&self, _: &str) -> Vec<String> {
         Vec::new()
-    }
-    fn owner_of(&self, group: &str) -> String {
-        group.to_string()
     }
 }
 
@@ -514,16 +502,11 @@ impl std::fmt::Display for RegistryError {
                  depends_on — an attached artifact is withheld with its target, and a dependency \
                  nobody declared is one no replacement checks"
             ),
-            RegistryError::CrossGroupAttachment {
-                layer,
-                group,
-                target,
-                target_group,
-            } => write!(
+            RegistryError::NoSharedView { layer, target } => write!(
                 f,
-                "{layer} is scoped to group {group} and attaches an artifact to {target}, scoped \
-                 to group {target_group}, whose artifacts are never drawn on the views of {group}; \
-                 scope {layer} to {target_group} or to a group sharing its views"
+                "{layer} attaches an artifact into {target}, which is drawn on none of the views \
+                 {layer} is drawn on, so the artifact could never be served; declare {layer} on a \
+                 view {target} is drawn on"
             ),
             RegistryError::MissingAttachment { layer, key } => write!(
                 f,
@@ -1952,19 +1935,11 @@ impl LayerRegistry {
                 // A new attachment is stored only here: every artifact of a layer that declares
                 // a dependency is published with its attachment, so a later fill of one can only
                 // repeat it.
-                let target_group = self
-                    .layers
-                    .get(&wanted.layer)
-                    .and_then(|target| target.declaration.scope.group());
-                if let (Some(group), Some(target_group)) =
-                    (layer.declaration.scope.group(), target_group)
-                {
-                    if views_of.owner_of(group) != views_of.owner_of(target_group) {
-                        return Err(RegistryError::CrossGroupAttachment {
+                if let Some(target) = self.layers.get(&wanted.layer) {
+                    if !layer.declaration.shares_a_view_with(&target.declaration) {
+                        return Err(RegistryError::NoSharedView {
                             layer: layer_name.to_string(),
-                            group: group.to_string(),
                             target: wanted.layer.clone(),
-                            target_group: target_group.to_string(),
                         });
                     }
                 }
@@ -2972,9 +2947,6 @@ mod tests {
         }
         fn keys_of(&self, _: &str) -> Vec<String> {
             Vec::new()
-        }
-        fn owner_of(&self, group: &str) -> String {
-            group.to_string()
         }
     }
     use tessera_types::layer::{
@@ -4497,9 +4469,6 @@ mod tests {
                 _ => Vec::new(),
             }
         }
-        fn owner_of(&self, group: &str) -> String {
-            group.to_string()
-        }
     }
 
     /// A publication into a view the group does not have is refused with nothing allocated, and
@@ -4527,42 +4496,26 @@ mod tests {
         assert_eq!(artifacts[0].incarnation, 4);
     }
 
-    /// Every group has every view; `halves` declares `members` of `quarter`, so the two share
-    /// views, and `tally` owns its own.
-    struct Sharing;
-
-    impl GroupViews for Sharing {
-        fn incarnation_of(&self, _: &str, _: &str) -> Option<tessera_types::view::ViewIncarnation> {
-            Some(tessera_types::view::DECLARED_INCARNATION)
-        }
-        fn keys_of(&self, _: &str) -> Vec<String> {
-            Vec::new()
-        }
-        fn owner_of(&self, group: &str) -> String {
-            match group {
-                "halves" => "quarter".to_string(),
-                other => other.to_string(),
-            }
-        }
-    }
-
-    /// A label scoped to a group that does not share its target's views is refused at publication
-    /// with nothing allocated; one scoped to a group sharing them publishes.
+    /// A label on a layer drawn on none of its target layer's views is refused at publication with
+    /// nothing allocated; one on a layer sharing a view with its target publishes.
     #[test]
-    fn an_attachment_across_groups_is_refused_and_one_within_shared_views_publishes() {
+    fn an_attachment_into_a_layer_on_none_of_its_views_is_refused() {
         let mut reg = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
         let mut store = ArtifactStore::default();
-        register(&mut reg, &mut alloc, scoped("clusters/q", "quarter")).unwrap();
+        let on = |name: &str, group: &str, views: &[&str]| {
+            let mut d = scoped(name, group);
+            d.views = views.iter().map(|view| view.to_string()).collect();
+            d
+        };
+        register(
+            &mut reg,
+            &mut alloc,
+            on("clusters/q", "quarter", &["quarter:q1", "halves:q1"]),
+        )
+        .unwrap();
         let put = reg
-            .prepare_put(
-                "clusters/q",
-                0,
-                &[in_view("c1", "q1", &[1])],
-                &store,
-                &mut alloc,
-                &Sharing,
-            )
+            .prepare_put("clusters/q", 0, &[in_view("c1", "q1", &[1])], &store, &mut alloc, &AnyView)
             .unwrap();
         apply_put(&mut reg, &mut store, &put);
         let label = || {
@@ -4574,23 +4527,25 @@ mod tests {
             });
             label
         };
-        for (name, group) in [("labels/t", "tally"), ("labels/h", "halves")] {
-            let mut d = scoped(name, group);
+        for (name, group, view) in [
+            ("labels/t", "tally", "tally:q1"),
+            ("labels/w", "wholes", "wholes:q1"),
+            ("labels/h", "halves", "halves:q1"),
+        ] {
+            let mut d = on(name, group, &[view]);
             d.depends_on = vec!["clusters/q".into()];
             register(&mut reg, &mut alloc, d).unwrap();
         }
 
-        let refused = reg
-            .prepare_put("labels/t", 0, &[label()], &store, &mut alloc, &Sharing)
-            .unwrap_err();
-        assert!(
-            matches!(refused, RegistryError::CrossGroupAttachment { .. }),
-            "{refused:?}"
-        );
-        assert_eq!(store.next_ordinal("labels/t", 0), 0);
-
+        for refused_layer in ["labels/t", "labels/w"] {
+            let refused = reg
+                .prepare_put(refused_layer, 0, &[label()], &store, &mut alloc, &AnyView)
+                .unwrap_err();
+            assert!(matches!(refused, RegistryError::NoSharedView { .. }), "{refused:?}");
+            assert_eq!(store.next_ordinal(refused_layer, 0), 0);
+        }
         let put = reg
-            .prepare_put("labels/h", 0, &[label()], &store, &mut alloc, &Sharing)
+            .prepare_put("labels/h", 0, &[label()], &store, &mut alloc, &AnyView)
             .unwrap();
         assert_eq!(put.created, 1);
     }

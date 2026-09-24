@@ -1927,7 +1927,6 @@ fn build_bundle(
                 &prefix_dir,
                 crate::PHASH,
                 &view_ids,
-                &args.groups,
                 &derived,
             )?
         } else {
@@ -1942,7 +1941,6 @@ fn build_bundle(
                 &prefix_dir,
                 crate::PHASH,
                 &view_ids,
-                &args.groups,
                 &derived,
             )?;
             drop(source_ids);

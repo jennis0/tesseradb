@@ -264,9 +264,6 @@ impl tessera_lifecycle::GroupViews for ServedViews<'_> {
             .flat_map(|held| held.views.iter().map(|view| view.key.clone()))
             .collect()
     }
-    fn owner_of(&self, group: &str) -> String {
-        self.0.owner_of_group(group)
-    }
 }
 
 /// Remove every artifact of a group-scoped layer whose view is not at the incarnation it was

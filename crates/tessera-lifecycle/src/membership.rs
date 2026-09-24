@@ -2584,8 +2584,10 @@ impl ArtifactStore {
     /// A view dropped and created again under the same key is a new incarnation, so this is what
     /// keeps the predecessor's artifacts, and their keys, out of the new view. A key goes only
     /// where it still names the removed artifact, since a republication into the new view may
-    /// hold it. An artifact attached to a removed one is in the same view, the publication having
-    /// refused an attachment across groups, so it is removed too. Returns the levels it changed.
+    /// hold it. An artifact attached to a removed one is removed by its own stamp: the
+    /// publication refused it unless its layer shares a view with its target's, so its view key
+    /// was dropped with its target's and its own incarnation is dead too. Returns the levels it
+    /// changed.
     pub fn retire_dead_views(
         &mut self,
         live: impl Fn(&str, &str, tessera_types::view::ViewIncarnation) -> bool,

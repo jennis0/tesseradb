@@ -723,16 +723,6 @@ pub struct PartitionDescriptor {
     pub required_terms: Vec<String>,
 }
 
-/// The group among `groups` that owns `group`'s keys: itself, unless it declares `members`. A
-/// group `groups` does not hold owns its own keys.
-pub fn owner_of_group(groups: &[GroupDescriptor], group: &str) -> String {
-    groups
-        .iter()
-        .find(|g| g.name == group)
-        .and_then(|g| g.members_of.clone())
-        .unwrap_or_else(|| group.to_string())
-}
-
 /// `MANIFEST.json` (contracts §2.2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -922,7 +912,11 @@ impl Manifest {
     /// (`views.md` §3.3). A group this manifest does not declare owns its own keys, which is the
     /// answer a caller can act on: it names no sharing groups either.
     pub fn owner_of_group(&self, group: &str) -> String {
-        owner_of_group(&self.groups, group)
+        self.groups
+            .iter()
+            .find(|g| g.name == group)
+            .and_then(|g| g.members_of.clone())
+            .unwrap_or_else(|| group.to_string())
     }
 
     /// Every view id one key of `owner` resolves to: the owning group's, and one for **every group
