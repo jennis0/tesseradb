@@ -1884,8 +1884,9 @@ def _member_addresses(insert: Insert, levelled: bool) -> set[tuple]:
         starts = pc.subtract(pc.cumulative_sum(lengths), lengths)
         parents = pc.list_parent_indices(key)
         elements = pc.list_flatten(key)
-        positions = pc.subtract(pa.array(range(len(elements)), pa.int64()),
-                                pc.take(pc.cast(starts, pa.int64()), parents))
+        ones = pc.fill_null(pa.nulls(len(elements), pa.int64()), 1)
+        indices = pc.subtract(pc.cumulative_sum(ones), 1)
+        positions = pc.subtract(indices, pc.take(pc.cast(starts, pa.int64()), parents))
         level = positions if levelled else pa.nulls(len(elements), pa.int64())
         key, view = elements, pc.take(view, parents)
     else:
