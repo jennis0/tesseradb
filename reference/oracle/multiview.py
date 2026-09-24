@@ -127,8 +127,6 @@ from .harness import (
     write_recipe,
 )
 
-#: The name of the directory under `/tmp` where the corpus and its bundle live between runs
-#: ([`harness.fixture_dir`] adds the builder's identity to it).
 WORK_DIR_NAME = "multiview"
 
 #: 6,144 entities in six compartments of 1,024. Small on purpose: every assertion here is a whole

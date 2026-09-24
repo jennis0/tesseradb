@@ -15,7 +15,10 @@ they cost milliseconds and can enumerate the cases a real build never would.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -27,6 +30,22 @@ from oracle import harness
 @pytest.fixture
 def work_dir(tmp_path: Path) -> Path:
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def binary(monkeypatch, tmp_path: Path) -> Path:
+    """A stand-in for the `tessera` binary, with the session's digest fixed to its contents, and a
+    fixture root under `tmp_path`: nothing here builds the binary or touches `/tmp`."""
+    fake = tmp_path / "bin" / "tessera"
+    fake.parent.mkdir()
+    fake.write_bytes(b"one tessera binary")
+    digest = hashlib.sha256(fake.read_bytes()).hexdigest()
+    monkeypatch.setattr(harness, "CLI_BIN", fake)
+    monkeypatch.setattr(harness, "builder_identity", lambda: digest)
+    root = tmp_path / "fixtures"
+    root.mkdir()
+    monkeypatch.setattr(harness, "FIXTURE_ROOT", root)
+    return fake
 
 
 def _stamped(bundle_root: Path, recipe: dict) -> None:
@@ -141,9 +160,8 @@ def test_a_bundle_a_server_has_published_into_is_not_reused(work_dir: Path):
     )
 
 
-@pytest.mark.parametrize("field", ["bundle_format", "binary_sha256"])
 def test_a_bundle_built_by_another_binary_is_rebuilt_in_its_own_directory(
-    monkeypatch, work_dir: Path, field: str
+    monkeypatch, work_dir: Path
 ):
     """A receipt records the binary that built the bundle, so another binary rebuilds it, and the
     other binary's fixtures live in another directory, so that rebuild replaces nothing the first
@@ -154,17 +172,64 @@ def test_a_bundle_built_by_another_binary_is_rebuilt_in_its_own_directory(
     ours = harness.fixture_dir("catalogue")
     assert cat._is_usable_bundle(bundle_root, wanted)
 
-    other = dict(harness.builder_identity())
-    other[field] = other[field] + 1 if field == "bundle_format" else "0" * 64
-    monkeypatch.setattr(harness, "builder_identity", lambda: other)
+    monkeypatch.setattr(harness, "builder_identity", lambda: "0" * 64)
 
     assert not cat._is_usable_bundle(bundle_root, wanted), (
-        f"a bundle built by a binary with another {field} was reused"
+        "a bundle built by another binary was reused"
     )
     assert harness.fixture_dir("catalogue") != ours, (
-        f"two binaries with different {field}s share a fixture directory, so each rebuilds the "
-        "bundle the other is reading"
+        "two binaries share a fixture directory, so each rebuilds the bundle the other is reading"
     )
+
+
+def test_a_binary_rebuilt_during_the_build_leaves_no_receipt(binary: Path, work_dir: Path):
+    """Cargo rebuilds the binary when a commit or a saved edit lands during a session, after the
+    session read its digest. The bundle the new binary builds must not be stamped as the old
+    binary's, or a session still on the old binary would reuse it."""
+    bundle_root = work_dir / "bundle"
+    wanted = cat.recipe(work_dir, bundle_root)
+    binary.write_bytes(b"the tessera binary cargo rebuilt")
+
+    _stamped(bundle_root, wanted)
+
+    assert not cat._is_usable_bundle(bundle_root, wanted), (
+        "a bundle built by a rebuilt binary was stamped with the digest read before the rebuild"
+    )
+
+
+def test_a_fixture_directory_prunes_only_its_own_idle_directories(monkeypatch):
+    """Each binary leaves a directory per fixture, so a fixture deletes its directories for other
+    binaries once they have gone unused for 7 days. Nothing else under the root is deleted: not a
+    recent directory, not another fixture's, not a name of any other form (the fixed-path fixtures
+    other checkouts still use among them), and not one a session has used within the week."""
+    root = harness.FIXTURE_ROOT
+    eight_days_ago = time.time() - 8 * 24 * 3600
+
+    def made(name: str, *, idle: bool) -> Path:
+        path = root / name
+        (path / "bundle").mkdir(parents=True)
+        if idle:
+            os.utime(path, (eight_days_ago, eight_days_ago))
+        return path
+
+    ours = made(f"tessera-catalogue-{harness.builder_identity()[:12]}", idle=True)
+    stale = made(f"tessera-catalogue-{'a' * 12}", idle=True)
+    kept = [
+        made(f"tessera-catalogue-{'b' * 12}", idle=False),
+        made(f"tessera-multiview-{'c' * 12}", idle=True),
+        made("tessera-catalogue", idle=True),
+        made(f"tessera-catalogue-{'d' * 12}-copy", idle=True),
+        made(f"tessera-catalogue-{'E' * 12}", idle=True),
+    ]
+
+    assert harness.fixture_dir("catalogue") == ours
+    assert not stale.exists(), "an idle directory of another binary was kept"
+    for path in kept:
+        assert path.exists(), f"{path.name} was deleted"
+
+    monkeypatch.setattr(harness, "builder_identity", lambda: "f" * 64)
+    harness.fixture_dir("catalogue")
+    assert ours.exists(), "a directory used this session was deleted as idle"
 
 
 def test_the_receipt_lives_beside_the_bundle_and_not_inside_it(work_dir: Path):

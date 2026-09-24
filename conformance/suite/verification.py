@@ -43,9 +43,9 @@ verb calls and then `Corpus::ingest_batch` beside them. This is the same trust c
 the CLI — the one Rust generator, reached through a build — and deliberately not a Python
 restatement of the materialisers, for §12.1's reason. Two writers of one input set is the cost:
 the shim's calls and `Corpus::config_toml`'s declaration are one obligation held apart in two
-crates, which `test_materialisation.py` exists to keep matched. The shim is cached at a fixed
-path per machine and shares the workspace's target directory, so after the first run its cost is
-a cargo fingerprint check.
+crates, which `test_materialisation.py` exists to keep matched. The shim lives in the checkout's
+own target directory and compiles into it, so after the first run its cost is a cargo fingerprint
+check.
 
 ## What the harness owns, and the two rules a naive harness breaks
 

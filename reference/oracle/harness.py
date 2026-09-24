@@ -60,40 +60,59 @@ DEFAULT_VIEW = "s0"
 # in `/tmp` carried no record of what produced it.
 
 
-@functools.cache
-def builder_identity() -> dict:
-    """The `tessera` binary that builds every fixture here: the bundle format it writes and a
-    SHA-256 digest of the binary. Every receipt records it ([`write_recipe`]), so a bundle built by
-    any other binary is rebuilt.
+#: Where the fixture directories live.
+FIXTURE_ROOT = Path("/tmp")
 
-    The format is `tessera_types::BUNDLE_FORMAT`, read from the source [`ensure_cli_built`] has
-    just compiled; `tessera --version` prints only the commit. Computed once per process, so a
-    session's fixtures stay at one path if the binary is rebuilt while it runs.
+#: How long a fixture directory for another binary may go unused before [`fixture_dir`] deletes it.
+FIXTURE_MAX_IDLE_SECONDS = 7 * 24 * 3600
+
+
+def _binary_digest() -> str:
+    return hashlib.sha256(CLI_BIN.read_bytes()).hexdigest()
+
+
+@functools.cache
+def builder_identity() -> str:
+    """The SHA-256 of the `tessera` binary that builds every fixture this session. Every receipt
+    records it ([`write_recipe`]), so a bundle built by any other binary is rebuilt.
+
+    Computed once per process, so a session's fixtures stay at one path if the binary is rebuilt
+    while it runs.
     """
     ensure_cli_built()
-    source = (REPO_ROOT / "crates" / "tessera-types" / "src" / "lib.rs").read_text()
-    found = re.search(r"^pub const BUNDLE_FORMAT: u32 = (\d+);", source, re.MULTILINE)
-    if found is None:
-        raise RuntimeError(
-            "crates/tessera-types/src/lib.rs has no `pub const BUNDLE_FORMAT: u32 = N;` line; "
-            "change the pattern in harness.builder_identity to match how it is declared"
-        )
-    return {
-        "bundle_format": int(found.group(1)),
-        "binary_sha256": hashlib.sha256(CLI_BIN.read_bytes()).hexdigest(),
-    }
+    return _binary_digest()
 
 
 def fixture_dir(name: str) -> Path:
-    """Where the fixture `name` lives between runs: one directory under `/tmp` per builder
-    identity, such as `/tmp/tessera-catalogue-f21-f71ddf814850`.
+    """Where the fixture `name` lives between runs: `/tmp/tessera-<name>-<digest>`, with the first
+    12 hex digits of [`builder_identity`].
 
-    Checkouts whose binaries differ keep separate fixtures, so a rebuild in one never replaces a
-    bundle another is reading. Checkouts with the same binary share one build.
+    The binary includes the commit it was built from, so each commit has its own directory, and a
+    rebuild in one checkout never replaces a bundle another checkout is reading. Checkouts with
+    the same binary share one build.
+
+    Each call marks this directory as used, and deletes the directories of `name` for other
+    binaries that have gone unused for 7 days. Only names of exactly that form are deleted.
     """
-    identity = builder_identity()
-    key = f"f{identity['bundle_format']}-{identity['binary_sha256'][:12]}"
-    return Path("/tmp") / f"tessera-{name}-{key}"
+    path = FIXTURE_ROOT / f"tessera-{name}-{builder_identity()[:12]}"
+    keyed = re.compile(rf"tessera-{re.escape(name)}-[0-9a-f]{{12}}")
+    idle_since = time.time() - FIXTURE_MAX_IDLE_SECONDS
+    with os.scandir(FIXTURE_ROOT) as entries:
+        for entry in entries:
+            if entry.name == path.name or not keyed.fullmatch(entry.name):
+                continue
+            try:
+                idle = (
+                    entry.is_dir(follow_symlinks=False)
+                    and entry.stat(follow_symlinks=False).st_mtime < idle_since
+                )
+            except OSError:
+                continue
+            if idle:
+                shutil.rmtree(entry.path, ignore_errors=True)
+    if path.is_dir():
+        os.utime(path)
+    return path
 
 
 def recipe_path(bundle_root: Path) -> Path:
@@ -116,23 +135,26 @@ def read_recipe(bundle_root: Path) -> dict | None:
 
 def _receipt(wanted: dict) -> dict:
     """The recipe as stamped: the caller's inputs and the binary that built from them."""
-    return {**wanted, "builder": builder_identity()}
+    return {**wanted, "binary_sha256": builder_identity()}
 
 
 def recipe_matches(bundle_root: Path, wanted: dict) -> bool:
-    """Whether the bundle at `bundle_root` was built from `wanted` by this checkout's binary."""
+    """Whether the bundle at `bundle_root` was built from `wanted` by this session's binary."""
     return read_recipe(bundle_root) == _receipt(wanted)
 
 
 def write_recipe(bundle_root: Path, wanted: dict | None) -> None:
-    """Stamp the recipe and the builder's identity, or remove the stamp when `wanted` is `None`.
+    """Stamp the recipe and the binary's digest, or remove the stamp when `wanted` is `None`.
 
     Removing first and stamping last is what makes the receipt mean "this bundle was built from
-    this, completely": a build that dies part way through leaves no receipt at all.
+    this, completely": a build that dies part way through leaves no receipt at all. The binary is
+    hashed again before stamping. If cargo rebuilt it after [`builder_identity`] read it, which a
+    commit or a saved edit during a session causes, nothing is stamped: the bundle serves this
+    session and the next one rebuilds it.
     """
     path = recipe_path(bundle_root)
-    if wanted is None:
-        path.unlink(missing_ok=True)
+    path.unlink(missing_ok=True)
+    if wanted is None or _binary_digest() != builder_identity():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_receipt(wanted), indent=2, sort_keys=True))

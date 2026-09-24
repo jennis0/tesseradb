@@ -125,8 +125,6 @@ from .harness import (
     write_recipe,
 )
 
-#: The name of the directory under `/tmp` where the corpus and its bundle live between runs
-#: ([`harness.fixture_dir`] adds the builder's identity to it).
 WORK_DIR_NAME = "catalogue"
 
 #: The view's quantisation frame — the grid's own coordinates, since this catalogue states its
