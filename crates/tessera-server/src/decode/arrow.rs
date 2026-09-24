@@ -4,7 +4,7 @@ use tessera_engine::coordinates;
 use tessera_engine::member_key;
 use tessera_engine::shapes::Bounds;
 use tessera_engine::scalar_column::{self, ScalarColumn};
-use tessera_engine::utf8::Utf8Column;
+use tessera_engine::utf8::{Utf8Column, Utf8Values};
 use tessera_engine::vocabulary::{code_value, Resolved};
 use tessera_engine::{
     check_declared_present, DeclaredScalar, Projection, ScopedScalar, Vocabularies,
@@ -201,17 +201,17 @@ fn check_columns<'b>(
 }
 
 /// A column `check_columns` has passed, read once for all of one record batch's rows.
-enum Cells<'b> {
+enum Cells {
     /// A category's value keys, resolved per row against its vocabulary.
-    Keys(Utf8Column<'b>),
+    Keys(Utf8Values),
     Scalars(ScalarColumn),
 }
 
-impl<'b> Cells<'b> {
-    fn new(col: &'b arrow::array::ArrayRef, declared: &DeclaredScalar) -> Self {
+impl Cells {
+    fn new(col: &arrow::array::ArrayRef, declared: &DeclaredScalar) -> Self {
         match declared.vocabulary {
             Some(_) => Cells::Keys(
-                Utf8Column::new(col.as_ref()).expect("check_columns checked the column's type"),
+                scalar_column::category_keys(col).expect("check_columns checked the column's type"),
             ),
             None => Cells::Scalars(
                 ScalarColumn::new(col, declared.arrow_type)
@@ -225,7 +225,7 @@ impl<'b> Cells<'b> {
 /// the request, for a refusal to name.
 fn cell(
     body_name: &str,
-    cells: &Cells<'_>,
+    cells: &Cells,
     row: usize,
     request_row: usize,
     declared: &DeclaredScalar,
@@ -237,7 +237,7 @@ fn cell(
                 .vocabulary
                 .as_deref()
                 .expect("a column of keys is a category's");
-            category_code(body_name, *col, row, declared, vocabulary, vocabularies)
+            category_code(body_name, col.column(), row, declared, vocabulary, vocabularies)
         }
         Cells::Scalars(column) => column.value(row).map_err(|e| {
             DecodeError(format!(
@@ -349,8 +349,8 @@ pub(crate) fn parse_ingest_batch(
                 .expect("every required column was found above");
             Cells::new(col, d)
         };
-        let declared_cells: Vec<Cells<'_>> = declared.iter().map(cells_of).collect();
-        let scoped_cells: Vec<Cells<'_>> = scoped_declared.iter().map(cells_of).collect();
+        let declared_cells: Vec<Cells> = declared.iter().map(cells_of).collect();
+        let scoped_cells: Vec<Cells> = scoped_declared.iter().map(cells_of).collect();
 
         for i in 0..batch.num_rows() {
             let placed = coordinates::place(projection, Some(extent), x[i], y[i])
@@ -499,7 +499,7 @@ pub(crate) fn parse_values_batch(
             ),
         };
 
-        let cells: Vec<Cells<'_>> = carried
+        let cells: Vec<Cells> = carried
             .iter()
             .map(|d| {
                 let col = batch

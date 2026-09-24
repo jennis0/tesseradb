@@ -2242,15 +2242,18 @@ impl BatchColumn {
             // A category arrives as its *key*, never as a code: §3.1 — the key in the row is not
             // the display name, and the code is drawn once and pinned, so a data file
             // supplying codes directly would be a second place codes are decided.
-            let keys = crate::utf8::Utf8Values::new(column).ok_or_else(|| BuildError::Schema {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "attribute '{}' is a category, so its column must hold value keys (utf8); \
-                     this file holds {:?}. A category's code is drawn once from the \
-                     vocabulary and never re-derived from the data (per-point-attributes §3.4)",
-                    attribute.name,
-                    column.data_type()
-                ),
+            let keys = tessera_store::scalar_column::category_keys(column).ok_or_else(|| {
+                BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "attribute '{}' is a category, so its column must hold value keys \
+                         (utf8); this file holds {:?}. A category's code is drawn once from the \
+                         vocabulary and never re-derived from the data (per-point-attributes \
+                         §3.4)",
+                        attribute.name,
+                        column.data_type()
+                    ),
+                }
             })?;
             return match attribute.value_set {
                 Some(crate::config::ValueSet::Open) => {

@@ -1456,6 +1456,26 @@ async fn a_category_column_as_large_utf8_is_read_as_a_build_reads_it() {
     assert_eq!(answer["error"], "contract");
 }
 
+/// **A column of Arrow's `null` type carries any declared column, every row without a value**:
+/// what `pa.nulls(n)` gives a writer with nothing to send, for a scalar and a category alike.
+#[tokio::test]
+async fn a_column_of_the_null_type_is_a_declared_column_with_no_values() {
+    let (_tmp, server) = served_declared().await;
+    declare_venue(&server).await;
+    let ids = [1100u64, 1101];
+    let mut columns = placed(&ids);
+    for name in ["score", "weight", "big", "seen", "tag", "venue"] {
+        columns.push(column(name, true, arrow::array::NullArray::new(ids.len())));
+    }
+    let (status, answer) = ingest(&server, "null-type", Some(ARROW), body_of(columns)).await;
+    assert_eq!(status, 200, "{answer}");
+    drain(&server).await;
+    for tessera_id in ingested_ids(&answer) {
+        let fields = fields_of(&server, tessera_id).await;
+        assert_eq!(fields, json!({}), "no row holds a value: {fields}");
+    }
+}
+
 /// A `uint64` past `i64::MAX`, which an `i64` cannot hold.
 const PAST_I64: u64 = 1 << 63;
 
