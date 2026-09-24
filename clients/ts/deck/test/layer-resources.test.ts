@@ -1,34 +1,11 @@
-import {describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import {SessionArtifactTable, servedLineage, type ArtifactsProjection, type Band, type MarksProjection} from '@tesseradb/client';
-import {LookupTexture, MarkSlab, TesseraLayer, type TesseraLayerProps} from '../src/index.js';
+import {SessionArtifactTable, mortonOfTile, servedLineage, type ArtifactsProjection, type ComposedTile, type MarksProjection, type TilesProjection} from '@tesseradb/client';
+import {band} from '../../core/test/support.js';
+import {LookupTexture, MarkSlab, TesseraLayer, binDensity, filterDensity, type TesseraLayerProps} from '../src/index.js';
 import {fakeDevice, type FakeResource} from './fake-device.js';
 
-function band(tag: number, n: number): Band {
-  return {
-    depth: 2,
-    prefix: BigInt(tag),
-    x: tag,
-    y: 0,
-    ids: BigUint64Array.from({length: n}, (_, i) => BigInt(tag * 1000 + i)),
-    positions: Float32Array.from({length: n * 2}, (_, i) => tag * 100 + i),
-    scalars: {},
-    served: n,
-    capUsed: 500,
-    visible: BigInt(n),
-    matched: BigInt(n),
-    highlighted: BigInt(n),
-    highlightBits: null,
-    membership: {},
-    heldBelow: BigInt(tag * 1000 + n),
-    identityKey: 'ik',
-    contentKey: 'ck',
-    bytes: n * 32,
-    touchedAt: 0
-  };
-}
-
-const marks = (n: number): MarksProjection => ({bands: [band(1, n)], standIn: [], count: {shown: n, total: n, exact: true}});
+const marks = (n: number): MarksProjection => ({bands: [band(2, 1n, n)], standIn: [], count: {shown: n, total: n, exact: true}});
 
 /** No artifacts, which is enough for the layer to build its lookup texture. */
 function artifacts(): ArtifactsProjection {
@@ -55,15 +32,19 @@ function artifacts(): ArtifactsProjection {
  * The layer under deck.gl's own `LayerManager`, the object a `Deck` drives it through: matching by
  * id, state carried to each new instance, finalised when it leaves the list. The fake device draws
  * nothing, so the sublayers fail to build their programs; only the Tessera layer's own errors count.
- * What the layer drew with is read off its first marks sublayer: the positions buffer it bound and
- * the lookup texture it passed.
+ * What the layer drew with is read off the sublayers it rendered: the positions buffer and lookup
+ * texture its first marks sublayer was given, and the wash's bounds.
  */
 function host() {
   const device = fakeDevice();
   const manager = new LayerManager(device, {});
   const errors: unknown[] = [];
   manager.setProps({onError: (error: unknown, layer: Layer) => (layer.id === 'tessera' ? errors.push(error) : undefined)});
-  const marksLayer = () => manager.getLayers().find((l) => l.id === 'tessera-marks-p0');
+  const sublayer = (id: string) => {
+    const layer = manager.getLayers().find((l) => l.id === 'tessera') as TesseraLayer | undefined;
+    return (layer?.getSubLayers() as Layer[] | undefined)?.find((l) => l.id === `tessera-${id}`);
+  };
+  const marksLayer = () => sublayer('marks-p0');
   return {
     device,
     errors,
@@ -74,7 +55,14 @@ function host() {
       const data = marksLayer()?.props.data as {attributes: Record<string, {buffer?: FakeResource}>} | undefined;
       return data?.attributes['instancePositions']?.buffer ?? null;
     },
-    texture: () => ((marksLayer()?.props as {lutTexture?: FakeResource | null} | undefined)?.lutTexture ?? null)
+    texture: () => ((marksLayer()?.props as {lutTexture?: FakeResource | null} | undefined)?.lutTexture ?? null),
+    /** The positions the marks sublayer was given as a typed array, where it was given no buffer. */
+    cpuPositions: () => (marksLayer()?.props.data as {attributes: Record<string, {value?: Float32Array}>} | undefined)?.attributes['getPosition']?.value ?? null,
+    /** The wash drawn: whether it shows, and the world bounds deck was given. */
+    wash: () => {
+      const props = sublayer('wash')?.props as {visible: boolean; bounds: number[]} | undefined;
+      return props ? {visible: props.visible, bounds: props.bounds} : null;
+    }
   };
 }
 
@@ -139,5 +127,86 @@ describe('TesseraLayer GPU resources', () => {
     expect(h.errors).toEqual([]);
     expect(own!.destroyed).toBe(true);
     expect(h.buffer()).toBe(slab.layers()[0]!.draw.gpu!.positions);
+  });
+
+  it('releases its own lookup texture when the host starts passing one', () => {
+    const h = host();
+    h.draw({marks: marks(3)});
+    const own = h.texture();
+    const lut = new LookupTexture();
+    lut.attach(h.device);
+    h.draw({marks: marks(3), lut});
+    expect(h.errors).toEqual([]);
+    expect(own!.destroyed).toBe(true);
+    expect(h.texture()).toBe(lut.gpu);
+  });
+
+  it('leaves a slab the host never attached on the CPU path', () => {
+    const h = host();
+    const slab = new MarkSlab();
+    h.draw({marks: marks(3), slab});
+    expect(h.errors).toEqual([]);
+    const draw = slab.layers()[0]!.draw;
+    expect(draw.gpu).toBeNull();
+    expect(h.buffer()).toBeNull();
+    expect(h.cpuPositions()).toBe(draw.positions);
+  });
+
+  it('leaves a lookup texture the host never attached off the GPU', () => {
+    const h = host();
+    const lut = new LookupTexture();
+    h.draw({marks: marks(3), lut});
+    expect(h.errors).toEqual([]);
+    expect(lut.gpu).toBeNull();
+    expect(h.texture()).toBeNull();
+  });
+});
+
+describe('TesseraLayer density wash', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const DEPTH = 3;
+  const tiles = (x: number, y: number): TilesProjection => {
+    const tile: ComposedTile = {prefix: mortonOfTile(x, y, DEPTH), depth: DEPTH, exact: true, drawn: 10, counts: {visible: 50n, matched: 50n, highlighted: 50n, served: 10}};
+    return {tiles: [tile]};
+  };
+  /** The bounds deck is given for a wash built from these tiles: `[left, bottom, right, top]`. */
+  const drawnBounds = (t: TilesProjection) => {
+    const [x0, y0, x1, y1] = filterDensity(binDensity(t.tiles, DEPTH)!, DEPTH).bounds;
+    return [x0, y1, x1, y0];
+  };
+
+  it('is built and drawn per layer: two maps on one page neither cancel nor borrow each other’s', () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('ImageData', class {
+      constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {}
+    });
+    const a = host();
+    const b = host();
+    const a1 = tiles(0, 0);
+    const a2 = tiles(2, 2);
+    const onB = tiles(6, 6);
+    const drawA = (t: TilesProjection) => a.draw({marks: marks(3), depth: DEPTH, tiles: t});
+    const drawB = () => b.draw({marks: marks(3), depth: DEPTH, tiles: onB});
+
+    drawA(a1);
+    drawB();
+    vi.advanceTimersByTime(1000);
+    drawA(a1);
+    drawB();
+    expect(a.wash()).toEqual({visible: true, bounds: drawnBounds(a1)});
+    expect(b.wash()).toEqual({visible: true, bounds: drawnBounds(onB)});
+
+    // While A's next wash is built, A draws its own last one.
+    drawA(a2);
+    expect(a.wash()).toEqual({visible: true, bounds: drawnBounds(a1)});
+    vi.advanceTimersByTime(1000);
+    drawA(a2);
+    expect(a.wash()).toEqual({visible: true, bounds: drawnBounds(a2)});
+    expect(a.errors).toEqual([]);
+    expect(b.errors).toEqual([]);
   });
 });

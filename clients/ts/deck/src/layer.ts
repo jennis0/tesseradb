@@ -123,6 +123,7 @@ export type LayerTimings = {
   outlinesMs: number;
   labelsMs: number;
   layersMs: number;
+  /** Writes to the lookup texture since it was made. */
   lutWrites: number;
   /**
    * The **parts** the outline layer holds and the **artifacts** they belong to; two units on
@@ -197,6 +198,11 @@ const HALO_BUFFER = 14;
  * existed.
  */
 const HALO_OUTLINE_WIDTH = (HALO_EM * ATLAS_PX) / 0.75;
+/**
+ * The glyphs an empty text layer is given in place of `'auto'`, which over no rows builds a font
+ * atlas 0 px high that WebGL refuses to upload. The digits are what every count label draws.
+ */
+const WARM_GLYPHS = '0123456789';
 const CHROME: [number, number, number, number] = [234, 238, 243, 240];
 const PLATE: [number, number, number, number] = [13, 15, 18, 235];
 
@@ -293,14 +299,20 @@ const heldStandIn = new WeakMap<object, {key: string; buffers: StandInBuffers}>(
 const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array}>();
 /** Frames whose slab-residency check has run — once per `marks` object, not once per paint. */
 const checkedMarks = new WeakSet<object>();
-/** The wash image, once per `tiles` object; `pending` while it is being built off the paint path. */
-type HeldWash = {depth: number; channel: string; image: ImageData | null; bounds: [number, number, number, number]; pending: boolean};
-const heldWash = new WeakMap<object, HeldWash>();
-/** The last wash built, drawn while the next is being built. */
-let lastWash: HeldWash | null = null;
-/** The pending wash build, one at a time: a newer `tiles` object supersedes an unbuilt older one. */
-let washTimer: ReturnType<typeof setTimeout> | null = null;
-/** How long `tiles` must stand still before the wash is rebuilt — the settle, not the frame. */
+/** What a wash is built for: one `tiles` object, at one depth, reading one count. */
+type WashKey = {tiles: TilesProjection; depth: number; channel: 'visible' | 'matched' | 'highlighted'};
+/**
+ * One layer's wash: the last image built, which is drawn until the next is ready, and the build
+ * waiting to run. Held in the layer's state, so two maps on one page never cancel or draw each
+ * other's wash.
+ */
+type WashState = {
+  built: (WashKey & {image: ImageData | null; bounds: [number, number, number, number]}) | null;
+  pending: WashKey | null;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+const sameWash = (a: WashKey | null, b: WashKey) => a !== null && a.tiles === b.tiles && a.depth === b.depth && a.channel === b.channel;
+/** How long `tiles` must stand still before the wash is rebuilt: the settle, not the frame. */
 const WASH_SETTLE_MS = 200;
 /** What the empty sublayers are given, once, so their descriptors are stable across paints. */
 const EMPTY_F32 = new Float32Array(0);
@@ -840,10 +852,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     zoomBucket: number;
     ownSlab: MarkSlab | null;
     ownLut: LookupTexture | null;
+    wash: WashState;
   };
 
   override initializeState(): void {
-    this.state = {tick: 0, unsubscribe: null, subscribed: null, zoomBucket: NaN, ownSlab: null, ownLut: null};
+    this.state = {tick: 0, unsubscribe: null, subscribed: null, zoomBucket: NaN, ownSlab: null, ownLut: null, wash: {built: null, pending: null, timer: null}};
     this.follow(this.props.store ?? null);
   }
 
@@ -873,6 +886,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     this.state.unsubscribe = null;
     this.state.subscribed = null;
     this.release({slab: true, lut: true});
+    if (this.state.wash.timer !== null) clearTimeout(this.state.wash.timer);
+    this.state.wash = {built: null, pending: null, timer: null};
   }
 
   /** The `store` convenience: subscribe, and mark the layer for update on every change. */
@@ -1207,12 +1222,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   }
 
   /**
-   * The density wash, rebuilt once per `tiles` object — and **off the paint path**. Binning and
-   * filtering the wash over a full viewport's tiles (65,536 at depth 8) is 60–70 ms, and it sat
-   * inside the first paint with marks. Now a new `tiles` object schedules the build on a
-   * macrotask, the paint draws the previous wash (or none) meanwhile, and the layer asks for an
-   * update when the image is ready — one frame later, never inside the frame that draws the
-   * marks. The image still comes from the exact tiles' counts and nothing else (§5.10).
+   * The density wash from the exact tiles' counts, built once per `tiles` object and off the
+   * paint path: binning and filtering a full viewport's tiles (65,536 at depth 8) takes 60 to 70
+   * ms. A new `tiles` object schedules the build on a timer, the paint draws this layer's previous
+   * wash (or none) meanwhile, and the layer asks for an update when the image is ready.
    *
    * `tiles` null draws the empty layer, so the bitmap program links with the rest at the first
    * paint of the session.
@@ -1222,46 +1235,39 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     let bounds: [number, number, number, number] = [0, 0, 1, 1];
     if (tiles) {
       // The channel is in the key beside the depth: a highlight change hands the layer the same
-      // `tiles` object with a different question to wash, and a memo on the object alone would
-      // draw the old answer.
-      const channel = this.props.washChannel ?? 'matched';
-      let held = heldWash.get(tiles);
-      if (!held || held.depth !== depth || held.channel !== channel) {
-        if (!held || !held.pending) {
-          // Keep the last wash drawn while this one is built: no flash to nothing at a settle.
-          held = {depth, channel, image: lastWash?.image ?? null, bounds: lastWash?.bounds ?? [0, 0, 1, 1], pending: true};
-          heldWash.set(tiles, held);
-          const build = () => {
-            washTimer = null;
-            const binned = binDensity(tiles.tiles, depth, channel);
-            const built = binned && binned.filled > 0 ? filterDensity(binned, depth) : null;
-            const entry = {
-              depth,
-              channel,
-              image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
-              bounds: built ? built.bounds : ([0, 0, 1, 1] as [number, number, number, number]),
-              pending: false
-            };
-            heldWash.set(tiles, entry);
-            lastWash = entry;
-            // The layer that is current for this id, which may no longer be this instance.
-            const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
-            // A discarded instance has no manager to ask; the next paint reads the memo anyway.
-            if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
-            current.setNeedsUpdate();
-            current.setNeedsRedraw();
+      // `tiles` object with a different question to wash.
+      const want: WashKey = {tiles, depth, channel: this.props.washChannel ?? 'matched'};
+      const wash = this.state.wash;
+      if (!sameWash(wash.built, want) && !sameWash(wash.pending, want)) {
+        wash.pending = want;
+        const build = () => {
+          wash.timer = null;
+          wash.pending = null;
+          const binned = binDensity(want.tiles.tiles, want.depth, want.channel);
+          const built = binned && binned.filled > 0 ? filterDensity(binned, want.depth) : null;
+          wash.built = {
+            ...want,
+            image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
+            bounds: built ? built.bounds : [0, 0, 1, 1]
           };
-          // Debounced to the settle: while a response streams in, every fold hands the layer a
-          // new `tiles` object a frame apart, and a wash per frame would cost more than the
-          // marks it sits under. The last one asked for is the one built.
-          if (typeof setTimeout !== 'undefined') {
-            if (washTimer !== null) clearTimeout(washTimer);
-            washTimer = setTimeout(build, WASH_SETTLE_MS);
-          } else build();
-        }
+          // The layer that is current for this id, which may no longer be this instance.
+          const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
+          // A discarded instance has no manager to ask; the next paint reads the state anyway.
+          if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
+          current.setNeedsUpdate();
+          current.setNeedsRedraw();
+        };
+        // Debounced to the settle: while a response streams in, every fold hands the layer a new
+        // `tiles` object a frame apart, and a wash per frame would cost more than the marks it
+        // sits under. The last one asked for is the one built.
+        if (typeof setTimeout !== 'undefined') {
+          if (wash.timer !== null) clearTimeout(wash.timer);
+          wash.timer = setTimeout(build, WASH_SETTLE_MS);
+        } else build();
       }
-      image = held.image;
-      bounds = held.bounds;
+      // The last wash built is drawn while the next is built: no flash to nothing at a settle.
+      image = wash.built?.image ?? null;
+      bounds = wash.built?.bounds ?? bounds;
     }
     const [x0, y0, x1, y1] = bounds;
     return new BitmapLayer(
@@ -1456,7 +1462,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           fontSettings: {sdf: true, buffer: HALO_BUFFER, radius: HALO_RADIUS, cutoff: 0.25},
           outlineWidth: HALO_OUTLINE_WIDTH,
           outlineColor: HALO[scheme],
-          characterSet: 'auto',
+          characterSet: rows.length > 0 ? 'auto' : WARM_GLYPHS,
           pickable: this.props.pickable && kind === 'name',
           artifactIds: rows.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
