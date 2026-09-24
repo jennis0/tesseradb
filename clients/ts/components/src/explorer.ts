@@ -303,6 +303,8 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: 'colour-by'}) accessor colourBy = '';
   @property() accessor layers = '';
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
+  /** The record field that titles a point, for the map's hover and the item card; unset, its id. */
+  @property({attribute: 'title-field'}) accessor titleField = '';
   @property({type: Number}) accessor budget = 0;
   @state() accessor sheet: Sheet | null = null;
   /** The level chosen through the legend's select; the map colours and labels at it. */
@@ -369,7 +371,7 @@ export class TesseraExplorer extends TesseraElement {
     const hasDetail = Boolean(selection?.item || selection?.artifact || selection?.artifactRefusal || selection?.itemRefusal || this.map?.lastPick);
     // The detail region shows whichever changed last.
     const showArtifact = this.lastDetail === 'artifact' && (selection?.artifact || selection?.artifactRefusal);
-    const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']}></tessera-artifact-card>` : html`<tessera-item-card exportparts=${FORWARD['item-card']} .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
+    const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']}></tessera-artifact-card>` : html`<tessera-item-card exportparts=${FORWARD['item-card']} title-field=${this.titleField || nothing} .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
     // The two pickers sit at the top of the toolbar slot, above *Colour by* and *Layers*
     // (`view-switching.md` §6.3) — in the docked sidebar, the overlay's left card and the narrow
     // layout's *Layers* sheet alike, all three of which render this slot. Both draw nothing for
@@ -444,6 +446,7 @@ export class TesseraExplorer extends TesseraElement {
         colour-by=${this.colourBy || nothing}
         layers=${this.layers || nothing}
         tooltip-fields=${this.tooltipFields}
+        title-field=${this.titleField || nothing}
         budget=${this.budget || nothing}
         controls-corner=${this.layout === 'overlay' ? 'top-right' : 'top-left'}
         .clusterLevel=${level}

@@ -20,7 +20,7 @@ export const PARTS = {
   hierarchy: ['actions', 'also', 'children', 'count-masked', 'count-matched', 'counts', 'expander', 'filter', 'fit', 'highlight', 'layer', 'lineage', 'more', 'name', 'row', 'search', 'title', 'tree', ...STATE],
   'artifact-list': ['count', 'item', 'items', 'name', 'title', ...STATE],
   selection: ['action', 'actions', 'count-matched', 'count-served', 'count-visible', 'counts', 'item', 'items', 'label', 'title', ...STATE],
-  'item-card': ['close', 'copy', 'field', 'key', 'label', 'label-chip', 'open', 'scoped', 'title', 'value', 'view-chip', ...STATE],
+  'item-card': ['close', 'copy', 'field', 'headline', 'key', 'label', 'label-chip', 'open', 'scoped', 'title', 'value', 'view-chip', ...STATE],
   'artifact-card': ['child', 'children', 'close', 'content', 'count', 'filter', 'fit', 'headline', 'highlight', 'label', 'name', 'outside', 'parent', 'parents', 'shape', 'title', 'value', 'verbs', ...STATE]
 } as const satisfies Record<string, readonly string[]>;
 

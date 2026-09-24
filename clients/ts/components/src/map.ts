@@ -301,7 +301,14 @@ export class TesseraMap extends TesseraElement {
   })
   accessor layers: string[] | null = null;
   @property({type: Number}) accessor budget = 0;
+  /** Columns the marks carry, shown beneath a hovered point's title. */
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
+  /**
+   * The record field a hovered point is titled by. Read off the marks where they carry it, else
+   * from the record once the pointer has rested. Unset, the title is the point's id and nothing
+   * is fetched.
+   */
+  @property({attribute: 'title-field'}) accessor titleField = '';
   @property({reflect: true}) accessor mode: 'pan' | 'box' | 'lasso' = 'pan';
   /** How served artifacts are coloured: by position about the extent's centre, or spread over the served set. */
   @property() accessor palette: PaletteKind = 'positional';
@@ -821,18 +828,11 @@ export class TesseraMap extends TesseraElement {
 
   /**
    * What the pointer is over: the tooltip from the mark beneath it, and the hovered artifact from
-   * the frontier's own shapes ({@link hoverAt}), never from deck's pick.
-   *
-   * Deck answers a pick with whatever polygon its picking pass finds, which was every served
-   * artifact — ancestors included, at zero alpha — so crossing a cluster meant crossing its
-   * parent's invisible ring too and the highlight flipped between the two on a pixel of movement
-   * (the owner's review, 2026-08-27). The shapes are now the frontier's alone, the deepest one
-   * containing the pointer wins, and the one already hovered holds until the pointer is clear of
-   * it. The mark beneath the pointer is passed as the preference, so the highlighted contour is
-   * the cluster whose point the tooltip is describing.
-   *
-   * Deck cannot answer it at all: the outline layer holds the hovered and the opened artifact and
-   * is not pickable, so a contour is never in its pick pass.
+   * the frontier's own shapes ({@link hoverAt}). Deck's pick is not asked: its picking pass
+   * answers with any served polygon, ancestors included, and the outline layer is not pickable.
+   * The deepest shape containing the pointer wins, the one already hovered holds until the
+   * pointer is clear of it, and the mark beneath is the tie-break, so the highlighted contour is
+   * the cluster whose point the tooltip describes.
    */
   private onHover(info: PickingInfo): void {
     const picked = resolvePick(info as never);
@@ -853,75 +853,45 @@ export class TesseraMap extends TesseraElement {
       if (this.hover) this.hover = null;
       return;
     }
-    // The hint: the first tooltip field as the title (a `title` column, typically), the rest as
-    // one muted line beneath — the boards' `tooltip`. With no fields, the id.
-    const values: string[] = [];
-    const fields = this.tooltipFields.split(/[\s,]+/).filter(Boolean);
-    if (fields.length > 0 && slot) {
-      if (at) {
-        for (const f of fields) {
-          const column = at.band.scalars[f];
-          if (!column) continue;
-          const raw = (column.values as ArrayLike<unknown>)[at.i];
-          values.push(column.arrowType === 'timestamp_us' ? new Date(Number(raw) / 1000).toISOString().slice(0, 4) : String(raw));
-        }
-      }
-    }
-    const title = values[0] ?? `#${idString(picked.id)}`;
-    const lines = values.slice(1);
-    this.hover = {x: info.x, y: info.y, title, lines};
-    // Nothing the marks carry names the thing under the pointer, so ask the record — see
-    // {@link describeHovered}. The id stands until the answer lands, and stands for good where
-    // the corpus has no text column or the record cannot be reached.
-    if (values.length === 0) this.describeHovered(picked.id, info.x, info.y);
+    const carried = (name: string): string | null => {
+      const column = at?.band.scalars[name];
+      const raw = at && column ? (column.values as ArrayLike<unknown>)[at.i] : null;
+      return raw === null || raw === undefined ? null : hoverText(raw, column!.arrowType);
+    };
+    const lines = this.tooltipFields
+      .split(/[\s,]+/)
+      .filter(Boolean)
+      .map(carried)
+      .filter((v): v is string => v !== null);
+    const title = this.titleField ? carried(this.titleField) : null;
+    this.hover = {x: info.x, y: info.y, title: title ?? `#${idString(picked.id)}`, lines};
+    if (this.titleField && title === null) this.describeHovered(picked.id, info.x, info.y);
     emit(this, 'tessera-hover', {id: idString(picked.id), x: info.x, y: info.y});
   }
 
   /**
-   * The hovered point's own name, fetched once the pointer rests on it.
+   * The hovered point's title field, from its record once the pointer rests on it: a text column
+   * lives in the record and never in the marks.
    *
-   * **A text column cannot be drawn**, so it is not in the response the marks came from: prose
-   * lives in the record blob and `render` on a text column is refused (records-and-search §3).
-   * The id is therefore the whole of what a mark knows about itself, and a tooltip reading
-   * `#31728047486770` is the honest rendering of that — and useless. One request per point, held
-   * by the store, is what turns it into a name.
-   *
-   * **After a dwell, not on the move.** A pointer crossing a dense map touches hundreds of marks a
-   * second and none of them is being looked at; {@link HOVER_DESCRIBE_MS} is the pause that says
-   * one of them is. A pointer that has moved on by the time the answer lands writes nothing.
+   * After a dwell, not on the move: a pointer crossing a dense map touches hundreds of marks a
+   * second, and {@link HOVER_DESCRIBE_MS} is the pause that says one of them is being looked at.
+   * A pointer that has moved on by the time the answer lands writes nothing.
    */
   private describeHovered(id: bigint, x: number, y: number): void {
-    const column = this.nameColumn();
-    if (column === null) return;
+    const field = this.titleField;
     if (this.describeTimer !== null) clearTimeout(this.describeTimer);
     this.describeTimer = setTimeout(() => {
       this.describeTimer = null;
       const store = this.resolvedStore;
       if (!store) return;
+      const arrowType = store.get('meta')?.declaredScalars.find((d) => d.name === field)?.arrowType ?? null;
       void store.describe(id).then((fields) => {
-        const name = fields?.[column];
-        if (typeof name !== 'string' || name === '') return;
-        // The pointer may have left, or moved to another mark, while this was in flight.
+        const value = fields?.[field];
+        if (value === null || value === undefined || value === '') return;
         if (!this.hover || this.hover.x !== x || this.hover.y !== y) return;
-        this.hover = {...this.hover, title: name};
+        this.hover = {...this.hover, title: hoverText(value, arrowType)};
       });
     }, HOVER_DESCRIBE_MS);
-  }
-
-  /**
-   * The column a hover names a point by: the first text column the bundle declares, or `null`
-   * where it declares none — every arXiv corpus answers `title`, this one answers `name`, and a
-   * corpus of bare points answers nothing and keeps its ids.
-   */
-  private nameColumn(): string | null {
-    const scalars = (this.resolvedStore?.get('meta') ?? null)?.declaredScalars ?? [];
-    // Prose first — a corpus with both a `text` title and a `keyword` code means the title — then
-    // whatever string column exists.
-    return (
-      scalars.find((d) => d.arrowType === 'text')?.name ??
-      scalars.find((d) => d.arrowType === 'utf8' || d.arrowType === 'keyword')?.name ??
-      null
-    );
   }
 
   private onClick(info: PickingInfo): void {
@@ -1231,6 +1201,12 @@ export class TesseraMap extends TesseraElement {
           </div>`
         : nothing}`;
   }
+}
+
+/** A value as the hover shows it; a timestamp in full, as an ISO date-time. */
+function hoverText(value: unknown, arrowType: string | null): string {
+  if (arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) return new Date(Number(value) / 1000).toISOString();
+  return String(value);
 }
 
 /** Compositions whose fidelity check has run — once per frame object. */

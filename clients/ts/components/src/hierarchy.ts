@@ -434,7 +434,7 @@ export class TesseraHierarchy extends TesseraElement {
   private renderNode(node: Node, depth: number, layer: Layer, filtered: boolean): unknown {
     const open = this.open.has(node.path);
     const clause = this.clauseOn(node.row.tesseraId);
-    const name = node.row.name ?? node.row.key ?? null;
+    const name = node.row.name;
     // A `dag` node under several served parents is drawn under each of them; the row says which
     // others it sits under, so the duplication reads as the structure it is (§5.1).
     const also = node.row.parentIds.filter((p) => String(p) !== node.path.split('/').at(-2));

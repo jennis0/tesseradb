@@ -40,7 +40,7 @@ const META = {
   filterOperands: []
 } as unknown as Meta;
 
-const row = (id: bigint, name: string, masked: bigint, extra: Partial<BrowseRow> = {}): BrowseRow => ({
+const row = (id: bigint, name: string | null, masked: bigint, extra: Partial<BrowseRow> = {}): BrowseRow => ({
   tesseraId: id,
   key: `d-${id}`,
   name,
@@ -73,6 +73,19 @@ describe('<tessera-hierarchy>', () => {
     // The request carried the layer and a limit and nothing about where the map is looking.
     const asked = store.calls.filter((c) => c.name === 'browse').map((c) => c.args[0] as Record<string, unknown>);
     expect(asked[0]).toEqual({layer: 'mesh/descriptors', limit: 50});
+  });
+
+  it('marks a row with no name as unnamed and never draws its key in the name’s place', async () => {
+    const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
+    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const store = fakeStore({meta: META, status: status({})});
+    store.setBrowse('roots', {artifacts: [row(3n, null, 10n)], parents: [], next: null});
+    el.store = store;
+    await settle(host);
+    await settle(host);
+    const name = deep(host, '[part="row"] [part="name"]')!;
+    expect(name.hasAttribute('data-unnamed')).toBe(true);
+    expect(name.textContent).not.toContain('d-3');
   });
 
   it('fetches a node’s children on expansion, and pages them under More', async () => {

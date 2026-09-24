@@ -73,3 +73,14 @@ describe('<tessera-explorer> parts', () => {
     }
   });
 });
+
+describe('<tessera-explorer title-field>', () => {
+  it('reaches the map’s hover and the default item card', async () => {
+    const {host, shadow, store} = await explorer('<tessera-explorer title-field="author"></tessera-explorer>');
+    store.set('selection', {item: {id: 5n, detail: {fields: {author: 'Ada'}, externalId: null, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
+    await settle(host);
+    expect((shadow.querySelector('tessera-map') as unknown as {titleField: string}).titleField).toBe('author');
+    const card = shadow.querySelector('tessera-item-card')!;
+    expect(card.shadowRoot!.querySelector('[part="headline"]')?.getAttribute('data-name')).toBe('author');
+  });
+});

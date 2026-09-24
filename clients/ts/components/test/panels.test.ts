@@ -1,4 +1,4 @@
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {FiltersProjection, Meta} from '@tesseradb/client';
 import '../src/item-card.js';
 import '../src/filter.js';
@@ -33,22 +33,32 @@ const META: Meta = {
 
 describe('<tessera-item-card>', () => {
   it('renders fields by name in declaration order, presented by type, with a slot per field', async () => {
-    const host = await mount('<tessera-item-card><a slot="field-title" href="#">my link</a></tessera-item-card>');
+    const host = await mount('<tessera-item-card title-field="title"><a slot="field-title" href="#">my link</a></tessera-item-card>');
     const el = host.querySelector('tessera-item-card') as TesseraItemCard;
     el.meta = META;
     // `archive` absent from the record, the extra `note` undeclared: order is declared-then-extra,
     // and the gap is named rather than shifting the fields after it.
     el.item = {id: 12345678901234567890n, detail: {fields: {note: 'x', title: 'A title', submitted_at: 1_700_000_000_000_000}, externalId: null, labels: [], views: [], scoped: {}}};
     await settle(host);
-    const names = deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'));
-    // The title first, then the fields in declared-then-extra order, then the id; the absent
-    // `archive` is not rendered — position never lies.
-    expect(names).toEqual(['title', 'submitted_at', 'note', 'tessera_id']);
+    // The headline is the field the host named; the rest in declared-then-extra order, then the
+    // id; the absent `archive` is not rendered.
+    expect(deep(host, '[part="headline"]')?.getAttribute('data-name')).toBe('title');
+    expect(deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'))).toEqual(['submitted_at', 'note', 'tessera_id']);
     expect(deep(host, '[part="field"][data-name="tessera_id"] [part="value"]')?.textContent).toBe('12345678901234567890');
     expect(deep(host, '[part="field"][data-name="submitted_at"] [part="value"]')?.textContent).toBe('2023-11-14');
     expect(deep(host, 'slot[name="field-title"]')).not.toBeNull();
     expect(host.textContent).toContain('my link');
     expect(deep(host, '[part="field"][data-name="archive"]')).toBeNull();
+  });
+
+  it('with no title field, heads the card with the id and shows every field in the grid', async () => {
+    const host = await mount('<tessera-item-card></tessera-item-card>');
+    const el = host.querySelector('tessera-item-card') as TesseraItemCard;
+    el.meta = META;
+    el.item = {id: 42n, detail: {fields: {note: 'x', title: 'A title'}, externalId: null, labels: [], views: [], scoped: {}}};
+    await settle(host);
+    expect(deep(host, '[part="headline"]')?.textContent).toBe('42');
+    expect(deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'))).toEqual(['title', 'note', 'tessera_id']);
   });
 
   it('fires tessera-open with the id as a decimal string, bubbling and composed', async () => {
@@ -314,6 +324,30 @@ describe('<tessera-filter>', () => {
     await new Promise((r) => setTimeout(r, 400));
     const sent = store.calls.find((c) => c.name === 'setFilters');
     expect((sent!.args[0] as {title: {query: string}}).title.query).toBe('graph');
+  });
+});
+
+describe('<tessera-filter> on a keyword column', () => {
+  const meta: Meta = {...META, filterOperands: [{column: 'author', family: 'keyword', operands: ['eq', 'prefix']}]};
+
+  it('offers only the operators the column publishes, and sends the draft’s operator', async () => {
+    vi.useFakeTimers();
+    const host = await mount('<tessera-filter column="author"></tessera-filter>');
+    const el = host.querySelector('tessera-filter') as TesseraFilter;
+    const store = fakeStore({meta, status: status({})});
+    store.set('filters', {draft: {author: {family: 'keyword', needle: '', op: 'eq', verb: 'filter'}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0});
+    el.store = store;
+    await settle(host);
+    const select = deep(host, 'select[part="mode"]') as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual(['eq', 'prefix']);
+    expect(select.value).toBe('eq');
+    const entry = deep(host, '[part="entry"]') as HTMLInputElement;
+    entry.value = 'Knuth';
+    entry.dispatchEvent(new Event('input'));
+    await vi.runAllTimersAsync();
+    const sent = store.calls.find((c) => c.name === 'setFilters')!.args[0] as {author: {op: string; needle: string}};
+    expect(sent.author).toMatchObject({op: 'eq', needle: 'Knuth'});
+    vi.useRealTimers();
   });
 });
 

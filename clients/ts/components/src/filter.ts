@@ -3,6 +3,7 @@ import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import {
   composeFilters,
+  emptyDraft,
   isPopulated,
   type ColumnDraft,
   type FilterOperandSet,
@@ -44,6 +45,10 @@ import {chrome, tokens} from './tokens.js';
  * every keystroke, which debounces and single-flights it; a tick, a mode or a date lands at once.
  * Emits `tessera-filterchange` with the composed expression.
  */
+
+/** The operators a string or keyword control can send. */
+const STRING_OPERATORS = ['contains', 'prefix', 'eq'] as const;
+type StringOperator = (typeof STRING_OPERATORS)[number];
 
 /** How long a typed control must be quiet before its change is sent. */
 const TYPING_DEBOUNCE_MS = 350;
@@ -250,24 +255,12 @@ export class TesseraFilter extends TesseraElement {
   }
 
   /**
-   * The empty control. **`verb: 'filter'` is the default position**, so a control the user has
-   * not spoken to about the mode narrows the map, which is what one always did; the chip's toggle
-   * moves it (`highlight-and-hierarchy.md` §5.2), and the store's draft keeps the choice, so a
-   * control re-entered under a highlight stays a highlight.
+   * The control's draft: the one being edited, else the store's, else the empty draft the client
+   * seeds for this operand. The operator a keyword control starts on is the draft's, never this
+   * element's choice.
    */
-  private emptyDraft(o: FilterOperandSet): ColumnDraft {
-    const verb = this.resolvedStore?.get('filters').draft[this.column]?.verb ?? 'filter';
-    switch (o.family) {
-      case 'text':
-        return {family: 'text', query: '', mode: 'all', verb};
-      case 'string':
-      case 'keyword':
-        return {family: o.family, needle: '', op: 'contains', verb};
-      case 'category':
-        return {family: 'category', keys: [], verb};
-      case 'numeric':
-        return {family: 'numeric', gte: null, lte: null, verb};
-    }
+  private currentDraft(o: FilterOperandSet): ColumnDraft | null {
+    return this.draft ?? this.resolvedStore?.get('filters').draft[this.column] ?? emptyDraft([o])[o.column] ?? null;
   }
 
   private change(next: ColumnDraft, immediate: boolean): void {
@@ -295,7 +288,8 @@ export class TesseraFilter extends TesseraElement {
   override render() {
     const o = this.resolvedOperand;
     if (!o) return nothing;
-    const draft = this.draft ?? this.emptyDraft(o);
+    const draft = this.currentDraft(o);
+    if (!draft) return nothing;
     // Every other shape's body carries an `id="ctl"` element `for` can bind to (an `input`); the
     // checklist's body is a `role="group"` of checkboxes, which `for` cannot label at all — a
     // `for="ctl"` pointing at nothing there was a dangling reference, not a working association.
@@ -312,7 +306,7 @@ export class TesseraFilter extends TesseraElement {
         return this.text(o, draft);
       case 'string':
       case 'keyword':
-        return this.string(draft);
+        return this.string(o, draft);
       case 'category':
         return this.category(draft);
       case 'numeric':
@@ -332,14 +326,16 @@ export class TesseraFilter extends TesseraElement {
       </div>`;
   }
 
-  private string(draft: ColumnDraft & {family: 'string' | 'keyword'}) {
+  /** A string or keyword control, offering the operators the column publishes. */
+  private string(o: FilterOperandSet, draft: ColumnDraft & {family: 'string' | 'keyword'}) {
+    const ops = o.operands.filter((op): op is StringOperator => (STRING_OPERATORS as readonly string[]).includes(op));
     return html`<div class="ctl-row">
       <div class="input grow">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.needle} autocomplete="off"
         aria-label=${`${this.column} value`}
         @input=${(e: Event) => this.change({...draft, needle: (e.target as HTMLInputElement).value}, false)} /></div>
       <select part="mode" style="width:auto" aria-label=${`${this.column} operator`} .value=${draft.op}
-        @change=${(e: Event) => this.change({...draft, op: (e.target as HTMLSelectElement).value as 'eq' | 'prefix' | 'contains'}, true)}>
-        ${(['contains', 'prefix', 'eq'] as const).map((op) => html`<option value=${op} ?selected=${draft.op === op}>${op}</option>`)}
+        @change=${(e: Event) => this.change({...draft, op: (e.target as HTMLSelectElement).value as StringOperator}, true)}>
+        ${ops.map((op) => html`<option value=${op} ?selected=${draft.op === op}>${op}</option>`)}
       </select>
     </div>`;
   }

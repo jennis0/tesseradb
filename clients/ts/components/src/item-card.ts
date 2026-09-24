@@ -16,10 +16,10 @@ import {chrome, tokens} from './tokens.js';
  * the record blob and never appears in a viewport response, so this is the only place its prose
  * is ever seen. A category arrives already resolved to its key.
  *
- * The title is the first declared text column that has a value (`title` by name where there is
- * one); a slot per field — `field-<name>` — lets a host render one as a link into their
- * application without replacing the card, and `tessera-open` (the id as a decimal string) does
- * the same for *Open*.
+ * The headline is the field the host names in `title-field`, else the item's id, and every other
+ * field is in the grid. A slot per field (`field-<name>`) lets a host render one as a link into
+ * their application without replacing the card, and `tessera-open` (the id as a decimal string)
+ * does the same for *Open*.
  *
  * **A miss and a broken pick are different.** Nothing under the cursor is the ordinary case; a
  * hit whose layer carried no identity is a fault in the map and says so, rather than reading as
@@ -86,6 +86,8 @@ export class TesseraItemCard extends TesseraElement {
   @property({attribute: false}) accessor refusal: Refusal | null = null;
   @property({attribute: false}) accessor pick: PickOutcome = null;
   @property({attribute: false}) accessor meta: Meta | null = null;
+  /** The field the headline shows; unset, the headline is the item's id. */
+  @property({attribute: 'title-field'}) accessor titleField = '';
 
   private get shown(): {item: {id: bigint; detail: ItemDetail} | null; refusal: Refusal | null; meta: Meta | null} {
     // A host feeding the card by property still gets the store's schema where one is adopted: the
@@ -119,13 +121,14 @@ export class TesseraItemCard extends TesseraElement {
     const names = Object.keys(fields);
     const ordered = [...declared.map((c) => c.name).filter((n) => n in fields), ...names.filter((n) => !declared.some((c) => c.name === n))];
     const id = idString(item.id);
-    // The title: a declared text column named `title` with a value, else the first with prose.
-    const titleName = ordered.find((n) => n === 'title' && typeof fields[n] === 'string') ?? ordered.find((n) => declared.find((c) => c.name === n)?.arrowType === 'utf8' && typeof fields[n] === 'string');
+    const titleName = this.titleField && fields[this.titleField] !== undefined && fields[this.titleField] !== null ? this.titleField : null;
     const rest = ordered.filter((n) => n !== titleName);
     const copy = () => void navigator.clipboard?.writeText(id);
     return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
-      ${titleName ? html`<div part="field" class="card-title" data-name=${titleName}><slot name=${`field-${titleName}`}><span part="value">${String(fields[titleName])}</span></slot></div>` : nothing}
+      ${titleName
+        ? html`<div part="headline" class="card-title" data-name=${titleName}><slot name=${`field-${titleName}`}><span part="value">${present(fields[titleName], declared.find((c) => c.name === titleName))}</span></slot></div>`
+        : html`<div part="headline" class="card-title mono" data-name="tessera_id">${id}</div>`}
       ${this.views(item.detail.views, meta)}
       ${this.labels(item.detail.labels)}
       <div class="field">

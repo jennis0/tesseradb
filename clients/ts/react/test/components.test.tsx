@@ -2,7 +2,7 @@ import {act, createElement, createRef} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {deep, fakeStore, settle, status} from '../../components/test/fake-store.js';
-import {TesseraCount, TesseraItemCard, TesseraKeyPicker, TesseraStatus, TesseraStore, TesseraViewPicker, type CountElement, type ItemCardElement, type ViewPickerElement} from '../src/components.js';
+import {TesseraCount, TesseraExplorer, TesseraItemCard, TesseraKeyPicker, TesseraStatus, TesseraStore, TesseraViewPicker, type CountElement, type ExplorerElement, type ItemCardElement, type ViewPickerElement} from '../src/components.js';
 
 /**
  * The wrappers: an object prop lands as a property (never an attribute), an `on*` prop receives
@@ -117,6 +117,14 @@ describe('@tesseradb/react/components', () => {
     select.value = 'v:pca64';
     select.dispatchEvent(new Event('change'));
     expect(seen).toEqual([{from: 'knn', to: 'pca64', sameFrame: false}]);
+  });
+
+  it('titleField on the explorer reaches its map', async () => {
+    const ref = createRef<ExplorerElement>();
+    await act(async () => root.render(createElement(TesseraExplorer, {ref, titleField: 'name'})));
+    await settle(host);
+    expect(ref.current?.titleField).toBe('name');
+    expect(ref.current?.map?.titleField).toBe('name');
   });
 
   it('a TesseraStore above provides by context to a wrapped panel below', async () => {

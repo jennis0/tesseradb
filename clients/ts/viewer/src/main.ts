@@ -630,6 +630,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
           : (rendered.find((c) => c.category)?.name ?? rendered[0]?.name ?? null);
       s.switching = false;
     });
+    explorer.titleField = dataset.titleField ?? '';
     writeViewToUrl(opening.id);
     followCameraWithBasemap(opening);
     void installBasemap(opening);
