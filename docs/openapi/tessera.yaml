@@ -527,14 +527,15 @@ paths:
         `u8 kind`, `u32` little-endian payload length, payload. Kinds:
 
         - `6` head: JSON `ItemsHead`, exactly one, first.
-        - `7` records: one Arrow IPC stream holding one batch of up to `page_rows` rows. Zero or
-          more, each followed by a page end.
+        - `7` records: one Arrow IPC stream holding one batch of up to `page_rows` rows. One or
+          more, each followed by a page end; none only in a response cancelled before its first
+          page, which happens only when the client has gone.
         - `8` page end: JSON `PageEnd`, carrying the cursor to resume after that page.
         - `4` trailer: JSON `RecordsTrailer`, exactly one, last.
 
         A body without a trailer is incomplete. A client whose connection drops resumes from the
-        last page end it received and discards a records frame that no page end follows. A
-        response with no rows is a head and a trailer. An unknown kind is a decoder error.
+        last page end it received and discards a records frame that no page end follows. An
+        unknown kind is a decoder error.
         `docs/openapi/README.md` walks a decode in Python and JavaScript.
 
         **Reading a whole result.** Each response carries at most `pages` pages and runs within
@@ -575,8 +576,12 @@ paths:
 
         **Pages.** A page ends at `page_rows` rows, or before the row that would take its Arrow
         bytes past `selection.max_page_bytes`; a single larger row is sent alone. A page holds at
-        least one row whenever one remains. When the response's time budget runs out, or the
-        stream deadline cancels it, a page holding rows is sent short and the trailer follows.
+        least one row whenever one remains, with one exception: a response that would otherwise
+        carry no page carries one page of no rows, so that every response gives the read's
+        columns and their types. That page's end has the trailer's `next`, and `ended_by` `end`
+        where that is null and `time` otherwise, and the trailer counts it as a page. When the
+        response's time budget runs out, or the stream deadline cancels it, a page holding rows
+        is sent short and the trailer follows.
         Every response moves the cursor on, including one that found no row under a sparse
         filter, and a response can run past its time budget by one evaluation of the filter over
         a stretch and one chunk of a page's scan.

@@ -325,6 +325,77 @@ async fn the_page_schema_is_the_named_fields_then_the_system_fields() {
     assert_eq!(marked, matched, "and marks the matching ones");
 }
 
+/// **A response that finds no row carries one page of no rows** with the columns asked for,
+/// typed as a page holding rows types them, and a page end and trailer that end the read.
+#[tokio::test]
+async fn a_read_that_finds_no_row_carries_one_typed_page_of_no_rows() {
+    let f = fixture().await;
+    let token = token_for(&f.server, &["1"]).await;
+    let mut body = json!({
+        "view": "s0",
+        "fields": ["note", "archive", "year", "score"],
+        "system_fields": ["labels", "position", "external_id"],
+        "page_rows": 10,
+        "pages": 1,
+    });
+    let full = items_ok(&f.server, &token, &body).await;
+    let schema = full.pages[0].0.schema();
+    body["filters"] = json!({ "score": { "range": { "gte": 1000000 } } });
+    body["count"] = json!(true);
+    for order in ["map", "stored"] {
+        body["order"] = json!(order);
+        let decoded = items_ok(&f.server, &token, &body).await;
+        assert_eq!(decoded.head["matched"], 0);
+        assert_eq!(decoded.pages.len(), 1, "{order}");
+        let (batch, end) = &decoded.pages[0];
+        assert_eq!((batch.num_rows(), batch.schema()), (0, schema.clone()), "{order}");
+        assert_eq!(end, &json!({ "next": null, "ended_by": "end" }));
+        let trailer = &decoded.trailer;
+        assert_eq!((&trailer["pages"], &trailer["rows"]), (&json!(1), &json!(0)));
+        assert_eq!((&trailer["next"], &trailer["ended_by"]), (&Value::Null, &json!("end")));
+    }
+}
+
+/// **A response that scans a stretch under a sparse filter and finds no row** before its time
+/// runs out carries one page of no rows, whose page end hands on the trailer's cursor.
+#[tokio::test]
+async fn a_response_that_finds_no_row_before_its_time_runs_out_carries_a_page_of_no_rows() {
+    let f = fixture_with(N, 16, generous_test_gate(), generous_bulk_gate(), |limits| {
+        limits.bulk_response_ms = 0;
+    })
+    .await;
+    let token = token_for(&f.server, &["1"]).await;
+    let filters = json!({ "score": { "range": { "gte": 48.0 } } });
+    let (_, matched) = viewport_counts(&f.server, &token, Some(&filters)).await;
+    let body = json!({ "view": "s0", "fields": ["score", "archive"], "filters": filters,
+                       "page_rows": 1 });
+    let responses = read_all(&f.server, &token, &body).await;
+    assert_eq!(ids_of(&responses).len() as u64, matched);
+    let schema = responses
+        .iter()
+        .flat_map(|r| &r.pages)
+        .find(|(batch, _)| batch.num_rows() > 0)
+        .unwrap()
+        .0
+        .schema();
+    let mut empty = 0;
+    for response in &responses {
+        assert!(!response.pages.is_empty(), "every response carries a page");
+        if response.trailer["rows"] != 0 {
+            continue;
+        }
+        empty += 1;
+        assert_eq!(response.pages.len(), 1);
+        assert_eq!(response.trailer["pages"], 1);
+        let (batch, end) = &response.pages[0];
+        assert_eq!((batch.num_rows(), batch.schema()), (0, schema.clone()));
+        assert_eq!(end["next"], response.trailer["next"]);
+        let ended_by = if end["next"].is_null() { "end" } else { "time" };
+        assert_eq!(end["ended_by"], ended_by);
+    }
+    assert!(empty > 0, "no response found nothing");
+}
+
 /// **`count` puts the viewport's own counts in the head**, and the headers are the viewport's:
 /// the same identity coordinate, and the region verdict exactly when a region leaf was sent.
 #[tokio::test]

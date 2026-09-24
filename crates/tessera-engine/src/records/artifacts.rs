@@ -969,6 +969,10 @@ impl Pager for ArtifactsPager<'_> {
         })
     }
 
+    fn empty(&self) -> Result<(RecordBatch, usize)> {
+        Ok((self.batch(&[])?, 0))
+    }
+
     fn cursor(&self, engine: &Engine) -> String {
         let cursor = ArtifactsCursor {
             idset: self.idset,

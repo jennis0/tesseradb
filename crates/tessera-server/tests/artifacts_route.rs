@@ -302,13 +302,27 @@ async fn a_withheld_parent_answers_as_a_parent_with_no_children() {
             .await;
             let mut trailer = decoded.trailer.clone();
             trailer.as_object_mut().unwrap().remove("stream_us");
-            (decoded.head, decoded.pages.len(), trailer)
+            let pages: Vec<(arrow::datatypes::SchemaRef, usize, Value)> = decoded
+                .pages
+                .iter()
+                .map(|(batch, end)| (batch.schema(), batch.num_rows(), end.clone()))
+                .collect();
+            (decoded.head, pages, trailer)
         }
     };
     let withheld = answer(by_key["r2-c1"]).await;
     let empty = answer(by_key["r2"]).await;
     assert_eq!(withheld, empty);
-    assert_eq!(withheld.1, 0);
+    // One page of no rows, with the columns asked for, ends the read.
+    let (_, pages, trailer) = &withheld;
+    assert_eq!(pages.len(), 1);
+    let (schema, rows, end) = &pages[0];
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!((names, *rows), (vec!["tessera_id", "key"], 0));
+    assert_eq!(schema.field(1).data_type(), &arrow::datatypes::DataType::Utf8);
+    assert_eq!(end, &json!({ "next": null, "ended_by": "end" }));
+    assert_eq!((&trailer["pages"], &trailer["rows"]), (&json!(1), &json!(0)));
+    assert_eq!((&trailer["next"], &trailer["ended_by"]), (&Value::Null, &json!("end")));
     let children = read_all(
         &f.server,
         &broad,

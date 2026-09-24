@@ -21,8 +21,9 @@
 //!
 //! ```text
 //! kind 6  head       JSON; exactly one, first
-//! kind 7  records    Arrow stream of one batch, its buffers optionally zstd-compressed; zero or
-//!                    more, each followed by a page end
+//! kind 7  records    Arrow stream of one batch, its buffers optionally zstd-compressed; one or
+//!                    more, each followed by a page end, a page of no rows where a response finds
+//!                    none, and none only where a response is cancelled before its first page
 //! kind 8  page end   JSON; one after each records frame, carrying the cursor to resume after it
 //! kind 4  trailer    JSON; exactly one, last
 //! ```

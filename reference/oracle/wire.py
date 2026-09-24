@@ -420,7 +420,8 @@ def decode_viewport_artifacts(data: bytes):
 # `POST /v1/items` is framed the viewport's way with kinds of its own:
 #
 #     kind 6  head       JSON {order, page_rows, visible?, matched?}   exactly one, first
-#     kind 7  records    one Arrow stream of one batch                  zero or more
+#     kind 7  records    one Arrow stream of one batch                  one or more; none only
+#                                                                    where cancelled at once
 #     kind 8  page end   JSON {next, ended_by}                          one after each records frame
 #     kind 4  trailer    JSON {pages, rows, next, ended_by, stream_us}  exactly one, last
 #

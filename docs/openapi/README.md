@@ -114,10 +114,14 @@ A `POST /v1/items` body uses the same framing with four kinds:
 
 ```
 kind 6  head      exactly one, first          JSON {order, page_rows, visible?, matched?}
-kind 7  records   zero or more                one Arrow IPC stream holding one batch
+kind 7  records   one or more                 one Arrow IPC stream holding one batch
 kind 8  page end  one after each records frame JSON {next, ended_by}
 kind 4  trailer   exactly one, last           JSON {pages, rows, next, ended_by, stream_us}
 ```
+
+A response that finds no row carries one page of no rows, so every response gives the read's
+columns and their types; only a response cancelled before its first page, which happens only when
+the client has gone, carries none.
 
 A reader keeps three rules. A body without a trailer is incomplete, however it was cut, and the
 read resumes from the cursor in the last page end received, which both decoders below hand back
