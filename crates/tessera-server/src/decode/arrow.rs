@@ -4,9 +4,9 @@ use tessera_engine::coordinates;
 use tessera_engine::shapes::Bounds;
 use tessera_engine::scalar_column::{self, ScalarColumn};
 use tessera_engine::utf8::Utf8Column;
+use tessera_engine::vocabulary::{code_value, Resolved};
 use tessera_engine::{
     DeclaredScalar, Projection, ScalarType, ScalarValue, ScopedScalar, Vocabularies,
-    VocabularyKind, ABSENT_CODE,
 };
 use tessera_lifecycle::{BatchArtifacts, WalScalar};
 use tessera_types::layer::LayerDeclaration;
@@ -62,16 +62,6 @@ fn category_code(
     vocabulary: &str,
     vocabularies: &Vocabularies,
 ) -> Result<WalScalar, DecodeError> {
-    let Some(key) = keys.at(row) else {
-        return Ok(code_at(declared.arrow_type, ABSENT_CODE));
-    };
-    if key.is_empty() {
-        return Err(DecodeError(format!(
-            "{body_name}: column '{}' carries the empty string, which is not a value key; send \
-             null for an item with no value",
-            declared.name
-        )));
-    }
     let minter = vocabularies.get(vocabulary).ok_or_else(|| {
         DecodeError(format!(
             "{body_name}: column '{}' names vocabulary '{vocabulary}', which this bundle does \
@@ -79,31 +69,21 @@ fn category_code(
             declared.name
         ))
     })?;
-    if let Some(code) = minter.code_of(key) {
-        return Ok(code_at(declared.arrow_type, code));
-    }
-    match minter.kind() {
-        // A declared vocabulary is closed, so an unbound key is refused here, where the whole
-        // batch can still be rejected without effect.
-        VocabularyKind::Declared => Err(DecodeError(format!(
-            "{body_name}: column '{}' carries value '{key}', which declared vocabulary \
-             '{vocabulary}' does not list; send a key it lists",
+    match minter.resolve(keys.at(row)) {
+        Ok(Resolved::Code(code)) => Ok(code_at(declared.arrow_type, code)),
+        // The executor mints a novel key's code at a commit window's close or in a values batch's
+        // pass, before the WAL append.
+        Ok(Resolved::Novel(key)) => Ok(WalScalar::Utf8(key.to_string())),
+        Err(e) => Err(DecodeError(format!(
+            "{body_name}: column '{}' {e}",
             declared.name
         ))),
-        // A novel key travels as a key; the executor mints its code at a commit window's close
-        // or in a values batch's pass, before the WAL append.
-        VocabularyKind::Discovered => Ok(WalScalar::Utf8(key.to_string())),
     }
 }
 
-/// A code at its column's declared width. A category is `u8`, `u16` or `u32` wide, so the
-/// fallthrough is `u32`.
+/// A code at its column's declared width.
 pub(super) fn code_at(width: ScalarType, code: u32) -> WalScalar {
-    match width {
-        ScalarType::U8 => WalScalar::U8(code as u8),
-        ScalarType::U16 => WalScalar::U16(code as u16),
-        _ => WalScalar::U32(code),
-    }
+    wal_scalar(code_value(width, code))
 }
 
 /// The body's record batches. A JSON body becomes one record batch, read by the same rules as
@@ -672,7 +652,7 @@ mod category_wire {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
-    use tessera_engine::{DeclaredScalar, Vocabularies};
+    use tessera_engine::{DeclaredScalar, Vocabularies, VocabularyKind, ABSENT_CODE};
 
     const CODE_OPS: u32 = 4711;
     const EXTENT: Bounds = Bounds {

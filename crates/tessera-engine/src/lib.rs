@@ -112,6 +112,8 @@ pub use tessera_store::manifest::{
     ManifestVocabulary, ManifestVocabularyValue, Visibility, VocabularyKind,
 };
 pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE};
+// A batch's category cell is resolved by the rule a build resolves a points file's by.
+pub use tessera_store::vocabulary;
 // `MetaRoster::metadata`'s value type. `/v1/meta` publishes a view's roster metadata typed
 // (`views.md` §3.2), so the server has to name the variants to write the wire's `type` tag —
 // re-exported for the same layering reason `DeclaredScalar` is.

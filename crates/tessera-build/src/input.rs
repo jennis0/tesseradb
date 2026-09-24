@@ -40,7 +40,7 @@ use parquet::file::statistics::Statistics;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_spatial::{fixed32, Bounds, Projection};
 use tessera_store::scalar_column::ScalarColumn;
-use tessera_store::vocabulary::VocabularyMinter;
+use tessera_store::vocabulary::{code_value, Resolved, Unresolved, VocabularyMinter};
 
 use crate::config::{Fields, ViewSelector, ENTITY_ID};
 use crate::error::{BuildError, Result};
@@ -2257,12 +2257,13 @@ impl BatchColumn {
             })?;
             return match attribute.value_set {
                 Some(crate::config::ValueSet::Open) => {
-                    let minter = minters.get_mut(vocabulary).unwrap_or_else(|| {
-                        panic!(
-                            "'{vocabulary}' is discovered, so `Schema::open_minters` must \
-                             have seeded it before this scan began"
-                        )
-                    });
+                    let minter = minters.get_mut(vocabulary).ok_or_else(|| {
+                        BuildError::Invalid(format!(
+                            "attribute '{}' draws codes from open vocabulary '{vocabulary}', and \
+                             the scan was given no minter for it; pass `Schema::open_minters`",
+                            attribute.name
+                        ))
+                    })?;
                     Ok(BatchValues::Discovered(mint_batch(
                         keys.column(),
                         minter,
@@ -2303,32 +2304,22 @@ impl BatchColumn {
     ) -> Result<ScalarValue> {
         Ok(match &self.values {
             BatchValues::Keys(keys) => {
-                let code = if keys.is_null(row) {
-                    crate::config::ABSENT_CODE
-                } else {
-                    let key = keys.value(row);
-                    let vocabulary = attribute
-                        .vocabulary
-                        .as_ref()
-                        .expect("a Keys column belongs to a category");
-                    schema_decl.vocabularies[vocabulary]
-                        .code_of(key)
-                        .ok_or_else(|| {
-                            crate::config::declaration_error(format!(
-                                "attribute '{}': the points file carries value '{key}', which the \
-                                 declared vocabulary does not list. Under \
-                                 `vocabulary = \"declared\"` there is no auto-mint: a category \
-                                 carries properties and a visibility consequence, so a typo must \
-                                 not create one (per-point-attributes §5)",
-                                attribute.name
-                            ))
-                        })?
-                };
-                code_as(attribute.ty, code)
+                let vocabulary = attribute
+                    .vocabulary
+                    .as_ref()
+                    .expect("a Keys column belongs to a category");
+                let resolved = schema_decl.vocabularies[vocabulary]
+                    .values
+                    .resolve(keys.column().at(row))
+                    .map_err(|e| unresolved(attribute, e))?;
+                match resolved {
+                    Resolved::Code(code) => code_value(attribute.ty, code),
+                    Resolved::Novel(_) => unreachable!("a closed vocabulary lists every key"),
+                }
             }
             // Already resolved by `decode`'s mint pre-pass — a pure index, like every other
             // variant here, and no lookup against `schema_decl` at all.
-            BatchValues::Discovered(codes) => code_as(attribute.ty, codes[row]),
+            BatchValues::Discovered(codes) => code_value(attribute.ty, codes[row]),
             BatchValues::Scalar(column) => column.value(row).map_err(|e| {
                 crate::config::declaration_error(format!(
                     "attribute '{}' (declared '{}'): the points file carries {e}; declare a wider \
@@ -2341,19 +2332,9 @@ impl BatchColumn {
     }
 }
 
-/// A vocabulary code at the column's declared width. A declared vocabulary's codes were checked
-/// against [`ScalarType::max_code`] at parse; a discovered one's are drawn by
-/// [`VocabularyMinter::mint`] from that same width's usable space (`vocabulary::usable_max` in
-/// `tessera-store`) and so are in range by construction. Either way the narrowing here cannot
-/// lose a value.
-fn code_as(ty: ScalarType, code: u32) -> ScalarValue {
-    match ty {
-        ScalarType::U8 => ScalarValue::U8(code as u8),
-        ScalarType::U16 => ScalarValue::U16(code as u16),
-        // `is_category_width` admits only these three, so the fallthrough is `u32` rather than a
-        // silent home for a width that should never have reached here.
-        _ => ScalarValue::U32(code),
-    }
+/// A category cell's refusal, naming the attribute.
+fn unresolved(attribute: &crate::config::Attribute, e: Unresolved) -> BuildError {
+    crate::config::declaration_error(format!("attribute '{}' {e}", attribute.name))
 }
 
 /// The batch-level mint pre-pass for a discovered vocabulary (§3.4): collect the distinct,
@@ -2367,8 +2348,8 @@ fn code_as(ty: ScalarType, code: u32) -> ScalarValue {
 /// one place every other variant's resolution is a pure index. Collecting first and minting the
 /// distinct set keeps the mutation entirely inside `decode`, before any row is read back.
 ///
-/// An empty key is refused, never minted as [`crate::config::ABSENT_CODE`] — the same typo trap
-/// [`VocabularyMinter::mint`] itself enforces for a declared vocabulary's row-time lookup.
+/// Each cell is resolved by [`VocabularyMinter::resolve`], so an empty key is refused here as it is
+/// at a running service.
 fn mint_batch(
     keys: crate::utf8::Utf8Column<'_>,
     minter: &mut VocabularyMinter,
@@ -2378,11 +2359,10 @@ fn mint_batch(
 
     let mut novel: BTreeSet<&str> = BTreeSet::new();
     for i in 0..keys.len() {
-        if keys.is_null(i) {
-            continue;
-        }
-        let key = keys.value(i);
-        if minter.code_of(key).is_none() {
+        let resolved = minter
+            .resolve(keys.at(i))
+            .map_err(|e| unresolved(attribute, e))?;
+        if let Resolved::Novel(key) = resolved {
             novel.insert(key);
         }
     }
@@ -2393,14 +2373,9 @@ fn mint_batch(
     }
 
     Ok((0..keys.len())
-        .map(|i| {
-            if keys.is_null(i) {
-                crate::config::ABSENT_CODE
-            } else {
-                minter
-                    .code_of(keys.value(i))
-                    .expect("every key in this batch was just minted or was already bound")
-            }
+        .map(|i| match minter.resolve(keys.at(i)) {
+            Ok(Resolved::Code(code)) => code,
+            _ => unreachable!("every key in this batch was just minted or was already bound"),
         })
         .collect())
 }
@@ -2503,6 +2478,29 @@ mod tests {
             false,
             &DataType::Timestamp(TimeUnit::Millisecond, None)
         ));
+    }
+
+    /// An open category whose vocabulary has no minter to draw codes from is refused.
+    #[test]
+    fn an_open_category_with_no_minter_is_refused() {
+        use arrow::array::{ArrayRef, StringArray};
+        use std::sync::Arc;
+
+        let attribute = crate::config::Attribute {
+            name: "a".to_string(),
+            title: None,
+            field: None,
+            ty: ScalarType::U16,
+            analyser: None,
+            vocabulary: Some("v".to_string()),
+            value_set: Some(crate::config::ValueSet::Open),
+            index: false,
+            render: false,
+        };
+        let column: ArrayRef = Arc::new(StringArray::from(vec!["k"]));
+        let decoded =
+            BatchColumn::decode_values(Path::new("in-memory"), &column, &attribute, &mut HashMap::new());
+        assert!(decoded.is_err());
     }
 
     /// A roster integer is held as an `i64`, so a `uint64` past `i64::MAX` is refused rather
