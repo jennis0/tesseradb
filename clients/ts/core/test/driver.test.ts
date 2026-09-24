@@ -77,7 +77,7 @@ function harness(opts: {
 }
 
 describe('driver', () => {
-  it('revalidates through the covered path once the interval lapses — the bound is reachable at a warm cache', async () => {
+  it('revalidates through the covered path once the interval lapses: the bound is reachable at a warm cache', async () => {
     const h = harness({revalidateAfterMs: 60_000});
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(1);
@@ -99,7 +99,7 @@ describe('driver', () => {
     expect(h.traces.some((t) => t.kind === 'revalidate')).toBe(true);
   });
 
-  it('takes up to three anticipation bites per pause — deferral re-arms instead of discarding', async () => {
+  it('takes up to three anticipation bites per pause: deferral re-arms instead of discarding', async () => {
     const h = harness();
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(2_000); // request settles, idle fires, bites chain
@@ -124,7 +124,7 @@ describe('driver', () => {
     expect(h.calls.some((c) => c.background)).toBe(true);
   });
 
-  it('cancel() kills a pending retry — no request fires after a principal switch', async () => {
+  it('cancel() kills a pending retry: no request fires after a principal switch', async () => {
     const h = harness({fail: () => true});
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(10);
@@ -135,7 +135,7 @@ describe('driver', () => {
     expect(h.calls.length).toBe(before);
   });
 
-  it('retries a 503 not-ready on a short backoff and recovers — a starting server is not a refusal', async () => {
+  it('retries a 503 not-ready on a short backoff and recovers: a starting server is not a refusal', async () => {
     // A 503 from a server still starting is retried like a 429.
     const statuses: string[] = [];
     const clock = fakeClock();
@@ -167,7 +167,7 @@ describe('driver', () => {
     expect(statuses).not.toContain('refused');
   });
 
-  it('a gesture pays the full derivation at most once per gap — the walk never runs per frame', async () => {
+  it('a gesture pays the full derivation at most once per gap: the walk never runs per frame', async () => {
     const h = harness();
     const derives: number[] = [];
     const driver = new Driver(
@@ -193,7 +193,7 @@ describe('driver', () => {
     expect(derives.length).toBeLessThan(6);
   });
 
-  it('an unchanged store under a covering frame reuses — no verdict reaches the consumer', async () => {
+  it('an unchanged store under a covering frame reuses: no verdict reaches the consumer', async () => {
     const h = harness();
     const verdicts: string[] = [];
     const driver = new Driver(
@@ -214,7 +214,7 @@ describe('driver', () => {
     expect(verdicts.filter((v) => v === 'fold' || v === 'derive').length).toBe(before);
   });
 
-  it('a due revalidation never displaces a live fetch — latency-neutral by construction', async () => {
+  it('a due revalidation never displaces a live fetch: latency-neutral', async () => {
     const h = harness({revalidateAfterMs: 1, hang: () => true});
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(5_000); // interval long lapsed; foreground still hung
@@ -225,7 +225,7 @@ describe('driver', () => {
     expect(h.calls.slice(1).filter((c) => c.k === 0)).toHaveLength(0);
   });
 
-  it('a real fetch never queues behind a running revalidation — it displaces it', async () => {
+  it('a real fetch never queues behind a running revalidation: it displaces it', async () => {
     // The refresh has its own slot, and a request aborts it, so a pan does not wait behind a
     // counting pass.
     const h = harness({revalidateAfterMs: 1, hang: (_n, k) => k === 0});
@@ -254,7 +254,7 @@ describe('driver', () => {
     expect(d.holdSuspended).toBe(false);
   });
 
-  it('a budget change replans at its depth on the very next schedule — no motion, no settle', async () => {
+  it('a budget change replans at its depth on the very next schedule: no motion, no settle', async () => {
     // `setBudget` reaches the next plan and suspends the depth hold, which would otherwise keep a
     // one-step depth change at the presented depth.
     const h = harness({prefetch: false, respond: () => servedResponse(10_000_000n, 8)});
@@ -273,7 +273,7 @@ describe('driver', () => {
     await h.clock.advance(1_000);
     expect(h.calls.some((c) => c.zoom === 9)).toBe(true);
   });
-  it('a redraw asks for nothing, however uncovered it is — a view stepped through is silent', async () => {
+  it('a redraw asks for nothing, however uncovered it is: a view stepped through is silent', async () => {
     // The settle asks for a depth the replica holds nothing at, and `redraw` reconciles on the
     // settle's terms, so a view switch's redraw must stay silent while a settle asks.
     const h = harness({prefetch: false, respond: () => servedResponse(10_000_000n, 8)});
@@ -286,7 +286,7 @@ describe('driver', () => {
     expect(h.calls.length).toBe(settled);
   });
 
-  it('the cold view buys counts before marks — the first marks request is at the counted depth, not the average model\'s', async () => {
+  it('the cold view buys counts before marks: the first marks request is at the counted depth, not the average model\'s', async () => {
     // With no counts, the first view of a session would be planned by the average model; the
     // count-only seed plans it from counts.
     const clock = fakeClock();
@@ -343,7 +343,7 @@ describe('driver', () => {
     expect(seeds()).toBe(seedsAfterFirst);
   });
 
-  it('a refused seed is not a refused view — the marks request the average model planned still goes', async () => {
+  it('a refused seed is not a refused view: the marks request the average model planned still goes', async () => {
     const clock = fakeClock();
     const calls: {zoom: number; k?: number}[] = [];
     const traces: {kind: string; fields: Record<string, number | string>}[] = [];

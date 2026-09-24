@@ -7,7 +7,8 @@ import type {Quantisation} from './types.js';
  * space and rectangular in data space. The viewer uses cell space, scaled by `CELLS_PER_WORLD_UNIT`,
  * as its deck.gl world, so a tile is `TILE_SIZE` world units at depth 0 and a deck tile `z` is a
  * Morton depth. deck.gl's viewport zoom maps 1:1 onto tile `z`, tile `(0,0,0)` covers the 512-unit
- * world, and tile y and cell y increase together.
+ * world, and tile y and cell y increase together. These were checked against deck.gl's `Tileset2D`
+ * in `clients/ts/spike/src/convention.test.ts`; change the constants only with that test.
  */
 export const CELL_GRID = 65536;
 export const MAX_DEPTH = 16;

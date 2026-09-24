@@ -150,7 +150,6 @@ export function artifactInView(
   return true;
 }
 
-
 /** One held payload: the artifact as served, and the ordinal it was named under. */
 type HeldArtifact = {artifact: Artifact; ordinal: number};
 
@@ -395,8 +394,8 @@ export class ArtifactChannel {
     }
     this.heldUnder = {identityKey, contentKey};
 
-    // Named in one batch so a parent link between two artifacts of this response resolves: the
-    // table sets links only within one batch.
+    // Named in one batch: `take` names every entry before it sets links, so a child can link to a
+    // parent that is new in the same response.
     const novel = artifacts.filter((a) => !this.held.has(keyOf(a)));
     const ordinals = this.table
       ? this.table.take(
@@ -673,7 +672,8 @@ export class ArtifactChannel {
           if (this.inFlight !== signal) return;
         }
         drawn = this.hold(response.result.artifacts, response.identityKey, response.contentKey);
-        // Only an unfiltered response marks a scope held whole.
+        // Only an unfiltered response marks a scope held whole: a filtered response's rows answer a
+        // narrower question.
         if (!filterExpr) this.markWholeExtent(layers, view);
       }
       this.inFlight = null;

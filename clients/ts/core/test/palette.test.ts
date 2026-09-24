@@ -3,8 +3,8 @@ import {GRID32_CENTRE, NEUTRAL, artifactColours, hslToRgb, polarOf, positionalCo
 
 const at = (x: number, y: number, ordinal: number): Placed => ({ordinal, centroid: [x, y]});
 
-describe('the positional palette (§5.10, decision 0099)', () => {
-  it('is a function of the centroid alone — stable under pan and across served sets', () => {
+describe('the positional palette', () => {
+  it('is a function of the centroid alone: stable under pan and across served sets', () => {
     const c = GRID32_CENTRE;
     const a = positionalColour([c + 1e9, c]);
     expect(positionalColour([c + 1e9, c])).toEqual(a);

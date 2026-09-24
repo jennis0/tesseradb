@@ -141,7 +141,7 @@ async function shown(
   scheduler.flush();
 }
 
-describe('a switch within a group keeps the camera and the selection (§4)', () => {
+describe('a switch within a group keeps the camera and the selection', () => {
   it('re-asks the same tiles under the new view, with the region leaf still on the request', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
@@ -183,7 +183,7 @@ describe('a switch within a group keeps the camera and the selection (§4)', () 
     expect(store.get('status').status).toBe('shown');
   });
 
-  it('draws a view returned to from its own held bands, without asking (§3)', async () => {
+  it('draws a view returned to from its own held bands, without asking', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, asked} = open({view: 'v0', clock, scheduler});
@@ -204,7 +204,7 @@ describe('a switch within a group keeps the camera and the selection (§4)', () 
     expect(asked('v0')).toHaveLength(askedV0);
   });
 
-  it('drops every column’s held suggestion page and refusal on a switch, even within the same frame (value-suggestion.md §5.1)', async () => {
+  it('drops every column’s held suggestion page and refusal on a switch, even within the same frame', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store} = open({view: 'v0', clock, scheduler});
@@ -226,7 +226,7 @@ describe('a switch within a group keeps the camera and the selection (§4)', () 
   });
 });
 
-describe('a switch across frames publishes no camera and drops the selection (§4)', () => {
+describe('a switch across frames publishes no camera and drops the selection', () => {
   it('publishes an empty frame at loading, asks nothing, and answers the map’s refit', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
@@ -290,7 +290,7 @@ describe('a switch across frames publishes no camera and drops the selection (§
   });
 });
 
-describe('a view that is not current asks for nothing (§8)', () => {
+describe('a view that is not current asks for nothing', () => {
   it('issues no request for a view stepped through and left before its settle', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
@@ -333,7 +333,7 @@ describe('a view that is not current asks for nothing (§8)', () => {
   });
 });
 
-describe('a view that is not current asks for nothing — the paths that reach the driver', () => {
+describe('a view that is not current asks for nothing: the paths that reach the driver', () => {
   it('does not ask for a stepped-to view whose bands are colour-stale under a layer switched on', async () => {
     // The colour-stale refetch reschedules the driver; a view the slider is passing through does
     // not ask through that route either.
@@ -406,7 +406,7 @@ describe('a view that is not current asks for nothing — the paths that reach t
   });
 });
 
-describe('the switch’s own rules (§3)', () => {
+describe('the switch’s own rules', () => {
   it('ignores an id the bundle does not declare, and reports it', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
@@ -452,7 +452,7 @@ describe('the switch’s own rules (§3)', () => {
   });
 });
 
-describe('the projections follow the view being entered (§3)', () => {
+describe('the projections follow the view being entered', () => {
   it('carries the incoming view’s artifacts at the switch, never the outgoing view’s', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
@@ -503,7 +503,7 @@ describe('the projections follow the view being entered (§3)', () => {
   });
 });
 
-describe('the replica projection reports across views, and clear() empties them all (§3, §4)', () => {
+describe('the replica projection reports across views, and clear() empties them all', () => {
   it('counts every view holding a band, and the bytes of all of them', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();

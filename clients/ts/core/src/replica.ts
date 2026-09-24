@@ -289,7 +289,6 @@ export class Replica {
     return this.contentKey;
   }
 
-
   /**
    * What the store can draw for a region now, without the network. Separate from
    * {@link fetchRegion} because fetching is rate-limited and reading the store is not: a view

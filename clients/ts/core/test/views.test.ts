@@ -123,7 +123,7 @@ describe('the layout entries', () => {
     ]);
   });
 
-  it('are one layout — and the layout picker draws nothing — for one plain view and no groups', () => {
+  it('are one layout, and the layout picker draws nothing, for one plain view and no groups', () => {
     expect(hasOneLayout(deployment({views: [view('s0')]}))).toBe(true);
     expect(hasOneLayout(rich)).toBe(false);
   });

@@ -42,7 +42,10 @@ export type PlannerInputs = {
   visibleInView?: number;
   /** World units per millisecond, signed, from recent movement. Biases the ring downwind. */
   velocity?: [number, number];
-  /** The depth currently drawn; a one-step budget disagreement defers to it. See {@link plan}. */
+  /**
+   * The depth currently drawn; a one-step budget disagreement defers to it. See {@link plan}. The
+   * driver leaves it unset on the first move after a settle, so a recalibrated depth can take over.
+   */
   holdDepth?: number;
   /** What the replica holds and what it may hold, which size the ring. See {@link ringMargin}. */
   heldBytes?: number;
@@ -176,8 +179,9 @@ export function plan(inputs: PlannerInputs): Plan {
   // of a ring is already held; the rest is speculative server work.
   //
   // The periphery is fetched coarser as well as further. Each level shallower is a quarter of the
-  // points per unit area, and a coarse band is a superset of the fine one that later replaces it,
-  // so doubling the reach while dropping a depth costs about the same as the band before it.
+  // points per unit area, and a coarse band's points are a subset of what the finer bands that
+  // replace it serve, so it draws at once and fills in when the finer fetch lands. Doubling the reach while dropping a
+  // depth costs about the same as the band before it.
   const reach = ringMargin(inputs.heldBytes ?? 0, inputs.budgetBytes ?? 0);
   const shift = velocity ? ringShift(viewport, velocity) : ([0, 0] as [number, number]);
   // The depths below the current one over the visible box come first: a zoom-in lands under the

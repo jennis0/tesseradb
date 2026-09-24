@@ -105,7 +105,7 @@ describe('the session artifact table', () => {
     expect(table.version).toBe(settled);
   });
 
-  it('leaves a child a root when its parent is not in the batch — a link that does not resolve is no link', () => {
+  it('leaves a child a root when its parent is not in the batch: a link that does not resolve is no link', () => {
     const table = new SessionArtifactTable();
     const [child] = table.take([ref(2n, 7n)]);
     expect(table.entry(child!)?.parentOrdinals).toEqual([]);
@@ -150,7 +150,7 @@ describe('the session artifact table', () => {
     expect(b).toBeGreaterThan(NO_ORDINAL);
   });
 
-  it('drops everything on clear — a new identity key may not reuse a name', () => {
+  it('drops everything on clear: a new identity key may not reuse a name', () => {
     const table = new SessionArtifactTable();
     table.take([ref(10n)]);
     table.clear();
@@ -219,7 +219,7 @@ describe('the level walk and retained references', () => {
   });
 });
 
-describe('the table is what a colour is built from (§5.10)', () => {
+describe('the table is what a colour is built from', () => {
   it('carries geometry, lists what is live, and stamps a version when it changes', () => {
     const table = new SessionArtifactTable();
     const before = table.version;

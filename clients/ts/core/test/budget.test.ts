@@ -118,7 +118,7 @@ describe('chooseDepth on a bimodal field', () => {
     expect(counted.limitedBy).toBe('budget');
   });
 
-  it('stops where a step deeper buys tiles and not marks — a few capped cells do not pull the depth down', () => {
+  it('stops where a step deeper buys tiles and not marks: a few capped cells do not pull the depth down', () => {
     // A field at depth 8 whose 64 x 64 cells hold 6 members each, except one city cell of 3,000.
     // The deepest fitting depth is 12, the first with nothing capped; depth 8 is within 15% of its
     // marks at 4^4 fewer tiles.
@@ -223,7 +223,7 @@ describe('calibrate', () => {
     expect(calibrate(observation(65_536), 16, 16)).toBe(16);
   });
 
-  it('raises mTarget on overshoot — damped and bounded, banked to apply across motion', () => {
+  it('raises mTarget on overshoot: damped and bounded, banked to apply across motion', () => {
     // A 2x overshoot at 0.5 damping corrects halfway, inside the 4x bound. The driver holds the
     // presented depth at rest, so a raised mTarget changes only the next gesture's depth.
     const next = calibrate(observation(200_000), 16, 16);

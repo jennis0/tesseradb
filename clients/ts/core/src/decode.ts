@@ -509,7 +509,7 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   }
   if (target == null) {
     throw new Error(
-      'viewport artifacts frame carries no `target` column: this client requires a server that serves it (a dependent artifact names its target by `tessera_id`)'
+      'viewport artifacts frame has no `target` column; this client expects the attached artifact\'s `tessera_id`, or null, on every artifact row, which a server older than this client does not send.'
     );
   }
   for (let i = 0; i < tesseraId.length; i++) {

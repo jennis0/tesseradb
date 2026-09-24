@@ -173,7 +173,7 @@ describe('naming on the main thread', () => {
 });
 
 describe('the cache releases what a band held', () => {
-  it('on replacement, truncation and an identity drop — and carries a layer over a refetch that did not name it', () => {
+  it('on replacement, truncation and an identity drop, and carries a layer over a refetch that did not name it', () => {
     const table = new SessionArtifactTable();
     const cache = new BandCache(1e9, table);
     const [a] = bandsOfResult(withMembers([4], [1, 1, 2, 2], [10n, 20n], [member(10n), member(20n)]), 3, meta(table));
@@ -230,7 +230,7 @@ describe('the membership golden (the notebook corpus’s k-means layer, named wi
   });
 });
 
-describe('a band is coloured by the response that carried it (§5.10)', () => {
+describe('a band is coloured by the response that carried it', () => {
   /** The same artifact, with a centroid, from which a positional colour is computed. */
   const placed = (id: bigint, dx: number, parent: bigint | null = null, rung = 0): Artifact => ({
     ...member(id, parent, 'l', rung),

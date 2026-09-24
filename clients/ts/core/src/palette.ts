@@ -51,7 +51,6 @@ function shade(radius: number, scheme: PaletteScheme): [number, number] {
   return scheme === 'dark' ? [0.62, 0.64 + 0.08 * radius] : [0.58, 0.4 - 0.08 * radius];
 }
 
-/** A fixed hue rotation applied to every colour. */
 const HUE_OFFSET = (0.5 + 0.45) * 360;
 
 /** The positional colour of one centroid. */

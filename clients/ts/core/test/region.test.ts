@@ -11,7 +11,7 @@ import {insideBox, insidePolygon, parseRegionVerdict, quantise, regionOperand, w
 /** A world coordinate exactly on grid unit `n`. */
 const at = (n: number) => (n / 4294967296) * WORLD_SIZE;
 
-describe('quantise — the 32-bit grid the server tests on', () => {
+describe('quantise: the 32-bit grid the server tests on', () => {
   it('is fixed32 restated over the world: floor, clamped to the grid', () => {
     expect(quantise(0)).toBe(0);
     expect(quantise(-1)).toBe(0);
@@ -21,7 +21,7 @@ describe('quantise — the 32-bit grid the server tests on', () => {
   });
 });
 
-describe('insidePolygon — even-odd on the grid, an edge inside, the half-open ray', () => {
+describe('insidePolygon: even-odd on the grid, an edge inside, the half-open ray', () => {
   const square = [
     [at(1000), at(1000)],
     [at(3000), at(1000)],
@@ -75,7 +75,7 @@ describe('insidePolygon — even-odd on the grid, an edge inside, the half-open 
   });
 });
 
-describe('insideBox — closed on every side, on the grid', () => {
+describe('insideBox: closed on every side, on the grid', () => {
   it('includes its edges and excludes one unit past them', () => {
     const box: [number, number, number, number] = [at(10), at(20), at(30), at(40)];
     expect(insideBox(at(10), at(20), box)).toBe(true);
@@ -85,7 +85,7 @@ describe('insideBox — closed on every side, on the grid', () => {
   });
 });
 
-describe('regionOperand — the leaf as the wire takes it', () => {
+describe('regionOperand: the leaf as the wire takes it', () => {
   it('normalises a box drawn from either corner', () => {
     expect(regionOperand({kind: 'box', bbox: [5, 6, 1, 2]})).toEqual({bbox: [1, 2, 5, 6]});
   });
@@ -95,7 +95,7 @@ describe('regionOperand — the leaf as the wire takes it', () => {
   });
 });
 
-describe('withRegion — the leaf composed with the other filters', () => {
+describe('withRegion: the leaf composed with the other filters', () => {
   const leaf = {bbox: [0, 0, 1, 1] as [number, number, number, number]};
   it('is the leaf alone, the expression alone, or all_of the two', () => {
     expect(withRegion(null, null)).toBeNull();
@@ -109,7 +109,7 @@ describe('withRegion — the leaf composed with the other filters', () => {
   });
 });
 
-describe('parseRegionVerdict — x-tessera-region', () => {
+describe('parseRegionVerdict: x-tessera-region', () => {
   it('reads exact, a cover at a depth, and nothing', () => {
     expect(parseRegionVerdict('exact')).toEqual({exact: true, depth: null});
     expect(parseRegionVerdict('cover; depth=11')).toEqual({exact: false, depth: 11});

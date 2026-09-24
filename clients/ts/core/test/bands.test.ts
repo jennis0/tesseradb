@@ -210,7 +210,7 @@ describe('BandCache.resolve', () => {
   });
 });
 
-describe('BandBudget — one budget over every view (view-switching.md §3)', () => {
+describe('BandBudget: one budget over every view', () => {
   /** Two views' caches under one budget: the current one and one the user left. */
   function twoViews(budgetBytes: number): {budget: BandBudget; current: BandCache; held: BandCache} {
     const budget = new BandBudget(budgetBytes);

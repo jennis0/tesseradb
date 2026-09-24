@@ -74,7 +74,7 @@ function body(rows: {x: Parts; y: Parts}[], type: {x: unknown; y: unknown} = {x:
 }
 
 describe('a shape is parts of rings', () => {
-  it('decodes three levels — parts, then rings, the axes zipped inside each', () => {
+  it('decodes three levels: parts, then rings, the axes zipped inside each', () => {
     const r = decodeViewport(
       body([
         {x: [[[0, 3, 3, 0]], [[6, 9, 9, 6]]], y: [[[0, 0, 3, 3]], [[6, 6, 9, 9]]]},
@@ -112,7 +112,7 @@ describe('a shape is parts of rings', () => {
     ]);
   });
 
-  it('keeps a hole with its part — the second ring of a part is not a second shape', () => {
+  it('keeps a hole with its part: the second ring of a part is not a second shape', () => {
     const r = decodeViewport(body([{x: [[[0, 9, 9, 0], [3, 6, 6, 3]]], y: [[[0, 0, 9, 9], [3, 3, 6, 6]]]}]));
     expect(r.artifacts[0]!.shape!.length).toBe(1);
     expect(r.artifacts[0]!.shape![0]!.map((ring) => ring.length)).toEqual([4, 4]);
@@ -124,7 +124,7 @@ describe('a shape is parts of rings', () => {
     ]);
   });
 
-  it('keeps a degenerate group as the ring the wire sent — one vertex, or two', () => {
+  it('keeps a degenerate group as the ring the wire sent: one vertex, or two', () => {
     // A one-member group is a ring of one vertex and a two-member group a ring of two. The decoder
     // carries what it was sent and does not invent an area.
     const r = decodeViewport(body([{x: [[[4]], [[1, 2]], [[0, 3, 3]]], y: [[[4]], [[1, 1]], [[0, 0, 3]]]}]));
@@ -145,7 +145,7 @@ describe('a shape is parts of rings', () => {
     expect(r.artifacts[0]!.shape).toEqual([]);
   });
 
-  it('refuses a two-level shape column — the rings of vertices a server older than the shape columns sends', () => {
+  it('refuses a two-level shape column: the rings of vertices a server older than the shape columns sends', () => {
     // A column one level too shallow is refused at the schema rather than read as parts.
     refused(() => decodeViewport(body([{x: [[0, 3, 3]] as never, y: [[0, 0, 3]] as never}], {x: RINGS, y: RINGS})));
     refused(() => decodeViewport(body([{x: [0, 3, 3] as never, y: [0, 0, 3] as never}], {x: FLAT, y: FLAT})));

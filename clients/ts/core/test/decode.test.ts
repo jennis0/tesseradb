@@ -37,7 +37,7 @@ describe('decodeViewport', () => {
     }
   });
 
-  it('deinterleaves losslessly — the positions re-interleave to the code they came from', () => {
+  it('deinterleaves losslessly: the positions re-interleave to the code they came from', () => {
     // Re-spreading the two axes must reproduce the server's `code` bit for bit, at 32 bits per axis;
     // `f32` positions would fail this.
     const r = decodeViewport(fixture('viewport-plain.bin'));

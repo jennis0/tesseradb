@@ -108,7 +108,7 @@ const ROWS: Row[] = [
 ];
 
 describe('the dictionary-encoded layer column', () => {
-  it('travels as a dictionary on the wire, and reads back as the layer name — apache-arrow resolves it on get()', () => {
+  it('travels as a dictionary on the wire, and reads back as the layer name: apache-arrow resolves it on get()', () => {
     const body = fullBody(ROWS);
     // The body carries a dictionary, so the test covers the encoding the server sends.
     const table = tableFromIPC(splitFramedStreams(body).artifacts!);
@@ -123,7 +123,7 @@ describe('the dictionary-encoded layer column', () => {
     expect(r.artifacts.map((a) => a.layer)).toEqual(['clusters/x', 'clusters/x', 'labels/x']);
   });
 
-  it('reads a plain utf8 layer the same way — the encoding moves no information', () => {
+  it('reads a plain utf8 layer the same way: the encoding moves no information', () => {
     const r = decodeViewport(fullBody(ROWS, {layerType: new Utf8()}));
     expect(r.artifacts.map((a) => a.layer)).toEqual(['clusters/x', 'clusters/x', 'labels/x']);
   });
@@ -140,7 +140,7 @@ describe('the shape columns trail, and are absent when no served layer draws a s
     expect(r.artifacts[1]!.parentIds).toEqual([1n]);
   });
 
-  it('reads a present pair after the fixed prefix — per-row null still meaning the layer declares none', () => {
+  it('reads a present pair after the fixed prefix: per-row null still meaning the layer declares none', () => {
     const rows: Row[] = [
       {...ROWS[0]!, shape: [[[0, 3, 3]], [[6, 9, 9]]]},
       {...ROWS[1]!, shape: [[[1, 2]]]},
@@ -181,11 +181,11 @@ describe('the shape columns trail, and are absent when no served layer draws a s
     expect(r.artifacts[2]!.shape).toBeNull();
   });
 
-  it('refuses one shape column without the other — the pair travels together by contract', () => {
+  it('refuses one shape column without the other: the pair travels together by contract', () => {
     refused(() => decodeViewport(fullBody([{...ROWS[0]!, shape: [[[0, 1]]]}], {shapes: true, oneAxis: true})));
   });
 
-  it('refuses the columns under their old names — a server older than the shape columns', () => {
+  it('refuses the columns under their old names: a server older than the shape columns', () => {
     // Read as having no shapes, a `hull_x` body would draw every cluster as its box.
     refused(() => decodeViewport(fullBody([{...ROWS[0]!, shape: [[[0, 1, 2]]]}], {shapes: true, oldNames: true})));
   });
@@ -199,14 +199,14 @@ describe('the rung column', () => {
     expect(r.artifacts.map((a) => a.rung)).toEqual([0, 2]);
   });
 
-  it('refuses a body that still carries `level` — a server older than the rename', () => {
+  it('refuses a body that still carries `level`: a server older than the rename', () => {
     // Read as 0, a missing rung would draw a whole hierarchy at its coarsest.
     refused(() => decodeViewport(fullBody(ROWS, {renameRung: 'level'})));
   });
 });
 
 describe('the parent list', () => {
-  it('reads every served parent, in the wire’s ascending order — several on a `dag` layer, none for a root', () => {
+  it('reads every served parent, in the wire’s ascending order: several on a `dag` layer, none for a root', () => {
     const r = decodeViewport(
       fullBody([
         {layer: 'mesh', id: 1n, rung: 0, matched: null},
@@ -217,7 +217,7 @@ describe('the parent list', () => {
     expect(r.artifacts.map((a) => a.parentIds)).toEqual([[], [], [1n, 3n]]);
   });
 
-  it('refuses a body that still carries the scalar `parent_id` — a server older than the list', () => {
+  it('refuses a body that still carries the scalar `parent_id`: a server older than the list', () => {
     // Read as having no links, a `parent_id` body would draw a hierarchy flat.
     refused(() => decodeViewport(fullBody(ROWS, {oldParent: true})));
   });
@@ -237,7 +237,7 @@ describe('the target column', () => {
     expect(r.artifacts[2]!.target).toBeTypeOf('bigint');
   });
 
-  it('refuses a body carrying no `target` column — a server older than the attachment', () => {
+  it('refuses a body carrying no `target` column: a server older than the attachment', () => {
     // Read as nothing attached, such a body would drop every topic label from the map.
     refused(() => decodeViewport(fullBody(ROWS, {noTarget: true})));
   });

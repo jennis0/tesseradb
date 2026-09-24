@@ -19,7 +19,7 @@ const CLUSTERS = layer('clusters/kmeans', ['centroid', 'box', 'hull']);
 const MESH = layer('mesh/descriptors', []);
 
 describe('a filter layer', () => {
-  it('is the declaration and nothing else — no field, no server change', () => {
+  it('is the declaration and nothing else: no field, no server change', () => {
     expect(isFilterLayer(MESH)).toBe(true);
     expect(isFilterLayer(CLUSTERS)).toBe(false);
   });

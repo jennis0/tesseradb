@@ -14,7 +14,7 @@ const fixture = (name: string) =>
   new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
 
 describe('splitFramedStreams', () => {
-  it('finds tiles, points and trailer — and no sub-cells — in a payload with no underlay', () => {
+  it('finds tiles, points and trailer, and no sub-cells, in a payload with no underlay', () => {
     const parts = splitFramedStreams(fixture('viewport-plain.bin'));
     expect(parts.tiles.byteLength).toBeGreaterThan(0);
     expect(parts.points.length).toBeGreaterThan(0);
@@ -97,7 +97,7 @@ describe('splitFramedStreams', () => {
     );
   });
 
-  it('consumes the whole payload exactly — every frame is length-prefixed', () => {
+  it('consumes the whole payload exactly: every frame is length-prefixed', () => {
     const raw = fixture('viewport-underlay.bin');
     const parts = splitFramedStreams(raw);
     const header = 5; // u8 kind + u32 LE length, per frame
@@ -119,7 +119,7 @@ describe('splitFramedStreams', () => {
     refused(() => splitFramedStreams(raw.subarray(0, raw.byteLength - 16)));
   });
 
-  it('refuses a body whose trailer is missing — incomplete by contract', () => {
+  it('refuses a body whose trailer is missing: incomplete by contract', () => {
     // Without the trailing kind-4 frame the body is well-framed but incomplete, as a mid-stream abort
     // leaves it.
     const raw = fixture('viewport-plain.bin');

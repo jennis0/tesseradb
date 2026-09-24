@@ -167,7 +167,7 @@ describe('status.stale keys on the content key, never on x-tessera-stale', () =>
 });
 
 describe('the drops', () => {
-  it('drops the replica and marks a refetch on setFilters — the identity key excludes filters', async () => {
+  it('drops the replica and marks a refetch on setFilters: the identity key excludes filters', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
@@ -539,7 +539,7 @@ describe('the colours are rebuilt when the table moves and not per response', ()
   });
 });
 
-describe('select — the selection is the region leaf on every request (§5.11)', () => {
+describe('select: the selection is the region leaf on every request', () => {
   /** The `region` leaf of the request's filters, or null. */
   const leafOf = (req: unknown): unknown => {
     const body = (req as [string, {filters?: unknown}])[1].filters;
@@ -710,7 +710,6 @@ describe('select — the selection is the region leaf on every request (§5.11)'
     expect(shown.matched.exact).toBe(false);
   });
 });
-
 
 describe('the store holds the drawn shape by identifier', () => {
   function shapeClient(shape: [number, number][][][] | null) {

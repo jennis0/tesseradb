@@ -340,8 +340,8 @@ export class Driver {
   /**
    * Decides what a paint costs; every trigger passes through here. Reuse is exact, by version
    * counter. A fold marks the handle's stand-ins stale for the settle to repair. The full
-   * derivation is paid at most once per {@link DriverOptions.deriveMinGapMs} while the view moves,
-   * and always at the settle, which is the only trigger that clears `standInStale`.
+   * derivation, which clears `standInStale`, is paid at most once per
+   * {@link DriverOptions.deriveMinGapMs} while the view moves, and always at the settle.
    */
   private reconcile(trigger: 'schedule' | 'absorb' | 'response' | 'settle', view: ViewState, ask = true): void {
     const planned = this.planFor(view);

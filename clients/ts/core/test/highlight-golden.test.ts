@@ -86,13 +86,13 @@ describe('point_rows = "highlight", against the full answer to the same request'
     expect([...bits.highlighted!]).toEqual([...full.highlighted!]);
   });
 
-  it('is the same per-tile answer — the served split and every count', () => {
+  it('is the same per-tile answer: the served split and every count', () => {
     const full = decodeViewport(fixture('viewport-highlight.bin'));
     const bits = decodeViewport(fixture('viewport-point-rows-highlight.bin'));
     expect(bits.tiles).toEqual(full.tiles);
   });
 
-  it('carries no position and no scalar — which is what a client joining by identifier wants', () => {
+  it('carries no position and no scalar: which is what a client joining by identifier wants', () => {
     const bits = decodeViewport(fixture('viewport-point-rows-highlight.bin'));
     // The projection is read from the frame's schema: the highlight projection has no `code`.
     expect(bits.codes.length).toBe(0);

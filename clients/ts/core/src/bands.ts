@@ -105,7 +105,7 @@ export function distinctOrdinals(ordinals: Uint32Array): Uint32Array {
  * Whether the band holds all of `served(T)` and would still at `k`.
  *
  * The server's sampling threshold depends on the mask, the generation and the view, not on the
- * viewport, so at a fixed content key and depth the reported `served` stays current. The band is
+ * bounding box or the zoom, so at a fixed content key and depth the reported `served` stays current. The band is
  * complete when it holds every served point and either `served` was below the cap in force or
  * that cap was already at least `k`; then a larger `k` cannot serve more. A complete tile is left
  * out of the request.
@@ -195,7 +195,8 @@ function nameResponse(result: ViewportResult, table: SessionArtifactTable): {nam
     for (let d = 0; d < column.ids.length; d++) {
       const id = column.ids[d]!;
       const known = frameOf.get(`${layer} ${id}`);
-      // `rung` is the wire's where the artifacts frame carries the artifact, and absent otherwise.
+      // `rung` is the wire's where the artifacts frame carries the artifact, and absent otherwise; it
+      // is not counted from parent links.
       refs.push({tesseraId: id, layer, parentIds: known?.parentIds ?? [], centroid: known?.centroid ?? null, rung: known?.rung});
     }
     const ordinals = table.take(refs);
@@ -262,7 +263,7 @@ export function bandSplitter(
     done: () => i >= result.tiles.length,
     step(deadline: number): Band[] {
       const bands: Band[] = [];
-      // The clock is read every 64 tiles; once a band would be a noticeable share of the work.
+      // The clock is read every 64 tiles; once per band would be a noticeable share of the work.
       while (i < result.tiles.length) {
         if ((i & 63) === 0 && bands.length > 0 && performance.now() >= deadline) break;
         const tile = result.tiles[i++]!;
@@ -671,7 +672,6 @@ export class BandCache {
     const exact = this.exactIn(want, depth);
     /** Stand-ins bucketed by distance from the drawn depth, coarsest first. */
     const byRank: {band: Band; clip: TileRect}[][] = [];
-
 
     if (uncovered.length === 0) return {exact, fallback: []};
 

@@ -59,7 +59,7 @@ describe('the artifact channel', () => {
     expect(viewport).toHaveBeenCalledTimes(1);
   });
 
-  it('asks with k = 0 and exactly the on layer named — the artifact channel’s own request shape', async () => {
+  it('asks with k = 0 and exactly the on layer named: the artifact channel’s own request shape', async () => {
     const clock = manualClock();
     const {client, viewport} = fakeClient(() => responseWith([clusterX(1n)]));
     const {ch} = channel(client, clock);
@@ -71,7 +71,7 @@ describe('the artifact channel', () => {
     expect(body.layers).toEqual(['clusters/x']);
   });
 
-  it('clears the held set on a refusal — a refusal is not an empty view', async () => {
+  it('clears the held set on a refusal: a refusal is not an empty view', async () => {
     const clock = manualClock();
     let fail = false;
     const {client} = fakeClient(() => {
@@ -116,7 +116,7 @@ describe('the artifact channel', () => {
     expect(table.ordinalOf('clusters/x', 1n)).toBe(ordinalOfOne);
   });
 
-  it('names a held artifact once — a pan back to it moves nothing in the session table', async () => {
+  it('names a held artifact once: a pan back to it moves nothing in the session table', async () => {
     const clock = manualClock();
     const table = new SessionArtifactTable();
     let served = [clusterX(1n), clusterX(2n)];
@@ -188,7 +188,7 @@ describe('the artifact channel', () => {
     expect(table.live).toBe(2);
   });
 
-  it('keeps the store when a layer is switched off — a question not asked is not an answer gone stale', async () => {
+  it('keeps the store when a layer is switched off: a question not asked is not an answer gone stale', async () => {
     const clock = manualClock();
     const table = new SessionArtifactTable();
     const {client} = fakeClient(() => responseWith([clusterX(1n), clusterX(2n)]));
@@ -526,7 +526,7 @@ describe('the idle promotion ratchet', () => {
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
   });
 
-  it('never promotes during interaction — a gesture disarms the idle timer', async () => {
+  it('never promotes during interaction: a gesture disarms the idle timer', async () => {
     const clock = manualClock();
     const {client, viewport} = fakeClient(() => responseWith([inside()]));
     const {ch} = holdingChannel(client, clock, {declarations: [decl()]});
@@ -549,7 +549,7 @@ describe('the idle promotion ratchet', () => {
   });
 });
 
-describe('the identity projection over a held scope (protocol §5.2)', () => {
+describe('the identity projection over a held scope', () => {
   /** The rows the server answers a filtered view with, in the identity projection. */
   const identity = (rows: {id: bigint; matched: boolean | null; rung?: number}[]): ArtifactIdentity[] =>
     rows.map((r) => ({layer: 'clusters/x', tesseraId: r.id, rung: r.rung ?? 0, matched: r.matched, highlighted: null}));
@@ -611,7 +611,7 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
     expect(ch.current.artifacts[0]!.rung).toBe(0);
   });
 
-  it('re-asks once with full rows when an identity row cannot be resolved — one round trip, never a wrong map', async () => {
+  it('re-asks once with full rows when an identity row cannot be resolved: one round trip, never a wrong map', async () => {
     const clock = manualClock();
     let filter: FilterExpr | null = null;
     let full = [inside(), bare()];
