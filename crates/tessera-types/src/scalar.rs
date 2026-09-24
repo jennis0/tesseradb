@@ -1,6 +1,4 @@
-//! A declared scalar column's type. It sits in the lowest crate so that the roster's metadata
-//! types, the store's column reader and the server's JSON reader take integer ranges from one
-//! table.
+//! A declared scalar column's type, and the value one of its rows carries.
 
 /// A declared-scalar value carried alongside the fixed columns (`tessera_id`, `residual`).
 /// The kinds below are the whole set.

@@ -3326,9 +3326,8 @@ fn write_content_extent(
 // named and the file does not carry is simply absent, which is what an optional column of the
 // artifact grain is.
 
-/// A field no `fields` map may move, as [`LEVEL`] is not, because `configuration.md` §1's table
-/// does not name it: a level is an address rather than a value, and the map's key set is the closed
-/// one that table states.
+/// A level column read under its own name, which no `fields` map may move, as [`LEVEL`] is: a
+/// level is an address rather than a value.
 const ATTACHED_LEVEL: &str = "attached_level";
 
 pub(crate) fn batches(
@@ -3934,9 +3933,8 @@ pub(crate) fn parents_at(
 // A list key column: the artifacts a point belongs to, and the edges between them
 // ---------------------------------------------------------------------------------------------
 
-/// The member source's key column, read against the layer's hierarchy
-/// (`artifacts-from-points.md` §4): one artifact per row, or a list of them whose positions mean
-/// what the layer's hierarchy kind declares.
+/// The member source's key column, read against the layer's hierarchy: one artifact per row, or a
+/// list of them whose positions mean what the layer's hierarchy kind declares.
 fn member_keys<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,

@@ -1736,14 +1736,14 @@ async fn post_ingest(
     (status, body)
 }
 
-/// Fresh source ids for the bound fixtures below. Offset well clear of `N_ITEMS`, or every batch here
-/// collides with the bundle's own external ids and answers 409 before any bound is consulted.
 /// A coordinate inside the fixture bundle's declared extent (0..1000 on both axes), so no row is
 /// clamped onto its edge.
 fn in_extent(i: u64) -> f32 {
     (i % 1000) as f32
 }
 
+/// Fresh source ids for the bound fixtures below. Offset well clear of `N_ITEMS`, or every batch here
+/// collides with the bundle's own external ids and answers 409 before any bound is consulted.
 fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
     const INGEST_BOUND_ID_BASE: u64 = 1_000_000;
     (0..n)
