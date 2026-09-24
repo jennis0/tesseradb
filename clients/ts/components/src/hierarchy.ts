@@ -174,7 +174,7 @@ export class TesseraHierarchy extends TesseraElement {
   /**
    * Every name the walk has seen, by identifier. **The only place a name for one of these
    * artifacts exists on this client**: a filter layer is never named in a viewport request, so its
-   * artifacts are never served, and *also under 546790* says nothing about what a node sits under.
+   * artifacts are never served.
    */
   private names = new Map<bigint, string>();
   private searchTimer: ReturnType<typeof setTimeout> | null = null;

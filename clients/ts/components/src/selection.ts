@@ -8,8 +8,7 @@ import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-selection>` — the selected region (design §5.3 tier 2, §5.11), as the boards draw it
- * (`SelectionFlow.png`): *Shown inside · Matched inside · Visible inside* through
+ * `<tessera-selection>`: the selected region. *Shown inside · Matched inside · Visible inside* through
  * `<tessera-count>` — `matched` as `Masked`, exact for the shape unless the server answered a
  * cover (`x-tessera-region`) or the frame did not cover the shape; `visible` only while no other
  * filter narrows the frame; `served` as the held marks inside against `matched`, both figures

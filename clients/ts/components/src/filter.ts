@@ -290,9 +290,9 @@ export class TesseraFilter extends TesseraElement {
     if (!o) return nothing;
     const draft = this.currentDraft(o);
     if (!draft) return nothing;
-    // Every other shape's body carries an `id="ctl"` element `for` can bind to (an `input`); the
-    // checklist's body is a `role="group"` of checkboxes, which `for` cannot label at all — a
-    // `for="ctl"` pointing at nothing there was a dangling reference, not a working association.
+    // Every other shape's body has an `input` with `id="ctl"` for the label's `for`. The checklist's
+    // body is a `role="group"` of checkboxes, which `for` cannot label, so the group names the
+    // heading through `aria-labelledby` instead.
     const checklist = draft.family === 'category' && this.shape === 'checklist';
     const label = checklist
       ? html`<span part="label" class="muted" id="ctl-label">${this.heading()}</span>`

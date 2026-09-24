@@ -25,26 +25,6 @@ import './artifact-list.js';
 import './artifact-card.js';
 import './legend.js';
 
-/**
- * `<tessera-explorer>` — the map with its status strip, toolbar, layer picker, filters, artifact
- * list and the detail card, in a default layout (design client-components §5.3 tier 0, §5.5),
- * laid out as the boards draw it. Constructs its own store from `viewer-url` and `token` or an
- * `authorise` property, or takes a `.store`; it is itself the context provider for its pieces.
- *
- * `layout="docked"` (`Main.png`): the map beside a sidebar — *Colour by* and *Layers* at the top,
- * the LAYERS checklist, the item or cluster card, then FILTERS and IN VIEW as collapsed sections
- * with a summary each. `layout="overlay"` (`ExplorerOverlay.png`): the map full-bleed, a floating
- * panel top-left with the selects, the layers and the filters, the toolbar top-right, and a
- * floating panel at the right with IN VIEW and the card. Under a narrow container
- * (`ExplorerNarrow.png`) the strip runs full width above a tab bar — Filters, Layers, In view,
- * Item — and each tab opens its panel as a sheet. `panels="filters legend layers hierarchy
- * artifacts detail"` chooses which appear; every region is a named slot with default content.
- *
- * **`<tessera-hierarchy>` sits beneath the filters** (`highlight-and-hierarchy.md` §5.1) and is
- * drawn only where the bundle has a hierarchical layer to browse — the element says so itself,
- * and the section it sits in is collapsed by default because the *In view* list is the viewport's
- * answer and this is the corpus's.
- */
 /** Every part of every element the explorer renders, forwarded (`parts.ts`). */
 const FORWARD = {
   map: exportparts('map'),
@@ -72,6 +52,23 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
   {sheet: 'detail', icon: 'info', label: 'Item', panel: 'detail'}
 ];
 
+/**
+ * `<tessera-explorer>`: the map with its status strip, toolbar, layer picker, filters, artifact
+ * list and detail card in a default layout. It builds its own store from `viewer-url` and `token`
+ * or an `authorise` property, or takes a `.store`, and is the context provider for its pieces.
+ *
+ * `layout="docked"` puts the map beside a sidebar: the colour and layer selects at the top, the
+ * layer checklist, the item or cluster card, then Filters and In view as collapsed sections with
+ * a summary each. `layout="overlay"` draws the map full-bleed with a floating panel top-left (the
+ * selects, the layers and the filters), the toolbar top-right, and a floating panel at the right
+ * with In view and the card. In a narrow container the strip runs full width above a tab bar
+ * (Filters, Layers, In view, Item), and each tab opens its panel as a sheet. `panels` chooses which
+ * appear; every region is a named slot with default content.
+ *
+ * `<tessera-hierarchy>` sits beneath the filters, drawn only where the bundle has a hierarchical
+ * layer to browse, in a section collapsed by default: In view answers for the viewport and the
+ * hierarchy for the corpus.
+ */
 export class TesseraExplorer extends TesseraElement {
   static override styles = [
     tokens,
@@ -430,7 +427,7 @@ export class TesseraExplorer extends TesseraElement {
           this.tabFocus = sheet;
           this.sheet = this.sheet === sheet ? null : sheet;
         }}>${icon(ic, 18)}${label}</button>`;
-    // The filters sheet's primary action names the number it will produce (`ExplorerNarrow.png`).
+    // The filters sheet's primary action names the number it will produce.
     const matched = s?.get('view').matched;
     const matchedText = matched && matched.exact && s?.get('status').status === 'shown' ? `Show ${matched.value.toLocaleString('en-GB')} matched` : 'Show';
     const sheetFooter = html`<div class="sheet-footer">

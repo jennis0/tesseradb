@@ -9,17 +9,16 @@ import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-item-card>` — the selected point (design §5.3 tier 2), as the boards draw it: the
- * title, then the fields **by name, in declaration order** as a label/value grid, then *Open* and
- * *Copy id*. `/v1/items` omits a field the item carries no value for, so position lies and a card
+ * `<tessera-item-card>`: the selected point. A headline, then the fields **by name, in
+ * declaration order** as a label/value grid, then Open and Copy id. `/v1/items` omits a field the item carries no value for, so position lies and a card
  * reading positionally would misattribute every field after the first gap. A text column lives in
  * the record blob and never appears in a viewport response, so this is the only place its prose
  * is ever seen. A category arrives already resolved to its key.
  *
  * The headline is the field the host names in `title-field`, else the item's id, and every other
- * field is in the grid, the id among them when it is not the headline. A slot per field (`field-<name>`) lets a host render one as a link into
- * their application without replacing the card, and `tessera-open` (the id as a decimal string)
- * does the same for *Open*.
+ * field is in the grid, the id among them when it is not the headline. A slot per field
+ * (`field-<name>`) lets a host render one as a link into their application without replacing the
+ * card, and `tessera-open` (the id as a decimal string) does the same for Open.
  *
  * **A miss and a broken pick are different.** Nothing under the cursor is the ordinary case; a
  * hit whose layer carried no identity is a fault in the map and says so, rather than reading as

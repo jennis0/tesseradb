@@ -326,12 +326,7 @@ export class TesseraMap extends TesseraElement {
    * case, the host's `color-scheme` decides both.
    */
   @property({reflect: true}) accessor ground: 'light' | 'dark' | '' = '';
-  /**
-   * Whether the single-hue density wash is drawn under the points. **Off by default** (owner
-   * direction, 2026-08-26): how density should be rendered is its own conversation, and the wash
-   * was confounding a pass over the map's hierarchy. The machinery is untouched — `wash` turns it
-   * on and the layer still builds it from the exact tiles' counts (decision 0097).
-   */
+  /** Whether the single-hue density wash, built from the exact tiles' counts, is drawn under the points. */
   @property({type: Boolean}) accessor wash = false;
   /**
    * Whether the map measures itself for the probe: the frame-gap loop behind `probe.timings.frame`,
@@ -490,8 +485,7 @@ export class TesseraMap extends TesseraElement {
       this.pushView();
     }
     const view = s.get('view');
-    // **Every switch drops the hover** (owner ruling, 2026-09-01), a switch within a group
-    // included: the marks under the cursor are different rows in the next view, and a tooltip
+    // **Every switch drops the hover**, a switch within a group included: the marks under the cursor are different rows in the next view, and a tooltip
     // held across the step would name a record that is no longer beneath the pointer.
     if (view.id !== this.cameraView) {
       this.cameraView = view.id;
@@ -595,14 +589,9 @@ export class TesseraMap extends TesseraElement {
       this.paintedOpened = opened;
       this.paint();
     }
-    // **The same rule, and the defect it was written for.** `highlighting` and `washChannel` are
-    // host-computed properties too: the layer subscribes to the store's projections and redraws
-    // itself when the marks move, but a property this element computed and handed it stays at
-    // whatever the last paint passed. So a highlight applied while the camera was still reached
-    // the wire, the response's bits reached the slab, and the layer went on drawing with
-    // `highlighting: false` — every mark lit, the dull uniform at 1.0 and the wash on the wrong
-    // channel — until something unrelated happened to repaint. On rung 3 that is the whole of
-    // *the highlight shows no visible difference*.
+    // The same rule for `highlighting` and `washChannel`: the layer redraws itself when the marks
+    // move, but a property this element computed and handed it keeps the value of the last paint,
+    // so a change in either repaints here.
     const wash = washChannel(s.get('filters'), view, region);
     if (view.highlighting !== this.paintedHighlighting || wash !== this.paintedWashChannel) {
       this.paintedHighlighting = view.highlighting;
