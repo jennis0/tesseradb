@@ -1,109 +1,335 @@
 #!/usr/bin/env node
-// Capture golden payloads from a live `tessera serve` for core's decoder tests.
+// Recaptures core's golden fixtures from two `tessera serve`s this script builds and starts.
 //
-// Usage:
-//   TESSERA_SESSION_CRED=… node clients/ts/scripts/capture-golden.mjs \
-//     --viewer http://127.0.0.1:37585 --session http://127.0.0.1:49303 --terms 0
+//   node clients/ts/scripts/capture-golden.mjs
 //
-// Writes core/test/fixtures/{meta.json,viewport-plain.bin,viewport-underlay.bin} and, where the
-// server carries a layer, viewport-artifacts.bin (the channel's counts-only shape, which the
-// worked decodes in reference/examples pin byte for byte) and viewport-membership.bin (the layer
-// named with points, so the per-point membership column is on it). Re-run it whenever the wire format changes; a
-// decoder test passing against a stale golden is worse than no test. `--artifacts-only`
-// recaptures the artifacts golden alone, against whatever corpus carries a layer, and leaves the
-// wide-schema goldens untouched.
-//
-// **Capture against the WIDE fixture** (`data/scaled/attrs/schema-wide.toml`, nineteen columns),
-// not against a demo bundle. `decode.test.ts` walks `meta.json`'s declared columns and checks each
-// one decodes at its declared type, so the goldens' value is the breadth of the schema behind
-// them: captured against the six-column demo bundle the same test still passes and silently stops
-// covering two thirds of the Arrow types.
-import {writeFile, mkdir} from 'node:fs/promises';
-import {dirname, join} from 'node:path';
-import {fileURLToPath} from 'node:url';
+// The binary and the notebook corpus are found as the live tests find them (`core/test/served.ts`).
+// `python3` with pyarrow writes the wide corpus's Parquet file. Every file in `core/test/fixtures`
+// is rewritten except `viewport-artifacts-pre-r40.bin`, and `wire-example/test/expected.json` with
+// them. Each capture checks the arrangement its tests rely on, and where the server did not
+// provide it the script stops and writes nothing.
+import {spawnSync} from 'node:child_process';
+import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {
+  Bool,
+  Field,
+  Float32,
+  Float64,
+  Int16,
+  Int32,
+  Int64,
+  Int8,
+  List,
+  Table,
+  TimestampMicrosecond,
+  Uint16,
+  Uint32,
+  Uint64,
+  Uint8,
+  Utf8,
+  tableFromIPC,
+  tableToIPC,
+  vectorFromArray
+} from 'apache-arrow';
+import {base64} from '../core/src/control.ts';
+import {start} from '../core/test/served.ts';
 
-const args = Object.fromEntries(
-  process.argv
-    .slice(2)
-    .reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1]]] : acc), [])
-);
-const viewer = args.viewer ?? 'http://127.0.0.1:37585';
-const session = args.session ?? 'http://127.0.0.1:49303';
-const terms = (args.terms ?? '0').split(',');
-const artifactsOnly = 'artifacts-only' in args;
-const cred = process.env.TESSERA_SESSION_CRED;
-if (!cred) throw new Error('set TESSERA_SESSION_CRED to the session credential');
+const FIXTURES = join(import.meta.dirname, '..', 'core', 'test', 'fixtures');
+const EXPECTED = join(import.meta.dirname, '..', 'wire-example', 'test', 'expected.json');
 
-const authorise = await fetch(`${session}/session/authorise`, {
-  method: 'POST',
-  headers: {authorization: `Bearer ${cred}`, 'content-type': 'application/json'},
-  body: JSON.stringify({auth_data: Buffer.from(JSON.stringify({terms})).toString('base64')})
-});
-if (!authorise.ok) throw new Error(`authorise: ${authorise.status} ${await authorise.text()}`);
-const {token} = await authorise.json();
+/** Every file to write, by path, held until every capture has passed its checks. */
+const captured = new Map();
 
-const metaResp = await fetch(`${viewer}/v1/meta`, {headers: {authorization: `Bearer ${token}`}});
-if (!metaResp.ok) throw new Error(`meta: ${metaResp.status} ${await metaResp.text()}`);
-const meta = await metaResp.json();
+function check(condition, what) {
+  if (!condition) throw new Error(`capture-golden: ${what}. Nothing was written`);
+}
 
-async function viewport(body) {
-  const r = await fetch(`${viewer}/v1/viewport`, {
+/** A viewport body's frames in order, each `{kind, payload}`. */
+function frames(body) {
+  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+  const out = [];
+  for (let at = 0; at < body.length; ) {
+    const length = view.getUint32(at + 1, true);
+    out.push({kind: body[at], payload: body.subarray(at + 5, at + 5 + length)});
+    at += 5 + length;
+  }
+  return out;
+}
+
+/** Each frame of `kind` read as an Arrow table. */
+const tables = (body, kind) => frames(body).filter((f) => f.kind === kind).map((f) => tableFromIPC(f.payload));
+const column = (table, name) => Array.from(table.getChild(name));
+const total = (table, name) => column(table, name).reduce((sum, v) => sum + Number(v), 0);
+
+/** A session for `terms` on `served`, and the three viewer routes the goldens come from. */
+async function session(served, terms) {
+  const authorised = await fetch(`${served.sessionUrl}/session/authorise`, {
     method: 'POST',
-    headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-    body: JSON.stringify(body)
+    headers: {authorization: `Bearer ${served.sessionCredential}`, 'content-type': 'application/json'},
+    body: JSON.stringify({auth_data: base64(new TextEncoder().encode(JSON.stringify({terms})))})
   });
-  if (!r.ok) throw new Error(`viewport: ${r.status} ${await r.text()}`);
-  return Buffer.from(await r.arrayBuffer());
+  if (!authorised.ok) throw new Error(`authorise: ${authorised.status} ${await authorised.text()}`);
+  const {token} = await authorised.json();
+  const call = async (path, body) => {
+    const response = await fetch(`${served.viewerUrl}${path}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`${path}: ${response.status} ${await response.text()}`);
+    return response;
+  };
+  return {
+    meta: async () => (await call('/v1/meta')).json(),
+    viewport: async (body) => new Uint8Array(await (await call('/v1/viewport', body)).arrayBuffer()),
+    browse: async (body) => (await call('/v1/artifacts/browse', body)).json()
+  };
 }
 
-const q = meta.views[0].quantisation; // the frame is the view's (decision 0040)
-const full = [q.x_min, q.y_min, q.x_max, q.y_max];
-// **`layers: []` deliberately**, so these two goldens carry no artifacts frame however many layers
-// the capturing server happens to hold. Omitting it would answer for every layer this principal
-// reaches, and the pair exists to pin the *absent*-frame case — the ordinary shape of a response,
-// and the one a decoder must read as "no artifacts" rather than as a truncated body.
-const base = {view: meta.views[0].id, zoom: 2, bbox: full, k: 50, layers: []};
+// ---- the wide corpus: every type a rendered column can have, and nulls in each -----------------
 
-const dir = join(dirname(fileURLToPath(import.meta.url)), '..', 'core', 'test', 'fixtures');
-await mkdir(dir, {recursive: true});
-if (!artifactsOnly) {
-  const plain = await viewport(base);
-  const underlay = await viewport({...base, underlay_offset: 2});
-  await writeFile(join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
-  await writeFile(join(dir, 'viewport-plain.bin'), plain);
-  await writeFile(join(dir, 'viewport-underlay.bin'), underlay);
-  console.log(
-    `captured to ${dir}: plain ${plain.length} B, underlay ${underlay.length} B (delta ${underlay.length - plain.length} B)`
-  );
-}
+const WIDE_ROWS = 1000;
 
 /**
- * The artifacts frame, captured only when this server actually carries a layer this principal
- * reaches — which needs `scripts/publish-clusters.mjs` to have run.
- *
- * **The other two goldens deliberately carry no kind-5 frame**, which is the ordinary shape of a
- * response and the case worth pinning most: a decoder must read a body with no artifacts frame as
- * *no artifacts*, not as a parse failure. This one covers the other side, and is skipped rather
- * than faked when there is no layer — a hand-assembled frame would be a test of this script's idea
- * of the format rather than of the server's.
+ * The wide corpus's rows. Each non-category column is null on every n-th row, n differing by
+ * column, and each category is absent on some rows. The values reach past what a narrower type
+ * would hold: `rank` past u16, `hash` and `long` past 2^53, `exact` past f32's precision.
  */
-if ((meta.layers ?? []).length > 0) {
-  const layer = meta.layers[0].name;
-  // The layer named with points: the artifacts frame **and** a points frame carrying the per-point
-  // membership column (D12, contracts §3.2 r39) — the point path's own shape once a layer is on.
-  // A larger `k` than the other goldens, so the clusters' members are among the points served
-  // rather than only their tiles' heads.
-  const membership = await viewport({...base, k: 200, layers: [layer]});
-  await writeFile(join(dir, 'viewport-membership.bin'), membership);
-  // And the annotation channel's own shape: `k = 0`, the tiles, the artifacts frame and the
-  // trailer, no points frame at all — the body a decoder is most likely to misread as truncated.
-  // Pinned by the worked decodes' answer sheet (`wire-example/test/expected.json`, re-derived on
-  // every capture), so capture it as the same principal every time: on the notebook corpus the
-  // terms are arXiv categories and `--terms 0` sees nothing, so the r43 goldens were taken as its
-  // *medium* preset (`tessera-demo/presets/notebook.json`, two terms).
-  const channel = await viewport({...base, k: 0, layers: [layer]});
-  await writeFile(join(dir, 'viewport-artifacts.bin'), channel);
-  console.log(`captured viewport-membership.bin (${membership.length} B) and viewport-artifacts.bin (${channel.length} B) for layer ${layer}`);
-} else {
-  console.log('no layer reachable: viewport-artifacts.bin not re-captured');
+function wideTable() {
+  const rows = Array.from({length: WIDE_ROWS}, (_, i) => i);
+  const every = (n, value, type) => vectorFromArray(rows.map((i) => (i % n === n - 1 ? null : value(i))), type);
+  return new Table({
+    entity_id: vectorFromArray(rows.map((i) => BigInt(i + 1)), new Uint64()),
+    x: vectorFromArray(rows.map((i) => ((i * 7919) % 1000) + 0.5), new Float64()),
+    y: vectorFromArray(rows.map((i) => ((i * 104729) % 997) + 0.25), new Float64()),
+    labels: vectorFromArray(rows.map(() => ['golden']), new List(new Field('item', new Utf8(), true))),
+    colour: every(9, (i) => ['red', 'green', 'blue', 'amber'][i % 4], new Utf8()),
+    family: every(11, (i) => `f${String(i % 20).padStart(3, '0')}`, new Utf8()),
+    tag: every(13, (i) => `t${i % 37}`, new Utf8()),
+    flag: every(4, (i) => i % 3 === 0, new Bool()),
+    small: every(5, (i) => i % 256, new Uint8()),
+    medium: every(6, (i) => (i * 61) % 65536, new Uint16()),
+    rank: every(7, (i) => 70_000 + i * 1_000, new Uint32()),
+    hash: every(8, (i) => 2n ** 63n + BigInt(i) * 7_919n, new Uint64()),
+    tiny: every(10, (i) => (i % 256) - 128, new Int8()),
+    short: every(12, (i) => i * 31 - 16_000, new Int16()),
+    offset: every(14, (i) => i * 2_000_003 - 1_000_000_000, new Int32()),
+    long: every(15, (i) => -(2n ** 60n) + BigInt(i), new Int64()),
+    // apache-arrow takes a timestamp as epoch milliseconds and stores microseconds.
+    at: every(16, (i) => 1_700_000_000_000 + i * 3_600_000, new TimestampMicrosecond()),
+    ratio: every(17, (i) => i / 7, new Float32()),
+    exact: every(18, (i) => i + 1 / 3, new Float64()),
+    title: vectorFromArray(rows.map((i) => `item ${i}`), new Utf8()),
+    code: vectorFromArray(rows.map((i) => `c-${i}`), new Utf8())
+  });
 }
+
+const attribute = (name, type, extra = '') => `[[attribute]]\nname   = "${name}"\ntype   = "${type}"\n${extra}`;
+const rendered = (name, type) => attribute(name, type, 'render = true\n');
+const category = (name) => attribute(name, 'category', `vocabulary = "${name}"\nrender     = true\n`);
+
+const WIDE_SCHEMA = `[sources]
+points = "points.parquet"
+
+[defaults]
+source = "points"
+
+[[view]]
+name             = "s0"
+extent           = { x = [0, 1000], y = [0, 1000] }
+point_visibility = { field = "labels", default = "public" }
+
+[[vocabulary]]
+name       = "colour"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+values     = ["red", "green", "blue", "amber"]
+
+[[vocabulary]]
+name       = "family"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+values     = [${Array.from({length: 20}, (_, i) => `"f${String(i).padStart(3, '0')}"`).join(', ')}]
+
+[[vocabulary]]
+name       = "tag"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
+${[
+  category('colour'),
+  category('family'),
+  category('tag'),
+  rendered('flag', 'bool'),
+  rendered('small', 'u8'),
+  rendered('medium', 'u16'),
+  rendered('rank', 'u32'),
+  rendered('hash', 'u64'),
+  rendered('tiny', 'i8'),
+  rendered('short', 'i16'),
+  rendered('offset', 'i32'),
+  rendered('long', 'i64'),
+  rendered('at', 'timestamp_us'),
+  rendered('ratio', 'f32'),
+  rendered('exact', 'f64'),
+  attribute('title', 'text', 'index  = true\n'),
+  attribute('code', 'keyword', 'index  = true\n')
+].join('\n')}`;
+
+function writeParquet(table, path) {
+  const script = 'import sys, pyarrow as pa, pyarrow.parquet as pq; pq.write_table(pa.ipc.open_stream(sys.stdin.buffer).read_all(), sys.argv[1])';
+  const python = spawnSync('python3', ['-c', script, path], {input: tableToIPC(table, 'stream')});
+  if (python.status !== 0) {
+    throw new Error(`python3 could not write the wide corpus's Parquet file (${python.error ?? python.stderr}); install pyarrow for python3 and re-run`);
+  }
+}
+
+/** `meta.json`, `viewport-plain.bin` and `viewport-underlay.bin`, over the wide corpus. */
+async function captureWide() {
+  const directory = mkdtempSync(join(tmpdir(), 'tessera-goldens-'));
+  try {
+    writeParquet(wideTable(), join(directory, 'points.parquet'));
+    const served = await start({directory, schema: WIDE_SCHEMA});
+    if (typeof served === 'string') throw new Error(served);
+    try {
+      const golden = await session(served, ['golden']);
+      const meta = await golden.meta();
+      const q = meta.views[0].quantisation;
+      // `layers: []`, so these two carry no artifacts frame.
+      const base = {view: 's0', zoom: 2, bbox: [q.x_min, q.y_min, q.x_max, q.y_max], k: 20, layers: []};
+      const plain = await golden.viewport(base);
+      const underlay = await golden.viewport({...base, underlay_offset: 2});
+
+      const points = tables(plain, 3);
+      check(points.length > 0, 'the plain capture served no points');
+      const ids = points.flatMap((t) => column(t, 'tessera_id'));
+      const rendered = meta.declared_scalars.filter((c) => c.render);
+      for (const {name, category} of rendered) {
+        check(points[0].getChild(name) !== null, `the points frame carries no column ${name}`);
+        if (category === null) check(points.some((t) => t.getChild(name).nullCount > 0), `no served point is null in ${name}`);
+      }
+      // The worked decodes check a tessera_id survives past 2^53, which a random blinding key
+      // misses about once in two thousand builds.
+      check(ids[0] > 2n ** 53n, 'the first served tessera_id is below 2^53; run the capture again');
+      captured.set('meta.json', JSON.stringify(meta, null, 2) + '\n');
+      captured.set('viewport-plain.bin', plain);
+      captured.set('viewport-underlay.bin', underlay);
+    } finally {
+      served.stop();
+    }
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
+}
+
+// ---- the notebook corpus: real clusters, a filter and a highlight, and the browse pages --------
+
+/** A principal seeing about half the notebook corpus, so its visible set is not the whole map. */
+const PRINCIPAL = [
+  'cs.LG', 'cs.CV', 'cs.AI', 'cs.CL', 'cs.RO', 'math.CO', 'math.AP', 'math.PR', 'math-ph', 'math.MP',
+  'hep-th', 'hep-ph', 'quant-ph', 'astro-ph', 'gr-qc', 'cond-mat.mes-hall', 'cond-mat.mtrl-sci',
+  'physics.optics', 'stat.ML', 'eess.SP'
+];
+
+/**
+ * `viewport-artifacts.bin`, `viewport-membership.bin`, the three highlight bodies and the three
+ * browse pages, over the notebook corpus as `PRINCIPAL`.
+ */
+async function captureNotebook() {
+  const served = await start();
+  if (typeof served === 'string') throw new Error(served);
+  try {
+    const reader = await session(served, PRINCIPAL);
+    const q = (await reader.meta()).views.find((v) => v.id === 's0').quantisation;
+    const full = [q.x_min, q.y_min, q.x_max, q.y_max];
+
+    // The k-means layer declares centroid, box and hull, over clusters in different parts of the
+    // map. At `k = 0` the body is tiles, artifacts and trailer; named with points it adds the
+    // points frame and its membership column.
+    const clusters = {view: 's0', zoom: 2, bbox: full, layers: ['clusters/kmeans']};
+    const channel = await reader.viewport({...clusters, k: 0});
+    const membership = await reader.viewport({...clusters, k: 50});
+    check(frames(channel).map((f) => f.kind).join() === '1,5,4', 'the k = 0 capture is not tiles, artifacts and trailer');
+    const artifacts = tables(membership, 5)[0];
+    check(artifacts?.getChild('shape_x') != null, 'the clusters carry no shape');
+    const centroids = new Set(column(artifacts, 'centroid_x').map((x, i) => `${x},${artifacts.getChild('centroid_y').get(i)}`));
+    check(artifacts.numRows >= 3 && centroids.size === artifacts.numRows, 'the clusters do not have distinct centroids');
+    const members = tables(membership, 3).flatMap((t) => column(t, 'membership:clusters/kmeans'));
+    check(members.some((m) => m !== null), 'no served point is named a member');
+
+    // One request in three shapes. The taxonomy's artifacts are archives and subject classes, so
+    // the filter admits some of them and the highlight fewer.
+    const request = {view: 's0', zoom: 3, bbox: full, k: 20, layers: ['taxonomy/arxiv'], computed: ['centroid'], filters: {archive: {in: ['cs', 'math']}}};
+    const lit = {...request, highlight: {archive: {in: ['cs']}}};
+    const highlight = await reader.viewport(lit);
+    const pointRows = await reader.viewport({...lit, point_rows: 'highlight'});
+    const plain = await reader.viewport(request);
+    const tiles = tables(highlight, 1)[0];
+    const [visible, matched, highlighted] = ['visible', 'matched', 'highlighted'].map((c) => total(tiles, c));
+    check(0 < highlighted && highlighted < matched && matched < visible, `the tiles do not count highlighted < matched < visible, all above zero (${highlighted}, ${matched}, ${visible})`);
+    const bits = tables(highlight, 3).flatMap((t) => column(t, 'highlighted'));
+    check(bits.some((b) => b) && bits.some((b) => !b), 'the served points are all highlighted or none are');
+    const litArtifacts = tables(highlight, 5)[0];
+    const matchedBits = column(litArtifacts, 'matched');
+    const highlightedBits = column(litArtifacts, 'highlighted');
+    check(matchedBits.some((b) => b) && matchedBits.some((b) => !b), 'the filter admits every artifact or none');
+    check(highlightedBits.some((b) => b) && highlightedBits.some((b, i) => !b && matchedBits[i]), 'the highlight lights no artifact, or every one the filter admits');
+
+    // The browse pages. The roots page is paged; the children are a root's, under a filter that
+    // admits nothing of at least one; the search is paged and carries no filter.
+    const roots = await reader.browse({view: 's0', layer: 'clusters/kmeans', limit: 4});
+    check(typeof roots.next === 'string', 'the roots page has no next page');
+    const [root] = (await reader.browse({view: 's0', layer: 'clusters/hdbscan', limit: 1})).artifacts;
+    const children = await reader.browse({view: 's0', layer: 'clusters/hdbscan', parent: root.tessera_id, filters: {archive: {in: ['q-fin']}}});
+    check(children.artifacts.every((a) => a.parent_ids.includes(root.tessera_id)), 'a child does not name the root it was asked under');
+    check(children.artifacts.some((a) => a.matched_count === 0 && a.masked_count > 0), 'no child is one the filter admits nothing of');
+    const search = await reader.browse({view: 's0', layer: 'clusters/hdbscan', q: 'hdb', limit: 2});
+    check(typeof search.next === 'string', 'the search page has no next page');
+
+    captured.set('viewport-artifacts.bin', channel);
+    captured.set('viewport-membership.bin', membership);
+    captured.set('viewport-highlight.bin', highlight);
+    captured.set('viewport-point-rows-highlight.bin', pointRows);
+    captured.set('viewport-no-highlight.bin', plain);
+    for (const [name, page] of [['roots', roots], ['children-filtered', children], ['search', search]]) {
+      captured.set(`browse-${name}.json`, JSON.stringify(page, null, 2) + '\n');
+    }
+  } finally {
+    served.stop();
+  }
+}
+
+/** What both worked decodes must read from a body: frame kinds, row counts and first ids. */
+function answer(body) {
+  const points = tables(body, 3);
+  const artifacts = tables(body, 5)[0] ?? null;
+  const firstPoint = points.find((t) => t.numRows > 0)?.getChild('tessera_id').get(0);
+  return {
+    frames: frames(body).map((f) => f.kind),
+    tiles: tables(body, 1)[0].numRows,
+    sub_cells: tables(body, 2)[0]?.numRows ?? null,
+    artifacts: artifacts?.numRows ?? null,
+    points: points.reduce((n, t) => n + t.numRows, 0),
+    first_point_tessera_id: firstPoint === undefined ? null : String(firstPoint),
+    first_artifact_tessera_id: artifacts ? String(artifacts.getChild('tessera_id').get(0)) : null
+  };
+}
+
+await captureWide();
+await captureNotebook();
+
+const expected = {
+  _comment:
+    'What both worked decodes, clients/ts/wire-example (apache-arrow) and reference/examples/decode_viewport.py (pyarrow), must agree on over the golden fixtures in clients/ts/core/test/fixtures: frame kinds in order, row counts per batch, and the first tessera_id of the points and artifacts batches as decimal strings. Written by clients/ts/scripts/capture-golden.mjs with the fixtures.'
+};
+for (const name of ['viewport-plain.bin', 'viewport-underlay.bin', 'viewport-artifacts.bin', 'viewport-membership.bin']) {
+  expected[name] = answer(captured.get(name));
+}
+for (const [name, contents] of captured) writeFileSync(join(FIXTURES, name), contents);
+writeFileSync(EXPECTED, JSON.stringify(expected, null, 2) + '\n');
+for (const [name, contents] of captured) console.log(`${name}: ${contents.length} bytes`);
