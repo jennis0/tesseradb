@@ -1,5 +1,6 @@
-import {Binary, Field, Float64, List, Table, tableToIPC, Utf8, vectorFromArray} from 'apache-arrow';
-import {afterAll, beforeAll, describe, expect, it, type TestContext} from 'vitest';
+import {Binary, Field, Float64, List, RecordBatch, Schema, Table, tableToIPC, Utf8, vectorFromArray} from 'apache-arrow';
+import {afterAll, beforeAll, describe, expect, it, vi, type TestContext} from 'vitest';
+import {clusterLayerDeclaration, labelLayerDeclaration} from '../../scripts/operator.js';
 import {TesseraClient} from '../src/client.js';
 import {addressed, Control} from '../src/control.js';
 import type {Meta, ViewportRequest} from '../src/types.js';
@@ -23,6 +24,8 @@ let client: TesseraClient;
 let control: Control;
 let meta: Meta;
 let token: string;
+/** The artifact the publish test creates, over rows 0 to 3 once grown. */
+let pair: bigint;
 
 beforeAll(async () => {
   served = await start();
@@ -145,36 +148,88 @@ describe('Control against a live server', () => {
     expect(refused).toMatchObject({status: 409, ok: false, attempts: 1});
   });
 
-  it('publishes an artifact over two rows and grows it by a third, each count read through the viewer', async (ctx) => {
+  it('publishes an artifact over two rows and grows it by a third as JSON and a fourth as Arrow, each count read through the viewer', async (ctx) => {
     live(ctx);
-    const declared = await control.declareLayer({
-      name: LAYER,
-      title: 'picked rows',
-      views: ['s0'],
-      membership: 'enumerated',
-      visibility: null,
-      artifact_visibility: {field: null, default: 'inherited'},
-      require_member_visibility: {count: 1},
-      hierarchy: {kind: 'flat', prune_children: false},
-      content: {computed: ['centroid'], supplied: []},
-      depends_on: [],
-      levels: []
-    });
-    expect(declared.status).toBe(201);
+    // The declaration `publish-clusters.mjs` sends.
+    const declaration = clusterLayerDeclaration({name: LAYER, title: 'picked rows', view: 's0', visibility: null, minVisible: 1, computed: ['centroid', 'box', 'hull']});
+    expect((await control.declareLayer(declaration)).status).toBe(201);
     const published = await control.publish(LAYER, {
       level: 0,
       addressing: 'external',
       artifacts: [{key: 'pair', members: [addressed('row-2'), addressed('row-3')]}]
     });
     expect(published.status).toBe(201);
-    const artifact = BigInt((published.body.artifacts as {key: string; tessera_id: string}[])[0]!.tessera_id);
+    pair = BigInt((published.body.artifacts as {key: string; tessera_id: string}[])[0]!.tessera_id);
     await flushed();
-    expect(await client.artifact(token, artifact, {view: 's0'})).toMatchObject({layer: LAYER, key: 'pair', maskedCount: 2n});
+    expect(await client.artifact(token, pair, {view: 's0'})).toMatchObject({layer: LAYER, key: 'pair', maskedCount: 2n});
 
     const grown = await control.grow(LAYER, {level: 0, addressing: 'external', artifacts: [{key: 'pair', members: [addressed('row-1')]}]});
     expect(grown.status).toBe(200);
     await flushed();
-    expect((await client.artifact(token, artifact, {view: 's0'})).maskedCount).toBe(3n);
+    expect((await client.artifact(token, pair, {view: 's0'})).maskedCount).toBe(3n);
+
+    const rows = new Table({key: vectorFromArray(['pair'], new Utf8()), members: vectorFromArray([[addressed('row-0')]], new List(new Field('item', new Utf8(), true)))});
+    const schema = new Schema(rows.schema.fields, new Map([['addressing', 'external'], ['level', '0']]));
+    const arrow = tableToIPC(new Table(schema, rows.batches.map((b) => new RecordBatch(schema, b.data))), 'stream');
+    expect((await control.grow(LAYER, arrow, {wait: true})).body).toMatchObject({visible: true});
+    expect((await client.artifact(token, pair, {view: 's0'})).maskedCount).toBe(4n);
+  });
+
+  it('takes the label layer the operator scripts declare, and serves a label to a viewer who sees what it was written from', async (ctx) => {
+    live(ctx);
+    const labels = `${LAYER}-labels`;
+    expect((await control.declareLayer(labelLayerDeclaration({name: labels, title: 'labels', view: 's0', clusters: LAYER}))).status).toBe(201);
+    const published = await control.publish(labels, {
+      level: 0,
+      addressing: 'external',
+      artifacts: [
+        {
+          key: 'l-pair',
+          members: [addressed('row-2'), addressed('row-3')],
+          content: [{values: ['two rows'], generated_from: [addressed('row-2'), addressed('row-3')]}],
+          attached_to: {layer: LAYER, level: 0, key: 'pair'}
+        }
+      ]
+    }, {wait: true});
+    expect(published.status).toBe(201);
+    const label = BigInt((published.body.artifacts as {tessera_id: string}[])[0]!.tessera_id);
+    expect(await client.artifact(token, label, {view: 's0'})).toMatchObject({layer: labels, key: 'l-pair', maskedCount: 2n});
+
+    // The pair `write-cycle-demo.mjs` declares: no existence floor, the centroid alone.
+    const clusters = 'ts-live/write-cycle';
+    expect((await control.declareLayer(clusterLayerDeclaration({name: clusters, title: 'c', view: 's0', visibility: null, minVisible: null, computed: ['centroid']}))).status).toBe(201);
+    expect((await control.declareLayer(labelLayerDeclaration({name: `${clusters}-labels`, title: 'l', view: 's0', clusters}))).status).toBe(201);
+    const names = (await client.meta(token)).layers.map((l) => l.name);
+    expect(names).toEqual(expect.arrayContaining([labels, clusters, `${clusters}-labels`]));
+  });
+
+  it('declares a vocabulary, a column over it and more values, which the vocabulary route then lists', async (ctx) => {
+    live(ctx);
+    const vocabulary = await control.declareVocabulary('ts-kind', {value_set: 'closed', visibility: 'public', width: 'u8', values: [{key: 'a', title: 'A'}]});
+    expect(vocabulary.status).toBe(201);
+    expect((await control.declareAttribute({name: 'kind', type: 'category', vocabulary: 'ts-kind', index: true})).status).toBe(201);
+    expect((await client.categories(token, 'kind')).map((v) => v.key)).toEqual(['a']);
+    expect((await control.vocabularyValues('ts-kind', {values: [{key: 'b'}]})).status).toBe(200);
+    expect((await client.categories(token, 'kind')).map((v) => v.key).sort()).toEqual(['a', 'b']);
+  });
+
+  it('declares a plain view and a view group, creates a view of the group and drops it, each read back from /v1/meta', async (ctx) => {
+    live(ctx);
+    // A session resolves the views it may reach when it is authorised.
+    const metaNow = async () => client.meta((await client.authorise([TERM])).token);
+    const extent = {x: [0, 100], y: [0, 100]};
+    expect(await control.declareView('ts-plain', {extent}, {wait: true})).toMatchObject({status: 201, body: {visible: true}});
+    expect((await metaNow()).views.map((v) => v.id)).toContain('ts-plain');
+
+    expect((await control.declareViewGroup('ts-group', {extent, metadata: [{name: 'label', type: 'text'}]}, {wait: true})).status).toBe(201);
+    expect((await metaNow()).groups.find((g) => g.name === 'ts-group')).toMatchObject({views: []});
+
+    expect((await control.createView('ts-group', 'one', {metadata: {label: 'One'}}, {wait: true})).status).toBe(201);
+    const created = (await metaNow()).views.find((v) => v.id === 'ts-group:one');
+    expect(created?.roster).toEqual({group: 'ts-group', key: 'one', metadata: {label: {type: 'text', value: 'One'}}});
+
+    expect((await control.dropView('ts-group', 'one', {wait: true})).status).toBe(200);
+    expect((await metaNow()).views.map((v) => v.id)).not.toContain('ts-group:one');
   });
 
   it('deletes a row, which the viewer no longer counts or opens', async (ctx) => {
@@ -186,6 +241,7 @@ describe('Control against a live server', () => {
     expect(after.visible).toBe(3n);
     expect(after.ids).not.toContain(gone);
     await expect(client.item(token, gone)).rejects.toMatchObject({status: 404});
+    expect((await client.artifact(token, pair, {view: 's0'})).maskedCount).toBe(3n);
   });
 
   it('suppresses a row from the moment it is accepted, and serves it again once lifted', async (ctx) => {
@@ -199,6 +255,16 @@ describe('Control against a live server', () => {
     const after = await seen();
     expect(after.visible).toBe(3n);
     expect(after.ids).toContain(hidden);
+  });
+
+  it('asks for a fold, which runs, and the deleted row stays gone after it', async (ctx) => {
+    live(ctx);
+    const folds = async () => ((await control.status()).body.compaction as {folds: number}).folds;
+    const before = await folds();
+    expect((await control.compact()).status).toBe(202);
+    await vi.waitFor(async () => expect(await folds()).toBeGreaterThan(before), {timeout: 30_000, interval: 50});
+    expect((await seen()).visible).toBe(3n);
+    expect((await byExternalId()).has(addressed('row-0'))).toBe(false);
   });
 
   it('drops the layer, which the viewer then no longer lists', async (ctx) => {
