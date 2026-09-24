@@ -13,6 +13,7 @@ use arrow::array::{
 };
 use arrow::datatypes::DataType;
 use tessera_types::layer::ListMeaning;
+pub use tessera_types::layer::LEVEL;
 
 /// The types [`KeyColumn::new`] takes, for a refusal to name.
 pub const KEY_TYPES: &str = "utf8, large_utf8, utf8_view or an integer";
@@ -134,10 +135,6 @@ impl<'a> KeyColumn<'a> {
         }
     }
 }
-
-/// The column beside a scalar member key that places it at a level: `uint32`, a null being level 0.
-/// A list's positions carry its levels, so it reads no such column.
-pub const LEVEL: &str = "level";
 
 /// A [`LEVEL`] column, or `None` where it is not `uint32`.
 pub fn read_levels(array: &dyn Array) -> Option<&UInt32Array> {

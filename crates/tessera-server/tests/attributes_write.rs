@@ -239,10 +239,11 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
         json!({ "name": "region", "type": "u8" }),
         json!({ "name": "tag", "type": "category", "vocabulary": "nothing" }),
         json!({ "name": "drawn", "type": "f32", "index": true, "render": true }),
+        json!({ "name": "level", "type": "u32" }),
     ] {
         let (status, body) = declare(&served, bad.clone()).await;
         assert_eq!(status, 422, "{bad}: {body}");
-        assert!(body["detail"].is_string(), "{bad}: {body}");
+        assert_eq!(body["error"], "contract", "{bad}: {body}");
     }
     let (status, _) = declare(&served, tag()).await;
     assert_eq!(status, 201);

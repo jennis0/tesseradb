@@ -111,9 +111,9 @@ struct Memberships<'b> {
 }
 
 /// Checks a batch's columns before any row is read and returns its layer columns. A name is the
-/// route's own, a declared scalar, a family in `scoped` or a registered layer's, matched in that
-/// order, so a layer cannot redefine `x`; a declared or scoped column at the wrong type is refused.
-/// A `level` column is read as a member table's is wherever the batch carries a layer column.
+/// route's own, a declared scalar, a family in `scoped`, `level` or a registered layer's, matched
+/// in that order, so a layer cannot redefine `x`; a declared or scoped column at the wrong type is
+/// refused. A `level` column places the batch's member keys, and is refused without a layer column.
 fn check_columns<'b>(
     body_name: &str,
     batch: &'b RecordBatch,
@@ -130,7 +130,6 @@ fn check_columns<'b>(
         ))
     };
     let mut declarations = Vec::new();
-    let mut level_unclaimed = false;
     for field in batch.schema_ref().fields() {
         let name = field.name().as_str();
         if fixed.iter().any(|f| f.name() == name)
@@ -138,30 +137,26 @@ fn check_columns<'b>(
             // A family under its plain name; `scoped` is empty for a view outside a group, so
             // there such a column is refused below.
             || scoped.iter().any(|f| f.name == name)
+            || name == member_key::LEVEL
         {
             continue;
         }
         match layer_of(name) {
             Some(declaration) => declarations.push((name, declaration)),
-            None if name == member_key::LEVEL => level_unclaimed = true,
             None => return Err(undeclared(name)),
         }
     }
-    if level_unclaimed && declarations.is_empty() {
-        return Err(undeclared(member_key::LEVEL));
-    }
     let levels = match batch.column_by_name(member_key::LEVEL) {
-        Some(column) if !declarations.is_empty() && layer_of(member_key::LEVEL).is_none() => {
-            Some(member_key::read_levels(column.as_ref()).ok_or_else(|| {
-                DecodeError(format!(
-                    "{body_name}: column '{}' places the batch's member keys at a level and is \
-                     {:?}; send it as uint32",
-                    member_key::LEVEL,
-                    column.data_type()
-                ))
-            })?)
-        }
-        _ => None,
+        None => None,
+        Some(_) if declarations.is_empty() => return Err(undeclared(member_key::LEVEL)),
+        Some(column) => Some(member_key::read_levels(column.as_ref()).ok_or_else(|| {
+            DecodeError(format!(
+                "{body_name}: column '{}' places the batch's member keys at a level and is \
+                 {:?}; send it as uint32",
+                member_key::LEVEL,
+                column.data_type()
+            ))
+        })?),
     };
     let mut columns = Vec::with_capacity(declarations.len());
     for (name, declaration) in &declarations {

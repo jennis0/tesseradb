@@ -85,7 +85,7 @@ pub(crate) fn record_batch(
         arrays.push(column);
     }
 
-    // Every other name is a layer's or is refused, on the Arrow decode's rule.
+    // Every other name is `level`, a layer's or refused, on the Arrow decode's rule.
     let known = |name: &str| {
         columns.fixed.iter().any(|f| f.name() == name)
             || columns.declared.iter().any(|d| d.name == name)
@@ -98,12 +98,11 @@ pub(crate) fn record_batch(
             if known(name) || layers.iter().any(|l| l == name) {
                 continue;
             }
+            if name == member_key::LEVEL {
+                levels = true;
+                continue;
+            }
             if (columns.layer_of)(name).is_none() {
-                // Read as a member table's `level` column where the batch carries a layer column.
-                if name == member_key::LEVEL {
-                    levels = true;
-                    continue;
-                }
                 return Err(DecodeError(format!(
                     "{body_name}: row {row}, column '{name}' is not a declared scalar, a \
                      registered layer or a group-scoped attribute of this batch's view; declare \

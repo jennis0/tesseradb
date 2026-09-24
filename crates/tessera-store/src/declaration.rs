@@ -11,7 +11,14 @@ pub const DECLARABLE_TYPES: &str = "bool, u8, u16, u32, u64, i8, i16, i32, i64, 
 /// Columns every segment carries.
 const FIXED_COLUMNS: [&str; 2] = ["tessera_id", "residual"];
 /// Columns of an ingest batch that are not attributes.
-const INGEST_COLUMNS: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
+const INGEST_COLUMNS: [&str; 6] = [
+    "external_id",
+    "x",
+    "y",
+    "access",
+    "node_id",
+    crate::member_key::LEVEL,
+];
 /// Keys of a filter expression and the frames' highlight column. A filter names a column directly,
 /// so a column under one of these would make a request ambiguous.
 pub const REQUEST_NAMES: [&str; 6] = [
@@ -274,6 +281,7 @@ mod tests {
             ("a name that is not a path segment", spec("a/b", "u8")),
             ("a fixed column's name", spec("tessera_id", "u8")),
             ("an ingest column's name", spec("access", "u8")),
+            ("the member level column's name", spec("level", "u32")),
             ("the record blob's name", spec("record", "u8")),
             ("a filter key", spec("any_of", "u8")),
             ("an unknown type", spec("c", "string")),
