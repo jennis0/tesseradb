@@ -1446,7 +1446,8 @@ export function createStore(options: StoreOptions): Store {
     clearSelection();
     contentKeyAtFrame = '';
     replaceProjection('view', {id: viewId, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0});
-    replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});
+    replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
+    replaceProjection('tiles', {tiles: []});
     replaceProjection('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy});
     replaceProjection('status', {...NO_STATUS});
     region.drop();

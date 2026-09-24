@@ -350,6 +350,26 @@ describe('the drops', () => {
     expect(() => JSON.stringify(store.requestFilters())).not.toThrow();
   });
 
+  it('clears the stand-in marks and the tiles on clear(), as it does the exact bands', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    // Zoomed in with the request left unanswered: the held coarser bands stand in.
+    viewport.mockImplementation(() => new Promise(() => {}));
+    store.setView({bbox: [0, 0, 1, 2], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('marks').standIn.length).toBeGreaterThan(0);
+    expect(store.get('tiles').tiles.length).toBeGreaterThan(0);
+
+    store.clear();
+    expect(store.get('marks').standIn).toEqual([]);
+    expect(store.get('tiles').tiles).toEqual([]);
+  });
+
   it('clears the frame and the encoding on clear()', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
