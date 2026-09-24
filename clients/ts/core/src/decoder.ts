@@ -42,10 +42,15 @@ export function inlineDecoder(): Decoder {
 }
 
 /**
- * How the worker is made where a bundle cannot resolve a relative worker file. The default,
- * `new URL('./decode.worker.js', import.meta.url)`, suits any bundler that serves the package as
- * files. A single-file build inlines the worker as a Blob or data URL and installs a factory here
- * before any decoder is built; without it, decoding falls back to the main thread.
+ * How the worker is made where the default cannot load it. The default loads `decode.worker.js`
+ * from beside this module, which Vite and webpack follow and bundle. The package build writes that
+ * file with Arrow bundled into it, because a page's import map does not apply inside a worker, so
+ * it also loads unbundled. esbuild does not follow the URL: a host copies the file beside its
+ * output or installs a factory here. The single-file bundle installs one that makes the worker
+ * from a Blob or data URL.
+ *
+ * The factory is read each time a worker is made. A worker that fails to load after construction
+ * rejects each decode sent to it.
  */
 let workerFactory: (() => Worker) | null = null;
 

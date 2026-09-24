@@ -15,7 +15,8 @@ import {
   type SelectionShape,
   type ViewProjection
 } from '@tesseradb/client';
-import {MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, resolvePick, viewInputOf, type ContourShape, type Picked} from '@tesseradb/deck';
+import {TesseraLayer, resolvePick, viewInputOf, type Picked} from '@tesseradb/deck';
+import {MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, type ContourShape} from '@tesseradb/deck/internal';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';

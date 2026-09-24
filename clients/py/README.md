@@ -15,7 +15,7 @@ pandas is installed. `pip install tesseradb --no-deps` installs neither pyarrow 
 put a `tessera` binary on `PATH` or name it with `TESSERA_BIN` to make or serve a database.
 
 From this checkout, `pip install -e 'clients/py[widget]'` — the wheel's build hook
-(`hatch_build.py`) runs `npm ci` (when the install is stale) and `npm run build -w
+(`hatch_build.py`) runs `npm ci` (when the install is stale) and `npm run bundle -w
 @tesseradb/components` in `clients/ts` and copies the single-file bundle into
 `tesseradb/static/`, which is why a checkout install needs Node and a PyPI install does not.
 Nothing built is committed. `check.sh` is the package's half of the gate: the tests, and a wheel

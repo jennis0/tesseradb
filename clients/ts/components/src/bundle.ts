@@ -1,19 +1,18 @@
 /**
- * The single-file distribution's entry (design §5.9): everything the root entry defines, with the
- * decode worker **inlined**. A relative worker file does not exist inside one file, and the
- * built decoder would otherwise fall back to the main thread silently, at tens of milliseconds a
- * response. Vite's `?worker&inline` makes the worker from a Blob URL and falls back to a data
- * URL where a host's `worker-src` refuses blob; where both are refused, the constructor throws,
- * the decoder catches it and decodes inline — the only case that path is meant for.
+ * The self-contained bundle's entry: everything the root entry defines, with the decode worker
+ * inlined. One file has no sibling worker file to load, so the worker is built from the bundle
+ * itself: Vite's `?worker&inline` makes it from a Blob URL, and from a data URL where a host's
+ * `worker-src` refuses blob. Where both are refused the constructor throws, and the decoder
+ * decodes on the main thread.
  *
- * Installed before any element could build a store, since a store builds its decoder on its
- * first response.
+ * The factory is installed before any element can build a store, since a store builds its decoder
+ * on its first response.
  *
- * This file is also the notebook widget's `_esm` (design §7): anywidget takes the module's default
- * export, `{initialize, render}` from `widget.ts`. A page with no build step that loads the same
- * file gets a default export it never calls.
+ * This file is also the notebook widget's `_esm`: anywidget takes the module's default export,
+ * `{initialize, render}` from `widget.ts`. A page with no build step that loads the same file gets
+ * a default export it never calls.
  */
-import DecodeWorker from '@tesseradb/client/src/decode.worker.ts?worker&inline';
+import DecodeWorker from '@tesseradb/client/decode.worker?worker&inline';
 import {setWorkerFactory} from '@tesseradb/client';
 
 setWorkerFactory(() => new DecodeWorker());

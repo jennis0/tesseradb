@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build -w @tesseradb/client && npm run build -w @tesseradb/deck && npm run build -w @tesseradb/components && npm run build -w @tesseradb/react",
     "typecheck": "npm run typecheck --workspaces --if-present && tsc -p scripts/tsconfig.json"
   }
 }

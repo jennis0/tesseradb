@@ -3,7 +3,7 @@ import {css, html, nothing, type PropertyValues} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import type {Store} from '@tesseradb/client';
 import {activeCount, artifactBudgetFor, browsableLayers, emptyDraft, levelForBudget} from '@tesseradb/client';
-import {clusterLayerOf} from '@tesseradb/deck';
+import {clusterLayerOf} from '@tesseradb/deck/internal';
 import './hierarchy.js';
 import {TesseraElement} from './base.js';
 import {storeContext} from './context.js';

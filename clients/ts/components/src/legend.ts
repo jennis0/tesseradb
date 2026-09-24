@@ -1,7 +1,7 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import {CLUSTER_PREFIX, NEUTRAL, colourLayers, layerEntries, type Rgba} from '@tesseradb/client';
-import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck';
+import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck/internal';
 import {TesseraElement, UNNAMED, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf} from './states.js';

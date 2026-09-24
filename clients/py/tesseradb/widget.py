@@ -152,7 +152,7 @@ class Map(anywidget.AnyWidget):
             raise RuntimeError(
                 "tesseradb's bundle is missing. From PyPI: pip install 'tesseradb[widget]' installs "
                 "it. From the checkout: pip install -e 'clients/py[widget]' builds it with Node, or "
-                "run `npm run build -w @tesseradb/components` in clients/ts."
+                "run `npm run bundle -w @tesseradb/components` in clients/ts."
             )
         self._token_source: TokenSource = token
         self._token: Optional[Token] = None

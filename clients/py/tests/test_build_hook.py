@@ -46,7 +46,7 @@ def test_builds_and_copies_the_bundle_skipping_npm_ci_when_current(tmp_path, mon
     monkeypatch.setattr(hatch_build.shutil, "which", lambda name: "/usr/bin/npm")
     static = tmp_path / "py" / "tesseradb" / "static"
     copied = hatch_build.build_bundle(ts, static, run=run, log=lambda m: None)
-    assert ran == [["run", "build", "-w", "@tesseradb/components"]]
+    assert ran == [["run", "bundle", "-w", "@tesseradb/components"]]
     assert [p.name for p in copied] == ["tessera-components.js", "tessera-components.js.sri"]
     assert (static / "tessera-components.js").read_text() == "bundle"
 

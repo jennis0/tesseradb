@@ -18,8 +18,8 @@ harness, built to answer one question: **does a running Tessera actually work?**
   `<tessera-status>`, `<tessera-count>`, `<tessera-item-card>`, `<tessera-filter>`,
   `<tessera-filter-panel>`, `<tessera-selection>`, `<tessera-store>` — a subpath entry each, the
   eight display states rendered through `part="state"`, tokens `--tessera-*`, parts, slots and
-  events per design §5. `npm run build -w @tesseradb/components` writes the single-file bundle with
-  the decode worker inlined and its SRI hash beside it (`dist/`).
+  events per design §5. `npm run bundle -w @tesseradb/components` writes the single-file bundle,
+  minified, with the decode worker inlined and its SRI hash beside it (`dist/`).
 - `react/` — `@tesseradb/react`. `useTesseraStore(options)` and `useProjection(store, name)` over
   `useSyncExternalStore`; the store is built in an effect paired with its `dispose`, so
   StrictMode's double mount leaks no driver. `@tesseradb/react/components` wraps every element
@@ -39,11 +39,23 @@ harness, built to answer one question: **does a running Tessera actually work?**
   (`--url`), and the §5.10 measurements printed.
 - `spike/` — the deck.gl tile-convention spike, kept as a regression guard.
 
-**Vite 8 and the decorators.** The elements use standard (TC39 stage-3) decorators with `accessor`,
-as design §5.9 decides; Vite 8's oxc transform lowers only the legacy form, so
-`components/vite-plugin-decorators.ts` runs esbuild over the component sources first. Both the dev
-server and the bundle use it; a host bundling the unbundled distribution needs the same or a
-transform of its own.
+**Building the packages.** `npm run build` here builds `core`, `deck`, `components` and `react` in
+that order into each package's `dist/`: ES2022 JavaScript and declarations from `tsc`, decorators
+lowered, and the decode worker as `dist/decode.worker.js` beside the decoder that loads it. Each
+package is versioned and packs with `npm pack`; none is published. Inside this workspace the
+packages resolve to their sources instead, through the `tessera-source` export condition, which
+`tsconfig.base.json` and each Vite and Vitest config name, so the tests, the viewer and the
+examples need no build.
+
+The decoder loads `decode.worker.js` from beside itself, a file the build writes with Arrow bundled
+in so that it loads without a bundler too. Vite and webpack follow the reference. esbuild does not:
+copy `@tesseradb/client/dist/decode.worker.js` beside the output, or give `setWorkerFactory` a
+factory.
+
+**Vite 8 and the decorators.** The elements use standard decorators with `accessor`. Vite 8's oxc
+transform lowers only the legacy form, so `components/vite-plugin-decorators.ts` runs esbuild over
+the component sources first for the viewer, the examples and the single-file bundle. The `dist/`
+build lowers them with `tsc`, so a host consuming the package needs no transform.
 
 The npm scope is `@tesseradb/*`, matching the Python package (design §8); it was `@tessera/*` until
 the store landed.

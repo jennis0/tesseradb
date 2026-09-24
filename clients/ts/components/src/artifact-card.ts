@@ -1,7 +1,7 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import {isFilterLayer, withMember, withoutMember, type Artifact, type ArtifactDetail, type ClauseVerb, type Masked, type Refusal} from '@tesseradb/client';
-import {attachedTopics, displayName} from '@tesseradb/deck';
+import {attachedTopics, displayName} from '@tesseradb/deck/internal';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';

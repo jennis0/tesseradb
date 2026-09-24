@@ -1,7 +1,7 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import {type Artifact, type ArtifactsProjection, type Masked, type ServedLineage} from '@tesseradb/client';
-import {attachedTopics, displayName} from '@tesseradb/deck';
+import {attachedTopics, displayName} from '@tesseradb/deck/internal';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState} from './states.js';
