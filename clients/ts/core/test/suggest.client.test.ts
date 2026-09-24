@@ -21,7 +21,7 @@ describe('TesseraClient.suggest', () => {
     let seenAuth = '';
     vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
       seenUrl = url;
-      seenAuth = (init?.headers as Record<string, string>).authorization;
+      seenAuth = (init?.headers as Record<string, string>).authorization!;
       return jsonResponse(200, {column: 'primary_category', q: 'mach', values: [], more: false});
     });
     const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: ''});

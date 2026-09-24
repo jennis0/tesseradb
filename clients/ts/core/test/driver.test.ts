@@ -1,41 +1,19 @@
 import {describe, expect, it} from 'vitest';
-import {Driver, type Clock} from '../src/driver.js';
+import {Driver} from '../src/driver.js';
 import {Replica} from '../src/replica.js';
 import {TesseraError} from '../src/client.js';
-import type {Quantisation, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {Quantisation, ViewportResponse} from '../src/types.js';
+import {fakeClock, response, result, tile} from './support.js';
 
 /**
- * The driver under a fake clock — the tests the old shape could not have.
- *
- * The first three pin the live defects the 2026-08-10 review found in the timer-soup controller:
- * a staleness bound the covered path starved, anticipation budgets nothing ever re-armed, and a
- * retry `setTimeout` that survived `cancel()`. Each was invisible precisely because scheduling
- * lived in the viewer where no clock could be injected.
+ * The driver under a fake clock: the staleness bound is reachable from the covered path,
+ * anticipation budgets re-arm, and a retry timer does not outlive `cancel()`.
  */
 
 const Q: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
 
 function emptyResponse(pin = 'p1'): ViewportResponse {
-  const result: ViewportResult = {
-    tiles: [],
-    ids: new BigUint64Array(0),
-    codes: new BigUint64Array(0),
-    positions: new Float64Array(0),
-    world: new Float32Array(0),
-    scalars: {},
-    subCells: null,
-    membership: {},
-    artifacts: []
-  };
-  return {
-    result,
-    timings: {serverUs: 0, admissionUs: 0, stageNs: null},
-    identityKey: 'ik',
-    contentKey: pin,
-    pin,
-    stale: false,
-    bytes: 0
-  };
+  return response(result(), {contentKey: pin});
 }
 
 /**
@@ -51,64 +29,16 @@ function emptyResponse(pin = 'p1'): ViewportResponse {
  */
 function servedResponse(visible: bigint, tiles = 1): ViewportResponse {
   const prefixes = Array.from({length: tiles}, (_, i) => BigInt(i));
-  const result: ViewportResult = {
-    tiles: prefixes.map((tile) => ({tile, visible, matched: visible, served: 1n})),
-    ids: BigUint64Array.from(prefixes.map((p) => p + 1n)),
-    codes: BigUint64Array.from(prefixes.map((p) => p + 1n)),
-    positions: Float64Array.from(prefixes.flatMap(() => [1, 1])),
-    world: Float32Array.from(prefixes.flatMap(() => [0.1, 0.1])),
-    scalars: {},
-    subCells: null,
-    membership: {},
-    artifacts: []
-  };
-  return {
-    result,
-    timings: {serverUs: 0, admissionUs: 0, stageNs: null},
-    identityKey: 'ik',
-    contentKey: 'p1',
-    pin: 'p1',
-    stale: false,
-    bytes: 0
-  };
-}
-
-function fakeClock(): Clock & {advance(ms: number): Promise<void>; t(): number} {
-  let now = 0;
-  let seq = 0;
-  const timers = new Map<number, {at: number; fire: () => void}>();
-  const drain = async () => {
-    for (let i = 0; i < 8; i++) await Promise.resolve();
-  };
-  return {
-    now: () => now,
-    t: () => now,
-    after(ms, fire) {
-      const id = ++seq;
-      timers.set(id, {at: now + ms, fire});
-      return id;
-    },
-    cancel(handle) {
-      timers.delete(handle as number);
-    },
-    async advance(ms) {
-      const target = now + ms;
-      for (;;) {
-        let nextId = -1;
-        for (const [id, t] of timers) {
-          if (t.at <= target && (nextId < 0 || t.at < timers.get(nextId)!.at)) nextId = id;
-        }
-        if (nextId < 0) break;
-        const t = timers.get(nextId)!;
-        timers.delete(nextId);
-        now = t.at;
-        t.fire();
-        await drain();
-      }
-      now = target;
-      await drain();
-    }
-  };
+  return response(
+    result({
+      tiles: prefixes.map((p) => tile(p, visible, {served: 1n})),
+      ids: BigUint64Array.from(prefixes.map((p) => p + 1n)),
+      codes: BigUint64Array.from(prefixes.map((p) => p + 1n)),
+      positions: Float64Array.from(prefixes.flatMap(() => [1, 1])),
+      world: Float32Array.from(prefixes.flatMap(() => [0.1, 0.1]))
+    }),
+    {contentKey: 'p1'}
+  );
 }
 
 function harness(opts: {
@@ -120,7 +50,7 @@ function harness(opts: {
 } = {}) {
   const clock = fakeClock();
   const calls: {zoom: number; k?: number; background?: boolean}[] = [];
-  const traces: {kind: string; fields: Record<string, number>}[] = [];
+  const traces: {kind: string; fields: Record<string, number | string>}[] = [];
   const hung: (() => void)[] = [];
   const replica = new Replica(
     async (req, _signal, background) => {
@@ -373,10 +303,8 @@ describe('driver', () => {
   });
 
   it('the cold view buys counts before marks — the first marks request is at the counted depth, not the average model\'s', async () => {
-    // The defect this pins, measured on rung 3 (2026-09-02): with no counts to plan from, the
-    // average model asked the first view of a session at depth 8 and was answered with 1,014,597
-    // points in 33.5 MB against a 500,000 budget, and the frame was then derived two levels
-    // shallower from 2.4 MB. The seed asks the same question for the price of the counting stage.
+    // With no counts to plan from, the first view of a session would be asked at a depth chosen
+    // blind. The counts-only seed plans the depth for the price of the counting stage.
     const clock = fakeClock();
     const calls: {zoom: number; k?: number}[] = [];
     const traces: {kind: string; fields: Record<string, number | string>}[] = [];
@@ -392,13 +320,7 @@ describe('driver', () => {
           ...emptyResponse(),
           result: {
             ...result,
-            tiles: Array.from({length: n}, (_, i) => ({
-              tile: BigInt(i),
-              visible: 10_000n,
-              matched: 10_000n,
-              served: 0n,
-              highlighted: 10_000n
-            }))
+            tiles: Array.from({length: n}, (_, i) => tile(BigInt(i), 10_000n))
           }
         };
       },

@@ -2,20 +2,21 @@ import {describe, expect, it} from 'vitest';
 import {CELL_GRID} from '../src/coords.js';
 import {XYZ, basemapScheme, lonLatOfCell} from '../src/projection.js';
 import type {Quantisation, ViewInfo} from '../src/types.js';
+import {view as plain} from './support.js';
 
 /** `/v1/meta`'s four projection fields, as the server publishes them for one view. */
 const view = (
   projection: ViewInfo['projection'],
   tileScheme: ViewInfo['tileScheme'] = null,
   tile: ViewInfo['tile'] = null
-): ViewInfo => ({
-  id: 's0',
-  displayName: 'S0',
-  projection,
-  worldAspect: projection === 'web_mercator' ? 1 : projection === 'none' ? null : 2,
-  tileScheme,
-  tile
-});
+): ViewInfo =>
+  plain('s0', {
+    displayName: 'S0',
+    projection,
+    worldAspect: projection === 'web_mercator' ? 1 : projection === 'none' ? null : 2,
+    tileScheme,
+    tile
+  });
 
 /** The whole world: every projection's output is the unit square (`projections.md` §4). */
 const world: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};

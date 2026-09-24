@@ -6,6 +6,7 @@ import {bandsOfResult, BandCache, distinctOrdinals} from '../src/bands.js';
 import {NO_ORDINAL, SessionArtifactTable} from '../src/artifactTable.js';
 import {GRID32_CENTRE, artifactColours} from '../src/palette.js';
 import type {Artifact, ViewportResult} from '../src/types.js';
+import {artifact, result, tile} from './support.js';
 
 /**
  * The per-point membership column (D12, §5.10): a nullable `u64` named `membership:<layer>`
@@ -114,36 +115,21 @@ describe('the membership column in the decoder', () => {
   });
 });
 
-const artifact = (id: bigint, parent: bigint | null = null, layer = 'l', rung = 0): Artifact => ({
-  layer,
-  tesseraId: id,
-  key: `c-${id}`,
-  maskedCount: 1n,
-  centroid: null,
-  box: null,
-  shape: null,
-  content: [],
-  parentIds: parent === null ? [] : [parent],
-  rung
-});
+const member = (id: bigint, parent: bigint | null = null, layer = 'l', rung = 0): Artifact =>
+  artifact(id, {layer, key: `c-${id}`, parentIds: parent === null ? [] : [parent], rung});
 
 /** A response of `tiles.length` tiles, each of its own served count, with a membership column. */
-function result(tiles: number[], local: number[], ids: bigint[], artifacts: Artifact[]): ViewportResult {
+function withMembers(tiles: number[], local: number[], ids: bigint[], artifacts: Artifact[]): ViewportResult {
   const n = tiles.reduce((a, b) => a + b, 0);
-  return {
-    tiles: tiles.map((served, i) => ({tile: BigInt(i), visible: BigInt(served), matched: BigInt(served), highlighted: BigInt(served), served: BigInt(served)})),
+  return result({
+    tiles: tiles.map((served, i) => tile(BigInt(i), BigInt(served), {served: BigInt(served)})),
     ids: BigUint64Array.from({length: n}, (_, i) => BigInt(i + 1)),
     codes: new BigUint64Array(n),
     positions: new Float64Array(n * 2),
     world: new Float32Array(n * 2),
-    scalars: {},
     membership: {l: {index: Uint16Array.from(local), ids: BigUint64Array.from(ids)}},
-    highlighted: null,
-    target: null,
-    subCells: null,
-    artifacts,
-    artifactsIdentity: null
-  };
+    artifacts
+  });
 }
 
 const meta = (table: SessionArtifactTable) => ({identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0, table});
@@ -152,7 +138,7 @@ describe('naming on the main thread', () => {
   it('remaps each band from local index to session ordinal, and takes one reference per distinct ordinal per band', () => {
     const table = new SessionArtifactTable();
     // Two tiles of two points; ids 10 and 20 as locals 1 and 2; parent link 20 → 10 in the frame.
-    const bands = bandsOfResult(result([2, 2], [1, 1, 2, 0], [10n, 20n], [artifact(10n), artifact(20n, 10n)]), 3, meta(table));
+    const bands = bandsOfResult(withMembers([2, 2], [1, 1, 2, 0], [10n, 20n], [member(10n), member(20n, 10n)]), 3, meta(table));
     const o10 = table.ordinalOf('l', 10n);
     const o20 = table.ordinalOf('l', 20n);
     expect(o10).toBeGreaterThan(NO_ORDINAL);
@@ -173,15 +159,15 @@ describe('naming on the main thread', () => {
 
   it('names the same artifact with the same ordinal across two responses', () => {
     const table = new SessionArtifactTable();
-    const first = bandsOfResult(result([1], [1], [10n], [artifact(10n)]), 3, meta(table));
+    const first = bandsOfResult(withMembers([1], [1], [10n], [member(10n)]), 3, meta(table));
     // A second response lists the id second: its local index differs, its ordinal does not.
-    const second = bandsOfResult(result([2], [2, 1], [99n, 10n], [artifact(99n), artifact(10n)]), 3, meta(table));
+    const second = bandsOfResult(withMembers([2], [2, 1], [99n, 10n], [member(99n), member(10n)]), 3, meta(table));
     expect(second[0]!.membership['l']!.ordinals[0]).toBe(first[0]!.membership['l']!.ordinals[0]);
     expect(table.live).toBe(2);
   });
 
   it('names nothing without a table, and carries no column', () => {
-    const bands = bandsOfResult(result([1], [1], [10n], [artifact(10n)]), 3, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
+    const bands = bandsOfResult(withMembers([1], [1], [10n], [member(10n)]), 3, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
     expect(bands[0]!.membership).toEqual({});
   });
 });
@@ -190,13 +176,13 @@ describe('the cache releases what a band held', () => {
   it('on replacement, truncation and an identity drop — and carries a layer over a refetch that did not name it', () => {
     const table = new SessionArtifactTable();
     const cache = new BandCache(1e9, table);
-    const [a] = bandsOfResult(result([4], [1, 1, 2, 2], [10n, 20n], [artifact(10n), artifact(20n)]), 3, meta(table));
+    const [a] = bandsOfResult(withMembers([4], [1, 1, 2, 2], [10n, 20n], [member(10n), member(20n)]), 3, meta(table));
     cache.put(a!);
     expect(table.live).toBe(2);
 
     // The same tile refetched for another layer's column: same set, same content key. The `l`
     // column and its references carry over; the new layer's references are added.
-    const refetched = bandsOfResult(result([4], [0, 0, 0, 0], [], []), 3, meta(table))[0]!;
+    const refetched = bandsOfResult(withMembers([4], [0, 0, 0, 0], [], []), 3, meta(table))[0]!;
     refetched.membership = {m: {ordinals: Uint32Array.from([0, 0, 0, 0]), distinct: new Uint32Array(0)}};
     cache.put(refetched);
     expect(cache.get(3, 0n)!.membership['l']).toBe(a!.membership['l']);
@@ -204,7 +190,7 @@ describe('the cache releases what a band held', () => {
 
     // Truncated to its head: the distinct list shrinks and the tail's ordinal is released.
     const tiny = new BandCache(1, table);
-    const [b] = bandsOfResult(result([4], [1, 1, 2, 2], [10n, 20n], [artifact(10n), artifact(20n)]), 3, meta(table));
+    const [b] = bandsOfResult(withMembers([4], [1, 1, 2, 2], [10n, 20n], [member(10n), member(20n)]), 3, meta(table));
     tiny.put(b!);
     tiny.evict({depth: 3, prefix: 0n});
     const kept = tiny.get(3, 0n)!;
@@ -253,13 +239,13 @@ describe('the membership golden (captured against the notebook layer, the layer 
 describe('a band is coloured by the response that carried it (§5.10)', () => {
   /** The same artifact, with a centroid — what a positional colour is a function of. */
   const placed = (id: bigint, dx: number, parent: bigint | null = null, rung = 0): Artifact => ({
-    ...artifact(id, parent, 'l', rung),
+    ...member(id, parent, 'l', rung),
     centroid: [GRID32_CENTRE + dx, GRID32_CENTRE]
   });
 
   it('takes each artifact’s centroid from the frame that named it, the point path’s included', () => {
     const table = new SessionArtifactTable();
-    bandsOfResult(result([2], [1, 1], [10n], [placed(10n, 1e9)]), 3, meta(table));
+    bandsOfResult(withMembers([2], [1, 1], [10n], [placed(10n, 1e9)]), 3, meta(table));
     const parent = table.ordinalOf('l', 10n);
     expect(table.entry(parent)!.centroid).toEqual([GRID32_CENTRE + 1e9, GRID32_CENTRE]);
     // Every live ordinal is colourable, and the colour is the centroid's.
@@ -273,12 +259,12 @@ describe('a band is coloured by the response that carried it (§5.10)', () => {
   it('keeps a coarse band coloured when a finer response moves the cut under it', () => {
     const table = new SessionArtifactTable();
     // The coarse cut: one parent, and a band whose points belong to it.
-    const coarse = bandsOfResult(result([2], [1, 1], [10n], [placed(10n, 1e9)]), 3, meta(table));
+    const coarse = bandsOfResult(withMembers([2], [1, 1], [10n], [placed(10n, 1e9)]), 3, meta(table));
     const parent = table.ordinalOf('l', 10n);
     // A zoom in. The point response's own artifacts frame carries the children — the debounced
     // `k = 0` channel is still two hundred milliseconds behind on the coarse cut.
     const fine = bandsOfResult(
-      result([2], [1, 2], [20n, 21n], [placed(20n, 9e8, 10n, 1), placed(21n, 11e8, 10n, 1)]),
+      withMembers([2], [1, 2], [20n, 21n], [placed(20n, 9e8, 10n, 1), placed(21n, 11e8, 10n, 1)]),
       3,
       meta(table)
     );
