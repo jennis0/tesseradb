@@ -47,51 +47,70 @@ The same rules. A module doc carries the design argument when the module upholds
 
 ## User documentation
 
-The rules above apply to `docs/start/`, `docs/guides/` and `docs/reference/` as well. These pages have a different reader: someone using Tessera to get something done, who wants the next step more than the reason for it. The reason belongs in `docs/system/`, and a user page links there when a reader will want it.
+The rules above were written for the system chapters, whose reader is assessing a design. The pages in `docs/start/`, `docs/guides/` and `docs/reference/` have a different reader: someone learning Tessera or using it to get something done. Where this section and the rules above differ, this section wins on those pages. British spelling and the evidence rules apply everywhere.
 
-A tutorial takes a newcomer from nothing to a working result along one path. A guide does one task for a reader who has finished a tutorial. A reference page is looked up, not read: every key, flag, route or method, with its type, default and what it refuses.
+There are three kinds of user page, and each is written differently. A tutorial teaches a newcomer by walking them through building something. A guide helps someone who already knows the basics do one task. A reference page is looked up, not read.
 
-### Voice
+### Tutorials
 
-Address the reader as "you" and give instructions as imperatives. "Run `tessera check`." Do not write "we", "let's", "the user should" or "you may want to".
+A tutorial reads like a knowledgeable, patient person sitting beside the reader while they do something for the first time.
 
-Open a tutorial with what the reader will have at the end and what they need before starting, in two or three sentences. Then give the first step. Open a guide with the task. End a page when its last step is done, without a recap or a list of next steps.
+It opens with a promise. Say who the tutorial is for, what the reader will have built by the end, what they will understand that they did not before, roughly how long it takes, and what they need. Then show the journey before walking it: a short outline of the stages, so every later step has somewhere to hang and the reader always knows where they are.
 
-A heading names what the reader does in that section ("Build the bundle"), or, in reference, the thing described (`[serve]`). A section holds as much as one step needs. Do not put a heading over every paragraph.
+It teaches a mental model, not a list of commands. Before each step, say what we are about to do and why it is needed; after it, say what happened and what to notice in the output. By the end the reader should be able to explain the pipeline to someone else: source data, a declaration that describes it, a build that turns both into a bundle, a server with three separate doors, and tokens that decide what each viewer sees.
 
-Use a numbered list for steps done in order and a bulleted list for items that are parallel. Everything else is prose. On these pages no list item starts with a bold phrase, whatever rule 5 allows elsewhere.
+Introduce each idea at the moment it is needed, one at a time, with the concrete case first and the name second, in plain words. "Every place on this map is tagged with who may see it. Tessera calls that tag an access label." A term the reader has not met is never used without this. Deeper explanation can wait for a link to the system chapters; the basic "what is this" cannot.
 
-An admonition box is for something that loses data, exposes an item a viewer should not see, or is not built yet. An ordinary sentence goes in the text.
+Give the reader visible progress early and often. A clean `check`, a count that matches what was expected, a map appearing: point them out.
+
+Never let the reader get lost. Every step works exactly as written, and the expected output is shown so they can tell they are on track. Where something is likely to go wrong, say what that looks like and what to do. Follow one path; choices belong in guides.
+
+Invite a little exploration where it teaches something: remove a required key and watch the check fail, or apply a second filter and watch the count change.
+
+End by consolidating: what the reader built, the ideas they now understand, and one or two natural next steps.
+
+The voice is warm, confident and conversational. "We" is natural for work done together and "you" for what the reader does. Admit what looks odd and explain it. Personality comes from specifics and from having a view, not from enthusiasm or exclamation marks.
+
+### Guides
+
+A guide opens with the task and when you would need it, in a few sentences. Each step says briefly why it matters, then how. Terms are defined at first use or linked to where they are. Warmth is welcome, but the reader has come to finish a job, so a guide explains less than a tutorial and moves faster.
+
+### Reference
+
+A reference page is terse and complete: every key, flag, route or method, with its type, default, what it does and what it refuses. One or two sentences per item. No narrative.
 
 ### Evidence
 
-Every command on a page was run, and its output is pasted as printed. Cut long output with a line reading `...`, and never retype it. The numbers are the ones the run printed, even when they are untidy. When a page is revised, the commands are run again.
+Every command on a user page was run, and its output is pasted as printed. Cut long output with a line reading `...`, and never retype it. The numbers are the ones the run printed, even when they are untidy. When a page is revised, the commands are run again.
 
 Examples use real data and real names: the GeoNames extract the tutorial builds, its `feature_class` column, the refusal the server returns. Do not use `foo`, `my_column` or `example.com` when a real value exists.
 
 Quote an error message exactly, and say what to change.
 
-### What gives prose away as generated
+### What makes prose read as generated
 
-`scripts/check-register.sh` rejects the stock phrases of generated documentation on these pages as well as the vocabulary in the Register section; the script holds the list. It cannot catch the following, and review looks for them:
+The tell is emptiness, not structure. An introduction, an outline and a closing summary are all right in a tutorial. What gives them away is being generic: a promise of "a powerful, interactive visualisation", an outline that repeats the headings, a summary that says nothing the reader could not have guessed before starting. Fill each one with specifics that only this tutorial could contain.
 
-- Paragraphs of the same length, each closing with a sentence that restates it.
-- Sentences opening "X lets you" or "With X, you can", or a colon reveal ("The result: a map").
-- Signposting: "Here's how", "Now that you have", "As we saw", "It's worth noting".
-- Rhetorical questions, reassurance ("don't worry") and enthusiasm.
-- Three examples when one would do, or two options put side by side for balance.
-- Generic claims no run could contradict ("Tessera handles large data efficiently"). Give the figure and its conditions, or cut the claim.
+Review looks for:
+
+- Claims no run could contradict ("Tessera handles large data efficiently"). Give the figure and its conditions, or cut the claim.
+- Enthusiasm, hype and reassurance in place of information ("That's it!", "don't worry", "seamlessly").
+- Every paragraph the same length and shape, or every sentence the same rhythm.
+- Explanations that restate the command instead of saying what it does and why.
+- Three examples where one would do, or options set side by side for balance.
+
+`scripts/check-register.sh` rejects the stock phrases of generated documentation on user pages; the script holds the list.
 
 ### Before and after
 
 > ✗ In this tutorial, we'll walk through building your first Tessera map. By the end, you'll have a powerful, interactive visualisation of your data, ready to explore!
 >
-> ✓ You will build a map of every place in the GeoNames extract for Ireland and open it in a browser. You need the `tessera` binary and the extract, which the first step downloads.
+> ✓ This tutorial is for someone who has never used Tessera. We'll take the 29,935 places GeoNames lists for Ireland, from 12,159 towns and villages to 3,970 hills and mountains, and turn them into a map you can search and filter in a browser. Along the way you'll meet the four things every Tessera deployment is made of: a declaration, a bundle, a server and a token. The commands take about four minutes to run, half of that building the binary.
 
-> ✗ **Credentials:** Tessera uses credentials to ensure that only authorised clients can access the session plane.
+> ✗ `point_visibility` names no field to read an access label from, so every place gets the default label, `public`.
 >
-> ✓ The session plane refuses a request without the session credential. Put the credential in a file readable only by the service's user, and name the file in `session_credential_file`.
+> ✓ Tessera decides who may see each place by tagging it with an access label, and each viewer is allowed a set of labels. A label can come from a column in your data, so that different rows are visible to different people. We have no such column, so the `default` in `point_visibility` gives every place the same label, `public`. In a later tutorial you'll give places different labels and watch two viewers see two different maps.
 
-> ✗ That's it! You've successfully deployed Tessera. Now that your service is running, you can explore filters, annotation layers and more.
+> ✗ Run `tessera build`.
 >
-> ✓ *(Nothing. The page ends after the last step.)*
+> ✓ Now build the bundle. The build reads every row of `points.parquet`, projects each place onto the map, sorts the places so that nearby ones sit together on disc, and writes the result into the `bundle` directory. The bundle is what the server opens; it never reads your Parquet files.

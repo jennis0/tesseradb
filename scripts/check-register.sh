@@ -56,10 +56,6 @@ EOF
 )
 
 USER_PATTERNS=$(cat <<'EOF'
-\bin this (guide|tutorial|section|page)\b
-\blet['’]s\b
-\bwe will\b
-\bwe['’]ll\b
 \bseamless(ly)?\b
 \brobust\b
 \bpowerful\b
