@@ -28,6 +28,13 @@ import './count.js';
  *
  * One refusal covers every withheld case and nothing here tells them apart.
  */
+/** A `role="button"` row's keys: Enter and Space press it. */
+const onKeys = (press: () => void) => (e: KeyboardEvent) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  press();
+};
+
 /** What each kind of drawn shape says on the card. */
 const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
   derived: 'derived — the hull of the members you can see',
@@ -230,7 +237,7 @@ export class TesseraArtifactCard extends TesseraElement {
         ? html`<div part="label" class="xs muted parents-label">Parents</div>
             <ul part="parents" class="list">
               ${parents.map(
-                (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.tesseraId)} @click=${() => void s?.openArtifact(pnt.tesseraId)}>
+                (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.tesseraId)} @click=${() => void s?.openArtifact(pnt.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(pnt.tesseraId))}>
                   <span part="name" class="name">${displayName(pnt, topics) ?? UNNAMED}</span>
                   <tessera-count .masked=${{value: Number(pnt.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
                 </li>`
@@ -241,7 +248,7 @@ export class TesseraArtifactCard extends TesseraElement {
         ? html`<div part="label" class="xs muted children-label">Children in this view</div>
             <ul part="children" class="list">
               ${children.map(
-                (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)}>
+                (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(c.tesseraId))}>
                   <span part="name" class="name">${displayName(c, topics) ?? UNNAMED}</span>
                   <tessera-count .masked=${{value: Number(c.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
                 </li>`

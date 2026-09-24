@@ -1,5 +1,5 @@
 import {ContextProvider} from '@lit/context';
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type PropertyValues} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import type {Store} from '@tesseradb/client';
 import {activeCount, artifactBudgetFor, browsableLayers, emptyDraft, levelForBudget} from '@tesseradb/client';
@@ -64,6 +64,13 @@ const FORWARD = {
 const ALL_PANELS = ['toolbar', 'legend', 'filters', 'hierarchy', 'artifacts', 'selection', 'detail'] as const;
 type Panel = (typeof ALL_PANELS)[number];
 type Sheet = 'filters' | 'layers' | 'artifacts' | 'detail';
+/** The narrow layout's tabs, each opening a sheet, drawn where its panel is. */
+const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}[] = [
+  {sheet: 'filters', icon: 'filter', label: 'Filters', panel: 'filters'},
+  {sheet: 'layers', icon: 'layers', label: 'Layers', panel: 'legend'},
+  {sheet: 'artifacts', icon: 'list', label: 'In view', panel: 'artifacts'},
+  {sheet: 'detail', icon: 'info', label: 'Item', panel: 'detail'}
+];
 
 export class TesseraExplorer extends TesseraElement {
   static override styles = [
@@ -307,6 +314,8 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: 'title-field'}) accessor titleField = '';
   @property({type: Number}) accessor budget = 0;
   @state() accessor sheet: Sheet | null = null;
+  /** The narrow layout's tab focused last, which keeps the tab list's one place in the tab order. */
+  @state() private accessor tabFocus: Sheet | null = null;
   /** The level chosen through the legend's select; the map colours and labels at it. */
   @state() accessor level: number | null = null;
 
@@ -413,8 +422,16 @@ export class TesseraExplorer extends TesseraElement {
         : nothing}
     </div>`;
 
-    const tab = (name: Sheet, ic: IconName, label: string) =>
-      html`<button type="button" role="tab" aria-selected=${this.sheet === name ? 'true' : 'false'} @click=${() => (this.sheet = this.sheet === name ? null : name)}>${icon(ic, 18)}${label}</button>`;
+    const tabs = TABS.filter((t) => this.has(t.panel));
+    // One tab is in the page's tab order: the one focused last, else the open sheet's, else the first.
+    const reachable = tabs.find((t) => t.sheet === this.tabFocus) ?? tabs.find((t) => t.sheet === this.sheet) ?? tabs[0];
+    const tab = ({sheet, icon: ic, label}: (typeof TABS)[number]) =>
+      html`<button type="button" role="tab" id=${`tab-${sheet}`} data-sheet=${sheet} tabindex=${reachable?.sheet === sheet ? '0' : '-1'}
+        aria-selected=${this.sheet === sheet ? 'true' : 'false'} aria-controls=${this.sheet === sheet ? 'sheet' : nothing}
+        @click=${() => {
+          this.tabFocus = sheet;
+          this.sheet = this.sheet === sheet ? null : sheet;
+        }}>${icon(ic, 18)}${label}</button>`;
     // The filters sheet's primary action names the number it will produce (`ExplorerNarrow.png`).
     const matched = s?.get('view').matched;
     const matchedText = matched && matched.exact && s?.get('status').status === 'shown' ? `Show ${matched.value.toLocaleString('en-GB')} matched` : 'Show';
@@ -459,16 +476,42 @@ export class TesseraExplorer extends TesseraElement {
         ${this.querySelector('[slot="tooltip"]') ? html`<slot name="tooltip" slot="tooltip"></slot>` : nothing}
       </tessera-map>
       ${this.layout === 'overlay' ? html`${overlayLeft}${overlayRight}` : docked}
-      ${this.sheet && sheetBody !== nothing ? html`<div part="sheet" role="dialog">${sheetBody}</div>` : nothing}
+      ${this.sheet && sheetBody !== nothing
+        ? html`<div part="sheet" id="sheet" role="dialog" aria-labelledby=${`tab-${this.sheet}`} tabindex="-1" @keydown=${this.onSheetKey}>${sheetBody}</div>`
+        : nothing}
       <div part="strip-row"><tessera-status exportparts=${FORWARD.status}></tessera-status></div>
-      <div part="tabs" role="tablist">
-        ${this.has('filters') ? tab('filters', 'filter', 'Filters') : nothing}
-        ${this.has('legend') ? tab('layers', 'layers', 'Layers') : nothing}
-        ${this.has('artifacts') ? tab('artifacts', 'list', 'In view') : nothing}
-        ${this.has('detail') ? tab('detail', 'info', 'Item') : nothing}
-      </div>
+      <div part="tabs" role="tablist" aria-label="Explorer panels" @keydown=${this.onTabKey}>${tabs.map(tab)}</div>
       ${meta ? nothing : nothing}
     </div>`;
+  }
+
+  /** The tab list's keys: the arrows move between tabs, wrapping, and Home and End go to the ends. */
+  private onTabKey = (e: KeyboardEvent): void => {
+    const buttons = [...this.renderRoot.querySelectorAll<HTMLButtonElement>('[part="tabs"] [role="tab"]')];
+    const at = buttons.indexOf(e.target as HTMLButtonElement);
+    if (at < 0) return;
+    const n = buttons.length;
+    const next = {ArrowRight: (at + 1) % n, ArrowLeft: (at - 1 + n) % n, Home: 0, End: n - 1}[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    const target = buttons[next]!;
+    this.tabFocus = target.dataset.sheet as Sheet;
+    target.focus();
+  };
+
+  /** Escape closes the sheet. */
+  private onSheetKey = (e: KeyboardEvent): void => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    this.sheet = null;
+  };
+
+  /** Focus goes into a sheet as it opens, and back to its tab as it closes. */
+  protected override updated(changed: PropertyValues<this>): void {
+    if (!changed.has('sheet')) return;
+    const before = changed.get('sheet');
+    if (this.sheet) this.renderRoot.querySelector<HTMLElement>('[part="sheet"]')?.focus();
+    else if (before) this.renderRoot.querySelector<HTMLElement>(`[role="tab"][data-sheet="${before}"]`)?.focus();
   }
 
   /** See `render`: the level a tiered layer draws at when nothing was chosen. */

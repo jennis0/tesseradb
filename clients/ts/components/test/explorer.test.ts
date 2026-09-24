@@ -84,3 +84,44 @@ describe('<tessera-explorer title-field>', () => {
     expect(card.shadowRoot!.querySelector('[part="headline"]')?.getAttribute('data-name')).toBe('author');
   });
 });
+
+describe('<tessera-explorer> narrow layout', () => {
+  const tabs = (shadow: ShadowRoot) => [...shadow.querySelectorAll<HTMLButtonElement>('[part="tabs"] [role="tab"]')];
+  const key = (el: Element, k: string) => el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, composed: true, cancelable: true}));
+
+  it('moves between tabs with the arrow keys, Home and End, keeping one tab in the tab order', async () => {
+    const {host, shadow} = await explorer();
+    const all = tabs(shadow);
+    expect(all.map((t) => t.tabIndex)).toEqual([0, -1, -1, -1]);
+    all[0]!.focus();
+    key(all[0]!, 'ArrowRight');
+    await settle(host);
+    expect(shadow.activeElement).toBe(tabs(shadow)[1]);
+    expect(tabs(shadow).map((t) => t.tabIndex)).toEqual([-1, 0, -1, -1]);
+    key(tabs(shadow)[1]!, 'ArrowLeft');
+    key(tabs(shadow)[0]!, 'ArrowLeft');
+    await settle(host);
+    expect(shadow.activeElement).toBe(tabs(shadow)[3]);
+    key(tabs(shadow)[3]!, 'Home');
+    await settle(host);
+    expect(shadow.activeElement).toBe(tabs(shadow)[0]);
+    key(tabs(shadow)[0]!, 'End');
+    await settle(host);
+    expect(shadow.activeElement).toBe(tabs(shadow)[3]);
+  });
+
+  it('moves focus into a sheet as it opens, closes it on Escape, and returns focus to its tab', async () => {
+    const {host, shadow} = await explorer();
+    const filters = tabs(shadow)[0]!;
+    filters.click();
+    await settle(host);
+    const sheet = shadow.querySelector('[part="sheet"]')!;
+    expect(sheet.getAttribute('role')).toBe('dialog');
+    expect(shadow.activeElement).toBe(sheet);
+    expect(filters.getAttribute('aria-selected')).toBe('true');
+    key(sheet, 'Escape');
+    await settle(host);
+    expect(shadow.querySelector('[part="sheet"]')).toBeNull();
+    expect(shadow.activeElement).toBe(tabs(shadow)[0]);
+  });
+});

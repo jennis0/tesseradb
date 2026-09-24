@@ -267,6 +267,25 @@ describe('<tessera-artifact-card> follows the served set', () => {
     expect(text).not.toMatch(/inside/);
   });
 
+  it('opens a parent or a child row on Enter and on Space, as on a click', async () => {
+    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const served = [artifact(1n, 100n, null, ['Alpha']), artifact(2n, 40n, 1n, ['Beta']), artifact(3n, 10n, 2n, ['Gamma'])];
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
+    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 2n, detail: {layer: 'clusters', key: 'c-2', maskedCount: 40n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
+    await settle(host);
+    const press = (selector: string, key: string) => {
+      const row = deep(host, selector)!;
+      const e = new KeyboardEvent('keydown', {key, bubbles: true, cancelable: true});
+      row.dispatchEvent(e);
+      return e.defaultPrevented;
+    };
+    expect(press('[part="parent"]', 'Enter')).toBe(true);
+    expect(press('[part="child"]', ' ')).toBe(true);
+    expect(press('[part="child"]', 'a')).toBe(false);
+    expect(store.calls.filter((c) => c.name === 'openArtifact').map((c) => c.args[0])).toEqual([1n, 3n]);
+  });
+
   it('lists a child on the card of each served parent it names (decision 0117)', async () => {
     const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
     const served = [artifact(1n, 100n, null, ['Alpha']), artifact(2n, 90n, null, ['Beta']), {...artifact(3n, 10n, null, ['Gamma']), parentIds: [1n, 2n]}];
