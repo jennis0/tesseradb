@@ -2,71 +2,42 @@ import type {Device, Texture} from '@luma.gl/core';
 import {NEUTRAL, NO_ORDINAL, type ArtifactsProjection, type ArtifactTableChange, type Rgba} from '@tesseradb/client';
 
 /**
- * The lookup texture (design §5.10, decision 0100): one RGBA entry per session ordinal, sized to
- * the table's range in powers of two, read by the point shader as `colour = lut[ordinal]` when
- * colouring by cluster.
- *
- * **Every colouring interaction is a rewrite of this texture and never a per-point pass.** A
- * palette change, the level chosen to colour at, highlighting the opened artifact and dimming the
- * rest, and the switch between cluster and column colour (a uniform, not even a rewrite) — each
- * is O(artifacts): the table's range, which is bounded by resident marks through the ordinals'
- * refcounts, not by the layer. A per-point colour rewrite at several million marks is tens of
- * milliseconds and a 12 MB upload per interaction, and is the construction refused.
+ * The lookup texture: one RGBA texel per session ordinal, read by the mark shader as
+ * `colour = lut[ordinal]` when colouring by cluster. A palette change, the level coloured at and
+ * a highlight each rewrite this texture in O(artifacts) instead of recolouring every mark.
  *
  * `lut[o]` is the colour of `resolve(o)`: the walk up `o`'s parent links to the nearest artifact
- * a colour is known for at the chosen level (`SessionArtifactTable.resolve`), neutral where the
- * walk fails — an edge never seen. Nothing here is a geometric guess (decision 0099).
+ * the colour map has a colour for at the chosen level, neutral where the walk finds none. The
+ * colour map covers every artifact the session table holds, including those a points response
+ * named before the artifact channel caught up, so a mark wears the colour of an artifact the
+ * server said it belongs to.
  *
- * **The walk stops at what is colourable, not at what the current view was served.** The colour
- * map covers every artifact the session table holds (`store.ts`), which includes the ones a
- * point response's own frame named while the debounced artifact channel was still on the last
- * cut. Resolving against the channel's set alone drew a band neutral for as long as it took the
- * channel to catch up, and again for every band held under a coarser cut once it had — the grey
- * banding on a zoom in. A point coloured this way still wears the colour of an artifact the wire
- * said it belongs to, which is what exact-only asks (§5.10).
+ * The texture is 1,024 texels wide and grows in rows, so an ordinal's texel is
+ * `(o & 1023, o >> 10)`.
  *
- * The texture is a fixed 1,024 texels wide and grows in rows, so an ordinal's texel is
- * `(o & 1023, o >> 10)` with no division in the shader.
- *
- * ## Rewriting is bounded by what changed, not by what the table holds
- *
- * The coverage rule above is about **which ordinals have a colour** and is unchanged by anything
- * here. What is bounded is the *cadence*: the session table holds whole levels once the artifact
- * channel has promoted them — 226k entries on GeoNames — and a settled view at new ground names a
- * few hundred it had not seen. Rebuilding all 226k texels and uploading the megabyte per settle
- * costs the hold rather than the change.
- *
- * So a rewrite is a **patch** — the changed ordinals' texels, and only the texture rows they fall
- * in — when the table's change list (`SessionArtifactTable.changesSince`) says every change since
- * the last build was an ordinal being **named**, and the caller handed in the same colour map
- * object. Anything else rebuilds whole. The rule is that narrow because a texel is
- * `colour(resolve(o))`, so a change to one entry moves every texel resolving *through* it: a
- * colour arriving, a link set on an entry that was already here, a slot freed — each can move a
- * texel that is not its own. A newly named ordinal cannot: nothing points at it yet, and the link
- * that would is reported against the child.
- *
- * A different colour map object is a recolour — the palette or the ground changed, and every texel
- * with it — because the store extends the map in place while the palette holds (`store.ts`).
- * Highlighting an artifact and choosing the level to colour at also move every texel; both are in
- * the key, and both are gestures rather than settles.
+ * An update patches only the rows of the changed ordinals when every table change since the last
+ * build was an ordinal being named and the colour map is the same object. Anything else rebuilds
+ * whole. A texel is `colour(resolve(o))`, so a new colour, a new link or a freed slot can move
+ * texels that resolve through the changed entry. A newly named ordinal cannot: nothing points at
+ * it yet. The store extends the colour map in place while the palette holds, so a new map object
+ * means every texel may have moved.
  */
 
-/** Texels per row — a power of two, so the shader masks and shifts. */
+/** Texels per row, a power of two so the shader masks and shifts. */
 export const LUT_WIDTH = 1024;
 export const LUT_SHIFT = 10;
 
 export type LutInputs = {
   artifacts: Pick<ArtifactsProjection, 'table' | 'colours'>;
-  /** The level to colour at — `undefined` colours at the deepest served (§5.10). */
+  /** The level to colour at; `undefined` colours at the deepest served. */
   level?: number;
   /** The opened artifact's ordinal: full colour for it and what resolves to it, the rest dimmed. */
   highlight?: number;
 };
 
 /**
- * The ordinals of a change list where **every** change is an ordinal being named, else null: the
- * one shape a patch may serve (see the head of this module). A null change list — a reader
- * further behind than the table's journal — is the same answer.
+ * The ordinals of a change list when every change is an ordinal being named, else null. A null
+ * change list, from a reader further behind than the table's journal, gives null.
  */
 function namedOnly(changes: readonly ArtifactTableChange[] | null): number[] | null {
   if (!changes) return null;
@@ -92,13 +63,9 @@ export function lutRows(range: number): number {
 }
 
 /**
- * Writes one ordinal's texel into `data`, for the inputs given: the colour of what the ordinal
- * resolves to, dimmed unless it is the highlight, neutral where the walk fails or the slot is
- * free. Stated once and used by both the whole build and the patch, so the two cannot disagree.
- *
- * The resolve is memoised per resolved ordinal — every ordinal resolving to the same artifact
- * gets the same bytes, and there are at most `colours.size` distinct answers — so the memo is
- * worth building for a whole pass and is handed back for a patch to share.
+ * A writer of one ordinal's texel into `data`: the colour of what the ordinal resolves to, dimmed
+ * unless it is the highlight, neutral where the walk fails or the slot is free. Returns false for
+ * a live ordinal whose walk found no colour yet. The build and the patch both use it.
  */
 function texelWriter(inputs: LutInputs, data: Uint8Array): (ordinal: number) => boolean {
   const {table, colours} = inputs.artifacts;
@@ -115,9 +82,8 @@ function texelWriter(inputs: LutInputs, data: Uint8Array): (ordinal: number) => 
   const neutral = highlight !== NO_ORDINAL ? dimmed(NEUTRAL) : NEUTRAL;
   return (o: number) => {
     let c: Rgba;
-    // **Settled** means the texel is final for this map: neutral by right (no ordinal, a freed
-    // slot) or coloured. A live ordinal whose walk finds no colour is *not* settled — the map
-    // simply has not been extended to it yet — and the caller keeps it to try again.
+    // Settled means the texel is final for this map: neutral for no ordinal or a freed slot, or
+    // coloured. A live ordinal with no colour yet is kept by the caller to try again.
     let settled = true;
     if (o === NO_ORDINAL) c = neutral;
     else if (!table.entry(o)) c = NEUTRAL;
@@ -152,8 +118,7 @@ export function buildLut(inputs: LutInputs): {data: Uint8Array; rows: number; ra
 
 /**
  * Rewrite `ordinals`' texels in `data` and return the half-open row span they fall in, or null
- * for none. The caller uploads that span and nothing else; ordinals are named from the top of
- * the range, so on a settle the span is a tail of a row or two.
+ * for none. The caller uploads only that span.
  */
 export function patchLut(inputs: LutInputs, data: Uint8Array, ordinals: readonly number[]): {from: number; to: number; pending: number[]} | null {
   if (ordinals.length === 0) return null;
@@ -172,40 +137,28 @@ export function patchLut(inputs: LutInputs, data: Uint8Array, ordinals: readonly
 }
 
 /**
- * The GPU half: a texture the size the table needs, written by the rows that moved — one
- * `writeData` of a row or two on a settle, of at most a few megabytes when everything moved,
- * against the twelve of a per-point pass.
- *
- * Owned by `TesseraLayer`, which makes it on its deck's device and releases it when finalised, or
- * by a host that passes its own and attaches it. Without a device it still builds the bytes, which
- * is what a test reads.
+ * The lookup texture on the GPU, written by the rows that changed. `TesseraLayer` makes one on its
+ * deck's device and releases it when finalised; a host may pass its own and attach it. Without a
+ * device it still builds the bytes.
  */
 export class LookupTexture {
   private device: Device | null = null;
   private texture: Texture | null = null;
   private rows = 0;
-  /**
-   * The inputs' identity **other than the table and the colours**: the palette, the level, the
-   * highlight. Those two are compared directly — the table by its version, the colour map by
-   * identity — because they are what a patch is decided from.
-   */
+  /** The caller's key for the palette, level and highlight; see {@link update}. */
   private key = '';
   /** The table version and colour map the held bytes were built from. */
   private builtAt = -1;
   private builtFrom: ReadonlyMap<number, Rgba> | null = null;
-  /** The rows {@link bytes} holds, which is the texture's height once one is attached. */
+  /** The rows {@link bytes} holds. */
   private builtRows = 0;
   /**
-   * Live ordinals whose texel is neutral only because the colour map had not reached them when
-   * they were written. **An ordinal is named before it is coloured**: a points frame's own
-   * artifacts frame grows the table, the layer draws, and the store extends the colour map *in
-   * place* a moment later — the same object, which this texture compares by identity. Without
-   * this set that extension was invisible and the ordinal stayed grey until something unrelated
-   * rebuilt the texture whole (found on GeoNames, 2026-08-28: the map opened grey and flashed
-   * coloured on a zoom). Re-tried on every update that would otherwise write nothing.
+   * Live ordinals written neutral because the colour map had no colour for them yet. The store
+   * extends the map in place after the table names an ordinal, and an in-place extension does not
+   * change the map's identity, so these are retried on every update.
    */
   private pending = new Set<number>();
-  /** Texture writes since construction — the count a test asserts against attribute uploads. */
+  /** Texture writes since construction. */
   writes = 0;
   bytes: Uint8Array = new Uint8Array(4);
 
@@ -214,7 +167,7 @@ export class LookupTexture {
     this.texture?.destroy();
     this.texture = null;
     this.rows = 0;
-    // The held bytes go to the fresh device on the next update, whole; force it.
+    // Force a whole rebuild onto the new device at the next update.
     this.key = '';
     this.builtAt = -1;
     this.builtFrom = null;
@@ -226,15 +179,13 @@ export class LookupTexture {
   }
 
   /**
-   * Rewrite for the inputs, unless the texture already holds them.
+   * Rewrite for the inputs, unless the texture already holds them. Returns whether anything was
+   * written.
    *
-   * `key` is the caller's statement of everything about the inputs **except the table and the
-   * colour map** — the palette, the level, the highlight. Those two are compared here: the table
-   * by its version, the colours by identity, which is what tells a table that gained a few
-   * ordinals from a map whose every colour moved. The first patches the rows those ordinals fall
-   * in; the second rebuilds whole (the rule, and why it is that narrow, is at the head of this
-   * module). The ground the map is drawn on needs no place in the key for the same reason: a
-   * scheme change reaches here as a rebuilt colour map.
+   * `key` covers everything about the inputs except the table and the colour map: the palette, the
+   * level, the highlight. The table is compared by version and the colour map by identity, which
+   * decides between a patch and a whole rebuild. A colour scheme change arrives as a new colour
+   * map.
    */
   update(inputs: LutInputs, key: string): boolean {
     const {table, colours} = inputs.artifacts;
@@ -285,11 +236,7 @@ export class LookupTexture {
     this.writes += 1;
   }
 
-  /**
-   * Re-try the pending ordinals against the current map: the ones whose walk now finds a colour
-   * are written and uploaded, the rest wait. Nothing is written when none is ready, so a texture
-   * with nothing pending costs a set-size check per update.
-   */
+  /** Write and upload the pending ordinals that now resolve to a colour; the rest wait. */
   private settle(inputs: LutInputs): boolean {
     if (this.pending.size === 0) return false;
     const {table, colours} = inputs.artifacts;
@@ -308,7 +255,7 @@ export class LookupTexture {
     return span !== null;
   }
 
-  /** The colour the texture holds for an ordinal — what the harness reads back for a point. */
+  /** The colour the texture holds for an ordinal. */
   colourOf(ordinal: number): Rgba {
     const at = ordinal * 4;
     if (at + 3 >= this.bytes.length) return NEUTRAL;

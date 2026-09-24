@@ -1,46 +1,28 @@
 /**
- * Persistent mark buffers with stable per-band slots, retained per depth.
+ * Persistent mark buffers for exact bands, with a stable slot per tile, retained per depth.
  *
- * **What this replaces.** Every redraw used to allocate fresh typed arrays and copy every drawn mark
- * into them, then hand deck.gl new references — a full re-upload on every frame of a drag. Here a
- * band is written **once**, into a slot it keeps, and a frame that adds nothing does nothing at all:
- * the same array references go back to deck.gl and no upload is issued.
+ * A band is written once into its slot. A frame that adds nothing returns the same array
+ * references, and deck.gl, which compares by reference, uploads nothing.
  *
- * **Partitioned by `identityKey|depth`, every visited depth retained under one budget.** A wheel
- * notch changes depth, and with a single partition every notch voided the slab and rebuilt it —
- * measured at ~120 ms a flip, in sessions that flip on every notch and traverse three or four
- * depths in a gesture. Retention makes a flip a *swap*: each partition keeps its buffers and its
- * own `visible`-toggled layer, so deck.gl keeps every retained buffer set on the GPU and
- * revisiting a depth uploads nothing. Eviction is by mark budget, least-recently-used whole
- * partitions first, never the active one. An **identity** change still voids everything — a
- * different principal's bands may not be drawn at all, so that is a reset, never a swap.
+ * Partitions are keyed by `identityKey|depth`. Each visited depth keeps its buffers and its own
+ * `visible`-toggled layer, so returning to a depth uploads nothing. Whole least-recently-used
+ * partitions other than the active one are evicted to stay under a mark budget. An identity change
+ * (a different principal or bundle) voids every partition, since no band from the old visible set
+ * may be drawn.
  *
- * **Exact bands only.** A band at the requested depth under the current identity key is immutable
- * and cumulative. Stand-in bands are the opposite — clipped to whatever ground is not yet held, so
- * their extent changes every time a response lands — and they are rebuilt in `assemble.ts` instead.
+ * Stand-in bands change extent with every response and are concatenated in `assemble.ts`.
  *
- * **Residency is allowed to exceed the frame.** A band that pans out of the render rectangle keeps
- * its slot and keeps being drawn — safely, because the frame's exact set is by construction every
- * band at this depth inside the render rectangle, so a resident band not in the frame is off
- * screen. {@link SLACK} bounds the excess before a partition compacts down to its frame.
+ * A band that pans out of the render rectangle keeps its slot and is still drawn, off screen,
+ * until residency passes {@link SLACK} times the frame and the partition compacts.
  *
- * **Dirty-span uploads, via GPU buffers this slab owns.** deck.gl's binary attribute path compares
- * by reference and re-uploads the whole live range whenever the reference moves — which, once
- * pieces paint as they absorb, is several full re-uploads per response: ~12 MB a paint at 10^6
- * marks, for an append that touched a fraction of it. So when a `Device` is attached, each
- * partition owns a luma.gl `Buffer` per attribute and writes exactly the span a band landed in;
- * deck is handed the buffer itself (`data.attributes.instancePositions` routes to
- * `Attribute.setExternalBuffer`, which binds without copying). The CPU arrays are kept regardless
- * — they are what growth re-writes from, and what picking reads — and remain the whole story
- * where no device is attached (tests, and `?gpu=0`).
+ * With a `Device` attached, each partition owns a luma.gl `Buffer` per attribute and writes only
+ * the span a band landed in; deck binds the buffer without copying. deck's own binary attribute
+ * path re-uploads the whole live range whenever a reference changes. The CPU arrays are kept for
+ * growth and picking, and are the only copy without a device.
  *
- * **The membership ordinal is a fourth attribute** (design §5.10): `u32` per point per band,
- * held here as `float32` for the shader, uploaded through the same dirty-span path as positions,
- * for the one layer the slab is told to carry (`membershipLayer`). The colour attribute stays
- * the column colour; which of the two the shader reads is a uniform on the layer, so the switch
- * between cluster and column colour uploads nothing. Changing the carried layer rewrites the
- * ordinals of every resident band from the columns the bands already hold — O(resident marks),
- * once per switch, and the only per-point pass a colouring interaction ever costs.
+ * Each mark also carries its membership ordinal for one layer (`membershipLayer`) as `float32`,
+ * alongside the column colour. A uniform on the layer chooses which the shader reads. Changing
+ * the carried layer rewrites every resident band's ordinals once.
  */
 import {Buffer as GpuBuffer} from '@luma.gl/core';
 import type {Device} from '@luma.gl/core';
@@ -51,10 +33,8 @@ import {writeColours, type Encoding} from './colour.js';
 const MIN_CAPACITY = 1 << 16;
 
 /**
- * Compact once residency reaches this multiple of what the frame draws.
- *
- * The trade is GPU vertex work against re-copying: every resident mark past the frame's own is
- * drawn for nothing, and every compaction copies the frame's marks again.
+ * Compact once residency reaches this multiple of what the frame draws. Resident marks outside
+ * the frame cost vertex work; each compaction copies the frame's marks again.
  */
 const SLACK = 2;
 
@@ -62,23 +42,16 @@ const SLACK = 2;
 const MIN_RESIDENT = 200_000;
 
 /**
- * Depths retained at once, and the total marks they may hold between them.
- *
- * One partition per depth the session actually visits, up to the slot count — a zoom traverses
- * three or four depths in one gesture, and each retained depth makes revisiting it free on both
- * CPU and GPU. The binding constraint is memory, not slots: ~20 B per mark CPU-side and ~12-16 B
- * on the GPU per retained depth, so the budget is expressed in marks and eviction frees whole
- * least-recently-used partitions until under it. The active partition is never evicted.
+ * Depths retained at once, and the total marks they may hold between them. A mark costs about
+ * 20 bytes on the CPU and 12 to 16 on the GPU, so the budget is in marks.
  */
 const PARTITIONS = 6;
 const SLAB_MARK_BUDGET = 6_000_000;
 
 /**
- * The buffers to draw, and the extent to draw of them.
- *
- * The arrays are **views over the partition's own storage**, not copies. An unchanged partition
- * returns the identical object, and identical references are exactly what deck.gl needs to see to
- * skip an upload — so this must never be rebuilt defensively.
+ * The buffers to draw, and the extent to draw of them. The arrays are views over the partition's
+ * storage. An unchanged partition returns the same object, which is how deck.gl skips an upload,
+ * so do not copy or rebuild it.
  */
 export type SlabDraw = {
   ids: BigUint64Array;
@@ -87,22 +60,16 @@ export type SlabDraw = {
   /** The membership ordinal per mark, `0` for none, as the shader's `float32`. */
   ordinals: Float32Array;
   /**
-   * The highlight bit per mark, `1` where the point satisfies the request's `highlight` and `0`
-   * where it does not, as the shader's `float32` (`highlight-and-hierarchy.md` §5.3).
-   *
-   * **Every mark reads `1` where no highlight is set**, so the shader's switch is a uniform and
-   * a map with no highlight draws exactly what it drew before this attribute existed. It rides
-   * the same dirty-span path as the ordinals and is written when a band is, which is every time
-   * it can have changed: the served set does not depend on the highlight, but the *bits* arrive
-   * with the points, so a highlight change is a re-fetch and a re-fetch is a write.
+   * The highlight bit per mark as `float32`: `1` where the point satisfies the request's
+   * `highlight`, `0` where it does not, and `1` everywhere when no highlight is set. The bits
+   * arrive with the points, so they change only when a band is written.
    */
   highlights: Float32Array;
   length: number;
   /**
-   * The partition's own GPU buffers, when a device is attached — capacity-sized, current to
-   * `length`. **Stable across appends**: the object is recreated only when the buffers themselves
-   * are (growth), which is what lets the layer memoise its attribute descriptors on it and deck
-   * skip `setData` entirely on an unchanged partition.
+   * The partition's GPU buffers when a device is attached: capacity-sized, current to `length`.
+   * The object changes only when the buffers grow, so the layer memoises its attribute
+   * descriptors on it.
    */
   gpu: GpuSlab | null;
 };
@@ -110,12 +77,9 @@ export type SlabDraw = {
 export type GpuSlab = {positions: GpuBuffer; colours: GpuBuffer; picking: GpuBuffer; ordinals: GpuBuffer; highlights: GpuBuffer};
 
 /**
- * deck's picking colour for instance `i` is `i + 1` in three little-endian bytes — a pure function
- * of the index. deck amortises *generating* that sequence in a global cache but still re-uploads
- * `4n` bytes of it whenever a layer's data changes, which at 1.7 × 10^6 drawn marks measured
- * ~210 ms/s of main thread (`bench-pickable` vs `-pickable0`). An owned buffer is written once per
- * growth and never touched again; the pattern is shared across partitions and grows monotonically,
- * so the byte-filling loop runs only over indices no partition has ever reached.
+ * deck's picking colour for instance `i` is `i + 1` in three little-endian bytes. deck re-uploads
+ * that sequence whenever a layer's data changes; an owned buffer is written once per growth
+ * instead. The pattern is shared across partitions and only grows.
  */
 let pickingPattern = new Uint8Array(0);
 
@@ -148,19 +112,16 @@ function emptyDraw(): SlabDraw {
   };
 }
 
-/** One depth's resident marks — the whole of what used to be the slab. */
+/** One depth's resident marks. */
 class Partition {
   key = '';
   lastUsed = 0;
   device: Device | null = null;
   private gpu: GpuSlab | null = null;
   /**
-   * Marks whose GPU copy is behind their CPU copy, flushed as **one write per attribute per
-   * sync**. A frame at 10^9 scale carries ~10^5 tiny bands, and a `buffer.write` per band is a
-   * driver call per band — measured at 790 ms for one sync of 132k bands, which handed back the
-   * entire cost the owned buffers had just removed. The ranges over-upload the gap between two
-   * disjoint dirty slots, but appends land at the tail so the common flush is exactly the span
-   * that arrived.
+   * Marks whose GPU copy is behind their CPU copy, flushed as one write per attribute per sync,
+   * since a frame can carry around 10^5 small bands. A range spans the gap between disjoint dirty
+   * slots; appends land at the tail, so the usual flush is the span that arrived.
    */
   private dirtyPos: {from: number; to: number} | null = null;
   private dirtyCol: {from: number; to: number} | null = null;
@@ -177,17 +138,15 @@ class Partition {
   live = 0;
   frameMarks = 0;
   /**
-   * One slot per **tile**, holding the band written into it. Keyed by tile because a refetched
-   * tile arrives as a *new* band object; holding the band because that identity is exactly the
-   * question "is this the served set I already wrote".
+   * One slot per tile, holding the band written into it. A refetched tile arrives as a new band
+   * object, so band identity says whether the slot already holds the served set.
    */
   slots = new Map<bigint, Slot>();
   private encodingKey = '';
   draw: SlabDraw = emptyDraw();
 
   sync(bands: readonly Band[], encoding: Encoding, encodingKey: string, colourBy: string | null, membershipLayer: string): SlabDraw {
-    // A partition reactivated under a changed encoding recolours everything it holds — it was
-    // invisible while the palette moved, and two colour scales on one map is not a state to render.
+    // A partition reactivated under a changed encoding recolours everything it holds.
     const recolour = encodingKey !== this.encodingKey;
     this.encodingKey = encodingKey;
     const reordinal = membershipLayer !== this.membershipLayer;
@@ -211,9 +170,9 @@ class Partition {
     }
     this.frameMarks = wanted;
 
-    // Compact when residency drifts past the frame, when appends will not fit, or when a slot has
-    // been superseded by a band that cannot reuse it — superseded marks are a *subset* of their
-    // replacement and drawn twice they read as a denser patch, so that compaction is immediate.
+    // Compact when residency drifts past the frame, when appends will not fit, or when a band
+    // cannot reuse its tile's slot. A superseded slot's marks are a subset of the new band's and
+    // would draw twice.
     const wouldLive = this.live + appending;
     const compact =
       stale > 0 || wouldLive > Math.max(MIN_RESIDENT, SLACK * wanted) || wouldLive > this.capacity;
@@ -226,7 +185,7 @@ class Partition {
     if (appending === 0 && rewrite.length === 0 && !recolour && !reordinal) return this.draw;
 
     if (recolour) {
-      // Every resident band, not only the frame's: a departed band is still drawn.
+      // Every resident band, since a band outside the frame is still drawn.
       for (const slot of this.slots.values()) {
         writeColours(this.colours, slot.from, slot.length, columnOf(slot.band, colourBy), encoding);
         this.uploadColours(slot.from, slot.length);
@@ -235,8 +194,7 @@ class Partition {
     if (reordinal) {
       for (const slot of this.slots.values()) this.writeOrdinals(slot.band, slot.from);
     }
-    // A refetch of the same size reuses its slot, so the common re-request neither grows the
-    // partition nor moves anything already written.
+    // A refetch of the same size reuses its slot.
     for (const band of rewrite) {
       const slot = this.slots.get(band.prefix)!;
       this.write(band, slot.from, encoding, colourBy);
@@ -268,7 +226,7 @@ class Partition {
     }
   }
 
-  /** Geometric growth, so a filling session pays one amortised copy rather than one per band. */
+  /** Grows by doubling, so the copies amortise. */
   private reserve(needed: number): void {
     if (needed <= this.capacity) return;
     let capacity = Math.max(this.capacity, MIN_CAPACITY);
@@ -293,10 +251,8 @@ class Partition {
   }
 
   /**
-   * Fresh capacity-sized GPU buffers, retained marks re-written from the CPU arrays.
-   *
-   * Also the late-attach path: a device arriving after a partition holds data re-creates from
-   * here, which is why the re-write covers `live` rather than assuming empty.
+   * Fresh capacity-sized GPU buffers, with every live mark marked dirty so the next flush writes
+   * it. A device attached after the partition holds data comes through here too.
    */
   private reserveGpu(): void {
     if (!this.device) return;
@@ -310,7 +266,6 @@ class Partition {
       highlights: this.device.createBuffer({byteLength: this.capacity * 4, usage})
     };
     this.gpu.picking.write(pickingColours(this.capacity), 0);
-    // Everything held is now behind the fresh buffers; the next flush rewrites it whole.
     if (this.live > 0) {
       this.dirtyPos = {from: 0, to: this.live};
       this.dirtyCol = {from: 0, to: this.live};
@@ -369,11 +324,7 @@ class Partition {
     }
   }
 
-  /**
-   * A band's highlight bits into the slot at `at` — **ones where the band carries none**, which
-   * is a band fetched under no highlight and is what makes the shader's switch a uniform rather
-   * than a per-point test of whether the question was put.
-   */
+  /** A band's highlight bits into the slot at `at`, ones where the band was fetched with no highlight. */
   private writeHighlights(band: Band, at: number): void {
     const n = band.ids.length;
     if (band.highlightBits) {
@@ -382,7 +333,7 @@ class Partition {
     if (this.gpu) this.dirtyHigh = Partition.widen(this.dirtyHigh, at, at + n);
   }
 
-  /** A band's ordinals for the carried layer into the slot at `at` — zeros where it has none. */
+  /** A band's ordinals for the carried layer into the slot at `at`, zeros where it has none. */
   private writeOrdinals(band: Band, at: number): void {
     const column = this.membershipLayer ? band.membership[this.membershipLayer] : undefined;
     const n = band.ids.length;
@@ -391,7 +342,7 @@ class Partition {
     if (this.gpu) this.dirtyOrd = Partition.widen(this.dirtyOrd, at, at + n);
   }
 
-  /** A band's marks into the slot at `at`. Whole-array `set` calls: a memcpy, not a loop. */
+  /** A band's marks into the slot at `at`. */
   private write(band: Band, at: number, encoding: Encoding, colourBy: string | null): void {
     this.reserve(at + band.ids.length);
     this.ids.set(band.ids, at);
@@ -404,12 +355,12 @@ class Partition {
   }
 
   /**
-   * Republish the views deck.gl draws from. A fresh `subarray` is how an upload is *requested* —
-   * it copies nothing, but it is a new reference, which is deck.gl's only signal that the contents
-   * moved. Each array is republished exactly when its own contents changed.
+   * Republish the views deck.gl draws from. A new `subarray` copies nothing but is a new
+   * reference, which is how deck.gl learns the contents changed, so each array is republished only
+   * when its contents did.
    */
   private publish(ids: boolean, positions: boolean, colours: boolean, ordinals = false): SlabDraw {
-    // The highlight bits are written exactly when a band is, so they republish with the positions.
+    // The highlight bits are written when a band is, so they republish with the positions.
     const highlights = positions;
     const changed = ids || positions || colours || ordinals || highlights || this.draw.length !== this.live;
     if (!changed) return this.draw;
@@ -440,7 +391,7 @@ class Partition {
 export type SlabLayer = {slot: number; draw: SlabDraw; active: boolean};
 
 export class MarkSlab {
-  /** Slot-stable, so each partition keeps the same deck.gl layer id for its whole life. */
+  /** Indexed by slot, so each partition keeps the same deck.gl layer id for its life. */
   private parts: (Partition | null)[];
 
   constructor(private readonly partitions = PARTITIONS, private readonly markBudget = SLAB_MARK_BUDGET) {
@@ -451,10 +402,7 @@ export class MarkSlab {
   private identityKey = '';
   private device: Device | null = null;
 
-  /**
-   * Give the slab the GPU. From here every partition owns its buffers and uploads spans itself;
-   * without it, the typed-array path carries everything, which is what tests and `?gpu=0` use.
-   */
+  /** Give the slab the GPU; from here every partition owns its buffers and uploads spans itself. */
   attach(device: Device): void {
     this.device = device;
     for (const p of this.parts) p?.attach(device);
@@ -464,12 +412,12 @@ export class MarkSlab {
     return this.parts[this.activeSlot] ?? null;
   }
 
-  /** Marks in the active draw range — every one of them uploaded and rasterised. */
+  /** Marks in the active draw range. */
   get drawn(): number {
     return this.active?.live ?? 0;
   }
 
-  /** Active marks resident but not in the last frame — what a compaction would reclaim. */
+  /** Active marks resident but not in the last frame, which a compaction would reclaim. */
   get departed(): number {
     const p = this.active;
     return p ? p.live - p.frameMarks : 0;
@@ -479,34 +427,26 @@ export class MarkSlab {
     return this.active?.slots.size ?? 0;
   }
 
-  /** Whether this exact band — not merely its tile — is what the active partition holds. */
+  /** Whether the active partition holds this band object, not only a band for its tile. */
   holds(band: Band): boolean {
     return this.active?.slots.get(band.prefix)?.band === band;
   }
 
   /**
-   * Bring the right partition up to date for one frame, and return what to draw.
-   *
-   * Returns the *same* object as last time when nothing changed — the caller passes it straight to
-   * deck.gl, which compares references, and no work reaches the GPU.
-   */
-  /**
-   * `encoding` is the **column** colouring the colour attribute holds; cluster colour is the
-   * layer's lookup texture and passes through here only as `membershipLayer`, the layer whose
-   * ordinals every mark carries (`''` for none).
+   * Bring the partition for `depth` up to date and return what to draw: the same object as last
+   * time when nothing changed. `encoding` is the column colouring the colour attribute holds;
+   * cluster colour comes from the layer's lookup texture, and reaches here only as
+   * `membershipLayer`, the layer whose ordinals every mark carries (`''` for none).
    */
   sync(bands: readonly Band[], depth: number, encoding: Encoding, colourBy: string | null, membershipLayer = ''): SlabDraw {
-    // **An empty frame changes nothing.** A view over ground this principal cannot see is not
-    // evidence that anything resident has expired; the identity change that does matter arrives as
-    // a cleared frame in the viewer, which calls {@link clear}.
+    // An empty frame changes nothing resident. A principal change reaches here through clear().
     if (bands.length === 0) {
       const p = this.active;
       if (p) p.frameMarks = 0;
       return p?.draw ?? emptyDraw();
     }
 
-    // **An identity change voids every partition.** A different principal or bundle is a different
-    // visible set, and a band from the old one may not be drawn at all — a reset, never a swap.
+    // A different principal or bundle is a different visible set: void every partition.
     const identity = bands[0]!.identityKey;
     if (identity !== this.identityKey) {
       this.identityKey = identity;
@@ -556,11 +496,8 @@ export class MarkSlab {
   }
 
   /**
-   * Every retained partition, for the viewer to render as one `visible`-toggled layer each.
-   *
-   * Only the active partition shows: the other depth's marks over the same ground would double the
-   * density everywhere both hold data. Retention is about what stays resident — in memory and on
-   * the GPU — not about what is drawn.
+   * Every retained partition, for the viewer to render as one `visible`-toggled layer each. Only
+   * the active one shows, since two depths over the same ground would double the density.
    */
   layers(): SlabLayer[] {
     const out: SlabLayer[] = [];
@@ -572,7 +509,7 @@ export class MarkSlab {
     return out;
   }
 
-  /** Drop everything — a principal change, or a view with nothing to draw at all. */
+  /** Drop everything, on a principal change or a view with nothing to draw. */
   clear(): void {
     for (const p of this.parts) p?.destroy();
     this.parts = this.parts.map(() => null);
@@ -581,9 +518,8 @@ export class MarkSlab {
   }
 
   /**
-   * The band and in-band index behind mark `index` of partition `slot` — what a hover reads its
-   * scalars through, so a hint costs no request. A walk over the partition's slots, O(bands),
-   * on a pointer move deck already throttles.
+   * The band and in-band index behind mark `index` of partition `slot`, so a hover reads scalars
+   * without a request. O(bands).
    */
   markAt(slot: number, index: number): {band: Band; i: number} | null {
     const p = this.parts[slot];
@@ -594,7 +530,7 @@ export class MarkSlab {
     return null;
   }
 
-  /** Marks held across every retained partition — the figure the budget bounds. */
+  /** Marks held across every retained partition, which the budget bounds. */
   get residentMarks(): number {
     let total = 0;
     for (const p of this.parts) if (p) total += p.live;
@@ -607,11 +543,9 @@ function columnOf(band: Band, colourBy: string | null): ScalarColumn | undefined
 }
 
 /**
- * What makes two encodings the same colouring.
- *
- * The rank map and the numeric domain both grow as marks arrive — stickily, never narrowing — so
- * comparing them by reference would recolour on every response for a palette that did not move.
- * Comparing by size is enough precisely *because* they only ever grow.
+ * A key equal for two encodings that colour alike. The rank map and the numeric domain only grow
+ * as marks arrive, so their size identifies them; a reference comparison would recolour on every
+ * response.
  */
 function encodingIdentity(encoding: Encoding): string {
   switch (encoding.kind) {

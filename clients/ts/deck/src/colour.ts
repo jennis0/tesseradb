@@ -1,17 +1,10 @@
 /**
- * Turning a declared column into mark colour — the vis half of encoding.
+ * Mark colour from a declared column: the palette and the numeric ramp applied to ranks and
+ * domains the store computes.
  *
- * **The boundary this file sits on** (client-interaction §9): *if it renders as a number, it is
- * served exact; if it renders as a mapping — colour, size, transfer function — the client may
- * compute it.* Nothing here is a masked quantity and nothing here decides what is drawn. Every
- * served mark gets a colour, always; an unresolvable value gets grey rather than being dropped,
- * because dropping it would make this file a second selection rule and break I7.
- *
- * **The accumulators moved to the store** (`@tesseradb/client`, design client-components §4): which
- * values the marks carry, in what order they were first seen, and how wide a numeric column has
- * ranged is *what was counted*, and a host on a plain canvas needs it without deck.gl. What stays
- * here is rank-to-colour: the palette applied. `Domain`, `Ranks`, `widenDomain`, `countCodes`,
- * `extendRanks` and `numericValues` are re-exported from core so the viewer has one source.
+ * A number shown to the viewer is served exact; a colour is a mapping the client may compute.
+ * Colour decides nothing about what is drawn: every served mark gets a colour, and a value that
+ * does not resolve gets grey.
  */
 import type {CategoryValue, ScalarColumn} from '@tesseradb/client';
 import {hasValue, numericValues, rankedValues, type Ranks} from '@tesseradb/client';
@@ -31,24 +24,21 @@ type Rgba = readonly [number, number, number, number];
 
 const ALPHA = 200;
 
-/** The uniform colour, and what the map looked like before any of this existed. */
+/** The colour of every mark when no column is encoded. */
 export const UNIFORM: Rgba = [120, 190, 255, ALPHA];
 
 /**
- * Everything unmappable: the *absent* sentinel (code 0), a number with no value, a code no key
- * explains, and any value past the palette's end.
- *
- * **Deliberately legible rather than invisible.** These marks are served and must be drawn (I7),
- * so the colour has to read as "no value" without reading as "no mark" — a low-saturation grey
- * that recedes behind the palette without disappearing against the background.
+ * Everything unmappable: the absent sentinel (code 0), a number with no value, a code no key
+ * explains, and any value past the palette's end. A low-saturation grey that reads as "no value"
+ * and stays visible against the background, since these marks are served and drawn.
  */
 export const UNMAPPED: Rgba = [110, 118, 132, ALPHA];
 
 /**
- * A qualitative palette, indexed by a value's **rank among the resolved values ordered by
- * frequency** — never by its code (codes are drawn at random from the declared width, so their
- * numeric order means nothing). Twelve hues, ordered so neighbours differ in both hue and
- * lightness — adjacent legend entries are the pairs a reader most needs to tell apart.
+ * A qualitative palette, indexed by a value's rank among the resolved values ordered by
+ * frequency. Codes are random within the declared width, so their order means nothing. Adjacent
+ * entries differ in both hue and lightness, since adjacent legend entries are the pairs a reader
+ * compares.
  */
 const PALETTE: readonly Rgba[] = [
   [102, 194, 255, ALPHA],
@@ -67,7 +57,7 @@ const PALETTE: readonly Rgba[] = [
 
 export const PALETTE_SIZE = PALETTE.length;
 
-/** A numeric column's colour ramp: min → max, low to high. */
+/** A numeric column's colour ramp, from the domain's minimum to its maximum. */
 const RAMP_LOW: Rgba = [40, 60, 140, ALPHA];
 const RAMP_HIGH: Rgba = [255, 214, 120, ALPHA];
 
@@ -78,7 +68,7 @@ export type Encoding =
   | {kind: 'category'; column: string; rankOfCode: Ranks}
   | {kind: 'numeric'; column: string; domain: {min: number; max: number}};
 
-/** The resolved values that hold a palette colour, in rank order — the legend's list. */
+/** The resolved values that hold a palette colour, in rank order: the legend's list. */
 export function paletteValues(
   values: readonly CategoryValue[],
   ranks: Ranks
@@ -104,12 +94,9 @@ export function colourOfFraction(t: number): Rgba {
 }
 
 /**
- * Colour `count` marks into `out` starting at mark `offset`, reading `column` from its own index 0.
- *
- * **Written per band rather than per frame**, which is what lets the slab colour an arriving band
- * without touching the marks already resident. **Exactly one entry per mark, unconditionally** —
- * an unresolvable value contributes a grey mark, never an untouched one. Colour is presentation and
- * must never decide what is drawn, and an unwritten span is transparent black.
+ * Colour `count` marks into `out` starting at mark `offset`, reading `column` from its index 0.
+ * Per band, so the slab colours an arriving band without touching resident marks. Every mark gets
+ * an entry, grey where the value does not resolve, because an unwritten span is transparent black.
  */
 export function writeColours(
   out: Uint8Array,
@@ -163,7 +150,7 @@ export function writeColours(
   }
 }
 
-/** An RGBA tuple as the packed `u32` a `Uint32Array` view stores — endian-correct via the scratch. */
+/** An RGBA tuple as the `u32` a `Uint32Array` view over the same bytes reads, in platform byte order. */
 const packScratch = new Uint8Array(4);
 const packScratch32 = new Uint32Array(packScratch.buffer);
 
@@ -175,7 +162,7 @@ function packRgba(c: Rgba): number {
   return packScratch32[0]!;
 }
 
-/** {@link writeColours} over a whole buffer of its own — the provisional layer, rebuilt per frame. */
+/** {@link writeColours} into a new buffer, for the stand-in layer rebuilt per frame. */
 export function buildColourAttribute(
   pointCount: number,
   scalars: Record<string, ScalarColumn>,
@@ -192,10 +179,7 @@ export function css(c: Rgba): string {
   return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
 }
 
-/**
- * A column's value at one point, as text — for the item panel, where a category must read as its
- * key rather than as the integer the wire carried.
- */
+/** A column's value at one point as text, with a category shown as its key, not its code. */
 export function formatScalar(
   column: ScalarColumn,
   index: number,
