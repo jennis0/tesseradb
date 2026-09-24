@@ -706,9 +706,9 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["accepted"], 1);
-    let tessera_ids = json["tessera_ids"].as_array().unwrap();
+    let tessera_ids = ingested_ids(&json);
     assert_eq!(tessera_ids.len(), 1);
-    let tessera_id = tessera_ids[0].as_u64().unwrap();
+    let tessera_id = tessera_ids[0];
 
     // The fixture's own identity key (matches `TEST_KEY_HEX`, shard 0) — inverting independently
     // of the server proves the response carries a real, working identity, not an opaque number.
@@ -765,8 +765,7 @@ async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
     );
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["accepted"], 4);
-    let tessera_ids = json["tessera_ids"].as_array().unwrap();
-    assert_eq!(tessera_ids.len(), 4);
+    assert_eq!(ingested_ids(&json).len(), 4);
 
     // A follow-up batch re-using one of the *supplied* external ids must still be caught.
     let dup_body = build_ingest_batch_optional(&[(Some(b"mixed-a".as_slice()), 9.0, 9.0, "0")]);
@@ -804,13 +803,58 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["accepted"], 2);
-    let tessera_ids = json["tessera_ids"].as_array().unwrap();
+    let tessera_ids = ingested_ids(&json);
     assert_eq!(tessera_ids.len(), 2);
     assert_ne!(
-        tessera_ids[0].as_u64().unwrap(),
-        tessera_ids[1].as_u64().unwrap(),
+        tessera_ids[0], tessera_ids[1],
         "two null-external-id items must still get distinct entities/tessera_ids"
     );
+}
+
+/// A `tessera_id` fills 64 bits, and a JSON number past 2^53 is rounded by JavaScript, so the
+/// ingest answer sends each as a decimal string: the same id the viewer serves for that row.
+#[tokio::test]
+async fn ingest_answers_each_rows_tessera_id_as_the_string_the_viewer_serves() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    // The fixture's points sit on whole coordinates, so this box holds only these rows.
+    let body = build_ingest_batch_optional(&[
+        (Some(b"string-a".as_slice()), 10.4, 10.4, "0"),
+        (None, 10.5, 10.5, "0"),
+        (Some(b"string-b".as_slice()), 10.6, 10.6, "0"),
+    ]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "string-ids")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let answer: serde_json::Value = resp.json().await.unwrap();
+    let answered = ingested_ids(&answer);
+    assert_eq!(answered.len(), 3);
+    drain(&server).await;
+
+    let token = token_for(&server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 12, "bbox": [10.3, 10.3, 10.7, 10.7], "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    let served: std::collections::BTreeSet<u64> = points.into_iter().map(|(id, _)| id).collect();
+    assert_eq!(served, answered.into_iter().collect());
 }
 
 /// `/healthz` must stay prompt while a viewport request runs, even on this test's single-threaded

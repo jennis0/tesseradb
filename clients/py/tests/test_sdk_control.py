@@ -46,7 +46,7 @@ class _Backpressure(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(answer)
             return
-        answer = json.dumps({"accepted": 1, "minted": 0, "tessera_ids": [7]}).encode()
+        answer = json.dumps({"accepted": 1, "minted": 0, "tessera_ids": ["7"]}).encode()
         self.send_response(200)
         self.send_header("content-length", str(len(answer)))
         self.end_headers()

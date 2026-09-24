@@ -1150,7 +1150,7 @@ class Cycle:
                 members=members(view),
                 record_order=True,
             )
-            tessera_ids: dict[int, int] = {}
+            tessera_ids: dict[int, str] = {}
             figures[name] = self.run_ingest(
                 self.control_for(self.served, name), source.batches(), f"{label}-{name}", tessera_ids
             )

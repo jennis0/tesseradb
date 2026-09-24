@@ -892,9 +892,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
     )
     .await;
     assert_eq!(resp.status(), 200);
-    let tessera_id: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
-        .as_u64()
-        .expect("the 200 returns one identifier per accepted row");
+    let tessera_id = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
     assert!(
         points(&served, "world")
@@ -1161,9 +1159,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
     )
     .await;
     assert_eq!(resp.status(), 200);
-    let before: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
-        .as_u64()
-        .unwrap();
+    let before = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
     let body = drop_view(&served, "quarter", "2026-Q6", false).await;
     assert_eq!(body["deleted"], 0);
@@ -1181,9 +1177,7 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
     .await;
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.json::<Value>().await.unwrap()["tessera_ids"][0]
-            .as_u64()
-            .unwrap(),
+        ingested_ids(&resp.json::<Value>().await.unwrap())[0],
         before,
         "the same identity, joined to a new view — not a fresh entity, which is what a deletion          would have made of it"
     );
@@ -1332,9 +1326,7 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
     )
     .await;
     assert_eq!(resp.status(), 200, "a join into a minted group's view");
-    let joined = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
-        .as_u64()
-        .unwrap();
+    let joined = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
     served.reauthorise().await;
     let in_q2 = points(&served, "quarter:2026-Q2").await;
@@ -2175,9 +2167,7 @@ async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
     let id = b"backfill".to_vec();
     let resp = families_ingest(&served, "first", "world", &id, 10.0, 10.0, HELD).await;
     assert_eq!(resp.status(), 200);
-    let tessera_id: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
-        .as_u64()
-        .unwrap();
+    let tessera_id = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
 
     // The join omits every value, which the rule permits — and which is what would otherwise put
@@ -2450,9 +2440,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
     )
     .await;
     assert_eq!(resp.status(), 200);
-    let first: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
-        .as_u64()
-        .unwrap();
+    let first = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     drain(&served.server).await;
 
     // The holder is deleted, so the binding is dead bookkeeping: decision 0047 makes the
@@ -2478,9 +2466,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
     )
     .await;
     assert_eq!(resp.status(), 200, "a deleted holder does not collide");
-    let second: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
-        .as_u64()
-        .unwrap();
+    let second = ingested_ids(&resp.json::<Value>().await.unwrap())[0];
     assert_ne!(second, first, "a fresh entity, not the dead binding's");
     drain(&served.server).await;
     served.reauthorise().await;
@@ -2510,9 +2496,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
         )
         .await;
         assert_eq!(seed.status(), 200);
-        let holder: u64 = seed.json::<Value>().await.unwrap()["tessera_ids"][0]
-            .as_u64()
-            .unwrap();
+        let holder = ingested_ids(&seed.json::<Value>().await.unwrap())[0];
 
         let body =
             json!([{ "tessera_id": holder.to_string(), "idset": FIXTURE_IDSET, "op": "delete" }]);
@@ -2539,9 +2523,7 @@ async fn a_row_demoted_from_a_join_allocates_a_fresh_entity_that_keeps_its_label
             // Taken: whether it joined the still-live holder or allocated past the delete, it must
             // carry a label — the fresh-entity case is the one the demotion produces.
             200 => taken.push(
-                serde_json::from_str::<Value>(&text).unwrap()["tessera_ids"][0]
-                    .as_u64()
-                    .unwrap(),
+                ingested_ids(&serde_json::from_str::<Value>(&text).unwrap())[0],
             ),
             // Refused: the holder was still live at the admit and the labels differ, which is the
             // label arm doing its job.
