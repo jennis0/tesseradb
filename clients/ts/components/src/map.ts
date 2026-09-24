@@ -6,6 +6,7 @@ import {
   WORLD_SIZE,
   assertCompositionMatchesServed,
   dataToWorldXY,
+  hasValue,
   worldBbox,
   type FiltersProjection,
   type RegionProjection,
@@ -839,7 +840,8 @@ export class TesseraMap extends TesseraElement {
           const column = at.band.scalars[f];
           if (!column) continue;
           const raw = (column.values as ArrayLike<unknown>)[at.i];
-          values.push(column.arrowType === 'timestamp_us' ? new Date(Number(raw) / 1000).toISOString().slice(0, 4) : String(raw));
+          if (!hasValue(column, at.i)) values.push('absent');
+          else values.push(column.arrowType === 'timestamp_us' ? new Date(Number(raw) / 1000).toISOString().slice(0, 4) : String(raw));
         }
       }
     }
