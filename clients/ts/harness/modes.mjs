@@ -1,18 +1,14 @@
 #!/usr/bin/env node
-// The mode toolbar under real pointer input (design client-components §5.3, §5.11): pan → box →
-// drag → pan → lasso → draw → pan, with the mouse driven through Playwright's input pipeline at a
-// human pace — a glide of small moves between every press, the hover events a hand produces.
-// The synthetic path (a handful of moves, no hover between gestures) passed while the toolbar was
-// broken: deck's input layer saw a selection's `pointerdown` and never its `pointerup`, its
-// session stayed pressed, and the next glide — button up — panned the camera, after which a real
-// pan drag did nothing. So every transition here asserts three things: the `mode` attribute, the
-// highlight (the map's live drag state while the button is down, and the store's region after
-// it), and the counting request on the wire; and between gestures, that a glide with the button
-// up moves nothing.
+// The map's mode toolbar under real pointer input: pan, box and drag, pan, lasso and draw, pan.
+// The mouse moves through Playwright's input pipeline at a human pace, with small moves and hover
+// events between presses, since a few synthetic moves do not hold deck's input session open long
+// enough to show a stuck press. Each transition checks the `mode` attribute, the drag shape and
+// then the store's region, and the region leaf on the next request; between gestures, a glide with
+// the button up must not move the camera.
 //
 //   node clients/ts/harness/modes.mjs [--url http://localhost:5173/?dataset=2m4] [--executable /path/to/chrome] [--headless]
 //
-// Headed by default: the bug is in the input layer, and the display is where it shows.
+// Headed by default, since the behaviour under test is in the browser's input handling.
 import {chromium} from 'playwright';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1]]] : acc), []));
@@ -20,11 +16,9 @@ const url = args.url ?? 'http://localhost:5173/?prefetch=0&dataset=2m4';
 const headless = 'headless' in args;
 const executablePath = args.executable;
 
-// **A page served from another port.** The demo enumerates one browser origin in
-// `serve.dev_cors_origins` — `http://localhost:5173` — so a viewer run on another port cannot
-// reach the server at all, and every claim below reads as a detached store rather than as a
-// configuration. Where the URL is not that origin the *browser's* origin check is switched off
-// rather than the server's: this is a measuring browser, and a running demo is not touched.
+// The demo's `serve.dev_cors_origins` allows only `http://localhost:5173`. For a page on another
+// port the browser's origin check is switched off, leaving the running server's configuration
+// alone.
 const sameOrigin = new URL(url).port === '5173';
 const originFlags = sameOrigin ? [] : ['--disable-web-security'];
 const browser = await chromium.launch(
@@ -37,10 +31,8 @@ const consoleErrors = [];
 page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
 /**
- * Every viewport request carrying a `region` leaf — a box or a lasso settled is a *filter*
- * (`selection-operand.md` §8: the shape rides the request the client was sending anyway), so
- * what is counted here is the kind of shape each request carried, not a counting request of its
- * own.
+ * The kind of `region` leaf each viewport request carried. A settled box or lasso is a filter
+ * sent on the ordinary viewport request.
  */
 const regionRequests = [];
 /** The `region` leaf anywhere in a filter expression, or null. */
