@@ -699,7 +699,7 @@ impl SignatureIndex {
                 // materialising a bitmap to intersect would cost more than the probe.
                 PostingSlice::Array(bytes) => {
                     for chunk in bytes.as_chunks::<4>().0 {
-                        let entity = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        let entity = u32::from_le_bytes(*chunk);
                         if wanted.contains(entity) {
                             by_entity.entry(entity).or_default().push(term);
                         }
