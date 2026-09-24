@@ -663,12 +663,9 @@ async fn authorise_and_revoke_match_the_description() {
         String::new(),
     ));
     let internal: Value = serde_json::from_slice(
-        &axum::body::to_bytes(
-            axum::response::IntoResponse::into_response(internal).into_body(),
-            4096,
-        )
-        .await
-        .unwrap(),
+        &axum::body::to_bytes(axum::response::IntoResponse::into_response(internal).into_body(), 4096)
+            .await
+            .unwrap(),
     )
     .unwrap();
     assert_ne!(body["detail"], internal["detail"]);
@@ -1215,12 +1212,9 @@ async fn the_artifacts_read_matches_the_description_with_its_refusals() {
         let resp = post(body, token).await.unwrap();
         assert_refusal(&doc, resp, 422, "contract").await;
     }
-    let resp = post(
-        json!({ "view": "no-such-view", "layer": LAYER, "fields": [] }),
-        token,
-    )
-    .await
-    .unwrap();
+    let resp = post(json!({ "view": "no-such-view", "layer": LAYER, "fields": [] }), token)
+        .await
+        .unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
     let resp = post(
         json!({ "view": "s0", "layer": LAYER, "fields": [], "idset": FIXTURE_IDSET + 1 }),
@@ -1301,12 +1295,9 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
     let cursor = decoded.trailer["next"].as_str().unwrap().to_string();
 
     // The rest of the read, from the cursor, to its end.
-    let resp = post(
-        json!({ "view": "s0", "fields": [], "cursor": cursor }),
-        token,
-    )
-    .await
-    .unwrap();
+    let resp = post(json!({ "view": "s0", "fields": [], "cursor": cursor }), token)
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let decoded = decode_records(&resp.bytes().await.unwrap());
     assert_valid(&doc, "ItemsHead", &decoded.head);
@@ -1418,11 +1409,12 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
     assert_invalid(&doc, "ArtifactRequest", &json!({}));
 }
 
-/// **Every viewer-plane route refuses a caller with no session credential, and one whose
-/// credential is not a token, whatever else is wrong with the request. The routes are enumerated
-/// from the description, not listed by hand.**
+/// **Every described route refuses a caller without its plane's credential. A viewer-plane route
+/// refuses one with no session token, and one whose credential is not a token, whatever else is
+/// wrong with the request; a control-plane route refuses one without the operator credential. The
+/// routes are enumerated from the description, not listed by hand.**
 ///
-/// This is the viewer-plane counterpart of
+/// The viewer half is the counterpart of
 /// `every_path_on_the_control_listener_needs_the_credential` (`tests/http_write.rs`): a per-route
 /// 401 test stays green while a new route ships open. The control plane checks its credential in
 /// a layer over the whole router; the viewer plane checks it in the `ViewerSession` extractor,
@@ -1431,7 +1423,7 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
 ///
 /// **What is enumerated.** axum exposes no route enumeration, so the loop runs over
 /// `docs/openapi/tessera.yaml`'s operations and their declared `security`.
-/// [`the_description_names_every_route_on_the_two_planes_and_no_other`] fails if a route is
+/// [`the_description_names_every_route_on_the_three_planes_and_no_other`] fails if a route is
 /// mounted and not described; describing it means declaring its `security`; declaring
 /// `sessionToken` puts it in this loop. A route declared `security: []` is skipped, and the two
 /// probes are asserted below to be the only ones. A route declared `operatorCredential` is sent
@@ -1453,7 +1445,7 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
 /// `ApiError::BadCredential`'s envelope; and, on the probe half, putting `/healthz` or `/readyz`
 /// behind the credential.
 #[tokio::test]
-async fn every_viewer_route_requires_a_session_token() {
+async fn every_described_route_requires_its_planes_credential() {
     let doc = description();
     let f = fixture().await;
     let auth = authorise_checked(&doc, &f.server, &["0"]).await;
@@ -1535,7 +1527,8 @@ async fn every_viewer_route_requires_a_session_token() {
                     assert_refusal(&doc, resp, 401, "bad-credential").await;
                 }
                 if kind != Malformed::No {
-                    let resp = send_viewer_probe(&f.server, &method, path, kind, Some(token)).await;
+                    let resp =
+                        send_viewer_probe(&f.server, &method, path, kind, Some(token)).await;
                     if with_token == 422 {
                         assert_refusal(&doc, resp, with_token, "contract").await;
                     } else {
@@ -1724,11 +1717,7 @@ async fn both_session_routes_require_the_credential_before_the_body() {
             }
         }
         for (kind, status) in malformed {
-            let req = f
-                .server
-                .client
-                .post(url.clone())
-                .bearer_auth(SESSION_CREDENTIAL);
+            let req = f.server.client.post(url.clone()).bearer_auth(SESSION_CREDENTIAL);
             let resp = with_body(req, kind, body).send().await.unwrap();
             if matches!(kind, Malformed::Shape | Malformed::UnknownField) {
                 assert_refusal(&doc, resp, status, "contract").await;
@@ -2546,4 +2535,164 @@ async fn layers_and_artifacts_match_the_description() {
     assert_answer(&doc, &delete, resp, 200).await;
     let resp = control(&f.server, &delete, &layer).send().await.unwrap();
     assert_refusal_to(&doc, Some(&delete), resp, 422, "contract").await;
+}
+
+/// A shape layer's publication and growth answer with `shapes`, a generating-set page that
+/// empties its set answers with `withdrawn`, and both match the description. So do the artifact
+/// routes' refusals of a body that is not JSON and of a path segment that is not UTF-8.
+#[tokio::test]
+async fn shape_reports_and_withdrawals_match_the_description() {
+    let doc = description();
+    let f = fixture().await;
+    let (put, patch, delete) = (
+        reqwest::Method::PUT,
+        reqwest::Method::PATCH,
+        reqwest::Method::DELETE,
+    );
+
+    // A spatial layer whose artifacts are boxes.
+    let boxes = json!({
+        "name": "regions/boxes",
+        "views": ["s0"],
+        "membership": "spatial",
+        "shape": { "kind": "bbox" },
+        "artifact_visibility": { "default": "inherited" },
+        "hierarchy": { "kind": "flat" },
+    });
+    assert_valid(&doc, "LayerDeclaration", &boxes);
+    let resp = control(&f.server, &put, "/control/layers")
+        .json(&boxes)
+        .send()
+        .await
+        .unwrap();
+    assert_answer(&doc, &put, resp, 201).await;
+    let url = "/control/layers/regions%2Fboxes/artifacts";
+    let publication = json!({ "addressing": "external",
+                              "artifacts": [{ "key": "west", "members": [],
+                                              "bbox": [0.0, 0.0, 500.0, 1000.0] }] });
+    assert_valid(&doc, "PublishRequest", &publication);
+    let resp = control(&f.server, &put, url)
+        .json(&publication)
+        .send()
+        .await
+        .unwrap();
+    let published = assert_answer(&doc, &put, resp, 201).await;
+    let views = published["shapes"][0]["views"].as_array().unwrap();
+    assert_eq!(
+        views.len(),
+        1,
+        "one report per view of the layer: {published}"
+    );
+    assert_eq!(views[0]["view"], "s0");
+
+    // A spatial layer's artifacts are not grown.
+    let resp = control(&f.server, &patch, url)
+        .json(&json!({ "addressing": "external",
+                       "artifacts": [{ "key": "west", "members": members(0..1) }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&patch), resp, 422, "contract").await;
+
+    // A growth that fills an authored circle reports the shape, naming the content's rank.
+    let outlines = json!({
+        "name": "outlines/a",
+        "views": ["s0"],
+        "membership": "enumerated",
+        "artifact_visibility": { "default": "inherited" },
+        "hierarchy": { "kind": "flat" },
+        "content": { "supplied": [{ "name": "outline", "type": "circle",
+                                    "require_member_visibility": "inherited" }] },
+    });
+    let resp = control(&f.server, &put, "/control/layers")
+        .json(&outlines)
+        .send()
+        .await
+        .unwrap();
+    assert_answer(&doc, &put, resp, 201).await;
+    let url = "/control/layers/outlines%2Fa/artifacts";
+    let resp = control(&f.server, &put, url)
+        .json(&json!({ "addressing": "external",
+                       "artifacts": [{ "key": "o0", "members": members(0..5) }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        assert_answer(&doc, &put, resp, 201).await["without_content"],
+        1
+    );
+    let fill = json!({ "addressing": "external",
+                       "artifacts": [{ "key": "o0",
+                                       "content": [{ "rank": 0, "values": ["500 500 100"] }] }] });
+    assert_valid(&doc, "GrowRequest", &fill);
+    let resp = control(&f.server, &patch, url)
+        .json(&fill)
+        .send()
+        .await
+        .unwrap();
+    let grown = assert_answer(&doc, &patch, resp, 200).await;
+    assert_eq!(grown["shapes"][0]["key"], "o0");
+    assert_eq!(grown["shapes"][0]["content"], 0);
+
+    // A layer whose content is served only to a viewer who sees all it was made from.
+    let topics = json!({
+        "name": "topics/a",
+        "views": ["s0"],
+        "membership": "enumerated",
+        "artifact_visibility": { "default": "inherited" },
+        "hierarchy": { "kind": "flat" },
+        "content": { "supplied": [{ "name": "topic", "type": "text",
+                                    "require_member_visibility": "all" }] },
+    });
+    assert_valid(&doc, "LayerDeclaration", &topics);
+    let resp = control(&f.server, &put, "/control/layers")
+        .json(&topics)
+        .send()
+        .await
+        .unwrap();
+    assert_answer(&doc, &put, resp, 201).await;
+    let url = "/control/layers/topics%2Fa/artifacts";
+    let resp = control(&f.server, &put, url)
+        .json(&json!({ "addressing": "external",
+                       "artifacts": [{ "key": "t0", "members": members(0..10),
+                                       "content": [{ "values": ["a topic"],
+                                                     "generated_from": members(0..4) }] }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_answer(&doc, &put, resp, 201).await;
+    let page = json!({ "addressing": "external",
+                       "artifacts": [{ "key": "t0", "rank": 0, "leaving": members(0..4) }] });
+    assert_valid(&doc, "GrowRequest", &page);
+    let resp = control(&f.server, &patch, url)
+        .json(&page)
+        .send()
+        .await
+        .unwrap();
+    let grown = assert_answer(&doc, &patch, resp, 200).await;
+    assert_eq!(grown["artifacts"][0]["left"], 4);
+    assert_eq!(grown["artifacts"][0]["withdrawn"], 0);
+
+    // The artifact routes read their own JSON, so a body that does not parse is the envelope's
+    // `422`; a path segment that is not UTF-8 is the framework's `400`.
+    for method in [&put, &patch] {
+        let resp = control(&f.server, method, url)
+            .header("content-type", "application/json")
+            .body("{")
+            .send()
+            .await
+            .unwrap();
+        assert_refusal_to(&doc, Some(method), resp, 422, "contract").await;
+        let resp = control(&f.server, method, "/control/layers/%FF/artifacts")
+            .json(&page)
+            .send()
+            .await
+            .unwrap();
+        assert_framework_refusal(&doc, method, resp, 400).await;
+    }
+    let resp = control(&f.server, &delete, "/control/layers/%FF")
+        .send()
+        .await
+        .unwrap();
+    assert_framework_refusal(&doc, &delete, resp, 400).await;
 }
