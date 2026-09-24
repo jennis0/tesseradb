@@ -73,3 +73,6 @@ self.onmessage = (event: MessageEvent<DecodeRequest>) => {
     self.postMessage({id, error: error instanceof Error ? error.message : String(error)});
   }
 };
+
+// The module has evaluated, so the decoder may send requests and their buffers.
+self.postMessage({ready: true});
