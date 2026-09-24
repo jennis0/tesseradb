@@ -9,7 +9,8 @@ import {base64} from './control.js';
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
-import type {ArrowType, ArtifactDetail, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import {openRecords, type RecordsRead} from './records.js';
+import type {ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /** Where a streamed response's points go, one frame's worth at a time. */
 export type PartSink = (part: ViewportPart) => void | Promise<void>;
@@ -790,6 +791,58 @@ export class TesseraClient {
       parents: (page.parents ?? []).map(browseRow),
       next: page.next ?? null
     };
+  }
+
+  /**
+   * `POST /v1/items`: one response of a bulk read of the items this principal may see in a view.
+   * Resolves when the head arrives; iterating the result then yields each page as an Arrow table.
+   * A refusal throws {@link TesseraError} here, before any page.
+   *
+   * The request is sent as given. The read stops at this response's trailer, and the caller
+   * continues it by sending the request again with `cursor` set to the result's `cursor`, until
+   * that is `null`.
+   */
+  items(token: string, req: ItemsRequest, signal?: AbortSignal): Promise<RecordsRead<ItemsHead>> {
+    return this.bulkRead('items', token, req, signal, (raw) => {
+      requireFields(raw, ['order', 'page_rows'], 'the head of a /v1/items response');
+      const head = raw as {order: ItemsHead['order']; page_rows: number; visible?: number; matched?: number};
+      return {order: head.order, pageRows: head.page_rows, visible: head.visible ?? null, matched: head.matched ?? null};
+    });
+  }
+
+  /**
+   * `POST /v1/artifacts`: one response of a bulk read of the artifacts of one layer this principal
+   * is served, as {@link items} reads items.
+   */
+  artifacts(token: string, req: ArtifactsRequest, signal?: AbortSignal): Promise<RecordsRead<ArtifactsHead>> {
+    return this.bulkRead('artifacts', token, req, signal, (raw) => {
+      requireFields(raw, ['page_rows'], 'the head of a /v1/artifacts response');
+      const head = raw as {page_rows: number; served?: number; matched?: number};
+      return {pageRows: head.page_rows, served: head.served ?? null, matched: head.matched ?? null};
+    });
+  }
+
+  private async bulkRead<Head>(
+    route: 'items' | 'artifacts',
+    token: string,
+    req: ItemsRequest | ArtifactsRequest,
+    signal: AbortSignal | undefined,
+    parseHead: (raw: unknown) => Head
+  ): Promise<RecordsRead<Head>> {
+    // Each field that is set, under its wire name. A `tessera_id` travels as a decimal string.
+    const body: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(req)) {
+      if (value === undefined) continue;
+      body[name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)] = typeof value === 'bigint' ? value.toString() : value;
+    }
+    const response = await this.send(`${this.opts.viewerUrl}/v1/${route}`, {
+      method: 'POST',
+      headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+      body: JSON.stringify(body),
+      signal
+    });
+    if (!response.ok) await fail(response);
+    return openRecords(response, req.cursor, signal, parseHead);
   }
 }
 

@@ -1208,3 +1208,94 @@ export type BrowsePage = {
   /** The cursor for the next page, or `null` where this was the last. */
   next: string | null;
 };
+
+/**
+ * `POST /v1/items`: every item this principal may see in `view` that matches `filters`. Each
+ * field is sent only when set, so one left unset takes the server's default.
+ */
+export type ItemsRequest = {
+  view: string;
+  /**
+   * Declared fields, by name, in the order their columns come back. A group-scoped field outside
+   * its group is pinned as `<field>@<key>`. An empty list returns `tessera_id` alone.
+   */
+  fields: string[];
+  systemFields?: ('position' | 'external_id' | 'labels')[];
+  filters?: FilterExpr;
+  /** Every visible item, with a `tessera:matched` column, in place of the matching ones only. */
+  keepUnmatched?: boolean;
+  /** Put the counts in the head. Refused together with a `cursor`. */
+  count?: boolean;
+  order?: 'map' | 'stored';
+  /** Capped by `meta.selection.maxPageRows`; the head reports the size used. */
+  pageRows?: number;
+  /** The most pages this response may carry. */
+  pages?: number;
+  /** A previous response's cursor, unchanged. */
+  cursor?: string;
+  /** Compress each page's Arrow buffers. The client decodes either form. */
+  compression?: 'zstd';
+  idset?: number;
+};
+
+/** `POST /v1/artifacts`: every artifact of `layer` this principal is served. */
+export type ArtifactsRequest = {
+  /** The view the counts, centroids, boxes and shapes are taken in. */
+  view: string;
+  layer: string;
+  /** Properties, in the order their columns come back. */
+  fields: ('key' | 'level' | 'parents' | 'target' | 'masked_count' | 'content' | 'centroid' | 'box' | 'shape')[];
+  level?: number;
+  /** Only the artifacts naming this one among their parents. Refused together with `q`. */
+  parent?: bigint;
+  q?: string;
+  /** Only artifacts with a visible member matching it, and a `matched_count` column. */
+  filters?: FilterExpr;
+  keepUnmatched?: boolean;
+  count?: boolean;
+  pageRows?: number;
+  pages?: number;
+  cursor?: string;
+  compression?: 'zstd';
+  idset?: number;
+};
+
+/** The head of a `POST /v1/items` response. */
+export type ItemsHead = {
+  /** The order this response's rows are in. */
+  order: 'map' | 'stored';
+  /** The page size used, after the cap. */
+  pageRows: number;
+  /** Visible items in the view at the start of the response; `null` unless the request asked for `count`. */
+  visible: number | null;
+  /** Of those, the ones matching the filter; `null` unless the request asked for `count`. */
+  matched: number | null;
+};
+
+/** The head of a `POST /v1/artifacts` response. */
+export type ArtifactsHead = {
+  pageRows: number;
+  /** Artifacts the request selects that this principal is served; `null` unless the request asked for `count`. */
+  served: number | null;
+  /** Of those, the ones with a visible member matching the filter; `null` unless the request asked for `count`. */
+  matched: number | null;
+};
+
+/** What follows each page of a bulk read. */
+export type PageEnd = {
+  /** The cursor to resume after this page; `null` where no row remains. */
+  next: string | null;
+  /** `time` means the response ends after this page. */
+  endedBy: 'rows' | 'bytes' | 'time' | 'end';
+};
+
+/** The last frame of a bulk read's response. */
+export type RecordsTrailer = {
+  pages: number;
+  rows: number;
+  /** The cursor to resume from, which can be past the last page end; `null` where no row remains. */
+  next: string | null;
+  endedBy: 'end' | 'pages' | 'budget_bytes' | 'budget_time' | 'deadline';
+  /** The whole response's wall time on the server, in microseconds. */
+  streamUs: number;
+};

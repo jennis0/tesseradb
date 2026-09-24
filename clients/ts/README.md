@@ -402,6 +402,53 @@ which in the demo's overlay layout is at once, so nothing changes there.
 components against a hand-made store, at `/.highlight-boards.html` on the dev server. It needs no
 service, which is the point — the states it draws are ones a live corpus reaches rarely.
 
+## Reading items and artifacts in bulk
+
+`client.items(token, request)` reads `POST /v1/items`: every item the principal may see in one view
+that matches a filter, with the fields the caller names. `client.artifacts(token, request)` reads
+`POST /v1/artifacts`: every artifact of one layer the principal is served, with the properties the
+caller names. `docs/openapi/tessera.yaml` says what each request field does.
+
+Each call reads one response. It resolves when the response's head has arrived, and a refusal
+throws `TesseraError` then. The result is an async iterator of apache-arrow `Table`s, one per page,
+and it carries:
+
+- `head`: the order used and the page size after the cap, and the counts where the request asked
+  for `count`.
+- `pageEnd`: the page end after the page last yielded, with its cursor `next` and its `endedBy`.
+- `trailer`: `null` until the body has been read to its end.
+- `cursor`: where the read continues. It is the trailer's `next` once the body is whole, the last
+  page end's before that, and the request's own `cursor` before any page end. `null` means no row
+  remains.
+
+To read a whole result, send the request again with `cursor` until it is `null`:
+
+```ts
+let cursor: string | undefined;
+for (;;) {
+  const read = await client.items(token, {view: 's0', fields: ['title'], pageRows: 10_000, cursor});
+  for await (const page of read) use(page);
+  if (read.cursor === null) break;
+  cursor = read.cursor;
+}
+```
+
+The request is sent as given. The client chooses no fields, order, page size or compression, and
+holds nothing between calls.
+
+A page is yielded once its page end has arrived. A body that ends without its trailer yields its
+whole pages and then throws; `cursor` is then the last page end's cursor, and a read resumed from
+it repeats no row. Breaking out of the loop, calling `return()` or aborting the request's signal
+closes the connection, and the server stops the response. After an abort no further page is
+yielded, including pages already received.
+
+Under `compression: 'zstd'` each page's Arrow buffers arrive compressed. On the first page it
+decodes, the client registers a zstd decoder with apache-arrow's reader, so a compressed page
+decodes to the same table as an uncompressed one. The decoder is `fzstd`: plain JavaScript,
+decompression only, no dependencies, about 8 KB minified and 4 KB gzipped, and synchronous, which
+is what apache-arrow's codec interface requires. A zstd decoder the host has registered itself is
+kept.
+
 ## Testing
 
 ```bash
