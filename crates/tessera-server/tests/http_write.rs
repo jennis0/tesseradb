@@ -4117,33 +4117,40 @@ async fn control_status_serves_its_pinned_shape() {
     assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
     tick(&server).await;
     let token = token_for(&server, &["0"]).await;
+    // Each body is read to its end, which is where the artifact sweep derives the hull.
     for _ in 0..2 {
-        let resp = server
-            .client
-            .post(server.viewer_url("/v1/viewport"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({
-                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "layers": [LAYER]
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status().as_u16(), 200);
+        let resp = settled(async || {
+            server
+                .client
+                .post(server.viewer_url("/v1/viewport"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({
+                    "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "layers": [LAYER]
+                }))
+                .send()
+                .await
+                .unwrap()
+        })
+        .await;
+        resp.bytes().await.unwrap();
     }
-    let pinned_and_derived = wait_for(
-        "a pinned log and a derived-geometry lookup",
+    wait_for(
+        "a pinned log",
         std::time::Duration::from_secs(60),
         async || {
-            let status = control_status(&server).await;
-            let wal = &status["write_executor"]["wal"];
-            let hit_rate = &status["derived_cache"]["hit_rate"];
-            match wal["pinned_by"].is_string() && hit_rate.is_f64() {
-                true => Ok(status),
-                false => Err(format!("wal {wal}, hit_rate {hit_rate}")),
+            let wal = control_status(&server).await["write_executor"]["wal"].clone();
+            match wal["pinned_by"].is_string() {
+                true => Ok(()),
+                false => Err(format!("wal {wal}")),
             }
         },
     )
     .await;
+    let pinned_and_derived = control_status(&server).await;
+    assert!(
+        pinned_and_derived["derived_cache"]["hit_rate"].is_f64(),
+        "{pinned_and_derived}"
+    );
     reads.push(pinned_and_derived);
 
     flush_and_fold(&server, None).await;
