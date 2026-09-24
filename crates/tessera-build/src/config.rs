@@ -1,13 +1,11 @@
-//! The configuration file: one TOML document declaring the corpus, its views, its vocabularies,
+//! The corpus declaration: one TOML document declaring the corpus, its views, its vocabularies,
 //! its attributes and its layers.
 //!
-//! [`configuration.md`](../../../docs/design/configuration.md) is the design and its §1 is the
-//! contract — the whole surface in one table. **The set is closed**, and that is a property rather
-//! than an accident: every block parses under `deny_unknown_fields`, and every value that is a word
-//! rather than a caller's string is drawn from an enumerated set. Closure is what the leak register
-//! rests on, the register being exhaustive *because* the surface is enumerable, so a key this
-//! module accepts without an entry in §1 is a disclosure control nobody has reasoned about.
-//! [`the_accepted_key_set_is_configuration_ms_table`] is the assertion that keeps the two in step.
+//! The doc comments on the blocks under "The file, as written" are the reference page
+//! `docs/reference/corpus-toml.md`, which `config/reference.rs` renders and holds to the parser.
+//! Every block parses under `deny_unknown_fields`, and every value that is a word rather than a
+//! caller's string is drawn from an enumerated set, so the page names the whole surface: a key
+//! added here without a doc comment fails that test.
 //!
 //! ## Two axes, and only two
 //!
@@ -191,449 +189,775 @@ pub const ENTITY_ID: &str = "entity_id";
 // The file, as written
 // ---------------------------------------------------------------------------------------------
 
+// The blocks' doc comments are the reference page `docs/reference/corpus-toml.md`, rendered by
+// `config/reference.rs`. They are written for someone declaring a corpus.
+
+/// `corpus.toml` declares a corpus: the files a build reads, the views that place each item on a
+/// map, the vocabularies and attributes each item carries, and the annotation layers drawn over
+/// the items. `tessera build` and `tessera check` read the file that `[build] schema` in
+/// `tessera.toml` names, `schema.toml` by default, or the one `--config` names. `tessera check
+/// --payloads` prints the same declaration as the request bodies that declare it on a running
+/// service.
+///
+/// Every table refuses a key it does not know. Where a key is refused beside another, or needs
+/// another, its description says so.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
-    /// `[sources]` — the caller's own names for the files this declaration reads.
+    /// The files the declaration reads, as `name = "path"`, each path relative to the directory
+    /// the declaration is in. Every `source` key elsewhere names one of these. An empty name, an
+    /// empty path and an absolute path are refused; `--file NAME=PATH` replaces a path from the
+    /// command line.
+    ///
+    /// Default: not set.
     #[serde(default)]
     sources: Option<BTreeMap<String, String>>,
-    /// `[defaults]` — what a block takes when it names neither of these itself.
+    /// The source and entity id column a block takes when it names none.
+    ///
+    /// Default: not set.
     #[serde(default)]
     defaults: Option<DefaultsBlock>,
+    /// Coordinate systems, each giving the items it holds a position on a map.
     #[serde(default)]
     view: Vec<ViewBlock>,
-    /// `[[view_group]]` — a set of views that share every setting and differ by a key
-    /// (`views.md` §3.1). Beside `[[view]]` rather than inside it: a group is not a view, it
-    /// cannot be named on a viewer verb, and its roster is a key set a plain view has no shape
-    /// for.
+    /// Sets of views that share every setting and differ by a key.
     #[serde(default)]
     view_group: Vec<ViewGroupBlock>,
+    /// Named value sets, which `category` attributes draw on.
     #[serde(default)]
     vocabulary: Vec<VocabularyBlock>,
+    /// The columns each item carries.
     #[serde(default)]
     attribute: Vec<AttributeBlock>,
+    /// Annotation layers: named sets of artifacts, such as clusters or regions, drawn over views.
     #[serde(default)]
     layer: Vec<LayerBlock>,
 }
 
-/// `[defaults]` — the source and the identity column a block takes when it names neither.
-///
-/// **This is what `[corpus]` was, minus the constraint that made it a block.** `[corpus]` named
-/// the one file every attribute was read from and the one column its identity sat in, and nothing
-/// could say otherwise; here both are defaults and any block that reads a source or an entity id
-/// may write its own. What `[corpus]` guaranteed — that every attribute lands in one entity space
-/// — is guaranteed by the entity id and never was by the file.
+/// What a block takes when it names no source or entity id column of its own. `source` reaches a
+/// `[[view]]` and an entity-scoped `[[attribute]]`, and nothing else: a vocabulary, a layer, a
+/// view group and `point_visibility` with no source of their own read no file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DefaultsBlock {
-    /// A name in `[sources]`, taken by a `[[view]]` or an `[[attribute]]` that names none.
+    /// A name in `[sources]`, read by a `[[view]]` and an entity-scoped `[[attribute]]` that name
+    /// no `source`. A name `[sources]` does not have is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
-    /// The column an entity id is read from, wherever one is read under the canonical name.
+    /// The column holding the entity id in a view's points and an attribute's source, where the
+    /// block does not name one itself. An empty name is refused.
+    ///
+    /// Default: `"entity_id"`.
     #[serde(default)]
     entity_id_field: Option<String>,
-    /// The view whose Morton code breaks entity-id ties within a signature group
-    /// ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md)).
+    /// The view whose map positions order the entity ids a build assigns to items with the same
+    /// access labels. A build of more than one view, counting each view of a group, is refused
+    /// without it. A view of a group is named `<group>:<key>`, and a name that is not one of the
+    /// build's views is refused.
     ///
-    /// Required when the declaration carries more than one view, and **explicit rather than
-    /// positional**: reordering declaration blocks must not silently re-key a rebuild, the ids
-    /// being permanent (I9). A group name is not a view — the anchor is one coordinate system,
-    /// so a group's view is named `<group>:<key>`.
+    /// Default: not set.
     #[serde(default)]
     allocation_view: Option<String>,
 }
 
-/// `[[view]]` — one named coordinate system.
+/// One coordinate system: a position for each item it holds, the frame those positions are stored
+/// across, and who may see the view and each of its points.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ViewBlock {
+    /// The view's name, which a request names it by. ASCII letters, digits, `_` and `-`, unique
+    /// among views and view groups.
     name: String,
+    /// A display title. Not built yet: the title is accepted and not published.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
-    /// The function that turns a place on the Earth into a coordinate in this view's frame
-    /// (`projections.md` §5), from the closed set and defaulting to `none`. Held as a string and
-    /// resolved by [`Projection::from_name`] so a name outside the set is refused listing the
-    /// ones inside it, rather than reported as *no variant matched*.
+    /// How a longitude and latitude become a position on the map: `web_mercator`,
+    /// `equirectangular` (also written `plate_carree`), `gall_isographic`, or `none` for
+    /// coordinates that are not places on the Earth. It decides which spellings `extent` and
+    /// `fields` take. Any other name is refused.
+    ///
+    /// Default: `"none"`.
+    // A string resolved by `Projection::from_name`, so a refusal can list the names.
     #[serde(default)]
     projection: Option<String>,
+    /// A name in `[sources]`: the file holding the view's points, one row per item. A build
+    /// refuses a view with no source; `tessera check` accepts one.
+    ///
+    /// Default: the value of `[defaults].source`.
     #[serde(default)]
     source: Option<String>,
+    /// Where the points file keeps each field, as `field = "column"`. The fields are `entity_id`
+    /// with either `x` and `y` or `morton` and `residual`; a projected view's are `entity_id`,
+    /// `lon` and `lat`. A field not named here is read from the column of its own name. A field
+    /// the view does not have, both kinds of position, `residual` without `morton`, and `fields`
+    /// where the view has no source are refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
-    /// The quantisation frame, in any of §1's four spellings. Held as a `toml::Value` and
-    /// resolved by [`compile_extent`] rather than typed here, because an untagged enum over a
-    /// string and a table reports every mistake inside the table as *matched no variant* — and
-    /// this key's mistakes (a `margin` beside a `min`, an `x` without a `y`) are exactly the ones
-    /// worth naming. The table form is still a `deny_unknown_fields` struct, so its key set is
-    /// closed and readable out of serde's own message.
+    /// The frame positions are stored across, as a 32-bit position on each axis. A point outside
+    /// it is stored on its edge, and a build refuses a frame that more than half the points fall
+    /// outside. The spellings are under `[view.extent]`.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
+    // A `toml::Value` resolved by `compile_extent`, which names the mistake in a table where an
+    // untagged enum would say only that no variant matched.
     #[serde(default)]
     extent: Option<toml::Value>,
+    /// Where each point's access label comes from: keys under `[view.point_visibility]`.
+    ///
+    /// Required.
     #[serde(default)]
     point_visibility: Option<PointVisibilityBlock>,
-    /// One label, or a list of labels (`views.md` §6, decision 0132).
+    /// The access label a viewer must hold to reach the view, or a list of labels of which they
+    /// must hold one. `public` alone admits every viewer. An empty list, an empty label,
+    /// `inherited`, `public` beside another label, and a label the plugin maps to no term are
+    /// refused.
+    ///
+    /// Type: string or array of strings.
+    ///
+    /// Default: `"public"`.
     #[serde(default)]
     visibility: Option<tessera_types::view::DeclaredGate>,
 }
 
-/// `[[view_group]]` — a set of views sharing every setting, differing by a key and per-view
-/// metadata (`views.md` §3.1, [decision 0108](../../../docs/decisions/0108-a-view-group-grows-by-its-roster.md)).
+/// A set of views that share every setting and differ by a key, and by the metadata each view
+/// carries. A view of the group is addressed `<group>:<key>`. The roster, which says what the
+/// views are, takes one of three forms:
 ///
-/// **Every `[[view]]` key, with the same meaning, plus the roster.** The roster is the whole of
-/// what a group has and a view does not, and it decides where the points come from: under
-/// `[[view_group.view]]` (form A) each view names its own file and the group names none, exactly
-/// as a layer's file is the layer; under `[view_group.views]` (form B) the group's own `source`
-/// holds every view's points with `fields.view` saying which view each row lands in. Declaring
-/// both is refused, as `source` beside inline `artifacts` is; declaring neither mints the views
-/// from the discriminator's distinct values and carries no metadata.
+/// - `[[view_group.view]]` blocks, one per view, each naming its own points file. The group
+///   names no `source`.
+/// - A `[view_group.views]` file with one row per view, beside a group `source` holding every
+///   view's points in rows that name their view in a `view` column.
+/// - Neither: the group's `source` holds every view's points, and the views are the distinct
+///   values of its `view` column. They carry no metadata.
 ///
-/// **`view` is held as `toml::Value` and not as a struct**, because a `[[view_group.view]]` block
-/// mixes a closed key set with the group's declared metadata names — so no derive knows its field
-/// list, and `deny_unknown_fields` cannot be the thing that closes it. `configuration.md` §1's
-/// guarantee is kept by hand in [`compile_roster_view`], against the closed set plus the declared
-/// names, which is the same manual route `extent`'s four spellings already take.
+/// Writing both rosters is refused. `[defaults].source` does not reach a group, so a build
+/// refuses a group with neither a `source` nor `[[view_group.view]]` blocks.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ViewGroupBlock {
+    /// The group's name, the first half of each of its views' ids. ASCII letters, digits, `_` and
+    /// `-`, unique among views and view groups.
     name: String,
+    /// A display title, served on `/v1/meta`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
+    /// As on `[[view]]`.
+    ///
+    /// Default: `"none"`.
     #[serde(default)]
     projection: Option<String>,
-    /// Form B's points file, one row per `(entity, view)`. **Form A declares none** — the file is
-    /// the view — and `[defaults].source` deliberately does not reach here: a defaulted group
-    /// source would turn a form A declaration into a form B one, or mint views from a
-    /// discriminator column nobody named.
+    /// A name in `[sources]`: the file holding every view's points, one row per item and view.
+    /// Required with `[view_group.views]` and refused beside `[[view_group.view]]` blocks.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// Where the group's `source` keeps each field: as on `[[view]]`, and `view`, the column
+    /// naming each row's view. Refused on a group with no `source`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
+    /// As on `[[view]]`: one frame for every view of the group.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
     #[serde(default)]
     extent: Option<toml::Value>,
+    /// As on `[[view]]`, for every view of the group.
+    ///
+    /// Required.
     #[serde(default)]
     point_visibility: Option<PointVisibilityBlock>,
-    /// One label, or a list of labels (`views.md` §6, decision 0132).
+    /// As on `[[view]]`, for every view of the group. A view of the group may narrow it with a
+    /// `visibility` of its own.
+    ///
+    /// Type: string or array of strings.
+    ///
+    /// Default: `"public"`.
     #[serde(default)]
     visibility: Option<tessera_types::view::DeclaredGate>,
-    /// Another group's name: this group's views are that group's (`views.md` §3.3). Chains are
-    /// refused, so the owner of a key set is always one hop away.
+    /// Another group's name: this group's views are that group's, and its own `source` holds
+    /// their points. The group named may not itself name `members`, and a roster or `metadata`
+    /// beside `members` is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     members: Option<String>,
-    /// The per-view values a view carries, `name = type` over the `[[attribute]]` types; a
-    /// category is `{ type = "category", vocabulary = … }`.
+    /// The values each view carries, served with it on `/v1/meta`: `name = "type"` over the
+    /// `[[attribute]]` types, or `name = { type = "category", vocabulary = "<name>" }`. Every view
+    /// must carry every name. `key`, `source`, `visibility` and the group's `view` column are
+    /// refused as names, and so is `metadata` on a group with no roster or one that names
+    /// `members`.
+    ///
+    /// Type: table.
+    ///
+    /// Default: not set.
     #[serde(default)]
     metadata: Option<BTreeMap<String, toml::Value>>,
-    /// `[[view_group.view]]` — form A's roster, one block per view.
+    /// The roster as one block per view: keys under `[[view_group.view]]`.
+    ///
+    /// Type: array of tables.
+    // Each block mixes fixed keys with the group's metadata names, so `compile_roster_view` reads
+    // it by hand and refuses an unknown key itself.
     #[serde(default)]
     view: Vec<toml::Value>,
-    /// `[view_group.views]` — form B's roster, as a table.
+    /// The roster as a file: keys under `[view_group.views]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     views: Option<RosterTableBlock>,
 }
 
-/// `[view_group.views]` — the roster as a table beside the group's own points file.
-///
-/// Two keys, and no more: what the table carries is fixed by the group's own declaration — the
-/// canonical `key`, `visibility` and the declared metadata names — so `fields` locates them and
-/// nothing here asserts one into existence (`configuration.md` §8).
+/// The roster as a file of one row per view, beside the group's `source`. Its columns are `key`,
+/// `visibility`, and one for each `metadata` name.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RosterTableBlock {
+    /// A name in `[sources]`: the roster file.
+    ///
+    /// Required.
     #[serde(default)]
     source: Option<String>,
+    /// Where the roster file keeps `key`, `visibility` and each metadata name, as
+    /// `field = "column"`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
 }
 
-/// `{ field, default }` or `{ source, default }` — where each point's own label is, and what one
-/// carrying none gets.
-///
-/// **A point's label comes from a field or from a source, never both** (`configuration.md` §1).
-/// `field` names a column of the view's own source; `source` names a separate exploded
-/// `(entity_id, term_id)` relation, which is the shape the probe generators produce natively at
-/// 10⁹ and the one the build writes as oracle output regardless. `default` alone is legal and is
-/// the corpus with no permission model.
+/// Where each point's access label comes from. A viewer sees a point when they hold one of its
+/// labels. Write `field` or `source`, not both, and at least one of the three keys.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PointVisibilityBlock {
+    /// A column of the view's points file holding each point's access label, as a string or a
+    /// list of strings. A null or an empty list is no label. An empty name is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     field: Option<String>,
+    /// A name in `[sources]`: a file of integer `entity_id` and `term_id` columns, one row per
+    /// point and access term. If one view of a build reads labels this way, every view must, from
+    /// the same file.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// The label a point with none of its own takes: `public` for every viewer, or an access
+    /// label the plugin maps to a term. `inherited` is refused. Without it, a point with no label
+    /// is refused, at a build and at `/control/ingest` alike.
+    ///
+    /// Default: not set.
     #[serde(default)]
     default: Option<String>,
 }
 
-/// `extent`'s table form, in one struct with every key optional and the combinations checked by
-/// hand ([`compile_extent`]).
+/// `extent` is the word `"auto"` or a table. A view with no projection takes four spellings, in
+/// the units of its own coordinates:
 ///
-/// One struct rather than three, because the three shapes overlap in exactly the ways a caller
-/// gets wrong — `margin` beside `min`, an `x` without a `y`, `auto` beside a stated box — and
-/// three variants would report each of those as *no variant matched*. The key set stays closed
-/// under `deny_unknown_fields`, which is what `configuration.md` §1's table is asserted against.
+/// ```toml
+/// extent = "auto"                           # the same as { auto = true, margin = 0.01 }
+/// extent = { auto = true, margin = 0.25 }   # a square fitted to the data, plus margin each side
+/// extent = { min = -25.0, max = 25.0 }      # one range for both axes
+/// extent = { x = [-18, 19], y = [-22, 24] } # a range for each axis
+/// ```
+///
+/// A projected view takes two, in degrees, and widens the box to the smallest aligned square that
+/// contains it:
+///
+/// ```toml
+/// extent = "auto"                                     # the data's own longitude and latitude
+/// extent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }  # a box
+/// ```
+///
+/// `auto` reads the view's points to fit the frame, so it is refused where the points source
+/// holds no rows. Any other word, an empty table, half a box, a number that is not finite, and a
+/// spelling of the other kind of view are refused.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExtentTable {
+    /// `true` fits the frame to the points the build reads. `false` is refused, and so is `auto`
+    /// beside `min`, `max`, `x` or `y`. A projected view writes `extent = "auto"` instead.
+    ///
+    /// Default: not set.
     #[serde(default)]
     auto: Option<bool>,
+    /// Space added to each side of an `auto` frame, as a fraction of the data's span. Finite and
+    /// at least 0. Refused without `auto = true`.
+    ///
+    /// Default: `0.01`.
     #[serde(default)]
     margin: Option<f64>,
+    /// The low end of both axes, beside `max`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     min: Option<f64>,
+    /// The high end of both axes, beside `min`. It must be above `min`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     max: Option<f64>,
+    /// The x axis as `[low, high]`, beside `y`, with `high` above `low`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     x: Option<[f64; 2]>,
+    /// The y axis as `[low, high]`, beside `x`, with `high` above `low`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     y: Option<[f64; 2]>,
-    /// The projected view's spelling, and the only one it takes (`projections.md` §4.2).
+    /// A projected view's longitudes as `[west, east]`, in degrees within ±180, beside `lat`. A
+    /// box crossing the antimeridian, with `west` above `east`, is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     lon: Option<[f64; 2]>,
+    /// A projected view's latitudes as `[south, north]`, in degrees within ±90, beside `lon`,
+    /// with `north` not below `south`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     lat: Option<[f64; 2]>,
 }
 
-/// `{ field, default }` — where each artifact's own label is, and what one carrying none gets.
-///
-/// **The presence of `field` is the declaration that artifacts carry their own labels** (C27),
-/// which is why it is one table rather than a flag beside a fallback: the two cannot be declared
-/// apart. It takes no `source`: an artifact's label rides its own row, there being one row per
-/// artifact, where a point's label is one of many terms and needs a relation of its own.
+/// What gates each artifact beyond the layer's own `visibility`. Written as
+/// `artifact_visibility = { default = "inherited" }`, or with a `field` naming each artifact's own
+/// labels.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactVisibilityBlock {
+    /// The field holding each artifact's own access labels: a column of the artifacts file, or
+    /// `access` on a `[[layer.artifacts]]` row. Naming it declares that artifacts carry labels of
+    /// their own. An empty name is refused, and so is `field` on an attribute membership.
+    ///
+    /// Default: not set.
     #[serde(default)]
     field: Option<String>,
+    /// The label an artifact with none of its own takes: an access label, `public` for every
+    /// viewer, or `inherited`, which leaves the layer's `visibility` as the artifact's only
+    /// gate. An empty label is refused.
+    ///
+    /// Required.
     #[serde(default)]
     default: Option<String>,
 }
 
-/// `[[vocabulary]]` — a named value set.
+/// A named set of values that `category` attributes and category metadata draw on. Each value is
+/// stored as an integer code: pinned where the declaration or its file writes one, and otherwise
+/// drawn at random, which a rebuild does again.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VocabularyBlock {
+    /// The vocabulary's name. ASCII letters, digits, `_` and `-`, unique among vocabularies.
     name: String,
+    /// A display title. Not built yet: the title is accepted and not published.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
+    /// The width codes are stored at: `u8`, `u16` or `u32`, whose largest codes are 255, 65,535
+    /// and 4,294,967,295.
+    ///
+    /// Required.
     #[serde(default)]
     width: Option<String>,
+    /// `closed` refuses a value the vocabulary does not hold, at a build and at ingest. `open`
+    /// gives such a value a new code.
+    ///
+    /// Required.
     #[serde(default)]
     value_set: Option<String>,
+    /// `public` shows every viewer every value. `derived` shows each viewer only the values
+    /// carried by points they can see.
+    ///
+    /// Required.
     #[serde(default)]
     visibility: Option<String>,
+    /// A name in `[sources]`: a file of values, with a `key` column and optional `code` and
+    /// `title` columns. A value with no code is drawn one. Refused beside `values`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// Where the values file keeps `key`, `code` and `title`, as `field = "column"`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
-    /// Inline values: an array of keys, or a `key = code` table. One type for both, because which
-    /// one was written decides only whether the codes are pinned.
+    /// The values written here: an array of keys, each drawn a code, or a table of
+    /// `key = code`, which pins them. A code is from 1 to the width's largest, since 0 means no
+    /// value. Two values at one code, a code also `reserved`, an empty key and a key given twice
+    /// are refused, and so is `values` beside `source`.
+    ///
+    /// Type: array of strings, or table of integers.
+    ///
+    /// Default: not set.
+    // One `toml::Value` for both spellings, because which one was written decides only whether
+    // the codes are pinned.
     #[serde(default)]
     values: Option<toml::Value>,
+    /// Retired codes, from 1 to the width's largest, which no value may hold and no draw picks.
+    ///
+    /// Default: not set.
     #[serde(default)]
     reserved: Option<Vec<i64>>,
 }
 
-/// `[[attribute]]` — one per-point column, read from the source it names or from
-/// `[defaults].source`.
-///
-/// `deny_unknown_fields` throughout: a mistyped key in a disclosure control is the one class of
-/// typo that must not read as a default. `vocabluary = "severity"` under a serde that ignores
-/// unknown fields is a category with no value set, declared by someone who believed they had said
-/// otherwise.
+/// A column each item carries. `render` and `index` decide where its value is kept, and may be
+/// set together. `render = true` stores the value beside each point's position, so it travels
+/// with every point a viewport returns and can colour the map. `index = true` builds an index that
+/// filters and searches by it. With neither, the value is kept in the item's record and read when
+/// the item is opened.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AttributeBlock {
+    /// The column's name, which filters and `/v1/categories/{column}` use. ASCII letters, digits,
+    /// `_` and `-`, unique among attributes. `tessera_id`, `residual`, `external_id`, `x`, `y`,
+    /// `access`, `node_id`, `record`, `all_of`, `any_of`, `none_of`, `region`, `member_of` and
+    /// `highlighted` are refused.
     name: String,
+    /// A display title. Not built yet: the title is accepted and not published.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
+    /// The column of the source file holding the values. An empty name is refused.
+    ///
+    /// Default: the attribute's `name`.
     #[serde(default)]
     field: Option<String>,
-    /// The `[sources]` name this column is read from. Absent takes `[defaults].source`, and a
-    /// declaration with neither is refused: a column has to be read from somewhere.
+    /// A name in `[sources]`: the file the values are read from, joined to the points by entity
+    /// id. A build refuses an entity-scoped attribute with no source here or in `[defaults]`. A
+    /// group-scoped attribute with none reads each view's own points file, and `[defaults]` does
+    /// not reach it.
+    ///
+    /// Default: the value of `[defaults].source`.
     #[serde(default)]
     source: Option<String>,
-    /// The column this source spells the entity id in. Absent takes `[defaults].entity_id_field`,
-    /// which defaults to `entity_id` — a file carrying entity ids joins whatever it calls them.
+    /// The column of `source` holding the entity id. An empty name is refused.
+    ///
+    /// Default: the value of `[defaults].entity_id_field`.
     #[serde(default)]
     entity_id_field: Option<String>,
+    /// The type of value the column holds, one of the types below.
+    ///
+    /// Required.
     #[serde(rename = "type", default)]
     ty: Option<String>,
+    /// The `[[vocabulary]]` a `category` draws on. Required on a `category`, refused on every
+    /// other type, and a name no `[[vocabulary]]` declares is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     vocabulary: Option<String>,
-    /// The two placement booleans (records §2), each defaulting `false` — the cheapest placement,
-    /// made more expensive only by an explicit word.
+    /// Store the value beside each point's position. Refused on `keyword` and `text`.
     #[serde(default)]
     render: bool,
+    /// Build an index that filters and searches by the value. A group-scoped `text` column needs
+    /// it.
     #[serde(default)]
     index: bool,
-    /// `"entity"` (the default) or `{ group = "<view_group>" }` — whether this column is one
-    /// value per entity or one per `(entity, view of the group)` (`views.md` §5,
-    /// [decision 0109](../../../docs/decisions/0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md)).
-    /// Held as a `toml::Value` because the two spellings are a word and a table, and a hand-written
-    /// match names them rather than reporting *no variant matched* ([`compile_scope`]).
+    /// `"entity"`: one value per item, the same under every view. `{ group = "<name>" }`: one value
+    /// per item and view of that group, which must own its views rather than name `members`.
+    ///
+    /// Type: string or table.
+    ///
+    /// Default: `"entity"`.
+    // A `toml::Value` matched by `compile_scope`, which names the mistake in either spelling.
     #[serde(default)]
     scope: Option<toml::Value>,
-    /// Where this column's own `source` spells the fields it is read by. **One key, `view`**, and
-    /// only a group-scoped column with a `source` of its own has anything to name with it: that
-    /// file carries one row per `(entity, view)`, and the discriminator says which view each row's
-    /// value is for (`views.md` §5). Absent is the column `view`, the same default a scoped
-    /// layer's `fields.view` takes. The entity id is `entity_id_field` beside it rather than a key
-    /// here, which is the spelling every attribute already had.
+    /// On a group-scoped attribute with a `source` of its own, `view` names the column saying
+    /// which view each row's value is for, `view` if absent. Refused on any other attribute, and
+    /// any other field is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
-    /// Which analyser a `text` column's terms are produced by, by name (decision 0070). Absent
-    /// means [`tessera_analyse::UNICODE`]; present on a non-`text` column is refused, because an
-    /// analyser a column does not use is a setting its author believes is in effect.
+    /// The analyser that turns a `text` column into search terms. This build has `unicode`, and
+    /// refuses any other name. Refused on every other type.
+    ///
+    /// Default: `"unicode"`.
     #[serde(default)]
     analyser: Option<String>,
 }
 
-/// `[[layer]]` — one annotation layer. Artifact-side semantics are `annotation-write-cycle.md`
-/// §6.1's; this is the declaration.
+/// An annotation layer: a named set of artifacts, such as clusters or regions, drawn over one or
+/// more views. An artifact's members are the items it contains. Three keys decide who may learn
+/// that an artifact exists, and none has a default: `visibility`, `artifact_visibility` and
+/// `require_member_visibility`.
+///
+/// A layer's artifacts come from its own `source` file, from `[[layer.artifacts]]` blocks, or
+/// from neither, in which case the layer is declared empty and filled through the control plane.
+/// `[defaults].source` does not reach a layer.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LayerBlock {
+    /// The layer's name. Unique among layers, not empty, and not `all` in any case, which a
+    /// viewport request writes for every layer.
     name: String,
+    /// A display title, served on `/v1/meta`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
-    /// `[layer.members]` — membership as its own source, one row per `(artifact, entity)`, for a
-    /// membership no single cell should hold.
-    #[serde(default)]
-    members: Option<MembersBlock>,
-    /// `[layer.labels]` — sugar, expanded to a layer of its own before anything here compiles
-    /// ([`expand_labels`]).
-    #[serde(default)]
-    labels: Option<LabelsBlock>,
+    /// The views the layer is drawn on. A view group's name draws it on every view of the group.
+    /// A name no `[[view]]` or `[[view_group]]` declares, and a name given twice, are refused.
+    ///
+    /// Required.
     #[serde(default)]
     views: Option<Vec<String>>,
-    /// `"entity"` (the default) or `{ group = "<view_group>" }` — one artifact set drawn on every
-    /// view the layer names, or a different set per view of the group (`views.md` §3.5,
-    /// decision 0109). The same key an attribute takes, with the same meaning.
+    /// `"entity"`: one set of artifacts drawn on every view the layer names.
+    /// `{ group = "<name>" }`: a set for each view of that group, each artifact naming its view in
+    /// the `view` field, and `views` may name only that group's views.
+    ///
+    /// Type: string or table.
+    ///
+    /// Default: `"entity"`.
     #[serde(default)]
     scope: Option<toml::Value>,
+    /// A name in `[sources]`: the artifacts file, one row per artifact. Refused beside
+    /// `[[layer.artifacts]]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// Where the artifacts file keeps each field, as `field = "column"`. The fields are `key`;
+    /// `members` or `excluding`, on an `enumerated` layer; `contents`, where the layer supplies
+    /// content; `parent`, under a `nested`, `dag` or `tiered` hierarchy; `attached_layer` and
+    /// `attached_key`, where it has `depends_on`; `view`, on a group-scoped layer; `space`, where
+    /// it has a shape or `polygon` content; and the shape's own fields: `min_x`, `min_y`, `max_x`
+    /// and `max_y` for a `bbox`, `cx`, `cy` and `r` for a `circle`, `cx`, `cy`, `a`, `b` and
+    /// `angle` for an `ellipse`, and `geometry`, as WKB, for a `polygon`. `level` and
+    /// `attached_level` are read under their own names. A field the layer does not declare, both
+    /// `members` and `excluding`, and `fields` beside `[[layer.artifacts]]` are refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
-    /// The artifacts written out in the document itself, instead of `source`
-    /// (`configuration.md` §1). Typed here rather than held as a `toml::Value`, so the inline
-    /// row's own key set is closed by the same `deny_unknown_fields` rule every block is under.
+    /// Artifacts written in the declaration: keys under `[[layer.artifacts]]`. Refused beside
+    /// `source`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     artifacts: Option<Vec<InlineArtifact>>,
-    /// `"enumerated"`, `"spatial"` or `{ attribute = "<field>" }`. Held as a `toml::Value`
-    /// because the third spelling is a table naming the field the predicate reads, and a
-    /// hand-written match reports the three shapes as three shapes rather than as *no variant
-    /// matched* ([`compile_membership`]).
+    /// How an artifact's members are found. `"enumerated"`: a stored set per artifact.
+    /// `"spatial"`: the points inside the artifact's shape. `{ attribute = "<name>" }`: one
+    /// artifact per value of that attribute, which must have `index = true` and a `category`,
+    /// `u8`, `u16` or `u32` type.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
+    // A `toml::Value` matched by `compile_membership`, which names the mistake in each spelling.
     #[serde(default)]
     membership: Option<toml::Value>,
-    /// `"closed"` (the default) or `"open"` — whether a member key no artifact declares is refused
-    /// or creates one (`artifacts-from-points.md` §3).
+    /// Members as a file of their own, one row per artifact and member: keys under
+    /// `[layer.members]`. Only on an `enumerated` layer, and refused beside a `members` or
+    /// `excluding` field.
+    ///
+    /// Default: not set.
+    #[serde(default)]
+    members: Option<MembersBlock>,
+    /// `"closed"`: the layer's artifacts are the ones its `source` or `[[layer.artifacts]]`
+    /// declare, and a member row naming another is refused. `"open"`: a member row naming a new
+    /// key creates an artifact with that key. Any other value is refused.
+    ///
+    /// Default: `"closed"`.
     #[serde(default)]
     value_set: Option<String>,
+    /// How the layer's artifacts relate to each other: keys under `[layer.hierarchy]`.
+    ///
+    /// Required.
     #[serde(default)]
     hierarchy: Option<HierarchyBlock>,
-    /// `layout` — the serving-layout pin, `"rows"`, `"column"` or `"list"`. Absent, the pick is
-    /// automatic and re-evaluated at every fold (decision 0094).
-    #[serde(default)]
-    layout: Option<String>,
-    #[serde(default)]
-    visibility: Option<String>,
-    #[serde(default)]
-    artifact_visibility: Option<ArtifactVisibilityBlock>,
-    #[serde(default)]
-    require_member_visibility: Option<toml::Value>,
-    #[serde(default)]
-    withdraw_on_member_deletion: Option<bool>,
-    #[serde(default)]
-    depends_on: Vec<String>,
+    /// The layer's levels: keys under `[[layer.levels]]`. Required under a `stacked` or `tiered`
+    /// hierarchy, and refused under `nested` and `dag` and on an attribute membership.
     #[serde(default)]
     levels: Vec<LevelBlock>,
+    /// How the layer is stored for serving. `"rows"`: a set of rows per artifact. `"column"`: one
+    /// artifact per row, for a level whose artifacts do not overlap. `"list"`: a list of
+    /// artifacts per row. Refused on an attribute membership.
+    ///
+    /// Default: chosen by the server, again at each compaction.
+    #[serde(default)]
+    layout: Option<String>,
+    /// The access label a viewer must hold to learn that the layer exists, or `public` for every
+    /// viewer. An empty label and `inherited` are refused.
+    ///
+    /// Required.
+    #[serde(default)]
+    visibility: Option<String>,
+    /// What gates each artifact beyond `visibility`: keys under `[layer.artifact_visibility]`.
+    ///
+    /// Required.
+    #[serde(default)]
+    artifact_visibility: Option<ArtifactVisibilityBlock>,
+    /// How much of an artifact's membership a viewer must see for the artifact to be served:
+    /// `"all"`, `"any"`, `{ count = n }` with n at least 1, `{ fraction = p }` with p a float
+    /// above 0 and at most 1, or `"none"` for no such rule. `"all"` and `fraction` are refused on
+    /// a `spatial` or attribute membership.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
+    #[serde(default)]
+    require_member_visibility: Option<toml::Value>,
+    /// Only `false` is accepted. Not built yet: withdrawing an artifact when one of its members
+    /// is deleted. A deleted member leaves the artifact, and its computed content is recomputed
+    /// from the members left.
+    ///
+    /// Default: `false`.
+    // Parsed rather than left unknown, so `true` is refused with a message saying it is not built.
+    #[serde(default)]
+    withdraw_on_member_deletion: Option<bool>,
+    /// Layers whose artifacts this layer's artifacts attach to, through `attached_layer` and
+    /// `attached_key`. Each must be declared before this one. Naming the layer itself is refused,
+    /// and so is `depends_on` on an attribute membership.
+    #[serde(default)]
+    depends_on: Vec<String>,
+    /// What each artifact carries besides its members: keys under `[layer.content]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     content: Option<ContentBlock>,
-    /// `[layer.shape]` — what kind of shape a `membership = "spatial"` layer's artifacts carry
-    /// ([`compile_shape`]).
+    /// The kind of shape each artifact of a `spatial` layer carries: keys under `[layer.shape]`.
+    /// Refused on any other membership. A `spatial` layer without one holds no artifacts.
+    ///
+    /// Default: not set.
     #[serde(default)]
     shape: Option<ShapeBlock>,
-    /// The space the layer's artifact table writes its geometry in, where a row carries no `space`
-    /// of its own (`polygon-membership.md` §4.3) — `"view"` if absent. On the layer beside
-    /// `source` and `fields` because it is an acquisition-side fact about the file, on the same
-    /// register those two are. Declarable on a layer carrying either kind of geometry: a
-    /// membership shape, or an authored shape content, which is read in the same space (§6.1).
+    /// The space a row of the `source` file writes its geometry in when it names none: `"view"`,
+    /// the view's own coordinates, or `"wgs84"`, longitude and latitude in degrees, which every
+    /// view the layer is drawn on must have a projection to take. Refused on a layer with neither
+    /// a shape nor `polygon` content. A `[[layer.artifacts]]` row without a `space` is in
+    /// `"view"` whatever this says.
+    ///
+    /// Default: `"view"`.
     #[serde(default)]
     default_space: Option<String>,
+    /// A layer of labels for this layer's artifacts, written here: keys under `[layer.labels]`.
+    ///
+    /// Default: not set.
+    #[serde(default)]
+    labels: Option<LabelsBlock>,
 }
 
-/// `[layer.shape]` as written. `kind` is optional *here* and not in the compiled form: absence is
-/// what makes the message name the key rather than reporting *no variant matched*, which is the
-/// same reason `membership` is held as a `toml::Value`. `depth` is held so that one written is
-/// refused naming where it went (`polygon-membership.md` §6.1) rather than as an unknown key.
+/// The kind of shape each artifact of a `spatial` layer carries. An artifact's members are the
+/// points inside its shape.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShapeBlock {
+    /// `bbox`, `circle`, `ellipse` or `polygon`.
+    ///
+    /// Required.
+    // Optional here so that its absence is refused naming the key.
     #[serde(default)]
     kind: Option<String>,
+    /// Refused: every shape kind is exact, so a shape has no depth.
+    ///
+    /// Type: any.
+    ///
+    /// Default: not set.
     #[serde(default)]
     depth: Option<toml::Value>,
 }
 
-/// One artifact written into the document itself — `artifacts = [{ key = …, contents = [ … ] }]`.
-///
-/// **For what a person authors**, a dozen curated regions rather than a corpus
-/// (`annotation-write-cycle.md` §6.1). Its keys are the artifact grain's canonical field names and
-/// nothing else: an inline row *is* the canonical spelling, so there is no `fields` map to move one
-/// — which is why declaring both is refused.
+/// One artifact written in the declaration, for a layer a person authors rather than a pipeline
+/// produces. Its keys are the artifacts file's fields under their own names, and a layer written
+/// this way builds the same bundle as the same rows in a file. A shape is written in the key its
+/// layer's `[layer.shape]` kind names.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InlineArtifact {
-    /// The caller's own name for the artifact, which is what an edge into it names.
+    /// The artifact's key, which `parent` and `attached_key` name it by.
     pub key: String,
-    /// The resolution this artifact sits at. `0` for a layer with no levels.
+    /// The level the artifact is at: 0 on a layer with no levels.
     #[serde(default)]
     pub level: u32,
-    /// The membership, by inclusion, as integer ids ([`crate::ids::integer_ids`]).
+    /// The members, as the integer values of the view's `entity_id` field. Only on an
+    /// `enumerated` layer, and refused beside `excluding`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub members: Option<Vec<i64>>,
-    /// The membership, by exclusion — the entities it leaves out. Complemented once at build
-    /// against the view's entity set, so the published artifact is the one `members` would have
-    /// produced (`annotation-write-cycle.md` §6.1). Declaring both is refused.
+    /// The members by exclusion: the ids of the points the artifact leaves out, which the build
+    /// turns into `members`. Only on an `enumerated` layer, and refused beside `members`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub excluding: Option<Vec<i64>>,
-    /// The ranked contents, best first: one entry per rank, each a value per supplied kind.
+    /// The artifact's content, best first: one array per rank, holding a value for each
+    /// `[[layer.content.supplied]]` entry in order.
     #[serde(default)]
     pub contents: Vec<Vec<String>>,
-    /// The artifact's shape, in its layer's kind's field and no other (`polygon-membership.md`
-    /// §6.1): `bbox = [min_x, min_y, max_x, max_y]`, `circle = [cx, cy, r]`,
-    /// `ellipse = [cx, cy, a, b, angle]` or `wkt = "POLYGON ((…))"`. Refused on a layer whose
-    /// membership is not `spatial`.
+    /// A `bbox` layer's shape: `[min_x, min_y, max_x, max_y]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub bbox: Option<Vec<f64>>,
+    /// A `circle` layer's shape: `[cx, cy, r]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub circle: Option<Vec<f64>>,
+    /// An `ellipse` layer's shape: `[cx, cy, a, b, angle]`, with `a` and `b` its semi-axes and
+    /// `angle` its rotation in degrees.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub ellipse: Option<Vec<f64>>,
+    /// A `polygon` layer's shape, as well-known text: `"POLYGON ((…))"`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub wkt: Option<String>,
-    /// The space the row's geometry is written in — `"view"` if absent, or `"wgs84"`, which a
-    /// view declaring a projection honours by putting the coordinates through it
-    /// (`polygon-membership.md` §4.3). It governs **every** geometry the row declares: the shape
-    /// above, and the authored shape content in a `contents` cell, which is read in the same
-    /// space as the same producer's membership polygon (§6.1).
+    /// The space the row's geometry is written in: `"view"` or `"wgs84"`, which every view the
+    /// layer is drawn on must have a projection to take. It governs the shape and any `polygon`
+    /// content.
+    ///
+    /// Default: `"view"`.
     #[serde(default)]
     pub space: Option<String>,
-    /// The parent artifacts in a hierarchy, by key — one under `nested` or `tiered`, and under
-    /// `dag` as many as the artifact sits beneath (`dag-hierarchies.md` §4). Written as one string
-    /// or as a list; a scalar is a list of one, exactly as the artifact table's `parent` column is
-    /// read.
+    /// The artifact's parents, by key: one under a `nested` or `tiered` hierarchy, and any number
+    /// under `dag`.
+    ///
+    /// Type: string or array of strings.
     #[serde(default, deserialize_with = "one_or_many")]
     pub parent: Vec<String>,
+    /// The layer this artifact attaches to, one that `depends_on` names.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub attached_layer: Option<String>,
+    /// The level of the artifact this one attaches to.
     #[serde(default)]
     pub attached_level: u32,
+    /// The key of the artifact this one attaches to.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub attached_key: Option<String>,
-    /// The artifact's own access labels, on a layer whose `artifact_visibility` names a field.
-    /// Written as one string or as a list, and `[]` for no label of its own. Absent states none,
-    /// which a layer reading labels refuses.
+    /// The artifact's own access labels, on a layer whose `artifact_visibility` names a `field`:
+    /// one label, a list, or `[]` for none of its own. Such a layer refuses a row without it.
+    ///
+    /// Type: string or array of strings.
+    ///
+    /// Default: not set.
     #[serde(default, deserialize_with = "stated_one_or_many")]
     pub access: Option<Vec<String>>,
 }
@@ -645,8 +969,7 @@ fn stated_one_or_many<'de, D: serde::Deserializer<'de>>(
     one_or_many(deserializer).map(Some)
 }
 
-/// A key written as one string or as a list of them — the two spellings of an artifact row's
-/// `parent` cell, which under `dag` may name several (`dag-hierarchies.md` §4).
+/// A key written as one string or as a list of them, as an artifact row's `parent` is.
 fn one_or_many<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Vec<String>, D::Error> {
@@ -662,119 +985,184 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(
     })
 }
 
-/// `[layer.labels]` — a label layer, written where it is used.
-///
-/// **Sugar, and sugar exactly**: it carries no key that is not a `[[layer]]` key, and it expands
-/// to a `[[layer]]` block before anything compiles, so a declaration written this way and the
-/// same one written out as a second layer build a byte-identical bundle
-/// (`annotation-write-cycle.md` §6.1). What the expansion supplies is mechanical — the parent's
-/// views, a flat hierarchy, `depends_on` the parent, and the content wrapper around `type`. What
-/// it never supplies is the gate, the membership requirement or the existence of membership data,
-/// each of which is written out here.
+/// A layer of labels for the artifacts of the layer it is written in, such as a name for each
+/// cluster. It builds the same bundle as a second `[[layer]]` written after this one, with the
+/// same `views` and `scope`, `hierarchy = { kind = "flat" }`, `depends_on` naming this layer, and
+/// one `[[layer.content.supplied]]` entry named for the label layer, of type `type`, at the
+/// requirement `[layer.labels.content]` states. Each label names the artifact it labels with
+/// `attached_layer` and `attached_key`. A label layer that needs any other key is written out as a
+/// `[[layer]]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LabelsBlock {
+    /// The label layer's name, as on `[[layer]]`.
     name: String,
+    /// A display title, served on `/v1/meta`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
+    /// As on `[[layer]]`: the labels file, one row per label.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// As on `[[layer]]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
-    /// `[layer.labels.members]` — the same block a `[[layer]]` takes, and here for the same
-    /// reason: a label's ranked contents each name the generating set they were drawn from, and a
-    /// `(artifact, rank, entity)` row is the only shape that carries one. Without it the sugar
-    /// could declare content it could never serve.
+    /// As `[layer.members]`: the members each label was made from.
+    ///
+    /// Default: not set.
     #[serde(default)]
     members: Option<MembersBlock>,
+    /// The kind of content each label is: `text`, `polygon`, `extent` or `point`.
+    ///
+    /// Required.
     #[serde(rename = "type", default)]
     ty: Option<String>,
-    /// Written out, never derived: a label's members **are** its generating set, and no build can
-    /// work out from the parent which entities a synthesis was drawn from.
+    /// As on `[[layer]]`.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
     #[serde(default)]
     membership: Option<toml::Value>,
-    /// A **threshold**: how much of a label's membership a viewer must already see for the label
-    /// to appear at all. `[layer.labels.content]`'s key is not the same dial at a second grain —
-    /// it is a provenance declaration — which is why neither can carry the other.
+    /// As on `[[layer]]`: how much of a label's membership a viewer must see for the label to be
+    /// served.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
     #[serde(default)]
     require_member_visibility: Option<toml::Value>,
-    /// `[layer.labels.content]` — where the text came from, declared and never supplied. `all`
-    /// says it is a synthesis of the members, so it is read only where every document behind it
-    /// can be; `inherited` says it is true whether or not any of them exists — a name a person
-    /// wrote — and adds no requirement beyond the artifact's gate. Only the caller knows which,
-    /// and the expansion fixing it at `all` decided a disclosure control on their behalf.
+    /// The requirement on each label's content: keys under `[layer.labels.content]`.
+    ///
+    /// Required.
     #[serde(default)]
     content: Option<LabelsContentBlock>,
-    /// Declared, never supplied. It is a disclosure control, so it has no default: the value an
-    /// expansion could pick for a caller who wrote nothing is a value the caller never chose.
+    /// As on `[[layer]]`.
+    ///
+    /// Required.
     #[serde(default)]
     artifact_visibility: Option<ArtifactVisibilityBlock>,
-    /// The one defaulted disclosure control in the surface: absent, this layer takes its parent's
-    /// gate. Admissible only because the value it defaults to is the parent's own and never the
-    /// widest one there is ([`expand_labels`]).
+    /// As on `[[layer]]`.
+    ///
+    /// Default: the `visibility` of the layer it is written in.
     #[serde(default)]
     visibility: Option<String>,
 }
 
-/// `[layer.labels.content]` — the label content's own member requirement. One key, because the
-/// rest of `[layer.content]` has no meaning here: a label layer's content is the label, supplied
-/// by the caller, so there is nothing to compute and the wrapper the expansion writes is the
-/// caller's `type` at the caller's requirement.
+/// The requirement on each label's content, which becomes its content entry's
+/// `require_member_visibility`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LabelsContentBlock {
+    /// `"all"` where the label was made from the items it names, so a viewer reads it only when
+    /// they can see all of them. `"inherited"` where it is true whatever they are, such as a name
+    /// a person wrote.
+    ///
+    /// Required.
     #[serde(default)]
     require_member_visibility: Option<String>,
 }
 
-/// `[layer.members]` — membership as its own source, instead of a list field on the artifact row.
-/// Declaring both is refused (`configuration.md` §7).
+/// An `enumerated` layer's members as a file of their own, one row per artifact and member, for
+/// a membership too large for one field of the artifacts file. Under `value_set = "closed"`, a
+/// members file needs the layer's own `source` or `[[layer.artifacts]]` for its rows to name.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MembersBlock {
+    /// A name in `[sources]`: the members file.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// Where the members file keeps each field, as `field = "column"`: `key`, the artifact's key;
+    /// `entity`, the member's id; and `rank`, where the layer supplies content, the rank in
+    /// `contents` whose content was made from this member.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
 }
 
+/// How a layer's artifacts relate to each other, written as `hierarchy = { kind = "flat" }`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HierarchyBlock {
+    /// `flat`: one population. `nested`: a tree, each artifact naming its `parent`, every artifact
+    /// at level 0. `dag`: the same with any number of parents. `stacked`: independent analyses,
+    /// one per level. `tiered`: levels, each artifact naming a `parent` at a coarser level. An
+    /// attribute membership takes `flat` alone.
+    ///
+    /// Required.
     #[serde(default)]
     kind: Option<String>,
-    /// A rendering default and the one key here carrying no disclosure argument in either
-    /// direction: every artifact served has passed its own test independently.
+    /// Serve only the deepest artifact that passes along each branch.
     #[serde(default)]
     prune_children: bool,
 }
 
+/// One level of a `stacked` or `tiered` layer. Levels are numbered from 0 with none repeated or
+/// missing.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LevelBlock {
+    /// The level's number, which an artifact names in its `level`.
+    ///
+    /// Required.
     #[serde(default)]
     level: Option<u32>,
+    /// A display title, served on `/v1/meta`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
+    /// The zoom levels the level is served at, `[low, high]` inclusive. A request naming no
+    /// levels is answered with the levels whose range covers its zoom. A range with `low` above
+    /// `high`, or starting past 16, is refused.
+    ///
+    /// Default: every zoom.
     #[serde(default)]
     zoom: Option<(u32, u32)>,
 }
 
+/// What each artifact carries besides its members.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContentBlock {
+    /// Properties the server computes from the members each viewer can see: `centroid`, `box`
+    /// and `hull`. Any other name, a name given twice, and `computed` on an attribute membership
+    /// are refused, and so is `hull` beside a shape or `polygon` content, since an artifact draws
+    /// one shape.
     #[serde(default)]
     computed: Vec<String>,
+    /// Content the artifacts carry, one entry per kind: keys under `[[layer.content.supplied]]`.
     #[serde(default)]
     supplied: Vec<SuppliedBlock>,
 }
 
+/// One kind of content each artifact carries, in its `contents`. Refused on an attribute
+/// membership.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SuppliedBlock {
+    /// The content's name, unique within the layer.
     name: String,
+    /// `text`, `polygon`, `extent` or `point`, published on `/v1/meta` so a client knows how to
+    /// draw it. `polygon` content is the artifact's drawn shape, so it is refused beside a `hull`
+    /// or a `[layer.shape]`.
+    ///
+    /// Required.
     #[serde(rename = "type", default)]
     ty: Option<String>,
+    /// `"all"`: content made from the members, served only to a viewer who can see every member
+    /// it was made from. `"inherited"`: content true whatever the members, such as a name a
+    /// person wrote, gated by the artifact alone.
+    ///
+    /// Required.
     #[serde(default)]
     require_member_visibility: Option<String>,
 }
@@ -5091,11 +5479,8 @@ fn compile_layers(
             members,
         });
 
-        // **The layout pin, refused rather than ignored where the word is not one of the three.**
-        // An ignored pin is the silent case: the operator declared a layout, got another, and has
-        // nothing to look at (selection memo §4.1). The one *combination* refused here rather than
-        // in `validate` is a shape with a row-major pin, and that one is `validate`'s — see
-        // `DeclarationError::LayoutWithoutRowSource`.
+        // A word outside the three is refused rather than ignored: an ignored pin serves a layout
+        // the operator did not declare.
         let layout = match block.layout.as_deref() {
             None => None,
             Some(word) => Some(ServingLayout::parse_pin(word).ok_or_else(|| {
@@ -5542,6 +5927,8 @@ fn compile_criterion(
     }
 }
 
+#[cfg(test)]
+mod reference;
 #[cfg(test)]
 mod tests;
 

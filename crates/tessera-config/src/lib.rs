@@ -12,57 +12,468 @@ use tokio::sync::Semaphore;
 
 pub mod defaults;
 mod error;
+#[cfg(test)]
+mod reference;
 
 use defaults::*;
 pub use error::ConfigError;
 
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
+/// `tessera.toml` describes one deployment: where its bundle and working files are, which corpus
+/// declaration `tessera build` reads, and how `tessera serve` listens and bounds its work.
+/// `tessera build`, `tessera check`, `tessera health` and `tessera serve` read it from the working
+/// directory, or from the nearest directory above it that has one. `--deployment` names another
+/// file.
+///
+/// Every table refuses a key it does not know. A relative path is read from the directory this
+/// file is in, except the `unix:` socket path of `[serve] control`. No integer may be negative.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    /// Where the bundle and the server's own files are.
     bundle: RawBundle,
-    plugin: RawPlugin,
-    disclosure: Option<RawDisclosure>,
+    /// What `tessera build` and `tessera check` read.
     #[serde(default)]
     build: RawBuild,
-    /// Read by hand, so that `key = "…"` gets its own refusal.
+    /// Where `tessera build` finds the identity key, which it needs to compute each item's
+    /// `tessera_id`. This file names only the variable; `key = "…"` is refused, so the key itself
+    /// cannot be written here. `tessera build --identity-file` reads the key from a file instead.
+    // Read by hand in `parse` against `IDENTITY_KEYS`, so that `key` gets a refusal of its own.
     identity: Option<toml::Value>,
+    /// The authorisation plugin, which turns an access label into the terms a viewer's token is
+    /// checked against.
+    plugin: RawPlugin,
+    /// How long a viewer's token lasts.
+    ///
+    /// Required.
+    disclosure: Option<RawDisclosure>,
+    /// How `tessera serve` listens, whom it admits, and the limits on each request. `tessera
+    /// build` reads none of it, and a file for building alone may leave the table out.
     #[serde(default)]
     serve: RawServe,
+    /// Writes through the control plane: the limits on each request, and when buffered writes
+    /// are published and compacted.
     #[serde(default)]
     ingest: RawIngest,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawBundle {
+    /// The bundle directory, which `tessera build` writes unless `--out` names another, and
+    /// `tessera serve` opens.
+    path: PathBuf,
+    /// A directory outside the bundle for files the server derives: cached visibility masks,
+    /// which survive a restart, and suggestion indexes and scratch files, which are rebuilt at
+    /// each start.
+    cache: PathBuf,
+    /// The write-ahead log. Every write through the control plane is appended and synced to disc
+    /// here before it is acknowledged, and the log is replayed when the server starts. The path
+    /// names a series of files: `wal.log` is written as `wal-000001.log`, `wal-000002.log` and so
+    /// on, and is never itself a file.
+    wal: PathBuf,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawBuild {
+    /// The corpus declaration. `--config` names another.
+    ///
+    /// Default: `"schema.toml"`.
+    schema: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPlugin {
+    /// The plugin. This build has one, `builtin:passthrough`, which makes each access label its
+    /// own term, and refuses any other name.
+    module: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawDisclosure {
+    /// The lifetime, in seconds, of every viewer token `POST /session/authorise` issues. A token
+    /// past it is refused with 403. With `0`, a token has expired when it is issued.
+    ///
+    /// Required.
     token_max_lifetime: Option<u64>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawServe {
+    /// The viewer plane's address and port, such as `"127.0.0.1:8141"`: `/v1/meta`,
+    /// `/v1/viewport`, `/v1/items`, `/v1/artifacts` and `/v1/categories`, for requests carrying a
+    /// viewer token. `tessera serve` refuses to start without it, and `tessera health` probes it.
+    /// Port 0 takes a free port, which the server prints when it starts.
+    ///
+    /// Default: not set.
+    viewer: Option<String>,
+    /// The session plane's address and port: `POST /session/authorise`, which issues viewer
+    /// tokens, and `POST /session/revoke`. `tessera serve` refuses to start without it.
+    ///
+    /// Default: not set.
+    session: Option<String>,
+    /// The control plane's address and port, or `"unix:<path>"` for a Unix socket: ingest,
+    /// deletion and suppression, declarations, flush, compaction and status, all under
+    /// `/control`. `tessera serve` refuses to start without it. A relative socket path is read
+    /// from the server's working directory, not from this file's directory, and a file already
+    /// at the path is removed.
+    ///
+    /// Default: not set.
+    control: Option<String>,
+    /// A file holding the session credential, the bearer token the session plane requires. Its
+    /// contents are trimmed. `tessera serve` refuses to start when the file cannot be read, and
+    /// when neither this nor `session_credential_env` is set. When both are set, the file is
+    /// used.
+    ///
+    /// Default: not set.
+    session_credential_file: Option<PathBuf>,
+    /// An environment variable holding the session credential. `tessera serve` refuses to start
+    /// when it is unset.
+    ///
+    /// Default: not set.
+    session_credential_env: Option<String>,
+    /// A file holding the operator credential, the bearer token every request to the control
+    /// plane requires. Its contents are trimmed. `tessera serve` refuses to start when the file
+    /// cannot be read, and when neither this nor `operator_credential_env` is set. When both are
+    /// set, the file is used.
+    ///
+    /// Default: not set.
+    operator_credential_file: Option<PathBuf>,
+    /// An environment variable holding the operator credential. `tessera serve` refuses to start
+    /// when it is unset.
+    ///
+    /// Default: not set.
+    operator_credential_env: Option<String>,
+    /// Browser origins, such as `"https://maps.example.org"`, whose pages may call the viewer
+    /// plane with a viewer token. `"*"` is refused.
+    ///
+    /// Default: `[]`.
+    cors_origins: Option<Vec<String>>,
+    /// Admit a page served from `localhost`, `127.0.0.1` or `[::1]`, on any port, to the viewer
+    /// plane, as for a notebook whose port is not known in advance.
+    ///
+    /// Default: `false`.
+    cors_loopback: Option<bool>,
+    /// Browser origins whose pages may call both the viewer plane and the session plane, so a
+    /// page in development can hold the session credential. The server logs a warning at start
+    /// when it is set. `"*"` is refused.
+    ///
+    /// Default: `[]`.
+    dev_cors_origins: Option<Vec<String>>,
+    /// Threads in the pool that computes responses.
+    ///
+    /// Default: the number of CPUs the process may use.
+    compute_threads: Option<usize>,
+    /// Viewer and session requests computed at once. It admits `/v1/viewport`, the single-item and
+    /// single-artifact reads, `/v1/artifacts/browse` and `/session/authorise`, never the control
+    /// plane.
+    ///
+    /// Default: four per compute thread.
+    compute_admission: Option<usize>,
+    /// Requests that may wait for an admission slot beyond those running. A request finding no
+    /// place is refused with 429 at once. `compute_admission` and `compute_queue` together may
+    /// not exceed 2305843009213693951.
+    ///
+    /// Default: twice `compute_admission`.
+    compute_queue: Option<usize>,
+    /// Milliseconds a queued request waits for an admission slot before it is refused with 429.
+    ///
+    /// Default: `250`.
+    admission_timeout_ms: Option<u64>,
+    /// Milliseconds a request waits for another request's build of a shared cached structure
+    /// before it is refused with 429.
+    ///
+    /// Default: `6000`.
+    single_flight_wait_ms: Option<u64>,
+    /// The largest `k` a viewport request may name; a larger one is lowered to it. A tile draws at
+    /// most the smaller of this and `k_max_marks`.
+    ///
+    /// Default: `1000`.
+    max_k: Option<usize>,
+    /// The fewest marks a tile with a visible point draws. `tessera serve` refuses to start with
+    /// `0`.
+    ///
+    /// Default: `2`.
+    k_min: Option<usize>,
+    /// The most marks a tile draws, and the `k` of a request that names none.
+    ///
+    /// Default: `500`.
+    k_max_marks: Option<usize>,
+    /// The marks the average occupied tile draws at any zoom; the threshold that samples points
+    /// is derived from it.
+    ///
+    /// Default: `16`.
+    theta_target_marks: Option<u64>,
+    /// The most tiles one `POST /v1/viewport` may cover. A request covering more is refused with
+    /// 422.
+    ///
+    /// Default: `262144`.
+    max_tiles_per_request: Option<usize>,
+    /// The largest `underlay_offset` a viewport request may name: how many zoom levels below the
+    /// tiles its exact masked counts are served at. A larger one is refused with 422, and `0`
+    /// refuses every underlay. At most 255.
+    ///
+    /// Default: `4`.
+    max_underlay_offset: Option<u8>,
+    /// The most underlay cells one viewport request may ask for, its tiles times 4 to the power
+    /// of its `underlay_offset`. A request asking for more is refused with 422.
+    ///
+    /// Default: `8192`.
+    max_underlay_cells: Option<usize>,
+    /// Bytes a streamed viewport response gathers before it sends a frame. A frame always ends
+    /// at a whole tile.
+    ///
+    /// Default: `1048576` (1 MiB).
+    stream_flush_bytes: Option<usize>,
+    /// Milliseconds a streamed response waits for a client that has stopped reading before it
+    /// cuts the response off.
+    ///
+    /// Default: `10000`.
+    stream_write_stall_ms: Option<u64>,
+    /// Milliseconds a streamed response may run. A viewport response is cut off at it. A bulk
+    /// read ends at it with a cursor to resume from.
+    ///
+    /// Default: `60000`.
+    stream_deadline_ms: Option<u64>,
+    /// Add each stage's timing, as `stage_ns`, to the last frame of a viewport response. It has
+    /// an effect only in a binary built with the `bench-timing` feature.
+    ///
+    /// Default: `false`.
+    stage_timing: Option<bool>,
+    /// The most vertices a `region` filter's polygon may have. A filter with more is refused
+    /// with 422.
+    ///
+    /// Default: `10000`.
+    max_region_vertices: Option<u64>,
+    /// The most boundary cells a `region` filter is resolved to at one zoom level. Past it the
+    /// filter is answered for a cover of the polygon, which the `x-tessera-region` header
+    /// reports, rather than refused.
+    ///
+    /// Default: `262144`.
+    max_region_cells: Option<usize>,
+    /// Bytes of resolved `region` filters kept for reuse, shared by every viewer.
+    ///
+    /// Default: `268435456` (256 MiB).
+    region_cache_bytes: Option<u64>,
+    /// The most values one page of `GET /v1/categories/{column}` returns, and the page size of a
+    /// request that names none. A larger `limit` is lowered to it.
+    ///
+    /// Default: `1000`.
+    max_category_values: Option<usize>,
+    /// The most values one `GET /v1/categories/{column}/suggest` returns, and the `limit` of a
+    /// request that names none.
+    ///
+    /// Default: `20`.
+    max_suggestions: Option<usize>,
+    /// The most values one suggestion request examines, hidden ones included, before it stops
+    /// and answers `more: true`.
+    ///
+    /// Default: `100000`.
+    max_suggestion_walk: Option<u64>,
+    /// The size of a viewer's visible set at or below which suggestions are answered from a set
+    /// of the values that viewer can see, built once per session, rather than by checking each
+    /// value in turn.
+    ///
+    /// Default: `10000000`.
+    max_suggest_set_entities: Option<u64>,
+    /// The most rows one page of `POST /v1/artifacts/browse` returns, and the page size of a
+    /// request that names none.
+    ///
+    /// Default: `200`.
+    max_browse_rows: Option<usize>,
+    /// The most vertices a shape published through `/control/layers/{name}/artifacts` may have.
+    /// A shape with more is refused with 422. A build does not read this key: it refuses a shape
+    /// of more than 1000000 vertices whatever the key says.
+    ///
+    /// Default: `1000000`.
+    max_shape_vertices: Option<u64>,
+    /// The most rows one page of a bulk read, `POST /v1/items` or `POST /v1/artifacts`, holds.
+    /// `0` is refused.
+    ///
+    /// Default: `100000`.
+    max_page_rows: Option<u32>,
+    /// The most bytes one page of a bulk read holds, as Arrow before compression. A row larger
+    /// than this is sent alone. `0` is refused, and so is a value above 2147483648.
+    ///
+    /// Default: `67108864` (64 MiB).
+    max_page_bytes: Option<usize>,
+    /// Bulk reads running at once. One more is refused with 429 at once, and `0` refuses every
+    /// bulk read. Bulk reads may hold seven times `max_page_bytes` of memory each. A value above
+    /// 2305843009213693951 is refused.
+    ///
+    /// Default: `2`.
+    bulk_admission: Option<usize>,
+    /// The most bytes one bulk-read response carries before it ends with a cursor to resume from.
+    /// A value below `max_page_bytes` is refused.
+    ///
+    /// Default: `268435456` (256 MiB).
+    bulk_response_bytes: Option<usize>,
+    /// Milliseconds one bulk-read response may run before it ends with a cursor to resume from.
+    /// `stream_deadline_ms` ends one too, whichever comes first.
+    ///
+    /// Default: `30000`.
+    bulk_response_ms: Option<u64>,
+    /// The most seconds a write asking to wait until it is visible, and `/control/flush`, wait
+    /// before answering `visible: false`.
+    ///
+    /// Default: `30`.
+    visible_wait_max_secs: Option<u64>,
+    /// Bytes of each viewer's projection of the rows they may see, kept between requests.
+    ///
+    /// Default: `2147483648` (2 GiB).
+    row_projection_cache_bytes: Option<u64>,
+    /// Bytes of cached visibility masks kept in memory. Masks also persist in the `[bundle]`
+    /// cache directory, which this does not bound.
+    ///
+    /// Default: `1073741824` (1 GiB).
+    fragment_cache_bytes: Option<u64>,
+    /// Bytes of per-viewer artifact counts kept for layers served from one bitmap per artifact.
+    ///
+    /// Default: `268435456` (256 MiB).
+    masked_count_cache_bytes: Option<u64>,
+    /// Bytes of per-viewer counts of occupied tiles, from which the sampling threshold is derived.
+    ///
+    /// Default: `33554432` (32 MiB).
+    occupancy_cache_bytes: Option<u64>,
+    /// Segments at or below this size are treated as one size tier when choosing which to merge.
+    ///
+    /// Default: `16777216` (16 MiB).
+    segment_floor_bytes: Option<u64>,
+    /// How many segments of one size tier are merged together. `tessera serve` refuses to start
+    /// with a value below 2.
+    ///
+    /// Default: `4`.
+    tier_width: Option<usize>,
+    /// The largest segment a merge may produce, in bytes.
+    ///
+    /// Default: not set, and the server merges up to 268435456 bytes (256 MiB).
+    max_merged_segment_bytes: Option<u64>,
+    /// How many small files of one size tier, which flushes write for attribute values, records,
+    /// text indexes and access terms, are combined into one. External-id files are combined four
+    /// at a time whatever this says. `tessera serve` refuses to start with a value below 2.
+    ///
+    /// Default: `8`.
+    coalesce_width: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawIngest {
-    commit_window_max_items: Option<usize>,
-    ingest_queue_bound: Option<usize>,
+    /// Requests to `/control/ingest` and `/control/values` handled at once. One more is refused
+    /// with 429 at once. A value above 2305843009213693951 is refused.
+    ///
+    /// Default: `64`.
     ingest_admission: Option<usize>,
-    ingest_max_batch_rows: Option<usize>,
-    ingest_max_batch_bytes: Option<usize>,
-    publish_max_body_bytes: Option<usize>,
-    max_artifacts_per_request: Option<usize>,
-    max_members_per_request: Option<usize>,
-    max_excluded_per_request: Option<usize>,
-    overlay_soft_limit: Option<usize>,
-    flush_max_age_secs: Option<u64>,
-    flush_max_items: Option<usize>,
+    /// Ingest batches that may wait for the writer. When the queue is full an ingest is refused
+    /// with 429 and a `Retry-After`. Deletions and suppressions do not wait in it and are never
+    /// refused for load.
+    ///
+    /// Default: `32`.
+    ingest_queue_bound: Option<usize>,
+    /// Ingested items that may wait for a flush. At or above it `/control/ingest` is refused
+    /// with 429 before anything is written.
+    ///
+    /// Default: `1000000`.
     ingest_buffer_max_items: Option<usize>,
+    /// The most rows one `/control/ingest` or `/control/values` request may carry. A request
+    /// with more is refused with 422.
+    ///
+    /// Default: `10000`.
+    ingest_max_batch_rows: Option<usize>,
+    /// The largest body `/control/ingest` or `/control/values` accepts, in bytes. A larger one
+    /// is refused with 422.
+    ///
+    /// Default: `16777216` (16 MiB).
+    ingest_max_batch_bytes: Option<usize>,
+    /// Rows at which a commit window closes. Items allocated ids in one window are grouped by the
+    /// access terms they carry, so a wider window stores the access index more compactly. `0` is
+    /// read as 1.
+    ///
+    /// Default: `10000`.
+    commit_window_max_items: Option<usize>,
+    /// Seconds between flushes, which publish buffered writes as a new segment and make them
+    /// visible.
+    ///
+    /// Default: `90`.
+    flush_max_age_secs: Option<u64>,
+    /// Buffered rows at which a flush runs before `flush_max_age_secs` has passed.
+    ///
+    /// Default: `40000`.
+    flush_max_items: Option<usize>,
+    /// The largest body `PUT` and `PATCH /control/layers/{name}/artifacts` accept, in bytes. A
+    /// larger one is refused with 422.
+    ///
+    /// Default: `67108864` (64 MiB).
+    publish_max_body_bytes: Option<usize>,
+    /// The most artifacts one `PUT /control/layers/{name}/artifacts` may publish. More is
+    /// refused with 422.
+    ///
+    /// Default: `10000`.
+    max_artifacts_per_request: Option<usize>,
+    /// The most members one `PATCH /control/layers/{name}/artifacts` may add and remove,
+    /// counted together. More is refused with 422.
+    ///
+    /// Default: `5000000`.
+    max_members_per_request: Option<usize>,
+    /// The most items one published artifact's `excluding` list may name. More is refused with
+    /// 422.
+    ///
+    /// Default: `1000000`.
+    max_excluded_per_request: Option<usize>,
+    /// Deletions and suppressions held in memory at which the server logs a warning and counts
+    /// an alarm. Nothing is refused.
+    ///
+    /// Default: `500000`.
+    overlay_soft_limit: Option<usize>,
+    /// Seconds after one compaction starts during which the schedule starts no other.
+    ///
+    /// Default: `86400`.
     compaction_min_interval_secs: Option<u64>,
+    /// When the daily compaction window opens, as `"HH:MM"` in UTC, or `"off"` for no window.
+    /// Any other value is refused.
+    ///
+    /// Default: `"00:00"`.
     compaction_window_start: Option<String>,
+    /// How long the window stays open, in seconds. `0` never opens it, and a day or more never
+    /// closes it.
+    ///
+    /// Default: `14400`.
     compaction_window_secs: Option<u32>,
+    /// Inside the window, compact when a view has at least this many segments. `0` never
+    /// compacts in the window.
+    ///
+    /// Default: `8`.
     compaction_window_min_segments: Option<usize>,
+    /// At any hour, compact when a view has this many segments, or `"off"`.
+    ///
+    /// Type: integer or `"off"`.
+    ///
+    /// Default: `64`.
     compaction_max_segments: Option<OrOff<u64>>,
+    /// At any hour, compact when this many deleted items wait to be removed, or `"off"`.
+    ///
+    /// Type: integer or `"off"`.
+    ///
+    /// Default: the value of `overlay_soft_limit`.
     compaction_after_deletions: Option<OrOff<u64>>,
+    /// At any hour, compact when deleted items waiting to be removed reach this fraction of the
+    /// stored rows, or `"off"`.
+    ///
+    /// Type: number or `"off"`.
+    ///
+    /// Default: `0.2`.
     compaction_dead_rows_fraction: Option<OrOff<f64>>,
+    /// At any hour, compact when the bundle's unreferenced bytes on disc reach this ratio of the
+    /// bytes its manifests name, or `"off"`.
+    ///
+    /// Type: number or `"off"`.
+    ///
+    /// Default: `1.0`.
     compaction_dead_bytes_ratio: Option<OrOff<f64>>,
 }
 
@@ -72,80 +483,6 @@ struct RawIngest {
 enum OrOff<T> {
     Value(T),
     Word(String),
-}
-
-#[derive(Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawBuild {
-    schema: Option<PathBuf>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawBundle {
-    path: PathBuf,
-    cache: PathBuf,
-    wal: PathBuf,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawPlugin {
-    module: String,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawServe {
-    viewer: Option<String>,
-    session: Option<String>,
-    control: Option<String>,
-    max_k: Option<usize>,
-    stage_timing: Option<bool>,
-    k_min: Option<usize>,
-    k_max_marks: Option<usize>,
-    theta_target_marks: Option<u64>,
-    max_underlay_offset: Option<u8>,
-    max_underlay_cells: Option<usize>,
-    max_tiles_per_request: Option<usize>,
-    max_category_values: Option<usize>,
-    max_suggestions: Option<usize>,
-    max_suggestion_walk: Option<u64>,
-    max_suggest_set_entities: Option<u64>,
-    max_shape_vertices: Option<u64>,
-    max_region_vertices: Option<u64>,
-    max_region_cells: Option<usize>,
-    max_browse_rows: Option<usize>,
-    max_page_rows: Option<u32>,
-    max_page_bytes: Option<usize>,
-    bulk_admission: Option<usize>,
-    bulk_response_bytes: Option<usize>,
-    bulk_response_ms: Option<u64>,
-    region_cache_bytes: Option<u64>,
-    session_credential_file: Option<PathBuf>,
-    session_credential_env: Option<String>,
-    operator_credential_file: Option<PathBuf>,
-    operator_credential_env: Option<String>,
-    compute_threads: Option<usize>,
-    compute_admission: Option<usize>,
-    compute_queue: Option<usize>,
-    admission_timeout_ms: Option<u64>,
-    single_flight_wait_ms: Option<u64>,
-    stream_flush_bytes: Option<usize>,
-    stream_write_stall_ms: Option<u64>,
-    stream_deadline_ms: Option<u64>,
-    row_projection_cache_bytes: Option<u64>,
-    masked_count_cache_bytes: Option<u64>,
-    occupancy_cache_bytes: Option<u64>,
-    fragment_cache_bytes: Option<u64>,
-    segment_floor_bytes: Option<u64>,
-    max_merged_segment_bytes: Option<u64>,
-    tier_width: Option<usize>,
-    coalesce_width: Option<usize>,
-    dev_cors_origins: Option<Vec<String>>,
-    cors_origins: Option<Vec<String>>,
-    cors_loopback: Option<bool>,
-    visible_wait_max_secs: Option<u64>,
 }
 
 /// The control plane's listen target: a unix socket, or a loopback TCP address.
@@ -198,7 +535,8 @@ pub struct Config {
     /// first, and either way the response ends with a cursor to resume from.
     pub bulk_response_ms: u64,
     pub region_cache_bytes: u64,
-    /// Emit `x-tessera-stage-ns`; does nothing in a binary built without `bench-timing`.
+    /// Add `stage_ns` to a viewport response's trailer; does nothing in a binary built without
+    /// `bench-timing`.
     pub stage_timing: bool,
     pub dev_cors_origins: Vec<String>,
     pub cors_origins: Vec<String>,
@@ -293,6 +631,9 @@ pub const DEPLOYMENT_FILE: &str = "tessera.toml";
 /// The environment variable holding the identity key when `[identity]` names none.
 pub const DEFAULT_IDENTITY_ENV: &str = "TESSERA_IDENTITY_KEY";
 
+/// The keys `[identity]` takes. It is read by hand, so that `key` is refused with its own message.
+const IDENTITY_KEYS: [&str; 1] = ["env"];
+
 /// The corpus declaration when `[build]` names none.
 pub const DEFAULT_SCHEMA_FILE: &str = "schema.toml";
 
@@ -362,10 +703,11 @@ fn parse(text: &str) -> Result<Config> {
         Some(value) => {
             let table = value.as_table().ok_or(ConfigError::IdentityNotATable)?;
             for key in table.keys() {
-                match key.as_str() {
-                    "env" => {}
-                    "key" => return Err(ConfigError::IdentityKeyInline),
-                    other => return Err(ConfigError::UnknownIdentityKey(other.to_string())),
+                if key == "key" {
+                    return Err(ConfigError::IdentityKeyInline);
+                }
+                if !IDENTITY_KEYS.contains(&key.as_str()) {
+                    return Err(ConfigError::UnknownIdentityKey(key.clone()));
                 }
             }
             match table.get("env").and_then(toml::Value::as_str) {

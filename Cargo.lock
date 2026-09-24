@@ -2869,6 +2869,7 @@ dependencies = [
  "tempfile",
  "tessera-analyse",
  "tessera-authz",
+ "tessera-docgen",
  "tessera-engine",
  "tessera-filter",
  "tessera-filter-write",
@@ -2901,6 +2902,7 @@ dependencies = [
  "tessera-build",
  "tessera-config",
  "tessera-corpus",
+ "tessera-docgen",
  "tessera-server",
  "tessera-spatial",
  "tessera-store",
@@ -2916,6 +2918,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "tempfile",
+ "tessera-docgen",
  "tessera-engine",
  "tessera-types",
  "tokio",
@@ -2932,6 +2935,13 @@ dependencies = [
  "tempfile",
  "tessera-spatial",
  "tessera-types",
+]
+
+[[package]]
+name = "tessera-docgen"
+version = "0.1.0"
+dependencies = [
+ "syn 2.0.119",
 ]
 
 [[package]]

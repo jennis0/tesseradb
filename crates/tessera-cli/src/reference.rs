@@ -12,6 +12,7 @@ use std::fmt::Write;
 use std::path::PathBuf;
 
 use clap::{Arg, ArgAction, Command, CommandFactory};
+use tessera_docgen::{cell, escape_angles, outside_code};
 
 const REGENERATE: &str = "TESSERA_WRITE_CLI_REFERENCE=1 cargo test -p tessera-cli cli_reference";
 
@@ -136,41 +137,12 @@ fn sentence(text: &str) -> String {
     }
 }
 
-/// A help text as one table cell: its paragraphs on one line, with `|`, `<` and `>` escaped
-/// outside code spans.
-fn cell(text: &str) -> String {
-    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    outside_code(&line, |plain| escape_angles(plain).replace('|', "\\|"))
-}
-
-/// `text` with `escape` applied to the parts outside backtick code spans.
-fn outside_code(text: &str, escape: impl Fn(&str) -> String) -> String {
-    text.split('`')
-        .enumerate()
-        .map(|(i, part)| match i % 2 {
-            0 => escape(part),
-            _ => part.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("`")
-}
-
-fn escape_angles(text: &str) -> String {
-    text.replace('<', "&lt;").replace('>', "&gt;")
-}
-
 #[test]
 fn cli_reference_matches_the_commands() {
-    let path = page_path();
-    let rendered = render();
-    if std::env::var_os("TESSERA_WRITE_CLI_REFERENCE").is_some() {
-        std::fs::write(&path, &rendered).expect("docs/reference/cli.md is writable");
-        return;
-    }
-    let committed = std::fs::read_to_string(&path).unwrap_or_default();
-    assert!(
-        committed == rendered,
-        "docs/reference/cli.md differs from the commands in crates/tessera-cli/src/main.rs. \
-         Regenerate it with: {REGENERATE}"
+    tessera_docgen::check_page(
+        &page_path(),
+        &render(),
+        "TESSERA_WRITE_CLI_REFERENCE",
+        REGENERATE,
     );
 }

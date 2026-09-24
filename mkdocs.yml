@@ -111,7 +111,8 @@ nav:
       - Wire framing: openapi/README.md
       - Capabilities: reference/capabilities.md
       - CLI: reference/cli.md
-      - Configuration schema: reference/schema.md
+      - tessera.toml: reference/tessera-toml.md
+      - corpus.toml: reference/corpus-toml.md
       - Python client:
           - reference/python/index.md
           - Connecting and creating: reference/python/connecting.md
