@@ -3730,6 +3730,407 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
 }
 
 // =================================================================================================
+// The shape of /control/status
+// =================================================================================================
+
+/// Every key path `/control/status` serves and the JSON type at it, read after an ingest, a flush,
+/// a fold and a refused fold, so that every optional figure has been filled. A path whose type
+/// depends on the moment lists each type it may take. `*` stands for every element of an array.
+const STATUS_SHAPE: &[(&str, &str)] = &[
+    ("/bulk", "object"),
+    ("/bulk/admission", "number"),
+    ("/bulk/in_flight", "number"),
+    ("/bulk/queue", "number"),
+    ("/bulk/shed_total", "number"),
+    ("/bulk/waiting", "number"),
+    ("/compaction", "object"),
+    ("/compaction/fold_failures", "number"),
+    ("/compaction/fold_refusals", "number"),
+    ("/compaction/fold_refusals_by_gate", "object"),
+    ("/compaction/fold_refusals_by_gate/insufficient_disc", "number"),
+    ("/compaction/fold_refusals_by_gate/insufficient_memory", "number"),
+    ("/compaction/fold_refusals_by_gate/nothing_to_fold", "number"),
+    ("/compaction/fold_refusals_by_gate/overlay_diverged", "number"),
+    ("/compaction/fold_refusals_by_gate/stepped_down", "number"),
+    ("/compaction/fold_refusals_by_gate/wal_poisoned", "number"),
+    ("/compaction/fold_requested", "bool"),
+    ("/compaction/folds", "number"),
+    ("/compaction/last_attr_bytes_read", "number"),
+    ("/compaction/last_attr_bytes_written", "number"),
+    ("/compaction/last_refusal", "object|null"),
+    ("/compaction/last_refusal/at_unix", "number"),
+    ("/compaction/last_refusal/gate", "string"),
+    ("/compaction/last_refusal/had_bytes", "number|null"),
+    ("/compaction/last_refusal/need_bytes", "number|null"),
+    ("/compaction/last_rss_bytes", "number"),
+    ("/compaction/last_secs", "number"),
+    ("/compaction/live_rows", "number"),
+    ("/compaction/passes", "array"),
+    ("/compaction/passes/*", "object"),
+    ("/compaction/passes/*/anon_bytes", "number"),
+    ("/compaction/passes/*/ms", "number"),
+    ("/compaction/passes/*/pass", "string"),
+    ("/compaction/passes/*/rss_bytes", "number"),
+    ("/compute", "object"),
+    ("/compute/admission", "number"),
+    ("/compute/in_flight", "number"),
+    ("/compute/queue", "number"),
+    ("/compute/shed_total", "number"),
+    ("/compute/streaming", "number"),
+    ("/compute/waiting", "number"),
+    ("/derived_cache", "object"),
+    ("/derived_cache/bytes", "number"),
+    ("/derived_cache/entries", "number"),
+    ("/derived_cache/evictions", "number"),
+    ("/derived_cache/hit_rate", "number|null"),
+    ("/derived_cache/hits", "number"),
+    ("/derived_cache/misses", "number"),
+    ("/entity_id_high_water", "number"),
+    ("/fragment_cache", "object"),
+    ("/fragment_cache/bound_bytes", "number"),
+    ("/fragment_cache/building_refusals", "number"),
+    ("/fragment_cache/bytes", "number"),
+    ("/fragment_cache/entries", "number"),
+    ("/fragment_cache/evictions", "number"),
+    ("/fragment_cache/hits", "number"),
+    ("/fragment_cache/misses", "number"),
+    ("/fragment_cache/oversized_admissions", "number"),
+    ("/fragment_cache/rebuilds", "number"),
+    ("/fragment_cache/thrashing", "bool"),
+    ("/fragment_cache/young_evictions", "number"),
+    ("/fragmentation", "object"),
+    ("/fragmentation/allocation", "object"),
+    ("/fragmentation/allocation/containers", "number"),
+    ("/fragmentation/allocation/postings", "number"),
+    ("/fragmentation/allocation/rows", "number"),
+    ("/fragmentation/allocation/runs", "number"),
+    ("/fragmentation/allocation/scope", "string"),
+    ("/fragmentation/allocation/windows", "number"),
+    ("/fragmentation/containers", "number"),
+    ("/fragmentation/postings", "number"),
+    ("/fragmentation/postings_per_container", "number|null"),
+    ("/fragmentation/rows", "number"),
+    ("/fragmentation/run_ratio", "number|null"),
+    ("/fragmentation/runs", "number"),
+    ("/fragmentation/scope", "string"),
+    ("/fragmentation/tiers", "number"),
+    ("/heap", "object"),
+    ("/heap/anon_bytes", "number"),
+    ("/heap/file_bytes", "number"),
+    ("/heap/last_trim_micros", "number"),
+    ("/heap/last_trim_returned_bytes", "number"),
+    ("/heap/resident_bytes", "number"),
+    ("/heap/trim_baseline_bytes", "number"),
+    ("/heap/trim_growth_bytes", "number"),
+    ("/heap/trims", "number"),
+    ("/ingest", "object"),
+    ("/ingest/admission", "number"),
+    ("/ingest/in_flight", "number"),
+    ("/ingest/shed_total", "number"),
+    ("/limits", "object"),
+    ("/limits/changes", "object"),
+    ("/limits/changes/max_body_bytes", "number"),
+    ("/limits/changes/max_changes_per_request", "number"),
+    ("/limits/changes/route", "string"),
+    ("/limits/declarations", "object"),
+    ("/limits/declarations/max_body_bytes", "number"),
+    ("/limits/declarations/max_records_per_request", "number"),
+    ("/limits/declarations/route", "string"),
+    ("/limits/grow", "object"),
+    ("/limits/grow/max_body_bytes", "number"),
+    ("/limits/grow/max_members_per_request", "number"),
+    ("/limits/grow/route", "string"),
+    ("/limits/ingest", "object"),
+    ("/limits/ingest/max_batch_bytes", "number"),
+    ("/limits/ingest/max_batch_rows", "number"),
+    ("/limits/ingest/route", "string"),
+    ("/limits/publish", "object"),
+    ("/limits/publish/max_artifacts_per_request", "number"),
+    ("/limits/publish/max_body_bytes", "number"),
+    ("/limits/publish/max_excluded_per_request", "number"),
+    ("/limits/publish/max_shape_vertices", "number"),
+    ("/limits/publish/route", "string"),
+    ("/limits/values", "object"),
+    ("/limits/values/max_batch_bytes", "number"),
+    ("/limits/values/max_batch_rows", "number"),
+    ("/limits/values/route", "string"),
+    ("/masked_count_cache", "object"),
+    ("/masked_count_cache/bytes", "number"),
+    ("/masked_count_cache/entries", "number"),
+    ("/masked_count_cache/evictions", "number"),
+    ("/masked_count_cache/hits", "number"),
+    ("/masked_count_cache/misses", "number"),
+    ("/occupancy", "object"),
+    ("/occupancy/bound_bytes", "number"),
+    ("/occupancy/bytes", "number"),
+    ("/occupancy/entries", "number"),
+    ("/occupancy/evictions", "number"),
+    ("/occupancy/hits", "number"),
+    ("/occupancy/misses", "number"),
+    ("/occupancy/walks", "number"),
+    ("/overlay", "object"),
+    ("/overlay/depth", "number"),
+    ("/overlay/retirable", "number"),
+    ("/overlay/soft_limit_alarms", "number"),
+    ("/partitions", "array"),
+    ("/partitions/*", "object"),
+    ("/partitions/*/partition", "string"),
+    ("/partitions/*/readiness", "bool"),
+    ("/partitions/*/segments_version", "number"),
+    ("/partitions/*/watermark", "number"),
+    ("/projection_builds_by_route", "object"),
+    ("/projection_builds_by_route/complement", "number"),
+    ("/projection_builds_by_route/split", "number"),
+    ("/projection_builds_by_route/walk", "number"),
+    ("/projection_builds_by_route/whole_domain", "number"),
+    ("/publication", "number"),
+    ("/region_cache", "object"),
+    ("/region_cache/bound_bytes", "number"),
+    ("/region_cache/building_refusals", "number"),
+    ("/region_cache/bytes", "number"),
+    ("/region_cache/entries", "number"),
+    ("/region_cache/evictions", "number"),
+    ("/region_cache/hits", "number"),
+    ("/region_cache/misses", "number"),
+    ("/region_cache/waits_satisfied", "number"),
+    ("/row_projection_cache", "object"),
+    ("/row_projection_cache/bound_bytes", "number"),
+    ("/row_projection_cache/building_refusals", "number"),
+    ("/row_projection_cache/bytes", "number"),
+    ("/row_projection_cache/entries", "number"),
+    ("/row_projection_cache/evictions", "number"),
+    ("/row_projection_cache/hits", "number"),
+    ("/row_projection_cache/misses", "number"),
+    ("/row_projection_cache/oversized_admissions", "number"),
+    ("/row_projection_cache/thrashing", "bool"),
+    ("/row_projection_cache/waiters_now", "number"),
+    ("/row_projection_cache/waits_satisfied", "number"),
+    ("/row_projection_cache/young_evictions", "number"),
+    ("/segments", "array"),
+    ("/segments/*", "object"),
+    ("/segments/*/count", "number"),
+    ("/segments/*/partition", "string"),
+    ("/segments/*/view", "string"),
+    ("/sessions", "object"),
+    ("/sessions/retained", "number"),
+    ("/sessions/sweep_at", "number"),
+    ("/sessions/sweeps", "number"),
+    ("/sessions/swept_total", "number"),
+    ("/suggest_sets", "object"),
+    ("/suggest_sets/builds", "number"),
+    ("/suggest_sets/bytes", "number"),
+    ("/suggest_sets/declined", "number"),
+    ("/suggest_sets/discarded", "number"),
+    ("/suggest_sets/entries", "number"),
+    ("/suggest_sets/evictions", "number"),
+    ("/suggest_sets/hits", "number"),
+    ("/suggest_sets/in_flight", "number"),
+    ("/suggest_sets/misses", "number"),
+    ("/write_executor", "object"),
+    ("/write_executor/apply_nanos_max", "number"),
+    ("/write_executor/apply_nanos_total", "number"),
+    ("/write_executor/bench_timing", "bool"),
+    ("/write_executor/coalesce_in_flight", "bool"),
+    ("/write_executor/coalesces", "number"),
+    ("/write_executor/deny_submitted", "number"),
+    ("/write_executor/flush", "object"),
+    ("/write_executor/flush/buffered_items", "number"),
+    ("/write_executor/flush/flush_failures", "number"),
+    ("/write_executor/flush/flush_requested", "bool"),
+    ("/write_executor/flush/flush_skips", "number"),
+    ("/write_executor/flush/flushable_items", "number"),
+    ("/write_executor/flush/flushes", "number"),
+    ("/write_executor/flush/in_flight", "bool"),
+    ("/write_executor/flush/overlay_publications", "number"),
+    ("/write_executor/flush/refresh_in_flight", "bool"),
+    ("/write_executor/flush/refreshes", "number"),
+    ("/write_executor/flush/ticks", "number"),
+    ("/write_executor/flush_stages", "object"),
+    ("/write_executor/flush_stages/bench_timing", "bool"),
+    ("/write_executor/flush_stages/executions", "number"),
+    ("/write_executor/flush_stages/executor_nanos", "object"),
+    ("/write_executor/flush_stages/executor_nanos/  .deny_state", "number"),
+    ("/write_executor/flush_stages/executor_nanos/  .manifest_clone", "number"),
+    ("/write_executor/flush_stages/executor_nanos/  .vocab_extensions", "number"),
+    ("/write_executor/flush_stages/executor_nanos/artifacts", "number"),
+    ("/write_executor/flush_stages/executor_nanos/buffer_rebase", "number"),
+    ("/write_executor/flush_stages/executor_nanos/compose", "number"),
+    ("/write_executor/flush_stages/executor_nanos/denied", "number"),
+    ("/write_executor/flush_stages/executor_nanos/discarded", "number"),
+    ("/write_executor/flush_stages/executor_nanos/dispatch", "number"),
+    ("/write_executor/flush_stages/executor_nanos/drop_superseded", "number"),
+    ("/write_executor/flush_stages/executor_nanos/manifest", "number"),
+    ("/write_executor/flush_stages/executor_nanos/manifest_commit", "number"),
+    ("/write_executor/flush_stages/executor_nanos/plan", "number"),
+    ("/write_executor/flush_stages/executor_nanos/publish_wall", "number"),
+    ("/write_executor/flush_stages/executor_nanos/rotate", "number"),
+    ("/write_executor/flush_stages/executor_nanos/shapes_install", "number"),
+    ("/write_executor/flush_stages/executor_nanos/swap", "number"),
+    ("/write_executor/flush_stages/executor_nanos/with_segment", "number"),
+    ("/write_executor/flush_stages/flushes", "number"),
+    ("/write_executor/flush_stages/pool_nanos", "object"),
+    ("/write_executor/flush_stages/pool_nanos/delta_tier", "number"),
+    ("/write_executor/flush_stages/pool_nanos/digests", "number"),
+    ("/write_executor/flush_stages/pool_nanos/drop_plan", "number"),
+    ("/write_executor/flush_stages/pool_nanos/entity_terms", "number"),
+    ("/write_executor/flush_stages/pool_nanos/failed", "number"),
+    ("/write_executor/flush_stages/pool_nanos/filter_extents", "number"),
+    ("/write_executor/flush_stages/pool_nanos/pool_wall", "number"),
+    ("/write_executor/flush_stages/pool_nanos/promote", "number"),
+    ("/write_executor/flush_stages/pool_nanos/record_extent", "number"),
+    ("/write_executor/flush_stages/pool_nanos/reopen", "number"),
+    ("/write_executor/flush_stages/pool_nanos/rows", "number"),
+    ("/write_executor/flush_stages/pool_nanos/scoped_extents", "number"),
+    ("/write_executor/flush_stages/pool_nanos/segment", "number"),
+    ("/write_executor/flush_stages/pool_nanos/shapes", "number"),
+    ("/write_executor/flush_stages/pool_nanos/text_dict", "number"),
+    ("/write_executor/flush_stages/pool_nanos/text_extents", "number"),
+    ("/write_executor/flush_stages/pool_nanos/text_postings", "number"),
+    ("/write_executor/flush_stages/pool_nanos/text_presence", "number"),
+    ("/write_executor/flush_stages/pool_nanos/text_rows", "number"),
+    ("/write_executor/flush_stages/pool_nanos/text_tokenise_terms", "number"),
+    ("/write_executor/flush_stages/rows_executed", "number"),
+    ("/write_executor/flush_stages/rows_published", "number"),
+    ("/write_executor/foreign_side_manifests", "number"),
+    ("/write_executor/merge_in_flight", "bool"),
+    ("/write_executor/merges", "number"),
+    ("/write_executor/posture", "string"),
+    ("/write_executor/ready", "bool"),
+    ("/write_executor/stage_nanos", "object"),
+    ("/write_executor/stage_nanos/.buf_insert", "number"),
+    ("/write_executor/stage_nanos/.est_fwd", "number"),
+    ("/write_executor/stage_nanos/.est_inv", "number"),
+    ("/write_executor/stage_nanos/.wal_pos", "number"),
+    ("/write_executor/stage_nanos/admit", "number"),
+    ("/write_executor/stage_nanos/allocate", "number"),
+    ("/write_executor/stage_nanos/apply_rows", "number"),
+    ("/write_executor/stage_nanos/buffer_clone", "number"),
+    ("/write_executor/stage_nanos/derive_records", "number"),
+    ("/write_executor/stage_nanos/record_batch", "number"),
+    ("/write_executor/stage_nanos/submit→receipt", "number"),
+    ("/write_executor/stage_nanos/swap", "number"),
+    ("/write_executor/stage_nanos/vocab_mint", "number"),
+    ("/write_executor/stage_nanos/wal_append", "number"),
+    ("/write_executor/stage_nanos/wal_fsync", "number"),
+    ("/write_executor/wal", "object"),
+    ("/write_executor/wal/bytes", "number"),
+    ("/write_executor/wal/members", "number"),
+    ("/write_executor/wal/pin_span_bytes", "number"),
+    ("/write_executor/wal/pinned_at", "number|null"),
+    ("/write_executor/wal/pinned_by", "string|null"),
+    ("/write_executor/wal/position", "number"),
+    ("/write_executor/wal/samples", "number"),
+    ("/write_executor/wal_appends", "number"),
+    ("/write_executor/wal_fsyncs", "number"),
+    ("/write_executor/wal_recoveries", "number"),
+    ("/write_executor/work_completed", "number"),
+    ("/write_executor/work_depth", "number"),
+    ("/write_executor/work_in_flight_nanos", "number"),
+    ("/write_executor/work_service_nanos_ewma", "number"),
+    ("/write_executor/work_submitted", "number"),
+];
+
+/// Records each key path under `path` in `value` with the JSON type found there.
+fn status_shape(
+    value: &serde_json::Value,
+    path: &str,
+    shape: &mut std::collections::BTreeMap<String, std::collections::BTreeSet<&'static str>>,
+) {
+    use serde_json::Value;
+    let kind = match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    shape.entry(path.to_owned()).or_default().insert(kind);
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                status_shape(item, &format!("{path}/*"), shape);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, field) in fields {
+                status_shape(field, &format!("{path}/{key}"), shape);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `/control/status` serves exactly the key paths in [`STATUS_SHAPE`], each with a type listed
+/// for it there.
+#[tokio::test]
+async fn control_status_serves_its_pinned_shape() {
+    let tmp = TempDir::new().unwrap();
+    let (server, faults) = serve_with_faults(&tmp).await;
+
+    flush_and_fold(&server, None).await;
+    // A torn append poisons the log for good, so the next fold is refused and
+    // `compaction.last_refusal` is filled.
+    faults.fail_next_appends(1);
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([{ "external_id": member(5), "op": "suppress" }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 500);
+    let resp = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_for_executor(&server, "the fold refused", |now| now.fold_refusals > 0).await;
+
+    let status = control_status(&server).await;
+    let mut served = std::collections::BTreeMap::new();
+    status_shape(&status, "", &mut served);
+    served.remove("");
+    let pinned: std::collections::BTreeMap<&str, Vec<&str>> = STATUS_SHAPE
+        .iter()
+        .map(|(path, kinds)| (*path, kinds.split('|').collect()))
+        .collect();
+    let listing: String = served
+        .iter()
+        .map(|(path, kinds)| {
+            let kinds: Vec<&str> = kinds.iter().copied().collect();
+            format!("    ({path:?}, {:?}),\n", kinds.join("|"))
+        })
+        .collect();
+    let unpinned: Vec<&String> = served
+        .keys()
+        .filter(|path| !pinned.contains_key(path.as_str()))
+        .collect();
+    let missing: Vec<&&str> = pinned
+        .keys()
+        .filter(|path| !served.contains_key(**path))
+        .collect();
+    assert!(
+        unpinned.is_empty() && missing.is_empty(),
+        "served but not pinned: {unpinned:?}; pinned but not served: {missing:?}; served:\n\
+         {listing}"
+    );
+    for (path, kinds) in &served {
+        for kind in kinds {
+            assert!(
+                pinned[path.as_str()].contains(kind),
+                "{path} is served as {kind} but pinned as {:?}",
+                pinned[path.as_str()]
+            );
+        }
+    }
+}
+
+// =================================================================================================
 // The fragmentation figure on /control/status, and admin-plane hygiene
 // =================================================================================================
 
