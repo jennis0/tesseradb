@@ -15,7 +15,7 @@ const CONTRACT = join(import.meta.dirname, '../../../../docs/openapi/tessera.yam
 
 type Operation = {id: string; method: string; path: string; pattern: RegExp; literal: number};
 
-/** Every operation under `paths:`, read line by line as the Python parity test reads it. */
+/** Every operation under `paths:`, read line by line. */
 function operations(text: string): Operation[] {
   const out: Operation[] = [];
   let path: string | null = null;
