@@ -171,24 +171,10 @@ impl ScalarColumn {
 
     /// An integer at the declared type, or [`OutOfRange`] where the type cannot hold it.
     fn integer(&self, value: i128) -> Result<ScalarValue, OutOfRange> {
-        let (min, max) = match self.ty {
-            ScalarType::U8 => (0, u8::MAX.into()),
-            ScalarType::U16 => (0, u16::MAX.into()),
-            ScalarType::U32 => (0, u32::MAX.into()),
-            ScalarType::U64 => (0, u64::MAX.into()),
-            ScalarType::I8 => (i8::MIN.into(), i8::MAX.into()),
-            ScalarType::I16 => (i16::MIN.into(), i16::MAX.into()),
-            ScalarType::I32 => (i32::MIN.into(), i32::MAX.into()),
-            ScalarType::I64 | ScalarType::TimestampUs => (i64::MIN.into(), i64::MAX.into()),
-            ScalarType::Bool
-            | ScalarType::F32
-            | ScalarType::F64
-            | ScalarType::Utf8
-            | ScalarType::Keyword
-            | ScalarType::Text => {
-                unreachable!("`new` reads only an integer declaration as integers")
-            }
-        };
+        let (min, max) = self
+            .ty
+            .integer_range()
+            .expect("`new` reads only an integer declaration as integers");
         if !(min..=max).contains(&value) {
             return Err(OutOfRange::Integer { value, min, max });
         }
