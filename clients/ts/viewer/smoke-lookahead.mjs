@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Does the anticipatory ring remove the wait when panning at high zoom?
+// Whether look-ahead removes the wait when panning at high zoom.
 //
 //   node clients/ts/viewer/smoke-lookahead.mjs [--no-prefetch] [--url http://localhost:5173]
 //     [--headed] [--executable /path/to/chrome]
@@ -10,10 +10,8 @@
 //
 // Requires a running `tessera serve` and `vite dev`.
 //
-// The measurement is the fraction of a pan that is answered entirely from held bands. A pan that
-// issues no request at all is one the user never waited for. Pauses between pans are deliberate:
-// the ring only runs when the view is still, which is the whole point — it spends an idle moment
-// so the next movement does not have to.
+// The measurement is the fraction of pans answered entirely from held bands, with no request.
+// The script pauses between pans, since look-ahead runs only while the view is still.
 import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-browser.mjs';
 
 const args = flags();
@@ -61,15 +59,14 @@ const drag = async (dx, pause) => {
   await page.waitForTimeout(pause);
 };
 
-// Settle the depth budget first: bands are keyed by depth, so a moving m_target lands every view
-// where nothing is held, and that is not what this measures.
+// Settle the depth budget first: bands are keyed by depth, so a moving `m_target` lands every
+// view where nothing is held.
 for (let i = 0; i < 4; i++) {
   await drag(-200, 2500);
   await drag(200, 2500);
 }
 
-// A run of pans in ONE direction — the case the ring is biased for, and the case a user panning
-// across a map actually performs.
+// A run of pans in one direction, as when crossing a map.
 const before = requests;
 const beforeUs = serverUs;
 const beforeBytes = bytes;
@@ -92,8 +89,7 @@ console.log(`per-pan viewport requests: [${perPan.join(', ')}]`);
 console.log(`${free} of ${perPan.length} pans needed no request at all (${total} requests total)`);
 console.log(`server CPU over those pans: ${((serverUs - beforeUs) / 1000).toFixed(1)} ms; wire ${(((bytes - beforeBytes)) / 1e6).toFixed(2)} MB`);
 console.log(`tiles from cache ${stats.cache}, prefetched ahead ${stats.prefetched}, replica ${stats.held}MB`);
-// A superseded request's abort is the client working as designed (`smoke-browser.mjs`), and this
-// script moves the view on purpose; the count is reported, the errors are not counted against it.
+// Superseded aborts are reported but not counted as failures, since the script moves the view.
 const unexplained = errors.filter((e) => !isSupersededAbort(e));
 const aborts = errors.length - unexplained.length;
 console.log(

@@ -4,19 +4,16 @@
 //   node clients/ts/viewer/smoke-artifacts.mjs [--url http://localhost:5173] [--shots DIR]
 //     [--headed] [--executable /path/to/chrome]
 //
-// **This is the instrument for the artifacts claim**, which is not "clusters draw" but: one
-// clustering, several viewers, and a count beside each cluster that is *that viewer's own* — with
-// clusters simply absent for a viewer who is served none of them, and nothing anywhere saying why;
-// and, at step 3, that the geometry drawn is the wire's: a hull and a label render under two
-// principals, read off the map's probe rather than eyeballed.
+// One clustering, several viewers: the count beside each cluster is that viewer's own, a cluster
+// is absent for a viewer who is served none of it, and the served geometry and labels reach the
+// map under two principals.
 //
-// It reports, per principal: how many clusters were served, what the same cluster is worth to
-// each of them, and how many outlines and labels the map drew. It fails if the counts do not move
-// with the mask, if a cluster is served to everyone alike, or if no hull or label rendered.
+// It reports, per principal, how many clusters were served, what the same cluster counts for each,
+// and how many outlines and labels the map drew. It fails if the counts do not change with the
+// mask, if a cluster is served to everyone alike, or if no geometry or label arrived.
 //
-// Everything is read through the components' parts — `tessera-artifact-list [part="item"]` — and
-// the probe; never through an id the shadow DOM hides. Requires a running `tessera serve` with a
-// published layer (`scripts/publish-clusters.mjs`) and a running `vite dev`.
+// Everything is read through the components' parts and the probe. Requires a running
+// `tessera serve` with a published layer (`scripts/publish-clusters.mjs`) and a running `vite dev`.
 import {mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-browser.mjs';
@@ -26,8 +23,7 @@ const url = args.url ?? 'http://localhost:5173';
 const shots = args.shots ?? '/tmp/tessera-artifacts';
 await mkdir(shots, {recursive: true});
 
-// A layer × principal grid is one settle per cell — twenty-five of them on a corpus with five
-// layers — so this is the script the headed browser matters most to (`smoke-browser.mjs`).
+// A layer × principal grid is one settle per cell, so a headed browser helps most here.
 const browser = await launchBrowser(args);
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
 const consoleErrors = [];
@@ -36,11 +32,10 @@ page.on('console', (m) => {
 });
 page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
-// Look-ahead off: it issues requests while the view is still, which is every moment this script
-// measures in, and none of them are this instrument's business.
+// Look-ahead off: it sends requests while the view is still, when this script measures.
 await page.goto(withParams(url, {prefetch: 0}), {waitUntil: 'load'});
 
-/** Wait until the mark count stops moving — every figure below is only meaningful once it has. */
+/** Wait until the mark count stops changing. */
 const settled = async (limitMs = 45_000) => {
   const started = Date.now();
   let last = -1;
@@ -57,13 +52,7 @@ const settled = async (limitMs = 45_000) => {
   }
 };
 
-/**
- * The artifact list, parsed through its parts: how many were served and what each is worth here.
- *
- * Read off the rendered element rather than from the wire, deliberately — what is on screen is
- * what this is checking, and a reader that went to the service directly would pass while the
- * viewer showed something else entirely.
- */
+/** The artifact list as rendered, through its parts: how many were served and each one's count. */
 const artifactList = async () =>
   page.locator('tessera-artifact-list').first().evaluate((root) => {
     const scope = root.shadowRoot ?? root;
@@ -71,11 +60,8 @@ const artifactList = async () =>
     const counts = {};
     const names = {};
     for (const item of scope.querySelectorAll('[part="item"]')) {
-      // **Keyed by the row's id, not by its name.** An artifact with no supplied text draws a
-      // neutral placeholder rather than its key, so keying by what the row says would collapse
-      // every nameless cluster of a layer onto one entry and compare a cluster with itself. The
-      // `tessera_id` is opaque and the same for every principal (I10), which is the identity this
-      // script needs to hold one cluster still across a switch.
+      // Keyed by `tessera_id`, which is the same for every principal; nameless rows all show the
+      // same placeholder.
       const id = item.getAttribute('data-id') ?? '';
       const name = item.querySelector('[part="name"]')?.textContent?.trim() ?? '';
       const countEl = item.querySelector('tessera-count');
@@ -91,14 +77,10 @@ const artifactList = async () =>
   });
 
 /**
- * What the map draws of the artifacts, from the probe: the rings the outline layer carries, the
- * artifacts they belong to, placed labels, the layers on — and, read off the explorer's store,
- * how many served artifacts carry a text and how many carry geometry.
- *
- * The two store reads are here because the probe cannot answer them. An artifact with no text
- * draws no label (its key is an id, never a name), and the outline layer holds only what draws —
- * the hovered and the opened artifact — so *the wire's geometry reached this client* is asked of
- * the store, which is where that geometry lands.
+ * What the map draws of the artifacts, from the probe (outline parts, their artifacts, placed
+ * labels, layers on), and from the explorer's store how many served artifacts carry text and how
+ * many carry geometry. The outline layer draws only the hovered and opened artifacts, so whether
+ * geometry arrived is read from the store.
  */
 const drawn = async () =>
   page.evaluate(() => {
@@ -106,15 +88,11 @@ const drawn = async () =>
     const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {content: string[]; box: unknown; shape: unknown}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
     const served = explorer?.store?.get('artifacts').served ?? [];
     const named = served.filter((a) => (a.content[0] ?? '').length > 0).length;
-    // `shape`, which is what a served artifact carries — this read `a.hull`, a field no served
-    // row has ever had, so `undefined !== null` counted every served artifact as carrying
-    // geometry and the figure was the served count under another name.
     const withGeometry = served.filter((a) => a.box !== null || a.shape !== null).length;
     return p ? {outlines: p.timings.outlines, outlinesDrawn: p.timings.outlinesDrawn, labels: p.timings.labels, layersOn: p.cluster.layersOn, served: p.cluster.servedIds.length, named, withGeometry} : null;
   });
 
-// The picker is rendered from `/v1/meta`, so nothing can be counted until the first response has
-// landed — and an entry exists only where this principal reaches a layer at all.
+// The picker renders from `/v1/meta`, with an entry only for layers this principal reaches.
 await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 await settled();
 
@@ -146,7 +124,7 @@ for (let l = 0; l < layers; l++) {
   }
 }
 
-// The pair a reader is meant to put side by side: the same clustering, two principals.
+// Screenshots to compare: the same clustering under two principals.
 const shotsTaken = [];
 for (const p of [Math.max(0, principals - 3), principals - 1]) {
   await page.selectOption('#principal', String(p));
@@ -161,8 +139,8 @@ for (const p of [Math.max(0, principals - 3), principals - 1]) {
   shotsTaken.push({label, file, list: await artifactList(), drawn: await drawn()});
 }
 
-// Opening a cluster draws its hull, and only its hull — the other half of the rule the checks
-// below assert. A row of the list, which is DOM, because deck's own pick does not fire here.
+// Opening a cluster draws its outline and no other. Opened through a list row, since deck's pick
+// does not fire headless.
 let openedDrawn = null;
 {
   const row = page.locator('tessera-artifact-list [part="item"]').first();
@@ -193,13 +171,11 @@ for (const r of results) {
 }
 const failures = [];
 /**
- * What a missing row means, which is **two different things** and must not be conflated: a
- * cluster can be missing from the list because this principal was not served it — the disclosure
- * control working — or because the list stopped at its row limit. Reporting the second as
- * "absent" would manufacture evidence for the very claim this script exists to check.
+ * The list's row limit. A cluster missing from the list is either not served to this principal
+ * or past the limit, and only the first counts as absent.
  */
 const LIST_ROWS = 40;
-/** What a row with no supplied text and no attached topic draws — never a name, never an id. */
+/** What a row with no text and no attached topic draws. */
 const NO_NAME = '\u2014';
 const readingOf = (row, key) => {
   const count = row.counts[key];
@@ -211,8 +187,7 @@ for (const [layer, rows] of byLayer) {
   const keys = new Set(rows.flatMap((r) => Object.keys(r.counts)));
   for (const key of [...keys].slice(0, 3)) {
     const across = rows.map((r) => `${r.principal.split(' ')[0]}=${readingOf(r, key)}`);
-    // The id identifies; a name, where the layer publishes one, is added for the reader. The
-    // placeholder a nameless row draws is not an identity and is never printed as one.
+    // A name, where the layer publishes one, is added for the reader; the placeholder is not.
     const named = rows.map((r) => r.names[key]).find((n) => n && n !== NO_NAME);
     console.log(`  ${layer} #${key.slice(-6)}${named ? ` (${named})` : ''}: ${across.join('  ')}`);
   }
@@ -237,17 +212,10 @@ console.log('--- geometry held and drawn (the wire’s, per principal) ---');
 for (const s of shotsTaken) {
   console.log(`  ${s.label.padEnd(26)} ${String(s.list.served ?? 0).padStart(3)} clusters, ${s.drawn?.withGeometry ?? 0} with geometry, ${s.drawn?.outlines ?? 0} rings drawn over ${s.drawn?.outlinesDrawn ?? 0} artifacts, ${s.drawn?.labels ?? 0} labels (${s.drawn?.named ?? 0} with a text)  ${s.file}`);
 }
-// The served geometry must reach the client under two principals — it is the wire's, derived per
-// principal, and a map that held none would pass every count check while showing a bare field.
-// **None of it draws at rest**: a shape is drawn only for the hovered and the opened artifact
-// (the owner's review, 2026-08-26), and the rest of the frontier is not handed to deck at all —
-// what the pointer is over is resolved against the served shapes in JS.
-// A label renders wherever a served artifact carries a text, and never where none does: a layer
-// whose artifacts have keys alone draws no label, since a key is an id.
-// `outlines` counts **rings** and `outlinesDrawn` counts **artifacts**: a hull is a list of rings
-// (`artifact-shapes.md` §1), so a cluster whose members are two separated clouds hands the layer
-// two rings and is one hull drawn. The opened-cluster check below is written in the second unit
-// deliberately — opening one cluster highlights one cluster however many pieces its shape has.
+// The served geometry must reach the client under two principals. None of it draws at rest: only
+// the hovered and opened artifacts are outlined. A label renders where a served artifact carries
+// text and nowhere else. `outlines` counts parts and `outlinesDrawn` artifacts; the opened-cluster
+// check uses artifacts, since one cluster may have several parts.
 const heldHull = shotsTaken.filter((s) => (s.drawn?.withGeometry ?? 0) > 0);
 if (heldHull.length < 2) failures.push(`served geometry reached the client under ${heldHull.length} of 2 principals`);
 for (const s of shotsTaken) {
@@ -260,9 +228,8 @@ for (const s of shotsTaken) {
   if (named > 0 && labels === 0) failures.push(`${s.label}: ${named} served artifacts carry a text and no label rendered`);
   if (named === 0 && labels > 0) failures.push(`${s.label}: no served artifact carries a text and ${labels} labels rendered — a key drawn as a name`);
 }
-// A run in which no principal was served a count from any layer proves nothing about masking — it
-// is what a lost layer selection looks like (found 2026-08-25: the choice was dropped on every
-// principal switch and this script still said OK). The list must have read a number somewhere.
+// A run in which no principal was served a count from any layer proves nothing about masking,
+// and is what a lost layer selection looks like.
 if (!results.some((r) => r.served !== null)) {
   console.error('ARTIFACT SMOKE FAILED: no principal was served a cluster count from any layer — the list never showed one');
   process.exit(1);

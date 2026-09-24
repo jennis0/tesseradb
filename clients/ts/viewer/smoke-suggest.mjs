@@ -6,15 +6,13 @@
 //
 // Requires a running `tessera serve` over the GeoNames bundle and a running `vite dev`, with a
 // dataset document (`?datasets=` or `VITE_TESSERA_DATASETS`) naming two presets: a broad one
-// (every country the corpus carries) and a narrow one holding `FR` alone. `feature_class` is
-// `public` with 9 values, and `country` is `derived` with 254 (`test_corpora/geonames/corpus.toml`)
-// — the one pair on this corpus that exercises both shapes round 2 of `value-suggestion.md` §5.1
-// built: a checklist where the empty-`q` page says `more: false`, a lookahead where it says `true`.
+// (every country) and a narrow one holding `FR` alone. `feature_class` is `public` with 9 values
+// and `country` is `derived` with 254 (`test_corpora/geonames/corpus.toml`), which exercises both
+// shapes: a checklist where the empty-`q` page says `more: false`, a lookahead where it says `true`.
 //
-// Not a test suite — see `smoke.mjs`'s own note. This checks the component against the wire, which
-// `clients/ts/components/test/panels.test.ts` cannot: a fake store answers whatever a test wrote,
-// and never proves the empty-`q` page actually decides the shape, that a keystroke actually reaches
-// `/v1/categories/country/suggest`, or that a chosen value actually narrows the viewport.
+// It checks against a real server what the component tests with a fake store cannot: that the
+// empty-`q` page decides the shape, that keystrokes reach `/v1/categories/country/suggest`, and
+// that a chosen value narrows the viewport.
 import {flags, isSupersededAbort, launchBrowser} from './smoke-browser.mjs';
 
 const args = flags();
@@ -26,7 +24,7 @@ const browser = await launchBrowser(args);
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
 
 const consoleErrors = [];
-/** Every `/v1/categories/*\/suggest` request, in order — the thing "requests per keystroke" reads. */
+/** Every `/v1/categories/*\/suggest` request, in order, for the requests-per-keystroke figure. */
 const suggestRequests = [];
 let viewportRequests = 0;
 let suggest429s = 0;
@@ -54,7 +52,7 @@ const shot = async (name) => {
   shots.push(path);
 };
 
-/** Wait until the picture stops changing — `smoke.mjs`'s own helper, unchanged. */
+/** Wait until the picture stops changing, as in `smoke.mjs`. */
 const settled = async (limitMs = 20_000) => {
   const started = Date.now();
   let last = -1;
@@ -82,8 +80,7 @@ const check = (name, pass, detail = '') => {
   console.log(`  [${pass ? 'ok' : 'FAIL'}] ${name}${detail ? ` — ${detail}` : ''}`);
 };
 
-// The broad principal first — `option[0]` if the picker opened on it already, else select it —
-// so `country`'s 254 values are visible and it reads as a lookahead.
+// The broad principal first, so `country`'s 254 values are visible and it shows as a lookahead.
 const principalOptions = await page.locator('#principal option').count().catch(() => 0);
 if (principalOptions === 0) {
   console.error('SMOKE FAILED: no #principal options — no measured presets reached the viewer');
@@ -94,8 +91,7 @@ const broadIndex = await page.evaluate(() => {
   const select = /** @type {HTMLSelectElement | null} */ (document.getElementById('principal'));
   let best = -1;
   for (const o of select?.options ?? []) {
-    // `visible at build` is not on the option itself, so read the picker's own choice: the demo
-    // opens on the broadest principal (`main.ts`), which is whatever is selected on load.
+    // The viewer opens on the broadest principal, so it is the one selected on load.
     if (o.selected) best = o.index;
   }
   return best === -1 ? 0 : best;
@@ -104,9 +100,7 @@ await page.selectOption('#principal', String(broadIndex));
 await settled();
 await shot('01-broad-opened');
 
-// Open the explorer's filter panel — the overlay layout renders it directly at this viewport width,
-// but a narrower one gates it behind the `Filters` tab (`explorer.ts`'s `sheet`), so click it if
-// the panel is not already on screen.
+// Open the filter panel: at a narrow width it is behind the `Filters` tab.
 const filterPanel = page.locator('tessera-filter-panel').first();
 if ((await filterPanel.count()) === 0 || !(await filterPanel.isVisible().catch(() => false))) {
   const tab = page.locator('[part="tabs"] button', {hasText: 'Filters'}).first();
@@ -117,7 +111,7 @@ if ((await filterPanel.count()) === 0 || !(await filterPanel.isVisible().catch((
 }
 check('the filter panel is reachable', (await filterPanel.count()) > 0);
 
-// --- feature_class: public, 9 values — the checklist shape ---------------------------------
+// feature_class: public, 9 values, the checklist shape.
 const featureClass = page.locator('tessera-filter[column="feature_class"]').first();
 await featureClass.waitFor({state: 'attached', timeout: 10_000}).catch(() => {});
 await page.waitForTimeout(500); // the empty-q page's one round trip
@@ -130,7 +124,7 @@ const fcCount = await fcBoxes.count();
 check('feature_class checklist carries 9 values', fcCount === 9, `saw ${fcCount}`);
 check('feature_class carries no match span', (await featureClass.locator('[part="tick"] mark').count()) === 0);
 
-// --- country: derived, 254 values — the lookahead shape -------------------------------------
+// country: derived, 254 values, the lookahead shape.
 const country = page.locator('tessera-filter[column="country"]').first();
 await country.waitFor({state: 'attached', timeout: 10_000}).catch(() => {});
 await page.waitForTimeout(500);
@@ -143,11 +137,11 @@ check('country’s initial list is 20', initialTicks === 20, `saw ${initialTicks
 const moreNote = await country.locator('[part="more"]').textContent().catch(() => null);
 check('country says "type more to narrow"', (moreNote ?? '').includes('type more to narrow'), `saw "${moreNote}"`);
 
-// Type "fr" one keystroke at a time — what the request count is measured against.
+// Type "fr" one keystroke at a time, and count the requests.
 const before = suggestRequests.filter((r) => r.column === 'country').length;
 await countryEntry.click();
 await countryEntry.type('f', {delay: 50});
-await page.waitForTimeout(250); // inside the 120ms debounce window — should not fire yet on its own
+await page.waitForTimeout(250); // longer than the store's 120 ms debounce
 await countryEntry.type('r', {delay: 50});
 await page.waitForTimeout(600); // past the debounce and the round trip
 await settled(6000);
@@ -161,7 +155,7 @@ check('typing "fr" narrows the list', narrowedTicks > 0 && narrowedTicks <= 20, 
 const markText = await country.locator('[part="tick"] mark').first().textContent().catch(() => null);
 check('a match span is highlighted', !!markText && /fr/i.test(markText), `mark="${markText}"`);
 
-// Choose the first suggestion — a chip appears, and the viewport refetches under the filter.
+// Choose the first suggestion: a chip appears, and the viewport refetches under the filter.
 const vpBefore = viewportRequests;
 const firstTick = country.locator('[part="tick"]').first();
 const pickedLabel = (await firstTick.textContent())?.trim() ?? '';
@@ -173,7 +167,7 @@ const chipCount = await country.locator('[part="value-chip"]').count();
 check('choosing a value adds a chip', chipCount > 0, `label was "${pickedLabel}"`);
 check('the viewport refetches under the chosen filter', viewportRequests > vpBefore, `${vpBefore} -> ${viewportRequests}`);
 
-// --- the narrow principal (FR only) sees country as a checklist -----------------------------
+// The narrow principal (FR only) sees country as a checklist.
 const narrowIndex = await page.evaluate(() => {
   const select = /** @type {HTMLSelectElement | null} */ (document.getElementById('principal'));
   for (const o of select?.options ?? []) if (/\bFR\b|France/i.test(o.textContent ?? '')) return o.index;
@@ -202,12 +196,9 @@ console.log(`  viewport requests total: ${viewportRequests}`);
 console.log(`  suggest 429s (single-flight admission shedding a concurrent ask, retried by the store — value-suggestion.md §5.1): ${suggest429s}`);
 console.log('--- screenshots ---');
 for (const s of shots) console.log(`  ${s}`);
-// **A 429 off `/v1/categories/*/suggest` is not a fault.** Every category control mounts and asks
-// an empty `q` in the same tick (`filter-panel.ts` renders one `<tessera-filter>` per operand), so
-// the session's one-in-flight-per-suggest admission sheds every ask but the first — by contract,
-// not by accident — and the store retries them (`store.ts`'s `suggest`). Chromium logs the shed
-// response as a console error regardless of what the client does with it next, so it is excepted
-// here the same way `isSupersededAbort` excepts a viewport request's own abort.
+// A 429 from `/v1/categories/*/suggest` is not a fault: every category control asks an empty `q`
+// at mount, the server admits one suggest at a time per session and sheds the rest, and the store
+// retries them. Chromium still logs each shed response.
 const unexplained = consoleErrors.filter((e) => !isSupersededAbort(e) && !/status of 429/.test(e));
 console.log('--- console errors (a superseded request’s abort and a suggest 429 excepted) ---');
 console.log(unexplained.length ? unexplained.map((e) => `  ${e}`).join('\n') : '  none');
