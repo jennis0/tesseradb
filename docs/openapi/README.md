@@ -4,14 +4,14 @@ Three things a power user who installs nothing needs, and where each is:
 
 | | where | kept true by |
 |---|---|---|
-| The API | [`tessera.yaml`](tessera.yaml) — OpenAPI 3.1 for the viewer and session planes | `crates/tessera-server/tests/openapi.rs`, which starts the server, exercises every route with a success and a refusal, and validates every JSON body against the description's schemas |
+| The API | [`tessera.yaml`](tessera.yaml), OpenAPI 3.1 for the viewer, session and control planes | `crates/tessera-server/tests/openapi.rs`, which starts the server, exercises every route with a success and a refusal, and validates every JSON body against the description's schemas |
 | The framing, to the byte | [The framing](#the-framing) and [the worked decodes](#the-worked-decodes) below | the viewport decodes' tests, over the golden fixtures in `clients/ts/core/test/fixtures/`; the items decodes have none |
 | What the server cannot enforce | [The twelve rules](../system/clients.md#the-twelve-rules) in the clients chapter | reading it |
 
 ## What the description is, and is not
 
-`tessera.yaml` is **hand-authored**. The JSON DTOs live in `tessera-server`, some private, two
-responses built with `json!`, and the Arrow-facing structs carry a deliberate *no serde derive*. Nothing generates the description from them, so the test is what stops it drifting:
+`tessera.yaml` is **hand-authored**. The JSON DTOs live in `tessera-server`, some private, the
+control plane's answers built with `json!`, and the Arrow-facing structs carry a deliberate *no serde derive*. Nothing generates the description from them, so the test is what stops it drifting:
 every closed DTO is declared `additionalProperties: false`, and a field added to a response and
 not to the file fails the test rather than surfacing on a stranger's screen.
 
@@ -21,11 +21,8 @@ the description says exactly that; the `/v1/viewport` body is not JSON and is de
 `arrow_type` value is engine-derived, so the description names its type and says the set is not
 enumerated there.
 
-One request semantic in the file is the owner's ruling of 2026-08-25 and is marked as landing
-on the s3 track: `layers` omitted or `[]` means *no* layers, the string `"all"` means every
-reachable layer, and an array is intersected with the reachable set. Until that track merges, the server reads an omitted `layers` as
-`"all"` — send `[]` for none and an explicit array otherwise, which both servers read identically.
-The test that asserts the ruled behaviour is `#[ignore]`d with that reason.
+A viewport request's `layers` omitted or `[]` means no layers, the string `"all"` means every
+layer the principal reaches, and an array means the named layers the principal reaches.
 
 ## The framing
 

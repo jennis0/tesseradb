@@ -1,13 +1,14 @@
 //! **The OpenAPI description is kept true here, or it is not true.**
 //!
-//! `docs/openapi/tessera.yaml` is hand-authored — the JSON DTOs live in this crate, some private,
-//! two responses built with `json!`, and the wire structs carry a deliberate *no serde derive*
-//! (I10) — so nothing generates it from the types and nothing but this test stops it drifting.
-//! Every route the viewer and session planes mount is exercised, with a success and at least one
+//! `docs/openapi/tessera.yaml` is hand-authored: the JSON DTOs live in this crate, some private,
+//! the control plane's answers are built with `json!`, and the wire structs carry no serde derive,
+//! so nothing generates it from the types and nothing but this test stops it drifting. Every route
+//! the viewer, session and control planes mount is exercised, with a success and at least one
 //! refusal each, and **every JSON request and response body is validated against the
-//! description's own schemas**. The closed DTOs are declared `additionalProperties: false`, so a
-//! field added to a response and not to the document fails here rather than being discovered by
-//! a stranger reading the wire.
+//! description's own schemas**. The fault-injection routes a test build adds to the control plane
+//! are not described. The closed DTOs are declared `additionalProperties: false`, so a field added
+//! to a response and not to the document fails here rather than being discovered by a stranger
+//! reading the wire.
 //!
 //! What this test does not do: decode the framed-Arrow body of `/v1/viewport` against a schema —
 //! there is none to write, and the frame layout is contracts §5, checked by
@@ -75,21 +76,32 @@ fn assert_invalid(doc: &Value, schema: &str, instance: &Value) {
 /// code, and — on a 429 — `Retry-After` agreeing with the body. Returns the body for further
 /// asserts.
 async fn assert_refusal(doc: &Value, resp: reqwest::Response, status: u16, code: &str) -> Value {
-    assert_eq!(resp.status().as_u16(), status);
+    assert_refusal_to(doc, None, resp, status, code).await
+}
+
+/// [`assert_refusal`] for the operation `method` names, which a path with several operations
+/// needs.
+async fn assert_refusal_to(
+    doc: &Value,
+    method: Option<&reqwest::Method>,
+    resp: reqwest::Response,
+    status: u16,
+    code: &str,
+) -> Value {
     let path = resp.url().path().to_string();
-    let responses = described_responses(doc, &path);
-    assert!(
-        responses.get(status.to_string()).is_some(),
-        "{path} answered {status}, which the description does not declare for it"
-    );
+    let got = resp.status().as_u16();
     let retry_after = resp
         .headers()
         .get("retry-after")
         .map(|v| v.to_str().unwrap().to_string());
-    let body: Value = resp
-        .json()
-        .await
-        .expect("a refusal carries the JSON envelope");
+    let text = resp.text().await.unwrap();
+    assert_eq!(got, status, "{path} answered {got}: {text}");
+    let responses = described_responses(doc, method, &path);
+    assert!(
+        responses.get(status.to_string()).is_some(),
+        "{path} answered {status}, which the description does not declare for it"
+    );
+    let body: Value = serde_json::from_str(&text).expect("a refusal carries the JSON envelope");
     assert_valid(doc, "Error", &body);
     assert_eq!(body["error"], code, "{body}");
     if status == 429 {
@@ -107,10 +119,14 @@ async fn assert_refusal(doc: &Value, resp: reqwest::Response, status: u16, code:
     body
 }
 
-/// The `responses` the description declares for the route `path` was sent to. A literal segment
-/// outranks a parameter, so `/v1/artifacts/browse` is not read as `/v1/artifacts/{tessera_id}`;
-/// every described path has one operation.
-fn described_responses<'a>(doc: &'a Value, path: &str) -> &'a Value {
+/// The `responses` the description declares for the route `path` was sent to, under `method`.
+/// A literal segment outranks a parameter, so `/v1/artifacts/browse` is not read as
+/// `/v1/artifacts/{tessera_id}`. With no `method`, the path must have one operation.
+fn described_responses<'a>(
+    doc: &'a Value,
+    method: Option<&reqwest::Method>,
+    path: &str,
+) -> &'a Value {
     let sent: Vec<&str> = path.split('/').collect();
     let (_, item) = doc["paths"]
         .as_object()
@@ -133,8 +149,76 @@ fn described_responses<'a>(doc: &'a Value, path: &str) -> &'a Value {
         })
         .max_by_key(|(literal, _)| *literal)
         .unwrap_or_else(|| panic!("{path} is not a described route"));
-    let (_, operation) = item.as_object().unwrap().iter().next().unwrap();
+    let operations = item.as_object().unwrap();
+    let operation = match method {
+        Some(method) => operations
+            .get(&method.as_str().to_ascii_lowercase())
+            .unwrap_or_else(|| panic!("{method} {path} is not a described operation")),
+        None => {
+            assert_eq!(
+                operations.len(),
+                1,
+                "{path} has several operations; name the method"
+            );
+            operations.values().next().unwrap()
+        }
+    };
     &operation["responses"]
+}
+
+/// A control-plane answer: a status the description declares for `method` and the route, and a
+/// JSON body valid against the schema it names for that status. Returns the body.
+async fn assert_answer(
+    doc: &Value,
+    method: &reqwest::Method,
+    resp: reqwest::Response,
+    status: u16,
+) -> Value {
+    let path = resp.url().path().to_string();
+    let got = resp.status().as_u16();
+    let text = resp.text().await.unwrap();
+    assert_eq!(got, status, "{method} {path} answered {got}: {text}");
+    let described = &described_responses(doc, Some(method), &path)[status.to_string()];
+    let schema = described["content"]["application/json"]["schema"]["$ref"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{method} {path} declares no JSON body for {status}"));
+    let body: Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("{method} {path}'s {status} is not JSON ({e}): {text}"));
+    assert_valid(
+        doc,
+        schema.trim_start_matches("#/components/schemas/"),
+        &body,
+    );
+    body
+}
+
+/// A refusal the HTTP framework makes before a handler runs: a status the description declares
+/// for `method` and the route, with a plain-text body rather than the envelope.
+async fn assert_framework_refusal(
+    doc: &Value,
+    method: &reqwest::Method,
+    resp: reqwest::Response,
+    status: u16,
+) {
+    let path = resp.url().path().to_string();
+    let got = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    let text = resp.text().await.unwrap();
+    assert_eq!(got, status, "{method} {path} answered {got}: {text}");
+    assert!(
+        described_responses(doc, Some(method), &path)
+            .get(status.to_string())
+            .is_some(),
+        "{method} {path} answered {status}, which the description does not declare for it"
+    );
+    assert!(
+        content_type.starts_with("text/plain"),
+        "{method} {path}'s {status} is described as plain text and came as {content_type:?}: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -325,10 +409,11 @@ fn viewport_body(extra: Value) -> Value {
 // The document itself: every mounted route and nothing else, and every closed DTO closed.
 // ---------------------------------------------------------------------------------------------
 
-/// The route set is `viewer::router` plus `session::router`, by hand — a route mounted and not
-/// described, or described and not mounted, fails here.
+/// The route set is `viewer::router`, `session::router` and `control::router` without its
+/// fault-injection routes, by hand: a route mounted and not described, or described and not
+/// mounted, fails here.
 #[test]
-fn the_description_names_every_route_on_the_two_planes_and_no_other() {
+fn the_description_names_every_route_on_the_three_planes_and_no_other() {
     let doc = description();
     let mut paths: Vec<&str> = doc["paths"]
         .as_object()
@@ -340,6 +425,21 @@ fn the_description_names_every_route_on_the_two_planes_and_no_other() {
     assert_eq!(
         paths,
         vec![
+            "/control/attributes",
+            "/control/changes",
+            "/control/compact",
+            "/control/flush",
+            "/control/ingest",
+            "/control/layers",
+            "/control/layers/{name}",
+            "/control/layers/{name}/artifacts",
+            "/control/status",
+            "/control/values",
+            "/control/view_groups/{name}",
+            "/control/views/{group}/{key}",
+            "/control/views/{name}",
+            "/control/vocabularies/{name}",
+            "/control/vocabularies/{name}/values",
             "/healthz",
             "/readyz",
             "/session/authorise",
@@ -386,6 +486,44 @@ fn every_closed_dto_is_declared_closed() {
         "ArtifactRequest",
         "ArtifactResponse",
         "BrowseRequest",
+        "PublicationAck",
+        "IngestResponse",
+        "ValuesResponse",
+        "ChangeItem",
+        "AttributeDeclaration",
+        "GroupScope",
+        "AttributeDeclared",
+        "VocabularyDeclaration",
+        "VocabularyValue",
+        "VocabularyValues",
+        "VocabularyDeclared",
+        "VocabularyValuesAdded",
+        "Extent",
+        "PointVisibility",
+        "ViewGroupDeclaration",
+        "MetadataField",
+        "ViewGroupDeclared",
+        "PlainViewDeclaration",
+        "PlainViewDeclared",
+        "ViewRecord",
+        "ViewCreated",
+        "ViewDropped",
+        "LayerDeclaration",
+        "SuppliedContent",
+        "LayerRegistered",
+        "PublishRequest",
+        "PublishedArtifact",
+        "ContentItem",
+        "Attachment",
+        "ArtifactsPublished",
+        "ShapeReport",
+        "GrowRequest",
+        "GrowingArtifact",
+        "MembershipsGrown",
+        "Status",
+        "BatchLimits",
+        "WriteExecutorStatus",
+        "CompactionStatus",
     ] {
         let schema = &doc["components"]["schemas"][name];
         assert!(schema.is_object(), "schema {name} is missing");
@@ -1271,11 +1409,12 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
     assert_invalid(&doc, "ArtifactRequest", &json!({}));
 }
 
-/// **Every viewer-plane route refuses a caller with no session credential, and one whose
-/// credential is not a token, whatever else is wrong with the request. The routes are enumerated
-/// from the description, not listed by hand.**
+/// **Every described route refuses a caller without its plane's credential. A viewer-plane route
+/// refuses one with no session token, and one whose credential is not a token, whatever else is
+/// wrong with the request; a control-plane route refuses one without the operator credential. The
+/// routes are enumerated from the description, not listed by hand.**
 ///
-/// This is the viewer-plane counterpart of
+/// The viewer half is the counterpart of
 /// `every_path_on_the_control_listener_needs_the_credential` (`tests/http_write.rs`): a per-route
 /// 401 test stays green while a new route ships open. The control plane checks its credential in
 /// a layer over the whole router; the viewer plane checks it in the `ViewerSession` extractor,
@@ -1284,10 +1423,11 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
 ///
 /// **What is enumerated.** axum exposes no route enumeration, so the loop runs over
 /// `docs/openapi/tessera.yaml`'s operations and their declared `security`.
-/// [`the_description_names_every_route_on_the_two_planes_and_no_other`] fails if a route is
+/// [`the_description_names_every_route_on_the_three_planes_and_no_other`] fails if a route is
 /// mounted and not described; describing it means declaring its `security`; declaring
 /// `sessionToken` puts it in this loop. A route declared `security: []` is skipped, and the two
-/// probes are asserted below to be the only ones.
+/// probes are asserted below to be the only ones. A route declared `operatorCredential` is sent
+/// with no credential and a wrong one and must answer the envelope's `401`.
 ///
 /// **Each route is probed twice over.** Once with a request the route accepts, and once with each
 /// way it can be malformed: a query string that does not parse or names a parameter the route does
@@ -1305,7 +1445,7 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
 /// `ApiError::BadCredential`'s envelope; and, on the probe half, putting `/healthz` or `/readyz`
 /// behind the credential.
 #[tokio::test]
-async fn every_viewer_route_requires_a_session_token() {
+async fn every_described_route_requires_its_planes_credential() {
     let doc = description();
     let f = fixture().await;
     let auth = authorise_checked(&doc, &f.server, &["0"]).await;
@@ -1314,6 +1454,7 @@ async fn every_viewer_route_requires_a_session_token() {
     let mut gated = 0usize;
     let mut probes = 0usize;
     let mut session_plane = 0usize;
+    let mut control_plane = 0usize;
 
     for (path, item) in doc["paths"].as_object().unwrap() {
         for (method, op) in item.as_object().unwrap() {
@@ -1329,6 +1470,28 @@ async fn every_viewer_route_requires_a_session_token() {
                 // The session plane's own credential, on its own listener.
                 Some("sessionCredential") => {
                     session_plane += 1;
+                    continue;
+                }
+                // The operator credential, on the control listener, answered 401 before anything
+                // else about the request is read.
+                Some("operatorCredential") => {
+                    control_plane += 1;
+                    let concrete = path
+                        .split('/')
+                        .map(|s| if s.starts_with('{') { "1" } else { s })
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    for credential in [None, Some("not-the-operator-credential")] {
+                        let mut req = f
+                            .server
+                            .client
+                            .request(method.clone(), f.server.control_url(&concrete));
+                        if let Some(credential) = credential {
+                            req = req.bearer_auth(credential);
+                        }
+                        let resp = req.send().await.unwrap();
+                        assert_refusal_to(&doc, Some(&method), resp, 401, "bad-credential").await;
+                    }
                     continue;
                 }
                 // The probes answer without a credential, and they are the only two routes on
@@ -1395,6 +1558,13 @@ async fn every_viewer_route_requires_a_session_token() {
     assert_eq!(
         session_plane, 2,
         "/session/authorise and /session/revoke are the session plane's"
+    );
+    assert_eq!(
+        control_plane, 17,
+        "the control plane's operations are ingest, values, changes, status, flush, compact, \
+         the attribute, vocabulary, value-page, view group and plain view declarations, a group \
+         view's create and drop, a layer's registration and drop, and an artifact publication \
+         and growth"
     );
 }
 
@@ -1652,4 +1822,877 @@ async fn an_underlay_that_finds_no_cells_still_carries_a_zero_row_frame() {
         decoded.sub_cells.is_some_and(|c| !c.is_empty()),
         "the underlay pass serves cells when there are cells to serve"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The control plane.
+// ---------------------------------------------------------------------------------------------
+
+/// `method path` on the control listener, with the operator credential.
+fn control(server: &TestServer, method: &reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    server
+        .client
+        .request(method.clone(), server.control_url(path))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+}
+
+const ARROW: &str = "application/vnd.apache.arrow.stream";
+
+/// `POST /control/ingest` in both encodings, a replay, and the refusals; then
+/// `POST /control/values` filling a column declared at the running service.
+#[tokio::test]
+async fn ingest_and_values_match_the_description() {
+    let doc = description();
+    let f = fixture().await;
+    let post = reqwest::Method::POST;
+    let ingest = |batch_id: &str| {
+        control(&f.server, &post, "/control/ingest").header("x-tessera-batch-id", batch_id)
+    };
+
+    // JSON, with a category and a number, and one row with no external id.
+    let rows = json!([
+        { "external_id": b64(b"openapi-1"), "x": 10.0, "y": 20.0, "access": ["0"],
+          "archive": "astro", "score": 1.5 },
+        { "x": 30.0, "y": 40.0, "access": "0", "archive": "hep", "score": null },
+    ]);
+    assert_valid(&doc, "IngestRecords", &rows);
+    let body = rows.to_string();
+    let resp = ingest("openapi-json")
+        .header("content-type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    let answer = assert_answer(&doc, &post, resp, 200).await;
+    assert_eq!(answer["accepted"], 2);
+    assert_eq!(answer["tessera_ids"].as_array().unwrap().len(), 2);
+    assert!(answer.get("replayed").is_none() && answer.get("visible").is_none());
+
+    // The same bytes again are a replay; different bytes under the same id are a conflict.
+    let resp = ingest("openapi-json")
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let replay = assert_answer(&doc, &post, resp, 200).await;
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["accepted"], 0);
+    assert_eq!(replay["tessera_ids"], answer["tessera_ids"]);
+    let resp = ingest("openapi-json")
+        .json(&json!([]))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
+
+    // Arrow, waiting for the rows to be visible; the batch leaves both declared columns out.
+    let resp = control(&f.server, &post, "/control/ingest?wait=visible")
+        .header("x-tessera-batch-id", "openapi-arrow")
+        .header("content-type", ARROW)
+        .body(build_ingest_batch_optional(&[(
+            Some(&b"openapi-2"[..]),
+            50.0,
+            60.0,
+            "0",
+        )]))
+        .send()
+        .await
+        .unwrap();
+    let answer = assert_answer(&doc, &post, resp, 200).await;
+    assert_eq!(answer["padded_columns"], 2);
+    assert!(answer["visible"].is_boolean());
+
+    // Refusals: no batch id, an unknown view, an undeclared column, an encoding the route does
+    // not take, an external id the view already holds, and no credential.
+    let one = json!([{ "x": 1.0, "y": 1.0, "access": ["0"] }]);
+    let resp = control(&f.server, &post, "/control/ingest")
+        .json(&one)
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
+    let resp = ingest("openapi-view")
+        .header("x-tessera-view", "no-such-view")
+        .json(&one)
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 404, "unknown").await;
+    let resp = ingest("openapi-column")
+        .json(&json!([{ "x": 1.0, "y": 1.0, "access": ["0"], "no_such_column": 1 }]))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
+    let resp = ingest("openapi-csv")
+        .header("content-type", "text/csv")
+        .body("x,y\n1,1\n")
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
+    let resp = ingest("openapi-held")
+        .json(&json!([{ "external_id": member(3), "x": 1.0, "y": 1.0, "access": ["0"] }]))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
+    let resp = f
+        .server
+        .client
+        .post(f.server.control_url("/control/ingest"))
+        .header("x-tessera-batch-id", "openapi-anonymous")
+        .json(&one)
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 401, "bad-credential").await;
+
+    // Values fill a column declared while the service runs, on an item the build placed.
+    let put = reqwest::Method::PUT;
+    let resp = control(&f.server, &put, "/control/attributes")
+        .json(&json!({ "name": "rating", "type": "f64" }))
+        .send()
+        .await
+        .unwrap();
+    assert_answer(&doc, &put, resp, 201).await;
+    let values = |batch_id: &str| {
+        control(&f.server, &post, "/control/values").header("x-tessera-batch-id", batch_id)
+    };
+    let rows = json!([{ "external_id": member(3), "rating": 4.5 }]);
+    assert_valid(&doc, "ValuesRecords", &rows);
+    let resp = values("openapi-values").json(&rows).send().await.unwrap();
+    let answer = assert_answer(&doc, &post, resp, 200).await;
+    assert_eq!(
+        (answer["rows"].clone(), answer["filled"].clone()),
+        (json!(1), json!(1))
+    );
+    let resp = values("openapi-values").json(&rows).send().await.unwrap();
+    let replay = assert_answer(&doc, &post, resp, 200).await;
+    assert_eq!(replay["replayed"], true);
+
+    // Refusals: a cell holding another value, an item the deployment does not hold, a
+    // `tessera_id` with no idset, and a stale idset.
+    let resp = values("openapi-values-differ")
+        .json(&json!([{ "external_id": member(3), "rating": 5.5 }]))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
+    let resp = values("openapi-values-nobody")
+        .json(&json!([{ "external_id": b64(b"nobody"), "rating": 1.0 }]))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
+    let tessera_id = answer_id(&f.server).await;
+    let resp = values("openapi-values-no-idset")
+        .json(&json!([{ "tessera_id": tessera_id, "rating": 1.0 }]))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
+    let resp = values("openapi-values-stale")
+        .json(&json!([{ "tessera_id": tessera_id, "idset": FIXTURE_IDSET + 1, "rating": 1.0 }]))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
+}
+
+/// A built item's `tessera_id`, as a string: the first point a viewport serves.
+async fn answer_id(server: &TestServer) -> String {
+    let token = token_for(server, &["0"]).await;
+    let resp = viewport(server, &token, &viewport_body(json!({}))).await;
+    let (tessera_id, _) = decode_viewport_frames(&resp.bytes().await.unwrap()).points[0];
+    tessera_id.to_string()
+}
+
+/// `POST /control/changes`: each op, both address forms, and the refusals, none of which applies
+/// anything.
+#[tokio::test]
+async fn changes_match_the_description() {
+    let doc = description();
+    let f = fixture().await;
+    let post = reqwest::Method::POST;
+    let changes = |body: &Value| {
+        control(&f.server, &post, "/control/changes")
+            .json(body)
+            .send()
+    };
+
+    let tessera_id = answer_id(&f.server).await;
+    let body = json!([
+        { "external_id": member(5), "op": "suppress" },
+        { "tessera_id": tessera_id, "idset": FIXTURE_IDSET, "op": "suppress" },
+    ]);
+    for item in body.as_array().unwrap() {
+        assert_valid(&doc, "ChangeItem", item);
+    }
+    let resp = changes(&body).await.unwrap();
+    assert_answer(&doc, &post, resp, 200).await;
+    let resp = control(&f.server, &post, "/control/changes?wait=visible")
+        .json(&json!([{ "external_id": member(5), "op": "unsuppress" },
+                      { "external_id": member(6), "op": "delete" }]))
+        .send()
+        .await
+        .unwrap();
+    let answer = assert_answer(&doc, &post, resp, 200).await;
+    assert!(answer["visible"].is_boolean());
+
+    // Refusals. The schema refuses the shapes the server refuses.
+    let resp = changes(&json!([{ "external_id": b64(b"nobody"), "op": "suppress" }]))
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 404, "unknown").await;
+    let resp = changes(
+        &json!([{ "tessera_id": tessera_id, "idset": FIXTURE_IDSET + 1,
+                                 "op": "suppress" }]),
+    )
+    .await
+    .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 409, "conflict").await;
+    for item in [
+        json!({ "external_id": member(5), "op": "predicate" }),
+        json!({ "external_id": member(5), "tessera_id": tessera_id, "idset": FIXTURE_IDSET,
+                "op": "suppress" }),
+        json!({ "tessera_id": tessera_id, "op": "suppress" }),
+        json!({ "tessera_id": 12345, "idset": FIXTURE_IDSET, "op": "suppress" }),
+        json!({ "external_id": member(5), "idset": FIXTURE_IDSET, "op": "suppress" }),
+        json!({ "external_id": member(5), "op": "suppress", "unknown": 1 }),
+    ] {
+        assert_invalid(&doc, "ChangeItem", &item);
+        let resp = changes(&json!([item])).await.unwrap();
+        assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
+    }
+    let resp = changes(&json!({ "op": "suppress" })).await.unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
+}
+
+/// `GET /control/status`, `POST /control/flush` and `POST /control/compact`.
+#[tokio::test]
+async fn status_flush_and_compact_match_the_description() {
+    let doc = description();
+    let f = fixture().await;
+    let (get, post) = (reqwest::Method::GET, reqwest::Method::POST);
+
+    let resp = control(&f.server, &get, "/control/status")
+        .send()
+        .await
+        .unwrap();
+    assert_answer(&doc, &get, resp, 200).await;
+
+    let resp = control(&f.server, &post, "/control/flush")
+        .send()
+        .await
+        .unwrap();
+    let answer = assert_answer(&doc, &post, resp, 202).await;
+    assert!(answer.get("visible").is_none());
+    let resp = control(&f.server, &post, "/control/flush?wait=visible")
+        .send()
+        .await
+        .unwrap();
+    let answer = assert_answer(&doc, &post, resp, 202).await;
+    assert_eq!(answer["visible"], true);
+    let resp = control(&f.server, &post, "/control/flush?wait=soon")
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
+
+    let resp = control(&f.server, &post, "/control/compact")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    assert!(described_responses(&doc, Some(&post), "/control/compact")
+        .get("202")
+        .is_some());
+    assert!(
+        resp.bytes().await.unwrap().is_empty(),
+        "a compact's 202 has no body"
+    );
+
+    // After a flush has published, the status still matches.
+    let resp = control(&f.server, &get, "/control/status")
+        .send()
+        .await
+        .unwrap();
+    let status = assert_answer(&doc, &get, resp, 200).await;
+    assert!(status["publication"].as_u64().unwrap() >= answer["publication"].as_u64().unwrap());
+    let resp = f
+        .server
+        .client
+        .get(f.server.control_url("/control/status"))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&get), resp, 401, "bad-credential").await;
+}
+
+/// The declaration routes: attributes, vocabularies and their value pages, view groups and the
+/// views created in them, and plain views. Each answers `201` for a new name and `200` for the
+/// same declaration again, except a group's view, whose key is taken once.
+#[tokio::test]
+async fn declarations_match_the_description() {
+    let doc = description();
+    let f = fixture().await;
+    let (put, patch, delete) = (
+        reqwest::Method::PUT,
+        reqwest::Method::PATCH,
+        reqwest::Method::DELETE,
+    );
+    let send = |method: &reqwest::Method, path: &str, body: &Value| {
+        control(&f.server, method, path).json(body).send()
+    };
+
+    // Attributes.
+    let attribute = json!({ "name": "rating", "title": "Rating", "type": "f64", "index": true });
+    assert_valid(&doc, "AttributeDeclaration", &attribute);
+    let resp = send(&put, "/control/attributes", &attribute).await.unwrap();
+    assert_eq!(
+        assert_answer(&doc, &put, resp, 201).await["existing"],
+        false
+    );
+    let resp = send(&put, "/control/attributes?wait=visible", &attribute)
+        .await
+        .unwrap();
+    let answer = assert_answer(&doc, &put, resp, 200).await;
+    assert_eq!(answer["existing"], true);
+    assert!(answer["visible"].is_boolean());
+    let resp = send(
+        &put,
+        "/control/attributes",
+        &json!({ "name": "rating", "type": "f32" }),
+    )
+    .await
+    .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 409, "conflict").await;
+    for refused in [
+        json!({ "name": "flag", "type": "bool", "render": true }),
+        json!({ "name": "flag", "type": "bool", "unknown": 1 }),
+        json!({ "name": "flag", "type": "category" }),
+    ] {
+        let resp = send(&put, "/control/attributes", &refused).await.unwrap();
+        assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+    }
+    assert_invalid(
+        &doc,
+        "AttributeDeclaration",
+        &json!({ "name": "flag", "type": "string" }),
+    );
+    let resp = control(&f.server, &put, "/control/attributes")
+        .header("content-type", "application/json")
+        .body("{")
+        .send()
+        .await
+        .unwrap();
+    assert_framework_refusal(&doc, &put, resp, 400).await;
+    let resp = control(&f.server, &put, "/control/attributes")
+        .body(attribute.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_framework_refusal(&doc, &put, resp, 415).await;
+    let resp = control(&f.server, &put, "/control/attributes")
+        .header("content-type", "application/json")
+        .body(format!("{{\"name\": \"{}\"}}", "x".repeat(3 << 20)))
+        .send()
+        .await
+        .unwrap();
+    assert_framework_refusal(&doc, &put, resp, 413).await;
+
+    // Vocabularies, and a page of values.
+    let vocabulary = json!({ "title": "Genre", "value_set": "closed", "visibility": "public",
+                             "width": "u8", "values": [{ "key": "drama" }], "reserved": [7] });
+    assert_valid(&doc, "VocabularyDeclaration", &vocabulary);
+    let resp = send(&put, "/control/vocabularies/genre", &vocabulary)
+        .await
+        .unwrap();
+    assert_eq!(assert_answer(&doc, &put, resp, 201).await["added"], 1);
+    let resp = send(&put, "/control/vocabularies/genre", &vocabulary)
+        .await
+        .unwrap();
+    assert_eq!(assert_answer(&doc, &put, resp, 200).await["existing"], true);
+    let mut wider = vocabulary.clone();
+    wider["width"] = json!("u16");
+    let resp = send(&put, "/control/vocabularies/genre", &wider)
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 409, "conflict").await;
+    let mut coded = vocabulary.clone();
+    coded["values"] = json!([{ "key": "drama", "code": 3 }]);
+    assert_invalid(&doc, "VocabularyDeclaration", &coded);
+    let resp = send(&put, "/control/vocabularies/genre", &coded)
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+
+    let page = json!({ "values": [{ "key": "comedy", "title": "Comedy" },
+                                  { "key": "drama", "title": "Drama" }] });
+    assert_valid(&doc, "VocabularyValues", &page);
+    let resp = send(&patch, "/control/vocabularies/genre/values", &page)
+        .await
+        .unwrap();
+    let answer = assert_answer(&doc, &patch, resp, 200).await;
+    assert_eq!(
+        (
+            answer["added"].clone(),
+            answer["existing"].clone(),
+            answer["titles"].clone()
+        ),
+        (json!(1), json!(1), json!(1))
+    );
+    let resp = send(&patch, "/control/vocabularies/no-such/values", &page)
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&patch), resp, 404, "unknown").await;
+    let resp = send(
+        &patch,
+        "/control/vocabularies/genre/values",
+        &json!({ "values": [{ "key": "" }] }),
+    )
+    .await
+    .unwrap();
+    assert_refusal_to(&doc, Some(&patch), resp, 422, "contract").await;
+
+    // A view group, and the views created in it.
+    let group = json!({ "title": "Quarters", "projection": "none",
+                        "extent": { "x": [0.0, 1000.0], "y": [0.0, 1000.0] },
+                        "visibility": "0", "point_visibility": { "default": "0" },
+                        "metadata": [{ "name": "year", "type": "i32" }] });
+    assert_valid(&doc, "ViewGroupDeclaration", &group);
+    let resp = send(&put, "/control/view_groups/quarter", &group)
+        .await
+        .unwrap();
+    assert_eq!(
+        assert_answer(&doc, &put, resp, 201).await["group"],
+        "quarter"
+    );
+    let resp = send(&put, "/control/view_groups/quarter", &group)
+        .await
+        .unwrap();
+    assert_eq!(assert_answer(&doc, &put, resp, 200).await["existing"], true);
+    let mut moved = group.clone();
+    moved["extent"]["x"] = json!([0.0, 500.0]);
+    let resp = send(&put, "/control/view_groups/quarter", &moved)
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 409, "conflict").await;
+    let sharing = json!({ "extent": { "x": [0.0, 1000.0], "y": [0.0, 1000.0] },
+                          "members": "no-such-group" });
+    let resp = send(&put, "/control/view_groups/sharing", &sharing)
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 404, "unknown").await;
+
+    let record = json!({ "metadata": { "year": 2026 } });
+    assert_valid(&doc, "ViewRecord", &record);
+    let resp = send(&put, "/control/views/quarter/2026-Q3", &record)
+        .await
+        .unwrap();
+    assert_eq!(
+        assert_answer(&doc, &put, resp, 201).await["view"],
+        "quarter:2026-Q3"
+    );
+    let resp = send(&put, "/control/views/quarter/2026-Q3", &record)
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 409, "conflict").await;
+    let resp = send(&put, "/control/views/no-such-group/2026-Q3", &record)
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 404, "unknown").await;
+    let resp = send(&put, "/control/views/quarter/2026-Q4", &json!({}))
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+
+    let resp = control(
+        &f.server,
+        &delete,
+        "/control/views/quarter/2026-Q3?delete_dangling=true",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(assert_answer(&doc, &delete, resp, 200).await["deleted"], 0);
+    let resp = control(&f.server, &delete, "/control/views/quarter/2026-Q3")
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&delete), resp, 404, "unknown").await;
+    let resp = control(
+        &f.server,
+        &delete,
+        "/control/views/quarter/2026-Q3?delete_dangling=maybe",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_refusal_to(&doc, Some(&delete), resp, 422, "contract").await;
+
+    // A plain view, whose name shares a namespace with the groups'.
+    let plain = json!({ "title": "Second layout",
+                        "extent": { "x": [0.0, 1000.0], "y": [0.0, 1000.0] } });
+    assert_valid(&doc, "PlainViewDeclaration", &plain);
+    let resp = send(&put, "/control/views/s1", &plain).await.unwrap();
+    assert_eq!(assert_answer(&doc, &put, resp, 201).await["view"], "s1");
+    let resp = send(&put, "/control/views/s1", &plain).await.unwrap();
+    assert_eq!(assert_answer(&doc, &put, resp, 200).await["existing"], true);
+    let mut moved = plain.clone();
+    moved["extent"]["y"] = json!([0.0, 10.0]);
+    let resp = send(&put, "/control/views/s1", &moved).await.unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 409, "conflict").await;
+    let resp = send(&put, "/control/views/quarter", &plain).await.unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+    assert_invalid(
+        &doc,
+        "PlainViewDeclaration",
+        &json!({ "title": "no extent" }),
+    );
+}
+
+/// An Arrow growth page: `key` and `members` per row, with the envelope in the schema's metadata.
+fn grow_arrow(key: &str, members: &[String]) -> Vec<u8> {
+    use arrow::array::{Array, ListBuilder, StringBuilder};
+    use arrow::datatypes::{DataType, Field, Schema};
+    let mut lists = ListBuilder::new(StringBuilder::new());
+    for member in members {
+        lists.values().append_value(member);
+    }
+    lists.append(true);
+    let lists = lists.finish();
+    let schema = std::sync::Arc::new(
+        Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("members", lists.data_type().clone(), true),
+        ])
+        .with_metadata([("addressing".to_string(), "external".to_string())].into()),
+    );
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            std::sync::Arc::new(StringArray::from_iter_values([key])),
+            std::sync::Arc::new(lists),
+        ],
+    )
+    .unwrap();
+    let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// A layer registered, published into, grown in both encodings and dropped, with the refusals of
+/// each step.
+#[tokio::test]
+async fn layers_and_artifacts_match_the_description() {
+    let doc = description();
+    let f = fixture().await;
+    let (put, patch, delete) = (
+        reqwest::Method::PUT,
+        reqwest::Method::PATCH,
+        reqwest::Method::DELETE,
+    );
+    const NAME: &str = "clusters/b";
+    let artifacts = format!("/control/layers/{}/artifacts", NAME.replace('/', "%2F"));
+
+    // The least a declaration states: every optional key left out.
+    let declaration = json!({
+        "name": NAME,
+        "views": ["s0"],
+        "membership": "enumerated",
+        "artifact_visibility": { "default": "inherited" },
+        "hierarchy": { "kind": "flat" },
+    });
+    assert_valid(&doc, "LayerDeclaration", &declaration);
+    let resp = control(&f.server, &put, "/control/layers")
+        .json(&declaration)
+        .send()
+        .await
+        .unwrap();
+    let registered = assert_answer(&doc, &put, resp, 201).await;
+    assert_eq!(registered["name"], NAME);
+    // A name is registered once, whatever the declaration.
+    let resp = control(&f.server, &put, "/control/layers")
+        .json(&declaration)
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+    let mut elsewhere = declaration.clone();
+    elsewhere["name"] = json!("clusters/c");
+    elsewhere["views"] = json!(["no-such-view"]);
+    let resp = control(&f.server, &put, "/control/layers")
+        .json(&elsewhere)
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+    let mut removed = elsewhere.clone();
+    removed["views"] = json!(["s0"]);
+    removed["content"] = json!({ "computed": [], "withdraw_on_member_deletion": true });
+    assert_invalid(&doc, "LayerDeclaration", &removed);
+    let resp = control(&f.server, &put, "/control/layers")
+        .json(&removed)
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+
+    // A publication, and the same again, which creates nothing.
+    let publication = json!({ "addressing": "external",
+                              "artifacts": [{ "key": "k0", "members": members(0..4) }] });
+    assert_valid(&doc, "PublishRequest", &publication);
+    let resp = control(&f.server, &put, &artifacts)
+        .json(&publication)
+        .send()
+        .await
+        .unwrap();
+    let published = assert_answer(&doc, &put, resp, 201).await;
+    assert_eq!(published["created"], 1);
+    let resp = control(&f.server, &put, &format!("{artifacts}?wait=visible"))
+        .json(&publication)
+        .send()
+        .await
+        .unwrap();
+    let again = assert_answer(&doc, &put, resp, 200).await;
+    assert_eq!(again["created"], 0);
+    assert_eq!(again["artifacts"], published["artifacts"]);
+
+    // Refusals: a member that names nothing, a stale idset, Arrow, and no artifacts.
+    let resp = control(&f.server, &put, &artifacts)
+        .json(&json!({ "addressing": "external",
+                       "artifacts": [{ "key": "k1", "members": [b64(b"nobody")] }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 404, "unknown").await;
+    let tessera_id = answer_id(&f.server).await;
+    let resp = control(&f.server, &put, &artifacts)
+        .json(
+            &json!({ "addressing": "tessera", "idset": FIXTURE_IDSET + 1,
+                       "artifacts": [{ "key": "k1", "members": [tessera_id] }] }),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 409, "conflict").await;
+    let resp = control(&f.server, &put, &artifacts)
+        .header("content-type", ARROW)
+        .body(grow_arrow("k0", &members(4..6)))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+    let empty = json!({ "addressing": "external", "artifacts": [] });
+    assert_invalid(&doc, "PublishRequest", &empty);
+    let resp = control(&f.server, &put, &artifacts)
+        .json(&empty)
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&put), resp, 422, "contract").await;
+
+    // Growth, as JSON and as Arrow.
+    let growth = json!({ "addressing": "external",
+                         "artifacts": [{ "key": "k0", "members": members(4..6) }] });
+    assert_valid(&doc, "GrowRequest", &growth);
+    let resp = control(&f.server, &patch, &artifacts)
+        .json(&growth)
+        .send()
+        .await
+        .unwrap();
+    let grown = assert_answer(&doc, &patch, resp, 200).await;
+    assert_eq!(grown["artifacts"][0]["joined"], 2);
+    let resp = control(&f.server, &patch, &artifacts)
+        .header("content-type", ARROW)
+        .body(grow_arrow("k0", &members(6..9)))
+        .send()
+        .await
+        .unwrap();
+    let grown = assert_answer(&doc, &patch, resp, 200).await;
+    assert_eq!(grown["artifacts"][0]["joined"], 3);
+    let resp = control(&f.server, &patch, &artifacts)
+        .json(&json!({ "addressing": "external",
+                       "artifacts": [{ "key": "no-such-key", "members": members(0..1) }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&patch), resp, 422, "contract").await;
+    let resp = control(&f.server, &patch, &artifacts)
+        .json(&json!({ "addressing": "external",
+                       "artifacts": [{ "key": "k0", "members": [b64(b"nobody")] }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&patch), resp, 404, "unknown").await;
+
+    // The drop, and a second one, which names no layer.
+    let layer = format!("/control/layers/{}", NAME.replace('/', "%2F"));
+    let resp = control(&f.server, &delete, &layer).send().await.unwrap();
+    assert_answer(&doc, &delete, resp, 200).await;
+    let resp = control(&f.server, &delete, &layer).send().await.unwrap();
+    assert_refusal_to(&doc, Some(&delete), resp, 422, "contract").await;
+}
+
+/// A shape layer's publication and growth answer with `shapes`, a generating-set page that
+/// empties its set answers with `withdrawn`, and both match the description. So do the artifact
+/// routes' refusals of a body that is not JSON and of a path segment that is not UTF-8.
+#[tokio::test]
+async fn shape_reports_and_withdrawals_match_the_description() {
+    let doc = description();
+    let f = fixture().await;
+    let (put, patch, delete) = (
+        reqwest::Method::PUT,
+        reqwest::Method::PATCH,
+        reqwest::Method::DELETE,
+    );
+
+    // A spatial layer whose artifacts are boxes.
+    let boxes = json!({
+        "name": "regions/boxes",
+        "views": ["s0"],
+        "membership": "spatial",
+        "shape": { "kind": "bbox" },
+        "artifact_visibility": { "default": "inherited" },
+        "hierarchy": { "kind": "flat" },
+    });
+    assert_valid(&doc, "LayerDeclaration", &boxes);
+    let resp = control(&f.server, &put, "/control/layers")
+        .json(&boxes)
+        .send()
+        .await
+        .unwrap();
+    assert_answer(&doc, &put, resp, 201).await;
+    let url = "/control/layers/regions%2Fboxes/artifacts";
+    let publication = json!({ "addressing": "external",
+                              "artifacts": [{ "key": "west", "members": [],
+                                              "bbox": [0.0, 0.0, 500.0, 1000.0] }] });
+    assert_valid(&doc, "PublishRequest", &publication);
+    let resp = control(&f.server, &put, url)
+        .json(&publication)
+        .send()
+        .await
+        .unwrap();
+    let published = assert_answer(&doc, &put, resp, 201).await;
+    let views = published["shapes"][0]["views"].as_array().unwrap();
+    assert_eq!(
+        views.len(),
+        1,
+        "one report per view of the layer: {published}"
+    );
+    assert_eq!(views[0]["view"], "s0");
+
+    // A spatial layer's artifacts are not grown.
+    let resp = control(&f.server, &patch, url)
+        .json(&json!({ "addressing": "external",
+                       "artifacts": [{ "key": "west", "members": members(0..1) }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&patch), resp, 422, "contract").await;
+
+    // A growth that fills an authored circle reports the shape, naming the content's rank.
+    let outlines = json!({
+        "name": "outlines/a",
+        "views": ["s0"],
+        "membership": "enumerated",
+        "artifact_visibility": { "default": "inherited" },
+        "hierarchy": { "kind": "flat" },
+        "content": { "supplied": [{ "name": "outline", "type": "circle",
+                                    "require_member_visibility": "inherited" }] },
+    });
+    let resp = control(&f.server, &put, "/control/layers")
+        .json(&outlines)
+        .send()
+        .await
+        .unwrap();
+    assert_answer(&doc, &put, resp, 201).await;
+    let url = "/control/layers/outlines%2Fa/artifacts";
+    let resp = control(&f.server, &put, url)
+        .json(&json!({ "addressing": "external",
+                       "artifacts": [{ "key": "o0", "members": members(0..5) }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        assert_answer(&doc, &put, resp, 201).await["without_content"],
+        1
+    );
+    let fill = json!({ "addressing": "external",
+                       "artifacts": [{ "key": "o0",
+                                       "content": [{ "rank": 0, "values": ["500 500 100"] }] }] });
+    assert_valid(&doc, "GrowRequest", &fill);
+    let resp = control(&f.server, &patch, url)
+        .json(&fill)
+        .send()
+        .await
+        .unwrap();
+    let grown = assert_answer(&doc, &patch, resp, 200).await;
+    assert_eq!(grown["shapes"][0]["key"], "o0");
+    assert_eq!(grown["shapes"][0]["content"], 0);
+
+    // A layer whose content is served only to a viewer who sees all it was made from.
+    let topics = json!({
+        "name": "topics/a",
+        "views": ["s0"],
+        "membership": "enumerated",
+        "artifact_visibility": { "default": "inherited" },
+        "hierarchy": { "kind": "flat" },
+        "content": { "supplied": [{ "name": "topic", "type": "text",
+                                    "require_member_visibility": "all" }] },
+    });
+    assert_valid(&doc, "LayerDeclaration", &topics);
+    let resp = control(&f.server, &put, "/control/layers")
+        .json(&topics)
+        .send()
+        .await
+        .unwrap();
+    assert_answer(&doc, &put, resp, 201).await;
+    let url = "/control/layers/topics%2Fa/artifacts";
+    let resp = control(&f.server, &put, url)
+        .json(&json!({ "addressing": "external",
+                       "artifacts": [{ "key": "t0", "members": members(0..10),
+                                       "content": [{ "values": ["a topic"],
+                                                     "generated_from": members(0..4) }] }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_answer(&doc, &put, resp, 201).await;
+    let page = json!({ "addressing": "external",
+                       "artifacts": [{ "key": "t0", "rank": 0, "leaving": members(0..4) }] });
+    assert_valid(&doc, "GrowRequest", &page);
+    let resp = control(&f.server, &patch, url)
+        .json(&page)
+        .send()
+        .await
+        .unwrap();
+    let grown = assert_answer(&doc, &patch, resp, 200).await;
+    assert_eq!(grown["artifacts"][0]["left"], 4);
+    assert_eq!(grown["artifacts"][0]["withdrawn"], 0);
+
+    // The artifact routes read their own JSON, so a body that does not parse is the envelope's
+    // `422`; a path segment that is not UTF-8 is the framework's `400`.
+    for method in [&put, &patch] {
+        let resp = control(&f.server, method, url)
+            .header("content-type", "application/json")
+            .body("{")
+            .send()
+            .await
+            .unwrap();
+        assert_refusal_to(&doc, Some(method), resp, 422, "contract").await;
+        let resp = control(&f.server, method, "/control/layers/%FF/artifacts")
+            .json(&page)
+            .send()
+            .await
+            .unwrap();
+        assert_framework_refusal(&doc, method, resp, 400).await;
+    }
+    let resp = control(&f.server, &delete, "/control/layers/%FF")
+        .send()
+        .await
+        .unwrap();
+    assert_framework_refusal(&doc, &delete, resp, 400).await;
 }
