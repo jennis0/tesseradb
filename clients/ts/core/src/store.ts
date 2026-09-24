@@ -21,6 +21,7 @@ import {TesseraClient, type TesseraClientOptions} from './client.js';
 import {HeldRecords, HeldShapes} from './held.js';
 import {SelectedRegion, type RegionProjection, type SelectionShape} from './selectedRegion.js';
 import {Suggestions} from './suggestions.js';
+import {CLUSTER_PREFIX, Legend, type LegendProjection} from './legend.js';
 import {HeldViews, type ViewMachinery} from './heldViews.js';
 import {ArtifactColours, ColourCoverage} from './colours.js';
 import {TokenSupply, type TokenSupplier} from './token.js';
@@ -71,6 +72,7 @@ export {formatCount, formatMasked} from './counts.js';
 export type ViewInput = {bbox: [number, number, number, number]; width: number; height: number};
 
 export type {TokenSupplier} from './token.js';
+export {CLUSTER_PREFIX, type LegendProjection} from './legend.js';
 export {REGION_HELD_LIMIT, type RegionProjection, type SelectionShape} from './selectedRegion.js';
 
 export type StoreOptions = {
@@ -282,17 +284,6 @@ export type FiltersProjection = {
   suggestEpoch: number;
 };
 
-export type LegendProjection = {
-  /** Palette rank per code, per column — assigned by observed frequency, never reordered. */
-  ranks: Record<string, Ranks>;
-  /** Sticky numeric domains per column — widened as marks arrive, never narrowed. */
-  domains: Record<string, Domain>;
-  /** Resolved category values per column — the codes drawn, named. */
-  categories: Record<string, CategoryValue[]>;
-  categoryErrors: Record<string, Refusal>;
-  colourBy: string | null;
-};
-
 export type ReplicaProjection = {
   /** Bytes held across **every** view's bands — the figure the one budget bounds (`view-switching.md` §3). */
   bytes: number;
@@ -431,9 +422,6 @@ export interface Store {
   dispose(): void;
 }
 
-/** The `colourBy` prefix that names a layer's cluster colour rather than a column. */
-export const CLUSTER_PREFIX = 'cluster:';
-
 const NO_STATUS: StatusProjection = {
   status: 'idle',
   sessionWarm: false,
@@ -467,6 +455,11 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('artifacts', {...projections.artifacts, colours: map, palette})
   );
   const coverage = new ColourCoverage();
+
+  const legend = new Legend(
+    async (column, codes) => client.categories(await tokens.get(), column, {codes, view: viewId}),
+    (value) => replaceProjection('legend', value)
+  );
 
   const suggestions = new Suggestions(
     clock,
@@ -516,7 +509,6 @@ export function createStore(options: StoreOptions): Store {
   let meta: Meta | null = null;
   let viewId = options.view ?? '';
   let budget = options.budget ?? 500_000;
-  let colourBy: string | null = null;
   let contentKeyAtFrame = '';
 
   /** One byte budget across every view's bands, evicted least recently drawn across them. */
@@ -929,7 +921,7 @@ export function createStore(options: StoreOptions): Store {
       matched: Number(matched),
       narrowed: filtersBesideRegion() !== null
     });
-    accumulateEncoding(frame);
+    legend.accumulate(frame, meta?.declaredScalars ?? []);
     colours.refresh();
     checkColourCoverage();
 
@@ -1041,68 +1033,6 @@ export function createStore(options: StoreOptions): Store {
     options.instruments?.onTrace?.('coverage', {ms: clock.now() - started, bands: bands.length, stale, asked: toAsk.length});
     if (a.coverage.current !== current || a.coverage.stale !== stale) {
       replaceProjection('artifacts', {...projections.artifacts, coverage: {current, stale}});
-    }
-  }
-
-  // ---- the encoding accumulators (in the store, §4) -----------------------------------------
-
-  function accumulateEncoding(frame: Composition): void {
-    // Cluster colour is the lookup texture's, resolved on the vis side from the table; nothing
-    // accumulates for it here.
-    if (!colourBy || !meta || colourBy.startsWith(CLUSTER_PREFIX)) return;
-    const column = meta.declaredScalars.find((c) => c.name === colourBy);
-    if (!column) return;
-    if (column.category) {
-      const counts = new Map<number, number>();
-      for (const band of frame.exact) {
-        const values = band.scalars[colourBy];
-        if (values) for (const [code, n] of countCodesCached(values)) counts.set(code, (counts.get(code) ?? 0) + n);
-      }
-      // The stand-in pieces bootstrap the palette while this depth's own bands stream in.
-      if (counts.size === 0) for (const piece of frame.standIn) countCodesInPiece(counts, piece, colourBy);
-      if (counts.size === 0) return;
-      const ranks = extendRanks(projections.legend.ranks[colourBy] ?? {}, counts);
-      if (ranks !== projections.legend.ranks[colourBy]) {
-        replaceProjection('legend', {...projections.legend, ranks: {...projections.legend.ranks, [colourBy]: ranks}});
-        void resolveCategoryCodes(colourBy, counts);
-      }
-    } else {
-      let domain: Domain | null = projections.legend.domains[colourBy] ?? null;
-      for (const band of frame.exact) {
-        const values = band.scalars[colourBy];
-        if (values) domain = widenDomain(domain, values);
-      }
-      for (const piece of frame.standIn) {
-        const values = piece.band.scalars[colourBy];
-        if (values) domain = widenDomainOver(domain, values, piece.indices, piece.limit);
-      }
-      if (domain && domain !== projections.legend.domains[colourBy]) {
-        replaceProjection('legend', {...projections.legend, domains: {...projections.legend.domains, [colourBy]: domain}});
-      }
-    }
-  }
-
-  async function resolveCategoryCodes(column: string, counts: Map<number, number>): Promise<void> {
-    if (!meta) return;
-    if (projections.legend.categoryErrors[column]) return;
-    const held = new Set((projections.legend.categories[column] ?? []).map((v) => v.code));
-    const wanted = [...counts.keys()].filter((code) => !held.has(code));
-    if (wanted.length === 0) return;
-    try {
-      const resolved = await client.categories(await tokens.get(), column, {codes: wanted, view: viewId});
-      if (disposed) return;
-      const byCode = new Map((projections.legend.categories[column] ?? []).map((v) => [v.code, v]));
-      for (const v of resolved) byCode.set(v.code, v);
-      replaceProjection('legend', {
-        ...projections.legend,
-        categories: {...projections.legend.categories, [column]: [...byCode.values()]}
-      });
-    } catch (error) {
-      if (disposed) return;
-      replaceProjection('legend', {
-        ...projections.legend,
-        categoryErrors: {...projections.legend.categoryErrors, [column]: refusalOf(error)}
-      });
     }
   }
 
@@ -1228,12 +1158,14 @@ export function createStore(options: StoreOptions): Store {
 
   /** The layer `colourBy` colours by, where `meta` lists it as one that can colour; else null. */
   function colourLayer(): string | null {
+    const colourBy = legend.colourBy;
     if (!meta || !colourBy?.startsWith(CLUSTER_PREFIX)) return null;
     const name = colourBy.slice(CLUSTER_PREFIX.length);
     return colourLayers(meta.layers).some((l) => l.name === name) ? name : null;
   }
 
   function traceUnknownColourLayer(): void {
+    const colourBy = legend.colourBy;
     if (meta && colourBy?.startsWith(CLUSTER_PREFIX) && colourLayer() === null) onTrace('colour-by', {refused: 1, layer: colourBy.slice(CLUSTER_PREFIX.length)});
   }
 
@@ -1348,15 +1280,14 @@ export function createStore(options: StoreOptions): Store {
 
   function setColourBy(column: string | null): void {
     const before = colourLayer();
-    colourBy = column;
-    replaceProjection('legend', {...projections.legend, colourBy: column});
+    legend.setColourBy(column);
     traceUnknownColourLayer();
     // `cluster:<layer>` is a uniform switch on the vis side and accumulates nothing. Its layer is
     // fetched only where it is not already asked for (`askLayers`).
     if (colourLayer() !== before) askLayers();
     // No refetch for a column: every declared column is already in the held response, so this is
     // an accumulator pass over what is drawn (§4). The mark count cannot move.
-    if (column && projections.view.composition) accumulateEncoding(projections.view.composition);
+    if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
   }
 
   function setBudget(next: number): void {
@@ -1448,7 +1379,7 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('view', {id: viewId, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0});
     replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
     replaceProjection('tiles', {tiles: []});
-    replaceProjection('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy});
+    legend.clear();
     replaceProjection('status', {...NO_STATUS});
     region.drop();
     publishReplica(null);
@@ -1470,6 +1401,7 @@ export function createStore(options: StoreOptions): Store {
     suggestions.dispose();
     shapes.dispose();
     records.dispose();
+    legend.dispose();
     for (const held of views.all()) {
       held.presenter.cancel();
       held.channel.cancel();
