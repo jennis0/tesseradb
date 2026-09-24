@@ -40,7 +40,7 @@ export const UNANSWERED = 0;
 
 /**
  * One request's answer: the status, the body decoded where it was a JSON object, and the whole
- * response text. `JSON.parse` rounds an integer past 2^53 in `body`; `text` holds it as it arrived.
+ * response text.
  */
 export type Answer = {
   status: number;
