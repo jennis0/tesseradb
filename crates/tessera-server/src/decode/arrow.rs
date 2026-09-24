@@ -576,6 +576,13 @@ pub(crate) fn parse_values_batch(
                     )))
                 }
                 (Some(external), None) => {
+                    if idset.as_ref().is_some_and(|arr| !arr.is_null(i)) {
+                        return Err(DecodeError(format!(
+                            "values body: row {} names an external_id with an idset, which \
+                             accompanies a tessera_id only; remove the idset",
+                            rows.len()
+                        )));
+                    }
                     check_external_id(&external)?;
                     Address::External(external)
                 }

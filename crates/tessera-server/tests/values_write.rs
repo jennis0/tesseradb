@@ -490,6 +490,78 @@ async fn a_row_addressed_by_tessera_id_carries_its_idset() {
     assert_eq!(answer["error"], "contract", "{answer}");
 }
 
+/// One Arrow values batch naming its entity by `tessera_id` and identifier set.
+fn arrow_values_by_tessera_id(id: u64, idset: u32, tag: &str) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("tessera_id", DataType::Utf8, true),
+        Field::new("idset", DataType::UInt32, true),
+        Field::new("tag", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from_iter([Some(id.to_string())])),
+            Arc::new(arrow::array::UInt32Array::from(vec![idset])),
+            Arc::new(StringArray::from_iter([Some(tag)])),
+        ],
+    )
+    .unwrap();
+    let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// An Arrow row names its entity by `tessera_id` and identifier set as a JSON row does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
+    let served = serve().await;
+    let id = ingest_point(&served, "points-1", "subject").await;
+    tick(&served.server).await;
+
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/values"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "values-arrow")
+        .header("x-tessera-view", "s0")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(arrow_values_by_tessera_id(id, FIXTURE_IDSET, "alpha"))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let answer: Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["filled"], 1);
+    tick(&served.server).await;
+    assert_eq!(item_fields(&served, id).await["tag"], json!("alpha"));
+}
+
+/// A row names its entity by exactly one form: both, neither, and an identifier set beside an
+/// `external_id` are each refused, and the batch has no effect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_row_naming_its_entity_by_both_forms_or_neither_is_refused() {
+    let served = serve().await;
+    let id = ingest_point(&served, "points-1", "subject").await;
+    tick(&served.server).await;
+
+    let rows = [
+        json!({"external_id": base64_of("subject"), "tessera_id": id.to_string(),
+               "idset": FIXTURE_IDSET, "tag": "alpha"}),
+        json!({"tag": "alpha"}),
+        json!({"external_id": base64_of("subject"), "idset": FIXTURE_IDSET, "tag": "alpha"}),
+    ];
+    for (i, row) in rows.into_iter().enumerate() {
+        let (status, answer) =
+            values(&served, &format!("values-{i}"), Some("s0"), json!([row])).await;
+        assert_eq!(status, 422, "{answer}");
+        assert_eq!(answer["error"], "contract", "{answer}");
+    }
+    tick(&served.server).await;
+    assert_eq!(item_fields(&served, id).await["tag"], Value::Null);
+}
+
 /// **A group-scoped column is nameable only on a batch that carries the view header**
 /// (`ingest.md` §1.4, `views.md` §5). This bundle declares no group, so `sentiment` is a name
 /// nothing declares and takes the undeclared-column refusal — which is the same refusal a scoped
