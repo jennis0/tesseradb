@@ -431,8 +431,17 @@ fn a_majority_of_clamped_points_is_reported_and_built() {
     assert!(tmp.path().join("bundles/corpus/CURRENT").is_file());
     let text = stderr(&output);
     // Against a frame of 0..65536, every point below zero on either axis clamps: all but the two
-    // whose x and y are both past zero.
-    assert!(text.contains("62 of 64 point(s)"), "{text}");
+    // whose x and y are both past zero. The clamp line leads with the count and the total.
+    let line = text
+        .lines()
+        .find(|line| line.contains("CLAMP"))
+        .unwrap_or_else(|| panic!("no clamp line: {text}"));
+    let counts: Vec<u64> = line
+        .split_whitespace()
+        .filter_map(|word| word.parse().ok())
+        .take(2)
+        .collect();
+    assert_eq!(counts, [62, 64], "{line}");
 }
 
 /// **A tail of clamped points is reported and built.** Outliers, or headroom a caller left for

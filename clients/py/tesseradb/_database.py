@@ -211,8 +211,8 @@ class Database:
     def declare_attribute(self, name: str, type: str, **kwargs) -> dict:
         """Declare a column the items carry, and return its block.
 
-        Its values come from a column of the same name in the table inserted into the anchor view,
-        after the first commit in any view's table, or from `insert(name, table, id=, value=)`.
+        Its values come from a column of the same name in the table inserted into the anchor view
+        (after the first commit, in any view's table), or from `insert(name, table, id=, value=)`.
 
         - `name`: the column's name.
         - `type`: `"bool"`, an integer type from `"u8"` to `"i64"`, `"f32"`, `"f64"`,

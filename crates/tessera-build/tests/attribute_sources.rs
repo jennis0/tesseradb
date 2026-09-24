@@ -314,7 +314,8 @@ fn a_column_from_a_second_source_lands_on_the_entities_it_names() {
 }
 
 /// **Every declared column is required.** A points file without `count` is refused, and one that
-/// carries `count` as nulls, typed or of Arrow's `null` type, builds with no entity holding a value.
+/// carries `count` as nulls, typed or of Arrow's `null` type, builds with no entity holding a
+/// value.
 #[test]
 fn a_declared_column_the_file_omits_is_refused_and_a_column_of_nulls_builds() {
     let dir = tempfile::tempdir().unwrap();

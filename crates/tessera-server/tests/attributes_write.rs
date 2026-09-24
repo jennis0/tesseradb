@@ -299,15 +299,19 @@ async fn a_batch_carries_every_declared_column_and_every_reader_answers_it() {
         tag: None,
     };
     // A JSON record without a key is missing that column; `null` is a value.
-    let json_row = |tag: &str| {
-        format!(
-            r#"[{{"external_id":"ajE=","x":500.0,"y":500.0,"access":["0"],"score":50.0,"sentiment":null{tag}}}]"#
-        )
-        .into_bytes()
+    let json_row = |tag: Option<Value>| {
+        let mut record = json!({
+            "external_id": "ajE=", "x": 500.0, "y": 500.0, "access": ["0"], "score": 50.0,
+            "sentiment": null,
+        });
+        if let Some(tag) = tag {
+            record["tag"] = tag;
+        }
+        json!([record]).to_string().into_bytes()
     };
     for (batch_id, content_type, body) in [
         ("omitting", ARROW, batch(&[unvalued("o1")], false)),
-        ("json-omitting", JSON, json_row("")),
+        ("json-omitting", JSON, json_row(None)),
     ] {
         let (status, body) = post_ingest(&served, batch_id, content_type, body).await;
         assert_eq!(status, 422, "{batch_id}: {body}");
@@ -344,7 +348,8 @@ async fn a_batch_carries_every_declared_column_and_every_reader_answers_it() {
     .await;
     // The refused batches' external ids are free, so the refusals bound nothing.
     let nulls = ingest(&served, "nulls", batch(&[unvalued("o1")], true)).await;
-    let (status, receipt) = post_ingest(&served, "json-nulls", JSON, json_row(r#","tag":null"#)).await;
+    let (status, receipt) =
+        post_ingest(&served, "json-nulls", JSON, json_row(Some(Value::Null))).await;
     assert_eq!(status, 200, "{receipt}");
     drain(&served.server).await;
 
@@ -441,9 +446,9 @@ fn record(id: &str, score: Option<f32>) -> Value {
 
 /// **A row that joins an item already held needs no declared column; a row that creates one
 /// does**, at both doors. A join's values are the item's already, so a batch of joins into a
-/// second view may leave them out; a row creating an item without them is refused, alone or
-/// beside a join, and nothing is allocated. A JSON join record may leave a key out beside a new
-/// record that carries it.
+/// second view may leave them out; a row creating an item without them is refused, alone, beside a
+/// join or beside a new record that carries the key, and nothing is allocated. A JSON join record
+/// may leave a key out beside a new record that carries it.
 #[tokio::test]
 async fn a_row_joining_a_held_item_needs_no_declared_column_and_a_new_one_does() {
     let served = Served::build(fixture).await;
@@ -482,6 +487,13 @@ async fn a_row_joining_a_held_item_needs_no_declared_column_and_a_new_one_does()
             "new-beside-join-json",
             JSON,
             json_body(vec![record("h1", None), record("n1", None)]),
+        ),
+        // Each record is held to the rule alone: a key one new record carries is missing from
+        // the next.
+        (
+            "new-beside-new-json",
+            JSON,
+            json_body(vec![record("n1", Some(5.0)), record("n2", None)]),
         ),
     ] {
         let (status, body) = post_ingest_into(&served, "extra", batch_id, content_type, body).await;

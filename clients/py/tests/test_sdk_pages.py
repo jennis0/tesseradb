@@ -515,7 +515,8 @@ def test_a_second_views_rows_carry_the_declared_columns_their_frame_holds(served
     report = db.commit()
     assert report.ok, report
     assert report.rows_accepted == {"atlas": 2, "map": 1}
-    answer = viewport(db, "atlas", [-5.0, -5.0, 40.0, 40.0], filters={"score": {"range": {"gte": 7.0}}})
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    answer = viewport(db, "atlas", frame, filters={"score": {"range": {"gte": 7.0}}})
     assert answer["counts"]["matched"] == 2
 
 

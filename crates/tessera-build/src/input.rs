@@ -2246,10 +2246,8 @@ impl BatchColumn {
                 BuildError::Schema {
                     path: path.to_path_buf(),
                     detail: format!(
-                        "attribute '{}' is a category, so its column must hold value keys \
-                         (utf8); this file holds {:?}. A category's code is drawn once from the \
-                         vocabulary and never re-derived from the data (per-point-attributes \
-                         §3.4)",
+                        "attribute '{}' is a category and this file holds {:?}; write its value \
+                         keys as utf8",
                         attribute.name,
                         column.data_type()
                     ),

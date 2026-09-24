@@ -528,7 +528,8 @@ async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() 
     );
 
     // A row, so the flush has something to publish and the fold something to fold.
-    let (status, body) = ingest(&served, "rows", batch(&[("b1", 1.0, None)], false, &["built"])).await;
+    let (status, body) =
+        ingest(&served, "rows", batch(&[("b1", 1.0, None)], false, &["built"])).await;
     assert_eq!(status, 200, "{body}");
     drain(&served.server).await;
     fold(&served.server).await;
