@@ -462,6 +462,10 @@ export interface Store {
   extentOf(artifactId: bigint): [number, number, number, number] | null;
   /** Data coordinates from marks or artifact geometry, derived from world positions. */
   dataXY(worldX: number, worldY: number): [number, number];
+  /**
+   * Forget everything answered under the current principal, for a re-authorise: the held views,
+   * marks, shapes, legend, suggestions, region and the selected item and artifact.
+   */
   clear(): void;
   refresh(): void;
   dispose(): void;
@@ -1790,10 +1794,13 @@ export function createStore(options: StoreOptions): Store {
   }
 
   async function pick(id: bigint): Promise<void> {
+    const epoch = clears;
     try {
       const detail = await client.item(await ensureToken(), id);
+      if (epoch !== clears) return;
       replaceProjection('selection', {...projections.selection, item: {id, detail}, itemRefusal: null});
     } catch (error) {
+      if (epoch !== clears) return;
       replaceProjection('selection', {
         ...projections.selection,
         item: null,
@@ -1940,14 +1947,16 @@ export function createStore(options: StoreOptions): Store {
   }
 
   async function openArtifact(id: bigint): Promise<void> {
+    const epoch = clears;
     try {
       const asked = await viewed();
       const detail = await client.artifact(asked.token, id, {view: asked.view});
-      // The principal may have changed under the request, in which case this shape describes a
-      // mask that is no longer the one being drawn.
+      if (epoch !== clears) return;
+      // A renewal may have changed the principal under the request, and a shape can be theirs.
       if (token === asked.token) holdShape(id, detail.shape);
       replaceProjection('selection', {...projections.selection, artifact: {id, detail}, artifactRefusal: null, item: null, itemRefusal: null});
     } catch (error) {
+      if (epoch !== clears) return;
       replaceProjection('selection', {
         ...projections.selection,
         artifact: null,
@@ -2140,7 +2149,11 @@ export function createStore(options: StoreOptions): Store {
     ];
   }
 
+  /** How many times the store has been cleared: an item or artifact asked for before a clear is not shown. */
+  let clears = 0;
+
   function clear(): void {
+    clears += 1;
     // A re-authorise moves the mask, and a category's suggestion page answers `visible(code)`
     // under the mask it was fetched against (`value-suggestion.md` §5.1) — held across a mask
     // change it would show values the new mask does not, or hide ones it now does.
@@ -2160,6 +2173,7 @@ export function createStore(options: StoreOptions): Store {
     table.clear();
     forgetShapes('all');
     forgetDescribed();
+    clearSelection();
     contentKeyAtFrame = '';
     replaceProjection('view', {id: viewId, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0});
     replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});

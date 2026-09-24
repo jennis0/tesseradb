@@ -1326,6 +1326,36 @@ describe('the item a click opens and the record a hover names', () => {
     expect(store.get('selection')).toMatchObject({item: null, itemRefusal: {code: 'not-found'}});
   });
 
+  it('forgets the item and the artifact on a clear, including one still on its way', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    let answer: (() => void) | null = null;
+    const item = vi.fn(async (_token: string, id: bigint) => {
+      if (id === 8n) await new Promise<void>((resolve) => (answer = resolve));
+      return {fields: {title: `paper ${id}`}, externalId: null, views: [], scoped: {}, labels: []};
+    });
+    (client as unknown as {item: typeof item}).item = item;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+
+    await store.openArtifact(9n);
+    await store.pick(7n);
+    expect(store.get('selection').item?.id).toBe(7n);
+    expect(store.get('selection').artifact?.id).toBe(9n);
+
+    store.clear();
+    expect(store.get('selection')).toEqual({item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
+
+    // Asked before the next clear and answered after it.
+    const late = store.pick(8n);
+    await clock.advance(1);
+    store.clear();
+    answer!();
+    await late;
+    expect(store.get('selection').item).toBeNull();
+  });
+
   it('asks for a hovered record once, holds a refusal as none, and asks again after a clear', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
