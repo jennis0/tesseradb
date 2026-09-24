@@ -2,7 +2,7 @@ import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient} from '../src/client.js';
 import {createStore} from '../src/store.js';
 import type {ViewportPart, ViewportResponse} from '../src/types.js';
-import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, tile, view, scalar} from './support.js';
+import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, settle, tile, view, scalar} from './support.js';
 import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
@@ -543,5 +543,91 @@ describe('the replica projection reports across views, and clear() empties them 
     expect(store.get('replica').views).toBe(0);
     expect(store.get('replica').bytes).toBe(0);
     expect(store.get('view').composition).toBeNull();
+  });
+});
+
+describe('what a filter change, a switch and a clear leave behind', () => {
+  it('drops a held view’s bands when the filters change, so returning to it asks again under the new filter', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, asked} = open({view: 'v0', clock, scheduler});
+    await clock.advance(1);
+    await shown(store, clock, scheduler);
+    store.setCurrentView('v1');
+    await clock.advance(600);
+    scheduler.flush();
+
+    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    await clock.advance(600);
+    scheduler.flush();
+    const askedV0 = asked('v0').length;
+
+    store.setCurrentView('v0');
+    scheduler.flush();
+    // v0's bands answered the unfiltered question, so there is nothing to draw from.
+    expect(store.get('marks').bands).toEqual([]);
+    await clock.advance(600);
+    scheduler.flush();
+    expect(asked('v0').length).toBeGreaterThan(askedV0);
+    expect((asked('v0').at(-1)![1] as FakeRequest).filters).toEqual({archive: {in: ['cs']}});
+  });
+
+  it('cancels the outgoing view’s artifact request on a switch', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, asked} = open({view: 'v0', clock, scheduler});
+    store.setLayers(['l']);
+    await clock.advance(1);
+    // Filtered, so the channel asks the server rather than answering from scopes it holds whole.
+    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    await shown(store, clock, scheduler);
+    await clock.advance(1000);
+    scheduler.flush();
+
+    // The point path asks at once; the channel's request waits for the view to be still, and the
+    // switch comes first.
+    store.setView({bbox: [10, 10, 60, 60], width: 800, height: 400});
+    await settle();
+    const askedV0 = asked('v0').length;
+    store.setCurrentView('far');
+    await clock.advance(1000);
+    scheduler.flush();
+    expect(asked('v0')).toHaveLength(askedV0);
+  });
+
+  it('cancels the pending artifact request on clear()', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, asked} = open({view: 'v0', clock, scheduler});
+    store.setLayers(['l']);
+    await clock.advance(1);
+    // Filtered, so the channel asks the server rather than answering from scopes it holds whole.
+    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    await shown(store, clock, scheduler);
+    await clock.advance(1000);
+    scheduler.flush();
+    // Held still, so a new view is the channel's alone to ask about.
+    store.setView({bbox: [0, 0, 50, 50], width: 800, height: 400});
+    scheduler.flush();
+    await clock.advance(10);
+    const askedV0 = asked('v0').length;
+
+    store.clear();
+    await clock.advance(1000);
+    expect(asked('v0')).toHaveLength(askedV0);
+  });
+
+  it('cancels a switch’s settle on clear()', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, asked} = open({view: 'v0', clock, scheduler});
+    await clock.advance(1);
+    await shown(store, clock, scheduler);
+
+    store.setCurrentView('v1');
+    store.clear();
+    await clock.advance(1000);
+    scheduler.flush();
+    expect(asked('v1')).toHaveLength(0);
   });
 });

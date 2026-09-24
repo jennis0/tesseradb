@@ -772,7 +772,7 @@ describe('the store holds the drawn shape by identifier', () => {
     expect(artifact).toHaveBeenCalledTimes(1);
   });
 
-  it('forgets every held shape on clear — a derived shape is this principal’s', async () => {
+  it('forgets every held shape on clear', async () => {
     const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
     const {store, artifact, clock} = await storeWith(parts);
     store.needShape(5n);
@@ -784,6 +784,63 @@ describe('the store holds the drawn shape by identifier', () => {
     store.needShape(5n);
     await clock.advance(1);
     expect(artifact).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('clear() and a refused request reach the region and the shapes', () => {
+  const SHAPED = meta({
+    ...META,
+    layers: [layer('regions', {membership: 'spatial', computedContent: ['centroid', 'box'], shape: 'predicate'})]
+  });
+
+  it('drops the region and every shape on clear, a predicate shape included', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const {client} = fakeClient((req) => {
+      const r = response('ck');
+      return (req.layers ?? []).length === 0 ? r : {...r, result: {...r.result, artifacts: [artifact(2n, {layer: 'regions'})]}};
+    }, SHAPED);
+    Object.assign(client, {artifact: vi.fn(async () => ({layer: 'regions', key: null, maskedCount: 1n, centroid: null, box: null, shape: parts}))});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    store.setLayers(['regions']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([2n]);
+    store.needShape(2n);
+    await clock.advance(1);
+    store.select({kind: 'box', bbox: [0, 0, 1, 1]});
+    expect(store.get('artifacts').shapes.size).toBe(1);
+    expect(store.get('region')).not.toBeNull();
+
+    store.clear();
+    expect(store.get('artifacts').shapes.size).toBe(0);
+    expect(store.get('region')).toBeNull();
+  });
+
+  it('shows the region as refused when the request carrying it is refused', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    let refuse = false;
+    const {store} = await warm(
+      () => {
+        if (refuse) throw new TesseraError(400, 'bad-region', 'too many vertices');
+        return response('ck');
+      },
+      {clock, scheduler}
+    );
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+
+    refuse = true;
+    store.select({kind: 'box', bbox: [0, 0, 1, 1]});
+    await clock.advance(5_000);
+    scheduler.flush();
+    expect(store.get('status').status).toBe('refused');
+    expect(store.get('region')).toMatchObject({status: 'refused', refusal: {code: 'bad-region'}, visible: null});
   });
 });
 

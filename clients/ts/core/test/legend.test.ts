@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import {TesseraError} from '../src/client.js';
 import type {Composition} from '../src/compose.js';
 import {Legend, type LegendProjection} from '../src/legend.js';
 import type {CategoryValue} from '../src/types.js';
@@ -29,5 +30,22 @@ describe('the category legend', () => {
     await settle();
     expect(published!.categories).toEqual({});
     expect(published!.colourBy).toBe('archive');
+  });
+
+  it('does not take a refusal asked for before a clear', async () => {
+    const answers: ((error: Error) => void)[] = [];
+    let published: LegendProjection | null = null;
+    const legend = new Legend(
+      () => new Promise((_, reject) => answers.push(reject)),
+      (value) => (published = value)
+    );
+    legend.setColourBy('archive');
+    legend.accumulate(frameOf(), [ARCHIVE]);
+    expect(answers).toHaveLength(1);
+
+    legend.clear();
+    answers[0]!(new TesseraError(500, 'fail-closed', 'vocabulary unreadable'));
+    await settle();
+    expect(published!.categoryErrors).toEqual({});
   });
 });
