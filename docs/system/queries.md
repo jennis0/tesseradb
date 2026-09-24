@@ -52,6 +52,10 @@ arithmetic, taken one or more zoom levels deeper, with no points attached. Drawn
 shaded field rather than individual marks, this sub-cell grid gives a sense of density in regions
 too sparse or too crowded for the drawn marks alone to convey.
 
+Each point carries the item's values for the view's rendered fields. A number, bool, timestamp or
+string the item does not hold arrives as a null, so a client can tell it from a zero. A category
+the item does not hold arrives as code 0, which every vocabulary reserves for no value.
+
 Where a request names annotation layers, the response also carries the artifacts those layers
 serve inside the requested tiles: clusters, hulls, regions, hierarchy nodes. Each artifact exists
 for this viewer or it does not; that does not depend on which points are drawn.
@@ -240,14 +244,206 @@ do not hold would be a disclosure about how the corpus is labelled, not a filter
 itself, so only the intersection of the item's labels with what the viewer's own credentials
 satisfy is ever served.
 
+## Reading items and artifacts in bulk
+
+Two routes return in bulk what the map is computed from. `POST /v1/items` returns every item the
+viewer may see in one view that matches a filter, with the fields the caller names.
+`POST /v1/artifacts` returns every artifact of one layer the viewer is served, with the
+properties the caller names. Both answer with pages of Apache Arrow record batches, framed as a
+viewport response is framed. A caller reads the whole result by passing each response's cursor
+back in the next request until the cursor is null, and the server keeps nothing between the
+requests.
+
+```mermaid
+sequenceDiagram
+  participant C as client
+  participant S as server
+  C->>S: request, no cursor
+  S-->>C: head, then pages, each followed by a page end holding a cursor
+  S-->>C: trailer: why the response ended, and the cursor to continue from
+  C->>S: the same request, with that cursor
+  S-->>C: head, pages, trailer
+  Note over C,S: repeated until the trailer's cursor is null
+```
+
+*A read is a chain of requests. Each response starts where the one before it ended.*
+
+Every page is built from the latest published data, with the visible set composed again exactly
+as a viewport composes it. A deletion or suppression accepted during a read applies from the next
+page. A row inserted during a read is returned if it lands ahead of the cursor and not if it lands
+behind it, and no row is returned twice. **Not built yet:** a read pinned to one version of the
+corpus. Rows returned before a flush and rows returned after it come from different versions, and
+a caller has no way to ask for one version throughout a read.
+
+### What a read of items returns
+
+A page's first column is `tessera_id`. The fields the request names follow, in the order named,
+and then any of three system fields: `position`, the item's position in the view; `external_id`,
+the id the item was inserted with; and `labels`, the item's access labels that this viewer also
+holds, as the item card gives them. Under `keep_unmatched` the read returns every visible item
+with a `tessera:matched` column, where it would otherwise return only the matching ones. Every
+named field is returned whether or not an item holds a value, and a value the item does not hold
+is a null, in a category as in any other field. A category arrives as its value keys, and each
+page's dictionary holds only the keys its own rows carry.
+
+A position is the stored one converted back through the view's projection and frame: longitude
+and latitude in degrees on a geographic view, the view's own coordinates otherwise. It lies within
+half a grid step of the position supplied. The view's grid divides its frame into 2³² steps along
+each axis, which is about 9 mm a step at the equator on a world-wide Web Mercator frame. A caller
+that needs the exact values it supplied declares them as number fields.
+
+A rendered field is read from the view the request names. Different views can hold different
+rendered values for one item, and the item card reads the first view the viewer can reach, so the
+two can differ. A field declared per view of a group resolves as a filter leaf on it does: under a
+view of its group it is read there, and under any other view the request pins it to one of the
+group's views as `<field>@<key>`. An item joined into a second view can hold a row there before
+its own ingest is flushed, and until that flush its record fields are null, as they are on its
+item card.
+
+The rows come in one of two orders. The two return the same rows.
+
+| Order | Rows by | Reads fastest |
+|---|---|---|
+| `map` | map cell in the view, then `tessera_id`, merged across the view's segments | rendered fields, which are stored in this order |
+| `stored` | the server's internal item numbering, which is the order the record store holds items in | fields read from the record store |
+
+Each declared field lists its `homes` in `/v1/meta`: the view's rendered columns, a per-item
+value column, or the record store. A request that names no order and carries no cursor is served
+in stored order if any named field's only home is the record store, and in map order otherwise.
+That choice may change, so a caller that needs one order names it. Reading record-store fields in
+map order decompresses the store's blocks out of sequence. On the arXiv corpus (2.4 million
+items) and a synthetic corpus of 25 million, on one thread with a warm cache, a full read of
+record-store fields took 1.3 to 1.8 times as long in map order as in stored order at 100,000-row
+pages, and 8 to 17 times as long at 1,000-row pages. Those figures were measured on a benchmark
+of the page reader that is not part of the workspace.
+
+Stored order groups a viewer's items by their full set of access terms, including terms the
+viewer does not hold. [Security](security.md#reading-in-bulk) states what that discloses.
+
+### What a read of artifacts returns
+
+A read of artifacts walks one layer level by level, and within a level in the order the
+artifacts were published. For each artifact it reaches, a page runs the viewport's own verdict:
+the artifact's access label, its layer's membership requirement over the viewer's visible
+members, and whether the viewer may read its content. An artifact the viewer is not served leaves
+no row, no count and no entry in another artifact's `parents`. An attached artifact, such as the
+label on a cluster, is served only while the artifact it is attached to is. If the layer stops
+being published to the viewer during a read, the read ends at the next page as though no artifact
+remained. A layer dropped and registered again under the same name is a different layer, and a
+cursor from the first does not open for the second.
+
+Three narrowings select which served artifacts a read returns. `level` reads one level of a
+levelled layer. `parent` reads the artifacts that name one artifact among their parents, and a
+parent the viewer is not served answers exactly as a parent with no children does. `q` keeps the
+artifacts whose key, or whose first text content the viewer is served, contains it, ignoring case.
+A request may carry `parent` or `q`, and is refused with both. A filter keeps the artifacts with
+at least one visible member that matches it, and adds each one's count of matching members; under
+`keep_unmatched` the rest are kept too, with a count of 0. An attached artifact is kept or
+dropped, and counted, as the artifact it is attached to is.
+
+Some properties need more than their name:
+
+- `parents` lists only the parents this viewer is also served.
+- `content` is the one set of supplied content this viewer is served, whole. On a layer that
+  authors its own shapes, the slot holding them is served empty, and the shape for this view is
+  served as `shape`.
+- `centroid` and `box` are taken over the members this viewer can see, in the view's coordinates
+  as `position` is. On a geographic view the centroid is the members' mean in the projected plane,
+  converted to degrees. That is the point the map draws, and it differs from the mean of the
+  members' longitudes and latitudes.
+- `shape` is the layer's drawn geometry as Well-Known Binary in the view's coordinates: a hull over
+  the members this viewer can see, or a predicate or authored shape whole. A hull over one or two
+  members, or over members on one line, is a polygon of zero area, and every ring is still closed
+  and at least four points long.
+
+The order of artifacts is the publisher's, and it does not group artifacts by access label.
+
+### Pages, responses and the cursor
+
+A page ends at `page_rows` rows, or before the row that would take its Arrow bytes past
+`selection.max_page_bytes`. A single row larger than that is sent alone. `page_rows` is held to
+`selection.max_page_rows`, and the response's head reports the size used. A response carries pages
+until one of these ends it: no row remains, the request's `pages` limit is reached, the
+deployment's byte or time budget for one response runs out, or the stream deadline cancels the
+response ([serving](serving.md#bulk-reads)). Each page ends with a page end holding the cursor
+after that page. The trailer says why the response ended and holds the cursor for the next request.
+
+Every response moves the cursor on, unless it is cancelled before its first page, which happens
+when the client has gone or the stream deadline passes first. The time budget is read between
+pages and between chunks of a page's scan, and a response stops for time only where stopping
+leaves the cursor further on than where the response began. A response can therefore run past its
+budget by one filter evaluation and one chunk, and a read under a very sparse filter still
+completes. The trailer's cursor can lie past the last page end, where the scan went on without
+finding a row. A response that finds no row carries one page of no rows, so that every response
+gives the read's columns and their types; only a response cancelled before its first page
+carries none.
+
+The cursor holds a position and nothing else. It is encrypted and authenticated, so a caller can
+neither read one nor make one. A cursor opens only for the read it was issued in. The route, the
+view and the view's incarnation must match, and the incarnation changes when a view is dropped and
+created again under its name. On the artifacts route the layer and the `level` named must match
+too. The credential must be the one the cursor was issued to, so a new session opened with the same
+credential continues the read, and another viewer cannot. A cursor presented anywhere else is one
+422 with one message, whatever the reason. A cursor issued under another idset, the numbering
+`tessera_id`s are issued under, is the 409 the item card gives.
+
+A cursor stays valid across flushes, merges, compactions and restarts, because the position it
+holds is a value that each page finds again in whatever segments it reads. It stops opening when
+the identity key is rotated. Since the cursor holds only a position, the fields, the filter,
+`keep_unmatched` and the page size may change between the requests of one read, and the pages'
+columns change with them. A request naming an order other than its cursor's is refused.
+
+A body that ends without its trailer is incomplete, as a viewport body is. The client resumes
+from the last page end it received and discards any records frame that no page end follows.
+
+With `count` on its first request, a read's head carries two exact counts taken at the start of
+the response. On items they are the viewer's visible items in the view, which is the count the
+viewport serves, and of those the ones the filter matches. On artifacts they are the artifacts
+served after `level`, `parent` and `q`, and of those the ones with a matching member. A count
+costs one evaluation of the filter over the whole view, and a request carrying a cursor may not
+ask for one.
+
+### Filters across pages
+
+An items response evaluates its filter over a stretch: the part of the view just ahead of the
+cursor, a range of map cells in map order or of item numbers in stored order. The first stretch
+spans as many rows as a page, and at least 4,096. Each time a stretch is used up without filling a
+page, the next is four times longer, up to as many rows as `max_page_bytes` holds at 17 bytes a
+row, about 3.9 million at the default. The size reached travels in the cursor, so a read continued
+over many responses evaluates about 1 + log₄(rows scanned ÷ first stretch) stretches in all, plus
+one each time a publication, a deletion or a suppression lands during a response. A response
+stopped for time or cancelled inside a stretch starts the next response on one a quarter the size.
+
+A stretch's result is held in the row positions of the data it was evaluated under. A flush, merge
+or compaction that lands during a response renumbers those positions, and a deletion or suppression
+changes the visible set the result was evaluated under, so after any of them the next page
+evaluates the stretch again. Visibility is not held with it: every page tests every row against the
+visible set composed for that page. No filter result is kept from one request to the next.
+
+What a filter costs across a whole read depends on its leaves:
+
+| Leaf | Cost across a read |
+|---|---|
+| number, date and keyword leaves; a category leaf on a derived vocabulary; any leaf on a rendered field | one pass over the rows of the stretches covered, in total |
+| text `match` and `phrase`; `eq` and `in` on a category that is not rendered and whose vocabulary is public | the leaf's index entries, read once per stretch evaluated |
+| `member_of` | the artifact's visible members, once per page that evaluates a stretch |
+| `region` | the shape's cells, once per page that evaluates a stretch |
+
+Both orders test each row by the same rule, including a region's enlarged cover past
+`max_region_cells`, so the two orders return the same rows.
+
+An artifacts response evaluates its filter over the whole view, because an artifact's members can
+lie anywhere in it. It does so once per response, and again when a publication or a change to the
+visible set lands during the response.
+
 ## What is not built
 
 **Not built yet:** typing into one box to search every category at once does not exist; a caller
 filters or suggests one column at a time.
 
-**Not built yet:** there is no endpoint that exports or summarises everything inside a drawn
-region in bulk; a viewer counts or draws a region through the ordinary viewport request, at
-whatever scale that request already supports.
+**Not built yet:** reading one result in parallel. A bulk read is one chain of requests, each
+continuing from the cursor the one before it returned, and one result cannot be split into slices
+read at once.
 
 ## Sources
 
