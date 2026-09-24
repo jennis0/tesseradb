@@ -18,7 +18,7 @@ harness, built to answer one question: **does a running Tessera actually work?**
   `<tessera-status>`, `<tessera-count>`, `<tessera-item-card>`, `<tessera-filter>`,
   `<tessera-filter-panel>`, `<tessera-selection>`, `<tessera-store>` — a subpath entry each, the
   eight display states rendered through `part="state"`, tokens `--tessera-*`, parts, slots and
-  events per design §5. `npm run bundle -w @tesseradb/components` writes the single-file bundle,
+  events. `npm run bundle -w @tesseradb/components` writes the single-file bundle,
   minified, with the decode worker inlined and its SRI hash beside it (`dist/`).
 - `react/` — `@tesseradb/react`. `useTesseraStore(options)` and `useProjection(store, name)` over
   `useSyncExternalStore`; the store is built in an effect paired with its `dispose`, so
@@ -45,7 +45,8 @@ lowered, and the decode worker as `dist/decode.worker.js` beside the decoder tha
 package is versioned and packs with `npm pack`; none is published. Inside this workspace the
 packages resolve to their sources instead, through the `tessera-source` export condition, which
 `tsconfig.base.json` and each Vite and Vitest config name, so the tests, the viewer and the
-examples need no build.
+examples need no build. `npm pack` drops that condition from the packed manifest and adds the
+licence (`scripts/pack.mjs`).
 
 The decoder loads `decode.worker.js` from beside itself, a file the build writes with Arrow bundled
 in so that it loads without a bundler too. Vite and webpack follow the reference. esbuild does not:

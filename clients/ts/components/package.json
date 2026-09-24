@@ -91,33 +91,16 @@
       "tessera-source": "./src/explorer.ts",
       "types": "./dist/explorer.d.ts",
       "default": "./dist/explorer.js"
-    }
+    },
+    "./tessera-components.js": "./dist/tessera-components.js"
   },
   "files": [
     "dist"
   ],
-  "sideEffects": [
-    "./*/index.*",
-    "./*/store-element.*",
-    "./*/map.*",
-    "./*/status.*",
-    "./*/count.*",
-    "./*/item-card.*",
-    "./*/filter.*",
-    "./*/filter-panel.*",
-    "./*/selection.*",
-    "./*/layer-picker.*",
-    "./*/view-picker.*",
-    "./*/key-picker.*",
-    "./*/artifact-list.*",
-    "./*/artifact-card.*",
-    "./*/hierarchy.*",
-    "./*/legend.*",
-    "./*/explorer.*",
-    "./*/tessera-components.*"
-  ],
   "scripts": {
     "build": "node ../scripts/build-package.mjs && npm run bundle",
+    "prepack": "node ../scripts/pack.mjs before",
+    "postpack": "node ../scripts/pack.mjs after",
     "bundle": "vite build && node scripts/sri.mjs",
     "test": "vitest run",
     "test:browser": "vitest run --config vitest.browser.config.ts",
@@ -126,7 +109,7 @@
   "dependencies": {
     "@lit/context": "^1.1.0",
     "@tesseradb/client": "^0.1.0",
-    "@tesseradb/deck": "^0.1.0"
+    "@tesseradb/deck": "0.1.0"
   },
   "peerDependencies": {
     "@deck.gl/core": "^9.3.7",

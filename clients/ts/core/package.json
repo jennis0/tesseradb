@@ -26,6 +26,8 @@
   ],
   "scripts": {
     "build": "node ../scripts/build-package.mjs && rolldown src/decode.worker.ts --format esm --platform browser --minify --file dist/decode.worker.js",
+    "prepack": "node ../scripts/pack.mjs before",
+    "postpack": "node ../scripts/pack.mjs after",
     "test": "vitest run",
     "test:live": "vitest run --config vitest.live.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"

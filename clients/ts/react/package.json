@@ -25,6 +25,8 @@
   "sideEffects": false,
   "scripts": {
     "build": "node ../scripts/build-package.mjs",
+    "prepack": "node ../scripts/pack.mjs before",
+    "postpack": "node ../scripts/pack.mjs after",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
