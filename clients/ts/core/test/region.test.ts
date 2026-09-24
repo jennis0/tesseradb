@@ -3,9 +3,9 @@ import {WORLD_SIZE} from '../src/coords.js';
 import {insideBox, insidePolygon, parseRegionVerdict, quantise, regionOperand, withRegion} from '../src/region.js';
 
 /**
- * The client's half of the region contract (`selection-operand.md` §8): the leaf's spelling, the
- * verdict read off the wire, and the highlight's predicate — the server's own even-odd rule over
- * the quantised grid, with a point on an edge inside and the half-open ray for a tie.
+ * The client's half of the region filter: the leaf's spelling, the verdict read from the response,
+ * and the server's even-odd rule over the quantised grid, with a point on an edge inside and a
+ * half-open ray for ties.
  */
 
 /** A world coordinate exactly on grid unit `n`. */

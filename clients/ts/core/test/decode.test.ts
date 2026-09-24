@@ -38,9 +38,8 @@ describe('decodeViewport', () => {
   });
 
   it('deinterleaves losslessly — the positions re-interleave to the code they came from', () => {
-    // The decoder's only geometric job. Re-spreading the two axes must reproduce the server's
-    // `code` bit for bit, at the full 32 bits per axis: a `Float32Array` here would fail this,
-    // which is why the positions are `f64`.
+    // Re-spreading the two axes must reproduce the server's `code` bit for bit, at 32 bits per axis;
+    // `f32` positions would fail this.
     const r = decodeViewport(fixture('viewport-plain.bin'));
     expect(r.codes.length).toBe(r.ids.length);
     const spread = (v: number): bigint => {
@@ -56,9 +55,7 @@ describe('decodeViewport', () => {
   });
 
   it('agrees with the bundle’s cell grid on where the points are', () => {
-    // The extent is still what makes a cell interpretable — it just no longer sits between the
-    // wire and the position. Scaling cell space back through it must land inside the extent
-    // `/v1/meta` publishes, or the client and the server disagree about the grid.
+    // Scaling cell space back through the extent must land inside the extent `/v1/meta` publishes.
     const r = decodeViewport(fixture('viewport-plain.bin'));
     const q = meta.views[0].quantisation;
     for (let i = 0; i < r.ids.length; i++) {
@@ -84,21 +81,17 @@ describe('decodeViewport', () => {
   });
 
   it('agrees with the underlay payload on the point set', () => {
-    // Same request, same k, same viewport — the underlay adds cells, never changes selection.
+    // Same request, k and viewport: the underlay adds cells and does not change the selection.
     const plain = decodeViewport(fixture('viewport-plain.bin'));
     const underlay = decodeViewport(fixture('viewport-underlay.bin'));
     expect([...underlay.ids]).toEqual([...plain.ids]);
   });
 
   it('decodes every rendered scalar the manifest names, at its declared type, and no other', () => {
-    // Asserted against `meta.json` rather than a hand-written list, so a column added to the
-    // schema is covered without touching the test.
+    // Asserted against `meta.json`, so a column added to the schema is covered.
     //
-    // **`render` is the whole of what decides this**, and both directions matter. A rendered
-    // column occupies a slot in every row of the hot column and therefore arrives here; a column
-    // with `render: false` lives in entity space or in the record blob, is filterable, is returned
-    // at drill-down, and appears in **no** viewport response. A client that offered every declared
-    // column to its colour control would be offering columns whose values never arrive.
+    // `render` decides this. A rendered column arrives in every response; a column with
+    // `render: false` is filterable and returned at drill-down, and appears in no viewport response.
     const r = decodeViewport(fixture('viewport-plain.bin'));
     const declared = meta.declared_scalars as {name: string; arrow_type: string; render: boolean}[];
     expect(declared.length).toBeGreaterThan(0);
@@ -116,9 +109,8 @@ describe('decodeViewport', () => {
   });
 
   it('hands back typed arrays rather than boxed values', () => {
-    // The reason the decoder exists in this shape: `[...child]` allocates one heap object per
-    // value per column, which at a full budget across this fixture's tail is ~10⁶ per response.
-    // `bool` and `utf8` are the two Arrow has no typed form for, and are the only ones exempt.
+    // `[...child]` allocates a heap object per value; only `bool` and `utf8`, which Arrow has no
+    // typed form for, are materialised.
     const r = decodeViewport(fixture('viewport-plain.bin'));
     const boxed = ['bool', 'utf8'];
     let typedColumns = 0;
@@ -134,9 +126,8 @@ describe('decodeViewport', () => {
   });
 
   it('reads a category code as a plain integer of the declared width', () => {
-    // Categories cross the wire as codes and nothing else — the key never appears here. Code 0 is
-    // the *absent* sentinel, so a column that is absent for part of the corpus legitimately
-    // carries it, and the decoder must not confuse it with a missing value.
+    // Categories cross the wire as codes. Code 0 is the absent sentinel, which a column absent for
+    // part of the corpus carries; it is not a missing value.
     const r = decodeViewport(fixture('viewport-plain.bin'));
     const category = (meta.declared_scalars as {name: string; category: unknown}[]).find(
       (s) => s.category !== null
@@ -181,9 +172,8 @@ describe('decodeViewport', () => {
   });
 
   it('sums the underlay’s sub-cell counts to the visible total', () => {
-    // The underlay is an exact masked breakdown of the same visible set the tile batch counts, so
-    // the two must agree. If they ever do not, one of them is a sample and the panel that renders
-    // it is lying.
+    // The underlay is an exact masked breakdown of the same visible set the tile list counts, so the
+    // two agree.
     const r = decodeViewport(fixture('viewport-underlay.bin'));
     const cellTotal = r.subCells!.reduce((a, c) => a + c.count, 0n);
     const tileTotal = r.tiles.reduce((a, t) => a + t.visible, 0n);

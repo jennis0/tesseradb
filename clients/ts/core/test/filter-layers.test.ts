@@ -4,8 +4,8 @@ import type {Layer} from '../src/types.js';
 import {layer as declared} from './support.js';
 
 /**
- * §5.4's ruling, read off a declaration: **a layer declaring `computed = []` is a filter layer,
- * and a filter layer is still a layer.** It is in the roster and never presented for viewing.
+ * A layer declaring `computed = []` is a filter layer: in the roster, and not presented for
+ * viewing.
  */
 const layer = (name: string, computedContent: string[]): Layer =>
   declared(name, {
@@ -26,9 +26,9 @@ describe('a filter layer', () => {
 
   it('is still a layer: it stays in the roster, and only the drawable ones may be drawn', () => {
     const roster = [CLUSTERS, MESH];
-    // In `meta`'s list and in the client's — a picker draws it, in its own group.
+    // In `meta`'s list and the client's; a picker draws it in its own group.
     expect(layerEntries(roster).map((e) => e.root.name)).toEqual(['clusters/kmeans', 'mesh/descriptors']);
-    // And not among the layers anything draws.
+    // Not among the layers anything draws.
     expect(drawableLayers(roster).map((l) => l.name)).toEqual(['clusters/kmeans']);
   });
 });

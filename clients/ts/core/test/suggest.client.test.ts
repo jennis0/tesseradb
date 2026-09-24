@@ -2,9 +2,8 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 
 /**
- * `TesseraClient.suggest`: `GET /v1/categories/{column}/suggest` (`value-suggestion.md` §5.1,
- * contracts §3.2). The server does not exist yet, so every case here is a fake `fetch` — the
- * shape of the request the client composes, and what it makes of what comes back.
+ * `TesseraClient.suggest`: `GET /v1/categories/{column}/suggest`, against a fake `fetch`. Checks the
+ * request the client composes and what it makes of the reply.
  */
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
