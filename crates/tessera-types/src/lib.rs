@@ -86,13 +86,14 @@ pub struct ViewId(pub String);
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SegId(pub String);
 
-/// Which geometry a response was answered from: `(prefix, segments_version)`.
+/// Which generation a response was answered from: `(prefix, segments_version)`.
 ///
-/// **A stamp, not a selector.** A client echoes the stamp of the response it is holding back on
-/// its next request, and the server answers from the **live** geometry regardless, reporting only
-/// whether anything has moved since (`geometry-pinning.md` §7). Presenting a superseded stamp is
-/// an ordinary request with an ordinary answer — never a `410`, never a refusal, and never a route
-/// to a superseded generation. Nothing is retained on its behalf.
+/// A response's stamp names the generation its session's projection was taken for. That is the
+/// live generation, or the one before it while the refresh after a flush has not yet reached the
+/// session. A client echoes the stamp it holds on its next request. The echoed stamp does not
+/// choose what the request is answered from; the server reports only whether it differs from the
+/// response's own stamp. Presenting a superseded stamp is an ordinary request with an ordinary
+/// answer: never a `410` and never a refusal. Nothing is retained on its behalf.
 ///
 /// **This is not I11.** I11 is the *within-request* rule — a request resolves its geometry once
 /// and uses it throughout, which an `Arc` held for the request's duration gives for free. The

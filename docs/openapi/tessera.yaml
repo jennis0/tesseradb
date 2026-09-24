@@ -460,12 +460,12 @@ paths:
               schema:
                 type: string
             x-tessera-pin:
-              description: The generation stamp this response was computed from, as JSON `{"prefix", "segments_version"}`. While the background refresh after a flush has not reached this session, it names the previous generation, which is the one the session is served from. Echo it back as `pin`; its only effect is `x-tessera-stale`.
+              description: The generation stamp this response was computed from, as JSON `{"prefix", "segments_version"}`. It names the generation of this session's visible set. While the background refresh after a flush has not reached this session, that is the previous generation, and the flush's new rows are not yet visible; deletions, suppressions, segments and the overlay are always current. Echo it back as `pin`; its only effect is `x-tessera-stale`.
               required: true
               schema:
                 type: string
             x-tessera-stale:
-              description: "`1` if the `pin` this request presented differs from this response's `x-tessera-pin`, else `0`. The **broadcast** form: it moves at every flush, merge and compaction whether or not anything this principal can see changed. Advisory in both directions."
+              description: "`1` if the `pin` this request presented differs from this response's `x-tessera-pin`, else `0`. The **broadcast** form: it moves at every flush, merge and compaction whether or not anything this principal can see changed. After a flush it moves when the refresh reaches this session, not at the flush itself. Advisory in both directions."
               required: true
               schema:
                 type: string

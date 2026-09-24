@@ -218,14 +218,13 @@ impl Engine {
             served,
             mask,
             geometry,
+            stamp: answered_from,
             coordinates,
             render_scalars,
         } = self.open_view(session, &generation, req.view, &req.cancel, &mut probe)?;
 
-        // What this response was answered from: the generation the session's projection was taken
-        // for, which is one behind `generation` while a refresh has not yet replaced it. A
-        // presented stamp that differs sets a flag, and never selects, refuses or expires.
-        let answered_from = geometry.stamp.clone();
+        // A presented stamp that differs from the one this response is answered from sets a flag,
+        // and never selects, refuses or expires.
         let stale = req
             .stamp
             .as_ref()

@@ -337,10 +337,10 @@ pub struct ViewportOut {
     /// The generation this response was answered from, which is one behind the live generation
     /// while a refresh has not yet replaced the session's projection. A client echoes it back.
     pub stamp: GenerationStamp,
-    /// Whether the geometry moved since the stamp the request presented. `false` when no stamp
-    /// was presented, or when the presented stamp equals this response's. Reports that the corpus
-    /// moved, not that anything this principal can see moved: a viewer whose visible set is
-    /// unchanged is still told the geometry advanced, which is not a disclosure.
+    /// Whether the stamp the request presented differs from this response's stamp. `false` when
+    /// no stamp was presented. Reports that the corpus moved, not that anything this principal can
+    /// see moved: a viewer whose visible set is unchanged is still told the geometry advanced,
+    /// which is not a disclosure.
     pub stale: bool,
     /// See [`ViewportHead::region`].
     pub region: Option<crate::region::RegionVerdict>,

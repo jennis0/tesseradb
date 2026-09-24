@@ -446,7 +446,7 @@ impl Engine {
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         let mut probe = Probe::new();
-        let geometry =
+        let (geometry, _) =
             self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
         let denied = generation
             .denied()

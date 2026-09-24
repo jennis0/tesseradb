@@ -134,7 +134,8 @@ whatever the client already has.
 A third value, the generation a response was answered from, travels as a header,
 `x-tessera-pin`, and a request may echo it back. While the background refresh after a
 [flush](write-path.md#flush) has not reached a session, the header names the previous generation,
-because that is what the session is served from. An echoed pin buys one comparison against the
+because the session's visible set is still that generation's projection. Deletions, suppressions
+and segments are current either way. An echoed pin buys one comparison against the
 generation the response was answered from, reported as a flag on the response, `x-tessera-stale`.
 
 ## Serving other map stacks
