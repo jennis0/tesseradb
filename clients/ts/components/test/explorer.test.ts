@@ -47,15 +47,44 @@ function forwardedBy(el: Element): Map<string, string> {
 const partsIn = (root: ParentNode): string[] => [...root.querySelectorAll('[part]')].flatMap((e) => e.getAttribute('part')!.split(/\s+/));
 
 describe('<tessera-explorer> parts', () => {
-  it('forwards every part each inner element renders, under a name prefixed by the element', async () => {
-    const {shadow} = await explorer();
-    const inner = [...shadow.querySelectorAll('*')].filter((e) => e.tagName.startsWith('TESSERA-'));
-    expect(inner.length).toBeGreaterThan(5);
-    for (const el of inner) {
-      const map = forwardedBy(el);
-      const prefix = el.tagName.toLowerCase().replace(/^tessera-/, '');
-      for (const part of partsIn(el.shadowRoot!)) expect(map.get(part), `${prefix} renders ${part}`).toBe(`${prefix}-${part}`);
-    }
+  it('forwards every part each inner element renders, under a name prefixed by the element, in every state', async () => {
+    const mesh = {name: 'mesh', title: 'mesh', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'dag', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1} as unknown as Meta['layers'][number];
+    const host = await mount('<tessera-explorer></tessera-explorer>');
+    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+    const store = fakeStore({meta: {...META, layers: [mesh]}, status: status({})});
+    store.setBrowse('roots', {artifacts: [{tesseraId: 1n, key: 'k-1', name: 'Neoplasms', maskedCount: 9n, matchedCount: null, rung: 0, parentIds: []}], parents: [], next: 'more'});
+    el.store = store;
+    await settle(host);
+    const shadow = el.shadowRoot!;
+    const seen = new Set<string>();
+    const check = async () => {
+      await settle(host);
+      await settle(host);
+      for (const inner of [...shadow.querySelectorAll('*')].filter((e) => e.tagName.startsWith('TESSERA-'))) {
+        const map = forwardedBy(inner);
+        const prefix = inner.tagName.toLowerCase().replace(/^tessera-/, '');
+        for (const part of partsIn(inner.shadowRoot!)) {
+          seen.add(`${prefix}-${part}`);
+          expect(map.get(part), `${prefix} renders ${part}`).toBe(`${prefix}-${part}`);
+        }
+      }
+    };
+    await check();
+    // Each state below renders an element or a part the one before did not.
+    store.set('selection', {item: {id: 5n, detail: {fields: {author: 'Ada'}, externalId: null, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
+    await check();
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'mesh', key: 'k-1', maskedCount: 9n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
+    await check();
+    store.set('region', {shape: {kind: 'box', bbox: [0, 0, 1, 1]}, status: 'shown', refusal: null, visible: {value: 3, exact: true}, matched: {value: 3, exact: true}, served: {shown: 1, total: 3, exact: true}, verdict: {exact: true, depth: null}, held: {ids: BigUint64Array.of(5n), positions: new Float32Array(2), count: 1}});
+    await check();
+    store.set('status', status({status: 'refused', refusal: {code: 'unauthorised', detail: ''}}));
+    await check();
+    store.set('status', status({stale: true}));
+    await check();
+    for (const s of shadow.querySelectorAll('tessera-status')) (s as unknown as {reauthorise: () => void}).reauthorise = () => {};
+    store.set('status', status({status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}));
+    await check();
+    for (const part of ['item-card-headline', 'artifact-card-headline', 'hierarchy-row', 'selection-items', 'status-refusal', 'map-refusal', 'status-refresh', 'status-reauthorise']) expect(seen, part).toContain(part);
   });
 
   it('forwards the filter controls’ parts through the filter panel', async () => {
