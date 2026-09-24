@@ -6,6 +6,7 @@ export {decodeViewport} from './decode.js';
 export {chooseDepth, calibrate, countedMarks, tilesInBbox, tileRectOfBbox, MIN_DEPTH} from './budget.js';
 export type {BudgetInputs, CountCell, CountField, DepthChoice, Observation} from './budget.js';
 export {TesseraClient, TesseraError, type PartSink, type TesseraClientOptions} from './client.js';
+export {RecordsRead} from './records.js';
 export {
   Control,
   addressed,

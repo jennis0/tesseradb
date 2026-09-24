@@ -23,11 +23,12 @@ let browser: Browser;
 
 const TYPES: Record<string, string> = {'.js': 'text/javascript', '.mjs': 'text/javascript', '.html': 'text/html', '.bin': 'application/octet-stream'};
 
-/** An import map for the client and Arrow's own dependencies, which the page loads unbundled. */
+/** An import map for the client and its dependencies, which the page loads unbundled. */
 const PLAIN = `<!doctype html><html><head><script type="importmap">${JSON.stringify({
   imports: {
     '@tesseradb/client': '/core/dist/index.js',
     'apache-arrow': '/node_modules/apache-arrow/Arrow.dom.mjs',
+    fzstd: '/node_modules/fzstd/esm/index.mjs',
     flatbuffers: '/node_modules/flatbuffers/mjs/flatbuffers.js',
     tslib: '/node_modules/tslib/tslib.es6.mjs',
     'json-with-bigint': '/node_modules/json-with-bigint/json-with-bigint.js'
