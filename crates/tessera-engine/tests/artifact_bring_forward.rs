@@ -524,6 +524,9 @@ fn an_ingested_member_counts_at_its_flush_and_the_fold_changes_nothing() {
     let engine = fx.open();
     engine.register_layer(declaration(LAYER, None)).unwrap();
 
+    // The tick that publishes the artifact also flushes the buffered row, so the flush is held
+    // until the buffered count has been read.
+    engine.set_flush_paused_for_test(true);
     let fresh = ingest(&engine, b"joins-a0");
     let mut members = fx.members(0..100);
     members.push(fresh);
@@ -535,7 +538,14 @@ fn an_ingested_member_counts_at_its_flush_and_the_fold_changes_nothing() {
         "buffered: the member has no row anywhere, so it is in no count"
     );
 
-    flush(&engine);
+    let before = engine.write_executor_stats().flushes;
+    engine.set_flush_paused_for_test(false);
+    tick_until(
+        &engine,
+        "the held flush to publish",
+        std::time::Duration::from_secs(60),
+        || engine.write_executor_stats().flushes > before,
+    );
     assert_eq!(
         served(&engine),
         vec![("a0".to_string(), 101)],

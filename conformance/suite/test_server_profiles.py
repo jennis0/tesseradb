@@ -31,18 +31,21 @@ battery on the catalogue bundle (2026-08-15, this host), with headroom for the w
 rotation phases the read-only measurement does not exercise. At deployment scale the floor is
 rounding noise and the rule reads as written.
 
-Two behaviours below the completion zone were measured while pinning the out-of-memory control's
-limit, and the gap between them matters:
+Below the completion zone the outcome depends on how much of the charge the kernel cannot
+reclaim. With swap off, only anonymous memory forces a kill; text pages are evicted and faulted
+back in. The server's anonymous memory after boot grows with the CPU count (measured 2026-09-24:
+about 4.9 MB on one CPU, 6.2 MB on four, 9.5 MB on twelve), so a limit between that and the
+binary's text behaves differently from one host to the next:
 
-- at 8 MiB the kernel kills the server during boot, reliably — the binary's own text cannot
-  fault in (`memory.events` records `oom_kill 1`);
+- at 8 MiB a twelve-CPU host kills the server during boot, and a four-CPU CI runner completes the
+  run with every `memory.events` counter at zero;
 - at 16 MiB the server neither boots nor dies: enough charge is reclaimable that the kernel
   thrashes text pages indefinitely, and the run surfaces as a health-wait timeout with
   `oom_kill 0` — a resource outcome the cgroup never names.
 
-So the control below pins the discrimination at 8 MiB, where the kill is certain, and the
-constrained walk's limit sits far from both bands. The thrash band is why the floor carries
-headroom rather than hugging the measurement.
+So the control below pins the discrimination at 2 MiB, under the anonymous floor on any CPU count,
+and the constrained walk's limit sits far from both bands. The thrash band is why the floor
+carries headroom rather than hugging the measurement.
 
 **At this corpus size the limit is real but does not yet bite — measured, and stated so nobody
 reads more into a green walk than it holds.** The constrained walk completes with every
@@ -106,9 +109,10 @@ from .test_stage_invariance import (
 #: measured 16 MiB thrash band).
 PROCESS_FLOOR_BYTES = 48 * 1024 * 1024
 
-#: The out-of-memory control's limit — inside the certain-kill band the module doc records.
+#: The out-of-memory control's limit — under the server's anonymous memory at any CPU count, so
+#: the kill does not depend on the host (module doc).
 #: Contrived on purpose: the control exists to observe the discrimination, not the regime.
-OOM_CONTROL_LIMIT_BYTES = 8 * 1024 * 1024
+OOM_CONTROL_LIMIT_BYTES = 2 * 1024 * 1024
 
 PROFILE_NAMES = ("default", "constrained", "cold", "single-thread")
 
