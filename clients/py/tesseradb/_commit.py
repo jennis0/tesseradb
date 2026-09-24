@@ -499,10 +499,9 @@ class Planner:
                 )
 
     def _points_of(self, insert, block: dict, table: pa.Table, name: str) -> None:
-        rows = list(range(table.num_rows))
-        self._refuse_outside_the_frame(name, table, insert, rows)
-        if not rows:
+        if not table.num_rows:
             return
+        rows = list(range(table.num_rows))
         self._page_rows(
             kind="points",
             name=insert.source,
@@ -511,50 +510,6 @@ class Planner:
             limits=self.limits.get("ingest", {}),
             line=f"points into view '{name}'",
         )
-
-    def _refuse_outside_the_frame(
-        self, view: str, table: pa.Table, insert, rows: list[int]
-    ) -> None:
-        """List the rows outside the view's frame, which refuses the commit.
-
-        A frame is fixed at the first commit and the ingest route refuses a whole page carrying a
-        row outside it. The rows stand as they were inserted: dropping them would commit a corpus
-        the user did not insert, and the remedy is theirs: move the rows, or rebuild the database
-        with an `extent=` that holds them.
-        """
-        frame = next(
-            (v.get("quantisation") for v in self.meta.get("views", []) if v.get("id") == view),
-            None,
-        )
-        if frame is None:
-            return
-        x_column = insert.columns.get("x") or insert.columns.get("lon")
-        y_column = insert.columns.get("y") or insert.columns.get("lat")
-        if x_column not in table.column_names or y_column not in table.column_names:
-            return
-        xs = table[x_column].to_pylist()
-        ys = table[y_column].to_pylist()
-        outside = [
-            row
-            for row in rows
-            if xs[row] is not None
-            and ys[row] is not None
-            and not (
-                frame["x_min"] <= xs[row] <= frame["x_max"]
-                and frame["y_min"] <= ys[row] <= frame["y_max"]
-            )
-        ]
-        if outside:
-            self.findings.append(
-                Finding(
-                    "rows outside the frame",
-                    f"{len(outside)} of {len(rows)} row(s) fall outside view '{view}''s frame "
-                    f"[{frame['x_min']:g}, {frame['x_max']:g}] × "
-                    f"[{frame['y_min']:g}, {frame['y_max']:g}], and the ingest route refuses a "
-                    f"page carrying one. A frame is fixed at the first commit, so the remedy is "
-                    f"the rows or a rebuild with an extent= that holds them",
-                )
-            )
 
     def _point_columns(self, insert, block: dict, table: pa.Table) -> list[tuple[str, Any]]:
         """The wire's columns for one points page: geometry, labels, the id, and the values.
@@ -1277,6 +1232,7 @@ def _fold(report, page: Page, answer: Answer) -> None:
         report.artifacts_minted += int(body.get("minted", 0))
         report.tessera_ids += body.get("tessera_ids", [])
         report.clipped += int(body.get("clipped", 0))
+        report.clamped += int(body.get("clamped", 0))
     elif page.kind == "values":
         report.values_filled += int(body.get("filled", 0))
         report.already_present += int(body.get("held", 0))

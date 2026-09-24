@@ -201,7 +201,7 @@ fn mint_cells<'a>(
                 }
             }
         };
-        cells[index] = code_at_declared_width(arrow_type, code);
+        cells[index] = tessera_store::vocabulary::code_value(arrow_type, code);
     }
     Ok(())
 }

@@ -124,8 +124,10 @@ a request that fails any of them takes no effect. Beyond those, four checks appl
    succeeds. A suppressed item's binding still collides, because suppression is temporary and a
    copy ingested past it would defeat it.
 
-A row whose coordinates fall outside the view's frame causes the request to be refused before
-anything is acknowledged, written to the WAL, or allocated an entity id.
+A row whose coordinates fall outside the view's frame is stored on the frame's edge, as a build
+stores one, and the response counts it as `clamped`. A coordinate that is not a finite number, or
+on a projected view is outside WGS84's range, causes the request to be refused before anything is
+acknowledged, written to the WAL, or allocated an entity id.
 
 ### The commit window
 
@@ -152,7 +154,7 @@ nothing: every waiter is refused, and a caller retries under the same batch id.
 |---|---|---|
 | 200 | Every row is durable in the WAL, with its identity allocated. It is not yet visible | Not needed |
 | 409 | A duplicate external id, or the same batch id with different bytes. Nothing in the batch took effect | After fixing the request |
-| 422 | Validation failed: an undeclared column, a wrong type, too many rows, or coordinates outside the view's frame. Nothing took effect | After fixing the request |
+| 422 | Validation failed: an undeclared column, a wrong type, too many rows, or a coordinate that is not a place. Nothing took effect | After fixing the request |
 | 429 | The server is declining the request for load, with a retry interval attached | After that interval |
 | 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
 | 503 | The executor is not running | Later |

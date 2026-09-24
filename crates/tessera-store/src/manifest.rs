@@ -249,14 +249,8 @@ pub struct Quantisation {
 }
 
 impl Quantisation {
-    /// Whether `(x, y)` has a cell in this extent — **the one definition**, because a second copy
-    /// is how ingest and flush come to disagree about which points exist.
-    ///
-    /// Morton codes are a *fraction of the declared extent* (contracts §2.5), so a point outside it
-    /// has no cell. The quantiser clamps rather than failing, which is why this must be checked
-    /// before a point ever reaches it: a clamped point at the boundary is indistinguishable from
-    /// one that legitimately sits there, so clamping silently moves data with nothing left to
-    /// notice afterwards.
+    /// Whether `(x, y)` has a cell in this extent. A row read from an ingest batch is clamped
+    /// into the extent by [`crate::coordinates::place`] before it reaches this check.
     ///
     /// Inclusive of the maxima, matching the quantiser's own domain: a point exactly at `x_max`
     /// occupies the top of the grid and belongs there. **NaN fails in both directions** and is

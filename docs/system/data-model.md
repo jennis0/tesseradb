@@ -157,9 +157,10 @@ A build refuses past half the corpus clamping, because a frame that misplaces mo
 describes some other dataset. No frame can bring a clipped point back inside a projection that
 does not reach it, so clipping is never a reason to refuse.
 
-That refusal threshold applies to a build. A live ingest refuses each out-of-frame coordinate on
-its own, rather than tolerating a fraction of the corpus; the two entry points have not been
-reconciled.
+A live ingest stores an out-of-frame coordinate on the frame's edge in the same way, and its
+receipt counts the rows it clamped as `clamped` and the rows it clipped as `clipped`. The
+half-corpus refusal applies to a build only, because a batch is a part of a corpus. Both refuse a
+coordinate that is not a finite number, and under a projection one outside WGS84's range.
 
 ## Fields: five families, one declaration
 

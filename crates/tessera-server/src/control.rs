@@ -518,6 +518,8 @@ struct IngestResp {
     /// Rows whose coordinates fell outside the view's projection domain and were stored on the
     /// frame's edge. Always 0 under `projection = "none"`.
     clipped: u64,
+    /// Rows whose coordinates fell outside the view's extent and were stored on its edge.
+    clamped: u64,
     /// Declared columns this batch omitted, each taken as absent in every row.
     padded_columns: u64,
     /// One `tessera_id` per row, in request order, whether or not the row carried an external id.
@@ -554,8 +556,10 @@ fn run_ingest(
     // columns all come from one generation.
     let meta = state.engine.meta();
     let view = resolve_view(view, &meta)?;
-    // The view's projection decides what the coordinate columns are called and what they mean.
+    // The view's projection decides what the coordinate columns are called and what they mean,
+    // and its extent is where each row is clamped onto.
     let projection = view.projection;
+    let extent = crate::filter_dto::view_extent(view);
     // A row with no label takes the view's `point_visibility.default`, as a built row does.
     let point_default = view.point_default.clone();
     let view = view.id.clone();
@@ -574,10 +578,12 @@ fn run_ingest(
         artifacts,
         padded_columns,
         clipped,
+        clamped,
     } = parse_ingest_batch(
         encoding,
         body,
         projection,
+        &extent,
         &meta.declared_scalars,
         &scoped,
         &meta.vocabularies,
@@ -656,8 +662,10 @@ fn run_ingest(
                 replayed: true,
                 over_bound,
                 over_bound_ids,
-                // Clipping is a property of the rows, so a replay reports the original count.
+                // Clipping and clamping are properties of the rows, so a replay reports the
+                // original counts.
                 clipped,
+                clamped,
                 padded_columns,
                 tessera_ids,
                 minted: 0,
@@ -785,6 +793,7 @@ fn run_ingest(
         over_bound,
         over_bound_ids,
         clipped,
+        clamped,
         padded_columns,
         tessera_ids,
         minted,
