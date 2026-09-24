@@ -530,7 +530,8 @@ pub struct Config {
     /// first, and either way the response ends with a cursor to resume from.
     pub bulk_response_ms: u64,
     pub region_cache_bytes: u64,
-    /// Emit `x-tessera-stage-ns`; does nothing in a binary built without `bench-timing`.
+    /// Add `stage_ns` to a viewport response's trailer; does nothing in a binary built without
+    /// `bench-timing`.
     pub stage_timing: bool,
     pub dev_cors_origins: Vec<String>,
     pub cors_origins: Vec<String>,
