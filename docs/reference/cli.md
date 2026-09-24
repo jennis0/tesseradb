@@ -115,6 +115,74 @@ A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run the comma
 | `--deployment` | `PATH` |  | Read this `tessera.toml` instead of searching for one upward from the working directory. |
 | `--timeout` | `SECONDS` | `3` | Seconds the whole request may take, from connecting to reading the answer. |
 
+## `tessera items`
+
+```text
+tessera items [OPTIONS] --view <VIEW> --fields <NAMES> --server <URL>
+```
+
+Read every item a session token may see in one view, with the fields named, from a running server, and write them as Arrow IPC or Parquet.
+
+The server answers `POST /v1/items` a page at a time, several pages to a response, and ends each response with a cursor for the next. This requests responses until no row remains and writes each page as it arrives. Each of the route's fields is the argument of the same name, sent only when given, so the server's own setting applies otherwise.
+
+The columns are `tessera_id`, the fields in the order named, the system fields in the order named, then `tessera:matched` under `--keep-unmatched`. A category field is a dictionary column of its value keys, each page's dictionary holding the keys of its own rows. A read that returns no row writes these columns with no rows.
+
+A read cut short leaves the whole pages read before it in the output, exits 1 and prints the cursor to read the rest with. The first response's head, with the counts under `--count`, is printed on stderr at the end.
+
+For example, `tessera items --server http://127.0.0.1:8080 --view papers --fields title,year --system-fields external_id --out papers.parquet`.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--view` | `VIEW` |  | The view to read, as `/v1/meta` names it. An item with no position in it is not returned. |
+| `--fields` | `NAMES` |  | The declared fields to return, comma-separated, in the order wanted. `--fields ''` returns `tessera_id` alone. A field declared for a view group, read under a view outside that group, is named `<field>@<key>`. |
+| `--system-fields` | `NAMES` |  | Any of `position`, `external_id` and `labels`, comma-separated, in the order wanted: the columns `tessera:x` and `tessera:y`, `tessera:external_id` and `tessera:labels`. |
+| `--filters` | `JSON` |  | A filter expression as JSON, such as `{"year": {"range": {"gte": 2020}}}`. Only the items that match are returned. |
+| `--keep-unmatched` |  |  | Return every item, with a `tessera:matched` column saying whether it matches `--filters`. |
+| `--count` |  |  | Count the items the token may see in the view and those that match. The counts are printed on stderr at the end. |
+| `--order` | `ORDER` |  | `map` returns the items by their place on the map; `stored` in the order the server stores records, which is faster for a field that is neither rendered nor indexed. Without it the server chooses. |
+| `--page-rows` | `N` |  | Rows in a page, at most the server's `selection.max_page_rows`, which applies without it. |
+| `--pages` | `N` |  | The most pages in one response. Responses are requested until the read is done. |
+| `--cursor` | `CURSOR` |  | Start after the last page of an earlier read: the cursor a read cut short printed. |
+| `--compression` | `COMPRESSION` |  | `zstd` compresses the pages on their way from the server. The output is written uncompressed either way. |
+| `--idset` | `IDSET` |  | The id numbering the ids are read in, `/v1/meta`'s `idset`. A server holding another refuses the read. |
+| `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
+| `--token` | `TOKEN` |  | A session token, as the session plane's `/session/authorise` issues one. Without it the token is read from `TESSERA_TOKEN`. |
+| `--out` | `PATH` |  | The file to write. Without it, or with `-`, the output goes to stdout. |
+| `--format` | `FORMAT` |  | `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it. |
+
+## `tessera artifacts`
+
+```text
+tessera artifacts [OPTIONS] --view <VIEW> --layer <LAYER> --fields <NAMES> --server <URL>
+```
+
+Read every artifact of one layer a session token is served, with the properties named, from a running server, and write them as Arrow IPC or Parquet.
+
+An artifact is one member of a layer: a cluster, a region, a node in a taxonomy. The read is carried across `POST /v1/artifacts` responses, and written, as `tessera items` carries and writes one. The columns are `tessera_id`, the properties in the order named, then `matched_count` under `--filters`. The rows are in order of level, and in the order they were published within a level.
+
+For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --layer clusters --fields key,masked_count --format ipc > clusters.arrows`.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--view` | `VIEW` |  | The view whose items the counts and the geometry are computed over. |
+| `--layer` | `LAYER` |  | The layer to read, as `/v1/meta` lists it. |
+| `--fields` | `NAMES` |  | Any of `key`, `level`, `parents`, `target`, `masked_count`, `content`, `centroid`, `box` and `shape`, comma-separated, in the order wanted. |
+| `--level` | `LEVEL` |  | Only the artifacts at this level of a levelled layer. |
+| `--parent` | `TESSERA_ID` |  | Only the children of this artifact, by its `tessera_id`. |
+| `--q` | `TEXT` |  | Only the artifacts whose key, or first text, contains this, ignoring case. |
+| `--filters` | `JSON` |  | A filter expression as JSON. Only the artifacts with a visible member that matches are returned, each with a `matched_count` column. |
+| `--keep-unmatched` |  |  | With `--filters`, return every artifact, those with no matching member included. |
+| `--count` |  |  | Count the artifacts served and those that match. The counts are printed on stderr at the end. |
+| `--page-rows` | `N` |  | Rows in a page, at most the server's `selection.max_page_rows`, which applies without it. |
+| `--pages` | `N` |  | The most pages in one response. Responses are requested until the read is done. |
+| `--cursor` | `CURSOR` |  | Start after the last page of an earlier read: the cursor a read cut short printed. |
+| `--compression` | `COMPRESSION` |  | `zstd` compresses the pages on their way from the server. The output is written uncompressed either way. |
+| `--idset` | `IDSET` |  | The id numbering the ids are read in, `/v1/meta`'s `idset`. A server holding another refuses the read. |
+| `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
+| `--token` | `TOKEN` |  | A session token, as the session plane's `/session/authorise` issues one. Without it the token is read from `TESSERA_TOKEN`. |
+| `--out` | `PATH` |  | The file to write. Without it, or with `-`, the output goes to stdout. |
+| `--format` | `FORMAT` |  | `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it. |
+
 ## `tessera serve`
 
 ```text

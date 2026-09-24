@@ -1273,6 +1273,64 @@ fn a_sparse_filter_under_no_time_budget_still_advances_and_completes() {
         let ids = read.ids();
         assert_each_once(&ids);
         assert_eq!(ids.len() as u64, matched, "{order:?}");
+
+        // A response that found nothing carries one page of no rows, with the read's columns,
+        // whose page end hands on the trailer's cursor.
+        let schema = read.pages.iter().find(|(b, _)| b.num_rows() > 0).unwrap().0.schema();
+        let mut empty = 0;
+        let mut at = 0;
+        for trailer in &read.trailers {
+            let pages = &read.pages[at..at + trailer.pages as usize];
+            at += trailer.pages as usize;
+            assert!(trailer.pages >= 1, "{order:?}: every response carries a page");
+            if trailer.rows > 0 {
+                continue;
+            }
+            empty += 1;
+            assert_eq!(trailer.pages, 1);
+            let (batch, end) = &pages[0];
+            assert_eq!((batch.num_rows(), batch.schema()), (0, schema.clone()));
+            assert_eq!(end.next, trailer.next);
+            let ended_by = match trailer.next {
+                None => PageEndedBy::End,
+                Some(_) => PageEndedBy::Time,
+            };
+            assert_eq!(end.ended_by, ended_by);
+        }
+        assert_eq!(at, read.pages.len());
+        assert!(empty > 0, "{order:?}: no response found nothing");
+    }
+}
+
+/// **A read that finds no row gives one page of no rows** with every column the request names,
+/// typed as a page holding rows types them, and the page end and trailer end the read.
+#[test]
+fn a_read_that_finds_no_row_gives_one_typed_page_of_no_rows() {
+    let fx = Fx::new();
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&["band", "score", "heat", "tag", "note", "prose", "when", "flag"]);
+    let system = names(&["position", "external_id", "labels"]);
+    let mut base = request("s0", &fields);
+    base.system_fields = &system;
+    base.page_rows = Some(10);
+    base.pages = Some(1);
+    let (full, _) = respond(&fx.engine, &session, base.clone()).unwrap();
+    let schema = full.pages[0].0.schema();
+    assert_eq!(schema.fields().len(), 1 + fields.len() + 4);
+
+    for order in [RecordsOrder::Map, RecordsOrder::Stored] {
+        let mut none = base.clone();
+        none.order = Some(order);
+        none.filter = Some(leaf("score", range(5_000_000, 6_000_000)));
+        none.count = true;
+        let (sink, trailer) = respond(&fx.engine, &session, none).unwrap();
+        assert_eq!(sink.head.unwrap().counts.unwrap().matched, 0);
+        assert_eq!(sink.pages.len(), 1, "{order:?}");
+        let (batch, end) = &sink.pages[0];
+        assert_eq!((batch.num_rows(), batch.schema()), (0, schema.clone()), "{order:?}");
+        assert_eq!((end.next.as_deref(), end.ended_by), (None, PageEndedBy::End));
+        assert_eq!((trailer.pages, trailer.rows), (1, 0));
+        assert_eq!((trailer.next, trailer.ended_by), (None, ResponseEndedBy::End));
     }
 }
 

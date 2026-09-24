@@ -729,6 +729,49 @@ fn a_withheld_parent_answers_as_a_parent_with_no_children() {
     );
 }
 
+/// **A read whose parent has no children gives one page of no rows** with every column the
+/// request names, typed as a page holding rows types them, and the page end and trailer end the
+/// read.
+#[test]
+fn a_parent_with_no_children_gives_one_typed_page_of_no_rows() {
+    let fx = fixture();
+    let engine = fx.engine();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let fields = names(&[
+        "key",
+        "level",
+        "parents",
+        "target",
+        "masked_count",
+        "content",
+        "centroid",
+        "box",
+        "shape",
+    ]);
+    let (filter, _) = middle();
+    let mut base = request(TREE, &fields);
+    base.filter = Some(filter);
+    base.keep_unmatched = true;
+    let (full, _) = respond(engine, &session, base.clone()).unwrap();
+    let schema = full.pages[0].0.schema();
+    assert_eq!(schema.fields().last().unwrap().name(), "matched_count");
+
+    let ids_by_key: HashMap<String, u64> = {
+        let pages = read_all(engine, &session, &request(TREE, &fields));
+        keys(&pages).into_iter().zip(ids(&pages)).collect()
+    };
+    let mut none = base.clone();
+    none.parent = Some(TesseraId::new(ids_by_key[&child_key(0, 0)]));
+    none.count = true;
+    let (sink, trailer) = respond(engine, &session, none).unwrap();
+    assert_eq!(sink.pages.len(), 1);
+    let (batch, end) = &sink.pages[0];
+    assert_eq!((batch.num_rows(), batch.schema()), (0, schema));
+    assert_eq!((end.next.as_deref(), end.ended_by), (None, tessera_engine::PageEndedBy::End));
+    assert_eq!((trailer.pages, trailer.rows, trailer.next), (1, 0, None));
+    assert_eq!(trailer.ended_by, tessera_engine::ResponseEndedBy::End);
+}
+
 /// The filter's region: a box over the middle of the map.
 fn middle() -> (FilterExpr, [f64; 4]) {
     let rect = [200.0, 150.0, 700.0, 650.0];
@@ -1602,7 +1645,8 @@ fn an_authored_shape_names_no_other_view_on_the_artifacts_read() {
     for secret in &a.secrets {
         let mut req = req.clone();
         req.q = Some(secret);
-        assert!(read_all(&a.engine, &session, &req).is_empty(), "q read the slot for '{secret}'");
+        let found = read_all(&a.engine, &session, &req);
+        assert!(keys(&found).is_empty(), "q read the slot for '{secret}'");
     }
 }
 
