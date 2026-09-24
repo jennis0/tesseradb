@@ -45,6 +45,7 @@ import {Buffer} from 'node:buffer';
 import {tableFromIPC} from 'apache-arrow';
 // Loading a `.ts` module needs Node 22.18 or later, which strips its types.
 import {Control} from '../core/src/control.ts';
+import {accepted, clusterLayerDeclaration, labelLayerDeclaration} from './operator.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -146,12 +147,6 @@ async function points(token, k) {
   return [...tableFromIPC(frame.payload).getChild('tessera_id').toArray()];
 }
 
-/** A control answer's body, or a throw naming the refusal. */
-function accepted(what, answer) {
-  if (!answer.ok) throw new Error(`${what}: ${answer.status} ${answer.detail}`);
-  return answer.body;
-}
-
 async function register(declaration) {
   return accepted(`register ${declaration.name}`, await control.declareLayer(declaration));
 }
@@ -195,34 +190,19 @@ if (dryRun) {
   process.exit(0);
 }
 
-await register({
-  name: clusterLayer,
-  title: 'write-cycle demo clusters',
-  views: [meta.views[0].id],
-  membership: 'enumerated',
-  content: {derived: ['centroid'], supplied: [], on_member_deletion: 'withdraw_content'},
-  access: {label: null, artifacts_carry_own: false},
-  visible_when: null,
-  hierarchy: {kind: 'flat', prune_children: false}
-});
-await register({
-  name: labelLayer,
-  title: 'write-cycle demo labels',
-  views: [meta.views[0].id],
-  membership: 'enumerated',
-  content: {
-    derived: [],
-    supplied: [{kind: 'label_text', corpus_derived: true}],
-    // **The declaration under test.** Strict: a description whose source is deleted is withdrawn at
-    // the fold rather than re-based onto the survivors. `shrink_generating_set` is the other choice
-    // and would put the label back at step 4 — deliberately, and only because the publisher said so.
-    on_member_deletion: 'withdraw_content'
-  },
-  access: {label: null, artifacts_carry_own: false},
-  visible_when: null,
-  hierarchy: {kind: 'flat', prune_children: false},
-  depends_on: [clusterLayer]
-});
+// The label layer's content is withdrawn at the fold once a member it was generated from is
+// deleted, which is what step 4 checks.
+await register(
+  clusterLayerDeclaration({
+    name: clusterLayer,
+    title: 'write-cycle demo clusters',
+    view: meta.views[0].id,
+    visibility: null,
+    minVisible: null,
+    computed: ['centroid']
+  })
+);
+await register(labelLayerDeclaration({name: labelLayer, title: 'write-cycle demo labels', view: meta.views[0].id, clusters: clusterLayer}));
 
 await publish(clusterLayer, [{key: 'c0', members: members.map(String)}]);
 await publish(labelLayer, [

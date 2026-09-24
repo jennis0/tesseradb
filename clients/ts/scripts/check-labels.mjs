@@ -26,6 +26,7 @@ import {readFile} from 'node:fs/promises';
 import {tableFromIPC} from 'apache-arrow';
 // Loading a `.ts` module needs Node 22.18 or later, which strips its types.
 import {Control} from '../core/src/control.ts';
+import {accepted} from './operator.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -210,8 +211,7 @@ expect('the label answers on its identifier before the suppression', (await byId
 
 const change = async (op) => {
   // Each item carries the idset its `tessera_id` was issued under.
-  const answer = await control.changes([{tessera_id: cluster.id.toString(), idset: (await metaOf(witnessToken)).idset, op}]);
-  if (!answer.ok) throw new Error(`${op}: ${answer.status} ${answer.detail}`);
+  accepted(op, await control.changes([{tessera_id: cluster.id.toString(), idset: (await metaOf(witnessToken)).idset, op}]));
 };
 
 // **The unsuppress runs whatever happens in between.** This suppresses a cluster on a live

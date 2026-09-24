@@ -39,6 +39,7 @@ import {readFile} from 'node:fs/promises';
 import {tableFromIPC} from 'apache-arrow';
 // Loading a `.ts` module needs Node 22.18 or later, which strips its types.
 import {Control} from '../core/src/control.ts';
+import {accepted, clusterLayerDeclaration, labelLayerDeclaration} from './operator.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -89,12 +90,6 @@ if (labelLayer && !labelTerm) {
 }
 
 // --------------------------------------------------------------------------------- the plumbing
-
-/** A control answer's body, or a throw naming the refusal. */
-function accepted(what, answer) {
-  if (!answer.ok) throw new Error(`${what}: ${answer.status} ${answer.detail}`);
-  return answer.body;
-}
 
 async function authorise(terms) {
   const r = await fetch(`${session}/session/authorise`, {
@@ -283,26 +278,15 @@ console.log(
 
 // -------------------------------------------------------------------------------- the publishing
 
-const declaration = {
+// The layer's own access label (`--label`), or public, which each artifact inherits.
+const declaration = clusterLayerDeclaration({
   name: layerName,
   title: args.title ?? `k-means over ${ids.length.toLocaleString()} sampled points`,
-  views: [view],
-  membership: 'enumerated',
-  value_set: 'closed',
-  // The layer's own access label (`--label`), or public; each artifact inherits it — a per-artifact
-  // label field would serve nothing here, since the demo's artifacts carry none.
+  view,
   visibility: args.label ?? null,
-  artifact_visibility: {field: null, default: 'inherited'},
-  // `null` is a declaration in its own right — *this layer needs no existence criterion* — rather
-  // than a field nobody filled in.
-  require_member_visibility: minVisible === null ? null : {count: minVisible},
-  hierarchy: {kind: 'flat', prune_children: false},
-  // Derived geometry, recomputed per viewer from `membership ∩ M_auth`: what the client draws as
-  // outlines and places names at, in place of the sidecar this script used to write.
-  content: {computed: ['centroid', 'box', 'hull'], supplied: [], withdraw_on_member_deletion: true},
-  depends_on: [],
-  levels: []
-};
+  minVisible,
+  computed: ['centroid', 'box', 'hull']
+});
 
 const layer = accepted('register', await control.declareLayer(declaration));
 console.log(`registered ${layer.name} (tessera_id ${layer.tessera_id}), the address to suppress it by`);
@@ -363,21 +347,12 @@ if (labelLayer) {
   }
   console.log(`term ${labelTerm} sees ${termVisible.size.toLocaleString()} of the sampled points`);
 
-  const labelDeclaration = {
+  const labelDeclaration = labelLayerDeclaration({
     name: labelLayer,
     title: args['labels-title'] ?? `toponymy over ${layerName}`,
-    views: [view],
-    membership: 'enumerated',
-    access: {label: null, artifacts_carry_own: false},
-    visible_when: null,
-    hierarchy: {kind: 'flat', prune_children: false},
-    // Corpus-derived: the text asserts something about documents, so it is served only to a viewer
-    // who can see everything it was generated from.
-    content: {derived: [], supplied: [{kind: 'label_text', corpus_derived: true}]},
-    // The layers this one edges into. An attachment into a layer that is not declared here is
-    // refused at publication — a dependency nobody declared is one no replacement checks.
-    depends_on: [layerName]
-  };
+    view,
+    clusters: layerName
+  });
   const labelsRegistered = accepted('register labels', await control.declareLayer(labelDeclaration));
   console.log(`registered ${labelLayer} (tessera_id ${labelsRegistered.tessera_id})`);
 
