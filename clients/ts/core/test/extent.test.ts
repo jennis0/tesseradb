@@ -7,10 +7,9 @@ import {artifactBudgetFor} from '../src/artifactBudget.js';
 import {artifact, fakeClock, fakeScheduler, layer, meta, response, servedResult, tile, view} from './support.js';
 
 /**
- * `extentOf` reads the served `box` in the wire's units — 32 bits per axis (contracts §3.2 item
- * 4), the same as `code` — and the outlines read the same box. An artifact at the corpus's far
- * corner is the case that tells a right divisor from a wrong one: under 2^16 its box lands 65,536
- * extents away, and `fit` on it shows nothing.
+ * `extentOf` reads the served `box` in wire units, 32 bits per axis as `code`, and the outlines
+ * read the same box. An artifact at the far corner distinguishes the right divisor from a wrong
+ * one: under 2^16 its box would land 65,536 extents away.
  */
 
 const META = meta({
@@ -49,7 +48,7 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     scheduler.flush();
     await clock.advance(600);
     expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([7n]);
-    // Both asks — the channel's `k = 0` and the point path's — carry the view's artifact budget.
+    // Both asks, the channel's `k = 0` and the point path's, carry the view's artifact budget.
     const asks = (client.viewport as unknown as {mock: {calls: [string, {k?: number; layers?: string[]; artifactBudget?: number}][]}}).mock.calls.map((c) => c[1]);
     const channel = asks.filter((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.length > 0);
     const points = asks.filter((r) => r.k !== 0);
@@ -59,16 +58,14 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
 
     const extent = store.extentOf(7n)!;
     expect(extent).not.toBeNull();
-    // The last quarter of a 100 × 200 extent: x in [75, 100], y in [150, 200].
+    // The last quarter of a 100 x 200 extent: x in [75, 100], y in [150, 200].
     expect(extent[0]).toBeCloseTo(75, 6);
     expect(extent[1]).toBeCloseTo(150, 6);
     expect(extent[2]).toBeCloseTo(100, 3);
     expect(extent[3]).toBeCloseTo(200, 3);
     for (const v of extent) expect(v).toBeLessThanOrEqual(200);
 
-    // The same box, as the outline draws it: world units, one conversion for both readers. With no
-    // shape the outline is the box, which is one part of one ring — `extentOf` reads the served
-    // `box` whatever the shape is, so nothing here moved when the shape became parts of rings.
+    // The same box as the outline draws it, in world units. With no shape the outline is the box.
     const shape = outlineOf(FAR)!;
     expect([shape.source, shape.parts.length]).toEqual(['box', 1]);
     const outline = shape.parts[0]![0]!;

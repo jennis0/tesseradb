@@ -8,9 +8,8 @@ import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
 import {tileRectOfBbox} from '../src/budget.js';
 
 /**
- * The store against a fake `TesseraClient`, a fake clock and a fake frame scheduler — no DOM, no
- * network. Every assertion is about the store's own contract: `setView`'s conversion, the stale
- * rule keyed on the content key, and the drops.
+ * The store against a fake `TesseraClient`, a fake clock and a fake frame scheduler, with no DOM
+ * and no network.
  */
 
 const META = meta({
@@ -19,14 +18,13 @@ const META = meta({
   filterOperands: [{column: 'archive', family: 'category', operands: ['in']}]
 });
 
-/** What the fake sees of a request: enough to answer for every tile it asked about. */
+/** What the fake sees of a request. */
 type FakeRequest = {zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[] | 'all'};
 
 /**
- * A response that answers **every** tile the request spans — one tile of 1,000 items each, the
- * served points on the first — so a frame's coverage of a region is the client's arithmetic and
- * not the fixture's shape. `response()` below answers one tile whatever was asked, which every
- * other test relies on.
+ * A response that answers every tile the request spans, 1,000 items each with the served points on
+ * the first, so a frame's coverage of a region is the client's arithmetic. `response()` answers one
+ * tile whatever was asked.
  */
 function responseCovering(req: FakeRequest, contentKey: string, served = 3): ViewportResponse {
   const base = response(contentKey, 'ik', served);
@@ -49,7 +47,7 @@ function response(contentKey: string, identityKey = 'ik', served = 3): ViewportR
   return responseOf(servedResult(served, [tile(0n, 10_000_000n)], {scalars}), {contentKey, identityKey});
 }
 
-/** The `region` leaf anywhere in a filter expression, or null — what the fake answers a verdict for. */
+/** The `region` leaf anywhere in a filter expression, or null. */
 function regionOf(expr: unknown): boolean {
   if (!expr || typeof expr !== 'object') return false;
   const node = expr as Record<string, unknown>;
@@ -62,9 +60,8 @@ function regionOf(expr: unknown): boolean {
 }
 
 /**
- * A fake client — only the four verbs the store calls, and a log of the viewport requests. A
- * request carrying a `region` leaf is answered with the wire's `exact` verdict, as the server
- * would say on `x-tessera-region`.
+ * A fake client with the verbs the store calls and a log of viewport requests. A request with a
+ * `region` leaf is answered with the verdict `exact`.
  */
 function fakeClient(reply: (req: FakeRequest) => ViewportResponse, meta: Meta = META) {
   const viewport = vi.fn(async (_token: string, req: FakeRequest) => ({...reply(req), region: regionOf(req.filters) ? {exact: true as const, depth: null} : null}));
@@ -80,7 +77,7 @@ function fakeClient(reply: (req: FakeRequest) => ViewportResponse, meta: Meta = 
   return {client, viewport};
 }
 
-/** Build a store and drive it to its first shown frame. */
+/** Builds a store and drives it to its first shown frame. */
 async function warm(reply: (req: FakeRequest) => ViewportResponse, opts: {clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>; meta?: Meta}) {
   const {client, viewport} = fakeClient(reply, opts.meta);
   const store = createStore({
@@ -112,8 +109,7 @@ describe('setView converts a data bbox to the driver’s target and zoom', () =>
     // One request went out for a shown frame.
     expect(viewport).toHaveBeenCalled();
     expect(store.get('view').composition).not.toBeNull();
-    // The tighter axis governs zoom: width/bw = 800/256 = 3.125, height/bh = 400/128 = 3.125 here
-    // by construction of the bbox, so the frame is drawn and the served count reflects the tile.
+    // The tighter axis sets the zoom: 800/256 = 400/128 = 3.125.
     expect(store.get('view').served.shown).toBe(3);
     expect(store.get('view').visible.value).toBe(10_000_000);
   });
@@ -152,9 +148,8 @@ describe('status.stale keys on the content key, never on x-tessera-stale', () =>
     expect(store.get('status').stale).toBe(false);
     const drawn = viewport.mock.calls.length;
 
-    // The interval lapses and the same, covered view is scheduled: the driver revalidates through
-    // the foreground slot with a counts-only request, which observes ck-2 without redrawing the
-    // marks. The content key moved under the presented frame, so the store marks itself stale.
+    // The interval lapses and the same view is scheduled: a count-only request observes ck-2
+    // without redrawing, so the store marks itself stale.
     key = 'ck-2';
     await clock.advance(200);
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
@@ -172,7 +167,7 @@ describe('status.stale keys on the content key, never on x-tessera-stale', () =>
 });
 
 describe('the drops', () => {
-  it('drops the replica and marks a refetch on setFilters — the identity key excludes filters', async () => {
+  it('drops the replica and marks a refetch on setFilters: the identity key excludes filters', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
@@ -181,8 +176,8 @@ describe('the drops', () => {
     scheduler.flush();
     const before = viewport.mock.calls.length;
 
-    // A filter narrows what is served without changing the identity key, so held bands would be
-    // served as if they belonged. The store must drop them itself and re-ask.
+    // A filter changes what is served but not the identity key, so the store drops its bands itself
+    // and asks again.
     store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
     await clock.advance(600);
     scheduler.flush();
@@ -194,11 +189,8 @@ describe('the drops', () => {
   });
 
   /**
-   * §5.2's two verbs, and the two claims the design turns on: **a filter never moves the mask and
-   * a highlight never moves the draw.** The first is the older one — a filter narrows what is
-   * served, never `visible` — and the second is what makes a highlight a highlight: the request's
-   * `filters` is the same expression whether a clause is in the highlight position or absent, so
-   * the cap clause, the sampling and `served` cannot see it.
+   * A filter does not move the mask and a highlight does not move the draw: the request's `filters`
+   * is the same whether a clause is in the highlight position or absent.
    */
   it('sends a clause in the highlight position as `highlight`, leaving `filters` untouched', async () => {
     const clock = fakeClock();
@@ -213,8 +205,7 @@ describe('the drops', () => {
     scheduler.flush();
     const body = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
     expect(body.highlight).toEqual({archive: {in: ['cs']}});
-    // Not merely different from the highlight — *nothing at all*, which is the request an
-    // unhighlighted client sends and the one the draw is defined against.
+    // No highlight at all, as an unhighlighted client sends.
     expect(body.filters ?? null).toBeNull();
     expect(store.get('filters').highlight).toEqual({archive: {in: ['cs']}});
     expect(store.get('filters').expr).toBeNull();
@@ -234,7 +225,7 @@ describe('the drops', () => {
     scheduler.flush();
     expect((viewport.mock.calls.at(-1)![1] as {filters?: unknown}).filters).toEqual({archive: {in: ['cs']}});
 
-    // The predicate is untouched; only the verb moves — which is the whole of §5.2's claim.
+    // The predicate is unchanged; only the verb moves.
     store.setFilters(withVerb(filtered, 'archive', 'highlight'));
     await clock.advance(600);
     scheduler.flush();
@@ -252,7 +243,7 @@ describe('the drops', () => {
     await clock.advance(600);
     scheduler.flush();
 
-    // An id past 2^53, which is why the leaf spells it as a string: a number would round it.
+    // An id past 2^53, which a number would round; the leaf spells it as a string.
     const id = 18_064_038_920_082_622_571n;
     store.setMembers([{layer: 'mesh/descriptors', artifact: id, outside: false, verb: 'highlight'}]);
     await clock.advance(600);
@@ -276,9 +267,8 @@ describe('the drops', () => {
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await clock.advance(600);
     scheduler.flush();
-    // The fixture's tiles carry `highlighted` equal to `matched`, which is what the wire carries
-    // for a request with no highlight — so the figure is right and `highlighting` is what says
-    // there was no question.
+    // The fixture's `highlighted` equals `matched`, as for a request with no highlight, so
+    // `highlighting` is what says there was none.
     expect(store.get('view').highlighted.value).toBe(store.get('view').matched.value);
     expect(store.get('view').highlighting).toBe(false);
 
@@ -320,8 +310,7 @@ describe('the drops', () => {
     await store.browse({layer: 'mesh/descriptors'});
     expect((browse.mock.calls[0] as unknown as [string, {view: string}])[1].view).toBe('s0');
 
-    // A caller passing the field explicitly absent — which a spread of a partial request produces
-    // — must not leave the request without a view: a masked count is per view.
+    // A caller passing `view: undefined` still gets a view: a masked count is per view.
     await store.browse({layer: 'mesh/descriptors', view: undefined});
     expect((browse.mock.calls[1] as unknown as [string, {view: string}])[1].view).toBe('s0');
 
@@ -339,14 +328,13 @@ describe('the drops', () => {
     scheduler.flush();
     expect(store.requestFilters()).toBeNull();
 
-    // `filters.expr` is one of the three sources; a reader taking it for the whole would miss the
-    // other two, which is what the hierarchy panel's staleness check did.
+    // `filters.expr` is one of three sources; the others are the member clauses and the region.
     store.setMembers([{layer: 'l', artifact: 7n, outside: false, verb: 'filter'}]);
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('filters').expr).toBeNull();
     expect(store.requestFilters()).toEqual({member_of: {layer: 'l', artifact: '7'}});
-    // JSON-safe by construction: the identifier is a decimal string, so this hashes and logs.
+    // The identifier is a decimal string, so the expression is JSON-safe.
     expect(() => JSON.stringify(store.requestFilters())).not.toThrow();
   });
 
@@ -405,8 +393,7 @@ describe('suggest in the store', () => {
     expect(store.get('filters').suggestions).toEqual({});
     expect(store.get('filters').suggestErrors).toEqual({});
 
-    // The dedupe is cleared alongside the projection — a re-ask for the identical q the mask
-    // change just invalidated must still reach the client, not read as already-answered.
+    // The dedupe is cleared with the projection, so asking again for the same q reaches the client.
     store.suggest('archive', '');
     await clock.advance(200);
     expect(suggest).toHaveBeenCalledTimes(2);
@@ -448,7 +435,7 @@ describe('setLayers before meta', () => {
       prefetch: false,
       replica: {revalidateAfterMs: Infinity}
     });
-    // Before meta has landed — the demo does exactly this when it opens a session's store.
+    // Before meta has landed.
     store.setLayers(['clusters/a']);
     expect(store.get('artifacts').layer).toBe('clusters/a');
     await clock.advance(1);
@@ -471,8 +458,7 @@ describe('the colours are rebuilt when the table moves and not per response', ()
   it('reuses the same colour map when a settle names no artifact the session had not held', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
-    // Two artifacts, served identically on every request — the shape of a layer whose artifacts
-    // are scattered through row space and so are served in full whatever the viewport.
+    // Two artifacts served on every request, as for a layer scattered through row space.
     const served = [
       artifact(1n, {layer: 'clusters/a', key: 'c1', maskedCount: 5n, centroid: [1, 2]}),
       artifact(2n, {layer: 'clusters/a', key: 'c2', maskedCount: 7n, centroid: [3, 4]})
@@ -531,9 +517,8 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     const held = first.get(one);
     expect(first.size).toBe(2);
 
-    // A settle that names a third artifact. Under the positional palette a colour is a pure
-    // function of one centroid, so the map is extended where the table moved: the same object,
-    // and the colours already in it are the same objects — not recomputed to the same values.
+    // A settle naming a third artifact. A positional colour depends on one centroid, so the map is
+    // extended in place: the same object, with the existing colours as the same objects.
     served = [...served, cluster(3n, [5, 6])];
     store.setView({bbox: [50, 100, 100, 200], width: 800, height: 800});
     await clock.advance(600);
@@ -547,15 +532,14 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     expect(next.get(one)).toBe(held);
     expect(next.get(table.ordinalOf('clusters/a', 3n))).toBeDefined();
 
-    // A palette change is not an extension: every colour moves, so the map is rebuilt and its
-    // identity says so.
+    // A palette change moves every colour, so the map is rebuilt.
     store.setPalette('spread');
     expect(store.get('artifacts').colours).not.toBe(first);
     expect(store.get('artifacts').colours.size).toBe(3);
   });
 });
 
-describe('select — the selection is the region leaf on every request (§5.11)', () => {
+describe('select: the selection is the region leaf on every request', () => {
   /** The `region` leaf of the request's filters, or null. */
   const leafOf = (req: unknown): unknown => {
     const body = (req as [string, {filters?: unknown}])[1].filters;
@@ -603,9 +587,8 @@ describe('select — the selection is the region leaf on every request (§5.11)'
     const shown = store.get('region')!;
     expect(shown.status).toBe('shown');
     expect(shown.verdict).toEqual({exact: true, depth: null});
-    // Exact: the server said so, and the replica holds every tile of the box — the whole extent
-    // at the depth the driver chose, 1,000 matched in each of the tiles that drew a point, and
-    // the frame's sum is over those.
+    // Exact: the server said so, and the replica holds every tile of the box, the whole extent at
+    // the depth the driver chose.
     expect(shown.matched.exact).toBe(true);
     expect(shown.matched.value).toBeGreaterThan(0);
     // No other filter is on, so the region alone is the same number.
@@ -728,7 +711,6 @@ describe('select — the selection is the region leaf on every request (§5.11)'
   });
 });
 
-
 describe('the store holds the drawn shape by identifier', () => {
   function shapeClient(shape: [number, number][][][] | null) {
     const artifact = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 7n, centroid: null, box: null, shape}));
@@ -846,9 +828,7 @@ describe('clear() and a refused request reach the region and the shapes', () => 
 
 describe('the subscriber fan-out', () => {
   it('tells every subscriber even when an earlier one throws', () => {
-    // The fault that motivated this: a viewer's basemap follower threw from inside the fan-out on
-    // a view with no tile, and every element subscribed after the map kept drawing the previous
-    // publish — a status strip at zero beside a million marks.
+    // A subscriber that throws must not stop the ones after it from being told.
     const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
     const traced: string[] = [];
     const store = createStore({viewerUrl: 'http://x', token: 't', instruments: {onTrace: (kind) => traced.push(kind)}});
@@ -892,7 +872,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
 
   /**
    * Answers as the server does: the artifacts of every layer named, and on a point request a
-   * membership column per named layer that has members, every point in its first artifact.
+   * membership column per named layer with members, each point in its first artifact.
    */
   function answer(req: FakeRequest): ViewportResponse {
     const r = response('ck');

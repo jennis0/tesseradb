@@ -3,48 +3,36 @@ import type {FilterExpr, FilterOperandSet, FilterOperator} from './types.js';
 /**
  * A filter draft, and how it becomes the expression `/v1/viewport` takes.
  *
- * **The draft and the expression are deliberately different shapes.** A control holds a half-typed
- * query, an empty range and a category set nobody has ticked yet; an expression holds only
- * predicates. Keeping the two apart is what lets an empty control mean *no constraint* rather than
- * *match nothing* — `{range: {}}` and `{in: []}` are both refused or empty-matching at the server,
- * and a form that sent them as the user cleared a box would blank the map on the way to a new query.
- *
- * **Every leaf is conjoined.** The composed expression is `all_of` over the populated controls, which
- * is the only reading of several filled-in boxes a user expects. Within one category control the
- * values are `in` — a disjunction — for the same reason: ticking two archives means either.
- *
- * The composition lives in the client so every customer composes the same way; the controls that
- * edit a draft, and their units (a date box against a `timestamp_us` column), are the vis side's.
+ * A draft holds controls, including empty ones; an expression holds only predicates. An empty
+ * control means no constraint: `{range: {}}` and `{in: []}` would be refused or match nothing.
+ * Populated controls are joined by `all_of`, and the values within one category control by `in`.
+ * The controls and their units are the renderer's.
  */
 
-/** What a `text` control asks for. The three modes are the operand surface, not a spelling of one. */
+/** What a `text` control asks for. */
 export type TextMode =
   /** `match`: every analysed token must appear, in any order and any position. */
   | 'all'
-  /** `match` with `minimum_should_match: 1` — any one token is enough. */
+  /** `match` with `minimum_should_match: 1`: any one token is enough. */
   | 'any'
   /** `phrase`: the tokens adjacent and in order. */
   | 'phrase';
 
 /**
- * The two verbs every clause carries (`highlight-and-hierarchy.md` §5.2), and the whole of what
- * moving a clause between them costs: a control's predicate is unchanged and only this field
- * moves, so a clause changes position **without being re-entered**.
+ * Where a clause is sent. Moving a clause changes only this field, so it is not re-entered.
  *
- * - `filter` — the clause joins `filters`; the map narrows to the matches and the counts say
- *   *matched N*.
- * - `highlight` — the clause joins `highlight`; the map stays, the matches are lit and the rest
- *   dulled, and the counts say *the highlight matched N*.
+ * - `filter`: the clause joins `filters`; the map narrows to the matches.
+ * - `highlight`: the clause joins `highlight`; the matches are lit and the rest dulled.
  */
 export type ClauseVerb = 'filter' | 'highlight';
 
-/** What a control asks — the predicate alone, with no word about where the clause is sent. */
+/** What a control asks: the predicate alone. */
 export type ColumnPredicate =
   | {family: 'text'; query: string; mode: TextMode}
   | {family: 'keyword'; needle: string; op: 'eq' | 'prefix' | 'contains'}
-  /** Selected category **keys**, not codes — the wire takes keys and resolves them server-side. */
+  /** Selected category keys; the server resolves them to codes. */
   | {family: 'category'; keys: string[]}
-  /** Inclusive bounds, as the column's own units; `null` for an open side. */
+  /** Inclusive bounds in the column's own units; `null` for an open side. */
   | {family: 'numeric'; gte: number | null; lte: number | null};
 
 /** One control: what it asks, and which of the request's two expressions it joins. */
@@ -52,7 +40,7 @@ export type ColumnDraft = ColumnPredicate & {verb: ClauseVerb};
 
 export type FilterDraft = Record<string, ColumnDraft>;
 
-/** Whether a control carries a predicate, as against merely existing. */
+/** Whether a control carries a predicate. */
 export function isPopulated(draft: ColumnPredicate): boolean {
   switch (draft.family) {
     case 'text':
@@ -67,11 +55,8 @@ export function isPopulated(draft: ColumnPredicate): boolean {
 }
 
 /**
- * The operator one populated control becomes.
- *
- * A category control with exactly one key still sends `in` rather than `eq`. The two are the same
- * question and `in` keeps the control's own arity — one code path, one thing to be wrong about — and
- * a server that answered them differently would be a bug rather than an optimisation.
+ * The operator one populated control becomes. A category control with one key still sends `in`,
+ * which asks the same as `eq`.
  */
 function operatorOf(draft: ColumnPredicate): FilterOperator {
   switch (draft.family) {
@@ -99,22 +84,14 @@ function operatorOf(draft: ColumnPredicate): FilterOperator {
 }
 
 /**
- * Compose the draft into an expression, or `null` for the unfiltered request.
- *
- * Null rather than an empty `all_of`: an unfiltered request and a request whose filter constrains
- * nothing must be the *same* request, or the two states differ in every byte ledger and cache key
- * downstream while meaning the same thing.
- *
- * A single populated control is sent as a bare leaf rather than wrapped in a one-element `all_of` —
- * the shorter form is what a reader of a captured request expects to see, and the server treats
- * them identically.
+ * Composes the draft's clauses for one position into an expression, or `null` for none, so an
+ * unfiltered request and one whose filter constrains nothing are the same request. A single clause
+ * is sent as a bare leaf.
  */
 export function composeFilters(draft: FilterDraft, verb: ClauseVerb = 'filter'): FilterExpr | null {
   const leaves: FilterExpr[] = [];
-  // Object key order is insertion order, and the draft is seeded in `/v1/meta`'s declaration order,
-  // so the composed expression's leaves read in schema order rather than in the order a user
-  // happened to fill the boxes in. That makes two sessions filtering the same way produce the same
-  // request body, which is what a request log has to be able to assume.
+  // The draft is seeded in `/v1/meta`'s declaration order, so leaves follow the schema and two
+  // sessions filtering alike send the same body.
   for (const [column, control] of Object.entries(draft)) {
     if (control.verb !== verb) continue;
     if (!isPopulated(control)) continue;
@@ -126,17 +103,14 @@ export function composeFilters(draft: FilterDraft, verb: ClauseVerb = 'filter'):
 }
 
 /**
- * How many controls carry a predicate — the count a panel heading shows. With a `verb`, how many
- * carry one *in that position*, which is what the panel's two headings say.
+ * How many controls carry a predicate, for a panel heading. With a `verb`, how many in that
+ * position.
  */
 export function activeCount(draft: FilterDraft, verb?: ClauseVerb): number {
   return Object.values(draft).filter((d) => isPopulated(d) && (verb === undefined || d.verb === verb)).length;
 }
 
-/**
- * Move one column's clause to the other position, leaving its predicate alone. The whole of
- * §5.2's *without being re-entered*.
- */
+/** Moves one column's clause to the other position, keeping its predicate. */
 export function withVerb(draft: FilterDraft, column: string, verb: ClauseVerb): FilterDraft {
   const control = draft[column];
   if (!control || control.verb === verb) return draft;

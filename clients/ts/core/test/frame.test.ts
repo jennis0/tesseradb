@@ -14,7 +14,7 @@ const fixture = (name: string) =>
   new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
 
 describe('splitFramedStreams', () => {
-  it('finds tiles, points and trailer — and no sub-cells — in a payload with no underlay', () => {
+  it('finds tiles, points and trailer, and no sub-cells, in a payload with no underlay', () => {
     const parts = splitFramedStreams(fixture('viewport-plain.bin'));
     expect(parts.tiles.byteLength).toBeGreaterThan(0);
     expect(parts.points.length).toBeGreaterThan(0);
@@ -30,17 +30,14 @@ describe('splitFramedStreams', () => {
   });
 
   it('has no artifacts frame when the response served none', () => {
-    // Absent, not empty: the server omits the frame rather than sending a zero-row one, so a
-    // deployment with no annotation layers pays nothing for the channel. These two are captured
-    // with `layers: []` for exactly this — a request that asks for no layer, against a server
-    // that has them.
+    // Absent, not empty: the server omits the frame, so a deployment with no annotation layers pays
+    // nothing. Captured with `layers: []` against a server that has layers.
     expect(splitFramedStreams(fixture('viewport-plain.bin')).artifacts).toBeNull();
     expect(splitFramedStreams(fixture('viewport-underlay.bin')).artifacts).toBeNull();
   });
 
   it('takes the frame where the response served some, between the tiles and the points', () => {
-    // Captured from a server carrying a published layer (`scripts/capture-golden.mjs`), so this is
-    // the server's own framing rather than this test's idea of it.
+    // Captured from a server with a published layer (`scripts/capture-golden.mjs`).
     const parts = splitFramedStreams(fixture('viewport-artifacts.bin'));
     expect(parts.artifacts).not.toBeNull();
     expect(parts.artifacts!.byteLength).toBeGreaterThan(0);
@@ -75,8 +72,7 @@ describe('splitFramedStreams', () => {
     );
     expect(ok.artifacts).not.toBeNull();
 
-    // A second frame would silently concatenate into the artifact surface — the same laxity the
-    // tiles rule refuses, and it would show a cluster twice on the map.
+    // A second artifacts frame is refused, as a second tile frame is; it would show a cluster twice.
     refused(() =>
       splitFramedStreams(
         cat(
@@ -101,7 +97,7 @@ describe('splitFramedStreams', () => {
     );
   });
 
-  it('consumes the whole payload exactly — every frame is length-prefixed', () => {
+  it('consumes the whole payload exactly: every frame is length-prefixed', () => {
     const raw = fixture('viewport-underlay.bin');
     const parts = splitFramedStreams(raw);
     const header = 5; // u8 kind + u32 LE length, per frame
@@ -117,15 +113,15 @@ describe('splitFramedStreams', () => {
   });
 
   it('refuses a truncated payload rather than returning a short stream', () => {
-    // A silently short points stream would decode to fewer points than `served` promised, which
-    // is a P2 failure wearing a plausible face: a sample presented as the set.
+    // A short points stream would decode to fewer points than `served` promised: a sample presented
+    // as the set.
     const raw = fixture('viewport-plain.bin');
     refused(() => splitFramedStreams(raw.subarray(0, raw.byteLength - 16)));
   });
 
-  it('refuses a body whose trailer is missing — incomplete by contract', () => {
-    // Strip the trailing kind-4 frame whole: what remains is well-framed but incomplete, which
-    // is exactly the state a mid-stream abort leaves a client holding.
+  it('refuses a body whose trailer is missing: incomplete by contract', () => {
+    // Without the trailing kind-4 frame the body is well-framed but incomplete, as a mid-stream abort
+    // leaves it.
     const raw = fixture('viewport-plain.bin');
     const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
     let at = 0;

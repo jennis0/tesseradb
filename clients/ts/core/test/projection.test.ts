@@ -18,13 +18,12 @@ const view = (
     tile
   });
 
-/** The whole world: every projection's output is the unit square (`projections.md` §4). */
+/** The whole world: every projection's output is the unit square. */
 const world: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
 
 /**
- * **The transforms written out rather than imported.** These are `projections.md` §5.1 and §5.2 as
- * a reader would type them, so a round trip below checks the client's inverse against the design
- * and not against itself. x east, **y south**.
+ * The forward transforms written out rather than imported, so a round trip checks the client's
+ * inverse against an independent copy. x east, y south.
  */
 const forward = {
   web_mercator: (lon: number, lat: number): [number, number] => [
@@ -61,8 +60,7 @@ describe('what a client decides from the published projection fields', () => {
         const [cx, cy] = cellsOf(x, y, world);
         const got = lonLatOfCell(cx, cy, view(projection), world);
         expect(got, `${projection} at ${place}`).not.toBeNull();
-        // 1e-9 degrees is about 0.1 mm on the ground — four orders below the 9.3 mm cell of the
-        // finest frame the design permits, so nothing at this scale can move a point.
+        // 1e-9 degrees is about 0.1 mm on the ground, far below the finest cell.
         expect(got![0], `${projection} lon at ${place}`).toBeCloseTo(lon, 9);
         expect(got![1], `${projection} lat at ${place}`).toBeCloseTo(lat, 9);
       }
@@ -70,9 +68,8 @@ describe('what a client decides from the published projection fields', () => {
   });
 
   it('round-trips through a sub-square frame, where the extent is doing the work', () => {
-    // The z3 tile (5, 2): x [0.625, 0.75], y [0.25, 0.375] — east of the meridian, north of the
-    // equator. A client that ignored the extent and read the cells as the whole world would put
-    // every one of these points somewhere off the west coast of Africa.
+    // The z3 tile (5, 2): x [0.625, 0.75], y [0.25, 0.375], east of the meridian and north of the
+    // equator. Ignoring the extent would put these points off the west coast of Africa.
     const frame: Quantisation = {xMin: 0.625, xMax: 0.75, yMin: 0.25, yMax: 0.375};
     const inside = view('web_mercator', XYZ, {z: 3, x: 5, y: 2});
     for (const [lon, lat] of [
@@ -97,10 +94,8 @@ describe('what a client decides from the published projection fields', () => {
   });
 
   it('draws a basemap only where a scheme addresses the frame', () => {
-    // **The case a boolean gets wrong.** The equirectangular view's frame here is the same aligned
-    // square as the Web Mercator one's, and it addresses no published scheme: the longitude/
-    // latitude schemes are 2:1 at their top level, so a host reading alignment as availability
-    // would put a Mercator basemap under a corpus that cannot line up with one.
+    // The equirectangular frame is the same aligned square as the Web Mercator one, and addresses
+    // no published scheme: the longitude and latitude schemes are 2:1 at their top level.
     expect(basemapScheme(view('web_mercator', XYZ, {z: 3, x: 5, y: 2}))).toBe('xyz');
     expect(basemapScheme(view('equirectangular'))).toBeNull();
     expect(basemapScheme(view('gall_isographic'))).toBeNull();
