@@ -632,7 +632,11 @@ export function createStore(options: StoreOptions): Store {
       if (!token) throw new TesseraError(401, 'bad-credential', 'no token');
       return token;
     }
-    const got = await options.authorise();
+    return renew(options.authorise);
+  }
+
+  async function renew(authorise: TokenSupplier): Promise<string> {
+    const got = await authorise();
     // A derived shape is a function of the principal's own visible members, so one held across a
     // change of token would draw the previous principal's shape against the new one's identifiers.
     if (token !== got.token) forgetShapes('derived');
@@ -644,11 +648,15 @@ export function createStore(options: StoreOptions): Store {
 
   function armRenewal(): void {
     if (renewTimer) clock.cancel(renewTimer);
-    if (!options.authorise || !Number.isFinite(expiresAt)) return;
-    // Renew a beat before expiry, so a warm client never presents a token the server will refuse.
-    const wait = Math.max(0, expiresAt - Date.now() - 30_000);
+    const authorise = options.authorise;
+    if (!authorise || !Number.isFinite(expiresAt)) return;
+    // Renew 30 s before expiry, so a warm client never presents a token the server will refuse, or
+    // halfway through a lifetime shorter than a minute. The token is still fresh by `ensureToken`'s
+    // margin when this fires, so it renews directly.
+    const left = expiresAt - Date.now();
+    const wait = Math.max(0, left / 2, left - 30_000);
     renewTimer = clock.after(wait, () => {
-      void ensureToken().catch(() => {});
+      void renew(authorise).catch(() => {});
     });
   }
 
