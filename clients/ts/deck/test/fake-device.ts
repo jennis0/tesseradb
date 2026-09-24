@@ -14,6 +14,9 @@ export type FakeDevice = Device & {
   textureRegions: {y: number; height: number}[];
 };
 
+/** What the fake device hands out: a buffer or texture that records whether it was destroyed. */
+export type FakeResource = {destroyed: boolean};
+
 export function fakeDevice(): FakeDevice {
   const dev = {
     bufferWrites: 0,
@@ -23,24 +26,32 @@ export function fakeDevice(): FakeDevice {
     createBuffer(_props: unknown) {
       const at = dev.writesByBuffer.length;
       dev.writesByBuffer.push(0);
-      return {
+      const buffer = {
+        destroyed: false,
         write: () => {
           dev.bufferWrites += 1;
           dev.writesByBuffer[at]! += 1;
         },
-        destroy: () => {}
+        destroy: () => {
+          buffer.destroyed = true;
+        }
       };
+      return buffer;
     },
     createTexture(props: {width: number; height: number}) {
-      return {
+      const texture = {
+        destroyed: false,
         width: props.width,
         height: props.height,
         writeData: (_data: unknown, options?: {y?: number; height?: number}) => {
           dev.textureWrites += 1;
           dev.textureRegions.push({y: options?.y ?? 0, height: options?.height ?? props.height});
         },
-        destroy: () => {}
+        destroy: () => {
+          texture.destroyed = true;
+        }
       };
+      return texture;
     }
   };
   return dev as unknown as FakeDevice;
