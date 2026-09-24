@@ -76,6 +76,34 @@ export type DeclaredScalar = {
   render: boolean;
   /** Whether the column carries an entity-space filter index, as against being answered by a scan. */
   index: boolean;
+  /**
+   * For a `text` column, the `<name>/<version>` of the analyser that segmented its index; `null`
+   * for every other type. Optional in this type only so hand-built fixtures need not carry it;
+   * `TesseraClient.meta` always sets it.
+   */
+  analyser?: string | null;
+  /**
+   * Where `/v1/items` reads the value from: `rendered`, `value_column`, `record`. Optional for the
+   * reason `analyser` is.
+   */
+  homes?: ('rendered' | 'value_column' | 'record')[];
+};
+
+/**
+ * One group-scoped column family: one column per view of the group `scope` names, with the
+ * schema a {@link DeclaredScalar} carries.
+ */
+export type ScopedScalar = {
+  name: string;
+  arrowType: ArrowType;
+  scope: {group: string};
+  category: CategoryDescriptor | null;
+  analyser: string | null;
+  /** Whether the column arrives in the points frame under a view in {@link views}. */
+  render: boolean;
+  index: boolean;
+  /** Every view id whose rows carry this column and that this principal may reach. */
+  views: string[];
 };
 
 /**
@@ -201,7 +229,8 @@ export type FilterOperator =
 export type Layer = {
   /** The layer's identity, and what a viewport request names to select it. */
   name: string;
-  title: string;
+  /** `null` where the declaration gave none. */
+  title: string | null;
   /** Which views the layer appears in. A layer is not answerable in a view it does not name. */
   views: string[];
   membership: 'enumerated' | 'spatial' | 'attribute';
@@ -222,7 +251,7 @@ export type Layer = {
    * The resolutions the layer declares. **Empty for a treed layer**, which declares none: its
    * lineage is in its edges, and a level number would say nothing about position in it.
    */
-  levels: {level: number; title: string; zoom: [number, number] | null}[];
+  levels: {level: number; title: string | null; zoom: [number, number] | null}[];
   /**
    * Which computed properties the layer **declares** — `centroid`, `box`, `hull` — as `/v1/meta`
    * publishes them in `computed_content` (contracts §3.2 r42). It is the declaration and not a
@@ -362,6 +391,11 @@ export type ViewGroup = {
 
 export type Meta = {
   apiVersion: number;
+  /**
+   * The bundle format version the server opened. Optional in this type only so hand-built
+   * fixtures need not carry it; `TesseraClient.meta` always sets it.
+   */
+  bundleFormat?: number;
   idset: number;
   /**
    * The declared views in serving order (`views.md` §3.2) — the plain views first, then each
@@ -376,6 +410,11 @@ export type Meta = {
   groups: ViewGroup[];
   /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
   declaredScalars: DeclaredScalar[];
+  /**
+   * The group-scoped column families this principal may reach — see {@link ScopedScalar}.
+   * Optional for the reason {@link bundleFormat} is.
+   */
+  scopedScalars?: ScopedScalar[];
   /**
    * The annotation layers this principal reaches — see {@link Layer}. Empty when it reaches none,
    * which is also what a deployment with no layers at all looks like.
@@ -405,6 +444,20 @@ export type Meta = {
      * that means *the set ended* from one that means *the deployment truncated*.
      */
     maxBrowseRows: number;
+    // The ceilings below are optional in this type only so hand-built fixtures need not carry
+    // them; `TesseraClient.meta` always sets them.
+    /** The most vertices a published shape may carry. */
+    maxShapeVertices?: number;
+    /** `/v1/categories/{column}/suggest`'s page ceiling and `limit`'s default. */
+    maxSuggestions?: number;
+    /** The most values one suggestion request examines before it answers `more: true`. */
+    maxSuggestionWalk?: number;
+    /** The visible-set size at or under which a suggestion is answered from the session's own values. */
+    maxSuggestSetEntities?: number;
+    /** The most rows a `POST /v1/items` page holds. */
+    maxPageRows?: number;
+    /** The most Arrow bytes a `POST /v1/items` page holds before compression. */
+    maxPageBytes?: number;
   };
   /** `serve.max_tiles_per_request` — the client's own bound when it chooses a request depth. */
   maxTilesPerRequest: number;

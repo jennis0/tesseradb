@@ -78,7 +78,9 @@ describe('TesseraClient against a live server', () => {
       arrowType: 'u8',
       category: {vocabulary: 'archive', kind: 'declared', visibility: 'public'},
       render: true,
-      index: true
+      index: true,
+      analyser: null,
+      homes: expect.arrayContaining(['rendered'])
     });
     expect(meta.declaredScalars.find((s) => s.name === 'submitted_at')).toMatchObject({arrowType: 'timestamp_us', category: null, render: true, index: false});
     expect(meta.filterOperands.find((f) => f.column === 'archive')).toMatchObject({family: 'category'});
@@ -91,6 +93,9 @@ describe('TesseraClient against a live server', () => {
     ]);
     expect(meta.layers.find((l) => l.name === 'topics/kmeans')!.depsOn).toEqual(['clusters/kmeans']);
     expect(meta.selection.maxBrowseRows).toBeGreaterThan(0);
+    expect(Number.isInteger(meta.bundleFormat)).toBe(true);
+    expect(meta.scopedScalars).toEqual([]);
+    for (const [name, ceiling] of Object.entries(meta.selection)) expect(Number.isInteger(ceiling), name).toBe(true);
   });
 
   it('decodes a viewport whose points sit in the tiles that served them, at the positions /v1/items gives', async (ctx) => {

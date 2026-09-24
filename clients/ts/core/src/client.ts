@@ -191,19 +191,20 @@ export class TesseraClient {
     if (!response.ok) await fail(response);
   }
 
+  /** `GET /v1/meta`. A body missing a field the contract requires is refused. */
   async meta(token: string): Promise<Meta> {
     const response = await fetch(`${this.opts.viewerUrl}/v1/meta`, {
       headers: {authorization: `Bearer ${token}`}
     });
     if (!response.ok) await fail(response);
     const m = (await response.json()) as RawMeta;
+    requireFields(m, META_FIELDS, '/v1/meta');
+    requireFields(m.selection, SELECTION_FIELDS, "/v1/meta's selection");
+    const category = (c: RawCategory | null) => (c ? {vocabulary: c.vocabulary, kind: c.kind, visibility: c.visibility} : null);
     return {
       apiVersion: m.api_version,
+      bundleFormat: m.bundle_format,
       idset: m.idset,
-      // The frame and the four projection fields ride with the view they describe, because that
-      // is where the server declares them: both belong to a view, and two views of one bundle may
-      // quantise and project differently (decision 0040). `projection.ts` is what a client does
-      // with them.
       views: m.views.map((s) => ({
         id: s.id,
         displayName: s.display_name,
@@ -217,13 +218,9 @@ export class TesseraClient {
         worldAspect: s.world_aspect,
         tileScheme: s.tile_scheme,
         tile: s.tile,
-        // The three roster fields are one record on the wire and one object here — a plain view
-        // has all three null, and `group` alone decides which case this is (`views.md` §3.2).
-        roster: s.group === null ? null : {group: s.group, key: s.key!, metadata: s.metadata ?? {}}
+        // The three roster fields are null together on a plain view, so `group` decides the case.
+        roster: s.group === null ? null : {group: s.group, key: s.key!, metadata: s.metadata!}
       })),
-      // The orderings, so a client can offer previous-and-next without interpreting a key. Empty
-      // is what a deployment of plain views alone publishes, and it wants the same rendering as
-      // "no groups here" — no group picker.
       groups: m.groups.map((g) => ({
         name: g.name,
         title: g.title,
@@ -233,13 +230,21 @@ export class TesseraClient {
       declaredScalars: m.declared_scalars.map((s) => ({
         name: s.name,
         arrowType: s.arrow_type,
-        // Null for a plain column, and the absence is the whole signal: without it a `u16`
-        // category is indistinguishable from a `u16` integer, since the hot path ships the code.
-        category: s.category
-          ? {vocabulary: s.category.vocabulary, kind: s.category.kind, visibility: s.category.visibility}
-          : null,
+        category: category(s.category),
         render: s.render,
-        index: s.index
+        index: s.index,
+        analyser: s.analyser,
+        homes: s.homes
+      })),
+      scopedScalars: m.scoped_scalars.map((s) => ({
+        name: s.name,
+        arrowType: s.arrow_type,
+        scope: {group: s.scope.group},
+        category: category(s.category),
+        analyser: s.analyser,
+        render: s.render,
+        index: s.index,
+        views: s.views
       })),
       selection: {
         kMin: m.selection.k_min,
@@ -247,39 +252,35 @@ export class TesseraClient {
         maxK: m.selection.max_k,
         thetaTargetMarks: m.selection.theta_target_marks,
         maxUnderlayOffset: m.selection.max_underlay_offset,
-        maxCategoryValues: m.selection.max_category_values ?? 1_000,
-        maxRegionVertices: m.selection.max_region_vertices ?? 10_000,
-        maxRegionCells: m.selection.max_region_cells ?? 262_144,
-        maxBrowseRows: m.selection.max_browse_rows ?? 200
+        maxCategoryValues: m.selection.max_category_values,
+        maxRegionVertices: m.selection.max_region_vertices,
+        maxRegionCells: m.selection.max_region_cells,
+        maxBrowseRows: m.selection.max_browse_rows,
+        maxShapeVertices: m.selection.max_shape_vertices,
+        maxSuggestions: m.selection.max_suggestions,
+        maxSuggestionWalk: m.selection.max_suggestion_walk,
+        maxSuggestSetEntities: m.selection.max_suggest_set_entities,
+        maxPageRows: m.selection.max_page_rows,
+        maxPageBytes: m.selection.max_page_bytes
       },
-      // Older servers do not publish it; fall back to the documented default rather than
-      // refusing to run against them.
-      maxTilesPerRequest: m.selection.max_tiles_per_request ?? 262_144,
-      // Absent, not merely empty, when the schema declares nothing filterable — so the fallback is
-      // the empty list and a client draws no filter controls, which is the correct rendering of a
-      // bundle that has none.
-      filterOperands: (m.filter_operands ?? []).map((f) => ({
+      maxTilesPerRequest: m.selection.max_tiles_per_request,
+      filterOperands: m.filter_operands.map((f) => ({
         column: f.column,
         family: f.family,
         operands: f.operands,
-        // Absent for an entity-scoped column, which is every column of a bundle that declares no
-        // view group — so the field is omitted rather than nulled, and a client that never met a
-        // scoped attribute reads the list exactly as it did before.
+        // Present only on a group-scoped column.
         ...(f.scope ? {scope: {group: f.scope.group}} : {})
       })),
-      // Gate-filtered by the server, so this list *is* what this principal may know about — and
-      // the empty list is the honest rendering of both "no layers here" and "none you may reach".
-      layers: (m.layers ?? []).map((l) => ({
+      // Filtered per principal by the server: the layers this principal may know exist.
+      layers: m.layers.map((l) => ({
         name: l.name,
         title: l.title,
         views: l.views,
         membership: l.membership,
         hierarchy: {kind: l.hierarchy.kind, pruneChildren: l.hierarchy.prune_children},
-        levels: l.levels.map((v) => ({level: v.level, title: v.title, zoom: v.zoom ?? null})),
+        levels: l.levels.map((v) => ({level: v.level, title: v.title, zoom: v.zoom})),
         computedContent: l.computed_content,
-        // The kind of the layer's one drawn geometry, or null; a server that publishes none is
-        // a server older than the shape columns, and the map then draws boxes for good.
-        shape: l.shape ?? null,
+        shape: l.shape,
         suppliedContent: l.supplied_content,
         depsOn: l.depends_on,
         version: l.version
@@ -893,9 +894,40 @@ function browseRow(r: RawBrowseRow): BrowseRow {
   };
 }
 
+/** The fields `/v1/meta` must carry, and those of its `selection` block. */
+const META_FIELDS = ['api_version', 'bundle_format', 'idset', 'views', 'groups', 'declared_scalars', 'scoped_scalars', 'filter_operands', 'selection', 'layers'] as const;
+const SELECTION_FIELDS = [
+  'k_min',
+  'k_max_marks',
+  'max_k',
+  'theta_target_marks',
+  'max_underlay_offset',
+  'max_tiles_per_request',
+  'max_category_values',
+  'max_shape_vertices',
+  'max_region_vertices',
+  'max_region_cells',
+  'max_suggestions',
+  'max_suggestion_walk',
+  'max_suggest_set_entities',
+  'max_browse_rows',
+  'max_page_rows',
+  'max_page_bytes'
+] as const;
+
+/** Throws where `body` lacks one of `fields`. */
+function requireFields(body: object, fields: readonly string[], where: string): void {
+  for (const field of fields) {
+    if (!(field in body)) throw new Error(`${where} has no \`${field}\`, which the contract requires; the server and this client are from different versions`);
+  }
+}
+
+type RawCategory = {vocabulary: string; kind: 'declared' | 'discovered'; visibility: 'derived' | 'public'};
+
 /** `GET /v1/meta`'s snake_case wire shape, mapped to {@link Meta} above. */
 type RawMeta = {
   api_version: number;
+  bundle_format: number;
   idset: number;
   views: {
     id: string;
@@ -905,36 +937,46 @@ type RawMeta = {
     world_aspect: number | null;
     tile_scheme: TileScheme | null;
     tile: {z: number; x: number; y: number} | null;
-    /** The roster record (`views.md` §3.2); all three null together on a plain view. */
+    /** The roster record; all three null together on a plain view. */
     group: string | null;
     key: string | null;
     metadata: Record<string, ViewMetadataValue> | null;
   }[];
-  /** The view groups, each its view ids in creation order. Empty where there are none. */
   groups: {name: string; title: string | null; members_of: string | null; views: string[]}[];
   declared_scalars: {
     name: string;
     arrow_type: ArrowType;
-    category: {vocabulary: string; kind: 'declared' | 'discovered'; visibility: 'derived' | 'public'} | null;
+    category: RawCategory | null;
+    analyser: string | null;
     render: boolean;
     index: boolean;
+    homes: ('rendered' | 'value_column' | 'record')[];
   }[];
-  filter_operands?: {
+  scoped_scalars: {
+    name: string;
+    arrow_type: ArrowType;
+    scope: {group: string};
+    category: RawCategory | null;
+    analyser: string | null;
+    render: boolean;
+    index: boolean;
+    views: string[];
+  }[];
+  filter_operands: {
     column: string;
     family: FilterOperandSet['family'];
     operands: string[];
     scope?: {group: string};
   }[];
-  /** Absent on a deployment whose server predates layers; empty when this principal reaches none. */
-  layers?: {
+  layers: {
     name: string;
-    title: string;
+    title: string | null;
     views: string[];
     membership: Layer['membership'];
     hierarchy: {kind: Layer['hierarchy']['kind']; prune_children: boolean};
-    levels: {level: number; title: string; zoom: [number, number] | null}[];
+    levels: {level: number; title: string | null; zoom: [number, number] | null}[];
     computed_content: string[];
-    shape?: ShapeKind | null;
+    shape: ShapeKind | null;
     supplied_content: string[];
     depends_on: string[];
     version: number;
@@ -945,11 +987,17 @@ type RawMeta = {
     max_k: number;
     theta_target_marks: number;
     max_underlay_offset: number;
-    max_tiles_per_request?: number;
-    max_category_values?: number;
-    max_region_vertices?: number;
-    max_region_cells?: number;
-    max_browse_rows?: number;
+    max_tiles_per_request: number;
+    max_category_values: number;
+    max_shape_vertices: number;
+    max_region_vertices: number;
+    max_region_cells: number;
+    max_suggestions: number;
+    max_suggestion_walk: number;
+    max_suggest_set_entities: number;
+    max_browse_rows: number;
+    max_page_rows: number;
+    max_page_bytes: number;
   };
 };
 

@@ -314,17 +314,25 @@ export const SELECTION: Meta['selection'] = {
   maxCategoryValues: 1000,
   maxRegionVertices: 10_000,
   maxRegionCells: 262_144,
-  maxBrowseRows: 200
+  maxBrowseRows: 200,
+  maxShapeVertices: 50_000,
+  maxSuggestions: 20,
+  maxSuggestionWalk: 100_000,
+  maxSuggestSetEntities: 10_000_000,
+  maxPageRows: 65_536,
+  maxPageBytes: 16_777_216
 };
 
 /** A deployment of one view `s0` with nothing declared, and whichever fields `over` names. */
 export function meta(over: Partial<Meta> = {}): Meta {
   return {
     apiVersion: 1,
+    bundleFormat: 1,
     idset: 0,
     views: [view('s0')],
     groups: [],
     declaredScalars: [],
+    scopedScalars: [],
     layers: [],
     selection: SELECTION,
     maxTilesPerRequest: 4096,

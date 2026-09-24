@@ -5,7 +5,7 @@ import {TesseraClient, TesseraError} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {liftGolden, liftTilesHighlighted} from './old-shape-columns.js';
 import type {Decoder} from '../src/decoder.js';
-import {refused, result} from './support.js';
+import {refused, rejectsAsRefused, result} from './support.js';
 
 /**
  * What the artifact channel puts on the wire, and what it makes of what comes back.
@@ -98,63 +98,125 @@ describe('the viewport request', () => {
 });
 
 describe('/v1/meta', () => {
-  it('maps the layers this principal reaches, and reads an absent list as none', async () => {
-    const base = {
-      api_version: 1,
-      idset: 7,
-      views: [{id: 's0', display_name: 'S0', quantisation: {x_min: 0, x_max: 65536, y_min: 0, y_max: 65536}, projection: 'none', world_aspect: null, tile_scheme: null, tile: null, group: null, key: null, ordinal: null, metadata: null}],
-      groups: [],
-      declared_scalars: [],
-      selection: {
-        k_min: 1,
-        k_max_marks: 5000,
-        max_k: 5000,
-        theta_target_marks: 16,
-        max_underlay_offset: 3
+  const selection = {
+    k_min: 1,
+    k_max_marks: 5000,
+    max_k: 5000,
+    theta_target_marks: 16,
+    max_underlay_offset: 3,
+    max_tiles_per_request: 4096,
+    max_category_values: 1000,
+    max_shape_vertices: 50_000,
+    max_region_vertices: 10_000,
+    max_region_cells: 262_144,
+    max_suggestions: 20,
+    max_suggestion_walk: 100_000,
+    max_suggest_set_entities: 10_000_000,
+    max_browse_rows: 200,
+    max_page_rows: 65_536,
+    max_page_bytes: 16_777_216
+  };
+  const body = {
+    api_version: 1,
+    bundle_format: 9,
+    idset: 7,
+    views: [{id: 's0', display_name: 'S0', quantisation: {x_min: 0, x_max: 65536, y_min: 0, y_max: 65536}, projection: 'none', world_aspect: null, tile_scheme: null, tile: null, group: null, key: null, metadata: null}],
+    groups: [],
+    declared_scalars: [{name: 'abstract', arrow_type: 'text', category: null, analyser: 'unicode/1', render: false, index: true, homes: ['record']}],
+    scoped_scalars: [
+      {name: 'mood', arrow_type: 'u8', scope: {group: 'quarter'}, category: {vocabulary: 'moods', kind: 'declared', visibility: 'public'}, analyser: null, render: true, index: true, views: ['quarter:q1']}
+    ],
+    filter_operands: [
+      {column: 'abstract', family: 'text', operands: ['match', 'phrase']},
+      {column: 'mood', family: 'category', operands: ['eq', 'in'], scope: {group: 'quarter'}}
+    ],
+    selection,
+    layers: [
+      {
+        name: 'clusters/hdbscan-2026-08',
+        title: null,
+        views: ['s0'],
+        membership: 'enumerated',
+        hierarchy: {kind: 'flat', prune_children: false},
+        levels: [{level: 0, title: null, zoom: [0, 4]}],
+        computed_content: ['centroid'],
+        shape: 'derived',
+        supplied_content: [],
+        depends_on: [],
+        version: 3
       }
-    };
-    const withLayer = {
-      ...base,
+    ]
+  };
+
+  it('decodes every field the contract publishes', async () => {
+    stubFetch(() => new Response(JSON.stringify(body), {status: 200}));
+    expect(await client().meta('tok')).toEqual({
+      apiVersion: 1,
+      bundleFormat: 9,
+      idset: 7,
+      views: [{id: 's0', displayName: 'S0', quantisation: {xMin: 0, xMax: 65536, yMin: 0, yMax: 65536}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
+      groups: [],
+      declaredScalars: [{name: 'abstract', arrowType: 'text', category: null, analyser: 'unicode/1', render: false, index: true, homes: ['record']}],
+      scopedScalars: [
+        {name: 'mood', arrowType: 'u8', scope: {group: 'quarter'}, category: {vocabulary: 'moods', kind: 'declared', visibility: 'public'}, analyser: null, render: true, index: true, views: ['quarter:q1']}
+      ],
+      filterOperands: [
+        {column: 'abstract', family: 'text', operands: ['match', 'phrase']},
+        {column: 'mood', family: 'category', operands: ['eq', 'in'], scope: {group: 'quarter'}}
+      ],
+      selection: {
+        kMin: 1,
+        kMaxMarks: 5000,
+        maxK: 5000,
+        thetaTargetMarks: 16,
+        maxUnderlayOffset: 3,
+        maxCategoryValues: 1000,
+        maxShapeVertices: 50_000,
+        maxRegionVertices: 10_000,
+        maxRegionCells: 262_144,
+        maxSuggestions: 20,
+        maxSuggestionWalk: 100_000,
+        maxSuggestSetEntities: 10_000_000,
+        maxBrowseRows: 200,
+        maxPageRows: 65_536,
+        maxPageBytes: 16_777_216
+      },
+      maxTilesPerRequest: 4096,
       layers: [
         {
           name: 'clusters/hdbscan-2026-08',
-          title: 'HDBSCAN clusters',
+          title: null,
           views: ['s0'],
           membership: 'enumerated',
-          hierarchy: {kind: 'flat', prune_children: false},
-          levels: [{level: 0, title: 'clusters', zoom: null}],
-          computed_content: [],
-          supplied_content: [],
-          depends_on: [],
+          hierarchy: {kind: 'flat', pruneChildren: false},
+          levels: [{level: 0, title: null, zoom: [0, 4]}],
+          computedContent: ['centroid'],
+          shape: 'derived',
+          suppliedContent: [],
+          depsOn: [],
           version: 3
         }
       ]
-    };
+    });
+  });
 
-    let body = withLayer;
-    stubFetch(() => new Response(JSON.stringify(body), {status: 200}));
+  it('refuses a body missing any field the contract requires, at the top or in selection', async () => {
+    const missing: Record<string, unknown>[] = [];
+    for (const field of Object.keys(body)) {
+      const {[field]: _, ...rest} = body as Record<string, unknown>;
+      missing.push(rest);
+    }
+    for (const field of Object.keys(selection)) {
+      const {[field]: _, ...rest} = selection as Record<string, unknown>;
+      missing.push({...body, selection: rest});
+    }
+    let answer: Record<string, unknown> = body;
+    stubFetch(() => new Response(JSON.stringify(answer), {status: 200}));
     const c = client();
-
-    const reached = await c.meta('tok');
-    expect(reached.layers).toEqual([
-      {
-        name: 'clusters/hdbscan-2026-08',
-        title: 'HDBSCAN clusters',
-        views: ['s0'],
-        membership: 'enumerated',
-        hierarchy: {kind: 'flat', pruneChildren: false},
-        levels: [{level: 0, title: 'clusters', zoom: null}],
-        computedContent: [],
-        shape: null,
-        suppliedContent: [],
-        depsOn: [],
-        version: 3
-      }
-    ]);
-
-    body = base as typeof withLayer;
-    // No layers reached and no layers registered are one answer, and neither is a failure.
-    expect((await c.meta('tok')).layers).toEqual([]);
+    for (const without of missing) {
+      answer = without;
+      await rejectsAsRefused(c.meta('tok'));
+    }
   });
 });
 
