@@ -96,8 +96,8 @@ listed() {  # listed <file> <path>...: whether the file is one of the paths or u
   return 1
 }
 
-# Every matching line as file:line:text. Fenced blocks, backticked spans and link targets are not
-# checked; a fenced line is blanked so the line numbers still match the file.
+# Every matching line as file:line:text. Fenced blocks, backticked spans, link targets and HTML tags
+# are not checked; a fenced line is blanked so the line numbers still match the file.
 hits() {  # hits <path>...
   local p f regex
   for p in "$@"; do
@@ -107,7 +107,7 @@ hits() {  # hits <path>...
       regex=$REGEX
       listed "$f" "${USER_PAGES[@]}" && regex=$USER_REGEX
       awk '/^[[:space:]]*(```|~~~)/ { fenced = !fenced; print ""; next } fenced { print ""; next } { print }' "$f" |
-        sed -e 's/`[^`]*`//g' -e 's/\](\([^)]*\))/]/g' | grep -niE -e "$regex" | sed "s|^|$f:|"
+        sed -e 's/`[^`]*`//g' -e 's/\](\([^)]*\))/]/g' -e 's/<[^>]*>//g' | grep -niE -e "$regex" | sed "s|^|$f:|"
     done
   done
 }
