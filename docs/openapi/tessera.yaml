@@ -1,62 +1,75 @@
-# Tessera's viewer and session planes, as an OpenAPI 3.1 description.
+# Tessera's HTTP API: the viewer, session and control planes, as an OpenAPI 3.1 description.
 #
 # Hand-authored, and kept true by `crates/tessera-server/tests/openapi.rs`, which starts the
 # server, exercises every route below (a success and at least one refusal each) and validates
 # every JSON request and response body against the schemas in `components`. A field added to a
 # response and not to this file fails that test, because every closed DTO is declared
-# `additionalProperties: false`. The contract itself is `docs/design/contracts.md` §3 (the API)
-# and §5 (the framing); where the two disagree, contracts wins and this file is wrong.
+# `additionalProperties: false`. Where this file and the server disagree, the server is right and
+# this file is wrong.
 #
 # What this file cannot say: the framed-Arrow bodies of `POST /v1/viewport`, `POST /v1/items` and
-# `POST /v1/artifacts`. They are not JSON, so each is declared as `application/octet-stream` and
-# described in prose on its route, and `docs/openapi/README.md` carries worked decodes in Python
-# and in JavaScript. The JSON frames of the two bulk reads have schemas
-# below (`ItemsHead`, `ArtifactsHead`, `PageEnd`, `RecordsTrailer`).
+# `POST /v1/artifacts`, and the Arrow IPC forms of `POST /control/ingest`, `POST /control/values`
+# and `PATCH /control/layers/{name}/artifacts`. They are not JSON, so each is declared as a binary
+# media type and described in prose on its route. `docs/openapi/README.md` carries worked decodes
+# of the framed bodies in Python and in JavaScript. The JSON frames of the two bulk reads have
+# schemas below (`ItemsHead`, `ArtifactsHead`, `PageEnd`, `RecordsTrailer`).
 openapi: 3.1.0
 info:
-  title: Tessera viewer and session planes
+  title: Tessera HTTP API
   version: "1"
-  summary: A permission-masked point service — the two planes a client speaks to.
+  summary: The viewer, session and control planes of a Tessera server.
   description: |
-    Two listeners. The **session plane** mints and revokes viewer sessions and is authenticated by
-    the operator-configured *session credential*, a shared secret; it is never browser-facing. The
-    **viewer plane** answers about the corpus as one principal may see it and is authenticated by
-    the *session token* the session plane minted. `/healthz` and `/readyz` sit on both, unauthenticated,
-    bare status codes with no body.
+    Three listeners. The **session plane** mints and revokes viewer sessions and is authenticated
+    by the *session credential*, a shared secret the operator configures; it is never
+    browser-facing. The **viewer plane** answers about the corpus as one principal may see it and
+    is authenticated by the *session token* the session plane minted. The **control plane**
+    declares, ingests, deletes, suppresses and publishes, reports the node's state, and is
+    authenticated by the *operator credential*, a second shared secret. `/healthz` and `/readyz`
+    sit on the viewer and session listeners, unauthenticated, bare status codes with no body.
 
     `api_version` is published by `GET /v1/meta` and by nothing else. There is no version header,
-    on either side, so a client must not send one as a negotiation and must not expect a refusal
-    if its assumed version is wrong (contracts §3.1).
+    on any plane. A client does not send one to negotiate, and a server does not refuse a client
+    whose assumed version is wrong.
 
-    **Every error is one envelope** (`Error` below) with a closed code list, and the codes group
-    into three refusal classes that tell a client whether to retry (contracts §3.1, design §10.6):
+    Every refusal a route's handler makes is one envelope (`Error` below) with a closed code list.
+    The codes group into three classes that tell a client whether to retry:
 
-    - **Failure** — `500 fail-closed`, `503 not-ready`. Fail-closed and never a partial result.
-    - **Backpressure** — `429 backpressure`. Retry the request *unchanged*, after `Retry-After`,
-      which every 429 carries together with an agreeing body `retry_after_s`. The number is
-      per-subject — `1` for the viewer and session planes' compute-admission gate, derived
-      elsewhere — so read the header rather than assuming it.
-    - **Shape** — `422 contract`. Must not be retried unchanged; the request has to change.
+    - **Failure**: `500 fail-closed` and `503 not-ready`. Never a partial result.
+    - **Backpressure**: `429 backpressure`. Retry the request unchanged after `Retry-After`, which
+      every 429 carries with an agreeing body `retry_after_s`. The number depends on what shed the
+      request: `1` for the compute-admission gate, and derived from the write executor's service
+      time on the control plane. Read the header.
+    - **Shape**: `422 contract`. The request has to change before it is sent again.
 
-    `401`, `403`, `404` and `409` are none of the three: they concern the credential or the
-    identity of the thing addressed. The `401`/`403` split is best-effort — a `401 bad-credential`
-    on a token that previously worked is a revoked session, and a client treats it as it treats
-    `403 expired-token`: the session has ended, re-authorise.
+    `401`, `403`, `404` and `409` are in none of the three: they concern the credential or the
+    thing addressed. A `401 bad-credential` on a session token that worked before is a revoked
+    session, and a client treats it as `403 expired-token`: the session has ended, so
+    re-authorise.
 
-    A refusal is a function of the request and the deployment's configuration, never of the
-    viewer's data. In particular `404 unknown` is one status, one code and one detail string for
-    *no such identifier* and *exists but is not visible to this principal*.
+    The HTTP framework answers three refusals itself, before a handler runs, with a plain-text
+    body instead of the envelope: `400` for a JSON body that does not parse or a path segment that
+    is not UTF-8, `413` for a JSON body over its route's byte cap, and `415` for a JSON route
+    called without `content-type: application/json`.
+
+    On the viewer plane a refusal depends on the request and the deployment's configuration, and
+    never on the viewer's data. `404 unknown` there is one status, one code and one detail string
+    for *no such identifier* and *exists but is not visible to this principal*.
 servers:
   - url: http://{viewer-host}
-    description: The viewer plane listener (`serve.viewer_bind`). Routes under `/v1/`.
+    description: The viewer plane's listener, `serve.viewer`. Routes under `/v1/`, and the probes.
     variables:
       viewer-host:
         default: 127.0.0.1:8080
   - url: http://{session-host}
-    description: The session plane listener (`serve.session_bind`). Routes under `/session/`.
+    description: The session plane's listener, `serve.session`. Routes under `/session/`, and the probes.
     variables:
       session-host:
         default: 127.0.0.1:8081
+  - url: http://{control-host}
+    description: "The control plane's listener, `serve.control`: a loopback TCP address, or a Unix socket written `unix:<path>`. Routes under `/control/`."
+    variables:
+      control-host:
+        default: 127.0.0.1:8082
 
 tags:
   - name: session
@@ -64,7 +77,31 @@ tags:
   - name: viewer
     description: The corpus as one principal sees it. Authenticated by a session token.
   - name: probes
-    description: Liveness and readiness, on both listeners, unauthenticated, no body.
+    description: Liveness and readiness, on the viewer and session listeners, unauthenticated, no body.
+  - name: "control: ingest"
+    description: New items, with their positions, labels and values. Control plane.
+  - name: "control: values"
+    description: Values on items that already exist. Control plane.
+  - name: "control: changes"
+    description: Deletions, suppressions and lifted suppressions. Control plane.
+  - name: "control: status"
+    description: The node's state, counters and published limits. Control plane.
+  - name: "control: flush"
+    description: Publishing buffered writes ahead of the next tick. Control plane.
+  - name: "control: compact"
+    description: Asking for a compaction fold. Control plane.
+  - name: "control: attributes"
+    description: Declaring attribute columns. Control plane.
+  - name: "control: vocabularies"
+    description: Declaring vocabularies and adding values to them. Control plane.
+  - name: "control: views"
+    description: Declaring plain views, and creating and dropping the views of a view group. Control plane.
+  - name: "control: view groups"
+    description: Declaring view groups. Control plane.
+  - name: "control: layers"
+    description: Registering and dropping annotation layers. Control plane.
+  - name: "control: artifacts"
+    description: Publishing a layer's artifacts and growing their memberships. Control plane.
 
 paths:
   /session/authorise:
@@ -968,12 +1005,1045 @@ paths:
         "500":
           $ref: "#/components/responses/FailClosed"
 
+  /control/ingest:
+    post:
+      tags: ["control: ingest"]
+      operationId: ingest
+      summary: Insert a batch of new items into one view.
+      description: |
+        The body is the batch's rows. `content-type` chooses the encoding: `application/json`,
+        `application/x-ndjson` or none at all is JSON, an array of objects or one object per line,
+        each keyed by column name; `application/vnd.apache.arrow.stream` is an Arrow IPC stream of
+        one or more record batches. Any other `content-type` is `422`.
+
+        **Columns.** The coordinates are `x` and `y` on a view whose projection is `none`, and
+        `lon` and `lat` in degrees on any other; a number on every row in JSON, `float32` or
+        `float64` in Arrow. A coordinate outside the view's extent is stored on its edge and
+        counted in `clamped`; one outside the projection's domain is counted in `clipped`; a
+        non-finite one is `422`. `access` holds the row's access labels: in JSON a string, a list
+        of strings or `null`; in Arrow a required column of strings, lists of strings or a
+        dictionary of strings. A null, an empty list and a label empty once trimmed are no label. A
+        row with no label takes the view's `point_visibility.default`, and the batch is `422` where
+        the view declares none. `external_id` is optional, base64 in JSON and `binary` in Arrow, at
+        most 64 bytes. `node_id` is accepted and not stored. Every other column is a declared
+        attribute, a group-scoped attribute of the view's group, or an enumerated layer; any other
+        name is `422`.
+
+        **Attributes.** A declared attribute the batch leaves out is absent on every row, and is
+        counted in `padded_columns`. In JSON, an attribute one row names is named on every row,
+        `null` where the row has no value. A category takes its vocabulary's key: under a `closed`
+        vocabulary an unknown key is `422`, and under an `open` one it is added. An integer is
+        read exactly, from a JSON number or a string of digits; `timestamp_us` is microseconds
+        since the Unix epoch.
+
+        **Layers.** A column named after an enumerated layer places each row in that layer's
+        artifacts: a key, or a list of keys whose meaning follows the layer's `hierarchy`, `null`
+        or `-1` for none. A `level` column places the keys at a level. On a `closed` layer an
+        unknown key is `422`; on an `open` one it creates the artifact, counted in `minted`. A
+        layer scoped to a view group needs the batch's view to be one of that group's.
+
+        **Identity.** An external id that already has a row in this view is `409`: a position is
+        not updated in place. One that has a row in another view joins that item, and a joining row
+        whose labels or values differ from the item's is `409`. One whose item was deleted starts
+        a new item, and one whose item is suppressed joins it and stays hidden. Two rows with the
+        same external id are `409`.
+
+        **Retries.** `x-tessera-batch-id` names the batch. The same bytes sent again under the same
+        id answer `200` with `replayed: true` and change nothing; different bytes under a used id
+        are `409`.
+
+        **Limits.** The body is at most `ingest.ingest_max_batch_bytes` and the batch at most
+        `ingest.ingest_max_batch_rows` rows; either over is `422`, and `/control/status` publishes
+        both under `limits.ingest`. Past `ingest.ingest_admission` requests in flight across this
+        route and `POST /control/values`, and while `ingest.ingest_buffer_max_items` items are
+        buffered, the request is `429`. A `401` is answered before any other refusal, and a `429`
+        for admission before the body is decoded.
+
+        The answer follows the write-ahead log's fsync. The rows become visible in the publication
+        cycle `publication` names.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/BatchId"
+        - $ref: "#/components/parameters/WriteView"
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IngestRecords"
+          application/x-ndjson:
+            schema:
+              type: string
+              description: One JSON object per line, each an `IngestRecord`. Blank lines are skipped.
+          application/vnd.apache.arrow.stream:
+            schema:
+              type: string
+              format: binary
+              description: An Arrow IPC stream whose columns are the JSON form's, at the Arrow types this route names.
+      responses:
+        "200":
+          description: The batch was accepted, or was a replay of an accepted batch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "404":
+          description: "`x-tessera-view` names no view."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The batch id was used for a different body; two rows share an external id; an external id already has a row in this view; a row joining an item in another view carries labels or values that differ from the item's. Nothing was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "The body is over the byte cap or cannot be read; `x-tessera-batch-id` is missing; `content-type` names another encoding; no `x-tessera-view` on a deployment with several views; a column is misnamed, undeclared or of the wrong type; a cell does not fit its column; a key is not in a closed vocabulary or layer; unlabelled rows on a view with no default; the batch is over the row cap. The detail names the row and column, never the id sent. Nothing was written."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          description: "`503 not-ready`: the write executor is not running, or a partition is serving a stepped-down manifest. Nothing was taken."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /control/values:
+    post:
+      tags: ["control: values"]
+      operationId: values
+      summary: Fill attribute values, and layer memberships, on items that already exist.
+      description: |
+        The body is encoded as `POST /control/ingest`'s is, and creates no item. A row names its
+        item by exactly one of `external_id`, and `tessera_id` with the `idset` it was minted
+        under. `tessera_id` is a string of decimal digits, `utf8` in Arrow, and `idset` an integer,
+        `uint32` in Arrow. A row naming an item the deployment does not hold is `422`, naming the
+        row by its index. The other columns are declared attributes, group-scoped attributes and enumerated
+        layers, as on ingest, and a row may leave any of them out.
+
+        **The fill rule.** A cell that holds no value takes the one sent and is counted in
+        `filled`. A cell that holds the same value is counted in `held` and is not written again.
+        A cell that holds a different value is `409`, and the batch has no effect. A layer column
+        adds each row to the artifacts it names, counted in `joined`, and on an `open` layer
+        creates the artifacts it does not find, counted in `minted`.
+
+        **Views.** A group-scoped attribute or a layer scoped to a group is written under the key
+        of the view `x-tessera-view` names, which must be a view of that group. Without the header
+        the batch may carry entity-scoped columns only.
+
+        Retries, byte and row caps and admission are `POST /control/ingest`'s, and `/control/status`
+        publishes the caps under `limits.values`. A replay answers `replayed: true`, `filled: 0`
+        and `held` equal to the row count.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/BatchId"
+        - $ref: "#/components/parameters/WriteView"
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValuesRecords"
+          application/x-ndjson:
+            schema:
+              type: string
+              description: One JSON object per line, each a `ValuesRecord`. Blank lines are skipped.
+          application/vnd.apache.arrow.stream:
+            schema:
+              type: string
+              format: binary
+              description: An Arrow IPC stream whose columns are the JSON form's. Every record batch of the stream carries the same columns.
+      responses:
+        "200":
+          description: The batch was applied, or was a replay of an applied batch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValuesResponse"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "404":
+          description: "`x-tessera-view` names no view."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: A cell holds a different value, the batch id was used for a different body, or `idset` is not the deployment's. The detail never names the held value. Nothing was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "The body is over the byte cap or cannot be read; `x-tessera-batch-id` is missing; a row names no item, two, one the deployment does not hold, or a `tessera_id` without an `idset`; two idsets in one batch; a column is undeclared or of the wrong type; a scoped column or layer without a view of its group; the batch is over the row cap. Nothing was written."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
+  /control/changes:
+    post:
+      tags: ["control: changes"]
+      operationId: changes
+      summary: Delete, suppress or lift the suppression of items.
+      description: |
+        `delete` removes an item from every view and every count; the compaction fold removes its
+        rows from disc. `suppress` hides an item from every viewer until `unsuppress` lifts it.
+        There is no edit: to change an item's access labels, delete it and ingest it again under
+        the same external id, and `op: "predicate"` is refused with that advice.
+
+        Every item is checked and its address resolved before any is applied, so a request with one
+        bad item applies nothing. An unknown `tessera_id` is answered ahead of an unknown external
+        id. A request carries at most 10,000 items in at most 2 MiB; over either is `422`, and
+        `/control/status` publishes both under `limits.changes`.
+
+        A deletion or suppression is in force from the moment it is accepted, for every request,
+        and the `200` follows the write-ahead log's fsync. This route is never shed with `429` and
+        has no readiness check. A `500` means a change may be in force without being durable:
+        sending the same request again is safe, and treating the items as visible is not.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/ChangeItem"
+      responses:
+        "200":
+          description: Every change is applied and durable. `publication` is the next cycle; the changes do not wait for it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicationAck"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "404":
+          description: An external id or a `tessera_id` names nothing the deployment holds. The detail names the item by its index. Nothing was applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "`idset` is not the deployment's. Nothing was applied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "The body is not a JSON array of change items, is over 2 MiB or carries more than 10,000 items; an unknown `op`; an item naming neither or both of `external_id` and `tessera_id`; `idset` with `external_id`, or none with `tessera_id`; two idsets in one request; an external id that is not base64; a `tessera_id` that is not a decimal string. Nothing was applied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: "`500 fail-closed`: the request was attempted and did not complete. The detail says whether a change may be in force and whether one was certainly not applied. Send the whole request again."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: "`503 not-ready`: no item reached the write executor, which is not running. Nothing was applied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /control/status:
+    get:
+      tags: ["control: status"]
+      operationId: status
+      summary: The node's state, its counters and the write routes' limits.
+      description: |
+        One JSON document, read fresh on every request. It carries corpus-wide figures such as
+        `entity_id_high_water`, which is why it sits behind the operator credential. Counters count
+        from the process's start. `readiness` and `write_executor.ready` agree with `/readyz`.
+      security:
+        - operatorCredential: []
+      responses:
+        "200":
+          description: The status document.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+
+  /control/flush:
+    post:
+      tags: ["control: flush"]
+      operationId: flush
+      summary: Publish buffered writes at the next tick instead of waiting for it.
+      description: |
+        Pulls the next publication cycle forward and answers `202` without waiting for it; two
+        requests before one tick share it. `publication` names the first cycle certain to include
+        every write buffered before the request. With `wait=visible` the `202` is held until that
+        cycle has run, or until `serve.visible_wait_max_secs` passes. A cycle flushes one view's
+        buffered rows, so rows in several views take one cycle each. A request body is not read.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/Wait"
+      responses:
+        "202":
+          description: The cycle is requested.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicationAck"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "422":
+          description: "`wait` has a value other than `visible`, or the query names another parameter. No cycle was requested."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /control/compact:
+    post:
+      tags: ["control: compact"]
+      operationId: compact
+      summary: Ask for a compaction fold at the next tick.
+      description: |
+        Sets a flag the write executor reads at its next tick, and answers `202` with no body. A
+        fold rewrites the bundle with deleted rows removed and runs for minutes to hours on a
+        large corpus. A request while a fold runs is dropped, and the `202` cannot say so;
+        `compaction` on `/control/status` shows what happened, including a fold refused for want
+        of memory or disc. The query string is not read.
+      security:
+        - operatorCredential: []
+      responses:
+        "202":
+          description: The fold is requested. No body.
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+
+  /control/attributes:
+    put:
+      tags: ["control: attributes"]
+      operationId: declareAttribute
+      summary: Declare an attribute column.
+      description: |
+        The body is a corpus declaration's `[[attribute]]` block in JSON, without the keys that
+        say where a build reads the values. The column is added after every column declared
+        before it. From the answer on, a batch may carry the column, `/v1/meta` lists it, and every
+        item holds no value in it until one is written.
+
+        The name is the column's identity. Declaring it again with the same fields answers `200`
+        and changes nothing; with any field different it is `409`. A name a layer holds is `422`.
+        `render = true` is refused on this route: declare a rendered column at a build.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttributeDeclaration"
+      responses:
+        "200":
+          description: The name already carries this declaration. Nothing was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttributeDeclared"
+        "201":
+          description: The column is declared.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttributeDeclared"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "409":
+          description: The name is declared with a different type, vocabulary, analyser, flags or scope. A column's type is written into every row, so it cannot change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/DeclarationTooLarge"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "An unknown field or type; `render = true`; a name that is not a valid column name or is a layer's; a category with no `vocabulary`, or one naming no vocabulary; `vocabulary` on another type; `analyser` on a type other than `text`, or an unknown analyser; a group scope naming no view group, or a group that takes its views from another."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
+  /control/vocabularies/{name}:
+    put:
+      tags: ["control: vocabularies"]
+      operationId: declareVocabulary
+      summary: Declare a vocabulary, the value set a category column draws on.
+      description: |
+        The body is a corpus declaration's `[[vocabulary]]` block in JSON, without the keys that
+        say where a build reads the values. The server draws every value's code; a body naming a
+        `code` is `422`.
+
+        The name, `value_set`, `visibility`, `width` and `reserved` are the vocabulary's identity.
+        Declaring it again with the same identity answers `200`, applies `values` as a page, as
+        `PATCH /control/vocabularies/{name}/values` does, and changes nothing else. With a
+        different identity it is `409`.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/VocabularyName"
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VocabularyDeclaration"
+      responses:
+        "200":
+          description: The name already carries this identity, and the values were applied as a page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VocabularyDeclared"
+        "201":
+          description: The vocabulary is declared with the values sent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VocabularyDeclared"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "409":
+          description: The name is declared with a different value set, visibility, width or reserved list. A code's width is written into every row that carries one, so it cannot change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/DeclarationTooLarge"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "An unknown field, such as `code`; a name that is not a valid identifier; a `width` other than `u8`, `u16` or `u32`; a reserved code that is 0 or past the width; an empty key, or a key named twice; more values than the width holds."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
+  /control/vocabularies/{name}/values:
+    patch:
+      tags: ["control: vocabularies"]
+      operationId: addVocabularyValues
+      summary: Add a page of values to a vocabulary, and set their titles.
+      description: |
+        Adds each key the vocabulary does not hold, with a code the server draws. A key it holds
+        keeps its code. A title sent for a held key replaces the key's title, so a client draws the
+        new name while every row carrying the code keeps its meaning. A page removes nothing. A
+        page that adds no key and changes no title writes nothing.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/VocabularyName"
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VocabularyValues"
+      responses:
+        "200":
+          description: The page is applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VocabularyValuesAdded"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "404":
+          description: No vocabulary has this name. A page does not create one, since a vocabulary's width and visibility are its declaration's to state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/DeclarationTooLarge"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: An unknown field; an empty key, or a key named twice; more values than the vocabulary's width holds. Nothing was added.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
+  /control/view_groups/{name}:
+    put:
+      tags: ["control: view groups"]
+      operationId: declareViewGroup
+      summary: Declare a view group, whose views are created one key at a time.
+      description: |
+        The body is a corpus declaration's `[[view_group]]` block in JSON, without its roster and
+        its source. The group starts with no views; `PUT /control/views/{group}/{key}` creates
+        them. A group's name and a plain view's name share one namespace.
+
+        The name is the group's identity. Declaring it again with the same fields answers `200`
+        and changes nothing; with any field different it is `409`, since a group's frame and gate
+        never change.
+      security:
+        - operatorCredential: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The group's name, which its views' ids begin with.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ViewGroupDeclaration"
+      responses:
+        "200":
+          description: The name already carries this declaration. Nothing was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewGroupDeclared"
+        "201":
+          description: The group is declared, with no views.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewGroupDeclared"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "404":
+          description: "`members` names no view group."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The name is declared with a different title, frame, projection, gate, point default, metadata or `members`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/DeclarationTooLarge"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "An unknown field; a name that is not a valid key, or a plain view's; an unknown projection; an extent that is not finite or has a maximum below its minimum; `members` naming a group that takes its own views from another, or with `metadata`; a metadata name declared twice, or of type `category`; a gate label or point default the auth plugin refuses."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
+  /control/views/{name}:
+    put:
+      tags: ["control: views"]
+      operationId: declarePlainView
+      summary: Declare a plain view, a coordinate system that belongs to no group.
+      description: |
+        The body is a corpus declaration's `[[view]]` block in JSON, without its source. The view
+        starts with no rows and takes them at its first flush. A plain view's name and a group's
+        name share one namespace, and a plain view has no drop route.
+
+        The name is the view's identity. Declaring it again with the same fields answers `200` and
+        changes nothing; with a different title, frame, projection, gate or point default it is
+        `409`.
+      security:
+        - operatorCredential: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The view's id, as a viewer request names it.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlainViewDeclaration"
+      responses:
+        "200":
+          description: The name already carries this declaration. Nothing was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlainViewDeclared"
+        "201":
+          description: The view is declared, with no rows.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlainViewDeclared"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "409":
+          description: The name is declared with a different title, frame, projection, gate or point default.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/DeclarationTooLarge"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "An unknown field; a name that is not a valid key, or a view group's; an unknown projection; an extent that is not finite or has a maximum below its minimum; a gate label or point default the auth plugin refuses."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
+  /control/views/{group}/{key}:
+    put:
+      tags: ["control: views"]
+      operationId: createView
+      summary: Create a view of a view group.
+      description: |
+        The view's id is `<group>:<key>`. It starts with no rows, and takes the group's frame and
+        projection. Its gate is the one sent, or the group's where none is. Its metadata carries
+        one value per name the group declares, each typed by its JSON form: a boolean, an integer,
+        a number with a fraction, or a string. The record cannot be changed after it is created.
+
+        A key held by a live view is `409`. A dropped key may be created again, and the new view
+        starts with none of the old one's rows or artifacts.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/ViewGroup"
+        - $ref: "#/components/parameters/ViewKey"
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ViewRecord"
+      responses:
+        "201":
+          description: The view is created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewCreated"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "404":
+          description: No view group has this name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: A live view holds this key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/DeclarationTooLarge"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "An unknown field; a key that is not valid; a metadata value that is null, an array or an object, or that does not match the type the group declares; a metadata name the group does not declare, or one it declares left out; a gate label the auth plugin refuses; a group that takes its views from another."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+    delete:
+      tags: ["control: views"]
+      operationId: dropView
+      summary: Drop a view of a view group and free its key.
+      description: |
+        The view leaves every roster at once, including the rosters of groups sharing its views,
+        and its rows stay on disc, unreachable, until the compaction fold. Its artifacts become
+        unreachable with it. Rows and group-scoped values buffered for it and not yet flushed are
+        discarded, and `fills_dropped` counts the values.
+
+        No item is deleted unless `delete_dangling` is `true`: then every item with a row in this
+        view and in no other is deleted, as `POST /control/changes` deletes it, and `deleted`
+        counts them.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/ViewGroup"
+        - $ref: "#/components/parameters/ViewKey"
+        - name: delete_dangling
+          in: query
+          required: false
+          description: Also delete the items that have a row in this view and no other. Absent is `false`.
+          schema:
+            type: boolean
+            default: false
+        - $ref: "#/components/parameters/Wait"
+      responses:
+        "200":
+          description: The view is dropped.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ViewDropped"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "404":
+          description: No live view of this group holds this key, or no group has this name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "`delete_dangling` is not `true` or `false`; `wait` has a value other than `visible`; the query names another parameter."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
+  /control/layers:
+    put:
+      tags: ["control: layers"]
+      operationId: registerLayer
+      summary: Register an annotation layer.
+      description: |
+        The body is a corpus declaration's `[[layer]]` block in JSON. `views` may name a view
+        group, which stands for every view the group holds when the layer is registered. The
+        answer follows the write-ahead log's fsync and carries the layer's `tessera_id`, the address
+        `POST /control/changes` suppresses it by.
+
+        A layer's name is its identity for ever: a name already registered, or one a dropped layer
+        held, is `422`, including a second request with the same declaration. A refusal means the
+        layer does not exist.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LayerDeclaration"
+      responses:
+        "201":
+          description: The layer is registered, with no artifacts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LayerRegistered"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "413":
+          $ref: "#/components/responses/DeclarationTooLarge"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "An unknown field, including the removed `withdraw_on_member_deletion`; a name that is empty, `all`, registered, or held by a dropped layer; a view that is neither a view nor a view group; a view outside the group a group-scoped layer names; a `depends_on` layer that is not registered, or the layer itself; levels on a `nested` or `dag` layer, none on a `stacked` or `tiered` one, levels not numbered densely from 0, or a level whose `zoom` range holds no depth; a `fraction` outside (0, 1], or on a `spatial` or attribute layer; `shape` on a layer that is not `spatial`; two drawn geometries; content, dependencies, levels, labels or a layout on an attribute layer; an unknown computed property; a repeated view, level title or content name; a label the auth plugin cannot read; a `spatial` layer over both projected and unprojected views."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
+  /control/layers/{name}:
+    delete:
+      tags: ["control: layers"]
+      operationId: dropLayer
+      summary: Drop a layer and retire its name.
+      description: |
+        The layer and its artifacts stop being served at once. Its name is never registered again,
+        since bookmarks, edges and suppressions name a layer, and its entity ids are not reused.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/LayerName"
+        - $ref: "#/components/parameters/Wait"
+      responses:
+        "200":
+          description: The layer is dropped.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicationAck"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "422":
+          description: "No layer is registered under this name; `wait` has a value other than `visible`; the query names another parameter."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
+  /control/layers/{name}/artifacts:
+    put:
+      tags: ["control: artifacts"]
+      operationId: publishArtifacts
+      summary: Publish artifacts into one level of a layer, all or none.
+      description: |
+        The body is JSON only; `application/vnd.apache.arrow.stream` is `422`. Each artifact names
+        its members by `members`, or by `excluding`, the view's items it leaves out. Members are
+        addressed as the batch's `addressing` says: base64 external ids, or `tessera_id` decimal
+        strings under the batch's `idset`. A member that names nothing is `404`, and a deleted one
+        is `422`.
+
+        An artifact whose `key` the level already holds is not created again: its members are
+        added to the held membership, and a part it lacks (its parents, attachment, contents,
+        shape or access labels) is filled. A part it holds with a different value is `409`, and the
+        detail never names the held value. The answer is `201` if the batch created an artifact,
+        and `200` if every key was held.
+
+        A large membership is published with its first page here and the rest with `PATCH`.
+        Per request: at most `ingest.max_artifacts_per_request` artifacts, `excluding` at most
+        `ingest.max_excluded_per_request` long, a body of at most `ingest.publish_max_body_bytes`,
+        and a shape of at most `serve.max_shape_vertices` vertices after it is fitted to each view.
+        Over any is `422`; `/control/status` publishes them under `limits.publish`.
+
+        The answer gives each artifact's `tessera_id` in the order sent, and never an ordinal or a
+        membership's size. `shapes` reports what fitting each shape to each of the layer's views
+        did.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/LayerName"
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishRequest"
+      responses:
+        "200":
+          description: Every key was held; the batch added members or filled parts, or changed nothing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactsPublished"
+        "201":
+          description: The batch created at least one artifact.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactsPublished"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "404":
+          description: A member or a content's generating set names nothing the deployment holds. The detail names it by its position in the batch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: A held artifact holds a part with a different value, or a second `excluding` for a held key; or `idset` is not the deployment's. Nothing was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "The body is not JSON, is over its cap or is Arrow; an unknown field; no artifacts, or more than the cap; an artifact with neither `members` nor `excluding` that attaches to nothing, or with both; an exclusion list over its cap; `view` missing on a layer scoped to a group or present on another; `idset` missing with `tessera` addressing or present with `external`; a member that is not base64 or not a decimal string; a deleted member; an unknown layer or level; a shape on a layer that declares none, none on one that does, the wrong kind, or one over the vertex cap; labels the layer does not take, or none where it requires them; a parent or attachment that does not exist."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+    patch:
+      tags: ["control: artifacts"]
+      operationId: growMemberships
+      summary: Add members to artifacts a level holds, remove them from generating sets, and fill missing parts.
+      description: |
+        Each row names an artifact by the key it was published under; an unknown key is `422`, and
+        this verb creates nothing. `members` joins the membership. With a `rank`, `members` and
+        `leaving` move the generating set of the content at that rank instead, and a page that
+        empties the set withdraws the content, reported as `withdrawn`. A part the artifact lacks
+        is filled; one it holds with a different value is `409`. The batch commits whole.
+
+        The body is JSON, or an Arrow IPC stream as `application/vnd.apache.arrow.stream`. The
+        Arrow form carries one row per artifact: `key` as `utf8`, `members` as `list<utf8>` or
+        `large_list<utf8>`, and optionally `view` as `utf8` and `access` in any form ingest's
+        `access` takes, with `addressing`, `level` and `idset` in the schema's metadata as strings.
+        It carries joining members and access labels only; every other part travels as JSON. Any
+        other column or metadata key is `422`.
+
+        At most `ingest.max_members_per_request` members, joining and leaving together, and a body
+        of at most `ingest.publish_max_body_bytes`; over either is `422`, and `/control/status`
+        publishes both under `limits.grow`. The answer never carries an ordinal or a membership's
+        size.
+      security:
+        - operatorCredential: []
+      parameters:
+        - $ref: "#/components/parameters/LayerName"
+        - $ref: "#/components/parameters/Wait"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GrowRequest"
+          application/vnd.apache.arrow.stream:
+            schema:
+              type: string
+              format: binary
+              description: One row per artifact, with the envelope in the schema's metadata, as this route describes.
+      responses:
+        "200":
+          description: The batch is applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MembershipsGrown"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/OperatorBadCredential"
+        "404":
+          description: A member names nothing the deployment holds. The detail names it by its position in the batch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: An artifact holds a part with a different value, or `idset` is not the deployment's. Nothing was written.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "The body cannot be read or is over its cap; an unknown field, column or metadata key; no artifacts; more members than the cap; an unknown key, layer or level; `leaving` without a `rank`; `view` missing on a layer scoped to a group or present on another; `idset` missing with `tessera` addressing or present with `external`; a member that is not base64 or not a decimal string; a deleted member; a shape the layer does not take; a content without a generating set on a layer whose content requires every member visible."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/WriteFailed"
+        "503":
+          $ref: "#/components/responses/ExecutorNotReady"
+
 components:
   securitySchemes:
     sessionCredential:
       type: http
       scheme: bearer
-      description: The operator-configured session credential (`serve.session_credential`), a shared secret. Compared in constant time. Never handed to a browser.
+      description: The session credential, a shared secret read from the file `serve.session_credential_file` names or the environment variable `serve.session_credential_env` names. Compared in constant time. Never handed to a browser.
+    operatorCredential:
+      type: http
+      scheme: bearer
+      description: The operator credential, a shared secret read from the file `serve.operator_credential_file` names or the environment variable `serve.operator_credential_env` names. Compared in constant time. Every path on the control listener requires it, and it is checked before the request's query or body is read, so a caller without it is answered `401` ahead of any other refusal.
     sessionToken:
       type: http
       scheme: bearer
@@ -988,8 +2058,94 @@ components:
       schema:
         type: string
         pattern: "^[0-9]+$"
+    Wait:
+      name: wait
+      in: query
+      required: false
+      description: "`visible` holds the answer until the publication cycle this write is in has run, or until `serve.visible_wait_max_secs` passes, and the answer's `visible` says which. Absent answers at once. Any other value, or a query parameter the route does not define, is `422`."
+      schema:
+        type: string
+        enum: [visible]
+    BatchId:
+      name: x-tessera-batch-id
+      in: header
+      required: true
+      description: The batch's identity, chosen by the caller, for retries. The same body sent again under the same id is answered as it was and changes nothing; a different body under a used id is `409`. Missing, or not UTF-8, is `422`.
+      schema:
+        type: string
+    WriteView:
+      name: x-tessera-view
+      in: header
+      required: false
+      description: The view the batch writes into, by id. Required where the deployment has more than one view. A name no view has is `404`; a value that is not UTF-8 is `422`.
+      schema:
+        type: string
+    VocabularyName:
+      name: name
+      in: path
+      required: true
+      description: The vocabulary's name, as an attribute's `vocabulary` names it.
+      schema:
+        type: string
+    ViewGroup:
+      name: group
+      in: path
+      required: true
+      description: The view group's name.
+      schema:
+        type: string
+    ViewKey:
+      name: key
+      in: path
+      required: true
+      description: The view's key within its group. The view's id is `<group>:<key>`.
+      schema:
+        type: string
+    LayerName:
+      name: name
+      in: path
+      required: true
+      description: The layer's name. A `/` in it is sent as `%2F`.
+      schema:
+        type: string
 
   responses:
+    OperatorBadCredential:
+      description: "`401 bad-credential`: the operator credential is missing or wrong. Nothing about the request was read."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotJson:
+      description: The JSON body does not parse, or a path segment is not UTF-8 once percent-decoded. The HTTP framework answers this before the handler runs, with a plain-text body.
+      content:
+        text/plain:
+          schema:
+            type: string
+    NotJsonContentType:
+      description: "The request does not carry `content-type: application/json`. The HTTP framework answers this before the handler runs, with a plain-text body."
+      content:
+        text/plain:
+          schema:
+            type: string
+    DeclarationTooLarge:
+      description: The body is over 2 MiB, the declaration routes' cap, published on `/control/status` as `limits.declarations.max_body_bytes`. The HTTP framework answers this before the handler runs, with a plain-text body.
+      content:
+        text/plain:
+          schema:
+            type: string
+    WriteFailed:
+      description: "`500 fail-closed`: the write could not be made durable, or the write executor stopped while holding it. It may have been applied in full, so this is not a refusal; the detail says so. Sending the same request again is safe."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ExecutorNotReady:
+      description: "`503 not-ready`: the write executor is not running. Nothing was taken."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     BadCredential:
       description: "`401 bad-credential`: missing, malformed or unrecognised bearer credential. On a token that previously worked this is the session ending — revoked — and a client treats it exactly as `403`."
       content:
@@ -1043,7 +2199,7 @@ components:
   schemas:
     Error:
       type: object
-      description: The one error envelope, every plane (contracts §3.1). The code list is closed.
+      description: The one error envelope, on every plane. The code list is closed.
       additionalProperties: false
       required: [error, detail]
       properties:
@@ -1060,7 +2216,7 @@ components:
             - not-ready
         detail:
           type: string
-          description: Human-readable. Identical for every branch of a `404`, so it discloses nothing an enumeration could use.
+          description: Human-readable. On the viewer plane it is identical for every branch of a `404`, so it discloses nothing an enumeration could use. On the control plane it names what was refused, and a row or member by its position in the batch, never by the identifier sent.
         retry_after_s:
           type: integer
           minimum: 0
@@ -2366,3 +3522,1822 @@ components:
           type: integer
           minimum: 0
           description: "The rung this artifact sits at — the declared level on a levelled layer, `0` on a treed or flat one (which, this response being one artifact with no parent links, is also its response-local chain depth; the viewport frame's `rung` column carries the same number). The one field here that is a fact about the artifact rather than about the asking principal: two principals served it agree on it."
+
+    PublicationAck:
+      type: object
+      additionalProperties: false
+      required: [publication]
+      description: When a write becomes visible. Every write route's answer carries these two fields.
+      properties:
+        publication:
+          type: integer
+          minimum: 0
+          description: The publication cycle this write is in. It is visible once `/control/status`'s `publication` reaches this number.
+        visible:
+          type: boolean
+          description: "Present only with `wait=visible`: `true` where the cycle ran before the answer, `false` where `serve.visible_wait_max_secs` passed first."
+
+    IngestRecords:
+      type: array
+      description: A JSON ingest batch, one object per row.
+      items:
+        $ref: "#/components/schemas/IngestRecord"
+
+    IngestRecord:
+      type: object
+      description: One row of a JSON ingest batch. The properties below are the route's own; any other key is a declared attribute, a group-scoped attribute of the view's group, or an enumerated layer's name.
+      properties:
+        external_id:
+          type: [string, "null"]
+          contentEncoding: base64
+          description: The caller's identifier for the item, at most 64 bytes. Absent or `null` is an item with none, addressed later only by the `tessera_id` the answer gives.
+        x:
+          type: number
+          description: The horizontal coordinate, on a view whose projection is `none`.
+        y:
+          type: number
+          description: The vertical coordinate, on a view whose projection is `none`.
+        lon:
+          type: number
+          description: Longitude in degrees, on a projected view.
+        lat:
+          type: number
+          description: Latitude in degrees, on a projected view.
+        access:
+          description: The row's access labels, one per element. Absent, `null` or `[]` is no label, which the view's `point_visibility.default` fills.
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: [string, "null"]
+            - type: "null"
+        node_id:
+          type: [string, "null"]
+          description: Accepted and not stored.
+        level:
+          type: [integer, string, "null"]
+          description: The level at which this row's layer keys are placed, as an integer or a string of digits. Read only where the batch carries a layer column.
+      additionalProperties:
+        description: "An attribute's value, or a layer's key or list of keys. A category takes its key; an integer is a JSON number or a string of digits; `timestamp_us` is microseconds since the Unix epoch; `null` is no value."
+        type: [boolean, number, string, array, "null"]
+
+    IngestResponse:
+      type: object
+      additionalProperties: false
+      required: [accepted, over_bound, over_bound_ids, clipped, clamped, padded_columns, tessera_ids, minted, publication]
+      properties:
+        accepted:
+          type: integer
+          minimum: 0
+          description: Rows accepted. `0` on a replay, so a sum over retried batches counts each row once.
+        over_bound:
+          type: integer
+          minimum: 0
+          description: Rows whose labels resolve to more terms than the auth plugin's per-item bound. They are stored, not refused.
+        over_bound_ids:
+          type: array
+          maxItems: 100
+          description: The external ids of the first 100 of those rows that carry one, in base64.
+          items:
+            type: string
+            contentEncoding: base64
+        clipped:
+          type: integer
+          minimum: 0
+          description: Rows whose coordinates lay outside the projection's domain and were stored on the frame's edge. Always `0` on a view whose projection is `none`.
+        clamped:
+          type: integer
+          minimum: 0
+          description: Rows whose coordinates lay outside the view's extent and were stored on its edge.
+        padded_columns:
+          type: integer
+          minimum: 0
+          description: Declared attributes the batch left out, each absent on every row.
+        tessera_ids:
+          type: array
+          description: One `tessera_id` per row in the order sent, as a string of decimal digits, whether or not the row carries an external id. A replay answers the original ids.
+          items:
+            type: string
+            pattern: "^[0-9]+$"
+        minted:
+          type: integer
+          minimum: 0
+          description: Artifacts the batch's layer columns created on `open` layers. A created artifact cannot be undone. `0` on a replay.
+        replayed:
+          const: true
+          description: Present only when this body was already accepted under this batch id. Nothing was written.
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`. A replay names the next cycle, later than the one that published its rows."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    ValuesRecords:
+      type: array
+      description: A JSON values batch, one object per row.
+      items:
+        $ref: "#/components/schemas/ValuesRecord"
+
+    ValuesRecord:
+      type: object
+      description: One row of a JSON values batch. It names its item by exactly one of `external_id`, and `tessera_id` with `idset`. Any other key is a declared attribute, a group-scoped attribute of the view's group, or an enumerated layer's name, as on ingest.
+      properties:
+        external_id:
+          type: [string, "null"]
+          contentEncoding: base64
+          description: The item's external id.
+        tessera_id:
+          type: [string, "null"]
+          pattern: "^[0-9]+$"
+          description: The item's `tessera_id`, as a string of decimal digits.
+        idset:
+          type: [integer, string, "null"]
+          description: The idset `tessera_id` was minted under, from `/v1/meta`. Required with `tessera_id` and refused with `external_id`.
+        level:
+          type: [integer, string, "null"]
+          description: As on `IngestRecord`.
+      additionalProperties:
+        description: An attribute's value, or a layer's key or list of keys, as on `IngestRecord`. A key the row leaves out leaves that cell as it is.
+        type: [boolean, number, string, array, "null"]
+
+    ValuesResponse:
+      type: object
+      additionalProperties: false
+      required: [rows, filled, held, joined, minted, publication]
+      properties:
+        rows:
+          type: integer
+          minimum: 0
+          description: Rows the batch carried.
+        filled:
+          type: integer
+          minimum: 0
+          description: Cells that held no value and now hold the one sent. `0` on a replay.
+        held:
+          type: integer
+          minimum: 0
+          description: Cells that already held the value sent.
+        joined:
+          type: integer
+          minimum: 0
+          description: Memberships the layer columns added, to artifacts created by this batch and to held ones alike.
+        minted:
+          type: integer
+          minimum: 0
+          description: Artifacts the layer columns created on `open` layers.
+        replayed:
+          const: true
+          description: Present only when this body was already accepted under this batch id. Nothing was written.
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    ChangeItem:
+      type: object
+      additionalProperties: false
+      required: [op]
+      description: One change. It names its item by exactly one of `external_id`, and `tessera_id` with `idset`.
+      properties:
+        op:
+          type: string
+          enum: [delete, suppress, unsuppress]
+          description: "`delete` removes the item; `suppress` hides it; `unsuppress` lifts a suppression."
+        external_id:
+          type: string
+          contentEncoding: base64
+          description: The item's external id.
+        tessera_id:
+          type: string
+          pattern: "^[0-9]+$"
+          description: The item's `tessera_id`, as a string of decimal digits; a JSON number is `422`.
+        idset:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: The idset `tessera_id` was minted under, from `/v1/meta`. Every item of one request carries the same one.
+      oneOf:
+        - required: [external_id]
+          not:
+            anyOf:
+              - required: [tessera_id]
+              - required: [idset]
+        - required: [tessera_id, idset]
+          not:
+            required: [external_id]
+
+    AttributeDeclaration:
+      type: object
+      additionalProperties: false
+      required: [name, type]
+      description: A corpus declaration's `[[attribute]]` block, without the keys that say where a build reads its values.
+      properties:
+        name:
+          type: string
+          description: The column's name, unique among attributes and layers.
+        title:
+          type: [string, "null"]
+          description: A human-readable title. Not part of the column's identity.
+        type:
+          type: string
+          enum: [bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, timestamp_us, keyword, text, category]
+          description: The value type. `category` stores its vocabulary's codes at the vocabulary's width.
+        vocabulary:
+          type: [string, "null"]
+          description: The vocabulary a `category` draws on, by name. Required for a category and refused on any other type.
+        analyser:
+          type: [string, "null"]
+          description: The analyser that segments a `text` column for search. Absent is `unicode`, the only one. Refused on any other type.
+        index:
+          type: boolean
+          default: false
+          description: Build a search structure, so a filter may name the column.
+        render:
+          type: boolean
+          default: false
+          description: Serve the column in the viewport's points frame. `true` is refused on this route.
+        scope:
+          description: "`entity`, one value per item, or `{\"group\": \"<view_group>\"}`, one value per item for each view of that group. Absent is `entity`."
+          default: entity
+          oneOf:
+            - type: string
+              const: entity
+            - $ref: "#/components/schemas/GroupScope"
+
+    GroupScope:
+      type: object
+      additionalProperties: false
+      required: [group]
+      properties:
+        group:
+          type: string
+          description: The view group whose views the values or artifacts are per.
+
+    AttributeDeclared:
+      type: object
+      additionalProperties: false
+      required: [name, existing, publication]
+      properties:
+        name:
+          type: string
+        existing:
+          type: boolean
+          description: "`true` where the name already carried this declaration and nothing was written."
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    VocabularyDeclaration:
+      type: object
+      additionalProperties: false
+      required: [value_set, visibility, width]
+      description: A corpus declaration's `[[vocabulary]]` block, without its name, which is in the path, and without the keys that say where a build reads its values.
+      properties:
+        title:
+          type: [string, "null"]
+          description: A human-readable title. Not part of the identity.
+        value_set:
+          type: string
+          enum: [closed, open]
+          description: "`closed` refuses a key it does not hold at ingest; `open` adds it."
+        visibility:
+          type: string
+          enum: [public, derived]
+          description: "`public` serves the values as declared to every viewer. `derived` serves a value only to a viewer who can see an item carrying it."
+        width:
+          type: string
+          enum: [u8, u16, u32]
+          description: The code's width, which bounds how many values the vocabulary can hold.
+        values:
+          type: array
+          default: []
+          description: The values to add, each with a code the server draws.
+          items:
+            $ref: "#/components/schemas/VocabularyValue"
+        reserved:
+          type: array
+          default: []
+          description: Retired codes, never drawn. Each is from 1 to the width's maximum. Compared as a set.
+          items:
+            type: integer
+            minimum: 1
+
+    VocabularyValue:
+      type: object
+      additionalProperties: false
+      required: [key]
+      properties:
+        key:
+          type: string
+          minLength: 1
+          description: The value's key, which ingest sends and filters name. Unique in the vocabulary.
+        title:
+          type: [string, "null"]
+          description: The name a client draws. On a key the vocabulary holds, a title replaces the held one.
+
+    VocabularyValues:
+      type: object
+      additionalProperties: false
+      required: [values]
+      properties:
+        values:
+          type: array
+          items:
+            $ref: "#/components/schemas/VocabularyValue"
+
+    VocabularyDeclared:
+      type: object
+      additionalProperties: false
+      required: [name, existing, added, titles, publication]
+      properties:
+        name:
+          type: string
+        existing:
+          type: boolean
+          description: "`true` where the name already carried this identity."
+        added:
+          type: integer
+          minimum: 0
+          description: Keys the request added.
+        titles:
+          type: integer
+          minimum: 0
+          description: Held keys whose title the request changed.
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    VocabularyValuesAdded:
+      type: object
+      additionalProperties: false
+      required: [name, added, existing, titles, publication]
+      properties:
+        name:
+          type: string
+        added:
+          type: integer
+          minimum: 0
+          description: Keys the page added.
+        existing:
+          type: integer
+          minimum: 0
+          description: Keys the page named that the vocabulary already held.
+        titles:
+          type: integer
+          minimum: 0
+          description: Held keys whose title the page changed.
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    Extent:
+      type: object
+      additionalProperties: false
+      required: [x, y]
+      description: The frame a view's positions are quantised over, in the view's own coordinates. It never changes.
+      properties:
+        x:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: number }
+          description: "`[min, max]` on the horizontal axis."
+        y:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: number }
+          description: "`[min, max]` on the vertical axis."
+
+    Gate:
+      description: The access labels a viewer must hold one of to reach the view, as one label or a list. It never changes.
+      oneOf:
+        - type: string
+        - type: array
+          items: { type: string }
+
+    PointVisibility:
+      type: object
+      additionalProperties: false
+      properties:
+        default:
+          type: [string, "null"]
+          description: The access label an ingested row with no label takes. Absent or `null`, such a row is refused.
+
+    Projection:
+      type: string
+      enum: [none, web_mercator, equirectangular, plate_carree, gall_isographic]
+      default: none
+      description: What places positions in the view. `none` takes coordinates as written; the others take longitude and latitude in degrees. `plate_carree` is another name for `equirectangular`.
+
+    ViewGroupDeclaration:
+      type: object
+      additionalProperties: false
+      required: [extent]
+      description: A corpus declaration's `[[view_group]]` block, without its name, which is in the path, and without its roster and source.
+      properties:
+        title:
+          type: [string, "null"]
+        projection:
+          $ref: "#/components/schemas/Projection"
+        extent:
+          $ref: "#/components/schemas/Extent"
+        visibility:
+          description: The gate every view of the group takes unless it names its own. Absent or `null` is `public`.
+          oneOf:
+            - $ref: "#/components/schemas/Gate"
+            - type: "null"
+        point_visibility:
+          oneOf:
+            - $ref: "#/components/schemas/PointVisibility"
+            - type: "null"
+        members:
+          type: [string, "null"]
+          description: Another view group whose views this group lays out a second time, under the same keys. That group must own its keys, and a group with `members` declares no `metadata`.
+        metadata:
+          type: array
+          default: []
+          description: The typed values each view of the group carries, in the order a client is served them.
+          items:
+            $ref: "#/components/schemas/MetadataField"
+
+    MetadataField:
+      type: object
+      additionalProperties: false
+      required: [name, type]
+      properties:
+        name:
+          type: string
+          description: The name, unique in the group.
+        type:
+          type: string
+          enum: [bool, u8, u16, u32, u64, i8, i16, i32, i64, float, text, timestamp_us, category]
+          description: The value's type. `category` is refused on this route.
+        vocabulary:
+          type: [string, "null"]
+          description: The vocabulary a `category` draws on.
+
+    ViewGroupDeclared:
+      type: object
+      additionalProperties: false
+      required: [group, existing, publication]
+      properties:
+        group:
+          type: string
+        existing:
+          type: boolean
+          description: "`true` where the name already carried this declaration and nothing was written."
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    PlainViewDeclaration:
+      type: object
+      additionalProperties: false
+      required: [extent]
+      description: A corpus declaration's `[[view]]` block, without its name, which is in the path, and without its source.
+      properties:
+        title:
+          type: [string, "null"]
+          description: The name a client draws. Absent is the view's id.
+        projection:
+          $ref: "#/components/schemas/Projection"
+        extent:
+          $ref: "#/components/schemas/Extent"
+        visibility:
+          description: The view's gate. Absent or `null` is `public`.
+          oneOf:
+            - $ref: "#/components/schemas/Gate"
+            - type: "null"
+        point_visibility:
+          oneOf:
+            - $ref: "#/components/schemas/PointVisibility"
+            - type: "null"
+
+    PlainViewDeclared:
+      type: object
+      additionalProperties: false
+      required: [view, existing, publication]
+      properties:
+        view:
+          type: string
+        existing:
+          type: boolean
+          description: "`true` where the name already carried this declaration and nothing was written."
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    ViewRecord:
+      type: object
+      additionalProperties: false
+      description: A view's roster record. It cannot be changed after the view is created.
+      properties:
+        visibility:
+          description: The view's own gate. Absent or `null` takes the group's.
+          oneOf:
+            - $ref: "#/components/schemas/Gate"
+            - type: "null"
+        metadata:
+          type: object
+          default: {}
+          description: One value for each name the group declares, and no other. A `timestamp_us` is microseconds since the Unix epoch, as an integer; an integer is never read as a float, nor a float as an integer.
+          additionalProperties:
+            type: [boolean, number, string]
+
+    ViewCreated:
+      type: object
+      additionalProperties: false
+      required: [view, group, key, publication]
+      properties:
+        view:
+          type: string
+          description: The view's id, `<group>:<key>`.
+        group:
+          type: string
+        key:
+          type: string
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    ViewDropped:
+      type: object
+      additionalProperties: false
+      required: [deleted, fills_dropped, publication]
+      properties:
+        deleted:
+          type: integer
+          minimum: 0
+          description: Items `delete_dangling` deleted. `0` without it.
+        fills_dropped:
+          type: integer
+          minimum: 0
+          description: Group-scoped values written for this view and not yet flushed, which were discarded with it.
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    LayerDeclaration:
+      type: object
+      additionalProperties: false
+      required: [name, views, membership, artifact_visibility, hierarchy]
+      description: A corpus declaration's `[[layer]]` block.
+      properties:
+        name:
+          type: string
+          description: The layer's identity, for ever. Not empty and not `all`.
+        title:
+          type: [string, "null"]
+        views:
+          type: array
+          items: { type: string }
+          description: The views the layer is drawn on. A view group's name stands for every view the group holds at registration.
+        membership:
+          description: "Where artifacts get their members: `enumerated`, a stored set per artifact; `spatial`, the items inside the artifact's shape; `{\"attribute\": \"<column>\"}`, the items carrying each value of an attribute."
+          oneOf:
+            - type: string
+              enum: [enumerated, spatial]
+            - type: object
+              additionalProperties: false
+              required: [attribute]
+              properties:
+                attribute:
+                  type: string
+        value_set:
+          type: string
+          enum: [closed, open]
+          default: closed
+          description: "`closed` refuses a key no artifact holds when a batch names it; `open` creates the artifact."
+        visibility:
+          type: [string, "null"]
+          description: The access label a viewer must hold to know the layer exists. Absent or `null`, every viewer may.
+        artifact_visibility:
+          type: object
+          additionalProperties: false
+          required: [default]
+          description: Whether artifacts carry access labels of their own, and what one carrying none gets.
+          properties:
+            field:
+              type: [string, "null"]
+              description: Present, artifacts carry their own labels, and a publication states each artifact's `access`. Absent or `null`, they carry none, and a label on one is refused.
+            default:
+              description: "What an artifact with no label of its own gets: `inherited`, the layer's gate alone, or `{\"label\": \"<label>\"}`."
+              oneOf:
+                - type: string
+                  const: inherited
+                - type: object
+                  additionalProperties: false
+                  required: [label]
+                  properties:
+                    label:
+                      type: string
+        require_member_visibility:
+          description: "How many of an artifact's members a viewer must see for the artifact to exist for them: `{\"count\": n}`, or `{\"fraction\": p}` of its declared members with `p` in (0, 1]. Absent or `null` is no such rule. A fraction is refused where the membership is `spatial` or an attribute."
+          oneOf:
+            - type: "null"
+            - type: object
+              additionalProperties: false
+              required: [count]
+              properties:
+                count:
+                  type: integer
+                  minimum: 0
+            - type: object
+              additionalProperties: false
+              required: [fraction]
+              properties:
+                fraction:
+                  type: number
+        hierarchy:
+          type: object
+          required: [kind]
+          description: Where the layer's lineage lives. Keys other than these two are ignored.
+          properties:
+            kind:
+              type: string
+              enum: [flat, nested, dag, stacked, tiered]
+              description: "`flat` has no lineage. `nested` is a tree held in parent edges, and `dag` the same with several parents allowed; neither declares levels. `stacked` is independent analyses, one per level. `tiered` is levels with containment edges from each level to the one below. `stacked` and `tiered` declare at least one level."
+            prune_children:
+              type: boolean
+              default: false
+              description: The viewport's default cut. `true` serves only the deepest passing artifact on each branch where a parent and a child both pass; a request may ask for more.
+        content:
+          type: object
+          additionalProperties: false
+          description: What artifacts carry beside their members. The removed key `withdraw_on_member_deletion` is refused by name.
+          properties:
+            computed:
+              type: array
+              default: []
+              description: Properties computed per viewer from the members that viewer can see.
+              items:
+                type: string
+                enum: [centroid, box, hull]
+            supplied:
+              type: array
+              default: []
+              description: Content the publisher supplies, in the order each artifact's `values` carry it.
+              items:
+                $ref: "#/components/schemas/SuppliedContent"
+        depends_on:
+          type: array
+          default: []
+          items: { type: string }
+          description: Registered layers whose artifacts this layer's artifacts may attach to or name as parents.
+        levels:
+          type: array
+          default: []
+          description: The layer's levels, numbered densely from 0. Empty on a `flat`, `nested` or `dag` layer.
+          items:
+            $ref: "#/components/schemas/LevelDeclaration"
+        layout:
+          description: How each level's membership is stored for serving. Absent or `null` lets the build and every fold choose. Every form serves the same answers.
+          oneOf:
+            - type: "null"
+            - type: string
+              enum: [artifact_major, row_major_label, row_major_list]
+        shape:
+          description: The kind of shape a `spatial` layer's artifacts carry. Refused on any other membership. A spatial layer without it accepts no artifacts.
+          oneOf:
+            - type: "null"
+            - type: object
+              additionalProperties: false
+              required: [kind]
+              properties:
+                kind:
+                  type: string
+                  enum: [bbox, circle, ellipse, polygon]
+        scope:
+          description: "`entity`, one artifact set drawn on every view the layer names, or `{\"group\": \"<view_group>\"}`, a different set per view of that group. Absent is `entity`."
+          default: entity
+          oneOf:
+            - type: string
+              const: entity
+            - $ref: "#/components/schemas/GroupScope"
+
+    SuppliedContent:
+      type: object
+      additionalProperties: false
+      required: [name, type, require_member_visibility]
+      properties:
+        name:
+          type: string
+          description: The content's name, unique in the layer.
+        type:
+          type: string
+          description: The content's type, published in `/v1/meta`'s `supplied_content`. `polygon`, `circle` and `ellipse` are authored shapes, read from the value's text; any other type is served as the string sent.
+        require_member_visibility:
+          type: string
+          enum: [all, inherited]
+          description: "`all` serves the content only to a viewer who can see every item it was made from, and each content carries `generated_from`. `inherited` serves it wherever the artifact is served, and carries no `generated_from`."
+
+    LevelDeclaration:
+      type: object
+      required: [level]
+      description: One level of a `stacked` or `tiered` layer. Keys other than these three are ignored.
+      properties:
+        level:
+          type: integer
+          minimum: 0
+        title:
+          type: [string, "null"]
+        zoom:
+          description: "`[min, max]` tile depth: a viewport naming no `levels` is answered at the levels whose range covers its depth. Absent or `null`, the level is served at every depth. A range holding no depth from 0 to 16 is refused."
+          oneOf:
+            - type: "null"
+            - type: array
+              minItems: 2
+              maxItems: 2
+              items: { type: integer, minimum: 0 }
+
+    LayerRegistered:
+      type: object
+      additionalProperties: false
+      required: [name, tessera_id, publication]
+      properties:
+        name:
+          type: string
+        tessera_id:
+          type: string
+          pattern: "^[0-9]+$"
+          description: The layer's own identifier, the address `POST /control/changes` suppresses the layer by.
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    PublishRequest:
+      type: object
+      additionalProperties: false
+      required: [addressing, artifacts]
+      properties:
+        level:
+          type: integer
+          minimum: 0
+          default: 0
+          description: The level the artifacts go into. Absent is 0, the only level of a layer that declares none.
+        addressing:
+          type: string
+          enum: [external, tessera]
+          description: How every member in the batch is written. `external` is a base64 external id; `tessera` is a `tessera_id` as a string of decimal digits.
+        idset:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: The idset the `tessera_id`s were minted under. Required with `tessera` addressing and refused with `external`.
+        default_space:
+          type: string
+          enum: [view, wgs84]
+          description: The space of a shape, and of authored shape content, whose artifact names none. `view` takes the view's own coordinates; `wgs84` takes degrees, projected by each view's own projection and refused on a view whose projection is `none`. Absent is `view`.
+        artifacts:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/PublishedArtifact"
+
+    PublishedArtifact:
+      type: object
+      additionalProperties: false
+      description: One artifact of a publication. Its members are `members` or `excluding`; an artifact with `attached_to` may carry neither, and is served over its target's members.
+      properties:
+        key:
+          type: [string, "null"]
+          description: The publisher's key, unique in the level. Needed by any artifact another names as a parent or target, and by any grown later.
+        view:
+          type: [string, "null"]
+          description: The key of the view the artifact belongs to. Required on a layer scoped to a group, refused on any other.
+        members:
+          type: [array, "null"]
+          items: { type: string }
+          description: The members, addressed as the batch's `addressing` says. `[]` is a membership that holds nobody.
+        excluding:
+          type: [array, "null"]
+          items: { type: string }
+          description: The view's items the membership leaves out, addressed as `members` are. The membership is every other item of the view. Refused beside `members`.
+        content:
+          type: array
+          default: []
+          description: Ranked supplied content, most specific first.
+          items:
+            $ref: "#/components/schemas/ContentItem"
+        attached_to:
+          oneOf:
+            - $ref: "#/components/schemas/Attachment"
+            - type: "null"
+        parent:
+          type: array
+          default: []
+          items: { type: string }
+          description: Parent keys. At most one on a `nested` or `tiered` layer, any number on a `dag`. A parent already exists or comes earlier in the batch.
+        bbox:
+          type: [array, "null"]
+          items: { type: number }
+          description: "`[min_x, min_y, max_x, max_y]`, on a layer whose `shape` is `bbox`."
+        circle:
+          type: [array, "null"]
+          items: { type: number }
+          description: "`[cx, cy, r]`, on a layer whose `shape` is `circle`."
+        ellipse:
+          type: [array, "null"]
+          items: { type: number }
+          description: "`[cx, cy, a, b, angle_degrees]`, on a layer whose `shape` is `ellipse`."
+        wkt:
+          type: [string, "null"]
+          description: A WKT polygon or multipolygon, on a layer whose `shape` is `polygon`.
+        space:
+          type: [string, "null"]
+          enum: [view, wgs84, null]
+          description: This artifact's space, in place of `default_space`.
+        access:
+          type: [array, "null"]
+          items: { type: string }
+          description: The artifact's own access labels. `null` or `[]` is no label, which `artifact_visibility.default` answers. Absent states none, which a layer whose `artifact_visibility` names a field refuses. Refused on a layer that names no field.
+
+    ContentItem:
+      type: object
+      additionalProperties: false
+      required: [values]
+      properties:
+        values:
+          type: array
+          items: { type: string }
+          description: One value per supplied content the layer declares, in the declaration's order.
+        generated_from:
+          type: array
+          default: []
+          items: { type: string }
+          description: The items this content was made from, addressed as `members` are. Required where the content's `require_member_visibility` is `all`, and refused where it is `inherited`.
+
+    Attachment:
+      type: object
+      additionalProperties: false
+      required: [layer, key]
+      description: The artifact this one is attached to, such as a cluster its label names. The target already exists, on a layer this one's `depends_on` names. The attached artifact is served only where its target is.
+      properties:
+        layer:
+          type: string
+        level:
+          type: integer
+          minimum: 0
+          default: 0
+        key:
+          type: string
+
+    ArtifactsPublished:
+      type: object
+      additionalProperties: false
+      required: [artifacts, created, without_content, filled, joined, publication]
+      properties:
+        artifacts:
+          type: array
+          description: One entry per artifact, in the order sent.
+          items:
+            type: object
+            additionalProperties: false
+            required: [key, tessera_id]
+            properties:
+              key:
+                type: [string, "null"]
+              tessera_id:
+                type: string
+                pattern: "^[0-9]+$"
+                description: The artifact's identifier, the held artifact's own where the key was held.
+        created:
+          type: integer
+          minimum: 0
+          description: Artifacts the batch created.
+        without_content:
+          type: integer
+          minimum: 0
+          description: Of those, the ones with no content on a layer that declares some.
+        filled:
+          type: integer
+          minimum: 0
+          description: Parts filled on held artifacts.
+        joined:
+          type: integer
+          minimum: 0
+          description: Memberships added, to created and held artifacts alike.
+        shapes:
+          type: array
+          description: Present when the batch carried a shape or authored shape content.
+          items:
+            $ref: "#/components/schemas/ShapeReport"
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    ShapeReport:
+      type: object
+      additionalProperties: false
+      required: [key, views]
+      description: What fitting one shape to each of its layer's views did.
+      properties:
+        key:
+          type: [string, "null"]
+          description: The artifact's key.
+        content:
+          type: integer
+          minimum: 0
+          description: The rank of the authored shape content this reports on. Absent for the artifact's own shape.
+        views:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [view, clipped, outside, rings_dropped, degrees_looking, vertices_in, vertices_out, parts, rings, interior_tiles, boundary_cells]
+            properties:
+              view:
+                type: string
+              clipped:
+                type: boolean
+                description: Part of the shape lay outside the view's extent and was cut away.
+              outside:
+                type: boolean
+                description: The whole shape lay outside the extent, so it holds nothing.
+              rings_dropped:
+                type: integer
+                minimum: 0
+                description: Rings that fell below three distinct vertices on the view's grid.
+              degrees_looking:
+                type: boolean
+                description: Every coordinate lay within ±180 by ±90 while the extent does not. The shape may have been written in degrees for a view that is not.
+              vertices_in:
+                type: integer
+                minimum: 0
+              vertices_out:
+                type: integer
+                minimum: 0
+              parts:
+                type: integer
+                minimum: 0
+              rings:
+                type: integer
+                minimum: 0
+              interior_tiles:
+                type: integer
+                minimum: 0
+                description: Grid tiles wholly inside the shape.
+              boundary_cells:
+                type: integer
+                minimum: 0
+                description: Grid cells the shape's edge crosses.
+
+    GrowRequest:
+      type: object
+      additionalProperties: false
+      required: [addressing, artifacts]
+      description: "`level`, `addressing`, `idset` and `default_space` are `PublishRequest`'s."
+      properties:
+        level:
+          type: integer
+          minimum: 0
+          default: 0
+        addressing:
+          type: string
+          enum: [external, tessera]
+        idset:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        default_space:
+          type: string
+          enum: [view, wgs84]
+        artifacts:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/GrowingArtifact"
+
+    GrowingArtifact:
+      type: object
+      additionalProperties: false
+      required: [key]
+      description: One artifact of a growth, by key. Every other field is optional, and a row with only a key changes nothing.
+      properties:
+        key:
+          type: string
+          description: The key the artifact was published under.
+        view:
+          type: [string, "null"]
+          description: The key of the view the artifact belongs to, as on a publication. Required on a layer scoped to a group, refused on any other.
+        rank:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 65535
+          description: Absent, `members` joins the membership. Present, `members` and `leaving` move the generating set of the content at this rank, and the row fills no part.
+        members:
+          type: array
+          default: []
+          items: { type: string }
+          description: Members joining, addressed as the batch's `addressing` says.
+        leaving:
+          type: array
+          default: []
+          items: { type: string }
+          description: Members leaving a generating set, applied after the joins. Needs a `rank`.
+        parent:
+          type: array
+          default: []
+          items: { type: string }
+          description: Parent keys. Filled where the artifact holds none; `409` where it holds others.
+        attached_to:
+          oneOf:
+            - $ref: "#/components/schemas/Attachment"
+            - type: "null"
+        content:
+          type: array
+          default: []
+          description: Contents by rank, each filled where the artifact lacks it. A content here carries no generating set.
+          items:
+            type: object
+            additionalProperties: false
+            required: [rank, values]
+            properties:
+              rank:
+                type: integer
+                minimum: 0
+                maximum: 65535
+              values:
+                type: array
+                items: { type: string }
+        bbox:
+          type: [array, "null"]
+          items: { type: number }
+        circle:
+          type: [array, "null"]
+          items: { type: number }
+        ellipse:
+          type: [array, "null"]
+          items: { type: number }
+        wkt:
+          type: [string, "null"]
+        space:
+          type: [string, "null"]
+          enum: [view, wgs84, null]
+        access:
+          type: [array, "null"]
+          items: { type: string }
+          description: The artifact's access labels, filled where it has none.
+
+    MembershipsGrown:
+      type: object
+      additionalProperties: false
+      required: [artifacts, publication]
+      properties:
+        artifacts:
+          type: array
+          description: One entry per row, in the order sent.
+          items:
+            type: object
+            additionalProperties: false
+            required: [key, tessera_id, joined, filled, left]
+            properties:
+              key:
+                type: string
+              tessera_id:
+                type: string
+                pattern: "^[0-9]+$"
+              joined:
+                type: integer
+                minimum: 0
+                description: Joining members the membership did not already hold.
+              filled:
+                type: integer
+                minimum: 0
+                description: Parts that were absent and are now held.
+              left:
+                type: integer
+                minimum: 0
+                description: Leaving members taken out of a generating set.
+              withdrawn:
+                type: integer
+                minimum: 0
+                description: Present where this row emptied the generating set at this rank. The content is withdrawn, and the publisher supplies it again.
+        shapes:
+          type: array
+          description: Present when the batch filled a shape or authored shape content.
+          items:
+            $ref: "#/components/schemas/ShapeReport"
+        publication:
+          type: integer
+          minimum: 0
+          description: "`PublicationAck.publication`."
+        visible:
+          type: boolean
+          description: "`PublicationAck.visible`."
+
+    Status:
+      type: object
+      additionalProperties: false
+      description: The `GET /control/status` document. Counters count from the process's start; gauges are read when the request is answered. Byte figures are bytes and times are in the unit their name gives.
+      required: [entity_id_high_water, publication, partitions, compute, bulk, write_executor, ingest, limits, segments, overlay, compaction, fragmentation, row_projection_cache, projection_builds_by_route, fragment_cache, sessions, masked_count_cache, region_cache, derived_cache, suggest_sets, occupancy, heap]
+      properties:
+        entity_id_high_water:
+          type: integer
+          minimum: 0
+          description: The next entity id the allocator will issue to an item, a corpus-wide figure.
+        publication:
+          type: integer
+          minimum: 0
+          description: Publication cycles completed since the write executor started. A write is visible once this reaches the `publication` its answer named.
+        partitions:
+          type: array
+          description: One entry per partition of the bundle.
+          items:
+            type: object
+            additionalProperties: false
+            required: [partition, segments_version, watermark, readiness]
+            properties:
+              partition:
+                type: string
+              segments_version:
+                type: integer
+                minimum: 0
+                description: Moves when a flush, merge or fold publishes.
+              watermark:
+                type: integer
+                minimum: 0
+                description: The entities the published geometry covers.
+              readiness:
+                type: boolean
+                description: Whether the node is ready, as `/readyz` answers.
+        compute:
+          type: object
+          additionalProperties: false
+          required: [admission, queue, in_flight, waiting, streaming, shed_total]
+          description: The compute-admission gate the viewport, item and session routes share.
+          properties:
+            admission:
+              type: integer
+              minimum: 0
+              description: Requests computing at once.
+            queue:
+              type: integer
+              minimum: 0
+              description: Requests that may wait for a slot.
+            in_flight:
+              type: integer
+              minimum: 0
+            waiting:
+              type: integer
+              minimum: 0
+            streaming:
+              type: integer
+              minimum: 0
+              description: Responses still streaming, which hold a slot but no compute.
+            shed_total:
+              type: integer
+              minimum: 0
+              description: Requests this gate answered `429`. Single-flight `429`s are not counted.
+        bulk:
+          type: object
+          additionalProperties: false
+          required: [admission, queue, in_flight, waiting, shed_total]
+          description: The admission limit `POST /v1/items` and `POST /v1/artifacts` run under, `serve.bulk_admission`. A read holds its slot for its whole response.
+          properties:
+            admission:
+              type: integer
+              minimum: 0
+            queue:
+              type: integer
+              minimum: 0
+              description: Always 0, so a read past the limit is refused at once.
+            in_flight:
+              type: integer
+              minimum: 0
+            waiting:
+              type: integer
+              minimum: 0
+            shed_total:
+              type: integer
+              minimum: 0
+        write_executor:
+          $ref: "#/components/schemas/WriteExecutorStatus"
+        ingest:
+          type: object
+          additionalProperties: false
+          required: [admission, in_flight, shed_total]
+          description: The admission limit `POST /control/ingest` and `POST /control/values` share, `ingest.ingest_admission`.
+          properties:
+            admission:
+              type: integer
+              minimum: 0
+            in_flight:
+              type: integer
+              minimum: 0
+            shed_total:
+              type: integer
+              minimum: 0
+              description: Requests this limit answered `429`. A `429` for a full buffer or queue is not counted.
+        limits:
+          type: object
+          additionalProperties: false
+          required: [ingest, values, publish, grow, changes, declarations]
+          description: Each write route's caps, so a client can size its requests. A request over one is `422` naming the limit, and is never truncated.
+          properties:
+            ingest:
+              $ref: "#/components/schemas/BatchLimits"
+            values:
+              $ref: "#/components/schemas/BatchLimits"
+            publish:
+              type: object
+              additionalProperties: false
+              required: [route, max_artifacts_per_request, max_body_bytes, max_shape_vertices, max_excluded_per_request]
+              properties:
+                route:
+                  type: string
+                max_artifacts_per_request:
+                  type: integer
+                  minimum: 0
+                max_body_bytes:
+                  type: integer
+                  minimum: 0
+                max_shape_vertices:
+                  type: integer
+                  minimum: 0
+                max_excluded_per_request:
+                  type: integer
+                  minimum: 0
+            grow:
+              type: object
+              additionalProperties: false
+              required: [route, max_members_per_request, max_body_bytes]
+              properties:
+                route:
+                  type: string
+                max_members_per_request:
+                  type: integer
+                  minimum: 0
+                  description: Joining and leaving members together.
+                max_body_bytes:
+                  type: integer
+                  minimum: 0
+            changes:
+              type: object
+              additionalProperties: false
+              required: [route, max_changes_per_request, max_body_bytes]
+              properties:
+                route:
+                  type: string
+                max_changes_per_request:
+                  type: integer
+                  minimum: 0
+                max_body_bytes:
+                  type: integer
+                  minimum: 0
+            declarations:
+              type: object
+              additionalProperties: false
+              required: [route, max_records_per_request, max_body_bytes]
+              description: The declaration routes, which the `route` string lists.
+              properties:
+                route:
+                  type: string
+                max_records_per_request:
+                  type: integer
+                  minimum: 0
+                  description: Always 1.
+                max_body_bytes:
+                  type: integer
+                  minimum: 0
+        segments:
+          type: array
+          description: The live segment count per partition and view, which every viewport pays for. A merge bounds the count; a fold resets it to one. A count past `compaction_max_segments` means folds are being refused.
+          items:
+            type: object
+            additionalProperties: false
+            required: [partition, view, count]
+            properties:
+              partition:
+                type: string
+              view:
+                type: string
+              count:
+                type: integer
+                minimum: 0
+        overlay:
+          type: object
+          additionalProperties: false
+          required: [depth, retirable, soft_limit_alarms]
+          description: The deletions and suppressions in force and not yet folded.
+          properties:
+            depth:
+              type: integer
+              minimum: 0
+              description: Deletions and suppressions together.
+            retirable:
+              type: integer
+              minimum: 0
+              description: Deletions alone, which a fold retires and the fold schedule keys on. A suppression never retires.
+            soft_limit_alarms:
+              type: integer
+              minimum: 0
+        compaction:
+          $ref: "#/components/schemas/CompactionStatus"
+        fragmentation:
+          type: object
+          additionalProperties: false
+          required: [scope, postings_per_container, run_ratio, postings, runs, containers, rows, tiers, allocation]
+          description: How scattered ingested entity ids are across the index, measured over delta tiers as each is flushed; the base bundle is not measured.
+          properties:
+            scope:
+              type: string
+              const: delta-tiers
+            postings_per_container:
+              type: [number, "null"]
+              description: Mean entries per container touched. `null` before the first flush publishes.
+            run_ratio:
+              type: [number, "null"]
+              description: Mean run length over the scattered baseline at the same density; `1.0` is fully scattered and larger is better. `null` before the first flush publishes.
+            postings:
+              type: integer
+              minimum: 0
+            runs:
+              type: integer
+              minimum: 0
+            containers:
+              type: integer
+              minimum: 0
+            rows:
+              type: integer
+              minimum: 0
+            tiers:
+              type: integer
+              minimum: 0
+              description: Published tiers measured.
+            allocation:
+              type: object
+              additionalProperties: false
+              required: [scope, postings, runs, containers, rows, windows]
+              description: The same counts taken per commit window, before tiers are formed.
+              properties:
+                scope:
+                  type: string
+                  const: commit-window-allocation
+                postings:
+                  type: integer
+                  minimum: 0
+                runs:
+                  type: integer
+                  minimum: 0
+                containers:
+                  type: integer
+                  minimum: 0
+                rows:
+                  type: integer
+                  minimum: 0
+                windows:
+                  type: integer
+                  minimum: 0
+        row_projection_cache:
+          type: object
+          additionalProperties: false
+          required: [entries, bytes, bound_bytes, hits, misses, building_refusals, waits_satisfied, waiters_now, evictions, young_evictions, thrashing, oversized_admissions]
+          description: The sessions' row projections of their visible sets.
+          properties:
+            entries: { type: integer, minimum: 0 }
+            bytes: { type: integer, minimum: 0 }
+            bound_bytes: { type: integer, minimum: 0 }
+            hits: { type: integer, minimum: 0 }
+            misses: { type: integer, minimum: 0 }
+            building_refusals:
+              type: integer
+              minimum: 0
+              description: Requests refused with `429` while another built the same projection.
+            waits_satisfied:
+              type: integer
+              minimum: 0
+              description: Requests served by waiting for another's build.
+            waiters_now:
+              type: integer
+              minimum: 0
+              description: Requests waiting now, across the process.
+            evictions: { type: integer, minimum: 0 }
+            young_evictions:
+              type: integer
+              minimum: 0
+              description: Entries evicted before they were read again, a sign the bound is smaller than what the sessions hold at once.
+            thrashing:
+              type: boolean
+              description: "`young_evictions` is above 0."
+            oversized_admissions: { type: integer, minimum: 0 }
+        projection_builds_by_route:
+          type: object
+          additionalProperties: false
+          required: [whole_domain, walk, split, complement]
+          description: How row projections were built, per construction. Every construction gives the same rows; the shares show whether the choice between them fits the corpus.
+          properties:
+            whole_domain: { type: integer, minimum: 0 }
+            walk: { type: integer, minimum: 0 }
+            split: { type: integer, minimum: 0 }
+            complement: { type: integer, minimum: 0 }
+        fragment_cache:
+          type: object
+          additionalProperties: false
+          required: [entries, bytes, bound_bytes, hits, misses, building_refusals, evictions, young_evictions, thrashing, oversized_admissions, rebuilds]
+          description: The mask fragments `POST /session/authorise` builds, one per credential.
+          properties:
+            entries: { type: integer, minimum: 0 }
+            bytes: { type: integer, minimum: 0 }
+            bound_bytes: { type: integer, minimum: 0 }
+            hits: { type: integer, minimum: 0 }
+            misses: { type: integer, minimum: 0 }
+            building_refusals: { type: integer, minimum: 0 }
+            evictions: { type: integer, minimum: 0 }
+            young_evictions: { type: integer, minimum: 0 }
+            thrashing: { type: boolean }
+            oversized_admissions: { type: integer, minimum: 0 }
+            rebuilds:
+              type: integer
+              minimum: 0
+              description: Fragments built again after an eviction, as against for the first time.
+        sessions:
+          type: object
+          additionalProperties: false
+          required: [retained, sweeps, swept_total, sweep_at]
+          description: Viewer sessions held in memory. Expired ones are swept when `retained` reaches `sweep_at`; an expired session is refused whether or not it has been swept.
+          properties:
+            retained: { type: integer, minimum: 0 }
+            sweeps: { type: integer, minimum: 0 }
+            swept_total: { type: integer, minimum: 0 }
+            sweep_at: { type: integer, minimum: 0 }
+        masked_count_cache:
+          type: object
+          additionalProperties: false
+          required: [entries, bytes, hits, misses, evictions]
+          description: Per-session masked counts, pruned at revocation and at the expiry sweep.
+          properties:
+            entries: { type: integer, minimum: 0 }
+            bytes: { type: integer, minimum: 0 }
+            hits: { type: integer, minimum: 0 }
+            misses: { type: integer, minimum: 0 }
+            evictions: { type: integer, minimum: 0 }
+        region_cache:
+          type: object
+          additionalProperties: false
+          required: [entries, bytes, bound_bytes, hits, misses, building_refusals, waits_satisfied, evictions]
+          description: The rows each `region` filter leaf selects, shared across sessions per generation.
+          properties:
+            entries: { type: integer, minimum: 0 }
+            bytes: { type: integer, minimum: 0 }
+            bound_bytes: { type: integer, minimum: 0 }
+            hits: { type: integer, minimum: 0 }
+            misses: { type: integer, minimum: 0 }
+            building_refusals: { type: integer, minimum: 0 }
+            waits_satisfied: { type: integer, minimum: 0 }
+            evictions: { type: integer, minimum: 0 }
+        derived_cache:
+          type: object
+          additionalProperties: false
+          required: [entries, bytes, hits, misses, evictions, hit_rate]
+          description: Artifact geometry derived per session, such as hulls.
+          properties:
+            entries: { type: integer, minimum: 0 }
+            bytes: { type: integer, minimum: 0 }
+            hits: { type: integer, minimum: 0 }
+            misses: { type: integer, minimum: 0 }
+            evictions: { type: integer, minimum: 0 }
+            hit_rate:
+              type: [number, "null"]
+              description: Hits over lookups. `null` before the first lookup.
+        suggest_sets:
+          type: object
+          additionalProperties: false
+          required: [entries, bytes, hits, misses, builds, declined, discarded, evictions, in_flight]
+          description: The per-session sets of visible category values `/v1/categories/{column}/suggest` answers from.
+          properties:
+            entries: { type: integer, minimum: 0 }
+            bytes: { type: integer, minimum: 0 }
+            hits: { type: integer, minimum: 0 }
+            misses: { type: integer, minimum: 0 }
+            builds: { type: integer, minimum: 0 }
+            declined:
+              type: integer
+              minimum: 0
+              description: Sessions too broad for a set, over `selection.max_suggest_set_entities`, which are answered by probing instead.
+            discarded: { type: integer, minimum: 0 }
+            evictions: { type: integer, minimum: 0 }
+            in_flight: { type: integer, minimum: 0 }
+        occupancy:
+          type: object
+          additionalProperties: false
+          required: [entries, bytes, bound_bytes, hits, misses, evictions, walks]
+          description: Which tiles hold visible rows, per session, view, depth and generation.
+          properties:
+            entries: { type: integer, minimum: 0 }
+            bytes: { type: integer, minimum: 0 }
+            bound_bytes: { type: integer, minimum: 0 }
+            hits: { type: integer, minimum: 0 }
+            misses: { type: integer, minimum: 0 }
+            evictions: { type: integer, minimum: 0 }
+            walks:
+              type: integer
+              minimum: 0
+              description: Occupancy walks. One per session, view and generation is expected; one per request means the cache is not holding.
+        heap:
+          type: object
+          additionalProperties: false
+          required: [anon_bytes, file_bytes, resident_bytes, trims, last_trim_returned_bytes, last_trim_micros, trim_baseline_bytes, trim_growth_bytes]
+          description: The kernel's view of the process's memory. The gap between `anon_bytes` and the caches above is what the allocator retains.
+          properties:
+            anon_bytes: { type: integer, minimum: 0 }
+            file_bytes: { type: integer, minimum: 0 }
+            resident_bytes: { type: integer, minimum: 0 }
+            trims:
+              type: integer
+              minimum: 0
+              description: Times the allocator was asked to return memory to the kernel.
+            last_trim_returned_bytes: { type: integer, minimum: 0 }
+            last_trim_micros: { type: integer, minimum: 0 }
+            trim_baseline_bytes: { type: integer, minimum: 0 }
+            trim_growth_bytes:
+              type: integer
+              minimum: 0
+              description: The growth over the baseline that asks for the next trim.
+
+    BatchLimits:
+      type: object
+      additionalProperties: false
+      required: [route, max_batch_rows, max_batch_bytes]
+      properties:
+        route:
+          type: string
+          description: The route these caps apply to, as `<method> <path>`.
+        max_batch_rows:
+          type: integer
+          minimum: 0
+          description: "`ingest.ingest_max_batch_rows`."
+        max_batch_bytes:
+          type: integer
+          minimum: 0
+          description: "`ingest.ingest_max_batch_bytes`."
+
+    WriteExecutorStatus:
+      type: object
+      additionalProperties: false
+      description: The write executor, the one thread that applies every write.
+      required: [posture, ready, work_submitted, deny_submitted, wal_appends, wal_fsyncs, wal_recoveries, wal, apply_nanos_total, apply_nanos_max, foreign_side_manifests, work_completed, work_depth, work_service_nanos_ewma, flush, coalesces, merges, coalesce_in_flight, merge_in_flight, work_in_flight_nanos, bench_timing, stage_nanos, flush_stages]
+      properties:
+        posture:
+          type: string
+          enum: [not-started, running, wal-poisoned, dead]
+          description: "`running` is ready. `wal-poisoned` is not ready, and still applies deletions and suppressions."
+        ready:
+          type: boolean
+          description: Whether `/readyz` answers `200`.
+        work_submitted:
+          type: integer
+          minimum: 0
+          description: Writes submitted to the queue that sheds, every write but changes.
+        deny_submitted:
+          type: integer
+          minimum: 0
+          description: Changes submitted to the queue that never sheds.
+        wal_appends: { type: integer, minimum: 0 }
+        wal_fsyncs:
+          type: integer
+          minimum: 0
+          description: "`wal_appends / wal_fsyncs` is the mean writes per commit window."
+        wal_recoveries:
+          type: integer
+          minimum: 0
+          description: Write-ahead log faults recovered from. A rise means changes were answered `500` and their callers send them again.
+        wal:
+          type: object
+          additionalProperties: false
+          required: [members, bytes, position, pinned_by, pinned_at, pin_span_bytes, samples]
+          description: The write-ahead log, sampled at most once per flush period.
+          properties:
+            members:
+              type: integer
+              minimum: 0
+              description: Files the log is held in. Steady state is two; a rising count is a rotation that is not reclaiming.
+            bytes: { type: integer, minimum: 0 }
+            position:
+              type: integer
+              minimum: 0
+              description: Record bytes written across every file the log has held. A position, not a size.
+            pinned_by:
+              type: [string, "null"]
+              description: What keeps the log from rotating below `pinned_at`, or `null` when nothing does. A `growth` or `fill` pin clears only at a compaction fold.
+            pinned_at:
+              type: [integer, "null"]
+              minimum: 0
+            pin_span_bytes:
+              type: integer
+              minimum: 0
+              description: "`position` less `pinned_at`; `0` when nothing pins the log."
+            samples:
+              type: integer
+              minimum: 0
+              description: Samples taken. Two reads with the same value read the same sample.
+        apply_nanos_total: { type: integer, minimum: 0 }
+        apply_nanos_max: { type: integer, minimum: 0 }
+        foreign_side_manifests:
+          type: integer
+          minimum: 0
+          description: Manifests another process wrote over this node's bundle root. Anything above 0 means a second writer.
+        work_completed: { type: integer, minimum: 0 }
+        work_depth:
+          type: integer
+          minimum: 0
+          description: Writes submitted and not yet answered.
+        work_service_nanos_ewma:
+          type: integer
+          minimum: 0
+          description: A moving average of one write's service time. With `work_depth` it gives a `429`'s `Retry-After`.
+        flush:
+          type: object
+          additionalProperties: false
+          required: [ticks, flushes, flush_skips, flush_failures, flushable_items, flush_requested, in_flight, buffered_items, overlay_publications, refreshes, refresh_in_flight]
+          properties:
+            ticks: { type: integer, minimum: 0 }
+            flushes: { type: integer, minimum: 0 }
+            flush_skips:
+              type: integer
+              minimum: 0
+              description: Ticks skipped because a flush was still running. A rising count means flushes are slower than the tick.
+            flush_failures:
+              type: integer
+              minimum: 0
+              description: Flushes that failed and left the buffer for the next tick.
+            flushable_items:
+              type: integer
+              minimum: 0
+              description: Rows the next flush would publish; an item in two views counts twice.
+            flush_requested:
+              type: boolean
+              description: A `POST /control/flush` is waiting for the next tick.
+            in_flight:
+              type: boolean
+              description: A flush is running, or finished and not yet published.
+            buffered_items:
+              type: integer
+              minimum: 0
+              description: Items buffered, the figure `ingest.ingest_buffer_max_items` bounds.
+            overlay_publications:
+              type: integer
+              minimum: 0
+              description: Manifests written for deletions and suppressions alone.
+            refreshes:
+              type: integer
+              minimum: 0
+              description: Session projections refreshed after a flush or merge. A session serves its old projection until its refresh.
+            refresh_in_flight:
+              type: boolean
+              description: The refresh for the newest flush or merge is still running.
+        coalesces: { type: integer, minimum: 0 }
+        merges: { type: integer, minimum: 0 }
+        coalesce_in_flight: { type: boolean }
+        merge_in_flight: { type: boolean }
+        work_in_flight_nanos:
+          type: integer
+          minimum: 0
+          description: How long the current write has run; `0` when the executor is idle.
+        bench_timing:
+          type: boolean
+          description: Whether this binary records stage times. Without it every stage time is 0.
+        stage_nanos:
+          type: object
+          description: Time spent in each stage of closing a commit window, by stage name. The names are instrumentation and are not listed here.
+          additionalProperties:
+            type: integer
+            minimum: 0
+        flush_stages:
+          type: object
+          additionalProperties: false
+          required: [bench_timing, executions, rows_executed, flushes, rows_published, executor_nanos, pool_nanos]
+          description: Flush stage times, on the executor thread and on the pool. Divide pool times by `executions`, and executor times by `flushes`, for a per-flush figure.
+          properties:
+            bench_timing: { type: boolean }
+            executions: { type: integer, minimum: 0 }
+            rows_executed: { type: integer, minimum: 0 }
+            flushes: { type: integer, minimum: 0 }
+            rows_published: { type: integer, minimum: 0 }
+            executor_nanos:
+              type: object
+              description: Nanoseconds by stage name, on the executor thread.
+              additionalProperties:
+                type: integer
+                minimum: 0
+            pool_nanos:
+              type: object
+              description: Nanoseconds by stage name, on the pool.
+              additionalProperties:
+                type: integer
+                minimum: 0
+
+    CompactionStatus:
+      type: object
+      additionalProperties: false
+      description: Compaction folds. Alarm on `fold_failures`, and on `fold_refusals` rising while `folds` does not.
+      required: [live_rows, folds, fold_failures, fold_requested, fold_refusals, fold_refusals_by_gate, last_refusal, last_secs, last_rss_bytes, last_attr_bytes_read, last_attr_bytes_written, passes]
+      properties:
+        live_rows: { type: integer, minimum: 0 }
+        folds: { type: integer, minimum: 0 }
+        fold_failures:
+          type: integer
+          minimum: 0
+          description: Folds discarded. Each leaves a bundle-sized directory nothing reclaims.
+        fold_requested:
+          type: boolean
+          description: A `POST /control/compact` is waiting for the next tick.
+        fold_refusals:
+          type: integer
+          minimum: 0
+          description: Folds asked for and not started, the sum of `fold_refusals_by_gate`.
+        fold_refusals_by_gate:
+          type: object
+          additionalProperties: false
+          required: [insufficient_disc, insufficient_memory, nothing_to_fold, overlay_diverged, stepped_down, wal_poisoned]
+          properties:
+            insufficient_disc: { type: integer, minimum: 0 }
+            insufficient_memory: { type: integer, minimum: 0 }
+            nothing_to_fold: { type: integer, minimum: 0 }
+            overlay_diverged: { type: integer, minimum: 0 }
+            stepped_down: { type: integer, minimum: 0 }
+            wal_poisoned: { type: integer, minimum: 0 }
+        last_refusal:
+          description: The latest refusal, or `null` where there has been none.
+          oneOf:
+            - type: "null"
+            - type: object
+              additionalProperties: false
+              required: [gate, need_bytes, had_bytes, at_unix]
+              properties:
+                gate:
+                  type: string
+                  description: One of `fold_refusals_by_gate`'s names.
+                need_bytes:
+                  type: [integer, "null"]
+                  minimum: 0
+                  description: For a memory or disc refusal, what the fold needs; `null` otherwise.
+                had_bytes:
+                  type: [integer, "null"]
+                  minimum: 0
+                  description: For a memory or disc refusal, what the host had; `null` otherwise.
+                at_unix:
+                  type: integer
+                  minimum: 0
+                  description: When, in seconds since the Unix epoch.
+        last_secs: { type: integer, minimum: 0 }
+        last_rss_bytes:
+          type: integer
+          minimum: 0
+          description: The last fold's resident memory, sampled between passes, so it understates the peak.
+        last_attr_bytes_read: { type: integer, minimum: 0 }
+        last_attr_bytes_written: { type: integer, minimum: 0 }
+        passes:
+          type: array
+          description: The last fold's passes, in order.
+          items:
+            type: object
+            additionalProperties: false
+            required: [pass, ms, rss_bytes, anon_bytes]
+            properties:
+              pass: { type: string }
+              ms: { type: integer, minimum: 0 }
+              rss_bytes: { type: integer, minimum: 0 }
+              anon_bytes: { type: integer, minimum: 0 }
