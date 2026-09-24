@@ -11,7 +11,7 @@ import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDoma
 import {composeFilters, emptyDraft, type ClauseVerb, type FilterDraft} from './filters.js';
 import {withMember, withMembers, withoutMember, type MemberClause} from './members.js';
 import {Presenter, defaultFrameScheduler, refusalOf, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
-import {insideBox, insidePolygon, regionOperand, withRegion, type WorldPolygon} from './region.js';
+import {regionOperand, withRegion} from './region.js';
 import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
 import {requestLevels} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
@@ -21,6 +21,7 @@ import {BandBudget, bandKey} from './bands.js';
 import {DEFAULT_CACHE_BYTES, Replica, type ReplicaOptions} from './replica.js';
 import {TesseraClient, type TesseraClientOptions} from './client.js';
 import {HeldRecords, HeldShapes} from './held.js';
+import {SelectedRegion, type RegionProjection, type SelectionShape} from './selectedRegion.js';
 import {Suggestions} from './suggestions.js';
 import {TokenSupply, type TokenSupplier} from './token.js';
 import type {DepthChoice} from './budget.js';
@@ -35,7 +36,6 @@ import type {
   ItemDetail,
   Meta,
   Quantisation,
-  RegionVerdict,
   Shape,
   ShapeKind,
   SuggestValue,
@@ -70,23 +70,8 @@ export {formatCount, formatMasked} from './counts.js';
 /** A data-coordinates bbox and the pixel size it is drawn at — what `setView` takes (§4). */
 export type ViewInput = {bbox: [number, number, number, number]; width: number; height: number};
 
-/**
- * A selection, in **data coordinates** — the space `setView` takes and `dataXY` returns — or a
- * published shape named by its `tessera_id` (*filter to this* on an artifact card).
- *
- * **A selection is a filter** (`selection-operand.md`; §5.11): it rides every viewport request as
- * the `region` leaf composed with the other filters, so the marks, the counts and the artifacts'
- * `matched` bits narrow to it, and the region's own count is read off the same frame as
- * everything else — no counting request of its own. `outside` negates it: `none_of` over the
- * leaf, the complement within what this principal can see (`polygon-membership.md` §8).
- */
-export type SelectionShape = (
-  | {kind: 'box'; bbox: [number, number, number, number]}
-  | {kind: 'lasso'; points: [number, number][]}
-  | {kind: 'artifact'; id: bigint}
-) & {outside?: boolean};
-
 export type {TokenSupplier} from './token.js';
+export {REGION_HELD_LIMIT, type RegionProjection, type SelectionShape} from './selectedRegion.js';
 
 export type StoreOptions = {
   viewerUrl: string;
@@ -258,30 +243,6 @@ export type SelectionProjection = {
   itemRefusal: Refusal | null;
   artifact: {id: bigint; detail: ArtifactDetail} | null;
   artifactRefusal: Refusal | null;
-};
-
-/**
- * The selected region and what it holds (§5.11), read off the presented frame: the region is a
- * leaf of the request, so `matched` is the sum of the frame's `matched` counts — the items inside
- * the shape that the other filters admit — exact for the shape when the server said so
- * (`verdict`) and the frame's exact tiles cover the shape, and a cover otherwise. `visible` is
- * the region alone: the same number where no other filter is on, and `null` where one is — the
- * frame answered a narrower question, and a figure for the wider one would be a second request.
- * `served` is the held marks inside against `matched` — a sample, so both figures always.
- * `status` is the frame's own: `loading` until a derive lands after the selection, and a refusal
- * of the request carrying the leaf is the region's refusal, never a zero.
- */
-export type RegionProjection = {
-  shape: SelectionShape;
-  status: 'loading' | 'shown' | 'refused';
-  refusal: Refusal | null;
-  visible: Masked | null;
-  matched: Masked;
-  served: Count;
-  /** `x-tessera-region`: exact for the shape, or a cover at a depth; `null` until it has answered. */
-  verdict: RegionVerdict | null;
-  /** The held marks inside the shape — ids and world positions, the first {@link REGION_HELD_LIMIT}. */
-  held: {ids: BigUint64Array; positions: Float32Array; count: number};
 };
 
 export type FiltersProjection = {
@@ -473,9 +434,6 @@ export interface Store {
 /** The `colourBy` prefix that names a layer's cluster colour rather than a column. */
 export const CLUSTER_PREFIX = 'cluster:';
 
-/** How many held marks a region lists — the panel's list, not the count, which is always whole. */
-export const REGION_HELD_LIMIT = 500;
-
 /**
  * How long a view waits, after becoming current, before it asks for the camera it inherited.
  *
@@ -537,6 +495,15 @@ export function createStore(options: StoreOptions): Store {
     (held) => replaceProjection('artifacts', {...projections.artifacts, shapes: held})
   );
 
+  const region = new SelectedRegion({
+    clock,
+    frame: frameOrNull,
+    extentOf,
+    covered: (box, depth) => replica !== null && meta !== null && replica.novelIn(tileRectOfBbox(box, depth), depth, meta.selection.kMaxMarks) === 0,
+    publish: (value) => replaceProjection('region', value),
+    trace: (kind, fields) => options.instruments?.onTrace?.(kind, fields)
+  });
+
   const records = new HeldRecords((id) => tokens.get().then((t) => client.item(t, id)).then((detail) => detail.fields));
 
   const tokens = new TokenSupply(options.authorise, options.token, clock, (changed) => {
@@ -556,7 +523,6 @@ export function createStore(options: StoreOptions): Store {
   let palette: PaletteKind = options.palette ?? 'positional';
   let scheme: PaletteScheme = 'dark';
   let contentKeyAtFrame = '';
-  let selection: SelectionShape | null = null;
 
   /**
    * One view's geometry machinery (`view-switching.md` §3). A replica's bands are quantised under
@@ -889,12 +855,7 @@ export function createStore(options: StoreOptions): Store {
       expired,
       retrying: status === 'retrying'
     });
-    // The request carrying the region leaf was refused — a polygon over `max_region_vertices`,
-    // a coordinate that is not one — so the region's numbers are a refusal and never a zero.
-    const region = projections.region;
-    if (status === 'refused' && refusal && region && region.status !== 'refused') {
-      replaceProjection('region', {...region, status: 'refused', refusal, visible: null, matched: NO_MASKED, served: {shown: region.held.count, total: 0, exact: false}});
-    }
+    if (status === 'refused' && refusal) region.refuse(refusal);
   }
 
   /**
@@ -995,7 +956,14 @@ export function createStore(options: StoreOptions): Store {
       channel.schedule({target: v.view.target, zoom: v.view.zoom}, v.width, v.height);
     }
     replaceProjection('tiles', {tiles: frame.tiles});
-    projectRegion(frame, replica?.lastRegionVerdict ?? null, p.fetched !== null, Number(matched));
+    region.answer({
+      marks: {bands: frame.exact, standIn: frame.standIn},
+      depth: frame.depth,
+      verdict: replica?.lastRegionVerdict ?? null,
+      fetched: p.fetched !== null,
+      matched: Number(matched),
+      narrowed: composeFilters(projections.filters.draft) !== null
+    });
     accumulateEncoding(frame);
     refreshColours();
     checkColourCoverage();
@@ -1375,9 +1343,7 @@ export function createStore(options: StoreOptions): Store {
       // No camera to carry, so no question to re-ask: `lastView` is the outgoing frame's bbox and
       // means nothing here. The map's refit is what supplies the next one.
       lastView = null;
-      selection = null;
-      regionVerdict = null;
-      replaceProjection('region', null);
+      region.drop();
     }
 
     // The `view` projection, immediately, with the new id and no marks: view A's marks must never
@@ -1498,7 +1464,8 @@ export function createStore(options: StoreOptions): Store {
 
   function requestFilters(): FilterExpr | null {
     const expr = withMembers(composeFilters(projections.filters.draft, 'filter'), projections.filters.members, 'filter');
-    return withRegion(expr, selection ? regionOperand(selection) : null, selection?.outside ?? false);
+    const selected = region.selected;
+    return withRegion(expr, selected ? regionOperand(selected) : null, selected?.outside ?? false);
   }
 
   /**
@@ -1552,7 +1519,7 @@ export function createStore(options: StoreOptions): Store {
   function setMembers(clauses: readonly MemberClause[]): void {
     const members = [...clauses];
     replaceProjection('filters', {...projections.filters, members});
-    if (selection) projectRegionLoading(selection);
+    region.loading(projections.marks);
     requery();
   }
 
@@ -1560,7 +1527,7 @@ export function createStore(options: StoreOptions): Store {
     const expr = composeFilters(draft, 'filter');
     replaceProjection('filters', {...projections.filters, draft, expr, highlight: composeFilters(draft, 'highlight')});
     // A region's `matched` is under the filters, so its numbers are to a question just changed.
-    if (selection) projectRegionLoading(selection);
+    region.loading(projections.marks);
     requery();
   }
 
@@ -1653,171 +1620,6 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  // ---- the selected region (§5.11) ------------------------------------------------------------
-
-  /** A shape in world space: the box, the lasso's polygon, or nothing to highlight by (an artifact). */
-  type WorldShape = {kind: 'box'; box: [number, number, number, number]} | {kind: 'lasso'; polygon: WorldPolygon} | {kind: 'artifact'};
-
-  /** When the selection was made, so the answer can be timed (the instruments' `region` trace). */
-  let selectedAt = 0;
-  /** The last verdict the wire gave for this selection — read off the replica, which observes every response. */
-  let regionVerdict: RegionVerdict | null = null;
-
-  /**
-   * The held marks whose world positions fall inside the shape — the region's sample (P1), by
-   * the server's own predicate over the quantised grid (`region.ts`). An artifact selection has
-   * no client-side predicate: the wire's `membership:<layer>` column is the membership, and the
-   * sample is every held mark, which the request already narrowed to the artifact's members.
-   */
-  function heldInside(world: WorldShape, outside: boolean): RegionProjection['held'] {
-    const ids: bigint[] = [];
-    const xy: number[] = [];
-    let count = 0;
-    const inside =
-      world.kind === 'box' ? (x: number, y: number) => insideBox(x, y, world.box) : world.kind === 'lasso' ? (x: number, y: number) => insidePolygon(x, y, world.polygon) : () => true;
-    const take = (band: {ids: BigUint64Array; positions: Float32Array}, i: number) => {
-      const x = band.positions[i * 2]!;
-      const y = band.positions[i * 2 + 1]!;
-      if (world.kind !== 'artifact' && inside(x, y) === outside) return;
-      count++;
-      if (ids.length < REGION_HELD_LIMIT) {
-        ids.push(band.ids[i]!);
-        xy.push(x, y);
-      }
-    };
-    for (const band of projections.marks.bands) {
-      for (let i = 0; i < band.ids.length; i++) take(band, i);
-    }
-    for (const piece of projections.marks.standIn) {
-      if (piece.indices) for (const i of piece.indices.slice(0, piece.limit)) take(piece.band, i);
-      else for (let i = 0; i < Math.min(piece.limit, piece.band.ids.length); i++) take(piece.band, i);
-    }
-    return {ids: BigUint64Array.from(ids), positions: Float32Array.from(xy), count};
-  }
-
-  function worldOfShape(shape: SelectionShape): WorldShape | null {
-    if (!meta) return null;
-    const q = frame();
-    if (shape.kind === 'artifact') return {kind: 'artifact'};
-    if (shape.kind === 'box') {
-      const [x0, y0] = dataToWorldXY(shape.bbox[0], shape.bbox[1], q);
-      const [x1, y1] = dataToWorldXY(shape.bbox[2], shape.bbox[3], q);
-      return {kind: 'box', box: [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)]};
-    }
-    if (shape.points.length < 3) return null;
-    return {kind: 'lasso', polygon: shape.points.map(([x, y]) => dataToWorldXY(x, y, q))};
-  }
-
-  /**
-   * The world box the selection's count is over, or `null` where the client cannot know it — an
-   * artifact whose extent the store does not hold. A frame whose exact tiles cover it has counted
-   * the whole shape; one that does not has counted the part in view.
-   */
-  function worldExtentOf(shape: SelectionShape): [number, number, number, number] | null {
-    const world = worldOfShape(shape);
-    if (!world) return null;
-    if (world.kind === 'box') return world.box;
-    if (world.kind === 'lasso') {
-      let x0 = Infinity;
-      let y0 = Infinity;
-      let x1 = -Infinity;
-      let y1 = -Infinity;
-      for (const [x, y] of world.polygon) {
-        if (x < x0) x0 = x;
-        if (y < y0) y0 = y;
-        if (x > x1) x1 = x;
-        if (y > y1) y1 = y;
-      }
-      return [x0, y0, x1, y1];
-    }
-    const extent = shape.kind === 'artifact' ? extentOf(shape.id) : null;
-    if (!extent || !meta) return null;
-    const q = frame();
-    const [x0, y0] = dataToWorldXY(extent[0], extent[1], q);
-    const [x1, y1] = dataToWorldXY(extent[2], extent[3], q);
-    return [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
-  }
-
-  /** The region as it stands before a frame has answered for it: its held sample, no numbers. */
-  function projectRegionLoading(shape: SelectionShape): void {
-    const world = worldOfShape(shape);
-    if (!world) {
-      replaceProjection('region', null);
-      return;
-    }
-    const held = heldInside(world, shape.outside ?? false);
-    replaceProjection('region', {
-      shape,
-      status: 'loading',
-      refusal: null,
-      visible: null,
-      matched: NO_MASKED,
-      served: {shown: held.count, total: 0, exact: false},
-      verdict: regionVerdict,
-      held
-    });
-  }
-
-  /**
-   * The region's numbers, read off a presented frame. `matched` is the frame's own sum — the
-   * request carried the leaf, so a tile's `matched` is the items inside the shape the filters
-   * admit. Exact for the shape when the wire said so *and* the frame's exact tiles cover the
-   * shape's extent; an outside selection is never covered by one frame, since its complement is
-   * the whole map.
-   */
-  function projectRegion(frame: Composition, verdict: RegionVerdict | null, derived: boolean, matched: number): void {
-    const shape = selection;
-    const current = projections.region;
-    if (!shape || !current || current.shape !== shape) return;
-    if (verdict) regionVerdict = verdict;
-    // A frame folded from the replica, before any derive answered for this selection, is to the
-    // previous question; the numbers wait for the derive.
-    if (current.status === 'loading' && !derived) return;
-    const world = worldOfShape(shape);
-    if (!world) return;
-    const outside = shape.outside ?? false;
-    const extent = outside ? null : worldExtentOf(shape);
-    // Covered means the replica holds every tile of the shape's extent at the frame's depth —
-    // asked of the replica rather than read off the frame's tile list, which names only the
-    // tiles that drew a point; a tile the region emptied is held, counted and listed nowhere.
-    const covered = extent !== null && replica !== null && meta !== null && replica.novelIn(tileRectOfBbox(extent, frame.depth), frame.depth, meta.selection.kMaxMarks) === 0;
-    const exact = (regionVerdict?.exact ?? false) && covered;
-    const held = heldInside(world, outside);
-    const draftEmpty = composeFilters(projections.filters.draft) === null;
-    const wasLoading = current.status === 'loading';
-    replaceProjection('region', {
-      ...current,
-      status: 'shown',
-      refusal: null,
-      matched: {value: matched, exact},
-      // The region alone is the same question only while no other filter narrows the frame.
-      visible: draftEmpty ? {value: matched, exact} : null,
-      served: {shown: held.count, total: matched, exact: true},
-      verdict: regionVerdict,
-      held
-    });
-    if (wasLoading) options.instruments?.onTrace?.('region', {answerMs: clock.now() - selectedAt, exact: exact ? 1 : 0, depth: regionVerdict?.depth ?? -1});
-  }
-
-  /**
-   * Select a shape — and, with it, filter to it: the leaf joins every request from here on, and
-   * the region's numbers are read off the next frame. `null` clears both.
-   */
-  function select(shape: SelectionShape | null): void {
-    const changed = shape !== selection;
-    selection = shape;
-    regionVerdict = null;
-    selectedAt = clock.now();
-    if (!shape || (shape.kind === 'lasso' && shape.points.length < 3)) {
-      selection = null;
-      replaceProjection('region', null);
-      if (changed) requery();
-      return;
-    }
-    projectRegionLoading(shape);
-    requery();
-  }
-
   function extentOf(artifactId: bigint): [number, number, number, number] | null {
     const artifact = projections.artifacts.served.find((a) => a.tesseraId === artifactId);
     const box = artifact?.box;
@@ -1867,16 +1669,14 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});
     replaceProjection('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy});
     replaceProjection('status', {...NO_STATUS});
-    selection = null;
-    regionVerdict = null;
-    replaceProjection('region', null);
+    region.drop();
     publishReplica(null);
   }
 
   function refresh(): void {
     // Redraw the marks against the refreshed content key — a held layer set goes with it (§4).
     channel?.reset();
-    if (selection) projectRegionLoading(selection);
+    region.loading(projections.marks);
     if (lastView) setView(lastView.input);
   }
 
@@ -1935,7 +1735,9 @@ export function createStore(options: StoreOptions): Store {
     needShape: (id) => shapes.need(id),
     clearSelection,
     setScheme,
-    select,
+    select(shape) {
+      if (region.select(shape, projections.marks)) requery();
+    },
     extentOf,
     dataXY,
     clear,
