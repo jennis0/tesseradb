@@ -1,7 +1,5 @@
 import type {SessionArtifactTable} from './artifactTable.js';
-import {bandKey, type Band, type BandKey} from './bands.js';
 import {artifactColours, positionalEntry, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
-import {rectContainsTile, type TileRect} from './rects.js';
 
 /**
  * A colour per live ordinal of the session artifact table, rebuilt only when the table has moved.
@@ -74,60 +72,4 @@ export class ArtifactColours {
     );
     return this.map;
   }
-}
-
-/**
- * Which bands in view draw every point in a colour. A band is colour-stale when it has no
- * membership column for a layer asked for, or names an ordinal that resolves to no colour; its
- * tile is then fetched again, once per served-set version.
- *
- * A band resolves against the colours, which cover every artifact the table holds, rather than
- * against the latest served set: a band fetched under a coarser cut names artifacts outside the
- * finer one and is still coloured correctly.
- */
-export class ColourCoverage {
-  /** The served-set version each band was last asked for again under. */
-  private readonly asked = new Map<BandKey, number>();
-
-  /** Forget what was asked for, when the bands drawn are another view's. */
-  forget(): void {
-    this.asked.clear();
-  }
-
-  /**
-   * Count the bands in `visible` (every band where it is null) at `depth` whose ordinals all
-   * resolve, and return the stale ones not yet asked for under `version`. With `mayAsk` false
-   * nothing is returned or recorded, so the bands are decided at the next check.
-   */
-  check(input: {
-    bands: readonly Band[];
-    layers: readonly string[];
-    table: SessionArtifactTable;
-    colours: ReadonlyMap<number, Rgba>;
-    version: number;
-    visible: TileRect | null;
-    depth: number;
-    mayAsk: boolean;
-  }): {current: number; stale: number; toAsk: Band[]} {
-    const {bands, layers, table, colours, visible, depth, version} = input;
-    const stale: Band[] = [];
-    let current = 0;
-    for (const band of bands) {
-      if (visible && (band.depth !== depth || !rectContainsTile(visible, band.x, band.y))) continue;
-      if (layers.every((layer) => resolves(band, layer, table, colours))) current++;
-      else stale.push(band);
-    }
-    const toAsk = input.mayAsk ? stale.filter((b) => this.asked.get(bandKey(b.depth, b.prefix)) !== version) : [];
-    for (const b of toAsk) this.asked.set(bandKey(b.depth, b.prefix), version);
-    return {current, stale: stale.length, toAsk};
-  }
-}
-
-function resolves(band: Band, layer: string, table: SessionArtifactTable, colours: ReadonlyMap<number, Rgba>): boolean {
-  const m = band.membership[layer];
-  if (!m) return false;
-  for (let i = 0; i < m.distinct.length; i++) {
-    if (table.resolve(m.distinct[i]!, colours) === 0) return false;
-  }
-  return true;
 }

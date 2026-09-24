@@ -1,10 +1,10 @@
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
 import {SessionArtifactTable} from './artifactTable.js';
-import {BandBudget} from './bands.js';
+import {BandBudget, bandKey, type Band, type BandKey} from './bands.js';
 import {tileRectOfBbox, type DepthChoice} from './budget.js';
 import {TesseraClient, type TesseraClientOptions} from './client.js';
-import {ArtifactColours, ColourCoverage} from './colours.js';
+import {ArtifactColours} from './colours.js';
 import type {Composition} from './compose.js';
 import {dataToWorldXY, gridToWorld, MAX_DEPTH, WORLD_SIZE} from './coords.js';
 import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
@@ -17,6 +17,7 @@ import {CLUSTER_PREFIX, Legend, type LegendProjection} from './legend.js';
 import {withMembers, type MemberClause} from './members.js';
 import type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
 import {worldBbox} from './prefetch.js';
+import {rectContainsTile} from './rects.js';
 import {Presenter, defaultFrameScheduler, refusalOf, type FrameScheduler, type Presented, type PresentedStatus, type Refusal} from './presented.js';
 import {regionOperand, withRegion} from './region.js';
 import {DEFAULT_CACHE_BYTES, Replica, type ReplicaOptions} from './replica.js';
@@ -49,7 +50,7 @@ import type {
  * The store composes parts that each own their state: the token ({@link TokenSupply}), each view's
  * replica, presenter and artifact channel ({@link HeldViews}), the typeahead ({@link Suggestions}),
  * shapes and hovered records ({@link HeldShapes}, {@link HeldRecords}), the selected region
- * ({@link SelectedRegion}), artifact colours ({@link ArtifactColours}, {@link ColourCoverage}) and
+ * ({@link SelectedRegion}), artifact colours ({@link ArtifactColours}) and
  * the legend ({@link Legend}). What remains here is what they share: `meta`, the current view id,
  * the camera, the layers, the filters and the projections.
  */
@@ -375,7 +376,8 @@ export function createStore(options: StoreOptions): Store {
   const colours = new ArtifactColours(table, options.palette ?? 'positional', (map, palette) =>
     replaceProjection('artifacts', {...projections.artifacts, colours: map, palette})
   );
-  const coverage = new ColourCoverage();
+  /** The served-set version each colour-stale band was last fetched again under. */
+  const colourAsked = new Map<BandKey, number>();
 
   const legend = new Legend(
     async (column, codes) => client.categories(await tokens.get(), column, {codes, view: views.id}),
@@ -813,9 +815,12 @@ export function createStore(options: StoreOptions): Store {
   }
 
   /**
-   * Publish the colour coverage of the bands in view, and fetch the colour-stale ones again. In
-   * view is the visible box: the point path also fetches a margin, whose bands name artifacts the
-   * channel did not serve for this view.
+   * Publish the colour coverage of the bands in view, and fetch the colour-stale ones again, once
+   * per served-set version. A band is colour-stale when it has no membership column for a layer
+   * asked for, or names an ordinal that resolves to no colour. It resolves against the colours,
+   * which cover every artifact the table holds, so a band fetched under a coarser cut is still
+   * coloured. In view is the visible box: the point path also fetches a margin, whose bands name
+   * artifacts the channel did not serve for this view.
    */
   function checkColourCoverage(): void {
     const a = projections.artifacts;
@@ -830,9 +835,18 @@ export function createStore(options: StoreOptions): Store {
     const depth = projections.view.depth;
     const visible = v ? tileRectOfBbox(worldBbox({target: [v.view.target[0], v.view.target[1]], zoom: v.view.zoom, width: v.width, height: v.height}, 1), depth) : null;
     const bands = projections.marks.bands;
-    // While a switch settles nothing is asked for: asking reschedules the driver, which would
-    // request a view the slider is passing through.
-    const {current, stale, toAsk} = coverage.check({bands, layers, table, colours: a.colours, version: a.version, visible, depth, mayAsk: !views.settling});
+    const staleBands: Band[] = [];
+    let current = 0;
+    for (const band of bands) {
+      if (visible && (band.depth !== depth || !rectContainsTile(visible, band.x, band.y))) continue;
+      if (layers.every((layer) => resolves(band, layer, a.colours))) current++;
+      else staleBands.push(band);
+    }
+    const stale = staleBands.length;
+    // While a switch settles nothing is asked for or recorded: asking reschedules the driver, which
+    // would request a view the slider is passing through.
+    const toAsk = views.settling ? [] : staleBands.filter((b) => colourAsked.get(bandKey(b.depth, b.prefix)) !== a.version);
+    for (const b of toAsk) colourAsked.set(bandKey(b.depth, b.prefix), a.version);
     if (toAsk.length > 0) {
       machinery.replica.retract(toAsk);
       machinery.presenter.reschedule();
@@ -841,6 +855,15 @@ export function createStore(options: StoreOptions): Store {
     if (a.coverage.current !== current || a.coverage.stale !== stale) {
       replaceProjection('artifacts', {...projections.artifacts, coverage: {current, stale}});
     }
+  }
+
+  function resolves(band: Band, layer: string, colourMap: ReadonlyMap<number, Rgba>): boolean {
+    const m = band.membership[layer];
+    if (!m) return false;
+    for (let i = 0; i < m.distinct.length; i++) {
+      if (table.resolve(m.distinct[i]!, colourMap) === 0) return false;
+    }
+    return true;
   }
 
   function toDriverView(input: ViewInput): DriverViewState & {width: number; height: number} {
@@ -891,7 +914,7 @@ export function createStore(options: StoreOptions): Store {
     incoming.presenter.setBudget(budget);
     // The content key, the bands asked for again and the shapes were the outgoing view's.
     contentKeyAtFrame = '';
-    coverage.forget();
+    colourAsked.clear();
     shapes.forget('all');
 
     if (!kept) {
