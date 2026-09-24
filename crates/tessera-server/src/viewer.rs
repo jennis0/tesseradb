@@ -314,6 +314,7 @@ async fn meta(
 
 /// `GET /v1/categories/{column}`'s query string.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CategoriesQuery {
     /// The request's view, which addresses a group-scoped category's per-view value set; unused
     /// for an entity-scoped column. A view the session cannot reach is a 404.

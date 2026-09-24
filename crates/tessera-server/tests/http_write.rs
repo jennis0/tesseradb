@@ -3298,11 +3298,25 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
             .unwrap();
         assert_eq!(refused(resp, 422).await, "contract", "{method} {path} {body}");
     }
-    // Bodiless, so only the query can be refused.
+    // Every control route that reads a query, sent a parameter it does not define and no body, so
+    // only the query can be refused.
     let queries = [
-        ("POST", "/control/flush?wait=visible&wait=visible"),
-        ("DELETE", "/control/views/quarter/2026-Q3?unexpected=1"),
-        ("GET", "/control/faults/arrivals?site=after_fsync&extra=1"),
+        ("POST", "/control/values?wiat=visible"),
+        ("POST", "/control/ingest?wiat=visible"),
+        ("POST", "/control/changes?wiat=visible"),
+        ("POST", "/control/flush?wiat=visible"),
+        ("PUT", "/control/layers?wiat=visible"),
+        ("DELETE", "/control/layers/clusters?wiat=visible"),
+        ("PUT", "/control/attributes?wiat=visible"),
+        ("PUT", "/control/vocabularies/genre?wiat=visible"),
+        ("PATCH", "/control/vocabularies/genre/values?wiat=visible"),
+        ("PUT", "/control/view_groups/quarter?wiat=visible"),
+        ("PUT", "/control/views/plain?wiat=visible"),
+        ("PUT", "/control/views/quarter/2026-Q3?wiat=visible"),
+        ("DELETE", "/control/views/quarter/2026-Q3?wiat=visible"),
+        ("PUT", "/control/layers/clusters/artifacts?wiat=visible"),
+        ("PATCH", "/control/layers/clusters/artifacts?wiat=visible"),
+        ("GET", "/control/faults/arrivals?site=after_fsync&wiat=visible"),
     ];
     for (method, path) in queries {
         let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();

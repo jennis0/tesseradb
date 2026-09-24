@@ -1157,9 +1157,10 @@ async fn changes(
 /// publication and the answer.
 const VISIBLE_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
-/// The `wait` query parameter every write route takes. Its one value is `visible`; any other is a
-/// 422, so `wait=true` is not mistaken for a completed wait.
+/// The `wait` query parameter every write route takes. Its one value is `visible`; any other value,
+/// or any other parameter, is a 422, so `wait=true` or `wiat=visible` is not mistaken for a wait.
 #[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WaitQuery {
     #[serde(default)]
     wait: Option<String>,
