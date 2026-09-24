@@ -6,6 +6,7 @@ These pages state what each interface accepts and returns.
 - [Wire framing](../openapi/README.md): the framed Arrow bodies of `POST /v1/viewport` and `POST /v1/items`, with decoders in Python and JavaScript.
 - [Capabilities](capabilities.md): which route, function, method or command performs each core capability on each of the four surfaces.
 - [CLI](cli.md): the `tessera` command and its subcommands.
+- [tessera.toml](tessera-toml.md): the deployment file, which says where the bundle is and how the server listens and bounds its work.
 - [Configuration schema](schema.md): the corpus declaration and `tessera.toml`.
 - [Python client](python.md): the `tesseradb` package.
 - [TypeScript client](typescript.md): the `@tesseradb/client` package.

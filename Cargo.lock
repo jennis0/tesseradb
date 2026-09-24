@@ -2916,6 +2916,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "tempfile",
+ "tessera-docgen",
  "tessera-engine",
  "tessera-types",
  "tokio",
@@ -2932,6 +2933,13 @@ dependencies = [
  "tempfile",
  "tessera-spatial",
  "tessera-types",
+]
+
+[[package]]
+name = "tessera-docgen"
+version = "0.1.0"
+dependencies = [
+ "syn 2.0.119",
 ]
 
 [[package]]

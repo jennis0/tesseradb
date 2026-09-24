@@ -15,3 +15,5 @@ tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# docs/reference/tessera-toml.md is rendered from this crate's source (`src/reference.rs`).
+tessera-docgen = { path = "../tessera-docgen" }
