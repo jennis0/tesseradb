@@ -42,7 +42,7 @@ sys.path.insert(0, str(REPO_ROOT / "conformance"))
 
 @pytest.fixture(scope="session")
 def catalogue_bundle_root() -> Path:
-    """The adversarial mask catalogue's bundle, built once per machine at a fixed path."""
+    """The adversarial mask catalogue's bundle, built once per `tessera` binary."""
     from oracle.catalogue import build_catalogue_bundle  # noqa: PLC0415
 
     root, _fx = build_catalogue_bundle()
@@ -199,7 +199,7 @@ def catalogue_density_server(tmp_path_factory, private_catalogue_bundle):
 
 @pytest.fixture(scope="session")
 def multiview_bundle_root() -> Path:
-    """The multi-view corpus's bundle — four views over one entity space, built once per machine."""
+    """The multi-view corpus's bundle: four views over one entity space, built once per binary."""
     from oracle.multiview import build_multiview_bundle  # noqa: PLC0415
 
     return build_multiview_bundle()

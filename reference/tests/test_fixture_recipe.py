@@ -1,6 +1,6 @@
 """The fixture-reuse receipt, which is the fix for a defect that has now happened twice.
 
-A fixture bundle is built once per machine at a fixed `/tmp` path and reused across sessions, so
+A fixture bundle is built once per `tessera` binary under `/tmp` and reused across sessions, so
 "may this one be reused?" is answered on every run of both suites. Answering it by *inspecting the
 bundle* is an allowlist — it has to be extended in step with every new build input, and the input
 nobody adds is the one that then goes wrong silently. It failed that way on MANIFEST's `identity`
@@ -138,6 +138,32 @@ def test_a_bundle_a_server_has_published_into_is_not_reused(work_dir: Path):
     assert not cat._is_usable_bundle(bundle_root, wanted), (
         "a bundle with published server state on top of the build was reused — a previous run's "
         "denies would silently narrow every mask in this one"
+    )
+
+
+@pytest.mark.parametrize("field", ["bundle_format", "binary_sha256"])
+def test_a_bundle_built_by_another_binary_is_rebuilt_in_its_own_directory(
+    monkeypatch, work_dir: Path, field: str
+):
+    """A receipt records the binary that built the bundle, so another binary rebuilds it, and the
+    other binary's fixtures live in another directory, so that rebuild replaces nothing the first
+    binary's sessions are reading."""
+    bundle_root = work_dir / "bundle"
+    wanted = cat.recipe(work_dir, bundle_root)
+    _stamped(bundle_root, wanted)
+    ours = harness.fixture_dir("catalogue")
+    assert cat._is_usable_bundle(bundle_root, wanted)
+
+    other = dict(harness.builder_identity())
+    other[field] = other[field] + 1 if field == "bundle_format" else "0" * 64
+    monkeypatch.setattr(harness, "builder_identity", lambda: other)
+
+    assert not cat._is_usable_bundle(bundle_root, wanted), (
+        f"a bundle built by a binary with another {field} was reused"
+    )
+    assert harness.fixture_dir("catalogue") != ours, (
+        f"two binaries with different {field}s share a fixture directory, so each rebuilds the "
+        "bundle the other is reading"
     )
 
 

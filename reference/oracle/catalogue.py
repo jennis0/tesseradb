@@ -84,7 +84,7 @@ which is what made the closure a test that flipped rather than a gap somebody ha
 
 ## Reuse is decided by a stamped recipe, not by a predicate over the artefact
 
-The bundle is built once per machine at a fixed path and reused. **What may be reused is decided
+The bundle is built once per `tessera` binary and reused. **What may be reused is decided
 by comparing the full input set against a `FIXTURE.json` receipt written beside the bundle** — see
 [`recipe`] — and never by inspecting the bundle for properties a reader happens to think of. That
 distinction is the whole mechanism, and it is here because the predicate form failed twice: a
@@ -118,17 +118,16 @@ from .harness import (
     CLI_BIN,
     REPO_ROOT,
     build_env,
-    bundle_format_matches,
     ensure_cli_built,
-    read_recipe,
+    fixture_dir,
+    recipe_matches,
     write_deployment,
     write_recipe,
 )
 
-# Where the corpus and its bundle live between runs. A fixed path, like `/tmp/tessera-250k`, so
-# the build is paid once per machine rather than once per session — `build_catalogue_bundle`
-# reuses whatever is already there if it was built from this module's current inputs.
-DEFAULT_WORK_DIR = Path("/tmp/tessera-catalogue")
+#: The name of the directory under `/tmp` where the corpus and its bundle live between runs
+#: ([`harness.fixture_dir`] adds the builder's identity to it).
+WORK_DIR_NAME = "catalogue"
 
 #: The view's quantisation frame — the grid's own coordinates, since this catalogue states its
 #: expected answers in cells. Written into the declaration below rather than passed at invocation:
@@ -1311,7 +1310,7 @@ def catalogue_points_path(work_dir: Path | None = None) -> Path:
     Exposed because the oracle now recomputes geometry from the build's *input* rather than from
     `columns.arrow`, and the catalogue is the one corpus whose input this module owns.
     """
-    return (DEFAULT_WORK_DIR if work_dir is None else work_dir) / POINTS_NAME
+    return (fixture_dir(WORK_DIR_NAME) if work_dir is None else work_dir) / POINTS_NAME
 
 
 def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int]]:
@@ -1321,7 +1320,7 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     See the module doc for why the reuse test is a stamped recipe and not a predicate over the
     artefact.
     """
-    work_dir = DEFAULT_WORK_DIR if work_dir is None else work_dir
+    work_dir = fixture_dir(WORK_DIR_NAME) if work_dir is None else work_dir
     work_dir.mkdir(parents=True, exist_ok=True)
     bundle_root = work_dir / "bundle-catalogue"
     wanted = recipe(work_dir, bundle_root)
@@ -1356,16 +1355,12 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
     """The receipt matches, there is a readable post-r6 bundle under it, and nothing has been
     published into it since the build.
 
-    The receipt is the test; the two structural checks below are a cheap second gate against a
-    bundle that was damaged or *written to* after its receipt was written — cases the receipt
-    cannot see, because neither is an input. All three are tolerant of anything unreadable: what
-    cannot be confirmed is rebuilt, because being wrong in that direction costs a build and being
-    wrong in the other hands every test a fixture nobody asked for.
-
-    **The format number is one of the structural checks, not part of the receipt**
-    ([`harness.bundle_format_matches`]). The recipe stamps the corpus and the arguments, which a
-    format bump does not touch, so a fixture built by an engine at an earlier number would be
-    reused and read as though it were this one.
+    The receipt is the test, and it records the binary that built the bundle as well as the
+    inputs ([`harness.write_recipe`]). The two structural checks below are a cheap second gate
+    against a bundle that was damaged or *written to* after its receipt was written — cases the
+    receipt cannot see, because neither is an input. All three are tolerant of anything
+    unreadable: what cannot be confirmed is rebuilt, because being wrong in that direction costs a
+    build and being wrong in the other hands every test a fixture nobody asked for.
 
     **The published-state check is not hypothetical.** An accepted deny is written into the bundle
     prefix as a further `SEGMENTS-<n>.json` (contracts §2.3), so any driver that points a server at
@@ -1374,7 +1369,7 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
     (`conformance/conftest.py`'s `private_catalogue_bundle`); this is the backstop for the one that
     forgets, and it turns a wrong answer into a rebuild.
     """
-    if read_recipe(bundle_root) != wanted:
+    if not recipe_matches(bundle_root, wanted):
         return False
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())
@@ -1387,8 +1382,6 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
             for p in prefix.glob("partitions/*/SEGMENTS-*.json")
             if p.name != "SEGMENTS-0.json"
         ]
-        if not bundle_format_matches(prefix):
-            return False
         return not published
     except (OSError, KeyError, ValueError):
         return False

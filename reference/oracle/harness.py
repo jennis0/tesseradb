@@ -15,8 +15,11 @@ build is via the CLI subprocess, same as before).
 from __future__ import annotations
 
 import base64
+import functools
+import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import socket
@@ -43,7 +46,7 @@ DEFAULT_VIEW = "s0"
 # Fixture reuse: a stamped recipe, not a predicate over the artefact
 # ---------------------------------------------------------------------------------------------
 #
-# A fixture bundle is built once per machine at a fixed path and reused across sessions. Deciding
+# A fixture bundle is built once per `tessera` binary ([`fixture_dir`]) and reused. Deciding
 # *whether* it may be reused by inspecting the bundle is the construction that failed twice in this
 # file's own history — once on the r6 `identity` object, once on `--mint-external-ids` — and each
 # time the fix was to extend the predicate by one more clause. That is an allowlist, and the input
@@ -57,21 +60,40 @@ DEFAULT_VIEW = "s0"
 # in `/tmp` carried no record of what produced it.
 
 
-# `tessera_types::BUNDLE_FORMAT`, transcribed. The receipt records the *inputs* a fixture was built
-# from, and the format number is not one of them: it is a property of the engine that built it. A
-# fixture is shared across checkouts at a fixed path, so one built by an engine at another number
-# has to be rebuilt rather than reused — `tessera serve` refuses it, and this suite reads `attrs/`
-# by hand and would decode the older bytes under the newer format's rules.
-BUNDLE_FORMAT = 20
+@functools.cache
+def builder_identity() -> dict:
+    """The `tessera` binary that builds every fixture here: the bundle format it writes and a
+    SHA-256 digest of the binary. Every receipt records it ([`write_recipe`]), so a bundle built by
+    any other binary is rebuilt.
+
+    The format is `tessera_types::BUNDLE_FORMAT`, read from the source [`ensure_cli_built`] has
+    just compiled; `tessera --version` prints only the commit. Computed once per process, so a
+    session's fixtures stay at one path if the binary is rebuilt while it runs.
+    """
+    ensure_cli_built()
+    source = (REPO_ROOT / "crates" / "tessera-types" / "src" / "lib.rs").read_text()
+    found = re.search(r"^pub const BUNDLE_FORMAT: u32 = (\d+);", source, re.MULTILINE)
+    if found is None:
+        raise RuntimeError(
+            "crates/tessera-types/src/lib.rs has no `pub const BUNDLE_FORMAT: u32 = N;` line; "
+            "change the pattern in harness.builder_identity to match how it is declared"
+        )
+    return {
+        "bundle_format": int(found.group(1)),
+        "binary_sha256": hashlib.sha256(CLI_BIN.read_bytes()).hexdigest(),
+    }
 
 
-def bundle_format_matches(prefix_dir: Path) -> bool:
-    """Whether the bundle under `prefix_dir` was written at the format this checkout reads."""
-    try:
-        manifest = json.loads((prefix_dir / "MANIFEST.json").read_text())
-    except (OSError, ValueError):
-        return False
-    return manifest.get("bundle_format") == BUNDLE_FORMAT
+def fixture_dir(name: str) -> Path:
+    """Where the fixture `name` lives between runs: one directory under `/tmp` per builder
+    identity, such as `/tmp/tessera-catalogue-f21-f71ddf814850`.
+
+    Checkouts whose binaries differ keep separate fixtures, so a rebuild in one never replaces a
+    bundle another is reading. Checkouts with the same binary share one build.
+    """
+    identity = builder_identity()
+    key = f"f{identity['bundle_format']}-{identity['binary_sha256'][:12]}"
+    return Path("/tmp") / f"tessera-{name}-{key}"
 
 
 def recipe_path(bundle_root: Path) -> Path:
@@ -92,8 +114,18 @@ def read_recipe(bundle_root: Path) -> dict | None:
         return None
 
 
+def _receipt(wanted: dict) -> dict:
+    """The recipe as stamped: the caller's inputs and the binary that built from them."""
+    return {**wanted, "builder": builder_identity()}
+
+
+def recipe_matches(bundle_root: Path, wanted: dict) -> bool:
+    """Whether the bundle at `bundle_root` was built from `wanted` by this checkout's binary."""
+    return read_recipe(bundle_root) == _receipt(wanted)
+
+
 def write_recipe(bundle_root: Path, wanted: dict | None) -> None:
-    """Stamp the recipe, or remove the stamp when `wanted` is `None`.
+    """Stamp the recipe and the builder's identity, or remove the stamp when `wanted` is `None`.
 
     Removing first and stamping last is what makes the receipt mean "this bundle was built from
     this, completely": a build that dies part way through leaves no receipt at all.
@@ -103,7 +135,7 @@ def write_recipe(bundle_root: Path, wanted: dict | None) -> None:
         path.unlink(missing_ok=True)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(wanted, indent=2, sort_keys=True))
+    path.write_text(json.dumps(_receipt(wanted), indent=2, sort_keys=True))
 
 
 def free_port() -> int:
@@ -294,7 +326,7 @@ def ensure_fixture_bundle(
     if bundle_root.exists():
         print(
             f"fixture at {bundle_root} was not built from this harness's current inputs "
-            f"(stamp={read_recipe(bundle_root)}, wanted={wanted}) — rebuilding"
+            f"(stamp={read_recipe(bundle_root)}, wanted={_receipt(wanted)}) — rebuilding"
         )
     ensure_cli_built()
     write_recipe(bundle_root, None)
@@ -424,7 +456,7 @@ def fixture_recipe(argv: list[str], *, declaration: str = "") -> dict:
     in it now rather than in the invocation, and a bundle quantised against a different frame has
     every stored cell wrong while remaining perfectly well-formed. The binary's path, the `--out`
     path and the `--deployment` path are dropped: none is a property of the fixture, and including
-    them would force a rebuild per worktree.
+    them would force a rebuild per worktree. The binary itself is recorded by [`write_recipe`].
 
     Note what the recipe cannot pin, and why that is correct: `--mint-id-key` mints a fresh
     identity key per build, so two bundles from an identical recipe have different `tessera_id`s.
@@ -464,7 +496,7 @@ def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:
     exactly one segment set per partition (`SEGMENTS-0.json`); any partition carrying more has
     been served against with writes and is rebuilt.
     """
-    if read_recipe(bundle_root) != wanted:
+    if not recipe_matches(bundle_root, wanted):
         return False
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())

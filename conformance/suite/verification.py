@@ -120,9 +120,9 @@ GRID_EXTENT = (0.0, 65536.0, 0.0, 65536.0)
 #: persist a `tessera_id` across builds regardless — the ids are a keyed permutation.
 FIXTURE_ID_KEY_HEX = "000102030405060708090a0b0c0d0e0f"
 
-#: Where the materialiser shim lives, per machine — a fixed path for the same reason as the
-#: catalogue's work dir: the compile is cached across sessions. The corpus *files* are per run.
-SHIM_DIR = Path("/tmp/tessera-corpus-suite/materialise-shim")
+#: Where the materialiser shim lives: in this checkout's target directory, where it is compiled,
+#: since its manifest names this checkout's crates. The corpus *files* are per run.
+SHIM_DIR = REPO_ROOT / "target" / "corpus-materialise-shim"
 
 
 class TotalVerificationFailure(AssertionError):
