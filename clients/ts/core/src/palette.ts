@@ -1,21 +1,17 @@
 /**
- * The artifact palette (design §5.10, decision 0099's default): **positional**. An artifact's
- * hue comes from its angle about the corpus extent's centre and its lightness from its distance,
- * so a colour is a pure function of where a cluster sits — stable under pan, stable across
- * responses, converging as a zoom narrows the angles on screen. A palette assigned in served
- * order would recolour every cluster whenever one entered the view.
+ * The artifact palette. The default, `positional`, takes an artifact's hue from its angle about the
+ * extent's centre and its lightness from its distance, so a colour depends only on where the
+ * cluster sits and does not change under pan or across responses. A palette assigned in served
+ * order would recolour every cluster whenever one entered the view. `spread` spaces hues evenly
+ * over the set in angle order, which separates neighbours better and changes with the set.
  *
- * The alternative, at the owner's choice, is **spread**: hues spaced evenly over the served set
- * ordered by angle, which separates neighbours better and changes with the served set.
- *
- * Geometry arrives in the wire's 32-bit grid units (contracts §3.2); the centre is the grid's
- * midpoint, which is the corpus extent's centre by construction of the quantisation.
+ * Geometry is in the wire's 32-bit grid units; the grid's midpoint is the extent's centre.
  */
 
 export type Rgba = readonly [number, number, number, number];
 
 export type PaletteKind = 'positional' | 'spread';
-/** The ground a colour is drawn on — the boards' light and dark values differ in lightness. */
+/** The ground a colour is drawn on. */
 export type PaletteScheme = 'light' | 'dark';
 
 /** The grid is 2³² per axis; the extent's centre and its half-width in the same units. */
@@ -23,7 +19,7 @@ export const GRID32_CENTRE = 2 ** 31;
 
 const ALPHA = 220;
 
-/** `h` in degrees, `s` and `l` in `[0, 1]` — to RGB bytes. */
+/** `h` in degrees, `s` and `l` in `[0, 1]`, to RGB bytes. */
 export function hslToRgb(h: number, s: number, l: number): [number, number, number] {
   const hue = ((h % 360) + 360) % 360;
   const c = (1 - Math.abs(2 * l - 1)) * s;
@@ -50,12 +46,12 @@ export function polarOf(centroid: readonly [number, number]): {angle: number; ra
   return {angle, radius};
 }
 
-/** The lightness and saturation of a hue on each ground (`gen.py`'s `position_colours`). */
+/** The saturation and lightness of a hue on each ground. */
 function shade(radius: number, scheme: PaletteScheme): [number, number] {
   return scheme === 'dark' ? [0.62, 0.64 + 0.08 * radius] : [0.58, 0.4 - 0.08 * radius];
 }
 
-/** The hue offset the boards apply, so the map's quadrants take the boards' colours. */
+/** A fixed hue rotation applied to every colour. */
 const HUE_OFFSET = (0.5 + 0.45) * 360;
 
 /** The positional colour of one centroid. */
@@ -66,14 +62,12 @@ export function positionalColour(centroid: readonly [number, number], scheme: Pa
   return [r, g, b, ALPHA];
 }
 
-/** The neutral: *not known here yet*, which is what a point wears until the wire names it. */
+/** The colour of a point whose artifact is not known here yet. */
 export const NEUTRAL: Rgba = [118, 126, 140, 200];
 
 /**
- * The colour of one artifact under the **positional** palette, centroid or not: the whole of what
- * that palette does per entry, since it ignores the set. Stated once here because a caller that
- * extends a colour map for a newly named ordinal — rather than rebuilding it over the whole
- * session table (`store.ts`) — must compute exactly what {@link artifactColours} would have.
+ * One artifact's colour under the positional palette, which does not depend on the set. A caller
+ * extending a colour map for a newly named ordinal uses this to match {@link artifactColours}.
  */
 export function positionalEntry(centroid: readonly [number, number] | null, scheme: PaletteScheme = 'dark'): Rgba {
   return centroid ? positionalColour(centroid, scheme) : NEUTRAL;
@@ -83,16 +77,12 @@ export function positionalEntry(centroid: readonly [number, number] | null, sche
 export type Placed = {ordinal: number; centroid: readonly [number, number] | null};
 
 /**
- * A colour per artifact, by ordinal. Positional colours ignore the set; spread colours are
- * assigned around the hue circle in angle order, so neighbours on the map are neighbours in hue
- * and the whole circle is used however few there are. An artifact with no centroid takes the
- * neutral.
+ * A colour per artifact, by ordinal. Spread colours go round the hue circle in angle order, so map
+ * neighbours are hue neighbours. An artifact with no centroid takes the neutral.
  *
- * The caller passes **every artifact the session table holds**, not only the set the current
- * view was served: a band held under a coarser cut names artifacts the channel has moved off,
- * and its points wear those artifacts' colours — exact, since membership in the artifact is what
- * the wire said — rather than going neutral until a refetch. Under `spread` the hue assignment
- * therefore moves with the table rather than with one response's served set.
+ * The caller passes every artifact the session table holds: a band held under a coarser cut names
+ * artifacts the current view was not served, and its points take their colours. Under `spread` the
+ * hues therefore move with the table.
  */
 export function artifactColours(
   placedIn: readonly Placed[],
