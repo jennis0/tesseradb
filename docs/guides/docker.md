@@ -3,7 +3,7 @@
 This guide runs Tessera in a container managed by Docker Compose, with the database kept in a Docker
 volume. It suits a host where you already run services this way. You'll need Docker with the Compose
 plugin, sudo on the host, and a clone of the Tessera repository to build the image from. From the
-`~/ireland` directory of [the first tutorial](../start/index.md) you need `corpus.toml`,
+`~/ireland` directory of [the first tutorial](../start/first-map.md) you need `corpus.toml`,
 `points.parquet` and `.env`, which holds the identity key.
 
 Once the container is running, [Operate a deployment](operating.md) takes over. It applies to this

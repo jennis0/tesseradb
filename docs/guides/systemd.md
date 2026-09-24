@@ -1,6 +1,6 @@
 # Run Tessera under systemd
 
-This guide turns the map you served from a terminal in [the first tutorial](../start/index.md)
+This guide turns the map you served from a terminal in [the first tutorial](../start/first-map.md)
 into a service on a Linux server, which starts at boot and comes back by itself if it crashes.
 You'll need sudo on the server and the `tessera` binary you built with cargo. From the tutorial's
 `~/ireland` directory you need `corpus.toml`, `points.parquet` and `.env`, which holds the identity
