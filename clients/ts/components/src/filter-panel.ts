@@ -13,19 +13,14 @@ import './filter.js';
 const FILTER_PARTS = exportparts('filter');
 
 /**
- * `<tessera-filter-panel>` — every operand `meta` offers, as `<tessera-filter>`s, with the
- * applied filters as chips with `×` and *Clear all* at the top (design §5.3 tier 2, the boards'
- * FILTERS panel). Which controls exist is the server's answer: a column absent from
- * `meta.filterOperands` is absent here, and a schema that adds one gains its control on the next
- * meta.
+ * `<tessera-filter-panel>`: a `<tessera-filter>` for every operand in `meta.filterOperands`, with
+ * the applied clauses as chips and a Clear all control.
  *
- * **Every chip carries its verb** (`highlight-and-hierarchy.md` §5.2): the word says which of the
- * request's two expressions the clause joins — *filter*, and the map narrows to the matches;
- * *highlight*, and the map stays with the matches lit and the rest dulled — and clicking it moves
- * the clause without the predicate being re-entered. A `member_of` clause (an artifact named from
- * the card or the hierarchy panel) is a chip here too, and the same word moves it.
+ * Each chip shows its verb: `filter` narrows the map to the matches, `highlight` keeps the map and
+ * lights the matches. Clicking the verb moves the clause to the other expression. A `member_of`
+ * clause (an artifact chosen from the card or the hierarchy panel) is a chip too.
  *
- * Keyed rendering, so a store tick never rebuilds a control under the user's cursor.
+ * Rendering is keyed, so a store update does not rebuild a control under the cursor.
  */
 export class TesseraFilterPanel extends TesseraElement {
   static override styles = [
@@ -105,8 +100,8 @@ export class TesseraFilterPanel extends TesseraElement {
   }
 
   /**
-   * What a `member_of` chip says: the clause's own label, which is the only name an artifact of a
-   * filter layer ever has here since it is never served, else the served name, else unnamed.
+   * A `member_of` chip's text: the clause's own label (the only name a filter layer's artifact has,
+   * since it is not served), else the served name, else unnamed.
    */
   private memberText(clause: MemberClause): string {
     const served = this.resolvedStore?.get('artifacts').served.find((a) => a.tesseraId === clause.artifact && a.layer === clause.layer);

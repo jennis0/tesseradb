@@ -9,39 +9,29 @@ import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-hierarchy>` — a layer's hierarchy, browsable **independently of the viewport**
- * (`highlight-and-hierarchy.md` §5.1), over `POST /v1/artifacts/browse` (§4).
+ * `<tessera-hierarchy>`: a layer's hierarchy over `POST /v1/artifacts/browse`, independent of the
+ * viewport. The viewport serves a budget cut, and where an artifact's members are spread over the
+ * whole layout its leaves arrive only at deep zoom; this panel opens on the roots at any zoom and
+ * does not move with the map.
  *
- * Rung 3 is why it exists: a 30,217-descriptor DAG went into a bundle and the viewer could show
- * none of it. The viewport serves a budget cut — roughly 48 artifacts at zoom 0, doubling per
- * level — and a MeSH descriptor's members are spread over the whole layout, so the cut deepens
- * uniformly and the leaves arrive at a zoom nobody reaches. **Nothing here depends on the
- * viewport**: it opens on the roots whatever the zoom, and it does not move when the map does.
+ * A layer select over the bundle's hierarchical layers, then a tree. Each row is a name, a masked
+ * count and an expander; expanding fetches the children, paged under "N more". On a `dag` layer a
+ * node appears under each served parent and lists its other parents. A parent the principal may
+ * not see is absent, so the node reads as a root. A search box shows matches with their lineage.
  *
- * A layer picker over the bundle's hierarchical layers, then a tree. Each row is a name, a masked
- * count and an expander; a child fetches its children on expansion and pages under *N more*. On a
- * `dag` layer a node appears under **each** of its served parents and says *also under X* by
- * listing its other parents — C29 per entry, so a parent this principal may not see is simply
- * absent and the node reads as a root of what they were given. A search box drives §4's search
- * form and shows its matches as rows with their lineage.
+ * The panel sends the map's filters and shows each row's matched count beside its masked count.
+ * Whether a row exists and its masked count do not change with the filter.
  *
- * **When the map carries a filter the panel sends the same `filters`** and shows each row's
- * `matchedCount` beside its masked one, so a filtered map and a filtered tree read the same
- * numbers. Existence and the masked count never move with the filter, and a row matching nothing
- * is still a row.
+ * A row's first action is highlight, which shows where an artifact's members are without changing
+ * the map; filter is beside it, and fit on a layer that draws something.
  *
- * **A click is *highlight* by default** (§5.2), because that is the action that shows where a
- * descriptor lives without losing the map; *filter* is beside it, and *fit* beside that on a layer
- * that draws something. A filter layer (§5.4) is offered here like any other and has no *fit*.
- *
- * The walk is this element's state and not the store's: what is expanded and what has been paged
- * belong to the panel, and a projection would have to hold them and be rebuilt on every tick.
+ * What is expanded and paged is this element's state, not the store's.
  */
 
 /** One node of the walk: a row, its children once fetched, and where its paging got to. */
 type Node = {
   row: BrowseRow;
-  /** The path that reached it — a `dag` node under two parents is two nodes, and this tells them apart. */
+  /** The path that reached it; a `dag` node under two parents is two nodes with different paths. */
   path: string;
   children: Node[] | null;
   next: string | null;
@@ -155,7 +145,7 @@ export class TesseraHierarchy extends TesseraElement {
 
   /** Which layer's hierarchy is shown; unset, the first the bundle offers. */
   @property() accessor layer = '';
-  /** Rows per page, and what *N more* fetches. Clamped to the deployment's own ceiling. */
+  /** Rows per page, and what "N more" fetches, clamped to the server's ceiling. */
   @property({type: Number}) accessor limit = 50;
 
   @state() private accessor roots: Node[] | null = null;
@@ -166,15 +156,14 @@ export class TesseraHierarchy extends TesseraElement {
   @state() private accessor refusal: Refusal | null = null;
   /** Which paths are open, so a re-render of the tree keeps the walk. */
   @state() private accessor open = new Set<string>();
-  /** Bumped to re-render after a node's children land — the tree is held in `roots`, by mutation. */
+  /** Bumped to re-render after a node's children land, since the tree in `roots` is mutated. */
   @state() private accessor revision = 0;
 
-  /** What the roots were fetched under, so a filter or a layer change refetches and nothing else does. */
+  /** The question the roots were fetched under; see {@link question}. */
   private fetchedUnder = '';
   /**
-   * Every name the walk has seen, by identifier. **The only place a name for one of these
-   * artifacts exists on this client**: a filter layer is never named in a viewport request, so its
-   * artifacts are never served.
+   * Every name the walk has seen, by identifier. A filter layer's artifacts are never served in a
+   * viewport, so this is the client's only source of their names.
    */
   private names = new Map<bigint, string>();
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -189,34 +178,21 @@ export class TesseraHierarchy extends TesseraElement {
   }
 
   /**
-   * The question the panel is asking, as a string: the layer and the map's own filter. A change
-   * refetches the roots and drops the walk, because every count in it answers the old question.
+   * The question the panel is asking, as a string: the layer and the map's filter. A change
+   * refetches the roots and drops the walk, whose counts answer the old question.
    */
   private question(): string {
-    // **The composed request, not the projections.** `store.browse` sends `requestFilters()` —
-    // the draft's filter-position leaves, the `member_of` clauses in that position *and the drawn
-    // region's leaf* — so a question hashed from `filters.expr` and the clauses alone missed a
-    // region change entirely and the tree kept counts answering the question before it. One
-    // source, and it is the one the request is built from. It is JSON-safe by construction: a
-    // `member_of` leaf spells its artifact as a decimal string.
+    // Hashed from `requestFilters()`, what `store.browse` sends, which includes the drawn region.
+    // A `member_of` leaf holds its artifact as a decimal string, so it serialises.
     return `${this.current()?.name ?? ''}|${JSON.stringify(this.resolvedStore?.requestFilters() ?? null)}`;
   }
 
   /**
-   * Whether the panel is being shown. **A panel that is not asks nothing.**
+   * Whether the panel is shown. A hidden panel sends no request, so a panel in a closed drawer
+   * does not load the roots alongside the first viewport.
    *
-   * The walk is a request per layer and the roots are the widest one there is; a panel in a closed
-   * drawer, a collapsed accordion or a tab nobody opened was making it anyway — on the page's
-   * first meta, beside the first viewport, against a server still materialising the session.
-   * Measured on rung 3: 320 ms of server time for roots nothing was drawing. So the ask waits
-   * until the element is shown, and follows the moment it is. In the demo's overlay layout the
-   * panel *is* shown, so it still browses on load; what changes is that a host who put it away no
-   * longer pays for it.
-   *
-   * `checkVisibility` is the test — display, visibility and `content-visibility`, which is what
-   * *put away* means here — and it is re-asked on every render. A reveal that re-renders nothing
-   * (a drawer opening above it) is caught by the observer instead. A runtime with neither answers
-   * *shown*, which is the behaviour this panel has always had.
+   * `checkVisibility` is asked on every render; a reveal that re-renders nothing (a drawer opening
+   * above it) is caught by the intersection observer. A runtime with neither counts as shown.
    */
   @state() private accessor shown = false;
   private observer: IntersectionObserver | null = null;
@@ -238,7 +214,7 @@ export class TesseraHierarchy extends TesseraElement {
     super.disconnectedCallback();
   }
 
-  /** Whether this element is displayed at all — see {@link shown}. */
+  /** Whether this element is displayed; see {@link shown}. */
   private displayed(): boolean {
     return typeof this.checkVisibility === 'function' ? this.checkVisibility() : true;
   }
@@ -270,7 +246,7 @@ export class TesseraHierarchy extends TesseraElement {
     }
   }
 
-  /** One page of the current layer, under the map's own filter — the store supplies that. */
+  /** One page of the current layer, under the map's filter, which the store supplies. */
   private page(req: {parent?: bigint; q?: string; cursor?: string}): Promise<BrowsePage> | null {
     const s = this.resolvedStore;
     const layer = this.current();
@@ -308,9 +284,8 @@ export class TesseraHierarchy extends TesseraElement {
   }
 
   /**
-   * Expand a node: its children, paged. A node already opened keeps what it fetched — closing and
-   * reopening costs nothing, and the counts are still answers to the same question, which
-   * {@link question} is what guards.
+   * Expand a node: its children, paged. A node keeps what it fetched while {@link question} is
+   * unchanged, so reopening it fetches nothing.
    */
   private async expand(node: Node, more = false): Promise<void> {
     const request = this.page({parent: node.row.tesseraId, ...(more && node.next ? {cursor: node.next} : {})});
@@ -345,8 +320,7 @@ export class TesseraHierarchy extends TesseraElement {
   private search(text: string): void {
     this.query = text;
     if (this.searchTimer) clearTimeout(this.searchTimer);
-    // Debounced like every other typed control here: a scan over the layer's keys and names is
-    // bounded by its artifact count and never by the corpus, but it is still a request a keystroke.
+    // Debounced, like every typed control.
     this.searchTimer = setTimeout(() => {
       this.searchTimer = null;
       const q = text.trim();
@@ -367,7 +341,7 @@ export class TesseraHierarchy extends TesseraElement {
     }, 250);
   }
 
-  /** The clause this row carries, if any — what colours the row and what the buttons toggle. */
+  /** The clause on this row's artifact, if any, which colours the row and sets the buttons. */
   private clauseOn(id: bigint): ClauseVerb | null {
     const layer = this.current()?.name;
     const held = this.resolvedStore?.get('filters').members ?? [];
@@ -435,8 +409,7 @@ export class TesseraHierarchy extends TesseraElement {
     const open = this.open.has(node.path);
     const clause = this.clauseOn(node.row.tesseraId);
     const name = node.row.name;
-    // A `dag` node under several served parents is drawn under each of them; the row says which
-    // others it sits under, so the duplication reads as the structure it is (§5.1).
+    // A `dag` node is drawn under each served parent; the row names the others.
     const also = node.row.parentIds.filter((p) => String(p) !== node.path.split('/').at(-2));
     const drawn = !isFilterLayer(layer);
     return html`<li>
@@ -459,8 +432,7 @@ export class TesseraHierarchy extends TesseraElement {
           <button part="filter" type="button" data-verb="filter" aria-pressed=${clause === 'filter' ? 'true' : 'false'}
             title="Filter to this" @click=${() => this.apply(node.row.tesseraId, 'filter')}>${icon('filter', 13)}</button>
           ${
-            // No *fit* on a filter layer: its artifacts are spread across the frame and there is
-            // nothing to fit to (§5.4).
+            // A filter layer draws nothing, so there is nothing to fit to.
             drawn
               ? html`<button part="fit" type="button" title="Fit the map to this"
                   @click=${() => emit(this, 'tessera-artifactfit', {id: idString(node.row.tesseraId)})}>${icon('fit', 13)}</button>`

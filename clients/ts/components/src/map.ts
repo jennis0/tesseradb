@@ -26,44 +26,36 @@ import {sameFrame} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-map>` is the canvas: points, the density wash, the artifact markers, hover, pick, the
- * selection highlight, and the display states drawn over the canvas itself, so a refused or
- * expired view never reads as an empty corpus.
+ * `<tessera-map>` is the canvas: points, the density wash, the artifact outlines and labels,
+ * hover, pick, the selection, and the refused, expired and empty states drawn over the canvas, so
+ * none of them reads as an empty corpus.
  *
- * **Per instance, not per module.** Each map owns its `Deck`, its `MarkSlab` and its probe. The
- * `Deck` is finalised a settle after disconnection, and not at all if the element reconnects
- * first: JupyterLab's windowed notebooks and a framework's reorder disconnect and reconnect
- * elements routinely, and a synchronous finalize would rebuild the GPU slab on every scroll past.
- * The store is not disposed on disconnect (`TesseraElement`).
+ * Each map owns its `Deck`, its `MarkSlab` and its probe. The `Deck` is finalised a moment after
+ * disconnection, and not at all if the element reconnects first, since notebooks and frameworks
+ * disconnect and reconnect elements routinely and the GPU slab would be rebuilt each time.
  *
- * **The map owns the camera and tells the store.** deck's `{target, zoom}` in world space goes to
- * `setView` through `viewInputOf` on every change; the driver debounces. The element holds the
- * view state itself so `fit()`, `fitTo()` and the keyboard can move it.
+ * The map owns the camera: deck's world-space `{target, zoom}` goes to `setView` through
+ * `viewInputOf` on every change, and the store debounces. `fit()`, `fitTo()` and the keyboard move
+ * the view state the element holds.
  *
- * **Selection.** `mode="box"`, or shift-drag in `pan`, draws a box; `mode="lasso"` draws a
- * freehand polygon. While dragging, only the shape is drawn. The settled shape goes to
- * `store.select`, which puts it on every request as the `region` leaf, so the map narrows to it
- * and its count is exact for the shape.
+ * `mode="box"`, or shift-drag in `pan`, draws a box; `mode="lasso"` a freehand polygon. The
+ * settled shape goes to `store.select`, which sends it on every request as the `region` leaf, so
+ * the map narrows to it and its count is exact for the shape.
  *
- * **Colour by cluster** is `colour-by="cluster:<layer>"`, and the `palette` property chooses
- * positional or spread. The layer owns the lookup texture.
+ * `colour-by="cluster:<layer>"` colours by cluster, with `palette` choosing positional or spread.
  *
- * `display: block` with its height from `--tessera-map-height`, because a custom element is
- * inline and heightless and deck sizes its canvas from its parent.
+ * The host is `display: block` with its height from `--tessera-map-height`, since deck sizes its
+ * canvas from its parent.
  */
 
 /** How long after disconnection the `Deck` is finalised, unless the element reconnects. */
 const FINALIZE_SETTLE_MS = 250;
-/**
- * How long the pointer must rest on a mark before its record is asked for — long enough that
- * crossing a dense map asks for nothing, short enough that stopping on a point answers before the
- * hand has settled.
- */
+/** How long the pointer must rest on a mark before its record is asked for. */
 const HOVER_DESCRIBE_MS = 140;
 
 /**
- * What the map publishes for an instrument or a smoke script, mutated in place, one object.
- * `timings.frame` and `cluster` are filled only while the map's `measure` is on.
+ * What the map reports about itself for instruments and tests, one object mutated in place.
+ * `timings.frame` and `cluster` are filled only while `measure` is on.
  */
 export type MapProbe = {
   paints: number;
@@ -73,10 +65,10 @@ export type MapProbe = {
   requests: number;
   encoding: string;
   view: {depth: number; status: string; stale: boolean; visible: number; matched: number; served: number; provisional: number};
-  /** `ms` is select-to-counted, the store's own clock: the settle, the request and the sum. */
+  /** `ms` is from the selection to its counts arriving, on the store's clock. */
   region: {verdict: string; exact: boolean; visible: number | null; matched: number; held: number; status: string; ms: number | null} | null;
   timings: {
-    /** Per settle: the slab sync, the wash bin, the lookup texture, the outlines, the labels and the whole layer build, last values in ms. */
+    /** The last paint's work per stage, in milliseconds. */
     slabMs: number;
     washMs: number;
     lutMs: number;
@@ -86,30 +78,25 @@ export type MapProbe = {
     /** Writes to the layer's lookup texture since the layer made it. */
     lutWrites: number;
     /**
-     * What the last paint drew of the artifacts: the **rings** the outline layer carries, the
-     * **artifacts** they belong to — the hovered and the opened one, which is all that draws — and
-     * the labels placed. The first two are in different units because a shape is a list of parts
-     * (`artifact-shapes.md` §1): opening a cluster whose members are two separated clouds hands
-     * deck two parts and draws one shape. Neither counts what may be hovered, which is the frontier
-     * and is held here rather than in the layer (`contours`).
+     * What the last paint drew: the outline parts, the artifacts they belong to (the hovered and
+     * the opened), and the labels placed. An artifact in several pieces has several parts.
      */
     outlines: number;
     outlinesDrawn: number;
     labels: number;
-    /** The mark style the last paint drew — radius in pixels and composited alpha — and the resident count it was chosen for. */
+    /** The mark radius in pixels and alpha the last paint drew, and the resident count behind them. */
     markRadius: number;
     markAlpha: number;
     markCount: number;
-    /** Frame gaps over the last two seconds, ms. */
+    /** Frame gaps over the last two seconds, in milliseconds. */
     frame: {mean: number; p95: number; n: number};
     /** Per-response decode, reported by the host through the store's instruments. */
     decodeMs: number[];
   };
   /**
-   * Colour by cluster, for the harness: the layer coloured by (else the first layer drawn), the
-   * coverage, that layer's served ids, and a sample of the ordinals the marks on screen carry with
-   * what each resolves to — one of those ids, or none — so *a coloured point's ordinal resolves to
-   * a served artifact* is checked rather than eyeballed. `layersOn` is the layers drawn.
+   * Colour by cluster: the layer coloured by (else the first drawn), its served ids, and a sample
+   * of the marks' ordinals with the served artifact each resolves to, so a test can check that a
+   * coloured mark resolves to a served artifact. `layersOn` is the layers drawn.
    */
   cluster: {
     layer: string | null;
@@ -118,10 +105,9 @@ export type MapProbe = {
     servedIds: string[];
     sample: {ordinal: number; resolvedId: string | null}[];
     /**
-     * How many of the sampled ordinals the lookup texture draws in a colour — resolved against
-     * the colours, which cover every artifact the session table holds, not only the served set
-     * (§5.10). `resolvedId` answers a narrower question: which *served* artifact the ordinal
-     * opens to. The two differ exactly where a band is held under a cut the view has moved off.
+     * How many sampled ordinals the lookup texture colours. Colours cover every artifact in the
+     * session table, so this can exceed the ordinals with a served `resolvedId`, where a band is
+     * held under a cut the view has moved off.
      */
     coloured: number;
   };
@@ -133,21 +119,10 @@ type ViewState = {target: [number, number, number]; zoom: number; minZoom: numbe
 const VIEW = new OrthographicView({id: 'ortho', flipY: true});
 
 /**
- * Which count the density wash reads (`highlight-and-hierarchy.md` §5.3), and so what the
- * interface labels it as: `highlighted` where a highlight is set, `matched` where the request's
- * `filters` carries anything and no highlight is, `visible` under neither.
- *
- * **The `matched` test has to be the request's**, not one control's. `filters` on the wire is the
- * draft's filter-position leaves, the `member_of` clauses in that position and the drawn region's
- * leaf, composed at one site in the store (`requestFilters`); a wash labelled *matched* while the
- * request carried no filter is a number under the wrong name, and one labelled *visible* while it
- * did is the same fault the other way. This was `filters.expr || selection` for a day —
- * `selection` is the picked point and the opened artifact, a projection that is never null, so the
- * `visible` branch was unreachable and every unfiltered wash was mislabelled.
- *
- * The three columns legitimately agree — `highlighted` equals `matched` with no highlight, and
- * `matched` equals `visible` with no filter — which is why the label is chosen from what was
- * *asked* and never from the numbers.
+ * Which count the density wash reads, and so its label: `highlighted` under a highlight, `matched`
+ * when the request's `filters` carries anything (the filter clauses, `member_of` clauses and the
+ * drawn region), `visible` otherwise. The choice follows what was asked, since the counts are
+ * equal when nothing narrows them.
  */
 export function washChannel(
   filters: FiltersProjection,
@@ -304,9 +279,8 @@ export class TesseraMap extends TesseraElement {
   /** Columns the marks carry, shown beneath a hovered point's title. */
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
   /**
-   * The record field a hovered point is titled by. Read off the marks where they carry it, else
-   * from the record once the pointer has rested. Unset, the title is the point's id and nothing
-   * is fetched.
+   * The record field a hovered point is titled by, read from the marks where they carry it, else
+   * from the record once the pointer rests. Unset, the title is the point's id.
    */
   @property({attribute: 'title-field'}) accessor titleField = '';
   @property({reflect: true}) accessor mode: 'pan' | 'box' | 'lasso' = 'pan';
@@ -314,16 +288,12 @@ export class TesseraMap extends TesseraElement {
   @property() accessor palette: PaletteKind = 'positional';
   /** The level to colour a nested layer at; unset colours at the deepest served. */
   @property({type: Number, attribute: 'cluster-level'}) accessor clusterLevel: number | null = null;
-  /** A deck.gl layer drawn under the points — a geographic corpus's basemap (§5.3). */
+  /** A deck.gl layer drawn under the points, such as a basemap. */
   @property({attribute: false}) accessor basemap: Layer | null = null;
   /**
-   * The ground the map itself draws on, where that is not the host page's.
-   *
-   * **A light raster basemap under a dark page is what this exists for.** The label ink, its halo
-   * and the positional palette's lightness answer to what is actually behind them, and the chrome
-   * around the canvas answers to the page — one host can want both, and inferring either from the
-   * other draws white names haloed in black over a pale street map. Unset, which is the ordinary
-   * case, the host's `color-scheme` decides both.
+   * The ground the map draws on, where it differs from the page's, such as a light basemap under a
+   * dark page. The label ink, halo and positional palette follow it; the chrome follows the page.
+   * Unset, the host's `color-scheme` decides both.
    */
   @property({reflect: true}) accessor ground: 'light' | 'dark' | '' = '';
   /** Whether the single-hue density wash, built from the exact tiles' counts, is drawn under the points. */
@@ -336,20 +306,20 @@ export class TesseraMap extends TesseraElement {
   @property({type: Boolean}) accessor measure = false;
   /** A fixed mark radius in pixels; unset, the marks are sized by their count and the zoom (`markStyle`). */
   @property({type: Number}) accessor radius: number | null = null;
-  /** The mode and fit control cluster — the map's own, not a slot. */
+  /** Hides the mode and fit controls. */
   @property({type: Boolean, attribute: 'no-controls'}) accessor noControls = false;
-  /** Which corner the toolbar sits in: top-left docked, top-right overlay (the boards). */
+  /** Which corner the controls sit in. */
   @property({attribute: 'controls-corner'}) accessor controlsCorner: 'top-left' | 'top-right' = 'top-left';
 
   @state() accessor hover: {x: number; y: number; title: string; lines: string[]} | null = null;
-  /** The artifact under the pointer — its outline, its label, or a mark it holds — for the outline's highlight. */
+  /** The artifact under the pointer (its outline, label or a mark it holds), whose outline is drawn. */
   @state() accessor hoveredArtifact: bigint | null = null;
   @state() accessor drag: [number, number, number, number] | null = null;
   @state() accessor dragPolygon: [number, number][] | null = null;
 
-  /** What the last click resolved to — a miss, a broken pick, or a hit that went to the store. */
+  /** What the last click resolved to: a miss, a broken pick, or a hit sent to the store. */
   lastPick: PickOutcome = null;
-  /** The map's probe, one object mutated in place; the demo publishes the first map's on `window`. */
+  /** The map's probe, one object mutated in place. */
   readonly probe: MapProbe = {
     paints: 0,
     at: 0,
@@ -362,11 +332,11 @@ export class TesseraMap extends TesseraElement {
     cluster: {layer: null, layersOn: [], coverage: {current: 0, stale: 0}, servedIds: [], sample: [], coloured: 0}
   };
 
-  /** Handed to the layer rather than left to it: a hover reads a mark's band back out of it. */
+  /** Passed to the layer, so a hover can read a mark's band from it. */
   readonly slab = new MarkSlab();
   private deck: Deck<OrthographicView> | null = null;
   private finalizeTimer: ReturnType<typeof setTimeout> | null = null;
-  /** The pending hover-record request's dwell, cancelled by the next hover and by disconnection. */
+  /** The pending hover dwell, cancelled by the next hover and by disconnection. */
   private describeTimer: ReturnType<typeof setTimeout> | null = null;
   private viewState: ViewState = {target: [WORLD_SIZE / 2, WORLD_SIZE / 2, 0], zoom: 0, minZoom: -2, maxZoom: MAX_DEPTH};
   private selectedWorldXY: [number, number] | null = null;
@@ -380,18 +350,13 @@ export class TesseraMap extends TesseraElement {
   private dragStart: [number, number] | null = null;
   private dragPointer: number | null = null;
   private metaSeen = false;
-  /**
-   * The frame the camera was last fitted or scheduled under (`view-switching.md` §4) — what a
-   * switch is compared against to decide whether the camera moves.
-   */
+  /** The frame the camera was last fitted or scheduled under, compared on a switch to decide whether to refit. */
   private cameraFrame: Quantisation | null = null;
   /** The view last drawn for; a change in it is a switch, and a switch drops the hover. */
   private cameraView = '';
   private frameGaps: number[] = [];
   private frameLoop: number | null = null;
   private lastFrameAt = 0;
-
-  // ---- lifecycle ---------------------------------------------------------------------------
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -437,17 +402,13 @@ export class TesseraMap extends TesseraElement {
       }
       if (changed.has('budget') && this.budget > 0) s.setBudget(this.budget);
       if (changed.has('palette')) s.setPalette(this.palette);
-      // The ground decides the positional palette's lightness as well as the labels', so a ground
-      // the host declared after the store was adopted has to reach it here.
+      // The ground also sets the positional palette's lightness in the store.
       if (changed.has('ground')) s.setScheme(this.scheme());
     }
     if (changed.has('mode') || changed.has('drag') || changed.has('dragPolygon') || changed.has('basemap') || changed.has('ground') || changed.has('wash') || changed.has('radius') || changed.has('clusterLevel') || changed.has('hoveredArtifact')) this.paint();
   }
 
-  /**
-   * The ground the map draws on, from the host's `color-scheme`: `dark` or `light` as declared,
-   * else the system preference. The positional palette's lightness follows it (§5.10).
-   */
+  /** The ground: `ground` if set, else the host's `color-scheme`, else the system preference. */
   private scheme(): PaletteScheme {
     if (this.ground === 'light' || this.ground === 'dark') return this.ground;
     if (typeof getComputedStyle === 'undefined') return 'dark';
@@ -485,23 +446,15 @@ export class TesseraMap extends TesseraElement {
       this.pushView();
     }
     const view = s.get('view');
-    // **Every switch drops the hover**, a switch within a group included: the marks under the cursor are different rows in the next view, and a tooltip
-    // held across the step would name a record that is no longer beneath the pointer.
+    // Every switch drops the hover: the marks under the cursor are different rows in the new view.
     if (view.id !== this.cameraView) {
       this.cameraView = view.id;
       this.hover = null;
       this.hoveredArtifact = null;
     }
-    // **A switch across frames refits; a switch within a group does not** (`view-switching.md`
-    // §4). Every view of a group shares one frame, so the same tiles at the same depth are the
-    // request in the next view and the store re-schedules the camera itself — moving the camera
-    // would throw away the position the user is reading.
-    //
-    // The question is asked of the **frame**, on every tick and not under a `view.id` gate: a pan
-    // has already written `cameraFrame` through `pushView`, so the two agree, and the refit does
-    // not depend on the store publishing the new id and the new extent in one tick. A null
-    // `cameraFrame` is the interval before the first camera went out, where there is nothing to
-    // refit from and the initial view is drawn as it is.
+    // A switch to another frame refits; a switch within a group, whose views share a frame, keeps
+    // the camera. Compared on every change rather than on a new view id, so the refit does not
+    // need the id and extent to change together. Before the first camera, `cameraFrame` is null.
     const frame = s.frame();
     if (frame && this.cameraFrame && !sameFrame(frame, this.cameraFrame)) this.fit();
     const status = s.get('status');
@@ -531,9 +484,7 @@ export class TesseraMap extends TesseraElement {
       emit(this, 'tessera-artifactopen', {id: idString(sel.artifact.id), detail: {...sel.artifact.detail, maskedCount: sel.artifact.detail.maskedCount.toString(10)}});
     }
     const region = s.get('region');
-    // The store's own view's frame (decision 0040): the extent is the view's, so the conversion
-    // between data coordinates and world space is asked of the store rather than read off the
-    // bundle, which no longer has one.
+    // The current view's frame converts between data coordinates and world space.
     const q = s.frame();
     if (region && q) {
       if (region.shape.kind === 'box') {
@@ -553,8 +504,7 @@ export class TesseraMap extends TesseraElement {
           this.paint();
         }
       } else if (region.shape !== this.regionShape) {
-        // An artifact selection draws no shape of its own: the map narrows to its members, and
-        // the opened artifact's outline is the drawing (`polygon-membership.md` §8).
+        // An artifact selection draws no shape of its own; the opened artifact's outline shows it.
         this.regionShape = region.shape;
         this.regionWorld = null;
         this.regionPolygon = null;
@@ -581,17 +531,14 @@ export class TesseraMap extends TesseraElement {
       p.region = null;
       this.paint();
     }
-    // The opened artifact is a property of the layer, read at a paint: an open or a close
-    // repaints so the outline highlights (the layer's own subscription redraws the projections,
-    // not the properties the host computes).
+    // The layer redraws itself on projection changes, not on the properties this element
+    // computes, so a change in the opened artifact repaints here.
     const opened = sel.artifact?.id ?? null;
     if (opened !== this.paintedOpened) {
       this.paintedOpened = opened;
       this.paint();
     }
-    // The same rule for `highlighting` and `washChannel`: the layer redraws itself when the marks
-    // move, but a property this element computed and handed it keeps the value of the last paint,
-    // so a change in either repaints here.
+    // Likewise for `highlighting` and `washChannel`.
     const wash = washChannel(s.get('filters'), view, region);
     if (view.highlighting !== this.paintedHighlighting || wash !== this.paintedWashChannel) {
       this.paintedHighlighting = view.highlighting;
@@ -605,7 +552,7 @@ export class TesseraMap extends TesseraElement {
   private probedComposition: object | null = null;
   /** The opened artifact the last paint drew, so a change repaints once. */
   private paintedOpened: bigint | null = null;
-  /** What the last paint told the layer about the highlight — see {@link onStoreChange}. */
+  /** What the last paint told the layer about the highlight. */
   private paintedHighlighting = false;
   private paintedWashChannel: ReturnType<typeof washChannel> | null = null;
   private regionShape: SelectionShape | null = null;
@@ -624,7 +571,7 @@ export class TesseraMap extends TesseraElement {
     this.probe.cluster = this.clusterProbe(clusterLayerOf(s.get('legend').colourBy), artifacts, s.get('marks').bands);
   }
 
-  /** See {@link MapProbe.cluster}: a sample of carried ordinals, each resolved through the table. */
+  /** A sample of carried ordinals, each resolved through the table; see {@link MapProbe.cluster}. */
   private clusterProbe(clusterLayer: string | null, a: ArtifactsProjection, bands: MarksProjection['bands']): MapProbe['cluster'] {
     const layer = clusterLayer ?? a.layers[0] ?? null;
     const rows = clusterLayer ? a.colourServed : a.served;
@@ -655,8 +602,6 @@ export class TesseraMap extends TesseraElement {
     this.deck = null;
     this.slab.clear();
   }
-
-  // ---- deck ---------------------------------------------------------------------------------
 
   private ensureDeck(): void {
     if (this.deck || !this.isConnected) return;
@@ -720,9 +665,6 @@ export class TesseraMap extends TesseraElement {
           drag: this.drag,
           dragPolygon: this.dragPolygon,
           wash: this.wash,
-          // The two halves of the draw under a highlight (`highlight-and-hierarchy.md` §5.3): the
-          // marks that satisfy it lit and the rest dulled, and the wash reading the count the
-          // question actually put ({@link washChannel}).
           highlighting: s.get('view').highlighting,
           washChannel: washChannel(s.get('filters'), s.get('view'), s.get('region')),
           radius: this.radius,
@@ -761,21 +703,10 @@ export class TesseraMap extends TesseraElement {
     });
   }
 
-  // ---- hover and pick -----------------------------------------------------------------------
-
   /**
-   * The shapes a hover — and a click — is resolved against, held until the served set, the fetched
-   * shapes, the level or the roster move. They are the **served** rings and never the drawn curve:
-   * the curve is a smoothing, and an answer given against it would be about a line the wire never
-   * sent. They answer *which artifact is under the pointer* and never whether a point is a member
-   * — that is the wire's membership column (`polygon-membership.md` §7.1).
-   *
-   * **A shape here is the artifact's `box` until its served shape arrives.** The viewport is asked
-   * for centroids and boxes, so at rest every candidate is a rectangle and the hover is coarser
-   * than it was: two clusters whose boxes overlap are separated by depth and by the mark under
-   * the pointer (`hoverAt`'s `prefer`), which is the wire's own membership and a better answer
-   * than geometry gave. The shape for whatever the hover lands on is fetched immediately, and the
-   * index is rebuilt around it when it lands.
+   * The shapes a hover or click is resolved against ({@link contourShapes}), held until the served
+   * set, the fetched shapes, the level or the roster change. Each is the artifact's box until its
+   * shape is fetched; where boxes overlap, depth and the mark under the pointer decide.
    */
   private contoursHeld: {served: object; fetched: object; level: number | null; meta: object | null; shapes: ContourShape[]} | null = null;
 
@@ -796,46 +727,31 @@ export class TesseraMap extends TesseraElement {
   private static readonly HOVER_MARGIN_PX = 4;
 
   /**
-   * The artifact a world point is over, for the hover and for the click alike: the deepest drawn
-   * shape containing it, the one already hovered held until the pointer is clear of it, and the
-   * mark beneath preferred where the caller has one ({@link hoverAt}).
-   *
-   * One route, so that what a click opens is what the pointer was highlighting. Nothing else can
-   * answer it: the outline layer draws the hovered and the opened artifact only and is not
-   * pickable, so a contour never reaches deck's pick pass.
+   * The artifact a world point is over ({@link hoverAt}). Hover and click both use it, so a click
+   * opens what the pointer highlighted. Contours are not in deck's pick pass.
    */
   private artifactAt(world: [number, number], prefer: bigint | null): bigint | null {
     return hoverAt(this.contours(), world, this.hoveredArtifact, TesseraMap.HOVER_MARGIN_PX / 2 ** this.viewState.zoom, prefer);
   }
 
-  /**
-   * What the pointer is over: the tooltip from the mark beneath it, and the hovered artifact from
-   * the frontier's own shapes ({@link hoverAt}). Deck's pick is not asked: its picking pass
-   * answers with any served polygon, ancestors included, and the outline layer is not pickable.
-   * The deepest shape containing the pointer wins, the one already hovered holds until the
-   * pointer is clear of it, and the mark beneath is the tie-break, so the highlighted contour is
-   * the cluster whose point the tooltip describes.
-   */
+  /** What the pointer is over: the tooltip from the mark beneath, and the hovered artifact from {@link artifactAt}. */
   private onHover(info: PickingInfo): void {
     const picked = resolvePick(info as never);
     const layerId = (info.sourceLayer ?? info.layer)?.id ?? '';
     const slot = picked.kind === 'mark' ? /marks-p(\d+)$/.exec(layerId) : null;
     const at = slot ? this.slab.markAt(Number(slot[1]), info.index) : null;
     const artifacts = this.resolvedStore?.get('artifacts') ?? null;
-    // The mark's own artifact, where there is one — a fact the wire carries, and the tie-break
-    // where two shapes interleave over the same ground.
+    // The mark's own artifact, preferred where shapes interleave.
     const own = at && artifacts ? artifactOfMark(at.band, at.i, artifacts, this.clusterLevel ?? undefined) : null;
     const world = this.worldAt(info.x, info.y);
     this.hoveredArtifact = world ? this.artifactAt(world, own) : null;
-    // **The shape is fetched where it is drawn.** The viewport carries no shape; this asks for the
-    // one the map is about to draw. Idempotent, so calling it on every pointer move costs one
-    // request per artifact per principal and nothing thereafter.
+    // The viewport carries no shapes; fetch the hovered one. `needShape` asks once per artifact.
     if (this.hoveredArtifact !== null) this.resolvedStore?.needShape(this.hoveredArtifact);
     if (picked.kind !== 'mark') {
       if (this.hover) this.hover = null;
       return;
     }
-    // An absent value reads as such beside the others; an absent title falls back as a missing one.
+    // An absent value is shown as absent; an absent title falls back as a missing one does.
     const carried = (name: string, absent: string | null): string | null => {
       const column = at?.band.scalars[name];
       if (!at || !column) return null;
@@ -855,12 +771,9 @@ export class TesseraMap extends TesseraElement {
   }
 
   /**
-   * The hovered point's title field, from its record once the pointer rests on it: a text column
-   * lives in the record and never in the marks.
-   *
-   * After a dwell, not on the move: a pointer crossing a dense map touches hundreds of marks a
-   * second, and {@link HOVER_DESCRIBE_MS} is the pause that says one of them is being looked at.
-   * A pointer that has moved on by the time the answer lands writes nothing.
+   * The hovered point's title field from its record, after the pointer rests for
+   * {@link HOVER_DESCRIBE_MS}, since a text column is not in the marks. An answer that lands after
+   * the pointer moved on is dropped.
    */
   private describeHovered(id: bigint, x: number, y: number): void {
     const field = this.titleField;
@@ -885,8 +798,7 @@ export class TesseraMap extends TesseraElement {
     switch (picked.kind) {
       case 'artifact':
         this.lastPick = null;
-        // The opened artifact draws its shape too, and the card's own request does not carry it
-        // into the projection the map reads.
+        // The card's request does not bring the shape into the projection the map reads.
         s?.needShape(picked.id);
         void s?.openArtifact(picked.id);
         return;
@@ -899,9 +811,7 @@ export class TesseraMap extends TesseraElement {
         this.paint();
         return;
       case 'miss': {
-        // Deck found nothing, which does not mean the pointer is over nothing: a contour is not in
-        // its pick pass. Resolve the click exactly as the hover is resolved, so what opens is what
-        // was highlighted, and fall back to a miss where the point is in no drawn shape.
+        // Contours are not in deck's pick pass: resolve the click as the hover, else a miss.
         const world = this.worldAt(info.x, info.y);
         const id = world ? this.artifactAt(world, null) : null;
         if (id === null) {
@@ -919,8 +829,6 @@ export class TesseraMap extends TesseraElement {
     }
   }
 
-  // ---- selection: the box and the lasso -------------------------------------------------------
-
   private unproject(e: PointerEvent): [number, number] | null {
     const rect = this.getBoundingClientRect();
     return this.worldAt(e.clientX - rect.left, e.clientY - rect.top);
@@ -935,16 +843,10 @@ export class TesseraMap extends TesseraElement {
   }
 
   /**
-   * The selection gestures are taken in the **capture phase, before deck's own input layer sees
-   * them**. deck (mjolnir/hammer) listens for `pointerdown` on its canvas and for the move and
-   * up on `window`; the old handlers ran on the canvas's parent in the bubble phase and stopped
-   * propagation there, so hammer saw every selection's `pointerdown` and never its `pointerup`.
-   * Its input session stayed pressed: the next mouse movement — button up, on the way to the
-   * *pan* button — read as a drag, the camera followed the pointer once the controller was back
-   * on, and the real pan drag that followed did nothing because hammer's session was already in
-   * flight. Found with human-paced pointer input in a real browser; the fast synthetic drag did
-   * not stay pressed long enough to show it. Stopping the `pointerdown` before it reaches the
-   * canvas means hammer never opens a session for a selection, so there is nothing to close.
+   * Selection gestures are taken in the capture phase, before deck's input layer sees them. deck
+   * (mjolnir/hammer) listens for `pointerdown` on the canvas and for move and up on `window`. If it
+   * saw a selection's `pointerdown` but not its `pointerup`, its session would stay pressed and the
+   * next pointer movement would pan. Stopping `pointerdown` first means no session opens.
    */
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
@@ -966,7 +868,7 @@ export class TesseraMap extends TesseraElement {
     const at = this.unproject(e);
     if (!at) return;
     if (this.dragPolygon) {
-      // A vertex per pointer move, thinned to a pixel or so: the shape the user drew, no more.
+      // A vertex per pointer move, thinned to about a pixel.
       const last = this.dragPolygon[this.dragPolygon.length - 1]!;
       const scale = 2 ** this.viewState.zoom;
       if (Math.hypot(at[0] - last[0], at[1] - last[1]) * scale >= 2) this.dragPolygon = [...this.dragPolygon, at];
@@ -1013,8 +915,6 @@ export class TesseraMap extends TesseraElement {
     emit(this, 'tessera-selectchange', {shape: shapeDetail(shape), status: shape ? 'loading' : 'cleared'});
   }
 
-  // ---- the camera -----------------------------------------------------------------------------
-
   private setViewState(next: Partial<ViewState>): void {
     this.viewState = {...this.viewState, ...next};
     this.deck?.setProps({viewState: this.viewState});
@@ -1033,9 +933,8 @@ export class TesseraMap extends TesseraElement {
   }
 
   /**
-   * Centre the camera on a **data coordinate** at the current zoom — what following an item into
-   * another view asks for (`view-switching.md` §6.4). `false` before `meta`, when there is no
-   * frame to convert against.
+   * Centre the camera on a data coordinate at the current zoom. Returns false before `meta`, when
+   * there is no frame to convert against.
    */
   lookAt(x: number, y: number): boolean {
     const q = this.resolvedStore?.frame();
@@ -1053,10 +952,9 @@ export class TesseraMap extends TesseraElement {
   }
 
   /**
-   * Fit a box given in **data coordinates** — the space `setView` takes and `tessera-viewchange`
-   * reports, so a host (the notebook widget's `bbox`) can hand back what it was told. The camera
-   * keeps the canvas's aspect, so the box shown contains the one asked for and the next
-   * `tessera-viewchange` reports the box actually shown.
+   * Fit a box in data coordinates, the space `tessera-viewchange` reports. The camera keeps the
+   * canvas's aspect, so the box shown contains the one asked for, and the next
+   * `tessera-viewchange` reports the box shown.
    */
   fitBbox(extent: [number, number, number, number]): boolean {
     const q = this.resolvedStore?.frame();
@@ -1113,8 +1011,6 @@ export class TesseraMap extends TesseraElement {
     e.preventDefault();
   };
 
-  // ---- the frame loop, for the probe while measuring -------------------------------------------
-
   private startFrameLoop(): void {
     if (this.frameLoop !== null || typeof requestAnimationFrame === 'undefined') return;
     this.lastFrameAt = performance.now();
@@ -1139,13 +1035,11 @@ export class TesseraMap extends TesseraElement {
     this.frameLoop = null;
   }
 
-  // ---- render ---------------------------------------------------------------------------------
-
   override render() {
     const status = this.resolvedStore?.get('status') ?? null;
     const state: PanelState = stateOf(status);
-    // Loading and retrying are the strip's to say; the map draws only what must never read as an
-    // empty corpus: a refusal, an expiry, an empty answer.
+    // Loading and retrying are the status strip's; the map draws the states that could otherwise
+    // read as an empty corpus.
     const overlay = state === 'refused' || state === 'expired' || state === 'empty' ? html`<div part="overlay">${renderState(state, status, {onRefresh: () => this.resolvedStore?.refresh()})}</div>` : nothing;
     const controls = this.noControls
       ? nothing
@@ -1159,8 +1053,7 @@ export class TesseraMap extends TesseraElement {
     return html`<div
         part="canvas"
         @pointerleave=${() => {
-          // deck only reports picks while the pointer is over it; a hover left standing when the
-          // pointer moves onto a panel is a box beside nothing.
+          // deck reports picks only while the pointer is over the canvas, so clear the hover here.
           if (this.hover) this.hover = null;
         }}
         @pointerdown=${{handleEvent: this.onPointerDown, capture: true}}
@@ -1194,7 +1087,7 @@ function hoverText(value: unknown, arrowType: string | null): string {
   return String(value);
 }
 
-/** Compositions whose fidelity check has run — once per frame object. */
+/** Compositions whose fidelity check has run. */
 const checkedCompositions = new WeakSet<object>();
 
 attachContextRoot();

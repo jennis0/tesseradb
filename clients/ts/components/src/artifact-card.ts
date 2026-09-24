@@ -24,19 +24,15 @@ const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
 };
 
 /**
- * `<tessera-artifact-card>`: the selected artifact. Its name, its masked count as members visible
- * to you, its supplied description, layer and key, the kind of shape its layer draws, its parents
- * and its children in this view from the served set, Fit to cluster, and the `member_of` clause
- * buttons for this artifact and for outside it. A `member_of` clause asks about membership, where a
- * drawn `region` asks about a shape; for an artifact whose members are spread across the map the
- * two differ. Fit is absent on a layer that draws nothing.
+ * `<tessera-artifact-card>`: the selected artifact. Its name, its masked count, its description,
+ * layer and key, the kind of shape its layer draws, its parents and children in this view, Fit to
+ * cluster, and the `member_of` clause buttons for inside and outside it. A `member_of` clause
+ * selects by membership, a drawn `region` by shape; they differ for an artifact whose members are
+ * spread across the map. Fit is absent on a layer that draws nothing.
  *
- * The count is the drill-down's, over the whole membership this principal sees, so it moves with
- * the mask and never with the viewport. The children are a live read of the served set.
- *
- * A cluster with no name (no supplied text and no topic attached) shows {@link UNNAMED} in the
- * headline and never its key, which has a field of its own. One refusal covers every withheld case
- * and nothing here tells them apart.
+ * The count is the drill-down's, over the whole membership this principal sees; it does not
+ * change with the viewport. An artifact with no text and no topic shows {@link UNNAMED} in the
+ * headline and its key in its own field. The server gives one refusal for every withheld case.
  */
 export class TesseraArtifactCard extends TesseraElement {
   static override styles = [
@@ -135,13 +131,9 @@ export class TesseraArtifactCard extends TesseraElement {
   }
 
   /**
-   * One of the card's clause buttons: a `member_of` clause on this artifact, in one position and
-   * one sense (`highlight-and-hierarchy.md` §3, §5.5).
-   *
-   * **Pressed is a state, and clicking a pressed button withdraws the clause** — so the card says
-   * what is on rather than adding a second clause each time it is used, and a viewer moves the
-   * clause between the two positions by pressing the other button, which is the same *without
-   * being re-entered* the chips give.
+   * One of the card's clause buttons: a `member_of` clause on this artifact, as a filter or a
+   * highlight, inside or outside. The button shows whether the clause is on; clicking a pressed
+   * button withdraws it, and pressing the other verb moves the clause.
    */
   private verb(layer: string, artifact: bigint, outside: boolean, verb: ClauseVerb, label: string, name: string | null) {
     const s = this.resolvedStore;
@@ -175,15 +167,11 @@ export class TesseraArtifactCard extends TesseraElement {
 
   override render() {
     const {artifact, refusal} = this.shown;
-    // The heading names what this is — the level's title on a levelled layer (a *County*, an
-    // *Admin 2*), the layer's title otherwise — read off the served row, whose `rung` is the wire's.
+    // The heading is the level's title on a levelled layer (County, Admin 2), else the layer's.
     const metaLayers = this.resolvedStore?.get('meta')?.layers ?? [];
     const row = artifact ? this.resolvedStore?.get('artifacts')?.served.find((a) => a.tesseraId === artifact.id) : undefined;
-    // **The declaration comes from the artifact's own layer, not from a served row.** A filter
-    // layer is never named in a viewport request (§5.4), so its artifacts are never in the served
-    // set and a card resolving the layer through that row would find none — and would then offer
-    // *fit* on the one layer that has nothing to fit to. The served row is still preferred where
-    // there is one, because the card is also fed directly by a host with no store behind it.
+    // A filter layer's artifacts are never served, so the layer falls back to the drill-down's;
+    // otherwise the card would offer Fit on a layer with nothing drawn.
     const declaredLayer = row?.layer ?? artifact?.detail.layer;
     const decl = declaredLayer === undefined ? undefined : metaLayers.find((l) => l.name === declaredLayer);
     const what = (row && decl?.levels.find((lv) => lv.level === row.rung)?.title) || decl?.title || 'Artifact';
@@ -199,25 +187,20 @@ export class TesseraArtifactCard extends TesseraElement {
     const artifacts = s?.get('artifacts');
     const served = artifacts?.served ?? [];
     const topics = artifacts ? attachedTopics(artifacts, s?.get('meta') ?? null) : new Map<bigint, string>();
-    // A live projection read: the artifact's own row and its children are whatever the channel
-    // has served for the view *now*, and this renders again on every answer.
+    // The artifact's row and children are read from the served set now, on every render.
     const here = served.find((a) => a.tesseraId === artifact.id);
-    // The children are the served artifacts naming this one among their parents — on a `dag`
-    // layer a child appears on the card of each served parent (decision 0117).
+    // On a `dag` layer a child appears on the card of each served parent.
     const children = served.filter((a) => a.parentIds.includes(artifact.id)).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0));
-    // **The parents above the children** (§5.5). Read off the served set for now, which names a
-    // parent only where the response carried it — C29 per entry — and is every parent the map is
-    // drawing. `POST /v1/artifacts/browse` answers the rest, and the hierarchy panel asks it.
+    // Parents from the served set, which holds every parent the map draws. The hierarchy panel
+    // asks `POST /v1/artifacts/browse` for the rest.
     const parents = here ? served.filter((a) => here.parentIds.includes(a.tesseraId)).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0)) : [];
     const stale = s?.get('status').stale ?? false;
     const count: Masked = {value: Number(artifact.detail.maskedCount), exact: true};
     const id = idString(artifact.id);
-    // Which kind the layer's drawn shape is (`polygon-membership.md` §7.1), so a reader knows
-    // whether the outline they see moves with the principal. `decl` is the served row's layer;
-    // an artifact opened with no served row (a host feeding the card directly) shows none.
+    // The kind of shape the layer draws, so a reader knows whether the outline depends on what
+    // they may see.
     const shape = decl?.shape ? {kind: decl.shape, text: SHAPE_TEXT[decl.shape]} : null;
-    // What a clause made from this card calls the artifact: its drawn name, carried on the clause
-    // because nothing downstream can resolve it (`MemberClause.label`). No name, no label.
+    // A clause made here carries the drawn name as its label, since nothing downstream can resolve it.
     const clauseName = here ? displayName(here, topics) : null;
     return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
@@ -252,8 +235,7 @@ export class TesseraArtifactCard extends TesseraElement {
             </ul>`
         : nothing}
       ${
-        // **No *fit* on a filter layer** (§5.4): its artifacts are spread across the frame and
-        // there is nothing to fit to. The declaration says so — a layer with no computed content.
+        // A filter layer draws nothing, so there is nothing to fit to.
         decl && isFilterLayer(decl)
           ? nothing
           : html`<button part="fit" class="btn" type="button" @click=${() => emit(this, 'tessera-artifactfit', {id})}>${icon('fit', 14)}Fit to cluster</button>`

@@ -6,17 +6,12 @@ import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-layer-picker>` — which annotation layers the map draws, from `meta.layers` (design
- * §5.3 tier 2, decision 0096): the LAYERS checklist of the boards, one entry per layer **with its
- * closure** — a clustering's labels are a second layer that `depends_on` it, so one entry names
- * both and the store names every layer in it in the request. Never a count of a layer's
- * artifacts: the wire carries none.
+ * `<tessera-layer-picker>`: which annotation layers the map draws, from `meta.layers`. One entry
+ * per layer with its closure: a clustering's labels are a layer that `depends_on` it, so one entry
+ * covers both. No artifact count is shown; the server serves none per layer.
  *
- * **A filter layer is still a layer** (`highlight-and-hierarchy.md` §5.4, owner ruling
- * 2026-09-02): a layer declaring `computed = []` is listed here, in its own group and with no
- * checkbox, because there is nothing to draw and a draw toggle would offer one. It is reached
- * through `<tessera-hierarchy>` and applied as a clause. It is never named in a viewport
- * request's `layers`, which is the store's own rule and not this element's.
+ * A filter layer (one declaring `computed = []`) is listed in its own group without a checkbox,
+ * since it has nothing to draw. It is applied as a clause through `<tessera-hierarchy>`.
  */
 export class TesseraLayerPicker extends TesseraElement {
   static override styles = [

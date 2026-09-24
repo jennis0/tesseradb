@@ -1,7 +1,7 @@
 /**
- * `@tesseradb/components` — the root entry defines every element on import (design §5.9). A host
- * that wants one piece beside its own map imports its subpath instead (`@tesseradb/components/count`
- * …); the map's entry is the only one that pulls in deck.gl.
+ * `@tesseradb/components`: the root entry defines every element on import. A host that wants one
+ * element imports its subpath, such as `@tesseradb/components/count`; only the map's pulls in
+ * deck.gl.
  */
 import './store-element.js';
 import './count.js';
@@ -43,5 +43,5 @@ export {storeContext} from './context.js';
 export {attachContextRoot, defineOnce} from './define.js';
 export {stateOf, renderState, showsContent, type PanelState} from './states.js';
 export {tokens, chrome} from './tokens.js';
-/** The formatter, re-exported from the client so a host has one source for the rule. */
+/** The count formatter, re-exported from the client. */
 export {formatCount, formatMasked, NO_COUNT, NO_MASKED, type Count, type Masked} from '@tesseradb/client';
