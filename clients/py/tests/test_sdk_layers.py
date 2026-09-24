@@ -194,6 +194,85 @@ def test_a_layer_reads_its_labels_from_one_column_whichever_call_names_it(db, ch
     assert checked(db).ok
 
 
+LABELLED = {"field": "team", "default": "inherited"}
+
+
+def test_a_member_key_the_layer_declares_inline_is_not_a_new_artifact(db):
+    """Before the first commit, a members insert naming a key the layer's inline artifacts declare
+    creates nothing, so a layer that reads labels takes it; a key nothing declares is refused."""
+    db.declare_layer(
+        "teams", kind="flat", value_set="open", artifact_visibility=LABELLED,
+        artifacts=[{"key": "a", "members": [0], "access": None}],
+    )
+    db.insert("teams", members=members(), id="entity", key="key")
+    with pytest.raises(Refusal):
+        db.insert(
+            "teams", members=pd.DataFrame({"key": ["b"], "entity": ["p1"]}), id="entity",
+            key="key",
+        )
+
+
+def test_a_member_key_in_no_artifact_is_not_a_new_artifact(db):
+    """A null key and the integer -1 put a member in no artifact, as the build reads them, so a
+    layer that reads labels takes them before the first commit; a text "-1" is a key."""
+    import pyarrow as pa
+
+    db.declare_layer("teams", kind="flat", value_set="open", artifact_visibility=LABELLED)
+    db.insert(
+        "teams",
+        artifacts=pd.DataFrame({"key": ["a"], "team": [None]}, dtype=object),
+        key="key",
+        access="team",
+    )
+    db.insert(
+        "teams",
+        members=pa.table({"key": pa.array([None, -1], pa.int64()), "entity": ["p0", "p1"]}),
+        id="entity",
+        key="key",
+    )
+    with pytest.raises(Refusal):
+        db.insert(
+            "teams", members=pd.DataFrame({"key": ["-1"], "entity": ["p2"]}), id="entity",
+            key="key",
+        )
+
+
+def test_a_list_member_key_names_one_artifact_per_element(db):
+    """A list key names an artifact per element, at the element's level on a tiered layer, so a
+    list naming declared artifacts creates nothing; an element nothing declares is refused."""
+    import pyarrow as pa
+
+    db.declare_layer(
+        "taxonomy", kind="tiered", levels=[(0, "Family"), (1, "Genus")], value_set="open",
+        artifact_visibility=LABELLED,
+    )
+    db.insert(
+        "taxonomy",
+        artifacts=pa.table({
+            "level": pa.array([0, 1], pa.uint32()),
+            "key": ["f", "g"],
+            "team": pa.array([None, None], pa.string()),
+        }),
+        key="key",
+        level="level",
+        access="team",
+    )
+    listed = pa.list_(pa.string())
+    db.insert(
+        "taxonomy",
+        members=pa.table({"key": pa.array([["f", "g"]], listed), "entity": ["p0"]}),
+        id="entity",
+        key="key",
+    )
+    with pytest.raises(Refusal):
+        db.insert(
+            "taxonomy",
+            members=pa.table({"key": pa.array([["g", "f"]], listed), "entity": ["p1"]}),
+            id="entity",
+            key="key",
+        )
+
+
 def test_a_label_set_takes_no_label_column(db):
     """A label set's text insert carries no labels of its own, so a column for them is refused."""
     db.declare_layer("clusters", kind="flat")

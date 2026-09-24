@@ -415,10 +415,13 @@ class Publication:
 
     def _head(self, i: int) -> bytes:
         access = b""
-        labels = self.rows[i].get(self.access_column) if self.access_column else None
-        if labels:
-            labels = [labels] if isinstance(labels, str) else list(labels)
-            access = b',"access":' + json.dumps(labels).encode()
+        if self.access_column:
+            # Stated on every row, `null` for no label of its own: a layer reading labels refuses a
+            # record that states none.
+            labels = self.rows[i].get(self.access_column)
+            if labels:
+                labels = [labels] if isinstance(labels, str) else list(labels)
+            access = b',"access":' + json.dumps(labels or None).encode()
         return (
             b'{"key":' + json.dumps(self.rows[i]["key"]).encode() + self._view(i) + access
             + b',"members":'

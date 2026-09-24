@@ -299,9 +299,11 @@ pub struct IncomingArtifact {
     /// layer, because the rows inside the shape are resolved from it at every segment's
     /// publication.
     pub shape: Option<ArtifactShapes>,
-    /// The artifact's own access label, as the plugin's descriptors for the labels the caller
-    /// wrote. Empty is no label, which the layer's `artifact_visibility.default` answers.
-    pub access: Vec<Vec<u8>>,
+    /// The artifact's own access labels, as the plugin's descriptors for the labels the caller
+    /// wrote. `Some` of an empty list is no label, which the layer's `artifact_visibility.default`
+    /// answers; `None` is a record that did not state its labels at all, which a layer reading
+    /// labels refuses.
+    pub access: Option<Vec<Vec<u8>>>,
 }
 
 /// The target of an attachment, as a caller names it.
@@ -398,7 +400,7 @@ impl IncomingArtifact {
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
-            access: Vec::new(),
+            access: None,
         }
     }
 
@@ -465,7 +467,7 @@ impl IncomingArtifact {
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
-            access: Vec::new(),
+            access: None,
         }
     }
 }

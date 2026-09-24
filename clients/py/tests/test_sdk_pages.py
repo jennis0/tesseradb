@@ -1305,6 +1305,42 @@ def test_an_artifacts_insert_naming_no_label_column_is_refused_before_and_after_
         assert teams_seen(db, ["public"]) == served_before
 
 
+def test_a_key_or_members_insert_creating_an_unlabelled_artifact_is_refused(served, corpus):
+    """On a layer that reads labels, a `key=` or `members=` insert naming a key no artifacts insert
+    declares would create an artifact with no labels: refused at the insert before the first
+    commit and by the server after it. Members joining an artifact that exists are taken."""
+    stray_members = pa.table({"key": ["blue-team"], "entity": ["p0"]})
+    stray_keys = pa.table({"id": ["p1"], "cluster": ["blue-team"]})
+
+    def declared(db):
+        clustering(db)
+        db.declare_layer(
+            "teams",
+            kind="flat",
+            value_set="open",
+            artifact_visibility={"field": "team", "default": "inherited"},
+        )
+        insert_teams(db)
+        with pytest.raises(Refusal):
+            db.insert("teams", members=stray_members, id="entity", key="key")
+        with pytest.raises(Refusal):
+            db.insert("teams", stray_keys, id="id", key="cluster")
+
+    db = served(declared)
+    for insert in (
+        lambda: db.insert("teams", members=stray_members, id="entity", key="key"),
+        lambda: db.insert("teams", stray_keys, id="id", key="cluster"),
+    ):
+        insert()
+        with pytest.raises(Refusal):
+            db.commit()
+    assert teams_seen(db, ["public", "red"]) == ["open-team", "red-team"]
+
+    db.insert("teams", members=pa.table({"key": ["open-team"], "entity": ["p15"]}), id="entity",
+              key="key")
+    assert db.commit().ok
+
+
 def test_the_label_column_a_commit_sent_is_the_one_every_later_insert_names(served, corpus):
     """Whichever commit first sends a layer's label column, from a build or a later declaration,
     the local declaration records it and an insert naming another column is refused."""

@@ -191,7 +191,7 @@ pub fn artifact_access(plugin: &dyn Plugin, labels: &[String]) -> Result<Vec<Des
     if descriptors.is_empty() {
         return Err(
             "`access` names labels the plugin maps to no term, so no viewer could hold them; \
-             write labels the plugin maps to a term, or send no `access` for no label"
+             write labels the plugin maps to a term, or an empty `access` for no label"
                 .to_string(),
         );
     }

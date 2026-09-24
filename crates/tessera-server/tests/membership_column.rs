@@ -1201,6 +1201,54 @@ async fn a_layer_declaring_supplied_content_refuses_to_mint() {
     );
 }
 
+/// A layer that reads each artifact's own labels refuses to mint from a key column, since a
+/// minted artifact states no labels; nothing is published under the key.
+#[tokio::test]
+async fn a_layer_reading_labels_refuses_to_mint() {
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
+    let server = open(&built.dir).await;
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "name": "teams/x",
+            "title": "a layer whose artifacts carry their own labels",
+            "views": ["s0"],
+            "membership": "enumerated",
+            "value_set": "open",
+            "visibility": null,
+            "artifact_visibility": { "field": "team", "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+            "content": { "computed": [], "supplied": [] },
+            "depends_on": [],
+            "levels": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "the layer may be declared");
+
+    let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("unlabelled")]));
+    let (status, detail) =
+        post_ingest(&server, "unlabelled", ingest_batch(&[SEED], "teams/x", keys)).await;
+    assert_eq!(status, 422, "{detail}");
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers/teams%2Fx/artifacts"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({ "addressing": "external",
+                       "artifacts": [{ "key": "unlabelled", "members": [], "access": null }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "the key is free");
+}
+
 /// A column that names neither a declared scalar nor a registered layer is refused exactly as it
 /// was before this existed — and the message says which two things it could have been.
 #[tokio::test]

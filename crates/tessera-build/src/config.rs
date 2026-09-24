@@ -631,9 +631,17 @@ pub struct InlineArtifact {
     #[serde(default)]
     pub attached_key: Option<String>,
     /// The artifact's own access labels, on a layer whose `artifact_visibility` names a field.
-    /// Written as one string or as a list; absent is no label.
-    #[serde(default, deserialize_with = "one_or_many")]
-    pub access: Vec<String>,
+    /// Written as one string or as a list, and `[]` for no label of its own. Absent states none,
+    /// which a layer reading labels refuses.
+    #[serde(default, deserialize_with = "stated_one_or_many")]
+    pub access: Option<Vec<String>>,
+}
+
+/// [`one_or_many`], for a cell whose absence means something different from an empty list.
+fn stated_one_or_many<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error> {
+    one_or_many(deserializer).map(Some)
 }
 
 /// A key written as one string or as a list of them — the two spellings of an artifact row's
