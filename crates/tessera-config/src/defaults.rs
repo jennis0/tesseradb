@@ -64,9 +64,10 @@ pub const DEFAULT_BULK_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
 /// Time one bulk-read response may run.
 pub const DEFAULT_BULK_RESPONSE_MS: u64 = 30_000;
 
-/// What one bulk read holds, in pages of `max_page_bytes`: about four while a page is built
-/// (measured 4.05 with rows of very uneven size), and three encoded pages: two in the body's
-/// channel and one being written by the HTTP layer.
+/// What one bulk read is allowed, in pages of `max_page_bytes`: about four while a page is built
+/// (measured 4.05 with rows of very uneven size), and at most two encoded pages on their way to
+/// the socket: one in the body channel, which alternates records frames and page ends, and one
+/// being written by the HTTP layer.
 pub const BULK_READ_PAGES_HELD: usize = 7;
 
 /// `compute_admission`'s default per compute thread; small requests wait on scheduling, not CPU.
