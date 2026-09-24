@@ -1003,8 +1003,7 @@ fn levelled_json(rows: &[u64]) -> Vec<u8> {
 /// table**, and a null there is level 0. The first batch is JSON and the rest Arrow.
 #[tokio::test]
 async fn a_level_column_places_a_scalar_key_on_the_wire_as_at_a_build() {
-    let mut layer = layer_toml("stacked", "cluster");
-    layer.push_str("\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n");
+    let layer = stacked_layer();
     let all: Vec<u64> = (0..N).collect();
     let built = build_side_with(&all, &layer, true);
     let ingested = build_side_with(&[], &layer, true);
@@ -1052,6 +1051,44 @@ async fn a_level_column_places_a_scalar_key_on_the_wire_as_at_a_build() {
             "the artifacts differ for a principal holding {terms:?}"
         );
     }
+}
+
+/// A stacked layer of three levels, reading its scalar keys from `cluster`.
+fn stacked_layer() -> String {
+    let mut layer = layer_toml("stacked", "cluster");
+    layer.push_str("\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n");
+    layer
+}
+
+/// A `level` column is refused, and the batch has no effect, where it is not `uint32`, where the
+/// batch carries no layer column for it to place, and where it names a level the layer does not
+/// declare.
+#[tokio::test]
+async fn a_level_column_the_batch_cannot_use_is_refused() {
+    let built = build_side(&[], &stacked_layer());
+    let server = open(&built.dir).await;
+    let rows: Vec<u64> = (0..10).collect();
+    let wide: ArrayRef = Arc::new(Int64Array::from(
+        rows.iter().map(|e| (e % 3) as i64).collect::<Vec<_>>(),
+    ));
+    let beyond: ArrayRef = Arc::new(UInt32Array::from(vec![7u32; rows.len()]));
+    let batches = [
+        vec![(LAYER, scalar_keys(&rows)), ("level", wide)],
+        vec![("level", levels(&rows))],
+        vec![(LAYER, scalar_keys(&rows)), ("level", beyond)],
+    ];
+    for (i, columns) in batches.into_iter().enumerate() {
+        let body = ingest_batch_with(&rows, columns);
+        let (status, detail) = post_ingest(&server, &format!("level-{i}"), body).await;
+        assert_eq!(status, 422, "{detail}");
+    }
+    tick(&server).await;
+    assert!(client_view(&server, &["0", "1"]).await.artifacts.is_empty());
+
+    // The same rows with a level column the batch can use are accepted.
+    let body = ingest_batch_with(&rows, vec![(LAYER, scalar_keys(&rows)), ("level", levels(&rows))]);
+    let (status, detail) = post_ingest(&server, "level-usable", body).await;
+    assert_eq!(status, 200, "{detail}");
 }
 
 /// **A tiered chain mints a level at a time, coarse first** — the ordering constraint edges carry

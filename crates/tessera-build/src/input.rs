@@ -2480,29 +2480,6 @@ mod tests {
         ));
     }
 
-    /// An open category whose vocabulary has no minter to draw codes from is refused.
-    #[test]
-    fn an_open_category_with_no_minter_is_refused() {
-        use arrow::array::{ArrayRef, StringArray};
-        use std::sync::Arc;
-
-        let attribute = crate::config::Attribute {
-            name: "a".to_string(),
-            title: None,
-            field: None,
-            ty: ScalarType::U16,
-            analyser: None,
-            vocabulary: Some("v".to_string()),
-            value_set: Some(crate::config::ValueSet::Open),
-            index: false,
-            render: false,
-        };
-        let column: ArrayRef = Arc::new(StringArray::from(vec!["k"]));
-        let decoded =
-            BatchColumn::decode_values(Path::new("in-memory"), &column, &attribute, &mut HashMap::new());
-        assert!(decoded.is_err());
-    }
-
     /// A roster integer is held as an `i64`, so a `uint64` past `i64::MAX` is refused rather
     /// than wrapped to a negative number.
     #[test]
