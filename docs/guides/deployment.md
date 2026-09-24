@@ -19,6 +19,15 @@ sudo install -d -o tessera -g tessera -m 0750 /srv/tessera /srv/tessera/corpus /
 sudo install -d -o tessera -g tessera -m 0700 /srv/tessera/secrets
 ```
 
+The rest of the page runs two kinds of command. One shown after `$` runs in your own shell and
+uses `sudo`. One shown after `tessera$` runs in a shell as the `tessera` user in `/srv/tessera`,
+which reads the credentials and reaches the control socket. Open that shell with:
+
+```console
+$ sudo -u tessera bash
+tessera$ cd /srv/tessera
+```
+
 Copy the declaration and its Parquet sources into `/srv/tessera/corpus`. The server keeps three
 things on disc, each named in `[bundle]` in `tessera.toml`:
 
@@ -70,14 +79,14 @@ session_credential_file  = "secrets/session.cred"
 operator_credential_file = "secrets/operator.cred"
 ```
 
-Relative paths resolve against the directory `tessera.toml` is in, wherever the process was
-started from. Every section refuses a key it does not know, so a misspelt key stops the server at
+The paths under `[bundle]`, `schema` and the two credential files resolve against the directory
+`tessera.toml` is in, wherever the process was started from. A relative control socket path
+resolves against the process's working directory instead, so give it in full. Every section refuses a key it does not know, so a misspelt key stops the server at
 startup with a list of the keys that section takes.
 
 `token_max_lifetime` has no default. It is how many seconds a viewer's token lasts. A token keeps
 the terms it was issued with until it expires or is revoked, so this is also the longest a viewer
-whose access has been narrowed goes on seeing what they saw before. `builtin:passthrough` is the
-only plugin.
+whose access has been narrowed goes on seeing what they saw before.
 
 The keys this page does not cover keep their defaults. Each is a field of `RawServe` or
 `RawIngest` in
@@ -103,9 +112,10 @@ address is a loopback one, and will listen on `0.0.0.0:9153` if you write that.
 Every control route needs the operator credential, and every session route the session
 credential. Create both:
 
-```bash
-cd /srv/tessera
-sudo -u tessera sh -c 'umask 077; openssl rand -hex 32 > secrets/session.cred; openssl rand -hex 32 > secrets/operator.cred'
+```console
+tessera$ umask 077
+tessera$ openssl rand -hex 32 > secrets/session.cred
+tessera$ openssl rand -hex 32 > secrets/operator.cred
 ```
 
 The server reads each file once, at startup, and trims the whitespace around it. To change a
@@ -120,11 +130,12 @@ tessera serve: refused to start: there is no operator credential; set `operator_
 
 !!! warning
     Not built yet: a plugin that checks a claim against your identity provider.
-    `builtin:passthrough` believes whatever terms the caller of `/session/authorise` names, so
-    the session credential is all that stands between a caller and every item a term can name.
-    Keep the session plane off the public network and out of every browser, and have your
-    backend decide each user's terms from its own sign-in. The two ways this goes wrong are
-    described under [Deployment](../system/clients.md#deployment) in the clients chapter.
+    `builtin:passthrough` is the only plugin, and it believes whatever terms the caller of
+    `/session/authorise` names, so the session credential is all that stands between a caller
+    and every item a term can name. Keep the session plane off the public network and out of
+    every browser, and have your backend decide each user's terms from its own sign-in.
+    [Deployment](../system/clients.md#deployment) in the clients chapter shows both ways this
+    goes wrong.
 
 ## Keep the identity key
 
@@ -134,17 +145,17 @@ needs nothing else.
 
 Your first build read the key from `TESSERA_IDENTITY_KEY` or a `.env` file beside `tessera.toml`,
 or printed it if you passed `--mint-id-key`. Put the same 32 hex characters in a file on the
-server:
+server, replacing `<your key>`:
 
-```bash
-sudo -u tessera sh -c 'umask 077; printf "[identity]\nkey = \"%s\"\n" "<your key>" > /srv/tessera/secrets/identity.toml'
+```console
+tessera$ umask 077
+tessera$ printf '[identity]\nkey = "%s"\n' '<your key>' > secrets/identity.toml
 ```
 
 Build as the `tessera` user, so the service can write into the bundle:
 
 ```console
-$ cd /srv/tessera
-$ sudo -u tessera tessera build --identity-file secrets/identity.toml
+tessera$ tessera build --identity-file secrets/identity.toml
 ...
 built /srv/tessera/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2255110 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
   view ireland: 29935 row(s)
@@ -156,10 +167,15 @@ A build never writes over an existing bundle:
 build FAILED: invalid input: /srv/tessera/bundle already contains a bundle (CURRENT exists); remove it or choose another --out
 ```
 
-Keep a copy of `identity.toml` away from the bundle's backups. If you lose the file and still
-have the bundle, `--carry-id-key-from /srv/tessera/bundle` reads the key back out of it on the
-next build. If you lose both, the only build left is `--mint-id-key`, which starts a new key, and
-every `tessera_id` a client has saved or shared then names a different item or none.
+Rebuild with `--carry-id-key-from bundle`, which reads the key from the bundle you are serving
+along with two things the identity file does not hold: the idset, the counter a client compares
+its `tessera_id`s against, and the batch size, if the first build split the corpus into batches.
+Both decide which `tessera_id` each item gets, as the key does. The identity file holds the key
+and, if you add a line `idset = <n>`, the idset, but never the batch size.
+
+Keep a copy of `identity.toml` away from the bundle's backups, for a rebuild after the bundle is
+lost. If you lose both, the only build left is `--mint-id-key`, which starts a new key, and every
+`tessera_id` a client has saved or shared then names a different item or none.
 
 A build given two keys that differ refuses:
 
@@ -173,13 +189,17 @@ what a client sees.
 
 ## Start the server and check it
 
-Run it once by hand as the `tessera` user. Under systemd the unit creates `/run/tessera` for the
-control socket; for this run, create it yourself:
+Run it once by hand. Under systemd the unit creates `/run/tessera` for the control socket; for
+this run, create it yourself:
 
 ```console
 $ sudo install -d -o tessera -g tessera -m 0700 /run/tessera
-$ cd /srv/tessera
-$ sudo -u tessera tessera serve
+```
+
+Then start the server in the `tessera` shell:
+
+```console
+tessera$ tessera serve
 2026-09-23T23:48:40.844894Z  INFO tessera_server::memory: the allocator's arena count is capped arenas=12
 2026-09-23T23:48:40.875765Z  INFO tessera_engine::engine: the engine adopted the prefix's derived artifact structures named=0 containment_adopted=0 prefix=v00000
 2026-09-23T23:48:40.876090Z  INFO tessera_server: bulk reads may hold this much memory at once, within the process's memory cap bulk_admission=2 max_page_bytes=67108864 bulk_read_memory_bytes=939524096
@@ -194,15 +214,15 @@ server stops with an error that does not name the path:
 tessera serve: No such file or directory (os error 2)
 ```
 
-From a second shell in `/srv/tessera`, probe the viewer plane:
+From a second `tessera` shell, probe the viewer plane:
 
 ```console
-$ curl -sSi http://127.0.0.1:9151/healthz
+tessera$ curl -sSi http://127.0.0.1:9151/healthz
 HTTP/1.1 200 OK
 content-length: 0
 date: Wed, 23 Sep 2026 23:48:40 GMT
 
-$ curl -sSi http://127.0.0.1:9151/readyz
+tessera$ curl -sSi http://127.0.0.1:9151/readyz
 HTTP/1.1 200 OK
 content-length: 0
 date: Wed, 23 Sep 2026 23:48:40 GMT
@@ -212,7 +232,7 @@ Ask the session plane for a token, as your backend will. Under `builtin:passthro
 is base64 of a JSON object listing the terms to grant:
 
 ```console
-$ curl -sS http://127.0.0.1:9152/session/authorise \
+tessera$ curl -sS http://127.0.0.1:9152/session/authorise \
   -H "authorization: Bearer $(cat secrets/session.cred)" \
   -H 'content-type: application/json' \
   -d "{\"auth_data\": \"$(printf '{"terms": ["public"]}' | base64 -w0)\"}"
@@ -222,7 +242,7 @@ $ curl -sS http://127.0.0.1:9152/session/authorise \
 Without the credential the session plane refuses:
 
 ```console
-$ curl -sS http://127.0.0.1:9152/session/authorise \
+tessera$ curl -sS http://127.0.0.1:9152/session/authorise \
   -H 'content-type: application/json' \
   -d '{"auth_data": "e30="}'
 {"error":"bad-credential","detail":"missing or invalid bearer credential"}
@@ -256,7 +276,7 @@ the caches and bulk reads come to about 4.4 GiB.
 own memory, and `file_bytes` is the bundle's resident pages:
 
 ```console
-$ curl -sS --unix-socket /run/tessera/control.sock \
+tessera$ curl -sS --unix-socket /run/tessera/control.sock \
   -H "authorization: Bearer $(cat secrets/operator.cred)" \
   http://localhost/control/status | jq '{posture: .write_executor.posture, heap}'
 {
@@ -391,11 +411,11 @@ The client partitions what it has cached by `x-tessera-identity-key`. Without it
 cached map can be shown under another viewer's token. Check the headers arrive through the proxy:
 
 ```console
-$ TOKEN=$(curl -sS http://127.0.0.1:9152/session/authorise \
+tessera$ TOKEN=$(curl -sS http://127.0.0.1:9152/session/authorise \
   -H "authorization: Bearer $(cat secrets/session.cred)" \
   -H 'content-type: application/json' \
   -d "{\"auth_data\": \"$(printf '{"terms": ["public"]}' | base64 -w0)\"}" | jq -r .token)
-$ curl -sS -o /dev/null -D - https://maps.example.org/v1/viewport \
+tessera$ curl -sS -o /dev/null -D - https://maps.example.org/v1/viewport \
   -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \
   -d '{"view": "ireland", "zoom": 0, "tiles": [0], "k": 0}'
@@ -420,8 +440,8 @@ calling the viewer plane at `https://maps.example.org`, list the page's origin u
 cors_origins = ["https://www.example.org"]
 ```
 
-`cors_origins` applies to the viewer plane only, and the session plane refuses a browser's
-cross-origin request from those origins. A wildcard is refused:
+`cors_origins` applies to the viewer plane only, and a browser on those origins cannot call the
+session plane. A wildcard is refused:
 
 ```text
 tessera serve: refused to start: serve.cors_origins contains "*", which a CORS origin list cannot hold; list each origin, such as "https://app.example", or remove the key
@@ -435,19 +455,41 @@ viewer plane, for notebooks.
 ## Watch health and readiness
 
 Both probes are on the viewer and session planes, need no credential and return no body. The
-control plane has neither; a request to it without the operator credential gets a 401.
+nginx configuration above does not pass them through, so run your load balancer's or monitor's
+check on the host, against `http://127.0.0.1:9151/readyz`, or against the session plane's address
+if the check runs elsewhere. The control plane has neither probe; a request to it without the
+operator credential gets a 401.
 
 `/healthz` answers 200 whenever the process is answering. `/readyz` answers 200 while the write
-side is running and 503 otherwise, which includes before it starts, after it stops, and after a
-write to the WAL has failed to reach the disc. `/control/status` names the state in
+side is running and 503 otherwise. `/control/status` names the state in
 `write_executor.posture`: `not-started`, `running`, `wal-poisoned` or `dead`.
 
+A failed write to the WAL shows in two ways, depending on which step failed.
+
+- If appending a record fails, the posture stays `wal-poisoned` and `/readyz` answers 503 until
+  the server restarts.
+- If the fsync after an append fails, the server retries it, then discards what did not reach the
+  disc and returns to `running`, with `/readyz` at 200. `write_executor.wal_recoveries` in
+  `/control/status` goes up by one. From then on the server publishes no flush, so ingested items
+  stop becoming visible, rotates no WAL, and refuses every compaction with the reason
+  `overlay_diverged`. The log carries an `ALARM` line ending "Restart this node."
+
+In both cases a deletion or suppression whose write failed is applied in memory anyway, and the
+caller is answered 500 with a detail saying "a change in it may be in force, so do not treat this
+as a no-op". An unsuppress whose write failed is not applied. The applied deletions and
+suppressions have no record on disc, and a restart forgets them.
+
 !!! warning
-    Do not restart the server because `/readyz` answers 503. After a failed WAL write the server
-    still applies every deletion and suppression it accepts, and a restart discards the ones that
-    never reached the disc, which can bring a suppressed item back into view. Point your load
-    balancer's check at `/readyz` on the viewer plane, and use `Restart=on-failure`, which acts
-    only when the process exits.
+    A restart can bring a suppressed or deleted item back into view if the change that hid it was
+    answered 500. Before you restart after a failed WAL write:
+
+    1. Have whatever sends changes to `/control/changes` send every change answered 500 again.
+    2. Fix the disc.
+    3. Restart the server.
+    4. Send every change answered 500 again.
+
+    Keep `Restart=on-failure` in the unit, which acts only when the process exits, and do not
+    restart the server automatically when `/readyz` answers 503.
 
 A WAL write that hangs on a stalled disc rather than failing leaves the posture at `running` and
 `/readyz` at 200. [Health and readiness](../system/serving.md#health-and-readiness) covers what
@@ -456,8 +498,8 @@ the probe can and cannot see.
 ## Schedule compaction
 
 A compaction rewrites the bundle as one segment per view, removes the rows of deleted items, and
-reclaims disc space that merges have left behind. Nothing else in the server does any of the
-three.
+reclaims disc space that merges have left behind. Merges reduce the number of segments too, but
+only a compaction removes deleted rows.
 The server starts one when any of the conditions below is met, each set under `[ingest]`:
 
 | Key | Default | Starts a compaction when |
@@ -468,8 +510,10 @@ The server starts one when any of the conditions below is met, each set under `[
 | `compaction_dead_rows_fraction` | 0.2 | Deleted items waiting to be removed are at least a fifth of all rows |
 | `compaction_dead_bytes_ratio` | 1.0 | Files no manifest names take at least as many bytes as the files the manifests name |
 
-None of these conditions starts a compaction within `compaction_min_interval_secs` of the
-previous one starting, 86400 seconds by default. `compaction_window_start` takes a UTC time as
+None of these conditions starts a compaction until `compaction_min_interval_secs`, 86400 seconds
+by default, has passed since the previous compaction started, nor while the previous one is still
+running. The server keeps that time in memory, so after a restart the first condition met starts
+one at once. A compaction that was refused does not count. `compaction_window_start` takes a UTC time as
 `"HH:MM"`. Writing `"off"` for `compaction_window_start`, `compaction_max_segments`,
 `compaction_after_deletions`, `compaction_dead_rows_fraction` or `compaction_dead_bytes_ratio`
 turns that condition off and leaves the others.
@@ -487,7 +531,7 @@ Without either it is refused, and `/control/status` records the reason under
 To start one yourself, whatever the schedule and the interval say:
 
 ```console
-$ curl -sS -X POST --unix-socket /run/tessera/control.sock \
+tessera$ curl -sS -X POST --unix-socket /run/tessera/control.sock \
   -H "authorization: Bearer $(cat secrets/operator.cred)" \
   -w '%{http_code}\n' http://localhost/control/compact
 202
@@ -497,7 +541,7 @@ The request is picked up at the next tick of the write side. A request made whil
 running is dropped, with a warning in the log. Read the outcome a few seconds later:
 
 ```console
-$ curl -sS --unix-socket /run/tessera/control.sock \
+tessera$ curl -sS --unix-socket /run/tessera/control.sock \
   -H "authorization: Bearer $(cat secrets/operator.cred)" \
   http://localhost/control/status | jq '.compaction | {folds, fold_refusals, last_refusal}'
 {
@@ -506,3 +550,36 @@ $ curl -sS --unix-socket /run/tessera/control.sock \
   "last_refusal": null
 }
 ```
+
+## Replace the bundle with a rebuilt one
+
+A bundle built from the sources holds what the sources hold. Everything ingested, deleted,
+suppressed or declared at the running service since the last build is missing from it, so put
+those changes into the sources first, or send them again once the new bundle is served.
+
+Build into a new directory while the service keeps running:
+
+```console
+tessera$ tessera build --carry-id-key-from bundle --out bundle.next 2>&1 | tail -2
+built bundle.next (v00000): 29935 items, 1 terms, 29935 pairs, 2255110 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
+  view ireland: 29935 row(s)
+```
+
+Stop the service, put the new bundle in place, and move the WAL and the cache aside with the old
+bundle:
+
+```console
+$ sudo systemctl stop tessera
+tessera$ mv bundle bundle.old && mv bundle.next bundle
+tessera$ mv state/wal state/wal.old && mv state/cache state/cache.old && mkdir state/wal
+$ sudo systemctl start tessera
+tessera$ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9151/readyz
+200
+```
+
+The old WAL belongs to the old bundle. Nothing checks which bundle a WAL was written against, and
+its records name items by the internal id the old bundle gave them, which a rebuild assigns afresh
+from the sources. Replayed over the new bundle, a deletion or suppression in it would hide whichever item now has
+that id. The cache is keyed to the bundle it was built from, so the new bundle never reads the old
+entries; moving it aside frees the space. Delete the three `.old` directories once the new bundle
+serves what you expect.
