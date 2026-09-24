@@ -169,6 +169,34 @@ describe('configuration after connection', () => {
     el.dispose();
   });
 
+  it('keeps its own store, undisposed, when removed and appended again', async () => {
+    const {host, el} = await bare('<tessera-store viewer-url="http://127.0.0.1:1" token="a"></tessera-store>');
+    const built = el.activeStore!;
+    const disposed = vi.spyOn(built, 'dispose');
+    el.remove();
+    await settle(host);
+    host.append(el);
+    await settle(host);
+    expect(el.activeStore).toBe(built);
+    expect(el.source).toBe('own');
+    expect(disposed).not.toHaveBeenCalled();
+    el.dispose();
+  });
+
+  it('an explorer that detaches passes null to its pieces, which detach with it', async () => {
+    await import('../src/explorer.js');
+    const host = await mount('<tessera-explorer viewer-url="http://127.0.0.1:1" token="a"></tessera-explorer>');
+    const explorer = host.querySelector('tessera-explorer') as unknown as Provider;
+    const map = explorer.shadowRoot!.querySelector('tessera-map') as unknown as Provider;
+    expect(map.activeStore).toBe(explorer.activeStore);
+    expect(map.source).toBe('context');
+    explorer.viewerUrl = '';
+    await settle(host);
+    expect(explorer.source).toBe('detached');
+    expect(map.activeStore).toBeNull();
+    expect(map.source).toBe('detached');
+  });
+
   it('keeps a store handed in by property through a configuration change, and never disposes it', async () => {
     const {host, el} = await bare('<tessera-store viewer-url="http://127.0.0.1:1" token="a"></tessera-store>');
     const own = el.activeStore!;

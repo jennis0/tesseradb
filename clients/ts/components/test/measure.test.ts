@@ -71,4 +71,24 @@ describe('<tessera-map measure>', () => {
     await frames(4);
     expect(el.probe.timings.frame.n).toBe(counted);
   });
+
+  it('on reconnect, runs the frame loop only if measure is on', async () => {
+    const off = await map('<tessera-map></tessera-map>');
+    off.el.remove();
+    off.host.append(off.el);
+    await settle(off.host);
+    await frames(4);
+    expect(off.el.probe.timings.frame.n).toBe(0);
+
+    const on = await map('<tessera-map measure></tessera-map>');
+    on.el.remove();
+    await frames(2);
+    const whileAway = on.el.probe.timings.frame.n;
+    await frames(4);
+    expect(on.el.probe.timings.frame.n).toBe(whileAway);
+    on.host.append(on.el);
+    await settle(on.host);
+    await frames(4);
+    expect(on.el.probe.timings.frame.n).toBeGreaterThan(whileAway);
+  });
 });
