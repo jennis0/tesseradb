@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import type {Store} from '@tesseradb/client';
+import type {Store, TokenSupplier} from '@tesseradb/client';
 import '../src/store-element.js';
 import '../src/status.js';
 import {TesseraStatus} from '../src/status.js';
@@ -92,7 +92,7 @@ describe('store precedence', () => {
 });
 
 describe('configuration after connection', () => {
-  type Provider = HTMLElement & {source: string; activeStore: Store | null; store: Store | null; viewerUrl: string; token: string; authorise: (() => Promise<string>) | null; dispose(): void};
+  type Provider = HTMLElement & {source: string; activeStore: Store | null; store: Store | null; viewerUrl: string; token: string; authorise: TokenSupplier | null; dispose(): void};
 
   async function bare(markup = '<tessera-store><tessera-status></tessera-status></tessera-store>') {
     const host = await mount(markup);
@@ -116,7 +116,7 @@ describe('configuration after connection', () => {
 
   it('builds one from an authorise supplier set after insertion', async () => {
     const {host, el} = await bare('<tessera-store viewer-url="http://127.0.0.1:1"></tessera-store>');
-    el.authorise = async () => 't';
+    el.authorise = async () => ({token: 't', expiresAt: 1});
     await settle(host);
     expect(el.source).toBe('own');
     el.dispose();
@@ -128,7 +128,7 @@ describe('configuration after connection', () => {
     const disposed: Store[] = [];
     const watch = (s: Store) => vi.spyOn(s, 'dispose').mockImplementation(() => void disposed.push(s));
     watch(built[0]!);
-    for (const change of [() => (el.token = 'b'), () => (el.viewerUrl = 'http://127.0.0.1:2'), () => (el.authorise = async () => 'c')]) {
+    for (const change of [() => (el.token = 'b'), () => (el.viewerUrl = 'http://127.0.0.1:2'), () => (el.authorise = async () => ({token: 'c', expiresAt: 1}))]) {
       change();
       await settle(host);
       const next = el.activeStore!;
@@ -283,6 +283,19 @@ describe('event details', () => {
     emit(el, 'tessera-clausechange', {id: '7', layer: 'mesh', outside: false, verb: 'highlight', on: true});
     emit(el, 'tessera-levelchange', {level: 2});
     expect(seen).toEqual(['mesh:7:highlight', '2']);
+  });
+
+  it('carry an opened artifact’s count as a decimal string, so the detail is JSON', async () => {
+    const {TesseraMap} = await import('../src/map.js');
+    const host = await mount('<tessera-map></tessera-map>');
+    const map = host.querySelector('tessera-map') as InstanceType<typeof TesseraMap>;
+    const store = fakeStore({status: status({})});
+    map.store = store;
+    await settle(host);
+    const details: unknown[] = [];
+    host.addEventListener('tessera-artifactopen', (e) => details.push(e.detail));
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 9n, detail: {layer: 'l', key: null, maskedCount: 2n ** 63n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
+    expect(JSON.parse(JSON.stringify(details))).toEqual([{id: '9', detail: {layer: 'l', key: null, maskedCount: '9223372036854775808', centroid: null, box: null, shape: null}}]);
   });
 
   it('carry an artifact selection’s id as a decimal string, so the detail is JSON', async () => {

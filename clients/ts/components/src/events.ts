@@ -19,8 +19,8 @@ export type TesseraEventDetails = {
   /** `<tessera-map>`: a point was clicked, and again with its record once it arrives. */
   'tessera-pick': {id: string; record?: ItemDetail};
   'tessera-hover': {id: string; x: number; y: number};
-  /** `<tessera-map>`: an artifact was opened and its drill-down arrived. */
-  'tessera-artifactopen': {id: string; detail: ArtifactDetail};
+  /** `<tessera-map>`: an artifact was opened and its drill-down arrived, its count a decimal string. */
+  'tessera-artifactopen': {id: string; detail: Omit<ArtifactDetail, 'maskedCount'> & {maskedCount: string}};
   'tessera-artifactselect': {id: string; layer: string};
   'tessera-artifactfit': {id: string};
   /**

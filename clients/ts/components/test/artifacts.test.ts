@@ -267,6 +267,17 @@ describe('<tessera-artifact-card> follows the served set', () => {
     expect(deep(host, '[part="parents"]')).toBeNull();
   });
 
+  it('puts no label on a clause made from an artifact with no name', async () => {
+    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 100n)])});
+    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
+    await settle(host);
+    (deep(host, '[part="filter"]') as HTMLButtonElement).click();
+    const [clause] = store.calls.find((c) => c.name === 'setMembers')!.args[0] as {label?: string}[];
+    expect(clause).not.toHaveProperty('label');
+  });
+
   it('opens a parent or a child row on Enter and on Space, as on a click', async () => {
     const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
     const served = [artifact(1n, 100n, null, ['Alpha']), artifact(2n, 40n, 1n, ['Beta']), artifact(3n, 10n, 2n, ['Gamma'])];

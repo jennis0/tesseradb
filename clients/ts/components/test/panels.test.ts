@@ -6,6 +6,7 @@ import '../src/filter-panel.js';
 import type {TesseraItemCard} from '../src/item-card.js';
 import type {TesseraFilter} from '../src/filter.js';
 import {deep, deepAll, fakeStore, mount, settle, status} from './fake-store.js';
+import {UNNAMED} from '../src/base.js';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -46,20 +47,20 @@ describe('<tessera-item-card>', () => {
     expect(deep(host, '[part="headline"]')?.getAttribute('data-name')).toBe('title');
     expect(deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'))).toEqual(['submitted_at', 'note', 'tessera_id']);
     expect(deep(host, '[part="field"][data-name="tessera_id"] [part="value"]')?.textContent).toBe('12345678901234567890');
-    expect(deep(host, '[part="field"][data-name="submitted_at"] [part="value"]')?.textContent).toBe('2023-11-14');
+    expect(deep(host, '[part="field"][data-name="submitted_at"] [part="value"]')?.textContent).toBe('2023-11-14T22:13:20.000Z');
     expect(deep(host, 'slot[name="field-title"]')).not.toBeNull();
     expect(host.textContent).toContain('my link');
     expect(deep(host, '[part="field"][data-name="archive"]')).toBeNull();
   });
 
-  it('with no title field, heads the card with the id and shows every field in the grid', async () => {
+  it('with no title field, heads the card with the id, once, and shows every other field in the grid', async () => {
     const host = await mount('<tessera-item-card></tessera-item-card>');
     const el = host.querySelector('tessera-item-card') as TesseraItemCard;
     el.meta = META;
     el.item = {id: 42n, detail: {fields: {note: 'x', title: 'A title'}, externalId: null, labels: [], views: [], scoped: {}}};
     await settle(host);
     expect(deep(host, '[part="headline"]')?.textContent).toBe('42');
-    expect(deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'))).toEqual(['title', 'note', 'tessera_id']);
+    expect(deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'))).toEqual(['title', 'note']);
   });
 
   it('fires tessera-open with the id as a decimal string, bubbling and composed', async () => {
@@ -354,6 +355,17 @@ describe('<tessera-filter> on a keyword column', () => {
 });
 
 describe('<tessera-filter-panel>', () => {
+  it('marks a member_of chip with no label and no served name as unnamed, never by its key', async () => {
+    const host = await mount('<tessera-filter-panel></tessera-filter-panel>');
+    const store = fakeStore({meta: META, status: status({})});
+    store.set('filters', {draft: {}, expr: null, highlight: null, members: [{layer: 'clusters', artifact: 4n, outside: false, verb: 'filter'}], suggestions: {}, suggestErrors: {}, suggestEpoch: 0});
+    (host.querySelector('tessera-filter-panel') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    const chip = deep(host, '[part="chip"][data-artifact="4"]')!;
+    expect(chip.textContent).toContain(UNNAMED);
+    expect(chip.textContent).not.toContain('clusters');
+  });
+
   /**
    * §5.2's two verbs on the chip: the word says which of the request's two expressions the clause
    * joins, and clicking it moves the clause **without the predicate being re-entered** — which is

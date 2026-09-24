@@ -19,7 +19,7 @@ import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, c
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
-import type {PickOutcome} from './item-card.js';
+import {timestampText, type PickOutcome} from './item-card.js';
 import {renderState, stateOf, type PanelState} from './states.js';
 import {icon} from './icons.js';
 import {sameFrame} from './view-switch.js';
@@ -534,7 +534,7 @@ export class TesseraMap extends TesseraElement {
     }
     if (sel.artifact && sel.artifact !== this.announcedArtifact) {
       this.announcedArtifact = sel.artifact;
-      emit(this, 'tessera-artifactopen', {id: idString(sel.artifact.id), detail: sel.artifact.detail});
+      emit(this, 'tessera-artifactopen', {id: idString(sel.artifact.id), detail: {...sel.artifact.detail, maskedCount: sel.artifact.detail.maskedCount.toString(10)}});
     }
     const region = s.get('region');
     // The store's own view's frame (decision 0040): the extent is the view's, so the conversion
@@ -1205,7 +1205,7 @@ export class TesseraMap extends TesseraElement {
 
 /** A value as the hover shows it; a timestamp in full, as an ISO date-time. */
 function hoverText(value: unknown, arrowType: string | null): string {
-  if (arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) return new Date(Number(value) / 1000).toISOString();
+  if (arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) return timestampText(value);
   return String(value);
 }
 

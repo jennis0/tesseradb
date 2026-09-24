@@ -220,9 +220,9 @@ export class TesseraArtifactCard extends TesseraElement {
     // whether the outline they see moves with the principal. `decl` is the served row's layer;
     // an artifact opened with no served row (a host feeding the card directly) shows none.
     const shape = decl?.shape ? {kind: decl.shape, text: SHAPE_TEXT[decl.shape]} : null;
-    // What a clause made from this card calls the artifact: its drawn name, else its key. Carried
-    // on the clause because nothing downstream can resolve it — see `MemberClause.label`.
-    const clauseName = (here ? displayName(here, topics) : null) ?? artifact.detail.key;
+    // What a clause made from this card calls the artifact: its drawn name, carried on the clause
+    // because nothing downstream can resolve it (`MemberClause.label`). No name, no label.
+    const clauseName = here ? displayName(here, topics) : null;
     return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
       <div part="headline" class="card-title">${(here ? displayName(here, topics) : null) ?? UNNAMED}</div>

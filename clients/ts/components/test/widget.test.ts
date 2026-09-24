@@ -182,7 +182,7 @@ describe('the up-sync', () => {
   it('ids cross as decimal strings, never numbers', () => {
     const {model, store} = setUp();
     const id = 2n ** 63n + 5n;
-    store.set('selection', {item: {id, detail: {} as never}, itemRefusal: null, artifact: {id: 7n, detail: {} as never}, artifactRefusal: null});
+    store.set('selection', {item: {id, detail: {} as never}, itemRefusal: null, artifact: {id: 7n, detail: {layer: 'clusters', key: null, maskedCount: 1n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     expect(model.state.selected).toBe('9223372036854775813');
     expect(model.state.selected_artifact).toBe('7');
     expect(typeof model.state.selected).toBe('string');

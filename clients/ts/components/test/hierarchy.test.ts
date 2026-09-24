@@ -2,6 +2,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {BrowseRow, Layer, Meta} from '@tesseradb/client';
 import '../src/hierarchy.js';
 import type {TesseraHierarchy} from '../src/hierarchy.js';
+import {UNNAMED} from '../src/base.js';
 import {deep, deepAll, deepText, fakeStore, mount, settle, status} from './fake-store.js';
 
 /**
@@ -113,6 +114,17 @@ describe('<tessera-hierarchy>', () => {
     // The parent it is drawn under is not repeated, and the other is named rather than numbered:
     // the walk is the only place a name for one of these artifacts exists on this client.
     expect(deepText(deep(host, '[part="also"]'))).toContain('Anatomy');
+  });
+
+  it('marks a parent the walk has no name for as unnamed in *also under*, never by its id', async () => {
+    const {host, store} = await panel();
+    store.setBrowse('p:1', {artifacts: [row(11n, 'Cysts', 900n, {parentIds: [1n, 77n]})], parents: [], next: null});
+    (deep(host, '[part="expander"]') as HTMLButtonElement).click();
+    await settle(host);
+    await settle(host);
+    const also = deepText(deep(host, '[part="also"]'));
+    expect(also).toContain(UNNAMED);
+    expect(also).not.toContain('77');
   });
 
   it('a click is a highlight, and the actions carry the filter beside it', async () => {

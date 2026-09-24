@@ -1,7 +1,7 @@
 import {css, html, nothing} from 'lit';
 import {repeat} from 'lit/directives/repeat.js';
 import {activeCount, emptyDraft, isPopulated, memberKey, withVerb, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
-import {TesseraElement, emit} from './base.js';
+import {TesseraElement, UNNAMED, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {exportparts} from './parts.js';
@@ -105,12 +105,13 @@ export class TesseraFilterPanel extends TesseraElement {
     s.setMembers(withoutMember(s.get('filters').members, clause.layer, clause.artifact));
   }
 
-  /** What a `member_of` chip says: the artifact's name where the map served it, else its layer. */
+  /**
+   * What a `member_of` chip says: the clause's own label, which is the only name an artifact of a
+   * filter layer ever has here since it is never served, else the served name, else unnamed.
+   */
   private memberText(clause: MemberClause): string {
-    // The clause's own label first: an artifact of a filter layer is never in the served set, so
-    // that is the only place a name for it can come from (§5.4).
     const served = this.resolvedStore?.get('artifacts').served.find((a) => a.tesseraId === clause.artifact && a.layer === clause.layer);
-    const name = clause.label ?? served?.content[0] ?? served?.key ?? clause.layer;
+    const name = clause.label ?? served?.content[0] ?? UNNAMED;
     return clause.outside ? `outside ${name}` : name;
   }
 

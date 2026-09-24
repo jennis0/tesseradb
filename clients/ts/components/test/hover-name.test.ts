@@ -109,6 +109,15 @@ describe('a hover over a mark', () => {
     expect(asked).toBe(0);
   });
 
+  it('never takes the title from tooltip-fields: they are lines beneath the id', async () => {
+    const {el} = await map([{name: 'code', arrowType: 'utf8'}, {name: 'name', arrowType: 'utf8'}], 'tooltip-fields="code,name"');
+    el.slab.markAt = carrying({code: {arrowType: 'utf8', value: 'GB-LND'}, name: {arrowType: 'utf8', value: 'London'}});
+
+    el.onHover(markAt(5n));
+    expect(el.hover?.title).toBe('#5');
+    expect(el.hover?.lines).toEqual(['GB-LND', 'London']);
+  });
+
   it('shows a timestamp in full', async () => {
     const at = 1_700_000_000_123_000;
     const {el} = await map([{name: 'published', arrowType: 'timestamp_us'}], 'tooltip-fields="published"');

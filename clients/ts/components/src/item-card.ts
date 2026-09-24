@@ -17,7 +17,7 @@ import {chrome, tokens} from './tokens.js';
  * is ever seen. A category arrives already resolved to its key.
  *
  * The headline is the field the host names in `title-field`, else the item's id, and every other
- * field is in the grid. A slot per field (`field-<name>`) lets a host render one as a link into
+ * field is in the grid, the id among them when it is not the headline. A slot per field (`field-<name>`) lets a host render one as a link into
  * their application without replacing the card, and `tessera-open` (the id as a decimal string)
  * does the same for *Open*.
  *
@@ -133,7 +133,9 @@ export class TesseraItemCard extends TesseraElement {
       ${this.labels(item.detail.labels)}
       <div class="field">
         ${rest.map((name) => this.field(name, fields[name], declared.find((c) => c.name === name)))}
-        <div part="field" data-name="tessera_id" style="display:contents"><span part="label" class="k">tessera_id</span><span part="value" class="v mono">${id}</span></div>
+        ${titleName
+          ? html`<div part="field" data-name="tessera_id" style="display:contents"><span part="label" class="k">tessera_id</span><span part="value" class="v mono">${id}</span></div>`
+          : nothing}
         ${externalId ? html`<div part="field" data-name="external_id" style="display:contents"><span part="label" class="k">external_id</span><span part="value" class="v mono">${externalId}</span></div>` : nothing}
       </div>
       ${this.scoped(item.detail.scoped)}
@@ -226,12 +228,15 @@ export class TesseraItemCard extends TesseraElement {
   }
 }
 
-/** A value as text, by the column's declared type — a category is already its key. */
+/** A `timestamp_us` value in full, as an ISO date-time. */
+export function timestampText(value: number | bigint): string {
+  return new Date(Number(value) / 1000).toISOString();
+}
+
+/** A value as text, by the column's declared type; a category is already its key. */
 export function present(value: unknown, column: DeclaredScalar | undefined): string {
   if (value === null || value === undefined) return '—';
-  if (column?.arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) {
-    return new Date(Number(value) / 1000).toISOString().slice(0, 10);
-  }
+  if (column?.arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) return timestampText(value);
   if (typeof value === 'number') return Number.isInteger(value) ? value.toLocaleString('en-GB') : String(value);
   if (typeof value === 'boolean') return value ? 'yes' : 'no';
   return String(value);

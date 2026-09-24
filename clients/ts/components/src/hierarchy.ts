@@ -302,9 +302,9 @@ export class TesseraHierarchy extends TesseraElement {
     return {row, path: `${parentPath}/${row.tesseraId}`, children: null, next: null, loading: false, refusal: null};
   }
 
-  /** What to call an artifact this walk has met; its identifier where the walk has not. */
+  /** What to call an artifact: its name where the walk has met one. */
   private nameOf(id: bigint): string {
-    return this.names.get(id) ?? idString(id);
+    return this.names.get(id) ?? UNNAMED;
   }
 
   /**
