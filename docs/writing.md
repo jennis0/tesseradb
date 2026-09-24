@@ -61,6 +61,12 @@ It teaches a mental model, not a list of commands. Before each step, say what we
 
 Introduce each idea at the moment it is needed, one at a time, with the concrete case first and the name second, in plain words. "Every place on this map is tagged with who may see it. Tessera calls that tag an access label." A term the reader has not met is never used without this. Deeper explanation can wait for a link to the system chapters; the basic "what is this" cannot.
 
+When you explain a setting, say what it is for, what the alternatives are and what each costs. The reader will face that choice with their own data. `render`, `index` and an attribute with neither are one decision, and a tutorial that shows only the value it uses leaves the reader unable to make it.
+
+Frame Tessera in terms the reader already knows. It is a database built to stream millions of points to a browser, so say how it differs from the databases they have used where that difference explains a step.
+
+Leave out what does not help the reader do the task or understand it: timings, version lists, counts that decorate a sentence, asides and teasers about what comes later. The evidence rules keep every figure true; they are not a reason to include one.
+
 Give the reader visible progress early and often. A clean `check`, a count that matches what was expected, a map appearing: point them out.
 
 Never let the reader get lost. Every step works exactly as written, and the expected output is shown so they can tell they are on track. Where something is likely to go wrong, say what that looks like and what to do. Follow one path; choices belong in guides.
