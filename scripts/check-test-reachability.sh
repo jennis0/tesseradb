@@ -5,7 +5,7 @@
 # that passes: both are silence. Three mechanisms in this repository make a test stop running
 # without anyone deleting it, and none of them is visible in a diff.
 #
-#   1. `#[ignore]`. CI's `cargo test --workspace` skips them, by design — several take minutes.
+#   1. `#[ignore]`. The gate's test run skips them, by design — several take minutes.
 #      An ignore WITHOUT a reason string is the defect this script refuses: nobody reading it can
 #      tell "slow, run it before a release" from "broken, someone silenced it".
 #   2. `#[cfg(feature = "...")]` on a test, where the feature is off in the crate's own build and
@@ -67,7 +67,7 @@ ignored=$(wc -l < "$work/ws-ignored")
 echo "  test entries the workspace harnesses list: $(cat "$work/raw")"
 echo "  distinct test names among them:            $exist"
 echo "  of those, #[ignore]d (CI skips):           $ignored"
-echo "  executed by \`cargo test --workspace\`:     $((exist - ignored))"
+echo "  executed by the gate's test run:          $((exist - ignored))"
 
 echo
 echo "== 2. #[ignore] without a reason string"
