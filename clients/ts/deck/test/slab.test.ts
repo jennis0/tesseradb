@@ -285,10 +285,8 @@ describe('MarkSlab', () => {
 
 describe('the highlight bit', () => {
   /**
-   * §5.3's dulling rides the slab's dirty-span path beside the ordinal, and the value where a
-   * band carries none is **1** — *matched* — so a map with no highlight draws exactly what it drew
-   * before the attribute existed, with the shader's switch a uniform rather than a per-point test
-   * of whether the question was put.
+   * The highlight bit is written through the slab's dirty-span path beside the ordinal, and is 1
+   * (matched) where a band carries none, so a map with no highlight draws every mark lit.
    */
   it('writes ones for a band fetched under no highlight', () => {
     const slab = new MarkSlab();

@@ -2,8 +2,7 @@ import type {Device} from '@luma.gl/core';
 
 /**
  * A device that counts: every buffer and texture it hands out records its writes, so a test can
- * assert that a colouring interaction rewrote the lookup texture and not the attributes (design
- * §5.10, decision 0100). Nothing here draws.
+ * assert that a colouring change rewrote the lookup texture and not the attributes. Nothing draws.
  */
 export type FakeDevice = Device & {
   bufferWrites: number;

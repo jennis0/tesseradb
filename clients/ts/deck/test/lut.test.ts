@@ -50,8 +50,7 @@ function band(tag: number, ordinals: number[], layer = 'l'): Band {
 /** A table naming a root and two children, with every ordinal served. */
 function served() {
   const table = new SessionArtifactTable();
-  // Rungs are the wire's, so a reference states one: the two children are served at rung 1,
-  // which is what the level walk below resolves against.
+  // The two children are served at rung 1, which the level walk below resolves against.
   const [root, a, b] = table.take([
     {tesseraId: 1n, layer: 'l', parentIds: [], rung: 0},
     {tesseraId: 2n, layer: 'l', parentIds: [1n], rung: 1},
@@ -80,9 +79,8 @@ describe('buildLut', () => {
   });
 
   it('colours an ordinal the current view was not served, and walks up to one it has a colour for', () => {
-    // The banding on a zoom in: the cut moves finer, the channel's served set moves with it, and
-    // every band held under the coarser cut named artifacts no longer in it. A walk cannot go
-    // down, so those points drew neutral until the tile was refetched.
+    // On a zoom in the cut moves finer, and bands held under the coarser cut name artifacts no
+    // longer served. A walk cannot go down, so they must be coloured from the whole table.
     const {table, root, a, named} = served();
     // The colour map is the whole table's, so the child is coloured though only the root is in
     // the view's served set.
@@ -130,9 +128,8 @@ describe('buildLut', () => {
 });
 
 /**
- * The rewrite is bounded by what changed, not by what the session table holds: after the artifact
- * channel's idle promotion the table holds whole levels — 226k entries on GeoNames — while a
- * settled view names a few hundred it had not seen.
+ * An update writes what changed, not the whole table: the table can hold whole levels while a
+ * settled view names a few hundred new ordinals.
  */
 describe('a table that only gained ordinals patches the rows they fall in', () => {
   /** The colour of one ordinal, as the texture holds it. */

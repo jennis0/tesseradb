@@ -5,9 +5,8 @@ import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, placeLabels} from '../src/labels.js';
 import medcpt from './fixtures/medcpt-kmeans-labels.json' with {type: 'json'};
 
 /**
- * Which artifacts get a label (§5.10, the owner's review 2026-08-26): the frontier of the served
- * set, a text to draw, the top N by masked count — and a size that is that count, on a
- * logarithmic band over the range the frontier drawn holds.
+ * Which artifacts get a label: the frontier of the served set with text to draw, the top N by
+ * masked count, each sized by that count on a logarithmic band over the frontier's range.
  */
 
 const artifact = (id: bigint, count: bigint, content: string[] = [], layer = 'clusters', parent: bigint | null = null): Artifact => ({
@@ -27,9 +26,8 @@ const artifact = (id: bigint, count: bigint, content: string[] = [], layer = 'cl
 });
 
 /**
- * A dependent layer's artifact — a topic label — naming its target by identifier, which is the
- * whole of the attachment on the wire (owner ruling, 2026-09-18). Its own count is its own: the
- * membership it is served over, which is nothing the map draws beside it.
+ * A dependent layer's artifact, a topic label, naming its target by identifier. Its count is its
+ * own and is not drawn.
  */
 const topic = (id: bigint, target: bigint, text: string, count = 1n): Artifact => ({
   ...artifact(id, count, [text], 'topics'),
@@ -37,10 +35,9 @@ const topic = (id: bigint, target: bigint, text: string, count = 1n): Artifact =
 });
 
 /**
- * The served set as the wire delivers it (contracts §3.2 r44): on this treed fixture `rung` is the
- * response-local parent-chain depth, computed here exactly as the server computes it after the cut
- * — a root, and a child of an unserved parent, at 0. It stands in for the server; nothing under
- * test derives it again.
+ * The served set as the server delivers it: on this treed fixture `rung` is the response-local
+ * parent-chain depth, computed here as the server computes it (a root, and a child of an unserved
+ * parent, at 0). Nothing under test derives it again.
  */
 function withRungs(served: Artifact[]): Artifact[] {
   const byId = new Map(served.map((a) => [a.tesseraId, a]));
@@ -63,8 +60,8 @@ const META = {layers: [{name: 'clusters', hierarchy: {kind: 'flat', pruneChildre
 const ids = (s: Iterable<bigint>) => [...s].map(String).sort();
 
 /**
- * The rung 3 clustering as it was served, one artifact per row of the fixture — a real layout,
- * because the budget's fault was a property of one and no synthetic set of centroids had it.
+ * A served k-means clustering, one artifact per row of the fixture: a real compact layout, which
+ * synthetic centroids do not reproduce.
  */
 function medcptClusters(): Artifact[] {
   return (medcpt.clusters as [string, string, string, number, number][]).map(([id, count, text, x, y]) => ({
@@ -143,12 +140,8 @@ describe('labelCandidates', () => {
   });
 
   it('attaches each topic to the cluster its `target` names, where two clusters hold the same count', () => {
-    // The defect the `target` column closed (owner ruling, 2026-09-18). Both clusters are served
-    // with 100 visible members, and the client used to attach a label by matching its copied
-    // count against the served counts of the generating layer: two rows shared the count, the
-    // match was not unique, and **both** labels were dropped — the map drew two nameless
-    // clusters. The join is by identifier now, so the count is not consulted and the tie is not
-    // a case.
+    // Both clusters have 100 visible members; the join is by `target`, so equal counts do not
+    // matter.
     const p = projection([artifact(1n, 100n), artifact(2n, 100n), topic(8n, 1n, 'left topic'), topic(9n, 2n, 'right topic')]);
     const {byId} = labelCandidates(p, META, undefined, 0, 10);
     expect(byId.get(1n)!.lines.join(' ')).toBe('left topic');
@@ -160,8 +153,8 @@ describe('labelCandidates', () => {
   });
 
   it('size is the masked count, and level says nothing: the deeper, larger name draws larger', () => {
-    // The owner's case, in miniature. 2 stops at depth 1 with 400 members; 5 and 6 are a level
-    // deeper and 5 is the biggest thing drawn. Size follows the counts, not the depths.
+    // 2 stops at depth 1 with 400 members; 5 and 6 are a level deeper and 5 is the biggest thing
+    // drawn. Size follows the counts, not the depths.
     const p = projection([
       artifact(1n, 9000n, ['root']),
       artifact(2n, 400n, ['stops here'], 'clusters', 1n),
@@ -227,9 +220,8 @@ describe('labelCandidates', () => {
 
 /**
  * A zoom scales the anchors and nothing else, so the sorted, budgeted list is built once per
- * served set and each bucket — a quarter of a zoom level — scales a copy. At 34k served the list
- * cost 38 ms to build and the placement over it 0.2 ms, so building it per bucket was the whole
- * of a zoom gesture's label work.
+ * served set and each zoom bucket, a quarter of a level, scales a copy. Building the list costs
+ * far more than placing it.
  */
 describe('the candidate list is held per served set, not per zoom bucket', () => {
   const set = [artifact(1n, 900n, ['first']), artifact(2n, 500n, ['second']), artifact(3n, 300n, ['third'])];
@@ -270,12 +262,10 @@ describe('labelBudget', () => {
   });
 
   /**
-   * The defect this replaced, on the layout that had it: rung 3's 253 k-means clusters, as the
-   * wire served them to the widest principal (`fixtures/medcpt-kmeans-labels.json`). They sit in
-   * a ball 464 world units across, so at zoom 0 they are 464 px across on a 1280 × 800 screen and
-   * the twenty-eight a screen-derived budget offered all wanted the same ground. What is checked
-   * is the **relation** — the drawn set names several times what twenty-eight named — and not the
-   * two figures, which move with the font metrics.
+   * 253 k-means clusters as served to the widest principal (`fixtures/medcpt-kmeans-labels.json`),
+   * in a ball 464 world units across. Offering the top 28 (one per 36,000 px² of a 1280 × 800
+   * screen) places few, since they compete for the same ground. The check is the ratio between the
+   * two, since the figures move with the font metrics.
    */
   it('names many more of a compact layout than a screen-derived budget did', () => {
     const p = projection(medcptClusters());

@@ -7,9 +7,9 @@ import {stateOf} from '../src/states.js';
 import {deep, deepAll, fakeStore, mount, settle, status} from './fake-store.js';
 
 /**
- * Every §5.4 state, through `part="state"`, on the strip and on a panel; and the harness's
- * first claims at the unit level: only `shown` renders a count, no count against a stale view
- * and a refresh control present, a refusal renders as one, an expiry fires `tessera-expired`.
+ * Every panel state through `part="state"`, on the strip and on a panel: only `shown` renders a
+ * count, a stale view renders none and offers refresh, a refusal renders as one, and an expiry
+ * fires `tessera-expired`.
  */
 
 afterEach(() => {
@@ -82,9 +82,8 @@ describe('<tessera-status> renders every state through part="state"', () => {
   });
 
   /**
-   * §5.2's third line, and why it is conditional: `highlighted` equals `matched` where no
-   * highlight was asked, so a cell drawn always would repeat a number and read as a second
-   * answer to a question nobody put. `highlighting` is what says the question was put.
+   * The highlight's count shows only under a highlight: without one `highlighted` equals `matched`
+   * and the cell would repeat it. `highlighting` says whether one was asked.
    */
   it('adds the highlight’s own count only where a highlight was asked', async () => {
     const host = await mount('<tessera-status></tessera-status>');

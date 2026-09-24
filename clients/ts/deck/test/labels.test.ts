@@ -77,8 +77,8 @@ describe('label placement (§5.10)', () => {
       expect(size).toBeLessThanOrEqual(LABEL_SIZE_MAX);
       previous = size;
     }
-    // **Logarithmic, not linear**: the owner's pair. 29,369 against 380,069 is 7.7% of the range
-    // linearly — a name on the floor — and half of it on the band, which is what the eye reads.
+    // Logarithmic: 29,369 against 380,069 is 7.7% of the range linearly and over half of it on
+    // the band.
     const midway = (labelSize(29_369, 176, 380_069) - LABEL_SIZE_MIN) / (LABEL_SIZE_MAX - LABEL_SIZE_MIN);
     expect(midway).toBeGreaterThan(0.55);
     expect(midway).toBeLessThan(0.75);

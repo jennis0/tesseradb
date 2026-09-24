@@ -94,10 +94,10 @@ describe('assemble', () => {
   it('unions descendant bands on zoom-out, density-matched per drawn tile', () => {
     const kids = [band(5, 0n, 2), band(5, 1n, 3)];
     const out = assemble(frame(3, [], kids));
-    // Both bands sit under one depth-3 tile, whose own depth would serve ~(2+3)/16 ≈ 0.3 marks —
-    // so the TILE gets the one-mark floor, not each band: a per-band floor is how a thousand tiny
-    // deep bands once handed a coarse tile a thousand marks. The mark drawn is an id-order prefix
-    // of the band with the larger share, the subset delta-serving.md permits.
+    // Both bands sit under one depth-3 tile, whose own depth would serve about (2+3)/16 = 0.3
+    // marks, so the tile gets the one-mark floor, not each band; a per-band floor would give a
+    // coarse tile over many tiny bands as many marks. The mark drawn is an id-order prefix of the
+    // band with the larger share.
     expect(out.standIn.ids.length).toBe(1);
     expect(out.provisional).toBe(1);
     // The contribution is a prefix: the band's first id, never a sample.
@@ -144,8 +144,7 @@ describe('assemble', () => {
   });
 
   it('carries the membership ordinal of every stand-in mark, indexed and whole alike', () => {
-    // The banding the owner saw on the 2.4M demo: a stand-in drew neutral though the band it
-    // came from knew each point's cluster, so mid-zoom the map went grey tile by tile.
+    // A stand-in mark carries the ordinal its band served, so it is not drawn neutral.
     const whole = band(4, 32n, 3);
     whole.membership = {clusters: {ordinals: Uint32Array.from([7, 7, 9]), distinct: Uint32Array.from([7, 9])}};
     const out = assemble(frame(2, [band(2, 0n, 2)], [whole]), [], 'clusters');

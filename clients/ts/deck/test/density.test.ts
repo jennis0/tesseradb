@@ -18,10 +18,8 @@ const tile = (x: number, y: number, depth: number, exact: boolean, matched: numb
 
 describe('binDensity', () => {
   /**
-   * §5.3's wash: the channel is what the interface chose, and it is what shows the members the cap
-   * clause did not draw — a highlight over 27 million articles draws 66,000 of them. What is
-   * checked is that the channel is *read*, not that the image looks a particular way: two tiles
-   * whose `matched` are equal and whose `highlighted` are not must bin differently under it.
+   * The wash reads the channel it is given. Two tiles with equal `matched` and different
+   * `highlighted` must bin differently under `highlighted`.
    */
   it('washes the channel it is given, so a highlight and a filter are different pictures', () => {
     const tiles = [tile(0, 0, 1, true, 100, 100, 1), tile(1, 0, 1, true, 100, 100, 100)];

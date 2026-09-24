@@ -16,7 +16,7 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-/** A box in world units, as the wire carries it: 32-bit grid units per axis (contracts §3.2). */
+/** A box in world units, as the server sends it: 32-bit grid units per axis. */
 const boxOf = (x0: number, y0: number, x1: number, y1: number): [number, number, number, number] =>
   [x0, y0, x1, y1].map((v) => Math.round(v * GRID32_PER_WORLD_UNIT)) as [number, number, number, number];
 

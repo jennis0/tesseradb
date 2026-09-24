@@ -1,10 +1,9 @@
 import {describe, expect, it} from 'vitest';
 import {ANTIALIAS_ABOVE_PX, deckOpacity, markStyle} from '../src/marks-style.js';
 
-/** The marks' size and alpha by count and zoom (§5.10; the boards' `datamap2`). */
+/** The marks' size and alpha by count and zoom. */
 describe('markStyle', () => {
   it('draws a million marks small and translucent, so a dense region reads as dense', () => {
-    // Recalibrated on the owner's review of the 2.4M map: it was 1.2 px at 0.5, which bloomed.
     const s = markStyle(1_000_000, 0);
     expect(s.radius).toBe(1.1);
     expect(s.alpha).toBe(0.34);
@@ -52,7 +51,7 @@ describe('markStyle', () => {
   });
 
   it('is smaller and dimmer than the band it replaces, at every count a screen holds', () => {
-    // The band before the review: `1.2 + 1.0(1−t) + 0.08z` px at `0.5 + 0.3(1−t) + 0.02z`.
+    // A reference band: `1.2 + 1.0(1−t) + 0.08z` px at `0.5 + 0.3(1−t) + 0.02z`.
     const before = (marks: number, zoom: number) => {
       const t = Math.min(1, Math.max(0, (Math.log10(Math.max(1, marks)) - 2) / 4));
       const z = Math.min(10, Math.max(0, zoom));
@@ -63,8 +62,7 @@ describe('markStyle', () => {
         expect(markStyle(marks, zoom).radius).toBeLessThan(before(marks, zoom).radius);
       }
     }
-    // Alpha comes down everywhere the blooming was, and the sparse end lands on the boards'
-    // own 0.78 rather than under it — the same figure the old band reached by a different route.
+    // Alpha is lower at every dense count, and the sparse end reaches 0.78.
     for (const marks of [2_400_000, 1_000_000, 100_000, 1_600]) {
       for (const zoom of [0, 1, 3, 6]) {
         expect(markStyle(marks, zoom).alpha).toBeLessThan(before(marks, zoom).alpha);
