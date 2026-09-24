@@ -96,7 +96,7 @@ enum Command {
         /// the size the budget allows. A build of more than one batch records the size in the
         /// bundle, and a different size assigns different internal ids. `--carry-id-key-from`
         /// reuses a recorded size and refuses a different one. When the carried bundle was built
-        /// as one batch, a size given here is used, and the build prints a warning that the ids
+        /// as one batch, a size given here is used, and the build prints a note saying the ids
         /// will differ.
         #[arg(long, value_name = "ITEMS")]
         batch_items: Option<u64>,
