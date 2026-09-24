@@ -764,8 +764,9 @@ fn check_access_column(object: &Object, field: &str, schema: &ArrowSchema, repor
 }
 
 /// What is wrong with the column named as where access labels are read from, or `None`: it must be
-/// present, and a string, a list of strings or a dictionary of strings. The check and the build's
-/// reader of an artifact source both ask this.
+/// present, and a string, a list of strings or a dictionary of strings. The check asks both; the
+/// build's reader asks only of a column the source carries, and a source without it states no
+/// labels, which the publication refuses.
 pub(crate) fn access_column_problem(field: &str, schema: &ArrowSchema) -> Option<String> {
     let Some((_, found)) = schema.column_with_name(field) else {
         return Some(format!(

@@ -476,9 +476,11 @@ impl std::fmt::Display for RegistryError {
             }
             RegistryError::LabelsUnstated { layer, key } => write!(
                 f,
-                "{layer} reads each artifact's own labels, and the artifact{} states none. Send \
-                 `access` with its labels, or `access: null` for an artifact with no label of its \
-                 own",
+                "{layer} reads each artifact's own labels, and the artifact{} states none. State \
+                 labels for every artifact created: `access` on a publication record, null or \
+                 empty for no label of its own; at a build, the layer's label column in the \
+                 artifact source, `access = []` on an inline row, or a row in the artifact source \
+                 for a key a member file names",
                 match key {
                     Some(key) => format!(" keyed {key}"),
                     None => String::new(),
@@ -4869,13 +4871,14 @@ mod tests {
         let mut d = declaration("clusters/a");
         d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
         register(&mut reg, &mut alloc, d).unwrap();
+        let mark = alloc.low_water();
         for batch in [vec![incoming("c1", &[1])], vec![unlabelled("c0", &[2]), incoming("c1", &[1])]]
         {
             let refused = reg
                 .prepare_put("clusters/a", 0, &batch, &store, &mut alloc, &AnyView)
                 .unwrap_err();
             assert!(matches!(refused, RegistryError::LabelsUnstated { .. }), "{refused:?}");
-            assert_eq!(store.next_ordinal("clusters/a", 0), 0);
+            assert_eq!(alloc.low_water(), mark, "nothing is allocated for a refused batch");
         }
         let prepared = reg
             .prepare_put("clusters/a", 0, &[unlabelled("c1", &[1])], &store, &mut alloc, &AnyView)

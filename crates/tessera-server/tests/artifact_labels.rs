@@ -781,13 +781,18 @@ artifacts = [
 
 /// Build the fixture's points with the two layers above; the build's own answer.
 fn build_labelled(dir: &std::path::Path, spelling: Spelling, field: &str) -> Result<(), String> {
+    build_config(dir, spelling, &built_config(field))
+}
+
+/// The fixture's points and teams source, built under `toml`.
+fn build_config(dir: &std::path::Path, spelling: Spelling, toml: &str) -> Result<(), String> {
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     write_points_n(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
     write_teams(&dir.join("teams.parquet"), spelling);
     let config_path = dir.join("config.toml");
-    std::fs::write(&config_path, built_config(field)).unwrap();
+    std::fs::write(&config_path, toml).unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .map_err(|e| e.to_string())?;
     let args = tessera_build::BuildArgs {
@@ -888,6 +893,97 @@ fn a_label_field_the_source_does_not_carry_is_refused() {
         build_labelled(dir.path(), Spelling::List, "team").is_ok(),
         "the same build naming the column"
     );
+}
+
+/// At a build, an inline row without `access` on a layer that reads labels is refused, where the
+/// same row with `access = []` builds.
+#[test]
+fn an_inline_row_stating_no_labels_is_refused_at_a_build() {
+    let unstated =
+        built_config("team").replace("members = [3, 4, 5], access = []", "members = [3, 4, 5]");
+    let dir = TempDir::new().unwrap();
+    assert!(build_config(dir.path(), Spelling::List, &unstated).is_err());
+    let dir = TempDir::new().unwrap();
+    assert!(build_config(dir.path(), Spelling::List, &built_config("team")).is_ok());
+}
+
+/// At a build, a key a member file names on an open layer that reads labels, with no row in the
+/// artifact source, would be minted with no labels and is refused; a member file naming only
+/// declared keys builds.
+#[test]
+fn a_key_a_member_file_would_mint_on_a_labelled_layer_is_refused_at_a_build() {
+    use arrow::array::{ArrayRef, StringArray, UInt64Array};
+    use arrow::datatypes::{Field, Schema};
+    use std::sync::Arc;
+
+    fn write(path: &std::path::Path, columns: Vec<(&str, ArrayRef)>) {
+        let schema = Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|(name, array)| Field::new(*name, array.data_type().clone(), false))
+                .collect::<Vec<_>>(),
+        ));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema.clone(),
+            columns.into_iter().map(|(_, array)| array).collect(),
+        )
+        .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut w = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+    }
+    fn with_members(dir: &std::path::Path, keys: &[&str]) -> Result<(), String> {
+        write(
+            &dir.join("minted.parquet"),
+            vec![
+                ("key", Arc::new(StringArray::from(vec!["declared"])) as ArrayRef),
+                ("team", Arc::new(StringArray::from(vec!["red"])) as ArrayRef),
+            ],
+        );
+        write(
+            &dir.join("minted_members.parquet"),
+            vec![
+                ("key", Arc::new(StringArray::from(keys.to_vec())) as ArrayRef),
+                (
+                    "entity",
+                    Arc::new(UInt64Array::from((0..keys.len() as u64).collect::<Vec<_>>()))
+                        as ArrayRef,
+                ),
+            ],
+        );
+        let toml = r#"
+[sources]
+points         = "points.parquet"
+minted         = "minted.parquet"
+minted_members = "minted_members.parquet"
+
+[[view]]
+name             = "s0"
+extent           = { min = 0.0, max = 1000.0 }
+point_visibility = { default = "public" }
+
+[[layer]]
+name                      = "minted"
+title                     = "minted"
+views                     = ["s0"]
+source                    = "minted"
+membership                = "enumerated"
+value_set                 = "open"
+visibility                = "public"
+artifact_visibility       = { field = "team", default = "inherited" }
+require_member_visibility = "none"
+hierarchy                 = { kind = "flat", prune_children = false }
+
+  [layer.members]
+  source = "minted_members"
+"#;
+        build_config(dir, Spelling::List, toml)
+    }
+    let dir = TempDir::new().unwrap();
+    assert!(with_members(dir.path(), &["declared", "stray"]).is_err());
+    let dir = TempDir::new().unwrap();
+    with_members(dir.path(), &["declared", "declared"]).expect("declared keys only");
 }
 
 /// `tessera check` refuses a label column its source does not carry, and one that holds no

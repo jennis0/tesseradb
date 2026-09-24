@@ -233,14 +233,14 @@ def _config(with_layers: bool) -> str:
     text += _layer_toml(
         SEALED, visibility="public", field="team", default=UNCARRIED, kind="flat",
         extra=_inline(
-            {"key": key, "members": members, **({"access": labels} if labels else {})}
+            {"key": key, "members": members, "access": labels or []}
             for key, members, labels in SEALED_ROWS
         ),
     )
     text += _layer_toml(
         GATED, visibility=GATE, field="team", default="inherited", kind="flat",
         extra=_inline(
-            {"key": key, "members": members, **({"access": labels} if labels else {})}
+            {"key": key, "members": members, "access": labels or []}
             for key, members, labels in GATED_ROWS
         ),
     )
@@ -314,8 +314,8 @@ def publish(server) -> None:
 
     def record(key, members, labels, parent=None):
         out = {"key": key, "members": [external_id(m) for m in members]}
-        if labels and key != FILLED_LATER:
-            out["access"] = labels
+        # Stated on every record, `None` for no label of its own: the layers read labels.
+        out["access"] = labels if labels and key != FILLED_LATER else None
         if parent:
             out["parent"] = [parent]
         return out

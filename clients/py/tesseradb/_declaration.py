@@ -494,17 +494,28 @@ def rows_of(frame: Any) -> list[dict]:
 
     table = frame if isinstance(frame, pa.Table) else pa.table(frame)
     columns = {name: table[name].to_pylist() for name in table.column_names}
-    return [
-        {name: values[i] for name, values in columns.items() if values[i] is not None}
-        for i in range(table.num_rows)
-    ]
+    return [_stated(
+        {name: values[i] for name, values in columns.items() if values[i] is not None},
+        "access" in columns,
+    ) for i in range(table.num_rows)]
+
+
+def _stated(row: dict, named_access: bool) -> dict:
+    """`row`, with a null `access` read as an empty list: a null states that the artifact has no
+    label of its own, where a missing `access` states nothing."""
+    if named_access and row.get("access") is None:
+        row["access"] = []
+    return row
 
 
 ATTACHMENT_KEYS = ("layer", "key", "level")
 
 
 def _artifact_row(layer: str, row: Any) -> dict:
-    row = {key: value for key, value in dict(row).items() if value is not None}
+    row = dict(row)
+    row = _stated(
+        {key: value for key, value in row.items() if value is not None}, "access" in row
+    )
     attached = row.pop("attached_to", None)
     if attached is not None:
         named = set(attached)

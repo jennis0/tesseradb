@@ -201,8 +201,8 @@ Every artifact created on a layer whose field is named states its labels, at a b
 running service alike. At a build the artifact source carries the field's column, and an inline row
 carries `access`, `[]` for no label of its own. At a running service a publication record carries
 `access`, `null` or `[]` for no label of its own. A record without `access` is refused, as is a
-source without the column, and so is a key an ingest's layer column would mint, since a minted
-artifact carries nothing but its name. A record that only adds members to an artifact that exists,
+source without the column, and so is a key that a build's member file or an ingest's layer column
+would mint without an artifact row, since a minted artifact carries nothing but its name. A record that only adds members to an artifact that exists,
 or a growth, need not state labels. The Python client refuses an artifacts insert that names no
 `access=` column into a layer that reads labels, and before the layer's first commit a `key=` or
 `members=` insert naming a key no artifacts insert declares; after the first commit the server

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Hashable, Iterable, Sequence
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from . import _columns
@@ -447,9 +448,6 @@ class Database:
             )
         self._refuse_an_insert_the_target_cannot_take(target, kind, role, block, named)
         self._refuse_a_label_column_the_layer_does_not_read(target, kind, role, block, named)
-        self._refuse_keys_that_would_create_unlabelled_artifacts(
-            target, kind, role, block, data, named
-        )
         projected = kind in ("view", "view_group") and block.get("projection", "none") != "none"
         metadata = D.metadata_names(block) if role == "roster" else ()
         if kind == "labels" and role == "text":
@@ -469,6 +467,7 @@ class Database:
             named_attributes=matched,
         )
         self._refuse_a_second_view_without_its_labels(kind, role, target, insert)
+        self._refuse_keys_that_would_create_unlabelled_artifacts(block, insert)
         insert = self._accumulated(insert)
         (self.pending if self.built else self.inserts).append(insert)
         self._save_state()
@@ -603,29 +602,35 @@ class Database:
             D.carry_labels(target, {"artifact_visibility": {"field": held}}, column)
 
     def _refuse_keys_that_would_create_unlabelled_artifacts(
-        self, target: str, kind: str, role: str, block: dict, data: Any, named: dict
+        self, block: dict, insert: Insert
     ) -> None:
-        """Before the first commit, refuse a `key=` or `members=` insert naming a key that no
-        artifacts insert declares, on a layer that reads labels: the build would create that
-        artifact from its key alone, with no labels. After the first commit the server refuses
-        the same artifact.
+        """Before the first commit, refuse a `key=` or `members=` insert naming a key that neither
+        an artifacts insert nor the layer's inline artifacts declare, on a layer that reads labels:
+        the build would create that artifact from its key alone, with no labels. After the first
+        commit the server refuses the same artifact.
         """
-        if self.built or kind != "layer" or role not in ("key", "members"):
+        target = insert.target
+        if self.built or insert.kind != "layer" or insert.role not in ("key", "members"):
             return
         column = self._label_column(target, block)
         if column is None:
             return
-        declared: set[tuple] = set()
+        declared = {
+            (int(row.get("level") or 0), str(row["key"]), None)
+            for row in block.get("artifacts") or []
+        }
         for one in self._uncommitted(target, "artifacts"):
-            declared |= _addresses(one.table(), one.columns)
-        table = pq.read_table(data) if _inserts.is_path(data) else _inserts.as_table(data)
-        missing = sorted(_addresses(table, named) - declared, key=repr)
+            declared |= _artifact_addresses(one)
+        kind = dict(block.get("hierarchy") or {}).get("kind")
+        missing = _member_addresses(insert, levelled=kind in ("stacked", "tiered")) - declared
         if missing:
+            level, key, view = min(missing, key=repr)
             raise Refusal(
-                f"insert into layer {target!r}: key {missing[0][1]!r} names no artifact an "
-                f"artifacts insert declares, so it would create one with no labels, and this "
-                f"layer reads each artifact's labels from column {column!r}. Insert that artifact "
-                f"first with insert({target!r}, artifacts=..., key=..., access={column!r})"
+                f"insert into layer {target!r}: key {key!r} names no artifact an artifacts "
+                f"insert or the layer's own artifacts declare, so the build would create one with "
+                f"no labels, and this layer reads each artifact's labels from column {column!r}. "
+                f"Insert that artifact first with insert({target!r}, artifacts=..., key=..., "
+                f"access={column!r})"
             )
 
     def _refuse_a_second_view_without_its_labels(
@@ -1820,15 +1825,72 @@ def _untagged(value: Any) -> Any:
     return value
 
 
-def _addresses(table: pa.Table, columns: dict) -> set[tuple]:
-    """The `(level, key, view)` of every row of a layer's table naming a key, as `columns` names
-    them; a row whose key is null names no artifact."""
-    def column(role: str) -> list:
-        name = columns.get(role)
-        return table[name].to_pylist() if name else [None] * table.num_rows
+#: The integer a member key column spells "in no artifact" with, beside a null: the build and the
+#: ingest route read a member key the same way (`tessera_store::member_key`). An artifact's own key
+#: of -1 is a name.
+NOISE_KEY = -1
 
-    return {
-        (int(level or 0), str(key), view)
-        for level, key, view in zip(column("level"), column("key"), column("view"))
-        if key is not None
-    }
+
+def _key_columns(insert: Insert) -> pa.Table:
+    """The insert's key, level and view columns and nothing else, as the rows name them."""
+    names = [insert.columns[role] for role in ("key", "level", "view") if insert.columns.get(role)]
+    return _inserts.decoded(pq.read_table(insert.path, columns=list(dict.fromkeys(names))))
+
+
+def _distinct(level: pa.Array, key: pa.Array, view: pa.Array) -> set[tuple]:
+    """The distinct `(level, key, view)` triples of three aligned arrays, a key in decimal where
+    its column is an integer one."""
+    table = pa.table({
+        "level": pc.cast(level, pa.int64()),
+        "key": pc.cast(key, pa.string()),
+        "view": pc.cast(view, pa.string()),
+    }).group_by(["level", "key", "view"]).aggregate([])
+    return {(row["level"] or 0, row["key"], row["view"]) for row in table.to_pylist()}
+
+
+def _artifact_addresses(insert: Insert) -> set[tuple]:
+    """The `(level, key, view)` an artifacts insert declares, one per row with a key."""
+    table = _key_columns(insert)
+    key = table[insert.columns["key"]].combine_chunks()
+    present = pc.is_valid(key)
+
+    def column(role: str) -> pa.Array:
+        name = insert.columns.get(role)
+        if name is None:
+            return pa.nulls(len(key), pa.int64() if role == "level" else pa.string())
+        return table[name].combine_chunks()
+
+    return _distinct(
+        *(pc.filter(array, present) for array in (column("level"), key, column("view")))
+    )
+
+
+def _member_addresses(insert: Insert, levelled: bool) -> set[tuple]:
+    """The `(level, key, view)` every member row of a `key=` or `members=` insert names, read as
+    the build reads a member key: a null or the integer -1 is in no artifact, and a list cell
+    names one artifact per element, at the element's position on a stacked or tiered layer and
+    at level 0 otherwise."""
+    table = _key_columns(insert)
+    key = table[insert.columns["key"]].combine_chunks()
+    rows = len(key)
+
+    def column(role: str, of: pa.DataType) -> pa.Array:
+        name = insert.columns.get(role)
+        return table[name].combine_chunks() if name else pa.nulls(rows, of)
+
+    view = column("view", pa.string())
+    if pa.types.is_list(key.type) or pa.types.is_fixed_size_list(key.type):
+        lengths = pc.fill_null(pc.list_value_length(key), 0)
+        starts = pc.subtract(pc.cumulative_sum(lengths), lengths)
+        parents = pc.list_parent_indices(key)
+        elements = pc.list_flatten(key)
+        positions = pc.subtract(pa.array(range(len(elements)), pa.int64()),
+                                pc.take(pc.cast(starts, pa.int64()), parents))
+        level = positions if levelled else pa.nulls(len(elements), pa.int64())
+        key, view = elements, pc.take(view, parents)
+    else:
+        level = column("level", pa.int64())
+    named = pc.is_valid(key)
+    if pa.types.is_signed_integer(key.type):
+        named = pc.and_(named, pc.not_equal(key, NOISE_KEY))
+    return _distinct(*(pc.filter(array, named) for array in (level, key, view)))
