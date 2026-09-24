@@ -2,51 +2,23 @@
 
 This tutorial is for someone who has never used Tessera. We'll take the 29,935 places GeoNames lists
 for Ireland and put them on a map in your browser, where you can search them by name and filter them
-by kind of place and by population. Among them are 12,159 towns and villages, 3,970 hills and
-mountains, and 3,241 lakes and rivers.
+by kind of place and by population.
 
-Along the way you'll write a declaration, the file that tells Tessera what your data means, and turn
-it into a bundle, which is what the server reads. Every place will get an access label saying who
-may see it. We'll also see why a web page that shows the map needs a small server of its own.
-
-Allow half an hour. The commands themselves take about three minutes, and two of those go on
-compiling Tessera. You'll need Rust (installed with rustup), `git`, `curl`, `unzip`, `openssl`,
-Python 3, Node.js with npm, and a web browser. We ran everything here on Linux, with Rust 1.97,
-Python 3.12 and Node 22.
+This tutorial should take about 30 minutes to complete. You'll need Rust (installed with rustup), `git`, `curl`, `unzip`, `openssl`,
+Python 3, Node.js with npm, and a web browser.
 
 ## What we'll do
 
-1. Build the `tessera` program from its source code.
+1. Build `tessera` from its source code.
 2. Download the GeoNames file for Ireland and convert it to Parquet.
-3. Write a declaration that describes the data, and check it with `tessera check`.
-4. Build a bundle with `tessera build`, and meet a place that GeoNames has put in the wrong
-   country.
+3. Write a declaration that describes the data, and validate it with `tessera check`.
+4. Build the data into a deployment with `tessera build`
 5. Start the server with `tessera serve`.
 6. Open the map in a browser and filter it.
 
-At the end, this is what will be running.
-
-```mermaid
-flowchart LR
-  subgraph server["the Tessera server"]
-    viewer["viewer address<br/>127.0.0.1:9141"]
-    session["session address<br/>127.0.0.1:9142"]
-    control["control address<br/>127.0.0.1:9143"]
-  end
-  data["points.parquet<br/>and corpus.toml"] -- "tessera build" --> bundle["bundle/"]
-  bundle -- "tessera serve" --> server
-  page["the page's server<br/>localhost:5180"] -- "gets permission to read the map" --> session
-  page -- "forwards map requests" --> viewer
-  browser["your browser"] <--> page
-```
-
-*Your browser only ever talks to the page's server, which holds the session secret. We won't use the
-control address in this tutorial.*
-
 ## Build Tessera
 
-We build Tessera from its source code. Clone the repository and install the `tessera` program from
-it.
+Build and install the tessera binary using cargo
 
 ```bash
 git clone https://github.com/jennis0/tesseradb ~/tesseradb
@@ -60,7 +32,7 @@ cargo install --path crates/tessera-cli
 ...
 ```
 
-That took two minutes on a 12-core machine. Cargo puts the program in `~/.cargo/bin`, which rustup
+Cargo puts the program in `~/.cargo/bin`, which rustup
 has already added to your `PATH`, so you can check straight away that it runs.
 
 ```bash
@@ -109,12 +81,12 @@ longitude, and a `P` that marks it as a populated place. Further along, its popu
 A population of 0 means GeoNames doesn't have a figure, which is true of most places here. Only
 1,119 of the 29,935 have a population at all. That will matter when we come to filter by it.
 
-We'll keep six of the 19 columns: the id, the name, the latitude and longitude, the class of place
+For this demo we'll keep six of the 19 columns: the id, the name, the latitude and longitude, the class of place
 and the population.
 
 ## Convert it to Parquet
 
-Tessera's build reads Parquet, a file format for tables. A Parquet file records the name and type of
+Tessera's build reads Parquet, an efficient file format for tables. A Parquet file records the name and type of
 every column inside the file itself, so a program can see what columns it has without reading any
 rows. `tessera check` makes use of that later on.
 
@@ -123,7 +95,8 @@ install pyarrow in it.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install pyarrow
+source .venv/bin/activate
+pip install pyarrow
 ```
 
 Save this script as `convert.py`.
@@ -164,7 +137,7 @@ print(f"wrote {points.num_rows} places to points.parquet")
 Because the file has no header, the script supplies the 19 column names itself, in the order
 `readme.txt` lists them. GeoNames doesn't quote its fields, so the script tells pyarrow not to look
 for quotes. It reads the id and the population as whole numbers, then writes six columns to
-`points.parquet` under the names Tessera expects.
+`points.parquet` under the names we'll tell Tessera to expect.
 
 - `entity_id` is a value that tells each row apart from every other. Tessera looks for a column
   with this name, and the GeoNames id is already unique, so we use that.
@@ -185,7 +158,7 @@ Every line of `IE.txt` is now a row in `points.parquet`.
 
 ## Describe the data
 
-Next we tell Tessera what the data means, in a file called a declaration. It's written in TOML. It
+Next we tell Tessera what the data means, in a file called a declaration. It's written in TOML. A declaration
 names the files to read and says how to place each row on a map. It lists the columns to keep and
 the kind of value each holds, and it says who may see each row. Save this as `corpus.toml` beside
 `points.parquet`.
@@ -228,7 +201,7 @@ render = true
 ```
 
 **The sources.** `[sources]` gives each file a short name, with its path relative to `corpus.toml`.
-`[defaults]` makes `points` the source for every block below it, so we don't have to repeat it.
+`[defaults]` makes `points` the source for every block below it, so we don't have to repeat it. This is only necessary when building from prepared data.
 
 **The view.** A [view](../system/data-model.md#views-and-view-groups) is one way of laying the
 places out on a flat map. It has a projection, which turns longitude and latitude into a position on
@@ -237,11 +210,10 @@ collection of documents might have a geographic map and a layout drawn from an e
 instance, and a viewer can switch between them. We only need one, which we'll call `ireland`.
 
 `web_mercator` is the projection almost every web map uses. It keeps shapes true, but stretches
-areas more and more the further they are from the equator. That's why Greenland looks nearly as big
-as Africa on most web maps.
+areas more and more the further they are from the equator.
 
 The `extent` gives a range of longitude and a range of latitude, in degrees. Ours is a rectangle
-around Ireland. There's no default, so every view has to state one.
+around Ireland. There's no default, so every view has to state one. [joe comment: I don't think this is true, I believe by default the extent will be set based on the data provided]
 
 `point_visibility` decides who may see each place. Tessera gives each place an access label, and
 each viewer holds a set of labels. A viewer sees only the places whose label they hold. Labels
@@ -249,9 +221,8 @@ usually come from a column in your data, but we don't have one, so every place g
 label, `public`. Every viewer holds `public`, so everyone will see every place. The tutorial on
 access control gives places different labels and shows two people two different maps.
 
-**The vocabulary.** The feature class is a single letter from a list GeoNames defines. Here is what
-each letter covers, and how many Irish places carry it. The [GeoNames feature codes
-page](http://www.geonames.org/export/codes.html) has more detail.
+**The vocabulary.** Vocabularies are categorical value sets stored as attributes (see below). In this case, the feature class is a single letter from a list GeoNames defines. The [GeoNames feature codes
+page](http://www.geonames.org/export/codes.html) has more detail. The Ireland data has:
 
 | Class | What GeoNames files under it | Places |
 |---|---|---|
@@ -268,34 +239,30 @@ page](http://www.geonames.org/export/codes.html) has more detail.
 A column whose values come from a fixed list like this is a category. Tessera keeps the list itself
 as a [vocabulary](../system/data-model.md#vocabularies).
 
-`width = "u8"` stores each place's class as a one-byte code, which leaves room for 255 values.
+`width = "u8"` stores each place's class as a one-byte code, which leaves room for 255 values. u16 and u32 width sets are also supported
 
 `value_set = "closed"` says the list is complete. The build will refuse any place whose class isn't
-on it.
+on it. An open vocabulary is derived from the data and will gain a new entry any time a new value is seen.
 
 `visibility = "public"` lets every viewer see the whole list, including `U`, which no Irish place
 carries. The alternative, `derived`, would show each viewer only the values found on places they can
-see. This `public` is a setting on the list, and has nothing to do with the access label on each
+see. This `public` is a setting on the vocabularly itself, and has nothing to do with the access label on each
 place.
 
-**The attributes.** An attribute is a column Tessera keeps for every place. We declare three. The
+**The attributes.** An attribute is a property Tessera keeps for every place that can be used for filtering or highlighting the data. We declare three. The
 name is `text`, the feature class is a `category` drawn from the vocabulary above, and the
 population is an `i64`, which is a whole number.
 
-Every attribute is stored with its place, and the server reads it when someone opens that place. Two
-settings add to that.
-
-- `index = true` builds a search index. On `name`, that lets you search for words in a place's
-  name.
+Unlike a traditional database, Tessera is designed to serve large numbers of points on an interactive map, so is designed to stream millions of points to the users browser. Most attributes aren't necessary for simply drawing the map, so when building a database you need to tell the system what to do with each attribute. We provide two key settings:
 - `render = true` stores the value beside each place's position on the map, so it travels with
-  every point that's drawn. That's what lets the map colour points by it and filter on it. We set
+  every point that's drawn. This is necessary for any value that is to be used as part of rendering the map (e.g. setting the colour of each point). We set
   it on `feature_class` and `population`.
+- `index = true` builds a search index available for filtering the data. On `name`, that lets you filter places based on a text search.
+- Attributes with neither of the above can be retrieved for each point but cannot be drawn or used for filtering. Data stored this way uses less memory and less disk space than the above.
 
 ## Describe the deployment
 
-The declaration describes the data. A second file, `tessera.toml`, describes this particular
-deployment of it. It says where the bundle goes and which declaration to build, and it sets up the
-server. `tessera check`, `tessera build` and `tessera serve` all look for it in the directory you
+The declaration describes the data. A second file, `tessera.toml`, configures the database itself. It says where the bundle goes, which declaration to build, and provides other configuration settings for the system. `tessera check`, `tessera build` and `tessera serve` all look for it in the directory you
 run them from, and then in the directories above. Save this beside `corpus.toml`.
 
 ```toml
@@ -342,7 +309,6 @@ create the files, and explain the addresses, when we start the server.
 Before building anything, ask Tessera what it makes of the two files. `tessera check` reads the
 declaration, opens each Parquet file it names, and compares the columns the declaration asks for
 with the columns each file actually has. It only reads names and types, never rows, so it's quick.
-On our file it took 18 milliseconds.
 
 ```bash
 tessera check
@@ -427,7 +393,7 @@ all, the build refuses to start and tells you the ways to supply one.
 
 Now build the bundle. The build reads every row of `points.parquet` and works out where each place
 sits on the map. It stores neighbouring places next to each other on disc, so that the places in any
-map tile, at any zoom, form one unbroken run of rows. Along the way it checks every feature class
+map tile, at any zoom, are efficiently retrieved. Along the way it checks every feature class
 against the vocabulary, builds the search index over the names and records which places carry which
 access label. Everything goes into the `bundle` directory. From here on the server reads only the
 bundle, and never looks at your Parquet file again.
@@ -482,9 +448,9 @@ chmod 600 session.secret operator.secret
 
 The server listens on three addresses, each with its own job.
 
-- The viewer address, port 9141, serves the map to browsers. Each browser gets only the places
+- The viewer address, port 9141, serves the data. Each caller gets only the places
   it's allowed to see.
-- The session address, port 9142, gives a browser permission to read the map. It only answers
+- The session address, port 9142, gives a caller permission to read the map. It only answers
   callers holding the session secret.
 - The control address, port 9143, takes changes to the data, such as new places and deletions.
   It only answers callers holding the operator secret. We won't use it here.
