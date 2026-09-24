@@ -103,19 +103,14 @@ export type ScopedScalar = {
 };
 
 /**
- * What a client may filter a column by, as `/v1/meta` publishes it (contracts §3.2).
- *
- * **`family` is what decides which control to draw**, and it is published rather than inferred
- * because two of the four cannot be derived from `arrowType`: a `text` column's type is a string
- * type and its operand is not a string predicate, and a `keyword`'s values are held in a dictionary
- * the server never serves. Concretely — a `category` has a value set, so `/v1/categories` fills a
- * dropdown; a `string` or `keyword` has none, because its values are row data rather than a
- * vocabulary, so the control is a free-text box and no endpoint will ever enumerate it.
+ * What a client may filter a column by, as `/v1/meta` publishes it. `family` decides the control:
+ * a `category` has a value set `/v1/categories` lists; a `keyword` has none, so its control is a
+ * text box; a `text` column is searched by analysed words; a `numeric` one by range.
  */
 export type FilterOperandSet = {
   column: string;
-  family: 'category' | 'keyword' | 'string' | 'text' | 'numeric';
-  /** The operator names this column accepts — `eq`, `in`, `prefix`, `contains`, `match`, `phrase`, `range`. */
+  family: 'category' | 'keyword' | 'text' | 'numeric';
+  /** The operator names this column accepts: `eq`, `in`, `prefix`, `contains`, `match`, `phrase`, `range`. */
   operands: string[];
   /**
    * Present only on a **group-scoped** attribute: the view group whose views this column's values

@@ -41,7 +41,7 @@ export type ClauseVerb = 'filter' | 'highlight';
 /** What a control asks — the predicate alone, with no word about where the clause is sent. */
 export type ColumnPredicate =
   | {family: 'text'; query: string; mode: TextMode}
-  | {family: 'string' | 'keyword'; needle: string; op: 'eq' | 'prefix' | 'contains'}
+  | {family: 'keyword'; needle: string; op: 'eq' | 'prefix' | 'contains'}
   /** Selected category **keys**, not codes — the wire takes keys and resolves them server-side. */
   | {family: 'category'; keys: string[]}
   /** Inclusive bounds, as the column's own units; `null` for an open side. */
@@ -57,7 +57,6 @@ export function isPopulated(draft: ColumnPredicate): boolean {
   switch (draft.family) {
     case 'text':
       return draft.query.trim().length > 0;
-    case 'string':
     case 'keyword':
       return draft.needle.length > 0;
     case 'category':
@@ -82,7 +81,6 @@ function operatorOf(draft: ColumnPredicate): FilterOperator {
       if (draft.mode === 'any') return {match: {query, minimum_should_match: 1}};
       return {match: query};
     }
-    case 'string':
     case 'keyword':
       return draft.op === 'eq'
         ? {eq: draft.needle}
@@ -161,7 +159,6 @@ export function emptyDraft(operands: FilterOperandSet[]): FilterDraft {
       case 'text':
         if (ops.includes('match')) draft[column] = {family: 'text', query: '', mode: 'all', verb: 'filter'};
         break;
-      case 'string':
       case 'keyword': {
         const op = ops.find((o): o is 'eq' | 'prefix' | 'contains' => o === 'eq' || o === 'prefix' || o === 'contains');
         if (op) draft[column] = {family, needle: '', op, verb: 'filter'};
