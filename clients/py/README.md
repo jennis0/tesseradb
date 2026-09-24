@@ -330,10 +330,8 @@ just outside the box.
 
 `sample(zoom=0, k=None, ...)` is what a map draws at a zoom: a display sample, thinned by density,
 in which each map tile carries at most `k` points and the zoom sets how many tiles there are. It
-holds fewer rows than the selection has items; `count()` is the number, and the reader's
-`items(view, fields, ...)` reads the rows themselves, a response at a time: it returns the
-response's rows as a pyarrow table and the cursor to pass back as `cursor`, `None` once no row
-remains. Its other keywords are `POST /v1/items`' request fields, sent as given. The result reads as a pyarrow table of
+holds fewer rows than the selection has items; `count()` is the number, and `items()` below
+reads every row. The result reads as a pyarrow table of
 `tessera_id`, `code` (the point's position on the view's grid) and the columns declared with
 `render=True`. A category column holds each value's key, as a dictionary column, and null for a
 value the reader may not see; the keys are looked up once per reader and kept. Its schema metadata carries `tessera.counts` (`visible`, `matched`, `highlighted`
@@ -354,8 +352,55 @@ Not built yet: `count(by=column)`, a count per value of a column, which needs a 
 server. Until then, `categories(column, prefix=...)` counts the items carrying each matching
 value, over the whole of what the reader may see.
 
-Not built yet: `items()`, the records of the items in a selection, which needs the server's
-records route. Until then, `item(tessera_id)` returns one record at a time.
+### Every row: `items` and `artifacts`
+
+```python
+papers = db.items("s0", ["title", "primary_category"], system_fields=["external_id"])
+papers.to_pandas()                            # every paper, as one DataFrame
+cs = db.viewer(["cs.LG"]).items("s0", ["title"], filters={"archive": {"eq": "cs"}})
+topics = db.artifacts("s0", "clusters/kmeans", ["key", "masked_count", "centroid"])
+
+for batch in db.items("s0", ["title"], page_rows=10_000, batches=True):
+    batch.to_pandas()                         # a page at a time
+```
+
+`items(view, fields, ...)` returns every item the reader may see in a view, with the columns
+named, as one pyarrow table. The server answers a page at a time, several pages to a response,
+and ends each response with a cursor for the next. `items` asks for responses until no row
+remains and joins their pages. The columns are `tessera_id`, the fields in the order named, then
+the `system_fields` asked for: `position` as `tessera:x` and `tessera:y`, `external_id` as
+`tessera:external_id` (bytes, from a `Database` as from `connect()`) and `labels` as
+`tessera:labels`. A category column holds each value's key as a dictionary column, and a missing
+value is null. `filters` narrows the rows as `Selection.filter` does, and `keep_unmatched=True`
+keeps every row and adds a `tessera:matched` column. The table's schema metadata `tessera.head`
+holds the page size and order the server used, and with `count=True` the numbers of items
+`visible` and `matched`. A read that returns no row is a table of `tessera_id` alone.
+
+`order="map"` returns the items by their place on the map and `order="stored"` in the order the
+server stores records, which is faster for a column that is neither rendered nor indexed. Without
+it the server chooses. `page_rows`, `pages`, `cursor`, `compression="zstd"` and `idset` are the
+route's own fields. Each keyword is sent only when given, so the server's own setting applies
+otherwise.
+
+With `batches=True` the call returns a `Batches`: an iterator of `pyarrow.RecordBatch`, one per
+page. It asks for the first response at once and for each later one when the pages before it are
+used up, so a loop that stops early reads no further. A batch's category dictionary holds only
+that page's keys; `read_all()` joins the pages left into one table with one dictionary per column,
+and `to_pandas()` into one DataFrame. `head` is the first response's head, `next` the cursor to
+pass as `cursor` to read on after the last batch taken, and `close()` ends the read. A response
+cut short raises a `Refusal` after its whole pages, naming the cursor to read on from.
+
+`artifacts(view, layer, fields, ...)` reads every annotation of a layer the reader is served in
+the same way. `fields` are drawn from `key`, `level`, `parents`, `target`, `masked_count`,
+`content`, `centroid`, `box` and `shape`; `level`, `parent` and `q` choose which annotations, and
+`filters` keeps those with a matching item and adds `matched_count`. The rows are in order of
+level, then in the order they were published.
+
+`tessera items` and `tessera artifacts` make the same reads from a shell and write Arrow IPC or
+Parquet; `tessera items --help` lists their arguments.
+
+Not built yet: `items()` on a selection. `db.items(view, fields, filters=...)` takes the same
+filter expression.
 
 ### The other queries
 

@@ -270,8 +270,8 @@ enum Command {
     ///
     /// The server answers `POST /v1/items` a page at a time, several pages to a response, and ends
     /// each response with a cursor for the next. This requests responses until no row remains and
-    /// writes each page as it arrives. Every argument is the route's field of the same name, sent
-    /// only when given, so the server's own setting applies otherwise.
+    /// writes each page as it arrives. Each of the route's fields is the argument of the same
+    /// name, sent only when given, so the server's own setting applies otherwise.
     ///
     /// The columns are `tessera_id`, the fields in the order named, the system fields in the order
     /// named, then `tessera:matched` under `--keep-unmatched`. A category field is a dictionary
