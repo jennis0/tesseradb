@@ -3301,7 +3301,7 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 }
 
 /// A `[[view]]`'s, a `[[view_group]]`'s or a roster record's own `visibility` (`views.md` §6):
-/// a list of labels, each one term taken verbatim (decision 0132). A declaration spells one
+/// a list of labels, each one term, stored trimmed. A declaration spells one
 /// label as a string and several as a list; both arrive here as the list.
 ///
 /// **`public` compiles to `None`**, which is what every downstream reader takes as *no gate*: it

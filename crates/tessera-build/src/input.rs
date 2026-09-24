@@ -2639,7 +2639,7 @@ pub struct RosterRow {
     pub key: String,
     /// The view's own gate, where the table carries a `visibility` column and this row a value:
     /// one label from a string column, or the elements of a `list<string>` column, each one
-    /// label verbatim (`views.md` §6, decision 0132). `None` takes the group's.
+    /// label (`views.md` §6). `None` takes the group's.
     pub visibility: Option<Vec<String>>,
     pub metadata: std::collections::BTreeMap<String, crate::config::MetadataValue>,
 }

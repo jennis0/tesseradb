@@ -26,7 +26,7 @@ pub(crate) struct RawIngestItem {
     /// In the view's frame, never longitude and latitude: the projection has already run.
     pub(crate) x: f64,
     pub(crate) y: f64,
-    /// The row's `access` labels, verbatim. Empty for a row with none, which the view's
+    /// The row's `access` labels, trimmed. Empty for a row with none, which the view's
     /// `point_default` fills or refuses.
     pub(crate) labels: Vec<Vec<u8>>,
     pub(crate) scalars: Vec<WalScalar>,

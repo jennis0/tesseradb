@@ -1601,7 +1601,7 @@ struct ViewGroupBody {
     #[serde(default = "projection_none")]
     projection: String,
     extent: ExtentBody,
-    /// One label or a list, each element one term taken verbatim. Absent is `public`.
+    /// One label or a list, each element one term. Absent is `public`.
     #[serde(default)]
     visibility: Option<tessera_types::view::DeclaredGate>,
     #[serde(default)]
@@ -1702,7 +1702,7 @@ async fn create_plain_view(
 #[serde(deny_unknown_fields)]
 struct ViewRecord {
     /// This view's own gate; absent takes the group's. One label or a list, each element one
-    /// term taken verbatim.
+    /// term.
     #[serde(default)]
     visibility: Option<tessera_types::view::DeclaredGate>,
     /// One entry per name the group declared. A `timestamp_us` is microseconds since the epoch,
