@@ -76,14 +76,14 @@ fn build_body() -> Vec<u8> {
     body.extend(points_frame(
         &[0, 1],
         &[1, 2],
-        &[("count", ScalarColumn::U64(&[70, 80]))],
+        &[("count", ScalarColumn::U64(&[70, 80]), None)],
         None,
         &[],
     ));
     body.extend(points_frame(
         &[2],
         &[3],
-        &[("count", ScalarColumn::U64(&[90]))],
+        &[("count", ScalarColumn::U64(&[90]), None)],
         None,
         &[],
     ));
@@ -218,7 +218,7 @@ fn every_scalar_type_arrives_as_its_arrow_type() {
     let mut columns = Vec::new();
     for (name, scalar, data_type) in scalars {
         want.push((name, data_type));
-        columns.push((name, scalar));
+        columns.push((name, scalar, None));
     }
     let batch = batch_of(&points_frame(&[1, 2], &[3, 4], &columns, None, &[]), FRAME_POINTS);
     let schema = batch.schema();
@@ -226,7 +226,8 @@ fn every_scalar_type_arrives_as_its_arrow_type() {
         let field = schema.field(at + 2);
         assert_eq!(field.name(), name);
         assert_eq!(field.data_type(), data_type);
-        assert!(!field.is_nullable());
+        assert!(field.is_nullable(), "{name} may hold an absent value");
+        assert_eq!(batch.column(at + 2).null_count(), 0, "{name} has every value");
     }
     let shown = |name: &str| -> Vec<String> {
         let column = batch.column_by_name(name).unwrap();
@@ -245,10 +246,40 @@ fn every_scalar_type_arrives_as_its_arrow_type() {
     );
 }
 
+/// A value marked absent arrives as null, at every type, and its neighbour keeps its value.
+#[test]
+fn an_absent_scalar_value_arrives_as_null() {
+    let text = ["a".to_string(), String::new()];
+    let present = [false, true];
+    let columns = [
+        ("bool", ScalarColumn::Bool(&[false, false]), Some(&present[..])),
+        ("u8", ScalarColumn::U8(&[0, 0]), Some(&present[..])),
+        ("u16", ScalarColumn::U16(&[0, 0]), Some(&present[..])),
+        ("u32", ScalarColumn::U32(&[0, 0]), Some(&present[..])),
+        ("u64", ScalarColumn::U64(&[0, 0]), Some(&present[..])),
+        ("i8", ScalarColumn::I8(&[0, 0]), Some(&present[..])),
+        ("i16", ScalarColumn::I16(&[0, 0]), Some(&present[..])),
+        ("i32", ScalarColumn::I32(&[0, 0]), Some(&present[..])),
+        ("i64", ScalarColumn::I64(&[0, 0]), Some(&present[..])),
+        ("f32", ScalarColumn::F32(&[0.0, 0.0]), Some(&present[..])),
+        ("f64", ScalarColumn::F64(&[0.0, 0.0]), Some(&present[..])),
+        ("time", ScalarColumn::TimestampUs(&[0, 0]), Some(&present[..])),
+        ("text", ScalarColumn::Utf8(&text), Some(&present[..])),
+    ];
+    let batch = batch_of(&points_frame(&[1, 2], &[3, 4], &columns, None, &[]), FRAME_POINTS);
+    for (name, _, _) in &columns {
+        let column = batch.column_by_name(name).unwrap();
+        assert!(column.is_null(0), "{name}: the absent value is null");
+        assert!(column.is_valid(1), "{name}: the present zero is a value");
+    }
+    assert_eq!(bools(&batch, "bool"), [None, Some(false)]);
+    assert_eq!(column::<arrow::array::StringArray>(&batch, "text").value(1), "");
+}
+
 #[test]
 fn highlighted_follows_the_scalars_and_membership_follows_it() {
     let ids = [1u64, 2, 3];
-    let scalars = [("w", ScalarColumn::U16(&[7, 8, 9]))];
+    let scalars = [("w", ScalarColumn::U16(&[7, 8, 9]), None)];
     let a = [Some(100), None, Some(300)];
     let b = [None, None, Some(999)];
 

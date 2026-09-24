@@ -1,8 +1,15 @@
 import {describe, expect, it} from 'vitest';
 import {bandsOfResult, mortonOfTile, type Band, type ReplicaFrame} from '@tesseradb/client';
-import type {ViewportResult} from '@tesseradb/client';
+import type {ScalarColumn, ViewportResult} from '@tesseradb/client';
 import {band as heldBand, refused} from '../../core/test/support.js';
-import {assemble, assembledMarks, assertAssemblyMatchesServed, foldBandColumn, refreshExact} from '../src/assemble.js';
+import {
+  assemble,
+  assembledMarks,
+  assertAssemblyMatchesServed,
+  foldBandColumn,
+  materialiseStandIn,
+  refreshExact
+} from '../src/assemble.js';
 
 /** A band at `depth`/`prefix` whose points all sit in cell `(cx, cy)`. */
 function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 0, cy: 0}): Band {
@@ -274,5 +281,31 @@ describe('refreshExact', () => {
     expect(out.provisional).toBe(0);
     expect(out.standIn.ids.length).toBe(0);
     assertAssemblyMatchesServed(out);
+  });
+});
+
+describe('a stand-in column with no value at some points', () => {
+  it('keeps each point\'s presence, through an index list, a prefix and a band without the column', () => {
+    const heat = (values: number[], present?: number[]): ScalarColumn => ({
+      arrowType: 'f64',
+      values: Float64Array.from(values),
+      ...(present ? {present: Uint8Array.from(present)} : {})
+    });
+    const whole = {...band(2, 0n, 3), scalars: {heat: heat([1, 2, 3])}};
+    const gappy = {...band(2, 1n, 3), scalars: {heat: heat([4, 0, 6], [1, 0, 1])}};
+    const bare = {...band(2, 2n, 2), scalars: {}};
+    const out = materialiseStandIn(
+      [
+        {band: whole, indices: null, limit: 2},
+        {band: gappy, indices: [2, 1], limit: Infinity},
+        {band: bare, indices: null, limit: 1}
+      ],
+      ['heat']
+    );
+    const column = out.scalars.heat!;
+    const read = Array.from(column.values as Float64Array, (v, i) =>
+      !column.present || column.present[i] === 1 ? v : null
+    );
+    expect(read).toEqual([1, 2, 6, null, null]);
   });
 });
