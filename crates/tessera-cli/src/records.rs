@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::Schema;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use clap::ValueEnum;
@@ -466,16 +466,15 @@ impl Output {
         written.map_err(|e| format!("writing {}: {e}", self.name()))
     }
 
-    /// Close the output. A read that returned no row writes `tessera_id` alone, since no page
-    /// carried the other columns.
+    /// Close the output. Every read is answered with at least one page, which opened it: a read
+    /// that found no row, with a page of no rows that gives its columns.
     fn finish(mut self) -> Result<(), String> {
-        let writer = match self.writer.take() {
-            Some(writer) => writer,
-            None => self.open(&Arc::new(Schema::new(vec![Field::new(
-                "tessera_id",
-                DataType::UInt64,
-                false,
-            )])))?,
+        let Some(writer) = self.writer.take() else {
+            return Err(format!(
+                "the read ended without a page, so its columns are not known and {} was not \
+                 written; a server answers every read with at least one page",
+                self.name()
+            ));
         };
         let inner = match writer {
             Writer::Ipc(writer) => writer.into_inner().map_err(|e| e.to_string()),

@@ -276,7 +276,7 @@ enum Command {
     /// The columns are `tessera_id`, the fields in the order named, the system fields in the order
     /// named, then `tessera:matched` under `--keep-unmatched`. A category field is a dictionary
     /// column of its value keys, each page's dictionary holding the keys of its own rows. A read
-    /// that returns no row writes `tessera_id` alone, since no page carried the other columns.
+    /// that returns no row writes these columns with no rows.
     ///
     /// A read cut short leaves the whole pages read before it in the output, exits 1 and prints
     /// the cursor to read the rest with. The first response's head, with the counts under

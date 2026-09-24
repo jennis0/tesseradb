@@ -24,12 +24,13 @@ use base64::Engine;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use common::{deployment, tessera, Server, SESSION_CREDENTIAL};
+use common::{deployment, tessera, Ports, Server, SESSION_CREDENTIAL};
 
 /// A served deployment, a token holding a hundred of its terms, and a proxy in front of it.
 struct Served {
     dir: TempDir,
     _server: Server,
+    _bound: common::Bound,
     viewer: String,
     token: String,
     proxy: Proxy,
@@ -37,25 +38,25 @@ struct Served {
 
 fn serve() -> Served {
     let dir = TempDir::new().unwrap();
-    let ports = deployment(dir.path());
-    let server = Server::start(dir.path());
+    deployment(dir.path(), &Ports::chosen());
+    let (server, bound) = Server::announced(dir.path());
     let terms: Vec<String> = std::iter::once("public".to_string())
         .chain((0..100).map(|term| term.to_string()))
         .collect();
     let auth_data =
         base64::engine::general_purpose::STANDARD.encode(json!({ "terms": terms }).to_string());
     let answer: Value = serde_json::from_slice(&post(
-        &format!("http://127.0.0.1:{}/session/authorise", ports.session),
+        &format!("{}/session/authorise", bound.session),
         SESSION_CREDENTIAL,
         &json!({ "auth_data": auth_data }),
     ))
     .unwrap();
-    let viewer = format!("http://127.0.0.1:{}", ports.viewer);
     Served {
         dir,
         _server: server,
-        proxy: Proxy::start(viewer.clone()),
-        viewer,
+        proxy: Proxy::start(bound.viewer.clone()),
+        viewer: bound.viewer.clone(),
+        _bound: bound,
         token: answer["token"].as_str().unwrap().to_owned(),
     }
 }
@@ -321,6 +322,24 @@ fn read_output(path: &Path) -> Vec<RecordBatch> {
     match path.extension().unwrap().to_str().unwrap() {
         "parquet" => read_parquet(path),
         _ => decode_stream(&std::fs::read(path).unwrap()),
+    }
+}
+
+/// The schema an output file declares, `.parquet` or `.arrows`, whether or not it holds a row.
+fn output_schema(path: &Path) -> arrow::datatypes::SchemaRef {
+    match path.extension().unwrap().to_str().unwrap() {
+        "parquet" => parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            std::fs::File::open(path).unwrap(),
+        )
+        .unwrap()
+        .schema()
+        .clone(),
+        _ => arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(std::fs::read(path).unwrap()),
+            None,
+        )
+        .unwrap()
+        .schema(),
     }
 }
 
@@ -622,6 +641,40 @@ fn an_artifacts_read_passes_its_own_arguments_and_is_the_read_over_http() {
         served.proxy.bodies(),
         [json!({"view": "s0", "layer": "generator/treed", "fields": ["key"], "level": 0})]
     );
+}
+
+/// **A read that finds no row writes the columns it asked for**, typed as a read with rows types
+/// them, with no rows, in both formats and to stdout.
+#[test]
+fn a_read_that_finds_no_row_writes_its_columns_with_no_rows() {
+    let served = serve();
+    let (paged, _) = served.http_read("items", &items_body(2));
+    let schema = paged[0].schema();
+    let filters = r#"{"tag": {"eq": "no such tag"}}"#;
+    let mut nothing = items_body(2);
+    nothing["filters"] = serde_json::from_str(filters).unwrap();
+    let (empty, _) = served.http_read("items", &nothing);
+    assert_eq!(rows(&empty), 0);
+    assert_eq!(empty[0].schema(), schema, "the server's page of no rows has the read's columns");
+
+    for (format, out) in [("ipc", "none.arrows"), ("parquet", "none.parquet")] {
+        let out = served.dir.path().join(out);
+        let mut args = with_out(items_args("2"), &out);
+        args.extend(["--filters", filters]);
+        let done = served.run(&args);
+        assert!(done.status.success(), "{}", done.stderr);
+        assert_eq!(rows(&read_output(&out)), 0, "{format}");
+        assert_eq!(output_schema(&out).fields(), schema.fields(), "{format}");
+
+        let mut args = items_args("2");
+        args.extend(["--filters", filters, "--format", format]);
+        let piped = served.run(&args);
+        assert!(piped.status.success());
+        let copy = served.dir.path().join("piped").with_extension(out.extension().unwrap());
+        std::fs::write(&copy, &piped.stdout).unwrap();
+        assert_eq!(rows(&read_output(&copy)), 0);
+        assert_eq!(output_schema(&copy).fields(), schema.fields(), "{format} on stdout");
+    }
 }
 
 /// Cut 10 bytes into the frame after the second page end, exactly at the second page end, or

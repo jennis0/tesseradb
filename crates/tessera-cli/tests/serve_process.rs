@@ -6,13 +6,13 @@ mod common;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{deployment, healthy, Server};
+use common::{deployment, healthy, Ports, Server};
 
 #[test]
 fn health_follows_the_server_and_sigterm_stops_it_cleanly() {
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = tmp.path();
-    deployment(dir);
+    deployment(dir, &Ports::free());
 
     assert!(!healthy(dir), "nothing is serving yet");
 
