@@ -18,9 +18,7 @@ use arrow::record_batch::RecordBatch;
 use clap::ValueEnum;
 use parquet::arrow::ArrowWriter;
 use serde_json::{Map, Value};
-use tessera_wire::{
-    FRAME_HEADER_BYTES, FRAME_PAGE_END, FRAME_RECORDS, FRAME_RECORDS_HEAD, FRAME_TRAILER,
-};
+use tessera_wire::{read_frame, FRAME_PAGE_END, FRAME_RECORDS, FRAME_RECORDS_HEAD, FRAME_TRAILER};
 
 #[derive(clap::Args)]
 pub(crate) struct ItemsArgs {
@@ -105,7 +103,7 @@ struct Paging {
     #[arg(long, value_name = "N")]
     pages: Option<u32>,
     /// Start after the last page of an earlier read: the cursor a read cut short printed.
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     cursor: Option<String>,
     /// `zstd` compresses the pages on their way from the server. The output is written
     /// uncompressed either way.
@@ -271,9 +269,22 @@ fn run(route: &str, request: Result<Map<String, Value>, String>, target: &Target
 struct Summary {
     rows: usize,
     pages: usize,
+    /// The responses that answered, each with a head.
     responses: usize,
     /// The first response's head.
     head: Option<Value>,
+    /// The cursor to read on from after the last page written; `None` is the start.
+    resume: Option<String>,
+    /// Whether a page end or a trailer has said that no row remains.
+    done: bool,
+}
+
+impl Summary {
+    /// Take the cursor of a page end or a trailer.
+    fn reached(&mut self, frame: &Value) {
+        self.resume = frame.get("next").and_then(Value::as_str).map(str::to_owned);
+        self.done = self.resume.is_none();
+    }
 }
 
 fn read(
@@ -292,50 +303,47 @@ fn read(
         .build()
         .map_err(|e| format!("starting the HTTP client: {e}"))?;
     let url = format!("{}/v1/{route}", target.server.trim_end_matches('/'));
-    let mut summary = Summary::default();
-    // Where the read goes on from: the cursor of the last page written.
-    let mut resume = request
-        .get("cursor")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let started = resume.clone();
+    let mut summary = Summary {
+        resume: request.get("cursor").and_then(Value::as_str).map(str::to_owned),
+        ..Summary::default()
+    };
     let read = loop {
         let response = match post(&client, &url, &token, &request) {
             Ok(response) => response,
             Err(e) => break Err(e),
         };
         summary.responses += 1;
-        match read_response(response, &mut output, &mut summary, &mut resume) {
-            Ok(Some(next)) => {
-                // The server takes `count` on a read's first request only.
-                request.remove("count");
-                request.insert("cursor".into(), next.clone().into());
-                resume = Some(next);
-            }
-            Ok(None) => break Ok(()),
-            Err(e) => break Err(e),
+        if let Err(e) = read_response(response, &mut output, &mut summary) {
+            break Err(e);
         }
+        let (Some(next), false) = (summary.resume.clone(), summary.done) else {
+            break Ok(());
+        };
+        // The server takes `count` on a read's first request only.
+        request.remove("count");
+        request.insert("cursor".into(), next.into());
     };
     let Err(e) = read else {
         return output.finish().map(|()| summary);
     };
-    if resume == started {
+    if summary.responses == 0 {
         return Err(e);
     }
-    let rows = summary.rows;
     let written = if summary.pages == 0 {
-        "No row was read before it".to_string()
+        "Nothing was written".to_string()
     } else {
+        let (rows, pages) = (summary.rows, summary.pages);
         match output.finish() {
-            Ok(()) => format!("The output holds the {rows} rows read before it"),
-            Err(also) => format!("The {rows} rows read before it were not all written ({also})"),
+            Ok(()) => format!("{rows} rows in {pages} whole pages were written"),
+            Err(also) => format!("{rows} rows were read but not all written ({also})"),
         }
     };
-    let from = match resume {
-        Some(cursor) => format!("pass --cursor {cursor} to read the rest"),
-        None => "no row remains after them".into(),
+    let rest = match (&summary.resume, summary.done) {
+        (_, true) => "every row had arrived".to_string(),
+        (Some(cursor), false) => format!("pass --cursor={cursor} to read the rest"),
+        (None, false) => "run the read again for the rest".to_string(),
     };
-    Err(format!("{e}. {written}; {from}"))
+    Err(format!("{e}. {written}; {rest}"))
 }
 
 /// One request, answered with its body open to read, or the refusal the server gave.
@@ -351,7 +359,7 @@ fn post(
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(Value::Object(request.clone()).to_string())
         .send()
-        .map_err(|e| format!("no answer from {url}: {e}"))?;
+        .map_err(|e| format!("no answer from {url}: {}", crate::innermost(&e)))?;
     let status = response.status();
     if status.is_success() {
         return Ok(response);
@@ -360,21 +368,25 @@ fn post(
     Err(format!("{url} refused the read ({status}): {detail}"))
 }
 
-/// Write one response's pages, each once its page end has arrived: the trailer's cursor, or
-/// `None` when no row remains.
+/// Write one response's pages, each once its page end has arrived, taking the cursor of each
+/// page end and of the trailer.
 fn read_response(
     mut body: impl Read,
     output: &mut Output,
     summary: &mut Summary,
-    resume: &mut Option<String>,
-) -> Result<Option<String>, String> {
+) -> Result<(), String> {
     let mut pending = None;
     let mut first = true;
     loop {
-        let (kind, payload) = match next_frame(&mut body) {
+        let (kind, payload) = match read_frame(&mut body) {
             Ok(Some(frame)) => frame,
             Ok(None) => return Err("the response ended before its trailer".into()),
-            Err(e) => return Err(format!("the response was cut short: {e}")),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(format!("the response is not a bulk read's body: {e}"))
+            }
+            Err(e) => {
+                return Err(format!("the response was cut short ({})", crate::innermost(&e)))
+            }
         };
         if first != (kind == FRAME_RECORDS_HEAD) {
             return Err("the response does not have exactly one head, first".into());
@@ -394,47 +406,20 @@ fn read_response(
                 output.write(&batch)?;
                 summary.rows += batch.num_rows();
                 summary.pages += 1;
-                *resume = cursor(&json(&payload)?);
+                summary.reached(&json(&payload)?);
             }
-            FRAME_TRAILER => return Ok(cursor(&json(&payload)?)),
-            other => return Err(format!("the response holds a frame of unknown kind {other}")),
+            FRAME_TRAILER => {
+                summary.reached(&json(&payload)?);
+                return Ok(());
+            }
+            other => return Err(format!("the response holds a frame of kind {other}")),
         }
-    }
-}
-
-/// The next frame of `body` as `(kind, payload)`, or `None` where the body ends first.
-fn next_frame(body: &mut impl Read) -> std::io::Result<Option<(u8, Vec<u8>)>> {
-    let mut header = [0u8; FRAME_HEADER_BYTES];
-    if !fill(body, &mut header)? {
-        return Ok(None);
-    }
-    let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as u64;
-    // Read as it arrives rather than allocated from the length, which the body states.
-    let mut payload = Vec::new();
-    body.by_ref().take(len).read_to_end(&mut payload)?;
-    if payload.len() as u64 != len {
-        return Ok(None);
-    }
-    Ok(Some((header[0], payload)))
-}
-
-/// Fill `buf` from `body`: false where the body ends first.
-fn fill(body: &mut impl Read, buf: &mut [u8]) -> std::io::Result<bool> {
-    match body.read_exact(buf) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
-        Err(e) => Err(e),
     }
 }
 
 fn json(payload: &[u8]) -> Result<Value, String> {
     serde_json::from_slice(payload)
         .map_err(|e| format!("the response holds a frame that is not JSON: {e}"))
-}
-
-/// A page end's or a trailer's `next`.
-fn cursor(frame: &Value) -> Option<String> {
-    frame.get("next").and_then(Value::as_str).map(str::to_owned)
 }
 
 /// A records frame's one batch.

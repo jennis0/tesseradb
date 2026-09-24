@@ -614,7 +614,7 @@ pub fn read_frame(body: &mut impl std::io::Read) -> std::io::Result<Option<(u8, 
     if !known(kind) {
         return Err(std::io::Error::new(
             ErrorKind::InvalidData,
-            FrameError::UnknownKind { kind, at: 0 },
+            format!("unknown frame kind {kind}"),
         ));
     }
     let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;

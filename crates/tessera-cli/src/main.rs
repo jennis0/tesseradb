@@ -431,63 +431,45 @@ enum ArtifactCensusLayer {
     Treed,
 }
 
-/// `GET /readyz` on the viewer plane, over one plain HTTP/1.1 connection, within `timeout` in all.
+/// `GET /readyz` on the viewer plane, waiting at most `timeout` to connect and for the answer.
 fn readyz(mut addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<(), String> {
-    use std::io::{ErrorKind, Read, Write};
     if addr.ip().is_unspecified() {
         addr.set_ip(match addr {
             std::net::SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
             std::net::SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
         });
     }
-    let deadline = std::time::Instant::now() + timeout;
-    let failed = |e: std::io::Error| match e.kind() {
-        ErrorKind::WouldBlock | ErrorKind::TimedOut => format!(
-            "{addr} did not answer /readyz within {} s",
-            timeout.as_secs()
-        ),
-        _ => format!("{addr}: {e}"),
-    };
-    // A zero duration is refused as a socket timeout, so the last moment before the deadline
-    // waits a millisecond.
-    let remaining = || {
-        deadline
-            .saturating_duration_since(std::time::Instant::now())
-            .max(std::time::Duration::from_millis(1))
-    };
-    let mut stream =
-        std::net::TcpStream::connect_timeout(&addr, remaining()).map_err(|e| match e.kind() {
-            ErrorKind::WouldBlock | ErrorKind::TimedOut => failed(e),
-            _ => format!("no server answering at {addr}: {e}"),
-        })?;
-    stream
-        .set_write_timeout(Some(remaining()))
-        .and_then(|()| {
-            stream.write_all(
-                format!("GET /readyz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
-            )
-        })
-        .map_err(failed)?;
-    let mut head = [0u8; 16];
-    let mut read = 0;
-    while read < head.len() {
-        stream.set_read_timeout(Some(remaining())).map_err(failed)?;
-        match stream.read(&mut head[read..]) {
-            Ok(0) => break,
-            Ok(n) => read += n,
-            Err(e) => return Err(failed(e)),
-        }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("starting the HTTP client: {e}"))?;
+    let status = client
+        .get(format!("http://{addr}/readyz"))
+        .send()
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("{addr} did not answer /readyz within {} s", timeout.as_secs())
+            } else if e.is_connect() {
+                format!("no server answering at {addr}: {}", innermost(&e))
+            } else {
+                format!("{addr}: {}", innermost(&e))
+            }
+        })?
+        .status();
+    match status.as_u16() {
+        200 => Ok(()),
+        code => Err(format!("{addr} answered /readyz with {code}: not ready")),
     }
-    let status_line = String::from_utf8_lossy(&head[..read]);
-    let code = status_line
-        .strip_prefix("HTTP/")
-        .and_then(|rest| rest.split(' ').nth(1));
-    match code {
-        Some("200") => Ok(()),
-        Some(code) => Err(format!("{addr} answered /readyz with {code}: not ready")),
-        None => Err(format!("{addr} did not answer /readyz with HTTP")),
+}
+
+/// The last error in `e`'s chain of sources, which names the cause: an HTTP client's own message
+/// names only the request that failed.
+fn innermost(e: &dyn std::error::Error) -> String {
+    let mut last = e;
+    while let Some(source) = last.source() {
+        last = source;
     }
+    last.to_string()
 }
 
 /// Exit with success on the first SIGTERM or SIGINT, from a thread of its own so the handler is

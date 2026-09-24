@@ -43,13 +43,12 @@ tessera-config = { path = "../tessera-config" }
 tessera-server = { path = "../tessera-server" }
 tessera-store = { path = "../tessera-store" }
 tessera-types = { path = "../tessera-types" }
-# The `items` and `artifacts` verbs: the frame kinds of a bulk read's body.
+# The `items` and `artifacts` verbs: a bulk read's frames, and the zstd codec its pages may be
+# compressed with.
 tessera-wire = { path = "../tessera-wire" }
 # The `corpus` verbs' output encoding: expected items and censuses leave on stdout as Arrow IPC,
 # the same encoding the suite's other Arrow surfaces speak.
 arrow = { workspace = true }
-# A records frame's buffers may be zstd-compressed, which the IPC reader decodes with this feature.
-arrow-ipc = { version = "=59.1.0", default-features = false, features = ["zstd"] }
 # The `items` and `artifacts` verbs write Parquet as well as Arrow IPC.
 parquet = { workspace = true }
 # The `items` and `artifacts` verbs' HTTP client, reading each response's frames as they arrive.
