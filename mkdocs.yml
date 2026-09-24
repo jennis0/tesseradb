@@ -83,6 +83,11 @@ nav:
       - Your first map from files: start/first-map.md
   - Guides:
       - guides/index.md
+      - Run Tessera under systemd: guides/systemd.md
+      - Run Tessera with Docker: guides/docker.md
+      - Operate a deployment: guides/operating.md
+      - Put Tessera behind TLS: guides/tls.md
+      - Rebuild and replace the bundle: guides/rebuild.md
   - Reference:
       - reference/index.md
       - HTTP API: reference/http.md
