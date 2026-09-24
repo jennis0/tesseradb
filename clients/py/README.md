@@ -490,6 +490,6 @@ skipped and `Map(url)` takes no `token`. D4 chooses which arm ships first, condi
 | kernel → page | `{type: "refused", detail}` | the token source raised |
 | page → kernel | `{type: "error", what, detail}` | a `filters` expression the panel cannot hold |
 
-Traitlets: `url`, `view`, `explorer_layout`, `height` down; `bbox`, `layers`, `colour_by`,
+Traitlets: `url`, `view`, `explorer_layout`, `height`, `title_field` down; `bbox`, `layers`, `colour_by`,
 `filters` both ways, synced up at the settle; `selected`, `selected_artifact`, `region` up.
 `last_error` is kernel-side only. The JavaScript half is `clients/ts/components/src/widget.ts`.

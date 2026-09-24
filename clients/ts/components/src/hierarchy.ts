@@ -82,20 +82,20 @@ export class TesseraHierarchy extends TesseraElement {
         border-radius: 3px;
       }
       [part='row']:hover {
-        background: var(--tessera-surface-2);
+        background: var(--_tessera-surface-2);
       }
       [part='row'][data-clause='highlight'] {
-        background: var(--tessera-highlight-soft);
-        color: var(--tessera-highlight);
+        background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
       }
       [part='row'][data-clause='filter'] {
-        background: var(--tessera-accent-soft);
-        color: var(--tessera-accent);
+        background: var(--_tessera-accent-soft);
+        color: var(--_tessera-accent);
       }
       [part='expander'] {
         display: inline-flex;
         width: 14px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
       [part='expander'][data-leaf] {
         visibility: hidden;
@@ -108,14 +108,14 @@ export class TesseraHierarchy extends TesseraElement {
         text-align: left;
       }
       [part='name'][data-unnamed] {
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       [part='counts'] {
         display: inline-flex;
         gap: 6px;
         align-items: baseline;
         font-size: 12px;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
       [part='actions'] {
         display: inline-flex;
@@ -129,26 +129,26 @@ export class TesseraHierarchy extends TesseraElement {
       [part='actions'] button {
         display: inline-flex;
         padding: 2px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
         border-radius: 2px;
       }
       [part='actions'] button:hover {
-        color: var(--tessera-ink);
-        background: var(--tessera-surface-3);
+        color: var(--_tessera-ink);
+        background: var(--_tessera-surface-3);
       }
       [part='also'] {
         padding-left: calc(18px + var(--depth, 0) * 14px);
         font-size: 11px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
       [part='more'] {
         padding-left: calc(18px + var(--depth, 0) * 14px);
         font-size: 12px;
-        color: var(--tessera-accent);
+        color: var(--_tessera-accent);
       }
       [part='lineage'] {
         font-size: 11px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
     `
   ];
@@ -174,7 +174,7 @@ export class TesseraHierarchy extends TesseraElement {
   /**
    * Every name the walk has seen, by identifier. **The only place a name for one of these
    * artifacts exists on this client**: a filter layer is never named in a viewport request, so its
-   * artifacts are never served, and *also under 546790* says nothing about what a node sits under.
+   * artifacts are never served.
    */
   private names = new Map<bigint, string>();
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -302,9 +302,9 @@ export class TesseraHierarchy extends TesseraElement {
     return {row, path: `${parentPath}/${row.tesseraId}`, children: null, next: null, loading: false, refusal: null};
   }
 
-  /** What to call an artifact this walk has met; its identifier where the walk has not. */
+  /** What to call an artifact: its name where the walk has met one. */
   private nameOf(id: bigint): string {
-    return this.names.get(id) ?? idString(id);
+    return this.names.get(id) ?? UNNAMED;
   }
 
   /**
@@ -434,7 +434,7 @@ export class TesseraHierarchy extends TesseraElement {
   private renderNode(node: Node, depth: number, layer: Layer, filtered: boolean): unknown {
     const open = this.open.has(node.path);
     const clause = this.clauseOn(node.row.tesseraId);
-    const name = node.row.name ?? node.row.key ?? null;
+    const name = node.row.name;
     // A `dag` node under several served parents is drawn under each of them; the row says which
     // others it sits under, so the duplication reads as the structure it is (§5.1).
     const also = node.row.parentIds.filter((p) => String(p) !== node.path.split('/').at(-2));

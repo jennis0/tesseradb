@@ -224,6 +224,11 @@ jobs:
       # `check-clients.sh` requires an installed tree rather than installing one itself, so that a
       # developer's stale `node_modules` fails loudly instead of being silently repaired.
       - run: npm --prefix clients/ts ci
+      # The components' browser suite (`npm run test:browser`) drives headless Chromium through
+      # Playwright; `check-clients.sh` runs it and refuses where the browser is not installed.
+      - name: Playwright's Chromium
+        working-directory: clients/ts
+        run: npx playwright install --with-deps chromium
       # The two halves of CLAUDE.md's gate that ran nowhere until now. The TypeScript client is in
       # the gate because one rename — `ead7e90` — shipped three defects into `clients/` that a
       # Rust-and-Python gate could not see, each found later by a separate investigation. The

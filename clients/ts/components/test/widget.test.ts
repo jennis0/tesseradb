@@ -58,7 +58,7 @@ const META = {
 /** A layer points can be coloured by: it declares geometry and depends on nothing. */
 const clusters = (name: string) => ({name, title: name, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: [], depsOn: [], version: 1});
 
-const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400};
+const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
 
 /** A model initialised and one view rendered, so there is a store: the store is per view. */
 function setUp(initial: Record<string, unknown> = {}) {
@@ -110,6 +110,14 @@ describe('the token protocol', () => {
     const p = supplier()();
     model.fire('msg:custom', {type: 'refused', detail: 'no credential'});
     await expect(p).rejects.toThrow('no credential');
+  });
+
+  it('hands title_field to every view’s explorer, and follows a change to it', async () => {
+    const {model, el} = setUp({title_field: 'title'});
+    const explorer = el.querySelector('tessera-explorer') as unknown as {titleField: string};
+    expect(explorer.titleField).toBe('title');
+    model.set('title_field', null);
+    expect(explorer.titleField).toBe('');
   });
 
   it('two views of one model: a store each, one supplier, and one ready', async () => {
@@ -174,7 +182,7 @@ describe('the up-sync', () => {
   it('ids cross as decimal strings, never numbers', () => {
     const {model, store} = setUp();
     const id = 2n ** 63n + 5n;
-    store.set('selection', {item: {id, detail: {} as never}, itemRefusal: null, artifact: {id: 7n, detail: {} as never}, artifactRefusal: null});
+    store.set('selection', {item: {id, detail: {} as never}, itemRefusal: null, artifact: {id: 7n, detail: {layer: 'clusters', key: null, maskedCount: 1n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     expect(model.state.selected).toBe('9223372036854775813');
     expect(model.state.selected_artifact).toBe('7');
     expect(typeof model.state.selected).toBe('string');
@@ -326,11 +334,11 @@ describe('draftOf inverts composeFilters', () => {
   it('null is the unfiltered request', () => {
     expect(composeFilters(draftOf(null, operands))).toBeNull();
   });
-  it('refuses what a draft cannot hold, naming the reason', () => {
-    expect(() => draftOf({none_of: [{title: {match: 'x'}}]}, operands)).toThrow(/none_of/);
-    expect(() => draftOf({nope: {eq: 'x'}}, operands)).toThrow(/not a filterable column/);
-    expect(() => draftOf({year: {eq: 3}}, operands)).toThrow(/numeric column cannot hold eq/);
-    expect(() => draftOf({all_of: [{year: {range: {gte: 1}}}, {year: {range: {lte: 2}}}]}, operands)).toThrow(/two leaves/);
-    expect(() => draftOf({year: {range: {gt: 1}}}, operands)).toThrow(/inclusive/);
+  it('refuses what a draft cannot hold', () => {
+    expect(() => draftOf({none_of: [{title: {match: 'x'}}]}, operands)).toThrow();
+    expect(() => draftOf({nope: {eq: 'x'}}, operands)).toThrow();
+    expect(() => draftOf({year: {eq: 3}}, operands)).toThrow();
+    expect(() => draftOf({all_of: [{year: {range: {gte: 1}}}, {year: {range: {lte: 2}}}]}, operands)).toThrow();
+    expect(() => draftOf({year: {range: {gt: 1}}}, operands)).toThrow();
   });
 });

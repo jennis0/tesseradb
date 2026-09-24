@@ -301,6 +301,8 @@ items_of() {
   esac
 }
 prose_of()   { case "$1" in 2m4|notebook*) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
+# The column the viewer titles a record by: `title` wherever the scale declares it, else none.
+title_of()   { case "$1" in 2m4|25m|notebook*) echo 'title' ;; *) echo '' ;; esac; }
 viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; notebook) echo 37589 ;; notebook-2m4) echo 37590 ;; *) echo 0 ;; esac; }
 session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; notebook) echo 49307 ;; notebook-2m4) echo 49308 ;; *) echo 0 ;; esac; }
 control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; notebook) echo 45725 ;; notebook-2m4) echo 45726 ;; *) echo 0 ;; esac; }
@@ -322,6 +324,7 @@ m = sorted(b.glob('v*/MANIFEST.json'))
 print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
 " 2>/dev/null || echo 0; }
   prose_of()   { if [[ -n "$prose_override" ]]; then printf '"%s"' "${prose_override//,/\",\"}"; fi; }
+  title_of()   { echo ''; }
   schema_of()  { echo ''; }
   # **Its own ports, not 2m4's.** Sharing them meant a `--bundle` run beside an already-running
   # 2m4 bound nothing, found that port ready anyway, and measured its principals against the other
@@ -419,6 +422,7 @@ m = sorted(b.glob('v*/MANIFEST.json'))
 print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
 " 2>/dev/null || echo 0; }
   prose_of()   { if [[ -n "$prose_override" ]]; then printf '"%s"' "${prose_override//,/\",\"}"; fi; }
+  title_of()   { echo ''; }
   schema_of()  { echo ''; }
   # This deployment's own ports, whatever they are: two rungs served at once are two files, and
   # the picker offers both.
@@ -754,6 +758,8 @@ fresh="$DEMO/presets/datasets-this-run.json"
     esac
     printf '{"id":"%s","label":"%s","items":%s,"prose":[%s],' \
       "$scale" "$label" "$(items_of "$scale")" "$(prose_of "$scale")"
+    title="$(title_of "$scale")"
+    if [[ -n "$title" ]]; then printf '"titleField":"%s",' "$title"; fi
     printf '"viewerUrl":"http://127.0.0.1:%s","sessionUrl":"http://127.0.0.1:%s","presets":' \
       "$(viewer_of "$scale")" "$(session_of "$scale")"
     cat "$DEMO/presets/$scale.json"

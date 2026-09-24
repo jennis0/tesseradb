@@ -65,11 +65,18 @@ const browser = await chromium.launch(
     : {args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox', ...originFlags], ...(executablePath ? {executablePath} : {})}
 );
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
-// The probe: the demo publishes its first map's on `window` (with the lanes it keeps itself);
-// any page with an explorer has the map's own, and that is what the C1 example page offers.
+// The probe: the demo publishes its first map's on `window` (with the lanes it keeps itself), with
+// measuring on. Any page with an explorer has the map's own, and that is what the C1 example page
+// offers; the first read turns its measuring on, since the frame gaps and the cluster sample are
+// filled only while it is.
 await page.addInitScript(() => {
-  const explorer = () => /** @type {{map: {probe: Window['__tesseraProbe']} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
-  window.__tesseraProbeOf = () => window.__tesseraProbe ?? explorer()?.map?.probe ?? null;
+  const explorer = () => /** @type {{map: {probe: Window['__tesseraProbe']; measure: boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+  window.__tesseraProbeOf = () => {
+    if (window.__tesseraProbe) return window.__tesseraProbe;
+    const map = explorer()?.map ?? null;
+    if (map) map.measure = true;
+    return map?.probe ?? null;
+  };
 });
 
 const consoleErrors = [];

@@ -65,11 +65,12 @@ const REACHED_AS: Record<string, string> = {
 };
 
 /** Operations the client does not reach. Adding a method for one of them fails this test until it is removed here. */
-const NOT_REACHED = new Set(['revoke', 'healthz', 'readyz', 'items', 'artifacts']);
+const NOT_REACHED = new Set(['healthz', 'readyz', 'items', 'artifacts']);
 
 /** One call of each method that reaches an operation, with arguments enough to send its request. */
 const CALLS: Record<string, (c: TesseraClient) => Promise<unknown>> = {
   authorise: (c) => c.authorise(['t']),
+  revoke: (c) => c.revoke(7),
   meta: (c) => c.meta('tok'),
   categories: (c) => c.categories('tok', 'archive'),
   suggest: (c) => c.suggest('tok', 'archive', 'cs'),
