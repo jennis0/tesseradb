@@ -43,9 +43,17 @@ tessera-config = { path = "../tessera-config" }
 tessera-server = { path = "../tessera-server" }
 tessera-store = { path = "../tessera-store" }
 tessera-types = { path = "../tessera-types" }
+# The `items` and `artifacts` verbs: the frame kinds of a bulk read's body.
+tessera-wire = { path = "../tessera-wire" }
 # The `corpus` verbs' output encoding: expected items and censuses leave on stdout as Arrow IPC,
 # the same encoding the suite's other Arrow surfaces speak.
 arrow = { workspace = true }
+# A records frame's buffers may be zstd-compressed, which the IPC reader decodes with this feature.
+arrow-ipc = { version = "=59.1.0", default-features = false, features = ["zstd"] }
+# The `items` and `artifacts` verbs write Parquet as well as Arrow IPC.
+parquet = { workspace = true }
+# The `items` and `artifacts` verbs' HTTP client, reading each response's frames as they arrive.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 clap = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
@@ -55,7 +63,8 @@ tracing-subscriber = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-parquet = { workspace = true }
+# The records test authorises its token as a client does, with `auth_data` in base64.
+base64 = { workspace = true }
 # The check verb's payload test round-trips stdout through the type `PUT /control/layers` takes:
 # a body that will not deserialise there is not a payload, whatever it looks like.
 serde_json = { workspace = true }

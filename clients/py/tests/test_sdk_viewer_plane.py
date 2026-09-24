@@ -2,7 +2,8 @@
 
 What is asked for through the HTTP API is asked for here: the artifacts a sample serves, the
 drill-down on one of them, the highlight that lights a served set without moving it, and the
-control-plane verbs that undo a declaration or end a deletion.
+control-plane verbs that undo a declaration or end a deletion. The bulk reads are in
+`test_sdk_records.py`.
 """
 
 from __future__ import annotations
@@ -27,53 +28,6 @@ def db(served, corpus):
 
 def counts(table) -> dict:
     return json.loads(table.schema.metadata[b"tessera.counts"])
-
-
-# ---------------------------------------------------------------------------- the items read
-
-
-def test_items_reads_every_visible_row_once_across_responses(db):
-    """A read carried by its cursor returns each item this reader may see once, compressed or
-    not."""
-    viewer = db.viewer()
-    for compression in (None, "zstd"):
-        ids, cursor = [], None
-        while True:
-            table, cursor = viewer.items(
-                "map", [], system_fields=["position"], page_rows=3, pages=2,
-                cursor=cursor, compression=compression,
-            )
-            assert table.column_names[0] == "tessera_id"
-            ids += table.column("tessera_id").to_pylist()
-            if cursor is None:
-                break
-        assert len(ids) == len(set(ids)) == 20
-
-
-def test_items_passes_a_refusal_through(db):
-    """A field the database does not declare is the server's refusal, raised."""
-    with pytest.raises(Refusal):
-        db.viewer().items("map", ["no_such_field"])
-
-
-def test_artifacts_reads_a_layer_across_responses(db):
-    """A layer published from Python is read whole from Python, carried by its cursor."""
-    viewer = db.viewer()
-    rows, cursor = [], None
-    while True:
-        table, cursor = viewer.artifacts(
-            "map", "clusters", ["key", "masked_count"], page_rows=1, pages=1, cursor=cursor
-        )
-        rows += table.to_pylist()
-        if cursor is None:
-            break
-    assert [row["masked_count"] for row in rows] == [20]
-
-
-def test_artifacts_passes_a_refusal_through(db):
-    """A layer the database does not publish is the server's refusal, raised."""
-    with pytest.raises(Refusal):
-        db.viewer().artifacts("map", "no/such/layer", ["key"])
 
 
 # ---------------------------------------------------------------------------- the artifacts frame

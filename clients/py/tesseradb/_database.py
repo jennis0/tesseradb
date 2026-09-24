@@ -1251,6 +1251,28 @@ class Database:
             return raw.decode()
         return raw
 
+    def items(self, view: str, fields: Sequence[str], **options):
+        """Every item in `view`, with the fields named, as one pyarrow table.
+
+        This is `Viewer.items` as this database's own reader, which sees every item; `options`
+        are its keywords. `batches=True` returns the pages one at a time instead.
+
+            db.items("papers", ["title", "year"]).to_pandas()
+            db.items("papers", ["title"], filters={"year": {"eq": 2023}}, order="stored")
+        """
+        self._refuse_before_the_first_commit("items")
+        return self.viewer().items(view, fields, **options)
+
+    def artifacts(self, view: str, layer: str, fields: Sequence[str], **options):
+        """Every annotation of `layer`, with the properties named, as one pyarrow table.
+
+        This is `Viewer.artifacts` as this database's own reader; `options` are its keywords.
+
+            db.artifacts("papers", "clusters", ["key", "masked_count"])
+        """
+        self._refuse_before_the_first_commit("artifacts")
+        return self.viewer().artifacts(view, layer, fields, **options)
+
     def view(self, name: str) -> Selection:
         """The whole of one view, as this database's own reader sees it: every item.
 

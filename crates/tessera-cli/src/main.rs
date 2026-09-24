@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod records;
+
 use clap::{Parser, Subcommand};
 use tessera_spatial::Bounds;
 use tessera_store::manifest::identity_key_fingerprint;
@@ -263,6 +265,38 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         timeout: u64,
     },
+    /// Read every item a session token may see in one view, with the fields named, from a running
+    /// server, and write them as Arrow IPC or Parquet.
+    ///
+    /// The server answers `POST /v1/items` a page at a time, several pages to a response, and ends
+    /// each response with a cursor for the next. This requests responses until no row remains and
+    /// writes each page as it arrives. Every argument is the route's field of the same name, sent
+    /// only when given, so the server's own setting applies otherwise.
+    ///
+    /// The columns are `tessera_id`, the fields in the order named, the system fields in the order
+    /// named, then `tessera:matched` under `--keep-unmatched`. A category field is a dictionary
+    /// column of its value keys, each page's dictionary holding the keys of its own rows. A read
+    /// that returns no row writes `tessera_id` alone, since no page carried the other columns.
+    ///
+    /// A read cut short leaves the whole pages read before it in the output, exits 1 and prints
+    /// the cursor to read the rest with. The first response's head, with the counts under
+    /// `--count`, is printed on stderr at the end.
+    ///
+    /// For example, `tessera items --server http://127.0.0.1:8080 --view papers --fields
+    /// title,year --system-fields external_id --out papers.parquet`.
+    Items(records::ItemsArgs),
+    /// Read every artifact of one layer a session token is served, with the properties named, from
+    /// a running server, and write them as Arrow IPC or Parquet.
+    ///
+    /// An artifact is one member of a layer: a cluster, a region, a node in a taxonomy. The read is
+    /// carried across `POST /v1/artifacts` responses, and written, as `tessera items` carries and
+    /// writes one. The columns are `tessera_id`, the properties in the order named, then
+    /// `matched_count` under `--filters`. The rows are in order of level, and in the order they
+    /// were published within a level.
+    ///
+    /// For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --layer
+    /// clusters --fields key,masked_count --format ipc > clusters.arrows`.
+    Artifacts(records::ArtifactsArgs),
     /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
     ///
     /// Takes no required flag: the same `tessera.toml` `tessera build` wrote into names the
@@ -2023,6 +2057,8 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Command::Items(args) => records::items(args),
+        Command::Artifacts(args) => records::artifacts(args),
         Command::Health {
             deployment,
             timeout,
