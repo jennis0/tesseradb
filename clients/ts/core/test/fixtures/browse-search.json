@@ -1,22 +1,22 @@
 {
-    "artifacts": [
-        {
-            "tessera_id": "13650843325015492830",
-            "key": "hdb-2422522",
-            "name": "a cluster of papers",
-            "masked_count": 239300,
-            "rung": 0,
-            "parent_ids": []
-        },
-        {
-            "tessera_id": "2228440977510482089",
-            "key": "hdb-2422562",
-            "name": "a cluster of papers",
-            "masked_count": 49102,
-            "rung": 0,
-            "parent_ids": []
-        }
-    ],
-    "parents": [],
-    "next": "49102:2228440977510482089"
+  "artifacts": [
+    {
+      "tessera_id": "15443688509121506038",
+      "key": "hdb-050000",
+      "masked_count": 27456,
+      "rung": 0,
+      "parent_ids": []
+    },
+    {
+      "tessera_id": "17563330156939775113",
+      "key": "hdb-050002",
+      "masked_count": 26903,
+      "rung": 1,
+      "parent_ids": [
+        "15443688509121506038"
+      ]
+    }
+  ],
+  "parents": [],
+  "next": "26903:17563330156939775113"
 }
