@@ -30,9 +30,9 @@
 /// scaffolding itself). Counters are exact.
 ///
 /// **D-D/D-E: the per-tile fields stopped partitioning wall clock the moment the tile loop went
-/// parallel.** `count_ns`, `select_ns`, `gather_ns`, `underlay_ns` and every per-tile counter
-/// (`tiles_nonempty`, `sigma_visible`, `select_rows_visited`, `points_gathered`,
-/// `underlay_cells_evaluated`) are now **cross-worker sums**: each tile's own contribution
+/// parallel.** `count_ns`, `select_ns`, `underlay_ns` and the sweep's per-tile counters
+/// (`tiles_nonempty`, `sigma_visible`, `select_rows_visited`, `underlay_cells_evaluated`) are now
+/// **cross-worker sums**: each tile's own contribution
 /// ([`crate::viewport::TileResult`]'s [`TileStats`]) is measured locally inside that tile's own
 /// `tile_sweep` call, on whatever rayon worker ran it, and summed into these fields by
 /// [`TileStats::fold_into`] in `Engine::viewport`'s serial in-order fold. At `compute_threads = 1`
@@ -136,10 +136,9 @@ pub struct StageTimings {
     /// **Cross-worker sum under `compute_threads > 1`, not a wall-clock partition** — see this
     /// struct's doc.
     pub select_ns: u64,
-    /// The per-row column gather (`row_to_point`), summed over tiles.
-    ///
-    /// **Cross-worker sum under `compute_threads > 1`, not a wall-clock partition** — see this
-    /// struct's doc.
+    /// The emit pass's gather: resolving the render columns of the segments the request's tiles
+    /// touch, then each tile's point columns and their append to the pending chunk. Serial, on
+    /// the request's thread; handing a chunk to the sink is not counted.
     pub gather_ns: u64,
     /// Design §7.3's density underlay: the sub-cell `count_range` calls, summed over tiles. Zero
     /// when the request did not ask for the underlay, which is the default.

@@ -265,9 +265,9 @@ pub(super) fn tile_ranges(
 }
 
 /// One tile's sweep contribution: count, select and underlay, with no gather — the emit pass
-/// gathers later from the `rows`/`parts` returned here. Safe to call concurrently from any rayon
-/// worker: every parameter is `&`-borrowed or `Copy`, nothing here reaches back into `Engine` or
-/// any state shared across tiles, and the return value is owned outright by the caller.
+/// gathers later from the `rows`/`tile_parts` returned here. Safe to call concurrently from any
+/// rayon worker: every parameter is `&`-borrowed or `Copy`, nothing here reaches back into
+/// `Engine` or any state shared across tiles, and the return value is owned outright by the caller.
 ///
 /// `Ok(None)` for an empty tile: no segment for this view, or nothing visible in `range` — no
 /// count row, no selection work. `Err` carries [`EngineError::Cancelled`] from the cancellation
@@ -296,7 +296,7 @@ pub(super) fn tile_sweep<'a>(
     // Summed over every segment the tile touches, each shifted into view row space by its
     // `row_base`: a tile straddling a build segment and a fresh flush segment must report their
     // union, not just one segment's share.
-    let parts: Vec<SelectionPart<'_>> = tile_parts
+    let part_list: Vec<SelectionPart<'_>> = tile_parts
         .iter()
         .map(|(s, range)| {
             let (segment, row_base) = segments[*s];
@@ -314,7 +314,7 @@ pub(super) fn tile_sweep<'a>(
         })
         .collect();
     // What selection draws from: `M_sel`'s count, equal to the composed count when unfiltered.
-    let matched: u64 = parts.iter().map(|p| p.visible).sum();
+    let matched: u64 = part_list.iter().map(|p| p.visible).sum();
     // The composed count: how many of this tile's items the principal may see, unaffected by a
     // filter, summed over the same segment ranges as `matched`.
     let visible: u64 = tile_parts
@@ -333,9 +333,6 @@ pub(super) fn tile_sweep<'a>(
     stats.count(|t| &mut t.tiles_nonempty, 1);
     stats.count(|t| &mut t.sigma_visible, matched);
 
-    // The owned list survives the call: the emit pass rebuilds a `SelectionParts` over it to
-    // resolve each selected row at gather time.
-    let part_list = parts;
     let parts = SelectionParts::new(&part_list);
     // Anchored on `matched`, not `visible`: selection's cap and tier decisions are about the set
     // it draws from. θ's threshold anchor stays unfiltered and, on a filtered request, arrives
@@ -406,7 +403,6 @@ pub(super) fn tile_sweep<'a>(
     Ok(Some(TileSweepOut {
         count,
         rows: selected.rows,
-        parts: part_list,
         tile_parts,
         sub_cells,
         stats: stats.t,
@@ -414,17 +410,16 @@ pub(super) fn tile_sweep<'a>(
 }
 
 /// [`tile_sweep`]'s return payload, folded serially and in-order into the request's counts and
-/// sub-cells and then consumed by the emit pass, which gathers `rows` through a `SelectionParts`
-/// rebuilt over `parts`. Not part of this crate's public API.
+/// sub-cells and then consumed by the emit pass, which gathers `rows`. Not part of this crate's
+/// public API.
 ///
 /// `rows` are view-space rows ascending by `tessera_id` — the order the wire requires within a
 /// tile, and the property every mid-stream cut's validity rests on.
 pub(super) struct TileSweepOut<'a> {
     pub(super) count: TileCount,
     pub(super) rows: Vec<u32>,
-    pub(super) parts: Vec<SelectionPart<'a>>,
-    /// The tiling's entry for this tile, positionally aligned with `parts`: which of the view's
-    /// segments each part is, the key [`Gather`] reads its per-segment columns by.
+    /// The tiling's entry for this tile: each segment the tile spans, by its position in the
+    /// view's segment list, and the tile's rows in it.
     pub(super) tile_parts: &'a [(usize, Range<u32>)],
     pub(super) sub_cells: Vec<SubCellCount>,
     pub(super) stats: TileStats,
@@ -786,7 +781,8 @@ fn gather_column<T>(
     (out, (!every).then_some(present))
 }
 
-/// One segment's identity and position columns.
+/// One segment's identity and position columns, empty for a segment no tile touches.
+#[derive(Default)]
 struct SegmentRows<'a> {
     tessera_id: &'a [u64],
     morton: &'a [u32],
@@ -841,17 +837,16 @@ fn per_segment<'a, T>(
 
 /// The emit pass's reader. Every segment a swept tile touches has its identity and position
 /// columns and each declared render column's typed values and presence resolved once for the
-/// request, indexed by the segment's position in the view's segment list. A tile then does only
-/// its per-part presence narrowing and the row loops.
+/// request, indexed by the segment's position in the view's segment list. A tile then narrows
+/// presence to its rows in each segment and runs the row loops.
 ///
-/// The column set is always `declared`'s length, so a request cannot end up with a column set
-/// derived from whichever tile happened to be first. A declared column a segment holds at another
-/// type is a malformed bundle, refused here rather than silently skipped. A column a segment's
-/// schema does not hold is absent for every row of that segment, answered from the schema and
-/// never a blob read: the state a group-scoped family's lane in a segment written before it
-/// existed produces. An absent value is the type's zero in the buffer and false in the column's
-/// `present`, except a category's, which is code 0 in the buffer.
+/// A segment holding a declared column at another type is refused. A segment whose schema lacks a
+/// declared column reads as absent on every row, as a group-scoped family's lane does in a segment
+/// written before the family existed. An absent value is the type's zero in the buffer and false
+/// in the column's `present`, except a category's, which is code 0 in the buffer.
 pub(super) struct Gather<'a> {
+    /// The view's segments with their row bases, ascending: where a selected row is placed.
+    view: &'a [(&'a SegmentData, u32)],
     segments: Vec<SegmentRows<'a>>,
     /// One per declared render column, in declaration order.
     columns: Vec<RenderColumn<'a>>,
@@ -863,35 +858,34 @@ pub(super) struct Gather<'a> {
 
 impl<'a> Gather<'a> {
     pub(super) fn new(
-        segments: &[(&'a SegmentData, u32)],
-        swept: &[TileSweepOut<'a>],
+        view: &'a [(&'a SegmentData, u32)],
+        swept: &[TileSweepOut<'_>],
         declared: &[DeclaredScalar],
     ) -> Result<Self> {
-        let mut touched = vec![false; segments.len()];
+        let mut touched: Vec<Option<&'a SegmentData>> = vec![None; view.len()];
         for ts in swept {
             for &(s, _) in ts.tile_parts {
-                touched[s] = true;
+                touched[s] = Some(view[s].0);
             }
         }
-        let resolved: Vec<Option<ResolvedScalars<'a>>> = segments
+        let resolved: Vec<Option<ResolvedScalars<'a>>> = touched
             .iter()
-            .zip(&touched)
-            .map(|(&(segment, _), &touched)| touched.then(|| resolve_scalars(segment, declared)))
+            .map(|segment| segment.map(|segment| resolve_scalars(segment, declared)))
             .collect();
 
         let mut columns = Vec::with_capacity(declared.len());
         for (ci, d) in declared.iter().enumerate() {
-            let presence = segments
+            let presence = touched
                 .iter()
                 .zip(&resolved)
-                .map(|(&(segment, _), r)| match r {
-                    Some(r) => RowPresence::read(
+                .map(|(segment, r)| match (segment, r) {
+                    (Some(segment), Some(r)) => RowPresence::read(
                         segment,
                         &d.name,
                         d.vocabulary.is_some(),
                         r[ci].is_some(),
                     ),
-                    None => RowPresence::NoRow,
+                    _ => RowPresence::NoRow,
                 })
                 .collect();
             macro_rules! typed {
@@ -924,30 +918,34 @@ impl<'a> Gather<'a> {
         }
 
         Ok(Gather {
-            segments: segments
+            view,
+            segments: touched
                 .iter()
-                .map(|&(segment, _)| SegmentRows {
-                    tessera_id: segment.columns.tessera_id(),
-                    morton: segment.morton.u32(),
-                    residual: segment.columns.residual(),
+                .map(|segment| {
+                    segment.map_or_else(SegmentRows::default, |segment| SegmentRows {
+                        tessera_id: segment.columns.tessera_id(),
+                        morton: segment.morton.u32(),
+                        residual: segment.columns.residual(),
+                    })
                 })
                 .collect(),
             columns,
             placed: Vec::new(),
-            presence: vec![RowPresence::NoRow; segments.len()],
+            presence: vec![RowPresence::NoRow; view.len()],
         })
     }
 
     /// Gather one tile's selected rows column-major. `rows` are view-space, ascending by
-    /// `tessera_id` and not by segment, so consecutive rows can land in different parts; they are
-    /// resolved to `(segment, local)` once, and every column then walks that placement, leaving
+    /// `tessera_id` and not by segment, so consecutive rows can land in different segments; they
+    /// are placed as `(segment, local)` once, and every column then walks that placement, leaving
     /// the inner loop a bounds-checked index into a typed slice.
-    pub(super) fn tile(&mut self, ts: &TileSweepOut<'a>) -> PointColumns {
-        let parts = SelectionParts::new(&ts.parts);
+    pub(super) fn tile(&mut self, ts: &TileSweepOut<'_>) -> PointColumns {
+        let view = self.view;
         self.placed.clear();
         self.placed.extend(ts.rows.iter().map(|&row| {
-            let (part, _, local) = parts.resolve_indexed(row);
-            (ts.tile_parts[part].0 as u32, local)
+            let (segment, local) =
+                segment_holding(view, row).expect("a selected row lies in the view's row space");
+            (segment as u32, local)
         }));
         let placed = &self.placed;
 

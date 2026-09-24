@@ -488,8 +488,7 @@ pub trait ViewportSink {
 
 /// The columns every points chunk of one response carries: the render columns the head published,
 /// read from the view's segments, and the membership resolver where the artifacts frame carried
-/// anything to resolve against. One value because the two are decided together —
-/// `point_rows = "highlight"` empties both.
+/// anything to resolve against. `point_rows = "highlight"` empties both.
 pub(super) struct PointSchema<'a> {
     pub(super) render_scalars: &'a [DeclaredScalar],
     pub(super) segments: &'a [(&'a SegmentData, u32)],
@@ -544,12 +543,8 @@ pub(super) fn emit_points<'a>(
         }
         stats.count(|t| &mut t.points_gathered, tile_points.len() as u64);
         buf_bytes += tile_points.wire_bytes_estimate();
-        if let Err((want, got)) = buf.append(tile_points) {
-            return Err(EngineError::Malformed(format!(
-                "two tiles of one response hold the same declared column at different \
-                 types ({want} and {got}); the bundle's segments disagree about it"
-            )));
-        }
+        buf.append(tile_points)
+            .expect("the gather and the seed build each column at its declared type");
         // Brackets gather-and-append only: the flush must not inflate this CPU-cost figure.
         stats.lap(|t| &mut t.gather_ns);
         stats.t.fold_into(&mut probe.t);

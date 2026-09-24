@@ -28,7 +28,7 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -106,11 +106,17 @@ fn score_of(entity: u64) -> f32 {
     (entity % 97) as f32 * 0.5
 }
 
-/// The fixture's points file, plus the three attribute columns keyed to `entity_id`.
+/// Where the fixture places entity `e`: spread over the whole extent.
+fn spread(e: u64) -> (f64, f64) {
+    (((e * 37) % 1000) as f64, ((e * 53) % 1000) as f64)
+}
+
+/// The fixture's points file, entity `e` at `at(e)`, plus the three attribute columns keyed to
+/// `entity_id`.
 ///
 /// The category arrives as its **key**, never as a code (§3.1): the code is assigned once, in the
 /// schema, and a data file supplying codes directly would be a second place codes are decided.
-fn write_points_with_attributes(path: &Path, n: u64) {
+fn write_points_with_attributes(path: &Path, n: u64, at: impl Fn(u64) -> (f64, f64)) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
@@ -120,8 +126,8 @@ fn write_points_with_attributes(path: &Path, n: u64) {
         Field::new("score", DataType::Float32, false),
     ]));
     let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let xs: Vec<f64> = ids.iter().map(|&e| at(e).0).collect();
+    let ys: Vec<f64> = ids.iter().map(|&e| at(e).1).collect();
     let bands: Vec<&str> = ids.iter().map(|e| band_of(*e)).collect();
     let stamps: Vec<i64> = ids.iter().map(|e| ingested_at_of(*e)).collect();
     let scores: Vec<f32> = ids.iter().map(|e| score_of(*e)).collect();
@@ -152,9 +158,14 @@ fn parse_schema(tmp: &Path) -> Schema {
 
 /// Build a fixture bundle carrying the attribute tail.
 fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
+    build_placed_fixture(out, tmp, n, spread);
+}
+
+/// [`build_fixture_with_attributes`] with entity `e` at `at(e)`.
+fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64, f64)) {
     let points = tmp.join("points.parquet");
     let pairs = tmp.join("pairs.parquet");
-    write_points_with_attributes(&points, n);
+    write_points_with_attributes(&points, n, at);
     write_pairs_n(&pairs, n);
     let schema = parse_schema(tmp);
     let args = BuildArgs {
@@ -351,7 +362,7 @@ fn both_build_implementations_write_the_same_tail() {
     let tmp = tempfile::tempdir().unwrap();
     let points = tmp.path().join("points.parquet");
     let pairs = tmp.path().join("pairs.parquet");
-    write_points_with_attributes(&points, 2_000);
+    write_points_with_attributes(&points, 2_000, spread);
     write_pairs_n(&pairs, 2_000);
     let schema = parse_schema(tmp.path());
     let args_for = |out: &Path| BuildArgs {
@@ -759,6 +770,184 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
     );
 }
 
+/// **Every served point's id, position and values come from the segment that holds it**, over a
+/// view of three segments (the build and two flushes, merging off) and tiles that each span a
+/// different set of them. Zoom 2 over the 1000-unit extent gives 250-unit tiles, served in raster
+/// order:
+///
+/// - `(0, 0)` holds build rows only, and is served first;
+/// - `(1, 0)` holds build rows and the second flush's, some of which have no score, so the nulls
+///   are in a part that is not the tile's first;
+/// - `(2, 0)` holds the first flush's rows only;
+/// - `(3, 3)` holds rows of all three segments.
+///
+/// The second flush's rows in `(1, 0)` climb a diagonal, which fixes their order in the segment:
+/// its rows 4 to 11 carry a score and the rest do not, and the build's rows in the same tile are
+/// its rows 4 to 7. Each point is checked against the segment files as stored.
+#[test]
+fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    // Four build rows in each of `(0, 0)`, `(1, 0)` and `(3, 3)`.
+    build_placed_fixture(&root, tmp.path(), 12, |e| {
+        let j = (e % 4) as f64;
+        match e / 4 {
+            0 => (20.0 + 30.0 * j, 20.0 + 30.0 * j),
+            1 => (310.0 + 40.0 * j, 230.0),
+            _ => (800.0 + 30.0 * j, 800.0 + 30.0 * j),
+        }
+    });
+    let engine = engine_over(tmp.path(), &root, config_uncapped());
+    engine.set_merge_for_test(false);
+
+    let ingest = |batch: &str, rows: Vec<((f64, f64), Option<f32>)>| {
+        let rows = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, ((x, y), score))| UnallocatedRow {
+                external_id: Some(format!("{batch}-{i}").into_bytes()),
+                view: "s0".to_string(),
+                join: None,
+                descriptors: vec![b"0".to_vec()],
+                x,
+                y,
+                scalars: vec![
+                    WalScalar::U8(2),
+                    WalScalar::I64(1_900_000_000_000_000 + i as i64),
+                    score.map_or(WalScalar::Null, WalScalar::F32),
+                ],
+                terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
+            })
+            .collect();
+        engine
+            .accept_ingest(rows, batch.to_string(), [0u8; 32])
+            .expect("the ingest is accepted");
+        flush(&engine);
+    };
+    // Five rows in `(2, 0)` and two in `(3, 3)`, every one scored.
+    ingest(
+        "first",
+        (0..5)
+            .map(|i| (520.0 + 40.0 * i as f64, 30.0 + 40.0 * i as f64))
+            .chain((0..2).map(|i| (815.0 + 40.0 * i as f64, 905.0)))
+            .enumerate()
+            .map(|(i, at)| (at, Some(10.0 + i as f32)))
+            .collect(),
+    );
+    // Twenty rows up a diagonal of `(1, 0)`, then three in `(3, 3)` of which the first is scored.
+    ingest(
+        "second",
+        (0..20)
+            .map(|i| {
+                let at = (255.0 + 10.0 * i as f64, 5.0 + 10.0 * i as f64);
+                (at, (4..12).contains(&i).then_some(20.0 + i as f32))
+            })
+            .chain((0..3).map(|i| ((905.0 + 30.0 * i as f64, 955.0), (i == 0).then_some(40.0))))
+            .collect(),
+    );
+
+    // The stored truth, keyed by `tessera_id`: which segment holds the row, its position code and
+    // its three values, with the score read through the segment's presence record.
+    struct Stored {
+        segment: usize,
+        code: u64,
+        band: u8,
+        ingested_at: i64,
+        score: Option<f32>,
+    }
+    let bundle = open_bundle(&root).expect("the bundle opens");
+    let view_data = bundle
+        .partitions
+        .values()
+        .find_map(|p| p.views.get("s0"))
+        .expect("the bundle holds view s0");
+    let segments = tessera_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
+    assert_eq!(segments.len(), 3, "the build and two flushes, unmerged");
+    let mut stored = BTreeMap::new();
+    for (at, (segment, _)) in segments.iter().enumerate() {
+        let columns = &segment.columns;
+        let other = || panic!("segment {} holds the tail at other types", segment.seg_id);
+        let Some(ScalarSlice::U8(band)) = columns.scalar("band") else { other() };
+        let Some(ScalarSlice::I64(stamp)) = columns.scalar("ingested_at") else { other() };
+        let Some(ScalarSlice::F32(score)) = columns.scalar("score") else { other() };
+        let presence = columns.presence("score");
+        for row in 0..columns.row_count() as usize {
+            let high = (segment.morton.u32()[row] as u64) << 32;
+            stored.insert(
+                columns.tessera_id()[row],
+                Stored {
+                    segment: at,
+                    code: high | columns.residual()[row] as u64,
+                    band: band[row],
+                    ingested_at: stamp[row],
+                    score: presence.contains(row as u32).then_some(score[row]),
+                },
+            );
+        }
+    }
+    assert_eq!(stored.len(), 42);
+    assert_eq!(stored.values().filter(|s| s.score.is_none()).count(), 14);
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let out = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 2, [0.0, 0.0, 999.0, 999.0], u32::MAX as usize),
+        )
+        .expect("a viewport over the three segments");
+    // Prefixes at zoom 2, x in the even bits: `(0, 0)` 0, `(1, 0)` 1, `(2, 0)` 4, `(3, 3)` 15.
+    assert_eq!(
+        out.tiles.iter().map(|t| t.tile).collect::<Vec<_>>(),
+        vec![0, 1, 4, 15]
+    );
+    let (ColumnBuf::U8(band), ColumnBuf::I64(ingested_at), ColumnBuf::F32(score)) = (
+        &out.points.scalars[0].values,
+        &out.points.scalars[1].values,
+        &out.points.scalars[2].values,
+    ) else {
+        panic!("the tail came back at other types");
+    };
+    let score_column = &out.points.scalars[2];
+
+    let mut seen = BTreeSet::new();
+    let mut segments_of_tile = BTreeMap::new();
+    let mut i = 0;
+    for tile in &out.tiles {
+        let mut held = BTreeSet::new();
+        for _ in 0..tile.served {
+            let (id, code) = (out.points.tessera_ids[i], out.points.codes[i]);
+            let truth = stored
+                .get(&id)
+                .unwrap_or_else(|| panic!("point {i} has an id no segment holds"));
+            assert!(seen.insert(id), "point {i} is served twice");
+            assert_eq!(code, truth.code, "point {i}'s position");
+            assert_eq!(code >> 60, tile.tile, "point {i} lies in the tile it is served under");
+            assert_eq!(band[i], truth.band, "point {i}'s band");
+            assert_eq!(ingested_at[i], truth.ingested_at, "point {i}'s ingested_at");
+            assert_eq!(
+                score_column.is_present(i).then_some(score[i]),
+                truth.score,
+                "point {i}'s score"
+            );
+            held.insert((truth.segment, truth.score.is_none()));
+            i += 1;
+        }
+        segments_of_tile.insert(tile.tile, held);
+    }
+    assert_eq!(i, out.points.len());
+    assert_eq!(seen.len(), stored.len(), "every stored row is served");
+
+    let segments_in = |tile: u64| -> BTreeSet<usize> {
+        segments_of_tile[&tile].iter().map(|&(s, _)| s).collect()
+    };
+    assert_eq!(segments_in(0), BTreeSet::from([0]));
+    assert_eq!(segments_in(1), BTreeSet::from([0, 2]));
+    assert!(segments_of_tile[&1].contains(&(2, true)), "(1, 0) serves an unscored flushed row");
+    assert_eq!(segments_in(4), BTreeSet::from([1]));
+    assert_eq!(segments_in(15), BTreeSet::from([0, 1, 2]));
+}
+
 /// **A segment holding a render column at a type other than the declared one is refused.** The
 /// manifest is rewritten after the build to declare `score` as `f64` while the segment stores
 /// `f32`, and the digest in `CURRENT` follows it, so the bundle opens and the disagreement
@@ -801,7 +990,7 @@ fn a_segment_holding_a_render_column_at_another_type_is_refused() {
     );
     assert!(
         matches!(answer, Err(tessera_engine::EngineError::Malformed(_))),
-        "the f32 column is refused, not served as f64: {:?}",
+        "a segment storing score as f32 under an f64 declaration is refused: {:?}",
         answer.map(|out| out.points.len())
     );
 }
