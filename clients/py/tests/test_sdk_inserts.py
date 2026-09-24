@@ -381,3 +381,14 @@ def test_a_committed_database_reopens_and_takes_the_next_commit(tmp_path):
         assert second.sent and second.rows == 2
     finally:
         again.close()
+
+
+def test_inserted_labels_are_stripped_and_an_empty_one_is_no_label(tmp_path):
+    """The labels the SDK sends and records are read as the server reads them: each stripped, an
+    empty or blank one dropped, so a padded label and a credential for it name one term."""
+    db = create(tmp_path / "db")
+    db.declare_view("map", default_label=" sealed ")
+    access = [[" red ", ""], ["  "], [" blue "]]
+    db.insert("map", frame(access=access), x="x", y="y", access="access")
+    terms = db._inserted_terms(db._document())
+    assert terms == ["sealed", "red", "blue"]

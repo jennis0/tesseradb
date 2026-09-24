@@ -908,12 +908,11 @@ def _label_lists(column) -> pa.Array:
 
 def _labels(value) -> list[str]:
     """One cell of an access column as its labels: a list is its elements, a scalar one label, and
-    a null none."""
+    a null none. Each label is stripped and an empty one dropped, as the server reads them."""
     if value is None:
         return []
-    if isinstance(value, list):
-        return [str(one) for one in value]
-    return [str(value)]
+    values = value if isinstance(value, list) else [value]
+    return [label for label in (str(one).strip() for one in values if one is not None) if label]
 
 
 def _halved(start: int, count: int, cap: int, encode):

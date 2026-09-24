@@ -1296,11 +1296,11 @@ class Database:
         label and each layer's named default."""
         terms: list[str] = []
         for block in document.get("view", []) + document.get("view_group", []):
-            default = dict(block.get("point_visibility") or {}).get("default")
+            default = str(dict(block.get("point_visibility") or {}).get("default") or "").strip()
             if default:
                 terms.append(default)
         for block in document.get("layer", []):
-            default = dict(block.get("artifact_visibility") or {}).get("default")
+            default = str(dict(block.get("artifact_visibility") or {}).get("default") or "").strip()
             if default and default != "inherited":
                 terms.append(default)
         for insert in self.inserts + self.pending:
@@ -1308,10 +1308,7 @@ class Database:
             if column is None:
                 continue
             for value in insert.table()[column].to_pylist():
-                if value is None:
-                    continue
-                for label in value if isinstance(value, list) else [value]:
-                    terms.append(str(label))
+                terms.extend(C._labels(value))
         return terms
 
     # ------------------------------------------------------------------ verbs that are not inserts
