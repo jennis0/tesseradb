@@ -215,6 +215,11 @@ A field that draws but carries no value for some item is stored as absent rather
 numeric zero, so a range query that happens to include zero does not wrongly match items that
 have no value at all.
 
+Every declared field is required wherever items arrive with their fields. A build refuses a source
+file that lacks the column, and an ingest refuses a batch that lacks it; a column of nulls is how
+either says an item has no value. A values batch fills only the columns it names. A field may not
+take the name of a column the system reads itself, `level` among them.
+
 ## Vocabularies
 
 A category's value set is a named object, a vocabulary, and more than one field can draw values

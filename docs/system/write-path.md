@@ -106,7 +106,9 @@ should be hidden.
 
 A request against `/control/ingest` is checked before the server commits any work to it. The
 operator credential, the body size, the row count and the declared columns are checked first, and
-a request that fails any of them takes no effect. Beyond those, four checks apply:
+a request that fails any of them takes no effect. A batch carries every declared column, and every
+group-scoped one of its view's group, with a null where a row has no value; a batch that leaves
+one out is refused. Beyond those, four checks apply:
 
 1. An admission limit bounds how many ingest requests run at once, and a buffer limit bounds how
    many rows may wait for a flush. Past either, the request is refused with a retry interval
@@ -154,7 +156,7 @@ nothing: every waiter is refused, and a caller retries under the same batch id.
 |---|---|---|
 | 200 | Every row is durable in the WAL, with its identity allocated. It is not yet visible | Not needed |
 | 409 | A duplicate external id, or the same batch id with different bytes. Nothing in the batch took effect | After fixing the request |
-| 422 | Validation failed: an undeclared column, a wrong type, too many rows, or a coordinate that is not a place. Nothing took effect | After fixing the request |
+| 422 | Validation failed: an undeclared column, a declared column left out, a wrong type, too many rows, or a coordinate that is not a place. Nothing took effect | After fixing the request |
 | 429 | The server is declining the request for load, with a retry interval attached | After that interval |
 | 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
 | 503 | The executor is not running | Later |

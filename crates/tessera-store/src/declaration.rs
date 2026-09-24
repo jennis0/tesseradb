@@ -150,6 +150,32 @@ pub fn check_column_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Every declared column must be in an input that writes rows, a build's attribute source and an
+/// ingest batch alike; a column of nulls says no row has a value. A `/control/values` batch fills
+/// only the columns it names, so it is not held to this.
+pub fn check_declared_present<'a>(
+    declared: impl IntoIterator<Item = &'a str>,
+    carries: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    let missing: Vec<String> = declared
+        .into_iter()
+        .filter(|column| !carries(column))
+        .map(|column| format!("'{column}'"))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let (noun, verb) = match missing.len() {
+        1 => ("column", "is"),
+        _ => ("columns", "are"),
+    };
+    Err(format!(
+        "declared {noun} {} {verb} missing; include every declared column, null where a row has \
+         no value",
+        missing.join(", ")
+    ))
+}
+
 /// Check a vocabulary's name, code width and retired codes, and answer the width.
 pub fn check_vocabulary(name: &str, width: &str, reserved: &[u32]) -> Result<ScalarType, String> {
     check_identifier("vocabulary", name)?;
@@ -343,6 +369,15 @@ mod tests {
                 "{what} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn every_declared_column_must_be_carried() {
+        let carried = ["a", "b"];
+        let carries = |column: &str| carried.contains(&column);
+        assert!(check_declared_present(["a", "b"], carries).is_ok());
+        assert!(check_declared_present([], carries).is_ok());
+        assert!(check_declared_present(["a", "c"], carries).is_err());
     }
 
     #[test]

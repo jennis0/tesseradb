@@ -6,7 +6,9 @@ use tessera_engine::shapes::Bounds;
 use tessera_engine::scalar_column::{self, ScalarColumn};
 use tessera_engine::utf8::Utf8Column;
 use tessera_engine::vocabulary::{code_value, Resolved};
-use tessera_engine::{DeclaredScalar, Projection, ScopedScalar, Vocabularies};
+use tessera_engine::{
+    check_declared_present, DeclaredScalar, Projection, ScopedScalar, Vocabularies,
+};
 use tessera_lifecycle::{BatchArtifacts, WalScalar};
 use tessera_types::layer::LayerDeclaration;
 use tessera_types::TesseraId;
@@ -15,8 +17,7 @@ use super::json::JsonColumns;
 use super::membership::{membership_column, MembershipColumn, MembershipTally};
 use super::DecodeError;
 use super::{
-    declared_as_scoped, scoped_absent, scoped_as_declared, scoped_wire_type, Address, BodyEncoding,
-    Fixed, EXTERNAL_ID_MAX_LEN,
+    scoped_as_declared, scoped_wire_type, Address, BodyEncoding, Fixed, EXTERNAL_ID_MAX_LEN,
 };
 
 #[derive(Debug)]
@@ -40,9 +41,6 @@ pub(crate) struct RawIngestItem {
 pub(crate) struct ParsedBatch {
     pub(crate) items: Vec<RawIngestItem>,
     pub(crate) artifacts: BatchArtifacts,
-    /// Declared columns the batch omitted, each absent on every row; reported so a pipeline that
-    /// stopped sending one is seen.
-    pub(crate) padded_columns: u64,
     /// Rows whose latitude lay outside the projection's domain and were moved onto the frame's
     /// edge; always `0` for an unprojected view.
     pub(crate) clipped: u64,
@@ -289,13 +287,18 @@ pub(crate) fn parse_ingest_batch(
         Fixed::Access,
         Fixed::NodeId,
     ];
+    let required: Vec<&str> = declared
+        .iter()
+        .map(|d| d.name.as_str())
+        .chain(scoped.iter().map(|f| f.name.as_str()))
+        .collect();
     let batches = record_batches(
         body_name,
         encoding,
         body,
         &JsonColumns {
             fixed: &fixed,
-            declared_on_every_row: true,
+            required: &required,
             declared,
             scoped,
             layer_of,
@@ -305,15 +308,12 @@ pub(crate) fn parse_ingest_batch(
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
     let (mut clipped, mut clamped) = (0u64, 0u64);
-    let mut padded: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for batch in batches {
         let batch = batch?;
-        padded.extend(
-            declared
-                .iter()
-                .filter(|d| batch.column_by_name(&d.name).is_none())
-                .map(|d| d.name.as_str()),
-        );
+        check_declared_present(required.iter().copied(), |name| {
+            batch.column_by_name(name).is_some()
+        })
+        .map_err(|detail| DecodeError(format!("{body_name}: {detail}")))?;
         // Where this record batch's rows start in the request's numbering, which a membership
         // names.
         let offset = items.len();
@@ -343,14 +343,14 @@ pub(crate) fn parse_ingest_batch(
 
         let memberships =
             check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
-        let declared_cells: Vec<Option<Cells<'_>>> = declared
-            .iter()
-            .map(|d| batch.column_by_name(&d.name).map(|col| Cells::new(col, d)))
-            .collect();
-        let scoped_cells: Vec<Option<Cells<'_>>> = scoped_declared
-            .iter()
-            .map(|d| batch.column_by_name(&d.name).map(|col| Cells::new(col, d)))
-            .collect();
+        let cells_of = |d: &DeclaredScalar| {
+            let col = batch
+                .column_by_name(&d.name)
+                .expect("every required column was found above");
+            Cells::new(col, d)
+        };
+        let declared_cells: Vec<Cells<'_>> = declared.iter().map(cells_of).collect();
+        let scoped_cells: Vec<Cells<'_>> = scoped_declared.iter().map(cells_of).collect();
 
         for i in 0..batch.num_rows() {
             let placed = coordinates::place(projection, Some(extent), x[i], y[i])
@@ -360,29 +360,16 @@ pub(crate) fn parse_ingest_batch(
             for column in &memberships.columns {
                 tally.read(body_name, column, memberships.levels, i, offset)?;
             }
-            // In declared order, not schema order: the vector is read back by position. A
-            // declared column the batch omits keeps its slot, absent, so an older client's batch
-            // misaligns nothing.
+            // In declared order, not schema order: the vector is read back by position.
             let mut scalars = Vec::with_capacity(declared.len());
             for (d, cells) in declared.iter().zip(&declared_cells) {
-                let Some(cells) = cells else {
-                    scalars.push(scoped_absent(&declared_as_scoped(d)));
-                    continue;
-                };
                 scalars.push(cell(body_name, cells, i, offset + i, d, vocabularies)?);
             }
             // The scoped values are a second positional list, in the families' order, since the
             // two lists are indexed against different declarations.
             let mut scoped_values = Vec::with_capacity(scoped.len());
-            let families = scoped.iter().zip(&scoped_declared).zip(&scoped_cells);
-            for ((f, as_declared), cells) in families {
-                let value = match cells {
-                    None => scoped_absent(f),
-                    Some(cells) => {
-                        cell(body_name, cells, i, offset + i, as_declared, vocabularies)?
-                    }
-                };
-                scoped_values.push(value);
+            for (d, cells) in scoped_declared.iter().zip(&scoped_cells) {
+                scoped_values.push(cell(body_name, cells, i, offset + i, d, vocabularies)?);
             }
             // A missing column and a null cell both mean the item has no external id.
             let external_id = match &ext {
@@ -407,7 +394,6 @@ pub(crate) fn parse_ingest_batch(
     Ok(ParsedBatch {
         items,
         artifacts: tally.into_artifacts(),
-        padded_columns: padded.len() as u64,
         clipped,
         clamped,
     })
@@ -450,7 +436,7 @@ pub(crate) fn parse_values_batch(
         &JsonColumns {
             fixed: &fixed,
             // A values row may leave a column out, which leaves that cell unfilled.
-            declared_on_every_row: false,
+            required: &[],
             declared,
             scoped,
             layer_of,

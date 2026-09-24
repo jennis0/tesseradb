@@ -1,12 +1,12 @@
 //! **`PUT /control/attributes`** (`ingest.md` §1.3, §6.3; decision 0136, track T4): a column is
 //! declared at a running service, an identical redeclaration answers the column that exists, a
-//! differing one is refused, a batch may carry the column or omit it from the answer onward, the
+//! differing one is refused, every batch carries the column from the answer onward, the
 //! declaration survives a restart, and every viewer-plane reader answers the column over the rows
 //! that carried it and absence over the rows that predate it.
 //!
 //! The engine-level cases are `tessera-engine/tests/runtime_attributes.rs`; what this file pins
-//! is the wire: the status codes and bodies the route answers, the Arrow batch with and without
-//! the column, and the viewer verbs a client reads the column through.
+//! is the wire: the status codes and bodies the route answers, a batch with and without the
+//! column, and the viewer verbs a client reads the column through.
 
 mod common;
 
@@ -127,11 +127,21 @@ fn batch(rows: &[Row], runtime: bool) -> Vec<u8> {
 
 /// Ingest and answer the `tessera_id`s the batch was given, in row order.
 async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> Vec<u64> {
-    ingest_with_receipt(served, batch_id, body).await.0
+    let (status, body) = post_ingest(served, batch_id, ARROW, body).await;
+    assert_eq!(status, 200, "batch {batch_id} is accepted: {body}");
+    ingested_ids(&body)
 }
 
-/// [`ingest`], with the receipt's `padded_columns` beside the ids.
-async fn ingest_with_receipt(served: &Served, batch_id: &str, body: Vec<u8>) -> (Vec<u64>, u64) {
+const ARROW: &str = "application/vnd.apache.arrow.stream";
+const JSON: &str = "application/json";
+
+/// One `/control/ingest` request into `s0`, and its status and body.
+async fn post_ingest(
+    served: &Served,
+    batch_id: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> (u16, Value) {
     let resp = served
         .server
         .client
@@ -139,15 +149,13 @@ async fn ingest_with_receipt(served: &Served, batch_id: &str, body: Vec<u8>) -> 
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", "s0")
-        .header("content-type", "application/vnd.apache.arrow.stream")
+        .header("content-type", content_type)
         .body(body)
         .send()
         .await
         .unwrap();
     let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(status, 200, "batch {batch_id} is accepted: {body}");
-    (ingested_ids(&body), body["padded_columns"].as_u64().unwrap())
+    (status, resp.json().await.unwrap())
 }
 
 /// The `tessera_id`s a filtered viewport answers, from a fresh session so the rows flushed since
@@ -263,14 +271,37 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     assert_eq!(tag["category"]["vocabulary"], "dept");
 }
 
-/// **A batch may carry the column or omit it from the answer onward**, and every viewer-plane
-/// reader answers the column over the rows that carried it and absence over the rest: the
-/// filter, the drill-down, and the categories vocabulary of a runtime category.
+/// **A batch carries every declared column, the runtime ones included.** One that omits a column
+/// is refused at either door and allocates nothing; one that carries it as nulls is accepted and
+/// serves no value. Every viewer-plane reader answers the column over the rows that carried a
+/// value: the filter, the drill-down, and the categories vocabulary of a runtime category.
 #[tokio::test]
-async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
+async fn a_batch_carries_every_declared_column_and_every_reader_answers_it() {
     let served = Served::build(fixture).await;
     assert_eq!(declare(&served, sentiment()).await.0, 201);
     assert_eq!(declare(&served, tag()).await.0, 201);
+
+    let unvalued = |id| Row {
+        id,
+        score: 40.0,
+        sentiment: None,
+        tag: None,
+    };
+    // A JSON record without a key is missing that column; `null` is a value.
+    let json_row = |tag: &str| {
+        format!(
+            r#"[{{"external_id":"ajE=","x":500.0,"y":500.0,"access":["0"],"score":50.0,"sentiment":null{tag}}}]"#
+        )
+        .into_bytes()
+    };
+    for (batch_id, content_type, body) in [
+        ("omitting", ARROW, batch(&[unvalued("o1")], false)),
+        ("json-omitting", JSON, json_row("")),
+    ] {
+        let (status, body) = post_ingest(&served, batch_id, content_type, body).await;
+        assert_eq!(status, 422, "{batch_id}: {body}");
+        assert_eq!(body["error"], "contract", "{batch_id}: {body}");
+    }
 
     let carrying = ingest(
         &served,
@@ -300,44 +331,10 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
         ),
     )
     .await;
-    let (omitting, padded) = ingest_with_receipt(
-        &served,
-        "omitting",
-        batch(
-            &[Row {
-                id: "o1",
-                score: 40.0,
-                sentiment: None,
-                tag: None,
-            }],
-            false,
-        ),
-    )
-    .await;
-    assert_eq!(
-        padded, 2,
-        "the receipt counts the declared columns the batch omitted"
-    );
-    // The JSON door pads the same way: a declared column no object names is omitted from the
-    // batch, and one an object names with `null` is a cell absent in that row and nothing padded.
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "json-omitting")
-        .header("x-tessera-view", "s0")
-        .header("content-type", "application/json")
-        .body(
-            r#"[{"external_id":"ajE=","x":500.0,"y":500.0,"access":["0"],"score":50.0,"sentiment":null}]"#,
-        )
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    let receipt: Value = resp.json().await.unwrap();
+    // The refused batches' external ids are free, so the refusals bound nothing.
+    let nulls = ingest(&served, "nulls", batch(&[unvalued("o1")], true)).await;
+    let (status, receipt) = post_ingest(&served, "json-nulls", JSON, json_row(r#","tag":null"#)).await;
     assert_eq!(status, 200, "{receipt}");
-    assert_eq!(receipt["padded_columns"], json!(1), "{receipt}");
     drain(&served.server).await;
 
     assert_eq!(
@@ -348,14 +345,14 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
     assert_eq!(
         filtered(&served, json!({ "sentiment": { "range": { "gte": 0.0 } } })).await,
         BTreeSet::from([carrying[0], carrying[1]]),
-        "a row with a null cell and a row from a batch omitting the column carry no value"
+        "a row with a null cell carries no value"
     );
     assert_eq!(
         filtered(&served, json!({ "score": { "range": { "gte": 40.0 } } }))
             .await
             .len(),
         2,
-        "the JSON row landed beside the Arrow one; no build row scores past 6"
+        "the two batches of nulls landed and the refused ones did not; no build row scores past 6"
     );
     assert_eq!(
         filtered(&served, json!({ "tag": { "eq": "ops" } })).await,
@@ -369,11 +366,11 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
         "{record}"
     );
     assert_eq!(record["fields"]["tag"], json!("eng"));
-    let record = item(&served, omitting[0]).await;
+    let record = item(&served, nulls[0]).await;
     assert_eq!(record["fields"]["score"], json!(40.0));
     assert!(
         record["fields"].get("sentiment").is_none() && record["fields"].get("tag").is_none(),
-        "a row from a batch omitting the column carries none: {record}"
+        "a row carrying nulls serves no value: {record}"
     );
     // An entity the build wrote: absent, answered from the segment schema.
     let built = served

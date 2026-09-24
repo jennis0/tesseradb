@@ -17,7 +17,9 @@ use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use base64::Engine as _;
 use serde_json::{Map, Value};
-use tessera_engine::{member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
+use tessera_engine::{
+    check_declared_present, member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar,
+};
 use tessera_types::layer::LayerDeclaration;
 
 use super::{DecodeError, Fixed};
@@ -26,8 +28,8 @@ use super::{DecodeError, Fixed};
 pub(crate) struct JsonColumns<'a> {
     /// The route's own columns, in the order the batch carries them.
     pub fixed: &'a [Fixed<'a>],
-    /// Whether a declared column one row names must be on every row of the batch.
-    pub declared_on_every_row: bool,
+    /// The declared and scoped columns every record must name, `null` where it has no value.
+    pub required: &'a [&'a str],
     pub declared: &'a [DeclaredScalar],
     pub scoped: &'a [ScopedScalar],
     pub layer_of: &'a dyn Fn(&str) -> Option<LayerDeclaration>,
@@ -42,10 +44,19 @@ pub(crate) fn record_batch(
     columns: &JsonColumns<'_>,
 ) -> Result<RecordBatch, DecodeError> {
     let rows = records(body_name, body)?;
+    for (row, record) in rows.iter().enumerate() {
+        check_declared_present(columns.required.iter().copied(), |name| {
+            record.contains_key(name)
+        })
+        .map_err(|detail| DecodeError(format!("{body_name}: row {row}: {detail}")))?;
+    }
     let mut fields: Vec<Field> = Vec::new();
     let mut arrays: Vec<ArrayRef> = Vec::new();
 
-    let has = |name: &str| rows.iter().any(|row| row.contains_key(name));
+    // A required column is built even for an empty body, so the Arrow decode finds it.
+    let has = |name: &str| {
+        columns.required.contains(&name) || rows.iter().any(|row| row.contains_key(name))
+    };
 
     for fixed in columns.fixed {
         let name = fixed.name();
@@ -58,20 +69,13 @@ pub(crate) fn record_batch(
         arrays.push(column);
     }
 
-    // A declared column no row names is left out, which the Arrow decode reads as absent on
-    // every row. One some rows name is carried on every row, null where a row has no value; with
-    // `declared_on_every_row`, a row omitting it is refused.
+    // A column is carried on every row, null where a row leaves it out, which only a values
+    // batch may do; one no row names and none requires is left out.
     for declared in columns.declared {
         if !has(&declared.name) {
             continue;
         }
-        let column = scalar_column(
-            body_name,
-            &rows,
-            &declared.name,
-            declared.wire_type(),
-            columns.declared_on_every_row,
-        )?;
+        let column = scalar_column(body_name, &rows, &declared.name, declared.wire_type())?;
         fields.push(Field::new(&declared.name, column.data_type().clone(), true));
         arrays.push(column);
     }
@@ -80,7 +84,7 @@ pub(crate) fn record_batch(
             continue;
         }
         let wire = super::scoped_wire_type(family);
-        let column = scalar_column(body_name, &rows, &family.name, wire, false)?;
+        let column = scalar_column(body_name, &rows, &family.name, wire)?;
         fields.push(Field::new(&family.name, column.data_type().clone(), true));
         arrays.push(column);
     }
@@ -332,26 +336,14 @@ fn refusal(body_name: &str, row: usize, column: &str, what: &str) -> DecodeError
     DecodeError(format!("{body_name}: row {row}, column '{column}' {what}"))
 }
 
-/// One scalar column at its wire type. Where `required`, a row omitting the name is refused.
+/// One scalar column at its wire type, null where a row omits the name.
 fn scalar_column(
     body_name: &str,
     rows: &[Map<String, Value>],
     name: &str,
     wire: ScalarType,
-    required: bool,
 ) -> Result<ArrayRef, DecodeError> {
-    let cell = |row: usize| -> Result<&Value, DecodeError> {
-        match rows[row].get(name) {
-            Some(value) => Ok(value),
-            None if required => Err(refusal(
-                body_name,
-                row,
-                name,
-                "is missing; send it on every row, null where the row has no value",
-            )),
-            None => Ok(&Value::Null),
-        }
-    };
+    let cell = |row: usize| rows[row].get(name).unwrap_or(&Value::Null);
     // An integer outside the declared type's range is refused; inside it, the cast is exact.
     let in_range = |row: usize, value: i128| {
         let (min, max) = wire
@@ -374,7 +366,7 @@ fn scalar_column(
         ($builder:ty, $ty:ty) => {{
             let mut builder = <$builder>::new();
             for row in 0..rows.len() {
-                match integer(body_name, cell(row)?, row, name)? {
+                match integer(body_name, cell(row), row, name)? {
                     None => builder.append_null(),
                     Some(value) => builder.append_value(in_range(row, value)? as $ty),
                 }
@@ -386,7 +378,7 @@ fn scalar_column(
         ScalarType::Bool => {
             let mut builder = BooleanBuilder::new();
             for row in 0..rows.len() {
-                match cell(row)? {
+                match cell(row) {
                     Value::Null => builder.append_null(),
                     Value::Bool(value) => builder.append_value(*value),
                     _ => return Err(refusal(body_name, row, name, "is not a boolean")),
@@ -406,7 +398,7 @@ fn scalar_column(
         ScalarType::F32 => {
             let mut builder = Float32Builder::new();
             for row in 0..rows.len() {
-                match float(body_name, cell(row)?, row, name)? {
+                match float(body_name, cell(row), row, name)? {
                     None => builder.append_null(),
                     Some(value) => builder.append_value(
                         scalar_column::narrow_to_f32(value).ok_or_else(|| {
@@ -428,7 +420,7 @@ fn scalar_column(
         ScalarType::F64 => {
             let mut builder = Float64Builder::new();
             for row in 0..rows.len() {
-                match float(body_name, cell(row)?, row, name)? {
+                match float(body_name, cell(row), row, name)? {
                     None => builder.append_null(),
                     Some(value) => builder.append_value(value),
                 }
@@ -438,7 +430,7 @@ fn scalar_column(
         ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
             let mut builder = StringBuilder::new();
             for row in 0..rows.len() {
-                match cell(row)? {
+                match cell(row) {
                     Value::Null => builder.append_null(),
                     Value::String(text) => builder.append_value(text),
                     _ => return Err(refusal(body_name, row, name, "is not a string")),

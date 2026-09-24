@@ -520,8 +520,6 @@ struct IngestResp {
     clipped: u64,
     /// Rows whose coordinates fell outside the view's extent and were stored on its edge.
     clamped: u64,
-    /// Declared columns this batch omitted, each taken as absent in every row.
-    padded_columns: u64,
     /// One `tessera_id` per row, in request order, whether or not the row carried an external id.
     /// Decimal strings, since a JSON number loses `u64` precision past 2^53 in JavaScript.
     tessera_ids: Vec<String>,
@@ -564,9 +562,10 @@ fn run_ingest(
     let point_default = view.point_default.clone();
     let view = view.id.clone();
 
-    // The group-scoped families this batch may carry: those whose group owns this view's key,
-    // including a sharing group's view. A plain view gets none, so a scoped column on it is refused
-    // as undeclared. Layers are looked up per column in the engine's registry.
+    // The group-scoped families this batch carries, as it carries every declared column: those
+    // whose group owns this view's key, including a sharing group's view. A plain view gets none,
+    // so a scoped column on it is refused as undeclared. Layers are looked up per column in the
+    // engine's registry.
     let scoped: Vec<ScopedScalar> = meta
         .scoped_scalars
         .iter()
@@ -576,7 +575,6 @@ fn run_ingest(
     let ParsedBatch {
         items,
         artifacts,
-        padded_columns,
         clipped,
         clamped,
     } = parse_ingest_batch(
@@ -666,7 +664,6 @@ fn run_ingest(
                 // original counts.
                 clipped,
                 clamped,
-                padded_columns,
                 tessera_ids,
                 minted: 0,
                 // Filled by the handler, which is where the wait can be awaited.
@@ -794,7 +791,6 @@ fn run_ingest(
         over_bound_ids,
         clipped,
         clamped,
-        padded_columns,
         tessera_ids,
         minted,
         publication: 0,

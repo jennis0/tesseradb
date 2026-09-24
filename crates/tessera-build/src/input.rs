@@ -2090,25 +2090,20 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     let file_schema = builder.schema().clone();
 
     let id_root = src.id_index(&file_schema)?;
+    tessera_store::declaration::check_declared_present(
+        columns.iter().map(|attribute| attribute.column()),
+        |column| file_schema.column_with_name(column).is_some(),
+    )
+    .map_err(|detail| BuildError::Schema {
+        path: path.to_path_buf(),
+        detail: format!("{detail} (its columns are {})", column_names(&file_schema)),
+    })?;
     let mut roots: Vec<usize> = id_root.into_iter().collect();
     for attribute in columns {
-        roots.push(
-            file_schema
-                .column_with_name(attribute.column())
-                .map(|(i, _)| i)
-                .ok_or_else(|| BuildError::Schema {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "the schema declares attribute '{}', read from a column named '{}', which \
-                         this attribute source has no column for. Its columns are: {}. A declared \
-                         column the data lacks would otherwise be written as the absent sentinel \
-                         for every row — a column that cost its width to say nothing",
-                        attribute.name,
-                        attribute.column(),
-                        column_names(&file_schema)
-                    ),
-                })?,
-        );
+        let (index, _) = file_schema
+            .column_with_name(attribute.column())
+            .expect("every declared column was found above");
+        roots.push(index);
     }
     // A group-scoped column is read from a points file that may hold several views' rows, so the
     // selection rides the same projection here as it does on the geometry (`views.md` §5, §3.1).

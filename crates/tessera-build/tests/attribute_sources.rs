@@ -34,35 +34,38 @@ const N: u64 = 40;
 
 /// The points file: identity spelled `id`, geometry, and one column of its own.
 fn write_points(path: &Path) {
-    let schema = Arc::new(ArrowSchema::new(vec![
+    write_points_counting(path, Some(|e| Some((e * 11) as i64)));
+}
+
+/// [`write_points`] with `count` computed per id, or without the column where `count` is `None`.
+fn write_points_counting(path: &Path, count: Option<fn(u64) -> Option<i64>>) {
+    let mut fields = vec![
         Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
-        Field::new("count", DataType::Int64, true),
-    ]));
+    ];
     let ids: Vec<u64> = (0..N).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids.clone())),
-            Arc::new(Float64Array::from(
-                ids.iter()
-                    .map(|e| ((e * 37) % 1000) as f64)
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                ids.iter()
-                    .map(|e| ((e * 53) % 1000) as f64)
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(Int64Array::from(
-                ids.iter()
-                    .map(|&e| Some((e * 11) as i64))
-                    .collect::<Vec<_>>(),
-            )),
-        ],
-    )
-    .unwrap();
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(UInt64Array::from(ids.clone())),
+        Arc::new(Float64Array::from(
+            ids.iter()
+                .map(|e| ((e * 37) % 1000) as f64)
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from(
+            ids.iter()
+                .map(|e| ((e * 53) % 1000) as f64)
+                .collect::<Vec<_>>(),
+        )),
+    ];
+    if let Some(count) = count {
+        fields.push(Field::new("count", DataType::Int64, true));
+        columns.push(Arc::new(Int64Array::from(
+            ids.iter().map(|&e| count(e)).collect::<Vec<_>>(),
+        )));
+    }
+    let schema = Arc::new(ArrowSchema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
     let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
@@ -293,6 +296,27 @@ fn a_column_from_a_second_source_lands_on_the_entities_it_names() {
             assert_eq!(score, None, "source {source} is named by no score row");
         }
     }
+}
+
+/// **Every declared column is required.** A points file without `count` is refused, and one that
+/// carries `count` as nulls builds with no entity holding a value.
+#[test]
+fn a_declared_column_the_file_omits_is_refused_and_a_column_of_nulls_builds() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = project(dir.path(), &[]);
+    let points = dir.path().join("points.parquet");
+
+    write_points_counting(&points, None);
+    let out = dir.path().join("omitted");
+    assert!(build(&args(&config, out.clone())).is_err());
+    assert!(!out.join("CURRENT").is_file(), "a refused build writes no bundle");
+
+    write_points_counting(&points, Some(|_| None));
+    let out = dir.path().join("nulls");
+    build(&args(&config, out.clone())).expect("a column of nulls builds");
+    let rows = rows_by_source(&out);
+    assert_eq!(rows.len(), N as usize);
+    assert!(rows.values().all(|fields| fields.iter().all(|(t, _)| *t != 0)));
 }
 
 /// **A source naming entities this build did not load is ignored, not refused.** That is what a
