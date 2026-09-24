@@ -139,8 +139,12 @@ column called anything else is renamed in the table; a membership shape is named
 
 The one place a name is matched is an attribute's value column: the attribute was declared, and a
 column of its name in the frame inserted into the **allocation view** fills it, as SQL's `INSERT BY
-NAME` does. On any other view's insert, attribute-named columns are ignored.
-`columns={attribute: column}` on the allocation view's insert names one explicitly.
+NAME` does. At the first commit, attribute-named columns on any other view's insert are ignored,
+since the build reads an attribute from one file. After it, every view's points carry the declared
+columns their frame holds, a group's scoped ones included, and a row that creates an item must
+carry every declared column, with nulls (`pa.nulls(n)`) where it has no value; the SDK adds none
+itself, and the server's refusal names a column left out. `columns={attribute: column}` on the
+allocation view's insert names one explicitly.
 
 `declare_columns(frame, skip=, render=, index=, keyword=, category=)` declares every column of a
 frame from its dtype, as details: stored in the record blob, shown at drill-down, neither rendered
