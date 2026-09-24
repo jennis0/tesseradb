@@ -1,48 +1,21 @@
 import {describe, expect, it} from 'vitest';
 import {bandsOfResult, mortonOfTile, type Band, type ReplicaFrame} from '@tesseradb/client';
-import type {ScalarColumn, ViewportResult} from '@tesseradb/client';
+import type {ViewportResult} from '@tesseradb/client';
+import {band as heldBand} from '../../core/test/support.js';
 import {assemble, assembledMarks, assertAssemblyMatchesServed, foldBandColumn, refreshExact} from '../src/assemble.js';
 
 /** A band at `depth`/`prefix` whose points all sit in cell `(cx, cy)`. */
 function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 0, cy: 0}): Band {
-  let morton = 0n;
-  for (let bit = 0; bit < 16; bit++) {
-    morton |= BigInt((cell.cx >> bit) & 1) << BigInt(2 * bit);
-    morton |= BigInt((cell.cy >> bit) & 1) << BigInt(2 * bit + 1);
-  }
-  const scalars: Record<string, ScalarColumn> = {
-    w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}
-  };
-  let x = 0;
-  let y = 0;
-  for (let bit = 0; bit < 16; bit++) {
-    x |= Number((prefix >> BigInt(2 * bit)) & 1n) << bit;
-    y |= Number((prefix >> BigInt(2 * bit + 1)) & 1n) << bit;
-  }
-  return {
-    depth,
-    prefix,
-    x,
-    y,
-    ids: BigUint64Array.from({length: n}, (_, i) => BigInt(i + 1)),
-    // World space already — the cell->world conversion happens when a band is built.
-    positions: Float32Array.from({length: n * 2}, (_, i) =>
-      (i % 2 === 0 ? cell.cx : cell.cy) / 128
-    ),
-    scalars,
+  const visible = BigInt(served * 3);
+  return heldBand(depth, prefix, n, {
+    // World space already: the cell-to-world conversion happens when a band is built.
+    positions: Float32Array.from({length: n * 2}, (_, i) => (i % 2 === 0 ? cell.cx : cell.cy) / 128),
+    scalars: {w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}},
     served,
-    capUsed: 500,
-    visible: BigInt(served * 3),
-    matched: BigInt(served * 3),
-    highlighted: BigInt(served * 3),
-    highlightBits: null,
-    membership: {},
-    heldBelow: BigInt(n + 1),
-    identityKey: 'ik',
-    contentKey: 'ck',
-    bytes: n * 32,
-    touchedAt: 0
-  };
+    visible,
+    matched: visible,
+    highlighted: visible
+  });
 }
 
 const WHOLE = {x0: 0, y0: 0, x1: 65535, y1: 65535};
