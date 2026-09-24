@@ -340,3 +340,10 @@ export function meta(over: Partial<Meta> = {}): Meta {
     ...over
   };
 }
+
+/** A request's headers as a record under lower-case names, whatever form `init` gave them in. */
+export function headersOf(init?: RequestInit): Record<string, string> {
+  const out: Record<string, string> = {};
+  new Headers(init?.headers).forEach((value, name) => (out[name] = value));
+  return out;
+}

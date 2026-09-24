@@ -140,9 +140,14 @@ export class TesseraClient {
 
   constructor(private readonly opts: TesseraClientOptions) {}
 
-  /** One request, through the host's `fetch` and with its headers where it gave them. */
+  /**
+   * One request, through the host's `fetch`, with the host's headers and then the route's own,
+   * which replace a host header of the same name in any case.
+   */
   private send(url: string, init: Omit<RequestInit, 'headers'> & {headers?: Record<string, string>} = {}): Promise<Response> {
-    return (this.opts.fetch ?? fetch)(url, {...init, headers: {...this.opts.headers, ...init.headers}});
+    const headers = new Headers(this.opts.headers);
+    for (const [name, value] of Object.entries(init.headers ?? {})) headers.set(name, value);
+    return (this.opts.fetch ?? fetch)(url, {...init, headers});
   }
 
   /** Release the decode worker, if one was created. */

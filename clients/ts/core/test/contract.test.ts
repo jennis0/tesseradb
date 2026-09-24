@@ -2,6 +2,7 @@ import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient} from '../src/client.js';
+import {headersOf} from './support.js';
 
 /**
  * `TesseraClient` reaches the operations the HTTP contract publishes.
@@ -131,7 +132,7 @@ describe('the client against the HTTP contract', () => {
     });
     const sent: {method: string; headers: Record<string, string>; signal: AbortSignal | null | undefined}[] = [];
     const hosted = async (_url: string | URL | Request, init?: RequestInit) => {
-      sent.push({method: init?.method ?? 'GET', headers: {...(init?.headers as Record<string, string>)}, signal: init?.signal});
+      sent.push({method: init?.method ?? 'GET', headers: headersOf(init), signal: init?.signal});
       return new Response(JSON.stringify({error: 'contract', detail: 'recorded'}), {status: 422});
     };
     const client = new TesseraClient({
@@ -139,7 +140,7 @@ describe('the client against the HTTP contract', () => {
       sessionUrl: 'http://session',
       sessionCredential: 'cred',
       fetch: hosted as typeof fetch,
-      headers: {'x-host': 'embed', authorization: 'Bearer host'}
+      headers: {'X-Host': 'embed', Authorization: 'Bearer host', 'Content-Type': 'text/plain'}
     });
     for (const [method, call] of Object.entries(CALLS)) {
       sent.length = 0;
@@ -151,8 +152,9 @@ describe('the client against the HTTP contract', () => {
       expect(thrown, method).toMatchObject({status: 422});
       expect(sent, method).toHaveLength(1);
       expect(sent[0]!.headers['x-host'], method).toBe('embed');
-      // The verb's own credential is sent, not the host's header of the same name.
-      expect(sent[0]!.headers.authorization, method).not.toBe('Bearer host');
+      // The verb's own credential replaces the host's header of the same name, whatever its case.
+      expect(sent[0]!.headers.authorization, method).toMatch(/^Bearer (tok|cred)$/);
+      if (sent[0]!.method === 'POST') expect(sent[0]!.headers['content-type'], method).toBe('application/json');
       expect(sent[0]!.signal, method).toBe(signal);
     }
   });

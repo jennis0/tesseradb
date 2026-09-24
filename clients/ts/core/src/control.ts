@@ -167,12 +167,14 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
 export class Control {
   private readonly base: string;
   private readonly credential: string;
-  private readonly opts: ControlOptions;
+  private readonly fetch: typeof fetch | undefined;
+  private readonly headers: Record<string, string> | undefined;
 
   constructor(options: ControlOptions) {
     this.base = options.controlUrl.replace(/\/+$/, '');
     this.credential = options.operatorCredential;
-    this.opts = options;
+    this.fetch = options.fetch;
+    this.headers = options.headers;
   }
 
   private async send(
@@ -183,7 +185,11 @@ export class Control {
     headers: Record<string, string> = {}
   ): Promise<Answer> {
     const url = this.base + path;
-    const init: RequestInit = {method, headers: {...this.opts.headers, authorization: `Bearer ${this.credential}`, ...headers}};
+    // The route's own headers replace a host header of the same name in any case.
+    const all = new Headers(this.headers);
+    all.set('authorization', `Bearer ${this.credential}`);
+    for (const [name, value] of Object.entries(headers)) all.set(name, value);
+    const init: RequestInit = {method, headers: all};
     if (body !== undefined) init.body = body as BodyInit;
     if (options.signal) init.signal = options.signal;
     const started = performance.now();
@@ -194,7 +200,7 @@ export class Control {
       let response: Response;
       let text: string;
       try {
-        response = await (this.opts.fetch ?? fetch)(url, init);
+        response = await (this.fetch ?? fetch)(url, init);
         text = await response.text();
       } catch (error) {
         if (options.signal?.aborted) throw options.signal.reason;
