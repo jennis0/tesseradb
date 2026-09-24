@@ -724,6 +724,7 @@ mod tests {
 
     fn row(external_id: Option<&str>, terms: &[u32]) -> UnallocatedRow {
         UnallocatedRow {
+            join_only: false,
             external_id: external_id.map(|s| s.as_bytes().to_vec()),
             view: "default".to_string(),
             join: None,
@@ -959,6 +960,7 @@ mod tests {
     #[test]
     fn a_window_of_joins_is_tallied_in_id_order_whatever_the_gaps() {
         let joining = |external: &str, entity: u64, terms: &[u32]| UnallocatedRow {
+            join_only: false,
             join: Some(tessera_types::EntityId::new(entity)),
             ..row(Some(external), terms)
         };

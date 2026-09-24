@@ -723,6 +723,16 @@ fn one_attribute_name_may_not_be_declared_twice() {
     assert!(err(&text).contains("declared twice"), "{}", err(&text));
 }
 
+/// `level` places a batch's member keys, so neither an attribute nor a layer may take the name.
+#[test]
+fn an_attribute_or_a_layer_named_level_is_refused() {
+    let attribute = format!("{SEVERITY}\n[[attribute]]\nname = \"level\"\ntype = \"u32\"\n");
+    assert!(parse_str(&attribute).is_err());
+    let layer = format!("{SEVERITY}{}", LAYER.replace("\"clusters/a\"", "\"level\""));
+    assert!(parse_str(&layer).is_err());
+    assert!(parse_str(&with_layer("")).is_ok());
+}
+
 #[test]
 fn an_attribute_needs_a_type() {
     let message = err("[[attribute]]\nname = \"score\"\n");

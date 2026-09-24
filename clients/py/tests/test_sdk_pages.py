@@ -307,6 +307,8 @@ def test_a_commit_of_rows_and_values_flushes_between_them(served, corpus):
                 "x": pa.array([20.0, 21.0], pa.float64()),
                 "y": pa.array([0.0, 0.0], pa.float64()),
                 "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+                # Every declared column travels with the rows, null until the values fill it.
+                "score": pa.nulls(2, pa.float64()),
             }
         ),
         id="id",
@@ -431,12 +433,118 @@ def small(db) -> None:
         y="y",
         access="labels",
     )
+    # The build reads `score` from this table, which holds a row for every item: a value on `p0`
+    # and nulls on the rest.
     db.insert(
         "score",
-        pa.table({"id": pa.array(["p0"], pa.string()), "score": pa.array([0.5], pa.float64())}),
+        pa.table(
+            {
+                "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
+                "score": pa.array([0.5] + [None] * 19, pa.float64()),
+            }
+        ),
         id="id",
         value="score",
     )
+
+
+def rows(ids, x0: float = 20.0, **columns) -> pa.Table:
+    """Points at `x0` onwards, labelled `public`, with `columns` beside them."""
+    n = len(ids)
+    return pa.table(
+        {
+            "id": pa.array(ids, pa.string()),
+            "x": pa.array([x0 + i for i in range(n)], pa.float64()),
+            "y": pa.array([1.0] * n, pa.float64()),
+            "labels": pa.array([["public"]] * n, pa.list_(pa.string())),
+            **columns,
+        }
+    )
+
+
+def test_a_later_insert_of_new_items_without_a_declared_column_is_refused_naming_it(
+    served, corpus
+):
+    """The SDK adds no column: a frame of new items without `score` reaches the server as it
+    was given, and the refusal the user reads names the column."""
+    db = served(small)
+    db.insert("map", rows(["s0", "s1"]), id="id", x="x", y="y", access="labels")
+    with pytest.raises(Refusal) as raised:
+        db.commit()
+    refusals = raised.value.report.refusals
+    assert [refusal["status"] for refusal in refusals] == [422]
+    assert "'score'" in refusals[0]["detail"]
+
+
+def test_a_column_declared_after_the_first_commit_travels_with_the_rows_that_carry_it(
+    served, corpus
+):
+    """A column declared at a running service is sent on a later points page whose frame carries
+    it, so the new items hold their values from the commit that adds them."""
+    db = served(small)
+    db.declare_attribute("rank", type="u32", index=True)
+    db.insert(
+        "map",
+        rows(["r0", "r1"], score=pa.nulls(2), rank=pa.array([3, 4], pa.uint32())),
+        id="id",
+        x="x",
+        y="y",
+        access="labels",
+    )
+    report = db.commit()
+    assert report.ok, report
+    answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0], filters={"rank": {"range": {"gte": 3}}})
+    assert answer["counts"]["matched"] == 2
+
+
+def two_views(db) -> None:
+    """[`small`], and a second view over the same items."""
+    small(db)
+    db.declare_view("atlas", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.insert(
+        "atlas",
+        rows([f"p{i}" for i in range(20)], x0=0.0),
+        id="id",
+        x="x",
+        y="y",
+        access="labels",
+    )
+
+
+def test_a_second_views_rows_carry_the_declared_columns_their_frame_holds(served, corpus):
+    """Every view's points page carries the declared columns its frame holds: a new item placed
+    in the second view first holds the `score` it was inserted with, and an item the first view's
+    page creates joins the second view with none."""
+    db = served(two_views)
+    db.insert("atlas", rows(["a0"], score=pa.array([7.5])), id="id", x="x", y="y", access="labels")
+    db.insert("map", rows(["b0"], score=pa.array([8.5])), id="id", x="x", y="y", access="labels")
+    db.insert("atlas", rows(["b0"]), id="id", x="x", y="y", access="labels")
+    report = db.commit()
+    assert report.ok, report
+    assert report.rows_accepted == {"atlas": 2, "map": 1}
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    answer = viewport(db, "atlas", frame, filters={"score": {"range": {"gte": 7.0}}})
+    assert answer["counts"]["matched"] == 2
+
+
+def test_columns_maps_an_attribute_on_a_second_views_rows(served, corpus):
+    """After the first commit `columns=` maps a declared attribute to a column of any view's rows,
+    so a new item placed in the second view holds the value its renamed column carried."""
+    db = served(two_views)
+    db.insert(
+        "atlas",
+        rows(["m0"], points=pa.array([9.5])),
+        id="id",
+        x="x",
+        y="y",
+        access="labels",
+        columns={"score": "points"},
+    )
+    report = db.commit()
+    assert report.ok, report
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    answer = viewport(db, "atlas", frame, filters={"score": {"range": {"gte": 9.0}}})
+    assert answer["counts"]["matched"] == 1
 
 
 def test_an_insert_into_an_attribute_fills_it_and_a_filter_finds_it(served, corpus):
@@ -526,6 +634,7 @@ def test_a_partly_refused_commit_returns_its_report_and_serves_what_landed(serve
                 "x": pa.array([1.5, 2.5], pa.float64()),
                 "y": pa.array([1.0, 1.0], pa.float64()),
                 "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+                "score": pa.nulls(2, pa.float64()),
             }
         ),
         id="id",
@@ -675,6 +784,7 @@ def test_a_row_outside_the_frame_commits_on_the_frames_edge_and_is_reported(serv
                 "x": pa.array([9_000.0, 3.5], pa.float64()),
                 "y": pa.array([0.0, 0.0], pa.float64()),
                 "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+                "score": pa.nulls(2, pa.float64()),
             }
         ),
         id="id",

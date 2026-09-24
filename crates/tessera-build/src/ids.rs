@@ -248,6 +248,16 @@ impl IdSpace {
         }
     }
 
+    /// How the points file names the item a source id stands for: the integer, the supplied key,
+    /// or the row it sits at.
+    pub fn display(&self, source_id: u64) -> String {
+        match self {
+            IdSpace::Integer => source_id.to_string(),
+            IdSpace::Supplied(keys) => String::from_utf8_lossy(keys.key(source_id)).into_owned(),
+            IdSpace::Positional => format!("at row {source_id}"),
+        }
+    }
+
     /// The `(first, last)` source id the union can hold, where that is known without reading a
     /// row. The supplied route's ranks are `0..n`, so its span is exact.
     pub fn rank_bounds(&self) -> Option<(u64, u64)> {

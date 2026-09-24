@@ -11,7 +11,14 @@ pub const DECLARABLE_TYPES: &str = "bool, u8, u16, u32, u64, i8, i16, i32, i64, 
 /// Columns every segment carries.
 const FIXED_COLUMNS: [&str; 2] = ["tessera_id", "residual"];
 /// Columns of an ingest batch that are not attributes.
-const INGEST_COLUMNS: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
+const INGEST_COLUMNS: [&str; 6] = [
+    "external_id",
+    "x",
+    "y",
+    "access",
+    "node_id",
+    crate::member_key::LEVEL,
+];
 /// Keys of a filter expression and the frames' highlight column. A filter names a column directly,
 /// so a column under one of these would make a request ambiguous.
 pub const REQUEST_NAMES: [&str; 6] = [
@@ -141,6 +148,37 @@ pub fn check_column_name(name: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Every declared column must be carried where an item's values arrive: by a build's attribute
+/// source, and by an ingest row that creates an item, or places one in a view of a scoped
+/// column's own group. A null says there is no value. A `/control/values` batch fills only the
+/// columns it names, so it is not held to this. `declared` is `(attribute, column)`, the column
+/// being the attribute's own name except where a build's `field` moves it.
+pub fn check_declared_present<'a>(
+    declared: impl IntoIterator<Item = (&'a str, &'a str)>,
+    carries: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    let missing: Vec<String> = declared
+        .into_iter()
+        .filter(|(_, column)| !carries(column))
+        .map(|(attribute, column)| match attribute == column {
+            true => format!("'{column}'"),
+            false => format!("'{column}' (attribute '{attribute}')"),
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let (noun, verb) = match missing.len() {
+        1 => ("column", "is"),
+        _ => ("columns", "are"),
+    };
+    Err(format!(
+        "declared {noun} {} {verb} missing; include every declared column, null where a row has \
+         no value",
+        missing.join(", ")
+    ))
 }
 
 /// Check a vocabulary's name, code width and retired codes, and answer the width.
@@ -274,6 +312,7 @@ mod tests {
             ("a name that is not a path segment", spec("a/b", "u8")),
             ("a fixed column's name", spec("tessera_id", "u8")),
             ("an ingest column's name", spec("access", "u8")),
+            ("the member level column's name", spec("level", "u32")),
             ("the record blob's name", spec("record", "u8")),
             ("a filter key", spec("any_of", "u8")),
             ("an unknown type", spec("c", "string")),
@@ -335,6 +374,16 @@ mod tests {
                 "{what} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn every_declared_column_must_be_carried() {
+        let carried = ["a", "b"];
+        let carries = |column: &str| carried.contains(&column);
+        assert!(check_declared_present([("a", "a"), ("moved", "b")], carries).is_ok());
+        assert!(check_declared_present([], carries).is_ok());
+        assert!(check_declared_present([("a", "a"), ("c", "c")], carries).is_err());
+        assert!(check_declared_present([("b", "c")], carries).is_err());
     }
 
     #[test]

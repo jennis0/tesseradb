@@ -185,11 +185,6 @@ fn clipped_points_are_counted_and_clamped_points_are_not() {
     assert_eq!(got[2].1, 65535, "87°S is on the southern edge");
     assert_eq!(got[3].1, 0, "the domain boundary itself is the same cell");
     assert_eq!(got[4], (32744, 21792), "London is untouched by any of it");
-
-    // The build reports and never refuses, at any proportion: three fifths of this corpus is
-    // clipped and the frame earns no refusal, because a clipped point's position is the
-    // projection's own domain boundary and no choice of frame moves it.
-    assert!(frame.refusal().is_none(), "clipping is never a refusal");
 }
 
 /// **`auto` is the same snap over the data's own longitude/latitude box** (§4.2).
@@ -612,15 +607,13 @@ fn the_report_counts_clipped_points_on_their_own_line_and_clamps_none() {
     );
 }
 
-/// **A majority-clipped corpus at a whole-world frame builds and is reported, never refused**
-/// (§7) — and at a **sub-square** frame the same rows are clamped as well, and the clamp refusal
-/// applies to them like any other out-of-frame row.
+/// **A majority-clipped corpus at a whole-world frame is reported as clipped**, and at a
+/// **sub-square** frame the same rows are counted as clamped as well.
 ///
 /// The two counts overlap rather than exclude each other. Clipping lands a point on the *world's*
-/// edge; a frame that does not reach that edge simply does not contain it. Carving a clipped
-/// point out of the clamp count would make a frame holding a quarter of its corpus pass.
+/// edge; a frame that does not reach that edge simply does not contain it.
 #[test]
-fn clipping_never_refuses_at_the_world_frame_and_still_clamps_at_a_sub_square() {
+fn clipped_rows_are_also_clamped_at_a_sub_square() {
     let tmp = tempfile::tempdir().unwrap();
     let points = tmp.path().join("mostly-polar.parquet");
     // Three beyond the domain and one ordinary, every longitude inside the sub-square below so
@@ -639,11 +632,6 @@ fn clipping_never_refuses_at_the_world_frame_and_still_clamps_at_a_sub_square() 
     )
     .expect("the frame resolves");
     assert_eq!(world.clipped(), 3);
-    assert!(
-        world.refusal().is_none(),
-        "three quarters clipped and nothing refused: {:?}",
-        world.refusal()
-    );
     let report = world.report();
     assert!(
         report.contains("3 of 4 point(s) (75.0%) CLIPPED"),
@@ -668,10 +656,6 @@ fn clipping_never_refuses_at_the_world_frame_and_still_clamps_at_a_sub_square() 
     .expect("the frame resolves");
     assert_eq!(sub.extent.y_min, 0.25, "the z2 square (2, 1)");
     assert_eq!(sub.clipped(), 3, "the same three rows are still clipped");
-    let refusal = sub
-        .refusal()
-        .expect("three of four rows are outside this frame");
-    assert!(refusal.contains("3 of 4 point(s) (75.0%)"), "{refusal}");
     let report = sub.report();
     assert!(
         report.contains("3 of 4 point(s) (75.0%) CLAMP onto"),

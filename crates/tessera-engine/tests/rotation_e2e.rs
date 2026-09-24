@@ -202,6 +202,7 @@ fn ingest_into(engine: &Engine, batch: &str, external_id: &str, view: &str) -> E
         *slot = *byte;
     }
     let row = UnallocatedRow {
+        join_only: false,
         external_id: Some(external_id.as_bytes().to_vec()),
         view: view.to_string(),
         join: None,
