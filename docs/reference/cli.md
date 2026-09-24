@@ -94,6 +94,23 @@ When a `match` filter returns nothing, this shows how the index split the text. 
 | `--analyser` | `NAME` | `unicode` | The analyser to use, by name. An unknown name is refused with the list of names this binary carries. |
 | `--identity` |  |  | Print the analyser's identity, the value a text column records, and exit. |
 
+## `tessera health`
+
+```text
+tessera health [OPTIONS]
+```
+
+Ask the server that `tessera.toml` names whether it is ready, and exit 0 if it is or 1 if it is not.
+
+Finds `tessera.toml` as `tessera build` does and sends `GET /readyz` to the viewer address in `[serve]`. The server answers 200 while its write side is running normally, and the command then exits 0. It exits 1, with the reason on stderr, on any other answer, when nothing is listening at the address (as while the server opens its bundle), when no answer comes within `--timeout`, and when `tessera.toml` is refused or declares no viewer address.
+
+A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run it on the machine or in the container the server runs in. The Docker image's health check runs it.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--deployment` | `PATH` |  | Read this `tessera.toml` instead of searching for one upward from the working directory. |
+| `--timeout` | `SECONDS` | `3` | Seconds the whole request may take, from connecting to reading the answer. |
+
 ## `tessera serve`
 
 ```text
