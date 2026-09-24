@@ -40,11 +40,18 @@ function u64(values: bigint[]) {
   return makeVector(makeData({type: new Uint64(), data: BigUint64Array.from(values)}));
 }
 
-/** A body of one tile whose points arrive in the frames given. */
-function body(points: Table[]): Uint8Array {
+/** A body whose points arrive in the frames given, served by tiles 0, 1, ... in the counts given. */
+function body(points: Table[], served?: bigint[]): Uint8Array {
   const total = BigInt(points.reduce((n, t) => n + t.numRows, 0));
+  const counts = served ?? [total];
   const tiles = tableToIPC(
-    new Table({tile: u64([0n]), visible: u64([total]), matched: u64([total]), served: u64([total]), highlighted: u64([total])}),
+    new Table({
+      tile: u64(counts.map((_, i) => BigInt(i))),
+      visible: u64(counts),
+      matched: u64(counts),
+      served: u64(counts),
+      highlighted: u64(counts)
+    }),
     'stream'
   );
   const trailer = new TextEncoder().encode(
@@ -120,12 +127,12 @@ describe('an absent rendered value', () => {
     }
   });
 
-  it('stays no value in the bands a response is split into', () => {
-    const r = decodeViewport(body([nulls]));
-    const bands = bandsOfResult(r, 0, {identityKey: 'i', contentKey: 'c', capUsed: 10, now: 0});
-    const heat = bands.flatMap((b) => read(b.scalars.heat!));
-    expect(heat.filter((v) => v === null)).toHaveLength(1);
-    expect(heat).toContain(0);
+  it('stays no value in the band of the tile that served it', () => {
+    // The first tile serves the point with every value, the second the three with nulls.
+    const r = decodeViewport(body([whole, nulls], [1n, 3n]));
+    const bands = bandsOfResult(r, 1, {identityKey: 'i', contentKey: 'c', capUsed: 10, now: 0});
+    expect(bands.map((b) => read(b.scalars.heat!))).toEqual([[1], [null, 0, 2.5]]);
+    expect(bands.map((b) => read(b.scalars.flag!))).toEqual([[true], [null, false, true]]);
   });
 
   it('takes no part in a numeric domain and reads as NaN, never as zero', () => {

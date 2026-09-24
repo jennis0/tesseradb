@@ -938,8 +938,8 @@ export type MembershipColumn = {
  *
  * **`present` says which points have a value.** The server sends an absent number, bool,
  * timestamp or string as null; `present[i]` is `0` there, and `values[i]` is a zero that means
- * nothing. Absent or `null`, every point has a value; {@link hasValue} reads it. A category is
- * never null: its absence is code 0 in `values`.
+ * nothing. Where `present` is missing or `null`, every point has a value; {@link hasValue} reads
+ * it. A category has no nulls; code 0 in `values` is its absence.
  */
 export type ScalarColumn = ScalarValues & {present?: Uint8Array | null};
 
