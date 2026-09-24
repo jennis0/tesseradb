@@ -1771,19 +1771,14 @@ async fn post_ingest(
     (status, body)
 }
 
-/// Fresh source ids for the bound fixtures below. Offset well clear of `N_ITEMS`, or every batch here
-/// collides with the bundle's own external ids and answers 409 before any bound is consulted.
-/// A coordinate inside the fixture bundle's declared extent (0..1000 on both axes).
-///
-/// **The wrap is not cosmetic.** `/control/ingest` refuses a coordinate outside the declared
-/// quantisation (§6), because Morton codes are computed against it and an out-of-extent point has
-/// no cell to occupy. A fixture that walks its row index straight into a coordinate leaves the
-/// extent at row 1000 and is refused — which is the validation working, not the test being
-/// awkward.
+/// A coordinate inside the fixture bundle's declared extent (0..1000 on both axes), so no row is
+/// clamped onto its edge.
 fn in_extent(i: u64) -> f32 {
     (i % 1000) as f32
 }
 
+/// Fresh source ids for the bound fixtures below. Offset well clear of `N_ITEMS`, or every batch here
+/// collides with the bundle's own external ids and answers 409 before any bound is consulted.
 fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
     const INGEST_BOUND_ID_BASE: u64 = 1_000_000;
     (0..n)
@@ -1875,19 +1870,62 @@ async fn ingest_is_refused_by_buffer_occupancy() {
     );
 }
 
-/// **An out-of-extent coordinate is refused before ack and leaves no WAL record** (§6).
-///
-/// Morton codes are a fraction of the declared extent, so a point outside it has no cell. Flush is
-/// where a buffered item acquires geometry, so the choice is refuse here or misplace the item in
-/// the grid there. Refused rather than clamped: a clamped point at the boundary cannot be told from
-/// one that belongs there, so clamping would move data with nothing left to notice afterwards.
-///
-/// **The WAL is a sequence, so the length is read from the active member and not from the base
-/// path.** An earlier form of this test read `wal.log` — which is a name for the family and never a
-/// file — so both readings were `Err`, both became 0, and it compared 0 to 0 while asserting
-/// nothing at all.
+/// The cell pair of every point served in `bbox` at zoom 8, by `tessera_id`.
+fn served_cells(engine: &Engine, bbox: [f64; 4]) -> std::collections::BTreeMap<u64, (u16, u16)> {
+    let session = engine
+        .authorise(br#"{"terms": ["0"]}"#)
+        .expect("the fixture grants term 0");
+    let out = engine
+        .viewport(&session, ViewportRequest::new("s0", 8, bbox, 200))
+        .expect("the viewport answers");
+    out.points
+        .iter()
+        .map(|(id, code)| {
+            (
+                id.raw(),
+                tessera_build::input::deinterleave((code >> 32) as u32),
+            )
+        })
+        .collect()
+}
+
+/// A coordinate outside the view's extent is stored on the extent's edge and counted in the
+/// receipt, as a build stores and counts one. The extent's maximum is inside it.
 #[tokio::test]
-async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
+async fn an_out_of_extent_coordinate_is_clamped_onto_the_edge_and_counted() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    // The fixture's extent is 0..1000 on both axes.
+    let rows = [
+        (9_000_001, 5000.0, 5000.0, "0"),
+        (9_000_002, -3.0, 500.0, "0"),
+        (9_000_003, 1000.0, 1000.0, "0"),
+    ];
+    let (status, body) = post_ingest(&server, "outside", &rows, true).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["accepted"], 3);
+    assert_eq!(body["clamped"], 2, "{body}");
+    tick(&server).await;
+
+    let ids = ingested_ids(&body);
+    let corner = served_cells(&server.state.engine, [995.0, 995.0, 1000.0, 1000.0]);
+    assert_eq!(corner[&ids[0]], (65_535, 65_535));
+    assert_eq!(corner[&ids[2]], (65_535, 65_535));
+    let west = served_cells(&server.state.engine, [0.0, 495.0, 5.0, 505.0]);
+    assert_eq!(west[&ids[1]], (0, 32_768));
+}
+
+/// A non-finite coordinate has no place in any frame, so it is refused before ack and leaves no
+/// WAL record.
+#[tokio::test]
+async fn a_non_finite_coordinate_is_refused_and_leaves_no_wal_record() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let wal_path = tmp.path().join("wal.log");
@@ -1897,41 +1935,21 @@ async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
     let before = std::fs::metadata(&active)
         .expect("the active WAL member exists")
         .len();
-
-    // The fixture's extent is 0..1000 on both axes; 5000 is outside it.
-    let (status, _) = post_ingest(
-        &server,
-        "out-of-extent",
-        &[(9_000_001, 5000.0, 5000.0, "0")],
-        true,
-    )
-    .await;
-    assert_eq!(status, 422, "a coordinate with no cell is a contract error");
-
+    for (batch_id, x) in [("nan", f32::NAN), ("infinite", f32::INFINITY)] {
+        let (status, _) = post_ingest(&server, batch_id, &[(9_000_001, x, 5.0, "0")], true).await;
+        assert_eq!(status, 422, "{batch_id}");
+    }
     assert_eq!(
         std::fs::metadata(&active).expect("still there").len(),
-        before,
-        "refused before ack: no entity id, no queue slot, no WAL append"
+        before
     );
-
-    // And an in-extent row on the same server is unaffected — the refusal is per row, not a
-    // posture the endpoint enters.
-    let (status, _) = post_ingest(&server, "fine", &[(9_000_002, 5.0, 5.0, "0")], true).await;
-    assert_eq!(status, 200);
 }
 
 /// **An ingest body carries its coordinates at either float width, and the wider one is not
 /// narrowed** (contracts §3.4; `projections.md` §6).
 ///
-/// Acceptance alone would pass against an accessor that read a `float64` column and rounded every
-/// value, so the discriminating case is a coordinate whose *width decides whether it has a cell at
-/// all*. The fixture's extent is `0..1000`; one `f32` step there is 6.1 × 10⁻⁵, and
-/// `1000.00002` is inside half of one — so it rounds to exactly `1000.0`, which
-/// `Quantisation::contains` admits as the inclusive maximum. Read at the width the caller sent it,
-/// the same value is outside the extent and has no cell.
-///
-/// A narrowing wire therefore does not merely lose precision here: it acks a row that is outside
-/// the declared extent, and the flush places it on the grid's edge with nothing left to notice.
+/// The extent is `0..1000`, and `1000.00002` rounds to exactly `1000.0` as an `f32`, the extent's
+/// inclusive maximum. Read at the width it was sent, it is outside the extent and is clamped.
 #[tokio::test]
 async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
     let tmp = TempDir::new().unwrap();
@@ -1942,7 +1960,7 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
         let client = server.client.clone();
         let url = server.control_url("/control/ingest");
         async move {
-            client
+            let response = client
                 .post(url)
                 .header("x-tessera-batch-id", batch_id)
                 .header("content-type", "application/vnd.apache.arrow.stream")
@@ -1950,17 +1968,12 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
                 .body(body)
                 .send()
                 .await
-                .unwrap()
-                .status()
-                .as_u16()
+                .unwrap();
+            let status = response.status().as_u16();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, body["clamped"].clone())
         }
     };
-
-    assert_eq!(
-        post("wide", vec![(9_100_001, 12.5, 33.25, "0")]).await,
-        200,
-        "a float64 coordinate column is part of the schema, not a contract error"
-    );
 
     let outside = 1_000.000_02_f64;
     assert_eq!(
@@ -1968,10 +1981,12 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
         "the fixture value must round to the extent maximum, or this case discriminates nothing"
     );
     assert_eq!(
-        post("wide-outside", vec![(9_100_002, outside, 33.25, "0")]).await,
-        422,
-        "a coordinate outside the extent at the width it was sent has no cell, whatever it would \
-         have rounded to"
+        post("wide", vec![(9_100_001, outside, 33.25, "0")]).await,
+        (200, serde_json::json!(1))
+    );
+    assert_eq!(
+        post("narrow", vec![(9_100_002, f64::from(outside as f32), 33.25, "0")]).await,
+        (200, serde_json::json!(0))
     );
 }
 

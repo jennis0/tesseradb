@@ -237,9 +237,11 @@ def test_a_member_key_in_no_artifact_is_not_a_new_artifact(db):
         )
 
 
-def test_a_list_member_key_names_one_artifact_per_element(db):
+@pytest.mark.parametrize("large", [False, True])
+def test_a_list_member_key_names_one_artifact_per_element(db, large):
     """A list key names an artifact per element, at the element's level on a tiered layer, so a
-    list naming declared artifacts creates nothing; an element nothing declares is refused."""
+    list naming declared artifacts creates nothing; an element nothing declares is refused. A
+    large list reads as a list does."""
     import pyarrow as pa
 
     db.declare_layer(
@@ -257,7 +259,7 @@ def test_a_list_member_key_names_one_artifact_per_element(db):
         level="level",
         access="team",
     )
-    listed = pa.list_(pa.string())
+    listed = pa.large_list(pa.string()) if large else pa.list_(pa.string())
     db.insert(
         "taxonomy",
         members=pa.table({"key": pa.array([["f", "g"]], listed), "entity": ["p0"]}),

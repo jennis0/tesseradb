@@ -9,7 +9,6 @@ use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar, ABSENT_CODE};
 use tessera_lifecycle::WalScalar;
 use tessera_types::TesseraId;
 
-use self::arrow::code_at;
 pub(crate) use self::arrow::{
     labels_col, parse_ingest_batch, parse_values_batch, ParsedBatch, ParsedValues,
 };
@@ -97,7 +96,7 @@ pub(crate) fn scoped_wire_type(family: &ScopedScalar) -> ScalarType {
 /// its vocabulary keeps out of the value space, and `Null` for every other type.
 pub(crate) fn scoped_absent(family: &ScopedScalar) -> WalScalar {
     match family.vocabulary {
-        Some(_) => code_at(family.arrow_type, ABSENT_CODE),
+        Some(_) => tessera_engine::vocabulary::code_value(family.arrow_type, ABSENT_CODE),
         None => WalScalar::Null,
     }
 }
