@@ -129,7 +129,7 @@ built /srv/tessera/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2181446 b
 ```
 
 A later rebuild needs more care than this one, because the running service changes the bundle. [The
-identity key and rebuilds](operating.md#the-identity-key-and-rebuilds) explains why.
+identity key and rebuilds](rebuild.md) explains why.
 
 ## Start it by hand
 

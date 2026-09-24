@@ -126,7 +126,7 @@ secrets:
 
 All three ports are published to the host's loopback address only, so nothing off the machine can
 reach Tessera directly. The browser-facing viewer address goes out through a TLS proxy on the host,
-as [Put nginx in front of the viewer address](operating.md#put-nginx-in-front-of-the-viewer-address)
+as [Put nginx in front of the viewer address](tls.md)
 describes. The repository's `docker/compose.yaml` publishes the viewer and session ports on every
 interface instead, which suits a machine with a firewall or a load balancer in front of it. Publish
 the control port to loopback, or not at all: it accepts deletions and new data from anyone holding
@@ -182,7 +182,7 @@ built /var/lib/tessera/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 21814
 Once the bundle is built, delete the copy; the original is still in `~/ireland`. The server reads
 the key from the bundle, and while `.env` is here Compose hands the key to every container it
 starts, where `docker inspect` shows it. You need the key again only to rebuild after losing the
-volume, as [The identity key and rebuilds](operating.md#the-identity-key-and-rebuilds) explains.
+volume, as [The identity key and rebuilds](rebuild.md) explains.
 
 ```console
 $ rm .env
@@ -274,7 +274,7 @@ section shows, and send again any changes made while the old one was served.
 
 ## Replace the bundle
 
-[Replace the bundle with a rebuilt one](operating.md#replace-the-bundle-with-a-rebuilt-one) explains
+[Replace the bundle with a rebuilt one](rebuild.md#replace-the-bundle-with-a-rebuilt-one) explains
 why a rebuild goes into a new directory and why the old log and cache are moved aside. Under Compose
 the steps are the same, with one difference. The image has no shell, so the move is done by a
 short-lived container from another image, here Alpine Linux, with the volume mounted. Compose names
