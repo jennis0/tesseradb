@@ -33,7 +33,7 @@ use crate::error::{
     map_accept_error, map_change_batch_error, map_join_error, map_store_error, ApiError,
 };
 use crate::health::is_ready;
-use crate::state::{ApiJson, ApiJsonRejection, AppState};
+use crate::state::{ApiJson, ApiJsonRejection, ApiQuery, AppState};
 
 /// The deny lane's runtime, whose blocking pool runs every `/control/changes` body. The deny lane
 /// never shares tokio's blocking pool with ingest: an ingest closure holds its thread until its
@@ -333,7 +333,7 @@ struct ValuesResp {
 /// need `x-tessera-view` naming a view whose key their group owns.
 async fn values(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<ValuesResp>, ApiError> {
@@ -797,7 +797,7 @@ fn run_ingest(
 /// cap), 429 (queue). Connections are not bounded in-process; the deployment bounds them.
 async fn ingest(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
@@ -1119,7 +1119,7 @@ fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
 /// fails, because an accepted deny left unapplied would fail open. The 200 follows the fsync.
 async fn changes(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: Result<ApiJson<Vec<ChangeItem>>, ApiJsonRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let ApiJson(items) = body.map_err(|rejection| match rejection {
@@ -1157,9 +1157,10 @@ async fn changes(
 /// publication and the answer.
 const VISIBLE_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
-/// The `wait` query parameter every write route takes. Its one value is `visible`; any other is a
-/// 422, so `wait=true` is not mistaken for a completed wait.
+/// The `wait` query parameter every write route takes. Its one value is `visible`; any other value,
+/// or any other parameter, is a 422, so `wait=true` or `wiat=visible` is not mistaken for a wait.
 #[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WaitQuery {
     #[serde(default)]
     wait: Option<String>,
@@ -1257,7 +1258,7 @@ async fn await_publication(state: &AppState, publication: u64) -> PublicationAck
 /// buffered before the request; `?wait=visible` holds the 202 until it is reached.
 async fn flush(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     // Read before the flush is armed, so an unknown value arms nothing.
     let asked = wait.asked()?;
@@ -1289,7 +1290,7 @@ async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
 /// append fails. A declaration that breaks the deployment's rules is a 422 saying why.
 async fn register_layer(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<tessera_types::layer::LayerDeclaration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let mut declaration = body.0;
@@ -1366,7 +1367,7 @@ async fn register_layer(
 async fn drop_layer(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     state
         .write(move |state| state.engine.drop_layer(name))
@@ -1404,7 +1405,7 @@ struct AttributeBody {
 /// has another, 422 for a rule broken. The engine refuses `render = true` on this route.
 async fn declare_attribute(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<AttributeBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1486,7 +1487,7 @@ struct VocabularyValuesBody {
 async fn declare_vocabulary(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<VocabularyBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1524,7 +1525,7 @@ async fn declare_vocabulary(
 async fn mint_vocabulary_values(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<VocabularyValuesBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let values: Vec<tessera_engine::DeclaredValue> = body
@@ -1638,7 +1639,7 @@ fn projection_none() -> String {
 async fn create_view_group(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<ViewGroupBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1674,7 +1675,7 @@ async fn create_view_group(
 async fn create_plain_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<PlainViewBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -1759,7 +1760,7 @@ fn metadata_value(name: &str, value: &serde_json::Value) -> Result<ViewMetadataV
 async fn create_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     body: ApiJson<ViewRecord>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let record = body.0;
@@ -1792,7 +1793,7 @@ async fn create_view(
 async fn drop_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
-    axum::extract::Query(query): axum::extract::Query<DropViewQuery>,
+    ApiQuery(query): ApiQuery<DropViewQuery>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let wait = WaitQuery { wait: query.wait };
     let dropped = state
@@ -2530,7 +2531,7 @@ struct IncomingContentBody {
 async fn publish_artifacts(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -2852,7 +2853,7 @@ struct ContentFillBody {
 async fn grow_memberships(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+    ApiQuery(wait): ApiQuery<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -3020,7 +3021,7 @@ async fn faults_arm(
 #[cfg(feature = "fault-injection")]
 async fn faults_arrivals(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(req): axum::extract::Query<FaultSiteRequest>,
+    ApiQuery(req): ApiQuery<FaultSiteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let site = parse_pause_site(&req.site)?;
     Ok(Json(serde_json::json!({

@@ -3255,11 +3255,11 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
 }
 
 /// **A JSON body of the wrong shape, or a valid one carrying a field the route does not define, is
-/// refused with the error envelope and `contract` on every control route that takes one.** The
-/// refused arm leaves its site unarmed: a suppression afterwards is acknowledged and never reaches
-/// the site.
+/// refused with the error envelope and `contract` on every control route that takes one, and so is
+/// a query string that does not deserialise.** The refused arm leaves its site unarmed: a
+/// suppression afterwards is acknowledged and never reaches the site.
 #[tokio::test]
-async fn a_body_of_the_wrong_shape_is_a_contract_refusal_on_every_json_control_route() {
+async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_control_route() {
     let tmp = TempDir::new().unwrap();
     let (server, _faults) = serve_with_faults(&tmp).await;
 
@@ -3297,6 +3297,37 @@ async fn a_body_of_the_wrong_shape_is_a_contract_refusal_on_every_json_control_r
             .await
             .unwrap();
         assert_eq!(refused(resp, 422).await, "contract", "{method} {path} {body}");
+    }
+    // Every control route that reads a query, sent a parameter it does not define and no body, so
+    // only the query can be refused.
+    let queries = [
+        ("POST", "/control/values?wiat=visible"),
+        ("POST", "/control/ingest?wiat=visible"),
+        ("POST", "/control/changes?wiat=visible"),
+        ("POST", "/control/flush?wiat=visible"),
+        ("PUT", "/control/layers?wiat=visible"),
+        ("DELETE", "/control/layers/clusters?wiat=visible"),
+        ("PUT", "/control/attributes?wiat=visible"),
+        ("PUT", "/control/vocabularies/genre?wiat=visible"),
+        ("PATCH", "/control/vocabularies/genre/values?wiat=visible"),
+        ("PUT", "/control/view_groups/quarter?wiat=visible"),
+        ("PUT", "/control/views/plain?wiat=visible"),
+        ("PUT", "/control/views/quarter/2026-Q3?wiat=visible"),
+        ("DELETE", "/control/views/quarter/2026-Q3?wiat=visible"),
+        ("PUT", "/control/layers/clusters/artifacts?wiat=visible"),
+        ("PATCH", "/control/layers/clusters/artifacts?wiat=visible"),
+        ("GET", "/control/faults/arrivals?site=after_fsync&wiat=visible"),
+    ];
+    for (method, path) in queries {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        let resp = server
+            .client
+            .request(method.clone(), server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused(resp, 422).await, "contract", "{method} {path}");
     }
 
     // An armed `after_fsync` would park this suppression, so the request would time out.
