@@ -35,4 +35,12 @@ npm --prefix clients/ts run typecheck --silent
 echo "check-clients: running the client test suites"
 npm --prefix clients/ts test --silent
 
+echo "check-clients: running the components' browser suite"
+if ! (cd clients/ts && node -e "require('playwright').chromium.launch().then((b) => b.close())" >/dev/null 2>&1); then
+  echo "check-clients: Playwright cannot launch Chromium, which the components' browser suite" >&2
+  echo "  needs. Install it with: (cd clients/ts && npx playwright install chromium)" >&2
+  exit 1
+fi
+npm --prefix clients/ts/components run test:browser --silent
+
 echo "check-clients: ok"
