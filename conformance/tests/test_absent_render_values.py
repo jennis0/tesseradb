@@ -6,8 +6,10 @@ function of the item's source id (`declared_fixture`), and a point names its ite
 and serving a null for a zero both fail.
 
 The deployment is built over part of the corpus and takes the rest through `/control/ingest`, so
-absences written by the build and by a flush are both read. The same answer is required after a
-restart and after a fold, which rewrites every segment.
+absences written by the build and by a flush are both read. One column has a value for every item
+the build holds and absences only among the ingested ones, so a tile draws from a segment with no
+absence and a segment with some in the same column. The same answer is required after a restart
+and after a fold, which rewrites every segment.
 
 A segment with no column at all cannot be built from a declaration: the build refuses a source
 lacking a declared column, and only a sharing group's own key, which a declaration cannot name,
@@ -35,6 +37,10 @@ COLUMNS = [
         lambda i: None if i % 6 == 0 else (i % 2) * 1_000_000, render=True,
     ),
     Column("flag", "bool", pa.bool_(), lambda i: None if i % 7 == 0 else i % 2 == 0, render=True),
+    Column(
+        "late", "f64", pa.float64(),
+        lambda i: None if i >= fx.N_BUILT and i % 2 == 0 else float(i % 3), render=True,
+    ),
 ]
 
 
@@ -73,6 +79,7 @@ def check(d: Deployment, stage: str) -> None:
         assert got == want, f"{stage}: {column.name}"
         present = [v for v in want.values() if v is not None]
         assert None in want.values() and 0 in present, f"{column.name} has absences and zeros"
+    assert all(COLUMNS[-1].value(i) is not None for i in BUILT), "the build holds every `late`"
 
 
 @pytest.fixture(scope="module")
