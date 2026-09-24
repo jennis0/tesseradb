@@ -80,6 +80,7 @@ nav:
   - Home: index.md
   - Start:
       - start/index.md
+      - Your first map from files: start/first-map.md
   - Guides:
       - guides/index.md
   - Reference:
