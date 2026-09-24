@@ -2,7 +2,7 @@
 
 These pages state what each interface accepts and returns.
 
-- [HTTP API](http.md): the viewer and session planes, from the OpenAPI description.
+- [HTTP API](http.md): the viewer, session and control planes, from the OpenAPI description.
 - [Wire framing](../openapi/README.md): the framed Arrow bodies of `POST /v1/viewport` and `POST /v1/items`, with decoders in Python and JavaScript.
 - [Capabilities](capabilities.md): which route, function, method or command performs each core capability on each of the four surfaces.
 - [CLI](cli.md): the `tessera` command and its subcommands.

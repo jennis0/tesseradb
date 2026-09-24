@@ -1,6 +1,6 @@
 # Capabilities
 
-Each row is a core capability and each column a surface; a cell names the route, function, method or command that performs it. The control-plane routes (`/control/...`) exist in the server but are not yet in the [OpenAPI description](http.md). The Python client writes only to a database it runs itself, made by `create` or `open`. The CLI declares and inserts only by building a new bundle.
+Each row is a core capability and each column a surface; a cell names the route, function, method or command that performs it. The [HTTP API](http.md) reference describes every route named here. The Python client writes only to a database it runs itself, made by `create` or `open`. The CLI declares and inserts only by building a new bundle.
 
 | Capability | HTTP | TypeScript client | Python client | CLI |
 |---|---|---|---|---|
